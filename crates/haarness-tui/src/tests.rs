@@ -17604,6 +17604,31 @@ fn a_drag_down_the_review_copies_one_side_without_numbers_or_signs() {
         "    pub const fn label(self) -> &'static str {\n            Self::WorkingTree => \"working\","
     );
 
+    // From a file's header down into its code: the header, then the code of
+    // the side the pointer ends on.
+    let (header, top) = screen_cell(&lines, "crates/haarness-tui/src/diffview.rs");
+    app.selection_range = Some(((header, top), (150, first + 1)));
+    let copied = app.selected_text();
+    let rows: Vec<&str> = copied.lines().collect();
+    assert!(
+        rows[0].starts_with("crates/haarness-tui/src/diffview.rs") && rows[0].ends_with("modified"),
+        "{copied}"
+    );
+    assert_eq!(
+        &rows[1..],
+        [
+            "    pub const fn label(self) -> &'static str {",
+            "            Self::WorkingTree => \"working tree\","
+        ],
+        "{copied}"
+    );
+    app.selection_range = Some(((header, top), (new_side - 4, first + 1)));
+    let copied = app.selected_text();
+    assert!(
+        copied.ends_with("\n            Self::WorkingTree => \"working\","),
+        "{copied}"
+    );
+
     let mut app = review_app_unified();
     let lines = app.lines((160, 24));
     let (_, first) = screen_cell(&lines, "Self::WorkingTree => \"working\",");
