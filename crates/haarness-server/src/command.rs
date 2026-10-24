@@ -10,9 +10,9 @@ use std::collections::HashSet;
 
 use haarness_core::{CoreError, CoreResult};
 use haarness_protocol::{
-    CommandExecutionResponse, CommandInfo, ExecuteCommandRequest, GoalActionRequest,
-    StartTurnRequest, ThreadId, WorkflowDefinition, WorkflowDialect, WorkflowId, WorkflowRun,
-    WorkflowRunStatus, WorkflowStartRequest,
+    CommandExecutionResponse, CommandInfo, DefinitionExecution, ExecuteCommandRequest,
+    GoalActionRequest, StartTurnRequest, ThreadId, WorkflowDefinition, WorkflowDialect, WorkflowId,
+    WorkflowRun, WorkflowRunStatus, WorkflowStartRequest,
 };
 use haarness_workflow_catalog::WorkflowCatalog;
 use serde_json::{Value, json};
@@ -110,7 +110,7 @@ fn resolved_commands(
         &mut seen,
         ResolvedCommand {
             info: CommandInfo {
-                execution: Default::default(),
+                execution: DefinitionExecution::default(),
                 name: "workflow".into(),
                 description: "Browse and manage durable workflows".into(),
                 source: Some("builtin".into()),
@@ -130,7 +130,7 @@ fn resolved_commands(
         &mut seen,
         ResolvedCommand {
             info: CommandInfo {
-                execution: Default::default(),
+                execution: DefinitionExecution::default(),
                 name: "goal".into(),
                 description: "Set or manage a persistent autonomous goal".into(),
                 source: Some("builtin".into()),
@@ -302,7 +302,7 @@ fn workflow_command_info(workflow: &WorkflowDefinition) -> CommandInfo {
             .join(" ")
     });
     CommandInfo {
-        execution: Default::default(),
+        execution: DefinitionExecution::default(),
         name: workflow.invocation.clone(),
         description,
         source: Some("workflow".into()),

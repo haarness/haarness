@@ -121,7 +121,7 @@ async fn parity_definition_shell_asks_then_expands_stdout_and_preserves_failure(
         argument_hint: None,
         template: "Context: !`printf APPROVED_CONTEXT; printf stderr-only >&2`".into(),
         plugin: None,
-        execution: Default::default(),
+        execution: haarness_protocol::DefinitionExecution::default(),
     });
     let provider = Capturing::default();
     let requests = provider.requests.clone();
@@ -839,7 +839,7 @@ impl Tool for OrderedWrite {
     }
     async fn execute(&self, args: Value, _context: ToolContext) -> CoreResult<ToolOutput> {
         if self.observed.load(std::sync::atomic::Ordering::SeqCst)
-            != args["expected"].as_u64().unwrap() as usize
+            != usize::try_from(args["expected"].as_u64().unwrap()).unwrap()
         {
             return Err(CoreError::Tool(
                 "write crossed an observation barrier".into(),
@@ -872,7 +872,7 @@ async fn parity_native_and_batch_reads_run_concurrently_with_write_barriers() {
         config.execution.read_parallelism = 2;
         let runtime = runtime(&fixture.0, config, Some(tools));
         let thread = echo_thread(&runtime).await;
-        let calls = vec![
+        let calls = [
             ("read", json!({"path":"one"})),
             ("read", json!({"path":"two"})),
             ("write", json!({"path":"out","expected":2})),

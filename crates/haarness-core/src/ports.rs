@@ -174,7 +174,7 @@ pub trait ThreadRepository: Send + Sync {
         Ok(None)
     }
     async fn input_queue(&self, _id: ThreadId) -> CoreResult<haarness_protocol::InputQueue> {
-        Ok(Default::default())
+        Ok(haarness_protocol::InputQueue::default())
     }
     async fn enqueue_input(
         &self,

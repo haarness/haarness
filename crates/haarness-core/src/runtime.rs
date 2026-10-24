@@ -244,6 +244,8 @@ type TurnAdmissionLocks = DashMap<ThreadId, Arc<AsyncMutex<()>>>;
 type BackgroundTasks = DashMap<ThreadId, Arc<BackgroundTask>>;
 type ToolPromotions = DashMap<ThreadId, HashSet<String>>;
 type ToolExecutionGates = DashMap<String, Arc<AsyncRwLock<()>>>;
+/// Subagent slot pools by (depth, concurrency limit), shared by a runtime and its turns.
+type SubagentSlots = Arc<Mutex<HashMap<(u8, usize), Arc<Semaphore>>>>;
 
 fn tool_execution_gate(gates: &ToolExecutionGates, name: &str) -> Arc<AsyncRwLock<()>> {
     gates
@@ -1376,7 +1378,7 @@ pub struct AgentRuntime {
     session_rules: Arc<Mutex<Vec<PermissionRule>>>,
     repository_approvals: Option<Arc<dyn crate::RepositoryApprovalStore>>,
     repository_rules: Arc<Mutex<Vec<PermissionRule>>>,
-    subagents: Arc<Mutex<HashMap<(u8, usize), Arc<Semaphore>>>>,
+    subagents: SubagentSlots,
     background_tasks: Arc<BackgroundTasks>,
     background_ledger: Arc<BackgroundLedger>,
     memory_context: Arc<RwLock<String>>,
@@ -6518,7 +6520,7 @@ struct RunnerTask {
     session_rules: Arc<Mutex<Vec<PermissionRule>>>,
     repository_approvals: Option<Arc<dyn crate::RepositoryApprovalStore>>,
     repository_rules: Arc<Mutex<Vec<PermissionRule>>>,
-    subagents: Arc<Mutex<HashMap<(u8, usize), Arc<Semaphore>>>>,
+    subagents: SubagentSlots,
     background_tasks: Arc<BackgroundTasks>,
     background_ledger: Arc<BackgroundLedger>,
     depth: u8,
@@ -13787,8 +13789,11 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             .unwrap_or_default()
             .as_bytes()
             .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+            .fold(String::new(), |mut hex, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            });
         let scope = arguments["__agentSwitch"]["threadId"]
             .as_str()
             .unwrap_or("unprepared");

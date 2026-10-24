@@ -880,6 +880,7 @@ pub struct LoopConfig {
 /// Execution semantics shared by discovered commands and skills.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", default)]
+#[allow(clippy::struct_excessive_bools)] // independent front-matter switches
 pub struct DefinitionExecution {
     pub user_invocable: bool,
     pub disable_model_invocation: bool,

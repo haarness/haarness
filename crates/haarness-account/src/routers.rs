@@ -110,7 +110,7 @@ fn save_preference(path: &std::path::Path, value: &Value) -> Result<()> {
         let mut file = options.open(&temp)?;
         file.write_all(&serde_json::to_vec(&value)?)?;
         file.sync_all()?;
-        fs::rename(&temp, &path)?;
+        fs::rename(&temp, path)?;
         Ok(())
     })();
     if result.is_err() {

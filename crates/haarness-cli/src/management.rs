@@ -2716,10 +2716,11 @@ fn edited_secret_map(
 ) -> Result<BTreeMap<String, String>> {
     for (name, value) in &mut next {
         if value == "<redacted>" {
-            *value = existing
-                .get(name)
-                .with_context(|| format!("Provide a value for {name}"))?
-                .clone();
+            value.clone_from(
+                existing
+                    .get(name)
+                    .with_context(|| format!("Provide a value for {name}"))?,
+            );
         }
     }
     Ok(next)
@@ -4129,7 +4130,7 @@ mod tests {
             "https://haarness.ai/app/remote/sessions/0199f2d4-5a1b-7c3d-8e4f-a0b1c2d3e4f5",
         );
         let size = rows.len();
-        assert!(size >= 21 && (size - 21) % 4 == 0, "{size}");
+        assert!(size >= 21 && (size - 21).is_multiple_of(4), "{size}");
         assert!(rows.iter().all(|row| row.len() == size));
         // Each corner except the bottom right holds a 7×7 finder pattern.
         for (top, left) in [(0, 0), (0, size - 7), (size - 7, 0)] {
