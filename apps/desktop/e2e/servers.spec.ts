@@ -1305,6 +1305,12 @@ test("opening a chat shows the centered loading mark without home flashes and ig
     await firstRow.click();
     await expect.poll(() => arrived).toBe(2);
     await expect(loading).toBeVisible();
+    // Another chat of the open project: the message box stays below the mark.
+    const composer = page.getByRole("textbox", { name: "Message", exact: true });
+    await expect(composer).toBeVisible();
+    expect((await loading.boundingBox())!.y + (await loading.boundingBox())!.height).toBeLessThanOrEqual(
+      (await page.locator(".composer").boundingBox())!.y + 0.5,
+    );
     await secondRow.click();
     await expect(page.locator(".transcript")).toContainText(
       "Echo: " + second.id,

@@ -11,7 +11,7 @@ import {
 } from "solid-js";
 import { Portal } from "solid-js/web";
 import { Icon } from "./icons";
-import { floatingBox } from "./native-area";
+import { dialogFrame, floatingBox, frameTop, shortestList } from "./native-area";
 
 export interface ComboboxOption {
   value: string;
@@ -111,15 +111,27 @@ export function Combobox(props: {
       if (!shown) return;
       const place = () => {
         const anchor = field.getBoundingClientRect();
-        const { left, width } = floatingBox(anchor, Math.max(anchor.width, 260), 220);
+        // Opened in a dialog (Settings, a form), it stays inside its box.
+        const frame = dialogFrame(field);
+        const { left, width } = floatingBox(anchor, Math.max(anchor.width, 260), 220, frame);
+        // Measured at its own height, not one a placement gave it before.
+        // The list keeps where it was scrolled to, which the taller box
+        // would otherwise reset.
+        const list = popup?.querySelector<HTMLElement>(".select-options");
+        const scrolled = list?.scrollTop ?? 0;
+        if (popup) popup.style.maxHeight = "";
         const height = popup?.getBoundingClientRect().height ?? 0;
+        const inside = popup && list ? frameTop(anchor, height, 4, frame, shortestList(popup, list)) : undefined;
+        if (popup) popup.style.maxHeight = inside?.height ? inside.height + "px" : "";
+        if (list) list.scrollTop = scrolled;
         setPosition({
           left,
           width,
           top:
-            anchor.bottom + height + 6 <= window.innerHeight - 8
+            inside?.top ??
+            (anchor.bottom + height + 6 <= window.innerHeight - 8
               ? anchor.bottom + 4
-              : Math.max(8, anchor.top - height - 4),
+              : Math.max(8, anchor.top - height - 4)),
         });
       };
       place();
@@ -128,12 +140,16 @@ export function Combobox(props: {
         const path = event.composedPath();
         if (!path.includes(field) && (!popup || !path.includes(popup))) close();
       };
+      // Only what moves the field moves the list: never the list's own scroll.
+      const scroll = (event: Event) => {
+        if (event.target === document || (event.target instanceof Element && event.target.contains(field))) place();
+      };
       document.addEventListener("pointerdown", outside, true);
-      document.addEventListener("scroll", place, true);
+      document.addEventListener("scroll", scroll, true);
       window.addEventListener("resize", place);
       onCleanup(() => {
         document.removeEventListener("pointerdown", outside, true);
-        document.removeEventListener("scroll", place, true);
+        document.removeEventListener("scroll", scroll, true);
         window.removeEventListener("resize", place);
       });
     }),

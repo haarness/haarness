@@ -90,9 +90,48 @@ async function createSection(name: string, group: string) {
   await dialog.getByRole("button", { name: "Create", exact: true }).click();
   await expect(titles(section(group))).toContainText([name]);
 }
+/** Where each row's label starts in an open menu, to the pixel. */
+const labelStarts = (menu: Locator) =>
+  menu.locator(":scope > button, :scope > .menu-branch > button").evaluateAll((rows) =>
+    rows.map((row) => {
+      const label = row.querySelector(".menu-item-label");
+      if (label) return Math.round(label.getBoundingClientRect().left);
+      const text = [...row.childNodes].find((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
+      const range = document.createRange();
+      range.selectNodeContents(text!);
+      return Math.round(range.getBoundingClientRect().left);
+    }),
+  );
+/** Where the live choice's tick sits, and how far in: in a column of its own
+ * before the label ("start"), or at the row's end as a picker's ✓ ("end"). */
+const tickPlace = (menu: Locator) =>
+  menu.locator('[aria-checked="true"]').evaluate((row) => {
+    const box = row.getBoundingClientRect();
+    const end = row.querySelector(".select-check");
+    const start = row.querySelector(".menu-check svg");
+    if (end && !start)
+      return { place: "end", glyph: end.textContent?.trim(), inset: Math.round(box.right - end.getBoundingClientRect().right) };
+    if (start && !end) return { place: "start", inset: Math.round(start.getBoundingClientRect().left - box.left) };
+    return undefined;
+  });
 async function fileUnder(name: string, group: string) {
   await options(name);
   await item("Section").click();
+  // Sections are a live choice without icons: ticked in a column of their
+  // own, so their labels line up with New section…'s, beside its icon.
+  const starts = await labelStarts(page.locator(".menu-branch-panel"));
+  expect(starts.length).toBeGreaterThan(1);
+  expect(new Set(starts).size).toBe(1);
+  expect(await tickPlace(page.locator(".menu-branch-panel"))).toEqual({ place: "start", inset: 8 });
+  if (process.env.HAARNESS_SCREENSHOTS) {
+    for (const theme of ["dark", "light"] as const) {
+      await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.locator(".menu-branch-panel").screenshot({
+        path: join(process.env.HAARNESS_SCREENSHOTS, `section-menu-${theme}.png`),
+      });
+    }
+  }
   await page.getByRole("menuitemradio", { name: group, exact: true }).click();
 }
 async function pin(name: string, pinned = true) {
