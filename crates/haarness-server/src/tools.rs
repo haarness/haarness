@@ -6513,6 +6513,121 @@ export default workflow({
     }
 
     #[tokio::test]
+    async fn patches_taking_two_files_in_opposite_orders_never_wait_on_each_other() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-patch-order-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(workspace.join(name), "one\ntwo\n").unwrap();
+        }
+        let workspace = workspace.canonicalize().unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        // Another call holds both files, so both patches queue for them.
+        let held = crate::file_lock::lock(
+            [workspace.join("a.txt"), workspace.join("b.txt")],
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let run = |input: &'static str| {
+            let patch = registry.get("apply_patch").unwrap();
+            let context = tool_context(&workspace);
+            tokio::spawn(async move { patch.execute(json!({ "input": input }), context).await })
+        };
+        // As written, one patch names a.txt first and the other b.txt.
+        let forward = run(concat!(
+            "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+ONE\n",
+            "*** Update File: b.txt\n@@\n-one\n+ONE\n*** End Patch\n"
+        ));
+        let backward = run(concat!(
+            "*** Begin Patch\n*** Update File: b.txt\n@@\n-two\n+TWO\n",
+            "*** Update File: x/../a.txt\n@@\n-two\n+TWO\n*** End Patch\n"
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(held);
+        let (forward, backward) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(forward, backward)
+        })
+        .await
+        .expect("the patches waited on each other");
+        forward.unwrap().unwrap();
+        backward.unwrap().unwrap();
+        for name in ["a.txt", "b.txt"] {
+            assert_eq!(
+                std::fs::read_to_string(workspace.join(name)).unwrap(),
+                "ONE\nTWO\n",
+                "{name}"
+            );
+        }
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_edit_does_not_wait_for_another_edits_diagnostics() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-edit-diagnose-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        std::fs::write(workspace.join("notes.mock"), "alpha\nbeta\n").unwrap();
+        // A language server that takes three seconds to start, so the first
+        // edit's diagnostics take that long.
+        let language = Arc::new(LanguageService::new(
+            workspace.clone(),
+            haarness_language::LspConfig {
+                builtins: false,
+                servers: std::collections::BTreeMap::from([(
+                    "slow".into(),
+                    haarness_language::LspServerConfig {
+                        command: vec!["python3".into(), language_fixture("mock_lsp.py")],
+                        extensions: vec![".mock".into()],
+                        environment: std::collections::BTreeMap::from([(
+                            "INIT_DELAY".into(),
+                            "3".into(),
+                        )]),
+                        ..haarness_language::LspServerConfig::default()
+                    },
+                )]),
+                ..haarness_language::LspConfig::default()
+            },
+            haarness_language::FormatterConfig::default(),
+        ));
+        let registry = NativeToolRegistry::new(workspace.clone()).with_language(language.clone());
+        let edit = |old: &str, new: &str| {
+            let edit = registry.get("edit").unwrap();
+            let context = tool_context(&workspace);
+            let arguments = json!({"path":"notes.mock", "old": old, "new": new});
+            tokio::spawn(async move { edit.execute(arguments, context).await })
+        };
+        let read = || std::fs::read_to_string(workspace.join("notes.mock")).unwrap();
+        let first = edit("alpha", "alpha first");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !read().contains("alpha first") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first edit never landed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The first edit now waits for the language server; the second edit
+        // is written meanwhile.
+        let second = edit("beta", "beta second");
+        let deadline = std::time::Instant::now() + Duration::from_millis(1_500);
+        while !read().contains("beta second") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the second edit waited for the first one's diagnostics"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!first.is_finished());
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(read(), "alpha first\nbeta second\n");
+        language.shutdown().await;
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn parallel_edits_of_one_file_wait_for_each_others_formatter() {
         let workspace =
             std::env::temp_dir().join(format!("haarness-edit-lock-{}", uuid::Uuid::now_v7()));
