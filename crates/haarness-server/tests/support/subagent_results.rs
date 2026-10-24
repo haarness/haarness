@@ -103,6 +103,19 @@ impl ModelProvider for Children {
                     ProviderEvent::ReasoningDelta("thinking".into()),
                     finish("stop"),
                 ],
+                // The answer beside a last call (a todo update), then an
+                // empty last step, as Claude and Gemini often end.
+                "answer beside a call" if !answered => vec![
+                    ProviderEvent::TextDelta("Done. The bug is in parse.rs.".into()),
+                    ProviderEvent::ToolCall {
+                        call_id: "child-todo".into(),
+                        name: "missing_tool".into(),
+                        arguments: serde_json::json!({}),
+                        provider_metadata: Value::Null,
+                    },
+                    finish("tool_use"),
+                ],
+                "answer beside a call" => vec![finish("end_turn")],
                 "block" => vec![
                     ProviderEvent::TextDelta("partial".into()),
                     finish("refusal"),
@@ -233,8 +246,32 @@ async fn a_subagent_whose_last_round_wrote_nothing_does_not_pass_off_earlier_tex
     let (output, _) = task_result(&items, turn);
     assert!(
         output.contains(
-            "<task_result>\nThe subagent ended without writing a reply (finish reason: stop). Its last text:\n\nLet me look.\n</task_result>"
+            "<task_result>\nThe subagent's last step wrote no text (finish reason: stop). The last text it wrote, before its final tool calls, follows; it may be its answer or only narration:\n\nLet me look.\n</task_result>"
         ),
+        "{output}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn an_answer_written_beside_a_last_call_reaches_the_parent_with_what_happened() {
+    let (directory, runtime) = runtime();
+    let thread = echo_thread(&runtime).await;
+    let (turn, items) = delegate(
+        &runtime,
+        thread.id,
+        &serde_json::json!({"prompt":"answer beside a call"}),
+    )
+    .await;
+    let (output, _) = task_result(&items, turn);
+    assert!(
+        output.contains(
+            "<task_result>\nThe subagent's last step wrote no text (finish reason: end_turn). The last text it wrote, before its final tool calls, follows; it may be its answer or only narration:\n\nDone. The bug is in parse.rs.\n</task_result>"
+        ),
+        "{output}"
+    );
+    assert!(
+        !output.contains("ended without writing a reply"),
         "{output}"
     );
     std::fs::remove_dir_all(directory).unwrap();

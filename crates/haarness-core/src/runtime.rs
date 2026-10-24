@@ -12188,10 +12188,11 @@ fn output_limit(reason: &str) -> bool {
 }
 
 /// What a parent reads as the result of a subagent's run `turn`: its last
-/// reply in that run. A run that stopped at its output limit says so, and
-/// one that ended without a reply says why, before any text an earlier round
-/// wrote: a blank result, or text that was not the run's answer, would tell
-/// the parent nothing or something untrue.
+/// reply in that run. A run that stopped at its output limit says so, one
+/// whose last step wrote nothing says so before the text an earlier step
+/// wrote, and one that wrote no text at all says why: a blank result, or
+/// text passed off as the run's answer, would tell the parent nothing or
+/// something untrue.
 fn subagent_reply(items: &[Item], turn: TurnId, last: Option<&LastRound>) -> String {
     let reply = last_reply(items, turn);
     let limit = last.filter(|round| output_limit(&round.reason));
@@ -12200,9 +12201,13 @@ fn subagent_reply(items: &[Item], turn: TurnId, last: Option<&LastRound>) -> Str
         .map(|tokens| format!(" ({tokens} output tokens)"))
         .unwrap_or_default();
     match (reply, limit) {
-        (Some(reply), None) if last.is_some_and(|round| !round.wrote_text) => {
-            format!("{} Its last text:\n\n{reply}", ended_without_reply(last))
-        }
+        // Often the answer, written beside a last tool call (a todo update)
+        // before an empty last step; sometimes narration. Which, only the
+        // model knows: say what happened, and hand the text on.
+        (Some(reply), None) if last.is_some_and(|round| !round.wrote_text) => format!(
+            "The subagent's last step wrote no text{}. The last text it wrote, before its final tool calls, follows; it may be its answer or only narration:\n\n{reply}",
+            finish_note(last)
+        ),
         (Some(reply), None) => reply.to_owned(),
         (Some(reply), Some(_)) => format!(
             "The subagent stopped at its output limit{tokens} before it finished. Its last text:\n\n{reply}"
@@ -12217,15 +12222,18 @@ fn subagent_reply(items: &[Item], turn: TurnId, last: Option<&LastRound>) -> Str
 /// "The subagent ended without writing a reply", with the provider's finish
 /// reason when `last` names one.
 fn ended_without_reply(last: Option<&LastRound>) -> String {
-    match last
-        .map(|round| round.reason.as_str())
+    format!(
+        "The subagent ended without writing a reply{}.",
+        finish_note(last)
+    )
+}
+
+/// " (finish reason: stop)", when `last` names one.
+fn finish_note(last: Option<&LastRound>) -> String {
+    last.map(|round| round.reason.as_str())
         .filter(|reason| !reason.is_empty())
-    {
-        Some(reason) => {
-            format!("The subagent ended without writing a reply (finish reason: {reason}).")
-        }
-        None => "The subagent ended without writing a reply.".into(),
-    }
+        .map(|reason| format!(" (finish reason: {reason})"))
+        .unwrap_or_default()
 }
 
 /// What a parent reads when the provider's safety check stopped its
@@ -15245,7 +15253,7 @@ mod tests {
         );
         assert_eq!(
             super::subagent_reply(&items, turn, Some(&round(false))),
-            "The subagent ended without writing a reply (finish reason: stop). Its last text:\n\nLet me look."
+            "The subagent's last step wrote no text (finish reason: stop). The last text it wrote, before its final tool calls, follows; it may be its answer or only narration:\n\nLet me look."
         );
     }
 
