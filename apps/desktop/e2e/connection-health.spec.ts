@@ -316,6 +316,215 @@ test("a wake follows a notification stream again that still looks open but died 
   }
 });
 
+test("a read that reaches a connection already closed shows no dialog, nor does a server stopped under live streams, while any other error still shows Electron's", async () => {
+  test.setTimeout(150000);
+  const remote = await endpoint("closed");
+  const client = new Haarness({ baseUrl: remote.url, token: remote.token });
+  try {
+    const thread = await chat(client, "Closed connection chat");
+    await launch();
+    let stderr = "";
+    app.process().stderr?.on("data", (chunk) => (stderr += chunk));
+    // Electron's own listener opens its dialog through dialog.showErrorBox;
+    // the monitor sees every uncaught exception, handled or not.
+    await app.evaluate(({ dialog }) => {
+      const shown: string[] = [];
+      const uncaught: string[] = [];
+      Object.assign(globalThis, { shownErrors: shown, uncaughtErrors: uncaught });
+      dialog.showErrorBox = (title, content) => void shown.push(title + "\n" + content);
+      process.on("uncaughtExceptionMonitor", (error) => void uncaught.push(error.stack ?? String(error)));
+    });
+    const seen = () =>
+      app.evaluate(() => globalThis as unknown as { shownErrors: string[]; uncaughtErrors: string[] }).then(
+        ({ shownErrors, uncaughtErrors }) => ({ shown: shownErrors, uncaught: uncaughtErrors }),
+      );
+    await addServer("Closed server", remote.url, remote.secret);
+    await page.locator(".project-list").getByRole("button", { name: thread.title!, exact: true }).click();
+    await expect(page.locator(".transcript")).toContainText("Echo: Closed connection chat start");
+
+    // Twice, a socket as code that ends it inside one of its own reads leaves
+    // it (an inspector's evaluate runs between any two calls): marked
+    // destroyed, its handle still reading. 216 bytes arrive, and Node throws
+    // from the read itself.
+    for (let time = 0; time < 2; time++)
+      await app.evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            const net = process.getBuiltinModule("node:net");
+            let socket: import("node:net").Socket;
+            const server = net.createServer((peer) => {
+              setTimeout(() => peer.write(Buffer.alloc(216, 120)), 50);
+              setTimeout(() => {
+                (socket as unknown as { _handle?: { close(): void } })._handle?.close();
+                peer.destroy();
+                server.close();
+                resolve();
+              }, 500);
+            });
+            server.listen(0, "127.0.0.1", () => {
+              const { port } = server.address() as import("node:net").AddressInfo;
+              socket = net.connect(port, "127.0.0.1", () => {
+                (socket as { destroyed: boolean }).destroyed = true;
+              });
+              socket.on("data", () => {});
+            });
+          }),
+      );
+    let state = await seen();
+    expect(state.uncaught).toHaveLength(2);
+    for (const stack of state.uncaught)
+      expect(stack).toMatch(/^RangeError \[ERR_OUT_OF_RANGE\][^\n]*Received 216\n.*getSystemErrorName.*\n.*ErrnoException.*\n.*TCP\.onStreamRead/);
+    expect(state.shown).toEqual([]);
+    // Noted once.
+    await expect.poll(() => stderr.split("a read that reached a connection already closed").length - 1).toBe(1);
+
+    // The server stops while a reply streams to the window and to the
+    // notification watch: nothing interrupts, and the app keeps answering.
+    const started = await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text: "::long 20000" });
+    await expect(page.locator(".transcript")).toContainText("marker-", { timeout: 30000 });
+    execFileSync(binary, ["--workspace", workspaces.at(-1)!, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
+    await client.waitTurn(started.id).catch(() => {});
+    await page.waitForTimeout(3000);
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Settings", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Close settings", exact: true }).click();
+    state = await seen();
+    expect(state.shown).toEqual([]);
+
+    // Any other uncaught exception still opens Electron's dialog, as before.
+    await app.evaluate(() => {
+      setTimeout(() => {
+        throw new Error("Another failure in main");
+      });
+    });
+    await expect.poll(async () => (await seen()).shown).toEqual([
+      expect.stringMatching(
+        /^A JavaScript error occurred in the main process\nUncaught Exception:\nError: Another failure in main\n {4}at /,
+      ),
+    ]);
+    expect(stderr.split("a read that reached a connection already closed").length - 1).toBe(1);
+  } finally {
+    client.close();
+    await app?.close().catch(() => {});
+  }
+});
+
+test("quitting in the middle of an event stream's read ends that stream after the read, and nothing is thrown", async () => {
+  test.setTimeout(150000);
+  const remote = await endpoint("quit");
+  const client = new Haarness({ baseUrl: remote.url, token: remote.token });
+  try {
+    const thread = await chat(client, "Quit chat");
+    await launch();
+    let stderr = "";
+    app.process().stderr?.on("data", (chunk) => (stderr += chunk));
+    const exited = new Promise<number | null>((resolve) => app.process().once("exit", (code) => resolve(code)));
+    await addServer("Quit server", remote.url, remote.secret);
+    await page.locator(".project-list").getByRole("button", { name: thread.title!, exact: true }).click();
+    await expect(page.locator(".transcript")).toContainText("Echo: Quit chat start");
+    // app.quit() runs inside a read of an event stream, before Node looks
+    // whether that socket is still open: where an inspector's evaluate (as
+    // Playwright closes the app) can land, since it runs between any two
+    // calls.
+    await app.evaluate(({ app: electronApp }) => {
+      const net = process.getBuiltinModule("node:net");
+      const socket = net.Socket.prototype as unknown as {
+        push(chunk: unknown, ...rest: unknown[]): boolean;
+        _unrefTimer(): void;
+      };
+      const push = socket.push;
+      const unref = socket._unrefTimer;
+      const streams = new WeakSet<object>();
+      socket.push = function (chunk, ...rest) {
+        if (Buffer.isBuffer(chunk) && /^(?:id|data): /m.test(chunk.toString("latin1"))) streams.add(this);
+        return push.call(this, chunk, ...rest);
+      };
+      let armed = true;
+      socket._unrefTimer = function () {
+        if (armed && streams.has(this) && /onStreamRead/.test(new Error().stack ?? "")) {
+          armed = false;
+          process.stderr.write("quitting inside an event stream's read\n");
+          electronApp.quit();
+        }
+        return unref.call(this);
+      };
+      process.on("uncaughtExceptionMonitor", (error) => void process.stderr.write("uncaught: " + error.stack + "\n"));
+    });
+    await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text: "::long 2000" });
+    expect(await exited).toBe(0);
+    expect(stderr).toContain("quitting inside an event stream's read");
+    expect(stderr).not.toContain("uncaught:");
+  } finally {
+    client.close();
+    await app?.close().catch(() => {});
+  }
+});
+
+test("quitting with no window open ends the event streams before the app exits", async () => {
+  test.setTimeout(150000);
+  const remote = await endpoint("windowless");
+  const client = new Haarness({ baseUrl: remote.url, token: remote.token });
+  try {
+    const thread = await chat(client, "Windowless chat");
+    await launch();
+    let stderr = "";
+    app.process().stderr?.on("data", (chunk) => (stderr += chunk));
+    const exited = new Promise<number | null>((resolve) => app.process().once("exit", (code) => resolve(code)));
+    await addServer("Windowless server", remote.url, remote.secret);
+    await page.locator(".project-list").getByRole("button", { name: thread.title!, exact: true }).click();
+    await expect(page.locator(".transcript")).toContainText("Echo: Windowless chat start");
+    // Event stream sockets are told apart by the events they carry, and say
+    // when they are read first and when something ends them.
+    await app.evaluate(() => {
+      const net = process.getBuiltinModule("node:net");
+      const socket = net.Socket.prototype as unknown as {
+        push(chunk: unknown, ...rest: unknown[]): boolean;
+        destroy(...args: unknown[]): unknown;
+      };
+      const push = socket.push;
+      const destroy = socket.destroy;
+      const streams = new WeakMap<object, number>();
+      let next = 0;
+      socket.push = function (chunk, ...rest) {
+        if (!streams.has(this) && Buffer.isBuffer(chunk) && /^(?:id|data): /m.test(chunk.toString("latin1"))) {
+          streams.set(this, ++next);
+          process.stderr.write(`event stream ${next} read\n`);
+        }
+        return push.call(this, chunk, ...rest);
+      };
+      socket.destroy = function (...args) {
+        if (streams.has(this)) process.stderr.write(`event stream ${streams.get(this)} ended\n`);
+        return destroy.apply(this, args);
+      };
+      process.on("exit", () => void process.stderr.write("process exits\n"));
+    });
+    // A reply reaches the window's stream and the one behind notifications.
+    await turn(client, thread, "read by both streams");
+    await expect.poll(() => stderr.match(/event stream \d+ read/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    // The window closes (on macOS the app stays, following the project's
+    // notifications) and, once the window's size is saved, the app quits
+    // with none open: before-quit and will-quit come in the same call.
+    await app
+      .evaluate(({ app: electronApp, BrowserWindow }) => {
+        for (const win of BrowserWindow.getAllWindows()) win.close();
+        const quit = () =>
+          BrowserWindow.getAllWindows().length ? setTimeout(quit, 50) : setTimeout(() => electronApp.quit(), 1000);
+        quit();
+      })
+      .catch(() => {});
+    expect(await exited).toBe(0);
+    // Every stream ended before the process exits, not during its teardown.
+    expect(stderr).toContain("process exits");
+    const before = stderr.slice(0, stderr.indexOf("process exits"));
+    const read = [...before.matchAll(/event stream (\d+) read/g)].map((match) => match[1]);
+    const ended = new Set([...before.matchAll(/event stream (\d+) ended/g)].map((match) => match[1]));
+    expect(read.filter((id) => !ended.has(id))).toEqual([]);
+  } finally {
+    client.close();
+    await app?.close().catch(() => {});
+  }
+});
+
 /** An Anthropic-format endpoint that lists its models in four pages of
  * 2.2 s each (inside the server's 3 s for a page and 10 s for the list), and
  * answers a message with "late hello". */
