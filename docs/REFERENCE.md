@@ -450,9 +450,9 @@ that never ends (a minified bundle, a JSON dump), holds only what is shown: a
 line longer than 2000 characters shows its first 2000 and ends in
 `… (line truncated to 2000 characters)`. One read returns at most 2000 lines or
 50 KB, whatever `limit` asks, and then ends with `(stopped at 50 KB; read on
-with offset=N)` (or `2000 lines`); a read without a `limit` whose 2000 lines
-end before the file does ends with `(more lines follow; read on with
-offset=2000)`. Text that is not UTF-8 (a
+with offset=N)` (or `2000 lines`); a read whose `limit` (2000 when none is
+given) ends before the file does ends with `(more lines follow; read on with
+offset=N)`. Text that is not UTF-8 (a
 Latin-1 file) shows `�` for what does not decode, with a note that `edit`
 cannot change it and `write` would replace those bytes (`edit` and `multiedit`
 refuse it as not UTF-8 text). A file with a NUL byte in its first 8 KiB counts
