@@ -2853,5 +2853,14 @@
   "a rule keeps this resource from the model": "bir kural bu kaynağı modelden uzak tutuyor",
   "did not answer within {seconds} s": "{seconds} sn içinde yanıt vermedi",
   "This server cannot read MCP resources. Remove them from the message, or update the server.": "Bu sunucu MCP kaynaklarını okuyamıyor. Bunları mesajdan kaldırın veya sunucuyu güncelleyin.",
-  "Sent again as it was read.": "Okunduğu hâliyle yeniden gönderilir."
+  "Sent again as it was read.": "Okunduğu hâliyle yeniden gönderilir.",
+  "No folder": "Klasör yok",
+  "Open folder…": "Klasör aç…",
+  "What should we work on?": "Ne üzerinde çalışalım?",
+  "New chat without a folder": "Klasörsüz yeni sohbet",
+  "Couldn’t open these chats.": "Bu sohbetler açılamadı.",
+  "This chat gets a folder of its own when you send its first message.": "Bu sohbet, ilk mesajını gönderdiğinizde kendi klasörünü alır.",
+  "Folder for new chat: {name}": "Yeni sohbetin klasörü: {name}",
+  "Chat folder: {name}": "Sohbet klasörü: {name}",
+  "Choose a folder": "Klasör seçin"
 }

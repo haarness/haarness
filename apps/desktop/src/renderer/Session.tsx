@@ -68,7 +68,7 @@ import { AgentTask } from "./AgentTask";
 import { Shimmer } from "./Shimmer";
 import { agentTasks, taskKey, type AgentTask as Task } from "./agent-tasks";
 import { createDictation } from "./dictation";
-import { ProjectPicker } from "./ProjectPicker";
+import { FolderPicker } from "./FolderPicker";
 import { PlanDock } from "./PlanDock";
 import { currentPlan } from "./plan";
 import { Select } from "./Select";
@@ -2281,14 +2281,18 @@ export function Session() {
                 <Mark />
               </div>
               <h2>
+                {/* Where the chat works is the composer's folder chip; the
+                    heading only says it. */}
                 <Show
-                  when={project()}
-                  fallback={projectHeading(t("{project} to get started"))}
+                  when={!project()?.chatHome && (group()?.label ?? project()?.label)}
+                  fallback={t("What should we work on?")}
                 >
-                  {projectHeading(t("What should we work on in {project}?"))}
+                  {(name) => projectHeading(t("What should we work on in {project}?"), name())}
                 </Show>
               </h2>
-              <Show when={project()}>
+              {/* Starters are about code; a chat without a folder starts
+                  from whatever is typed. */}
+              <Show when={project() && !project()!.chatHome}>
                 <div class="suggestions" aria-label={t("Chat starters")}>
                   <For each={projectStarters}>
                     {(item) => (
@@ -2465,21 +2469,6 @@ export function Session() {
       </div>
       <Show when={editable() || pending() || !follow() || todos().length}>
         <div class="composer-area" ref={toastAnchor("composer")}>
-          <Show when={empty()}>
-            <div class="composer-project">
-              <ProjectPicker />
-              <Show when={group()?.git && !group()?.remote}>
-                <MenuButton
-                  label={t("Choose working location")}
-                  icon="branch"
-                  class="location-picker"
-                  text={t(locationName(project()))}
-                  title={project()?.workspace}
-                  items={locationChoices()}
-                />
-              </Show>
-            </div>
-          </Show>
           <Show when={!follow()}>
             <button
               class="jump-latest"
@@ -2837,6 +2826,19 @@ export function Session() {
                       },
                     ]}
                   />
+                  <Show when={state.connection}>
+                    <FolderPicker />
+                  </Show>
+                  <Show when={empty() && group()?.git && !group()?.remote}>
+                    <MenuButton
+                      label={t("Choose working location")}
+                      icon="branch"
+                      class="location-picker"
+                      text={t(locationName(project()))}
+                      title={project()?.workspace}
+                      items={locationChoices()}
+                    />
+                  </Show>
                   {/* In the body, so the composer's own styles stay off the dialog. */}
                   <Show when={screenshotsFor()}>
                     {(open) => (
@@ -3013,17 +3015,21 @@ export function Session() {
  * right, Haarness answers in the reading column, and everything the engine
  * *did* sits on a single quiet rail beneath the answer.
  */
-/** The new-chat heading with the project picker in it. The word or mark
+/** The new-chat heading with the project's name in it. The word or mark
  * right after the name ("?") stays on its line: a long name gives way with
- * an ellipsis instead of leaving the mark alone on the next line. */
-function projectHeading(template: string) {
+ * an ellipsis instead of leaving the mark alone on the next line. A Cloud
+ * session's title is often a sentence, which must not end in a full stop
+ * before the question mark. */
+function projectHeading(template: string, name: string) {
   const [before, after = ""] = template.split("{project}");
   const [, glued = "", rest = ""] = /^(\S*)([\s\S]*)$/.exec(after) ?? [];
   return (
     <>
       {before}
       <span class="heading-project">
-        <ProjectPicker heading />
+        <span class="heading-project-name" title={name}>
+          {name.replace(/[.!?。！？]+$/u, "")}
+        </span>
         {glued}
       </span>
       {rest}

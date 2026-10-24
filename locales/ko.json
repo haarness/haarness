@@ -2853,5 +2853,14 @@
   "a rule keeps this resource from the model": "규칙에 따라 이 리소스는 모델에 전달되지 않습니다",
   "did not answer within {seconds} s": "{seconds}초 안에 응답하지 않았습니다",
   "This server cannot read MCP resources. Remove them from the message, or update the server.": "이 서버는 MCP 리소스를 읽을 수 없습니다. 메시지에서 제거하거나 서버를 업데이트하세요.",
-  "Sent again as it was read.": "읽었던 내용 그대로 다시 보냅니다."
+  "Sent again as it was read.": "읽었던 내용 그대로 다시 보냅니다.",
+  "No folder": "폴더 없음",
+  "Open folder…": "폴더 열기…",
+  "What should we work on?": "무엇을 함께 해 볼까요?",
+  "New chat without a folder": "폴더 없이 새 채팅",
+  "Couldn’t open these chats.": "이 채팅을 열 수 없습니다.",
+  "This chat gets a folder of its own when you send its first message.": "첫 메시지를 보내면 이 채팅에 전용 폴더가 생깁니다.",
+  "Folder for new chat: {name}": "새 채팅 폴더: {name}",
+  "Chat folder: {name}": "채팅 폴더: {name}",
+  "Choose a folder": "폴더 선택"
 }

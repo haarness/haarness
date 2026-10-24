@@ -2853,5 +2853,14 @@
   "a rule keeps this resource from the model": "a rule keeps this resource from the model",
   "did not answer within {seconds} s": "did not answer within {seconds} s",
   "This server cannot read MCP resources. Remove them from the message, or update the server.": "This server cannot read MCP resources. Remove them from the message, or update the server.",
-  "Sent again as it was read.": "Sent again as it was read."
+  "Sent again as it was read.": "Sent again as it was read.",
+  "No folder": "No folder",
+  "Open folder…": "Open folder…",
+  "What should we work on?": "What should we work on?",
+  "New chat without a folder": "New chat without a folder",
+  "Couldn’t open these chats.": "Couldn’t open these chats.",
+  "This chat gets a folder of its own when you send its first message.": "This chat gets a folder of its own when you send its first message.",
+  "Folder for new chat: {name}": "Folder for new chat: {name}",
+  "Chat folder: {name}": "Chat folder: {name}",
+  "Choose a folder": "Choose a folder"
 }

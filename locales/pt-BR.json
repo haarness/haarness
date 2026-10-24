@@ -2853,5 +2853,14 @@
   "a rule keeps this resource from the model": "uma regra mantém este recurso longe do modelo",
   "did not answer within {seconds} s": "não respondeu em {seconds} s",
   "This server cannot read MCP resources. Remove them from the message, or update the server.": "Este servidor não consegue ler recursos MCP. Remova-os da mensagem ou atualize o servidor.",
-  "Sent again as it was read.": "É enviado de novo como foi lido."
+  "Sent again as it was read.": "É enviado de novo como foi lido.",
+  "No folder": "Sem pasta",
+  "Open folder…": "Abrir pasta…",
+  "What should we work on?": "No que vamos trabalhar?",
+  "New chat without a folder": "Novo chat sem pasta",
+  "Couldn’t open these chats.": "Não foi possível abrir estes chats.",
+  "This chat gets a folder of its own when you send its first message.": "Este chat ganha uma pasta própria quando você envia a primeira mensagem.",
+  "Folder for new chat: {name}": "Pasta do novo chat: {name}",
+  "Chat folder: {name}": "Pasta do chat: {name}",
+  "Choose a folder": "Escolher pasta"
 }

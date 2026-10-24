@@ -2853,5 +2853,14 @@
   "a rule keeps this resource from the model": "规则禁止模型使用此资源",
   "did not answer within {seconds} s": "{seconds} 秒内未响应",
   "This server cannot read MCP resources. Remove them from the message, or update the server.": "此服务器无法读取 MCP 资源。请将其从消息中移除，或更新服务器。",
-  "Sent again as it was read.": "按读取时的内容再次发送。"
+  "Sent again as it was read.": "按读取时的内容再次发送。",
+  "No folder": "无文件夹",
+  "Open folder…": "打开文件夹…",
+  "What should we work on?": "我们要做些什么？",
+  "New chat without a folder": "不使用文件夹的新对话",
+  "Couldn’t open these chats.": "无法打开这些对话。",
+  "This chat gets a folder of its own when you send its first message.": "发送第一条消息后，此对话会有自己的文件夹。",
+  "Folder for new chat: {name}": "新对话的文件夹：{name}",
+  "Chat folder: {name}": "对话文件夹：{name}",
+  "Choose a folder": "选择文件夹"
 }

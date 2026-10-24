@@ -2853,5 +2853,14 @@
   "a rule keeps this resource from the model": "правило не допускает модель к этому ресурсу",
   "did not answer within {seconds} s": "не ответил за {seconds} с",
   "This server cannot read MCP resources. Remove them from the message, or update the server.": "Этот сервер не может читать ресурсы MCP. Удалите их из сообщения или обновите сервер.",
-  "Sent again as it was read.": "Отправляется снова в том виде, в каком был прочитан."
+  "Sent again as it was read.": "Отправляется снова в том виде, в каком был прочитан.",
+  "No folder": "Без папки",
+  "Open folder…": "Открыть папку…",
+  "What should we work on?": "Над чем поработаем?",
+  "New chat without a folder": "Новый чат без папки",
+  "Couldn’t open these chats.": "Не удалось открыть эти чаты.",
+  "This chat gets a folder of its own when you send its first message.": "У этого чата появится своя папка, когда вы отправите первое сообщение.",
+  "Folder for new chat: {name}": "Папка нового чата: {name}",
+  "Chat folder: {name}": "Папка чата: {name}",
+  "Choose a folder": "Выберите папку"
 }

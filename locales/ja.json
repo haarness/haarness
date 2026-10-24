@@ -2853,5 +2853,14 @@
   "a rule keeps this resource from the model": "ルールにより、このリソースはモデルに渡されません",
   "did not answer within {seconds} s": "{seconds} 秒以内に応答がありませんでした",
   "This server cannot read MCP resources. Remove them from the message, or update the server.": "このサーバーは MCP リソースを読み取れません。メッセージから削除するか、サーバーを更新してください。",
-  "Sent again as it was read.": "読み取ったときの内容のまま、もう一度送信します。"
+  "Sent again as it was read.": "読み取ったときの内容のまま、もう一度送信します。",
+  "No folder": "フォルダーなし",
+  "Open folder…": "フォルダーを開く…",
+  "What should we work on?": "何に取り組みましょうか？",
+  "New chat without a folder": "フォルダーなしで新しいチャット",
+  "Couldn’t open these chats.": "これらのチャットを開けませんでした。",
+  "This chat gets a folder of its own when you send its first message.": "最初のメッセージを送ると、このチャット専用のフォルダーができます。",
+  "Folder for new chat: {name}": "新しいチャットのフォルダー: {name}",
+  "Chat folder: {name}": "チャットのフォルダー: {name}",
+  "Choose a folder": "フォルダーを選択"
 }
