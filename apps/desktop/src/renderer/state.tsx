@@ -205,6 +205,8 @@ interface State extends Live {
   catalogVersion: number;
 }
 /** `saved` is the settings index.tsx read before the first render. */
+/** Whether a chat of This computer was running or waiting at last look. */
+const HOME_BUSY = "chat-home-busy:v1";
 function createApp(saved?: Preferences) {
   const [state, set] = createStore<State>({
     modelRecents: [],
@@ -1096,12 +1098,27 @@ function createApp(saved?: Preferences) {
     state.openingNewChat &&
     !!state.chatHomeAt.id &&
     state.openingProject === chatHomeLocation().id;
-  /** This computer has been open (or opening) in this window: from then on
-   * its chats are followed live, so work running there keeps its marks. */
+  /** This computer's chats are followed live, so work running there keeps
+   * its marks and its notifications: from launch when work may be going on
+   * there (see `followHomeAtLaunch`), else once it has been open (or
+   * opening) in this window. */
   const [homeUsed, setHomeUsed] = createSignal(false);
   createEffect(() => {
     if (state.connection?.chatHome || homeOpening()) setHomeUsed(true);
   });
+  /**
+   * This computer is followed from launch when work may be going on there:
+   * its daemon runs (read from its own record, so nothing starts for the
+   * answer), or one of its chats was running or waiting for an answer when
+   * Haarness last quit. Otherwise its daemon waits until it is used.
+   */
+  async function followHomeAtLaunch() {
+    const [running, busy] = await Promise.all([
+      window.haarness.chatHomeRunning().catch(() => false),
+      window.haarness.storage(HOME_BUSY).catch(() => false),
+    ]);
+    if (running || busy === true) setHomeUsed(true);
+  }
   /**
    * Moves the new chat elsewhere (`move`, the folder chip's choice) with its
    * draft: typed first and a folder chosen after, the text, attachments and
@@ -1542,6 +1559,26 @@ function createApp(saved?: Preferences) {
     if (changed) setIndexes(next);
   });
   onCleanup(() => indexDisposers.forEach((dispose) => dispose()));
+  // Whether a chat of This computer is running or waiting for an answer,
+  // kept as it changes while its chats are followed live: what the next
+  // launch reads (followHomeAtLaunch).
+  let homeBusy: boolean | undefined;
+  createEffect(() => {
+    const id = state.chatHomeAt.id;
+    if (!id) return;
+    const overview = indexes()[id];
+    const live =
+      state.connection?.id === id && state.connectionStatus === "Connected"
+        ? state
+        : overview?.live
+          ? overview
+          : undefined;
+    if (!live) return;
+    const busy = !!(live.turns.length || live.permissions.length || live.questions.length);
+    if (busy === homeBusy) return;
+    homeBusy = busy;
+    void window.haarness.storage(HOME_BUSY, busy).catch(() => {});
+  });
   const conversations = (id?: string) =>
     visibleLocations()
       .filter((location) => !id || projectKey(location) === id)
@@ -2381,6 +2418,7 @@ function createApp(saved?: Preferences) {
     set("version", value.version);
     set("platform", value.platform);
     set("chatHomeAt", value.chatHome);
+    void followHomeAtLaunch();
     const savedProject = await window.haarness.storage("active-project");
     const savedServer = await window.haarness.storage("active-server");
     const legacy = value.recent.find((item) => item.id === savedProject);

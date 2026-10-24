@@ -582,3 +582,85 @@ test("This computer's daemon starts only when it is used: a launch on a project 
   await expect(page.locator(".transcript")).toContainText("Echo: A chat from before", { timeout: 60000 });
   expect(homeDaemons()).toBe(1);
 });
+
+test("This computer is followed from launch when work may be going on there: its daemon runs, or a chat of it was busy at the last quit", async () => {
+  const running = () => section().locator(".session-status.running");
+  const leaveOnProject = async () => {
+    await app!.evaluate(({ dialog }, directory) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
+    }, project);
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
+    await ready();
+    await expect(page.locator(".titlebar-caption")).toHaveText("pocket-project");
+  };
+  await launch();
+  await ready();
+  // A chat that goes on working after Haarness quits, with a project the
+  // place left open.
+  await send("!linger 30000 Still going");
+  await expect(rows()).toHaveCount(1, { timeout: 60000 });
+  await expect(running()).toHaveCount(1);
+  await leaveOnProject();
+  await app!.close();
+  expect(homeDaemons()).toBe(1);
+
+  // Its daemon runs: its chats are followed at once, the running one
+  // marked, and its end is told as any chat's.
+  await launch();
+  await app!.evaluate(({ Notification }) => {
+    (globalThis as any).notificationRecords = [];
+    Notification.isSupported = () => true;
+    Notification.prototype.show = function () {
+      (globalThis as any).notificationRecords.push(this);
+    };
+  });
+  await ready();
+  await expect(page.locator(".titlebar-caption")).toHaveText("pocket-project");
+  await expect(running()).toHaveCount(1, { timeout: 20000 });
+  const win = await app!.browserWindow(page);
+  await win.evaluate((win) => win.hide());
+  await expect
+    .poll(
+      () =>
+        app!.evaluate(() =>
+          (globalThis as any).notificationRecords.some(
+            (item: any) => item.title.includes("Task finished") && item.body.includes("This computer"),
+          ),
+        ),
+      { timeout: 60000 },
+    )
+    .toBe(true);
+  await win.evaluate((win) => win.show());
+  await expect(running()).toHaveCount(0);
+
+  // A chat busy when Haarness quits, whose daemon is gone by the next
+  // launch (a restart of the computer): This computer starts with it.
+  await section().getByRole("button", { name: "New chat in This computer", exact: true }).click();
+  await ready();
+  await send("!linger 60000 Busy at quit");
+  await expect(rows()).toHaveCount(2, { timeout: 60000 });
+  await expect(running()).toHaveCount(1);
+  await page.locator(".project-list .project-heading").filter({ hasText: /^pocket-project$/ }).click();
+  await ready();
+  await expect(page.locator(".titlebar-caption")).toHaveText("pocket-project");
+  await app!.close();
+  stopChatHome(binary, env);
+  await expect.poll(homeDaemons).toBe(0);
+  await launch();
+  await ready();
+  await expect(page.locator(".titlebar-caption")).toHaveText("pocket-project");
+  await expect.poll(homeDaemons, { timeout: 60000 }).toBe(1);
+  await expect(rows()).toHaveCount(2);
+
+  // Nothing busy there and its daemon stopped: it waits until it is used.
+  await expect(running()).toHaveCount(0);
+  await app!.close();
+  stopChatHome(binary, env);
+  await expect.poll(homeDaemons).toBe(0);
+  await launch();
+  await ready();
+  await expect(page.locator(".titlebar-caption")).toHaveText("pocket-project");
+  await expect(rows()).toHaveCount(2);
+  await page.waitForTimeout(2000);
+  expect(homeDaemons()).toBe(0);
+});
