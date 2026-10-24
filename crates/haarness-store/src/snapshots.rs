@@ -75,6 +75,8 @@ struct Written {
     files: u64,
     /// Blobs compressed: content no blob held yet.
     compressed: u64,
+    /// Blobs it added to the store, each with the rows that name it.
+    blobs: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -848,7 +850,10 @@ fn reclaim_rows(
     }
     // Blobs are content-addressed and shared, so they only go once the
     // last manifest that named them is gone. The rows of a capture still
-    // being written name theirs too, so they stay.
+    // being written name theirs too, so they stay. This scans every
+    // manifest row under the write lock, which on a very large database
+    // can outlast another connection's busy timeout; a sweep in short
+    // batches over an index on `snapshot_files(hash)` would not (follow-up).
     let blobs = transaction
         .execute(
             "DELETE FROM snapshot_blobs WHERE hash NOT IN (SELECT hash FROM snapshot_files)",
@@ -1078,16 +1083,17 @@ impl SqliteSnapshotStore {
         step: impl FnMut(CaptureStep) -> CoreResult<()>,
     ) -> CoreResult<SnapshotInfo> {
         let _capturing = Capturing::start(id);
+        let mut written = Written::default();
         let published = self
-            .write_manifest(id, limits, step)
-            .and_then(|written| self.publish(id, thread, written).map(|()| written));
+            .write_manifest(id, limits, &mut written, step)
+            .and_then(|()| self.publish(id, thread, written));
         match published {
-            Ok(written) => Ok(SnapshotInfo {
+            Ok(()) => Ok(SnapshotInfo {
                 id: id.to_owned(),
                 file_count: written.files,
             }),
             Err(error) => {
-                self.discard(id);
+                self.discard(id, written);
                 Err(error)
             }
         }
@@ -1096,15 +1102,16 @@ impl SqliteSnapshotStore {
     /// Read every managed entry and write its manifest row under `id`, with
     /// the blob of any content not stored yet. Repository size is not a
     /// reason to reject an otherwise valid operation; it only means more
-    /// batches. `step` runs between them (tests act there).
+    /// batches. `written` counts what it wrote, also when it fails part
+    /// way; `step` runs between batches (tests act there).
     fn write_manifest(
         &self,
         id: &str,
         limits: BatchLimits,
+        written: &mut Written,
         mut step: impl FnMut(CaptureStep) -> CoreResult<()>,
-    ) -> CoreResult<Written> {
+    ) -> CoreResult<()> {
         let sources = self.source_paths()?;
-        let mut written = Written::default();
         // The capture's first row: the rows of a capture are only ever
         // removed together, so while it stands, all of them do.
         let mut first = None;
@@ -1119,7 +1126,7 @@ impl SqliteSnapshotStore {
             if !batch.is_empty()
                 && (batch.len() >= limits.entries || bytes.saturating_add(size) > limits.bytes)
             {
-                self.write_batch(id, &batch, first.as_deref(), &mut written, &mut step)?;
+                self.write_batch(id, &batch, first.as_deref(), written, &mut step)?;
                 first.get_or_insert_with(|| batch[0].manifest.path.clone());
                 batch.clear();
                 bytes = 0;
@@ -1128,9 +1135,9 @@ impl SqliteSnapshotStore {
             batch.push(scanned);
         }
         if !batch.is_empty() {
-            self.write_batch(id, &batch, first.as_deref(), &mut written, &mut step)?;
+            self.write_batch(id, &batch, first.as_deref(), written, &mut step)?;
         }
-        Ok(written)
+        Ok(())
     }
 
     /// `first` is the path of the capture's first row, once a batch was
@@ -1194,6 +1201,7 @@ impl SqliteSnapshotStore {
         {
             return Err(removed_while_written());
         }
+        let mut added = 0_usize;
         {
             let mut exists = tx.prepare_cached(BLOB_STORED).map_err(storage)?;
             let mut insert_blob = tx
@@ -1212,7 +1220,7 @@ impl SqliteSnapshotStore {
                 if let Some(data) = &entry.data {
                     let size = i64::try_from(data.len()).unwrap_or(i64::MAX);
                     if let Some(compressed) = blobs.get(manifest.hash.as_str()) {
-                        insert_blob
+                        added += insert_blob
                             .execute(params![manifest.hash, size, compressed])
                             .map_err(storage)?;
                     } else if !exists
@@ -1224,7 +1232,7 @@ impl SqliteSnapshotStore {
                         // again under the write lock, so no manifest row
                         // names a blob that is gone; once this transaction
                         // commits, the row keeps its blob.
-                        insert_blob
+                        added += insert_blob
                             .execute(params![manifest.hash, size, compress(data)?])
                             .map_err(storage)?;
                         written.compressed += 1;
@@ -1245,6 +1253,7 @@ impl SqliteSnapshotStore {
         tx.commit().map_err(storage)?;
         drop(connection);
         written.files += u64::try_from(batch.len()).unwrap_or(u64::MAX);
+        written.blobs += u64::try_from(added).unwrap_or(u64::MAX);
         step(CaptureStep::Written)
     }
 
@@ -1281,32 +1290,36 @@ impl SqliteSnapshotStore {
     }
 
     /// Remove the manifest rows of a capture that failed, a batch per
-    /// transaction. The blobs only it stored go with the next retention
-    /// pass, and rows this cannot remove once the capture is abandoned.
-    fn discard(&self, id: &str) {
-        let mut removed_any = false;
+    /// transaction, and return how many transactions removed some. Rows
+    /// this cannot remove go once the capture is abandoned. The blobs it
+    /// added go with the next retention pass, which scans every manifest
+    /// row for them: one that added none (the content of an unchanged tree
+    /// was all stored) asks for no such scan.
+    fn discard(&self, id: &str, written: Written) -> usize {
+        let mut transactions = 0;
         loop {
-            let connection = self.connection.lock();
-            let removed = connection.execute(
+            let removed = self.connection.lock().execute(
                 "DELETE FROM snapshot_files WHERE rowid IN \
                  (SELECT rowid FROM snapshot_files WHERE snapshot_id=?1 LIMIT ?2) \
                  AND NOT EXISTS(SELECT 1 FROM snapshots WHERE id=?1)",
                 params![id, i64::try_from(BATCH.entries).unwrap_or(i64::MAX)],
             );
             match removed {
-                Ok(0) => {
-                    if removed_any && let Some(database) = database_key(&connection) {
-                        ORPHANED.lock().insert(database);
-                    }
-                    return;
-                }
-                Ok(_) => removed_any = true,
+                Ok(0) => break,
+                Ok(_) => transactions += 1,
                 Err(error) => {
                     tracing::debug!(snapshot = id, %error, "could not remove a failed capture's entries");
-                    return;
+                    break;
                 }
             }
         }
+        if transactions > 0
+            && written.blobs > 0
+            && let Some(database) = database_key(&self.connection.lock())
+        {
+            ORPHANED.lock().insert(database);
+        }
+        transactions
     }
 }
 
@@ -2796,11 +2809,31 @@ mod tests {
         uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, seconds, 0)).to_string()
     }
 
+    /// What `write_manifest` wrote, if it completed.
+    fn manifest(
+        store: &SqliteSnapshotStore,
+        id: &str,
+        limits: BatchLimits,
+        step: impl FnMut(CaptureStep) -> CoreResult<()>,
+    ) -> CoreResult<Written> {
+        let mut written = Written::default();
+        store
+            .write_manifest(id, limits, &mut written, step)
+            .map(|()| written)
+    }
+
     fn capture_with(store: &SqliteSnapshotStore, limits: BatchLimits) -> (String, Written) {
         let id = uuid::Uuid::now_v7().to_string();
-        let written = store.write_manifest(&id, limits, |_| Ok(())).unwrap();
+        let written = manifest(store, &id, limits, |_| Ok(())).unwrap();
         store.publish(&id, ThreadId::new(), written).unwrap();
         (id, written)
+    }
+
+    /// Whether the next retention pass of `store`'s database scans for the
+    /// blobs a failed capture added.
+    fn blob_scan_scheduled(store: &SqliteSnapshotStore) -> bool {
+        let database = database_key(&store.connection.lock()).unwrap();
+        ORPHANED.lock().contains(&database)
     }
 
     #[test]
@@ -2815,19 +2848,18 @@ mod tests {
         other.busy_timeout(std::time::Duration::ZERO).unwrap();
         let id = uuid::Uuid::now_v7().to_string();
         let mut writes = 0;
-        let written = store
-            .write_manifest(&id, batches_of(3), |_| {
-                other
-                    .execute_batch(&format!(
-                        "BEGIN IMMEDIATE; \
+        let written = manifest(&store, &id, batches_of(3), |_| {
+            other
+                .execute_batch(&format!(
+                    "BEGIN IMMEDIATE; \
                          INSERT INTO permission_rules(workspace,pattern,decision,created_at) \
                          VALUES('ws','p{writes}','allow','now'); COMMIT;"
-                    ))
-                    .map_err(storage)?;
-                writes += 1;
-                Ok(())
-            })
-            .unwrap();
+                ))
+                .map_err(storage)?;
+            writes += 1;
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(written.files, 20);
         assert_eq!(writes, 14, "seven batches, each checked and written");
         assert!(
@@ -2855,7 +2887,8 @@ mod tests {
                 first,
                 Written {
                     files: 4,
-                    compressed: 2
+                    compressed: 2,
+                    blobs: 2
                 },
                 "{limits:?}"
             );
@@ -2864,7 +2897,8 @@ mod tests {
                 again,
                 Written {
                     files: 4,
-                    compressed: 0
+                    compressed: 0,
+                    blobs: 0
                 },
                 "an unchanged tree compresses nothing: {limits:?}"
             );
@@ -2898,17 +2932,16 @@ mod tests {
         let id = uuid::Uuid::now_v7().to_string();
         let mut checked = 0;
         let mut pruned = None;
-        let written = store
-            .write_manifest(&id, batches_of(1), |step| {
-                checked += usize::from(step == CaptureStep::Checked);
-                // `a`'s row is written. `b`'s content was found stored, and
-                // the pass removes it before `b`'s row is written.
-                if step == CaptureStep::Checked && checked == 2 {
-                    pruned = Some(elsewhere.prune(chrono::Duration::days(7), 0)?);
-                }
-                Ok(())
-            })
-            .unwrap();
+        let written = manifest(&store, &id, batches_of(1), |step| {
+            checked += usize::from(step == CaptureStep::Checked);
+            // `a`'s row is written. `b`'s content was found stored, and
+            // the pass removes it before `b`'s row is written.
+            if step == CaptureStep::Checked && checked == 2 {
+                pruned = Some(elsewhere.prune(chrono::Duration::days(7), 0)?);
+            }
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(
             pruned.unwrap(),
             PruneReport {
@@ -2922,7 +2955,8 @@ mod tests {
             written,
             Written {
                 files: 2,
-                compressed: 1
+                compressed: 1,
+                blobs: 1
             },
             "`b`'s content is stored again"
         );
@@ -2945,12 +2979,11 @@ mod tests {
         // Stops after its first batch, as a crash would: nothing removes
         // what it wrote.
         let stopped = |id: &str| {
-            store
-                .write_manifest(id, batches_of(1), |step| match step {
-                    CaptureStep::Written => Err(CoreError::Storage("crashed".into())),
-                    CaptureStep::Checked => Ok(()),
-                })
-                .unwrap_err();
+            manifest(&store, id, batches_of(1), |step| match step {
+                CaptureStep::Written => Err(CoreError::Storage("crashed".into())),
+                CaptureStep::Checked => Ok(()),
+            })
+            .unwrap_err();
         };
         let crashed = started_hours_ago(25);
         stopped(&crashed);
@@ -2990,7 +3023,7 @@ mod tests {
 
         // A capture whose rows a pass took for abandoned cannot complete.
         let slow = started_hours_ago(25);
-        let written = store.write_manifest(&slow, BATCH, |_| Ok(())).unwrap();
+        let written = manifest(&store, &slow, BATCH, |_| Ok(())).unwrap();
         assert_eq!(
             store
                 .prune(chrono::Duration::days(7), 20)
@@ -3007,7 +3040,7 @@ mod tests {
 
         // A completed one is never abandoned, however old its id.
         let done = started_hours_ago(25);
-        let written = store.write_manifest(&done, BATCH, |_| Ok(())).unwrap();
+        let written = manifest(&store, &done, BATCH, |_| Ok(())).unwrap();
         store.publish(&done, ThreadId::new(), written).unwrap();
         assert_eq!(
             store.prune(chrono::Duration::days(7), 20).unwrap(),
@@ -3080,15 +3113,14 @@ mod tests {
         // it for abandoned.
         let id = started_hours_ago(25);
         let mut written = 0;
-        let error = store
-            .write_manifest(&id, batches_of(1), |step| {
-                if step == CaptureStep::Written {
-                    written += 1;
-                    assert_eq!(store.sweep()?.abandoned, 1);
-                }
-                Ok(())
-            })
-            .unwrap_err();
+        let error = manifest(&store, &id, batches_of(1), |step| {
+            if step == CaptureStep::Written {
+                written += 1;
+                assert_eq!(store.sweep()?.abandoned, 1);
+            }
+            Ok(())
+        })
+        .unwrap_err();
         assert_eq!(written, 1, "the next batch stops");
         assert!(error.to_string().contains("try again"), "{error}");
         assert_eq!(count(&store, "snapshot_files"), 0);
@@ -3100,7 +3132,7 @@ mod tests {
         let workspace = guard.0.join("ws");
         fs::write(workspace.join("a"), "a\n").unwrap();
         let id = started_hours_ago(25);
-        let written = store.write_manifest(&id, BATCH, |_| Ok(())).unwrap();
+        let written = manifest(&store, &id, BATCH, |_| Ok(())).unwrap();
         let abandoned = abandoned_captures(&store.connection.lock()).unwrap();
         assert_eq!(abandoned, vec![id.clone()]);
         // Another process completes it before the pass removes anything.
@@ -3112,6 +3144,49 @@ mod tests {
         assert_eq!(report.blobs, 0);
         let manifest = store.load_manifest(&id).unwrap();
         assert_eq!(store.load_blob(&manifest["a"]).unwrap(), b"a\n");
+    }
+
+    #[tokio::test]
+    async fn a_failed_capture_that_added_no_blob_schedules_no_blob_scan() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("a"), "a\n").unwrap();
+        fs::write(workspace.join("b"), "b\n").unwrap();
+        store.capture(ThreadId::new()).await.unwrap();
+        store
+            .connection
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON snapshots \
+                 BEGIN SELECT RAISE(ABORT, 'no room'); END;",
+            )
+            .unwrap();
+        // Unchanged: every blob it names was stored already.
+        store.capture(ThreadId::new()).await.unwrap_err();
+        assert_eq!(count(&store, "snapshot_files"), 2);
+        assert!(!blob_scan_scheduled(&store));
+
+        // A new file's content is a blob only the failed capture named.
+        fs::write(workspace.join("c"), "c\n").unwrap();
+        store.capture(ThreadId::new()).await.unwrap_err();
+        assert!(blob_scan_scheduled(&store));
+        assert_eq!(store.sweep().unwrap().blobs, 1);
+        assert!(!blob_scan_scheduled(&store));
+    }
+
+    #[test]
+    fn a_failed_capture_is_removed_a_batch_per_transaction() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for index in 0..2_100 {
+            fs::write(workspace.join(format!("f{index:04}")), format!("{index}\n")).unwrap();
+        }
+        let id = uuid::Uuid::now_v7().to_string();
+        let written = manifest(&store, &id, BATCH, |_| Ok(())).unwrap();
+        assert_eq!(written.blobs, 2_100);
+        assert_eq!(store.discard(&id, written), 3, "1,024, 1,024 and 52 rows");
+        assert_eq!(count(&store, "snapshot_files"), 0);
+        assert!(blob_scan_scheduled(&store));
     }
 
     #[tokio::test]
@@ -3179,12 +3254,11 @@ mod tests {
             entries: 100,
             bytes: 10,
         };
-        let written = store
-            .write_manifest(&uuid::Uuid::now_v7().to_string(), limits, |step| {
-                batches += usize::from(step == CaptureStep::Written);
-                Ok(())
-            })
-            .unwrap();
+        let written = manifest(&store, &uuid::Uuid::now_v7().to_string(), limits, |step| {
+            batches += usize::from(step == CaptureStep::Written);
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(written.files, 6);
         assert_eq!(batches, 4, "a b, c d, e, f");
     }
