@@ -61,6 +61,11 @@ pub enum WorkflowRootScope {
     Project,
     Global,
     Plugin,
+    /// A chat's own folder (`.haarness/workflows` in it): the chat's own
+    /// workflows, found for that chat whatever the project configuration
+    /// setting. Without project configuration they are trusted as inline
+    /// source is: portable ones run, native ones do not.
+    Chat,
 }
 
 /// One workflow directory. Roots are searched in the supplied order; the
@@ -91,6 +96,16 @@ impl WorkflowRoot {
             scope: WorkflowRootScope::Global,
             plugin_name: None,
             legacy,
+        }
+    }
+
+    #[must_use]
+    pub fn chat(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            scope: WorkflowRootScope::Chat,
+            plugin_name: None,
+            legacy: false,
         }
     }
 
@@ -127,6 +142,17 @@ impl WorkflowCatalog {
         // Keep scope metadata for permission checks when resuming stored runs.
         self.project_config_disabled = !enabled;
         self
+    }
+
+    /// This catalog as one chat working in `folder` sees it: the workflows
+    /// in the folder's `.haarness/workflows` come first.
+    #[must_use]
+    pub fn for_chat_folder(&self, folder: &Path) -> Self {
+        let mut catalog = self.clone();
+        catalog
+            .roots
+            .insert(0, WorkflowRoot::chat(folder.join(".haarness/workflows")));
+        catalog
     }
 
     /// Build a catalog with explicit, testable precedence.
@@ -388,6 +414,20 @@ impl WorkflowCatalog {
                 .canonicalize()
                 .unwrap_or_else(|_| root.path.clone());
             canonical == candidate || canonical.starts_with(candidate)
+        })
+    }
+
+    /// Whether `path` is one of a chat's own workflows (a [`WorkflowRootScope::Chat`] root).
+    #[must_use]
+    pub fn is_chat_path(&self, path: &Path) -> bool {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.roots.iter().any(|root| {
+            root.scope == WorkflowRootScope::Chat
+                && canonical.starts_with(
+                    root.path
+                        .canonicalize()
+                        .unwrap_or_else(|_| root.path.clone()),
+                )
         })
     }
 
@@ -1557,6 +1597,34 @@ return client.fetch(labels.fetch + prose)
                 .iter()
                 .any(|item| item.error.contains("Missing meta"))
         );
+    }
+
+    #[test]
+    fn a_chat_folder_s_own_workflows_are_found_for_it_with_project_config_off() {
+        let temp = TempDir::new("chat-folder");
+        let project = temp.0.join("home/.haarness/workflows");
+        let chat = temp.0.join("home/2026-10-24/chat-ab12");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(chat.join(".haarness/workflows")).unwrap();
+        fs::write(
+            project.join("homes.ts"),
+            "export default workflow({ name: 'homes', run() {} })",
+        )
+        .unwrap();
+        let source = "export default workflow({ name: 'mine', run() {} })";
+        fs::write(chat.join(".haarness/workflows/mine.ts"), source).unwrap();
+        let catalog = WorkflowCatalog::new(vec![WorkflowRoot::project(&project, false)])
+            .with_project_config(false);
+        assert!(catalog.read_source("mine").is_err());
+        let for_chat = catalog.for_chat_folder(&chat);
+        assert_eq!(for_chat.read_source("mine").unwrap().source, source);
+        let path = chat.join(".haarness/workflows/mine.ts");
+        assert_eq!(for_chat.read_catalog_path(&path).unwrap().source, source);
+        // The chat's own, not the project's: project configuration stays off.
+        assert!(!for_chat.is_project_path(&path));
+        assert!(for_chat.is_chat_path(&path));
+        assert!(!catalog.is_chat_path(&path));
+        assert!(for_chat.read_source("homes").is_err());
     }
 
     #[test]

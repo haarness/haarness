@@ -333,3 +333,40 @@ async fn daily_usage_groups_days_models_tools_and_subagents_without_names() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn the_chat_home_s_usage_counts_under_chats_without_a_project() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.0.join("workspaces.json"),
+        json!({"projects":[
+        {"id":"p1","name":"Alpha","root":"/alpha"},
+        {"id":"p9","name":"Chat folders","root":"/data/Chat folders"}],"workspaces":[
+        {"id":"w1","projectId":"p1","path":"/alpha"},
+        {"id":"w9","projectId":"p9","path":"/data/Chat folders"}]})
+        .to_string(),
+    )
+    .unwrap();
+    // Marked in its own file only, as after an older build rewrote the registry.
+    std::fs::write(
+        fixture.0.join("chat-home.json"),
+        json!({"paths": ["/data/Chat folders"]}).to_string(),
+    )
+    .unwrap();
+    turn(&fixture.store("w1"), "model-a", 100, None).await;
+    turn(&fixture.store("w9"), "model-a", 40, None).await;
+    let report = collect(
+        &fixture.0,
+        std::path::Path::new("/alpha"),
+        Options::default(),
+    )
+    .unwrap();
+    assert_eq!(report.total.input_tokens, 140, "its usage still counts");
+    let mut names = report
+        .projects
+        .iter()
+        .map(|project| project.name.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, ["Alpha", "Chats without a project"]);
+}

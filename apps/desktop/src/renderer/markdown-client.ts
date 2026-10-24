@@ -41,48 +41,60 @@ function fail() {
   }
 }
 
+/** Starts the worker. A client drawn here starts it too, so the reply
+ * streamed next does not wait for it to load. */
+function start() {
+  worker = new Worker(new URL("./markdown.worker.ts", import.meta.url), { type: "module" });
+  worker.onerror = (event) => { event.preventDefault(); fail(); };
+  worker.onmessageerror = fail;
+  worker.onmessage = ({ data }: MessageEvent<Reply>) => {
+    const current = clients.get(data.key);
+    if (!current || current.running?.revision !== data.revision) return;
+    clearTimeout(current.timer);
+    current.running = undefined;
+    if (data.error || !data.patch) return fail();
+    // Deltas are ordered, but superseded text must never flash in the UI.
+    current.buffered.splice(data.patch.start, Infinity, ...data.patch.html);
+    current.buffered.length = data.patch.count;
+    if (current.latest?.revision === data.revision) {
+      let start = 0;
+      while (start < current.buffered.length && current.buffered[start] === current.rendered[start]) start++;
+      current.receive({ start, html: current.buffered.slice(start), count: current.buffered.length }, current.latest.live);
+      current.rendered = current.buffered.slice();
+      current.drawn = data.revision;
+    }
+    if (current.latest?.revision !== data.revision) dispatch(current);
+  };
+  return worker;
+}
+
 function dispatch(client: Client) {
   if (!client.latest || client.running) return;
   if (failed || client.local) return fallback(client, client.latest);
   try {
-    if (!worker) {
-      worker = new Worker(new URL("./markdown.worker.ts", import.meta.url), { type: "module" });
-      worker.onerror = (event) => { event.preventDefault(); fail(); };
-      worker.onmessageerror = fail;
-      worker.onmessage = ({ data }: MessageEvent<Reply>) => {
-        const current = clients.get(data.key);
-        if (!current || current.running?.revision !== data.revision) return;
-        clearTimeout(current.timer);
-        current.running = undefined;
-        if (data.error || !data.patch) return fail();
-        // Deltas are ordered, but superseded text must never flash in the UI.
-        current.buffered.splice(data.patch.start, Infinity, ...data.patch.html);
-        current.buffered.length = data.patch.count;
-        if (current.latest?.revision === data.revision) {
-          let start = 0;
-          while (start < current.buffered.length && current.buffered[start] === current.rendered[start]) start++;
-          current.receive({ start, html: current.buffered.slice(start), count: current.buffered.length }, current.latest.live);
-          current.rendered = current.buffered.slice();
-          current.drawn = data.revision;
-        }
-        if (current.latest?.revision !== data.revision) dispatch(current);
-      };
-    }
+    const target = worker ?? start();
     client.running = client.latest;
     client.timer = setTimeout(fail, 10_000);
-    worker.postMessage(client.running);
+    target.postMessage(client.running);
   } catch {
     fail();
   }
 }
 
-export function createMarkdownClient(receive: Client["receive"]) {
+/** `here`: drawn on this thread from the first text, as each update comes. */
+export function createMarkdownClient(receive: Client["receive"], here = false) {
   clearTimeout(idle);
   const key = ++sequence;
   let revision = 0;
   let disposed = false;
-  const client: Client = { receive, buffered: [], rendered: [] };
+  const client: Client = { receive, buffered: [], rendered: [], local: here };
   clients.set(key, client);
+  if (here && !failed && !worker)
+    try {
+      start();
+    } catch {
+      fail();
+    }
   return {
     update(text: string, live: boolean, breaks = true) {
       if (disposed) return;

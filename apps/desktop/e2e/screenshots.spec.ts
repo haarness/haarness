@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, symlink, utimes } fr
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // The composer's + menu offers the screenshots folder's newest images: picked
 // ones are numbered and attach in that order, another folder can be chosen,
@@ -107,7 +108,7 @@ test.beforeAll(async () => {
       return { response: calls.answers.shift() ?? 1, checkboxChecked: false };
     };
   }, [workspace]);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90000 });
 });
 
@@ -117,6 +118,7 @@ test.afterAll(async () => {
     try {
       execFileSync(binary, ["--workspace", workspace, "--trust-project", "serve", "--stop"], { env, stdio: "ignore", timeout: 30_000 });
     } catch {}
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });
 

@@ -6,6 +6,7 @@ import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 const binary = process.env.HAARNESS_BIN ? resolve(process.env.HAARNESS_BIN) : resolve("../../target/debug/haarness");
 const shots = process.env.UI_AUDIT_OUT ? resolve(process.env.UI_AUDIT_OUT) : resolve("test-results/ui-audit");
@@ -73,8 +74,7 @@ test.beforeAll(async () => {
     const original = dialog.showOpenDialog;
     dialog.showOpenDialog = async () => { dialog.showOpenDialog = original; return { canceled: false, filePaths: [directory] }; };
   }, workspace);
-  await page.getByRole("region", { name: "Project home" })
-    .getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 240000 });
   await page.waitForTimeout(1500);
 });
@@ -85,6 +85,7 @@ test.afterAll(async () => {
     await app.close().catch(() => {});
   }
   try { execFileSync(binary, ["--workspace", workspace, "--trust-project", "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }); } catch {}
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true });
 });
 
@@ -117,8 +118,8 @@ test("capture surfaces", async () => {
   await page.keyboard.press("Escape");
   await page.waitForTimeout(300);
 
-  // Project picker popover.
-  const picker = page.locator(".composer-project").first();
+  // The composer's folder chip popover.
+  const picker = page.locator("button.composer-folder").first();
   if (await picker.isVisible()) {
     await picker.click();
     await page.waitForTimeout(500);

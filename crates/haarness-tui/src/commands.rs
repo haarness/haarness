@@ -2361,6 +2361,7 @@ impl App {
                     provider: Some(self.thread.provider.clone()),
                     model: Some(self.thread.model.clone()),
                     ultracode: None,
+                    directory: None,
                 };
                 let thread = client.create_thread(request).await?;
                 // A new chat starts in the open chat's mode, as it would
@@ -4836,6 +4837,7 @@ impl App {
                 provider: Some(self.thread.provider.clone()),
                 model: Some(self.thread.model.clone()),
                 ultracode: None,
+                directory: None,
             })
             .await?;
         self.refresh_threads(client).await?;

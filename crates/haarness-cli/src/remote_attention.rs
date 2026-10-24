@@ -781,15 +781,16 @@ impl Project {
 
 /// The live servers Cloud can reach, each with the project it routes to: a
 /// registered workspace (a record's folder is its workspace id) that is not
-/// closed for remote access and that the server really serves.
+/// closed for remote access and that the server really serves. The chat
+/// home is no project: its chats stay on this computer.
 fn reachable(servers: Vec<Server>, workspaces: &[WorkspaceInfo], hidden: &HashSet<String>) -> Live {
     servers
         .into_iter()
         .filter_map(|server| {
             let folder = server.record.file.parent()?.file_name()?.to_str()?;
-            let workspace = workspaces
-                .iter()
-                .find(|workspace| workspace.id == folder && !hidden.contains(&workspace.id))?;
+            let workspace = workspaces.iter().find(|workspace| {
+                workspace.id == folder && !workspace.chat_home && !hidden.contains(&workspace.id)
+            })?;
             let same_folder = comparable_workspace(Path::new(&workspace.path))
                 == comparable_workspace(Path::new(&server.workspace));
             same_folder.then(|| {
@@ -3177,8 +3178,13 @@ mod tests {
     #[test]
     fn only_registered_open_projects_that_a_server_really_serves_are_reachable() {
         let root = discovery::tests::temp("attention-projects");
-        let (a, b, c) = (root.join("a"), root.join("b"), root.join("c"));
-        for folder in [&a, &b, &c] {
+        let (a, b, c, home) = (
+            root.join("a"),
+            root.join("b"),
+            root.join("c"),
+            root.join("Chat folders"),
+        );
+        for folder in [&a, &b, &c, &home] {
             std::fs::create_dir_all(folder).unwrap();
         }
         let workspace = |id: &str, path: &Path| -> WorkspaceInfo {
@@ -3212,6 +3218,10 @@ mod tests {
             workspace("wa", &a),
             workspace("wb", &b),
             workspace("wc", &c),
+            WorkspaceInfo {
+                chat_home: true,
+                ..workspace("wh", &home)
+            },
         ];
         let hidden = HashSet::from(["wb".to_owned()]);
         let live = reachable(
@@ -3222,6 +3232,8 @@ mod tests {
                 server("wc", &a),
                 // Not registered.
                 server("wz", &c),
+                // The chat home's own server.
+                server("wh", &home),
             ],
             &workspaces,
             &hidden,

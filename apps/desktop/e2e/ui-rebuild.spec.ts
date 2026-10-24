@@ -20,6 +20,7 @@ import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 const binary = resolve(
   process.env.HAARNESS_BIN ?? "../../target/debug/haarness",
@@ -70,6 +71,7 @@ test.afterEach(async () => {
       timeout: 30000,
       stdio: "ignore",
     });
+  stopChatHome(binary, env);
   await rm(temporary, { recursive: true, force: true });
 });
 async function launch() {
@@ -94,8 +96,7 @@ test("open windows retain deferred Settings and unsent drafts when a rebuild rep
     });
   }, workspace);
   await page
-    .getByRole("region", { name: "Project home" })
-    .getByRole("button", { name: "Open project", exact: true })
+    .getByRole("button", { name: "Open another project", exact: true })
     .click();
   const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await composer.fill("rebuild conversation proof");

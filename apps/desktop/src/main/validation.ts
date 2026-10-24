@@ -64,6 +64,7 @@ export function localArgs(args: string[]) {
     "-s",
     "--trust-project",
     "--disable-project-config",
+    "--chat-home",
     "--data-dir",
     "--yolo",
     "--dangerously-skip-permissions",

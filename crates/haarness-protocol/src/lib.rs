@@ -55,6 +55,10 @@ pub const PTY_CAPABILITY: &str = "pty.v1";
 /// unknown `id` and choose their own, so a client that relies on its chosen id
 /// checks this first or compares the returned one.
 pub const THREAD_CREATE_ID_CAPABILITY: &str = "thread-create-id.v1";
+/// Server capability for [`CreateThreadRequest::directory`],
+/// [`Thread::directory`] and [`PtyCreateRequest::directory`]. Older servers
+/// ignore an unknown `directory` and create a chat in the project folder.
+pub const THREAD_DIRECTORY_CAPABILITY: &str = "thread-directory.v1";
 /// Reasoning-effort names Haarness can send to a provider, lightest first.
 /// Model catalogs advertise a per-model subset of this scale; a tier outside
 /// it is a provider-app setting the public request APIs reject, so it never
@@ -138,6 +142,12 @@ pub struct Thread {
     /// confirmation by the next turn).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revert: Option<RevertState>,
+    /// The chat's own working folder, canonical and absolute, when it was
+    /// created with one (`directory` of its create): its tools run there,
+    /// and paths outside it are outside its project. Absent for a chat that
+    /// works in the server's project folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -565,6 +575,17 @@ pub struct CreateThreadRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub ultracode: Option<bool>,
+    /// A working folder of the chat's own, `<date>/<name>` relative to the
+    /// server's project folder (`2026-10-24/fix-the-tests`): the server
+    /// creates it and the chat's tools run there, with it as their project
+    /// boundary. When another chat already works in that folder the server
+    /// picks `<name>-2`, `-3`, …; the folder chosen is the thread's
+    /// `directory`. The absolute folder another chat reports shares that
+    /// folder. Omitted, the chat works in the project folder (in the chat
+    /// home, in a new folder of its own), or in its parent chat's folder.
+    /// Servers that know it list `thread-directory.v1`; older ones ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

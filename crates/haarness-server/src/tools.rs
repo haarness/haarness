@@ -156,7 +156,6 @@ impl NativeToolRegistry {
     ) -> Self {
         let mut registry = Self::build(workspace.clone(), mcp, skills, skill_infos);
         let tool: Arc<dyn Tool> = Arc::new(WorkflowTool {
-            workspace,
             coordinator: workflows,
         });
         registry.tools.insert(tool.definition().name.clone(), tool);
@@ -215,25 +214,22 @@ impl NativeToolRegistry {
     }
 
     /// Attach post-edit formatting/diagnostics and the model-facing LSP query
-    /// tool without changing the stable constructors used by embedders.
+    /// tool without changing the stable constructors used by embedders. Paths
+    /// resolve where each call works (`ToolContext::workspace`).
     #[must_use]
-    pub fn with_language(mut self, workspace: PathBuf, language: Arc<LanguageService>) -> Self {
+    pub fn with_language(mut self, language: Arc<LanguageService>) -> Self {
         for name in ["read", "write", "edit", "multiedit", "apply_patch"] {
             let Some(inner) = self.tools.remove(name) else {
                 continue;
             };
             let tool: Arc<dyn Tool> = Arc::new(LanguageAwareTool {
                 name,
-                workspace: workspace.clone(),
                 language: Arc::clone(&language),
                 inner,
             });
             self.tools.insert(name.into(), tool);
         }
-        let tool: Arc<dyn Tool> = Arc::new(LspTool {
-            workspace,
-            language,
-        });
+        let tool: Arc<dyn Tool> = Arc::new(LspTool { language });
         self.tools.insert(tool.definition().name.clone(), tool);
         self
     }
@@ -280,7 +276,6 @@ impl NativeToolRegistry {
         ] {
             let tool: Arc<dyn Tool> = Arc::new(BuiltinTool {
                 kind,
-                workspace: workspace.clone(),
                 client: web_client(),
                 skills: skills.clone(),
                 skill_catalog: skill_catalog.clone(),
@@ -628,7 +623,6 @@ impl WorkflowHost for McpCodeHost {
 
 struct LanguageAwareTool {
     name: &'static str,
-    workspace: PathBuf,
     language: Arc<LanguageService>,
     inner: Arc<dyn Tool>,
 }
@@ -663,11 +657,12 @@ impl Tool for LanguageAwareTool {
             if let Some(file) = arguments
                 .get("path")
                 .and_then(Value::as_str)
-                .and_then(|path| language_path(&self.workspace, path))
+                .and_then(|path| language_path(&context.workspace, path))
             {
                 let language = Arc::clone(&self.language);
                 let cancel = context.cancel.clone();
-                tokio::spawn(async move { language.touch(&file, &cancel).await });
+                let root = context.workspace.clone();
+                tokio::spawn(async move { language.touch(&file, &root, &cancel).await });
             }
             return Ok(output);
         }
@@ -675,7 +670,7 @@ impl Tool for LanguageAwareTool {
         let paths = mutation_paths(self.name, &arguments)
             .into_iter()
             .filter_map(|path| {
-                language_path(&self.workspace, &path).map(|resolved| (path, resolved))
+                language_path(&context.workspace, &path).map(|resolved| (path, resolved))
             })
             .collect::<Vec<_>>();
         let mut before = Vec::with_capacity(paths.len());
@@ -691,17 +686,17 @@ impl Tool for LanguageAwareTool {
             .language
             .process_files(
                 paths.iter().map(|(_, path)| path.clone()).collect(),
+                &context.workspace,
                 context.cancel.clone(),
             )
             .await;
         refresh_formatted_diffs(&mut output, before).await;
-        append_language_report(&mut output, &self.workspace, &reports);
+        append_language_report(&mut output, &context.workspace, &reports);
         Ok(output)
     }
 }
 
 struct LspTool {
-    workspace: PathBuf,
     language: Arc<LanguageService>,
 }
 
@@ -750,11 +745,11 @@ impl Tool for LspTool {
             }
         };
         let requested = string(&arguments, "filePath")?;
-        let file = haarness_core::resolve_permission_path(&self.workspace, requested);
-        let root = self
+        let file = haarness_core::resolve_permission_path(&context.workspace, requested);
+        let root = context
             .workspace
             .canonicalize()
-            .unwrap_or_else(|_| self.workspace.clone());
+            .unwrap_or_else(|_| context.workspace.clone());
         if !file.starts_with(root) && !context.authorized_external_paths.contains(&file) {
             return Err(CoreError::Invalid(
                 "LSP path is outside the workspace and was not authorized".into(),
@@ -767,7 +762,15 @@ impl Tool for LspTool {
         let character = required_u32(&arguments, "character")?.saturating_sub(1);
         let result = self
             .language
-            .query(operation, &file, line, character, None, &context.cancel)
+            .query(
+                operation,
+                &file,
+                &context.workspace,
+                line,
+                character,
+                None,
+                &context.cancel,
+            )
             .await
             .map_err(CoreError::Tool)?;
         Ok(ToolOutput {
@@ -1571,17 +1574,39 @@ impl Tool for ScheduleTool {
             .and_then(Value::as_str)
             .ok_or_else(|| CoreError::Invalid("schedule action is required".into()))?;
         validate_schedule_input(input)?;
-        let reference = || {
-            input
+        // A chat that works in a folder of its own sees and changes only the
+        // schedules made in that folder, and schedules only into it; a chat
+        // without one sees no chat's schedules.
+        let own_folder = chat_folder(&self.workspace, &context);
+        let visible = |schedule: &haarness_scheduler::Schedule| match &own_folder {
+            Some(folder) => in_folder(schedule, folder),
+            None => schedule.directory.is_none(),
+        };
+        if own_folder.is_some() && input.get("workspace").is_some_and(|value| !value.is_null()) {
+            return Err(CoreError::Invalid(
+                "A chat with a folder of its own schedules only into its own folder; leave out workspace.".into(),
+            ));
+        }
+        let reference = || -> CoreResult<String> {
+            let reference = input
                 .get("id")
                 .or_else(|| input.get("name"))
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
                     CoreError::Invalid(format!("schedule id or name is required for {action}"))
-                })
+                })?;
+            match self.scheduler.find(reference).map_err(schedule_error)? {
+                Some(schedule) if visible(&schedule) => Ok(schedule.id.to_string()),
+                // Another chat's schedule reads as no schedule at all.
+                _ => Err(CoreError::Tool(format!("schedule not found: {reference}"))),
+            }
         };
         match action {
-            "list" => schedule_output("Schedules", &self.scheduler.list().map_err(schedule_error)?),
+            "list" => {
+                let mut schedules = self.scheduler.list().map_err(schedule_error)?;
+                schedules.retain(|schedule| visible(schedule));
+                schedule_output("Schedules", &schedules)
+            }
             "history" => {
                 let reference = reference()?;
                 let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(20);
@@ -1589,12 +1614,12 @@ impl Tool for ScheduleTool {
                     &format!("Schedule history {reference}"),
                     &self
                         .scheduler
-                        .history(reference, usize::try_from(limit).unwrap_or(20))
+                        .history(&reference, usize::try_from(limit).unwrap_or(20))
                         .map_err(schedule_error)?,
                 )
             }
             "run" => {
-                let reference = reference()?.to_owned();
+                let reference = reference()?;
                 let scheduler = self.scheduler.clone();
                 let run = tokio::task::spawn_blocking(move || scheduler.run_now(&reference))
                     .await
@@ -1605,14 +1630,14 @@ impl Tool for ScheduleTool {
             "delete" => {
                 let removed = self
                     .scheduler
-                    .remove(reference()?)
+                    .remove(&reference()?)
                     .map_err(schedule_error)?;
                 schedule_output(&format!("Removed schedule {}", removed.name), &removed)
             }
             "enable" | "disable" => {
                 let schedule = self
                     .scheduler
-                    .toggle(reference()?, action == "enable")
+                    .toggle(&reference()?, action == "enable")
                     .map_err(schedule_error)?;
                 schedule_output(
                     &format!(
@@ -1630,16 +1655,19 @@ impl Tool for ScheduleTool {
             "update" => {
                 let schedule = self
                     .scheduler
-                    .update(reference()?, schedule_update(input)?)
+                    .update(&reference()?, schedule_update(input)?)
                     .map_err(schedule_error)?;
                 schedule_output(&format!("Updated schedule {}", schedule.name), &schedule)
             }
             "create" => {
-                let workspace = input
+                let named = input
                     .get("workspace")
                     .and_then(Value::as_str)
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| self.workspace.clone());
+                    .map(PathBuf::from);
+                // Made in a chat with a folder of its own (not the project
+                // folder), its runs work in that folder too.
+                let directory = own_folder.clone();
+                let workspace = named.unwrap_or_else(|| self.workspace.clone());
                 let schedule = self
                     .scheduler
                     .create(CreateSchedule {
@@ -1647,6 +1675,7 @@ impl Tool for ScheduleTool {
                         prompt: schedule_string(input, "prompt"),
                         request: schedule_string(input, "request"),
                         workspace,
+                        directory,
                         model: schedule_string(input, "model"),
                         agent: schedule_string(input, "agent"),
                         variant: schedule_string(input, "variant"),
@@ -1666,6 +1695,23 @@ impl Tool for ScheduleTool {
             ))),
         }
     }
+}
+
+/// Whether `schedule` was made in the chat folder `folder` (canonical).
+fn in_folder(schedule: &haarness_scheduler::Schedule, folder: &Path) -> bool {
+    schedule
+        .directory
+        .as_deref()
+        .and_then(|directory| directory.canonicalize().ok())
+        .is_some_and(|directory| directory == folder)
+}
+
+/// The call's working folder when it is a chat's own folder rather than the
+/// project folder `project`.
+fn chat_folder(project: &Path, context: &ToolContext) -> Option<PathBuf> {
+    let project = project.canonicalize().ok()?;
+    let folder = context.workspace.canonicalize().ok()?;
+    (folder != project).then_some(folder)
 }
 
 fn validate_schedule_input(input: &serde_json::Map<String, Value>) -> CoreResult<()> {
@@ -1828,7 +1874,6 @@ impl ToolRegistry for NativeToolRegistry {
 }
 
 struct WorkflowTool {
-    workspace: PathBuf,
     coordinator: Arc<WorkflowCoordinator>,
 }
 
@@ -1903,18 +1948,16 @@ impl Tool for WorkflowTool {
             .ok_or_else(|| CoreError::Invalid("workflow action is required".into()))?;
         match action {
             "read" => {
+                // The chat's own folder's workflows are this chat's too.
+                let catalog = self.coordinator.catalog_for(Some(context.thread_id)).await;
                 if let Some(name) = input.get("name").and_then(Value::as_str) {
-                    let result = self
-                        .coordinator
-                        .catalog()
-                        .read_source(name)
-                        .map_err(workflow_catalog_error)?;
+                    let result = catalog.read_source(name).map_err(workflow_catalog_error)?;
                     Ok(ToolOutput {
                         text: result.source,
                         metadata: json!({"title": format!("Workflow {name}"), "name": name}),
                     })
                 } else {
-                    workflow_json_output("Workflows", &self.coordinator.catalog().list(), json!({}))
+                    workflow_json_output("Workflows", &catalog.list(), json!({}))
                 }
             }
             "create" => {
@@ -1930,7 +1973,7 @@ impl Tool for WorkflowTool {
                     ));
                 }
                 let result = create_workflow_file(
-                    &self.workspace,
+                    &context.workspace,
                     self.coordinator.catalog().as_ref(),
                     name,
                     source,
@@ -1949,7 +1992,7 @@ impl Tool for WorkflowTool {
                 if let Some(value) = path.as_ref()
                     && Path::new(value).is_relative()
                 {
-                    path = Some(self.workspace.join(value).display().to_string());
+                    path = Some(context.workspace.join(value).display().to_string());
                 }
                 let name = (source.is_none() && path.is_none())
                     .then(|| input.get("name").and_then(Value::as_str).map(str::to_owned))
@@ -2416,7 +2459,6 @@ enum Kind {
 }
 struct BuiltinTool {
     kind: Kind,
-    workspace: PathBuf,
     client: reqwest::Client,
     skills: Option<Arc<dyn SkillRegistry>>,
     skill_catalog: Arc<str>,
@@ -2719,7 +2761,7 @@ impl Tool for BuiltinTool {
         }
         match self.kind {
             Kind::Read => {
-                let path = self.resolve_existing(string(&args, "path")?, &context)?;
+                let path = resolve_existing(string(&args, "path")?, &context)?;
                 // Workflow `ctx.agent({ files })` must use the same direct
                 // read permission/hook path as every other workspace read,
                 // but it also needs a race-safe canonical media path and a
@@ -2805,14 +2847,14 @@ impl Tool for BuiltinTool {
                 )
                 .await?;
                 self.instructions
-                    .attach(&mut output, &path, &self.workspace, context.thread_id);
+                    .attach(&mut output, &path, &context.workspace, context.thread_id);
                 Ok(output)
             }
             Kind::ImageGenerate => {
                 generate_media(
                     GeneratedMediaKind::Image,
                     &args,
-                    &self.workspace,
+                    &context.workspace,
                     media_client(),
                     &context.cancel,
                 )
@@ -2822,7 +2864,7 @@ impl Tool for BuiltinTool {
                 generate_media(
                     GeneratedMediaKind::Video,
                     &args,
-                    &self.workspace,
+                    &context.workspace,
                     media_client(),
                     &context.cancel,
                 )
@@ -2830,8 +2872,8 @@ impl Tool for BuiltinTool {
             }
             Kind::List => {
                 let requested = string(&args, "path")?;
-                let path = self.resolve_existing(requested, &context)?;
-                let secrets = SecretFilter::new(&self.workspace, requested, &path, None);
+                let path = resolve_existing(requested, &context)?;
+                let secrets = SecretFilter::new(&context.workspace, requested, &path, None);
                 let mut entries = tokio::fs::read_dir(&path).await.map_err(tool_error)?;
                 let mut names = Vec::new();
                 let mut skipped = Skipped::default();
@@ -2856,7 +2898,7 @@ impl Tool for BuiltinTool {
             }
             Kind::Glob => {
                 let requested = args.get("path").and_then(Value::as_str).unwrap_or(".");
-                let root = self.resolve_existing(requested, &context)?;
+                let root = resolve_existing(requested, &context)?;
                 if !root.is_dir() {
                     return Err(CoreError::Invalid(format!(
                         "glob path must be a directory: {}",
@@ -2873,17 +2915,17 @@ impl Tool for BuiltinTool {
                     ));
                 }
                 let pattern = root.join(pattern).to_string_lossy().into_owned();
-                let workspace = self
+                let workspace = context
                     .workspace
                     .canonicalize()
-                    .unwrap_or_else(|_| self.workspace.clone());
+                    .unwrap_or_else(|_| context.workspace.clone());
                 // A file a `read` rule denies is left out like a secret one.
                 let rules = context
                     .invoker
                     .as_ref()
                     .and_then(|invoker| invoker.read_rules());
-                let secrets = SecretFilter::new(&self.workspace, requested, &root, rules);
-                let named = self.workspace.clone();
+                let secrets = SecretFilter::new(&context.workspace, requested, &root, rules);
+                let named = context.workspace.clone();
                 let cancel = context.cancel.clone();
                 // The walk reads folders synchronously and `**` follows links
                 // (one to `/` reaches everything), so it runs off the async
@@ -2919,13 +2961,13 @@ impl Tool for BuiltinTool {
             Kind::Grep => {
                 let regex = regex::Regex::new(string(&args, "pattern")?).map_err(tool_error)?;
                 let requested = args.get("path").and_then(Value::as_str).unwrap_or(".");
-                let root = self.resolve_existing(requested, &context)?;
+                let root = resolve_existing(requested, &context)?;
                 // A file a `read` rule denies is left out like a secret one.
                 let rules = context
                     .invoker
                     .as_ref()
                     .and_then(|invoker| invoker.read_rules());
-                let secrets = SecretFilter::new(&self.workspace, requested, &root, rules);
+                let secrets = SecretFilter::new(&context.workspace, requested, &root, rules);
                 // The walker searches a file it is given whatever its filters
                 // say, so a secret-named or denied one, or a link to one, is
                 // left out here, before anything reads it.
@@ -2968,7 +3010,7 @@ impl Tool for BuiltinTool {
                                     "{}:{}:{}",
                                     entry
                                         .path()
-                                        .strip_prefix(&self.workspace)
+                                        .strip_prefix(&context.workspace)
                                         .unwrap_or(entry.path())
                                         .display(),
                                     index + 1,
@@ -2990,7 +3032,7 @@ impl Tool for BuiltinTool {
             Kind::Write => {
                 let requested_path = string(&args, "path")?;
                 let new_contents = string(&args, "content")?;
-                let path = self.resolve_new(requested_path, &context)?;
+                let path = resolve_new(requested_path, &context)?;
                 let existing = existing_diff_body(&path).await;
                 if let Some(parent) = path.parent() {
                     tokio::fs::create_dir_all(parent)
@@ -3008,7 +3050,7 @@ impl Tool for BuiltinTool {
             }
             Kind::Edit => {
                 let requested_path = string(&args, "path")?;
-                let path = self.resolve_existing(requested_path, &context)?;
+                let path = resolve_existing(requested_path, &context)?;
                 let before = string(&args, "old")?;
                 let after = string(&args, "new")?;
                 let text = tokio::fs::read_to_string(&path).await.map_err(tool_error)?;
@@ -3035,7 +3077,7 @@ impl Tool for BuiltinTool {
             }
             Kind::MultiEdit => {
                 let requested_path = string(&args, "path")?;
-                let path = self.resolve_existing(requested_path, &context)?;
+                let path = resolve_existing(requested_path, &context)?;
                 let edits = args
                     .get("edits")
                     .and_then(Value::as_array)
@@ -3102,14 +3144,12 @@ impl Tool for BuiltinTool {
                         move_to: Some(target),
                         ..
                     } = operation
-                        && let (Ok(source), Ok(destination)) = (
-                            self.resolve_entry(path, &context),
-                            self.resolve_new(target, &context),
-                        )
+                        && let (Ok(source), Ok(destination)) =
+                            (resolve_entry(path, &context), resolve_new(target, &context))
                         && same_entry(
                             &source,
                             &destination,
-                            &haarness_core::resolve_permission_entry(&self.workspace, target),
+                            &haarness_core::resolve_permission_entry(&context.workspace, target),
                         )
                     {
                         return Err(CoreError::Invalid(format!(
@@ -3123,7 +3163,7 @@ impl Tool for BuiltinTool {
                 for operation in operations {
                     match operation {
                         haarness_core::patch::FileOp::Add { path, content } => {
-                            let resolved = self.resolve_new(&path, &context)?;
+                            let resolved = resolve_new(&path, &context)?;
                             let existing = existing_diff_body(&resolved).await;
                             if let Some(parent) = resolved.parent() {
                                 tokio::fs::create_dir_all(parent)
@@ -3145,7 +3185,7 @@ impl Tool for BuiltinTool {
                             move_to,
                             hunks,
                         } => {
-                            let resolved = self.resolve_existing(&path, &context)?;
+                            let resolved = resolve_existing(&path, &context)?;
                             let text = tokio::fs::read_to_string(&resolved)
                                 .await
                                 .map_err(tool_error)?;
@@ -3154,15 +3194,15 @@ impl Tool for BuiltinTool {
                             if let Some(target) = move_to {
                                 // The move takes the source's entry away: a
                                 // link goes, not the file it leads to.
-                                let entry = self.resolve_entry(&path, &context)?;
+                                let entry = resolve_entry(&path, &context)?;
                                 let removed = entry_diff_body(&entry).await;
-                                let destination = self.resolve_new(&target, &context)?;
+                                let destination = resolve_new(&target, &context)?;
                                 // A file the patch added earlier is checked here.
                                 if same_entry(
                                     &entry,
                                     &destination,
                                     &haarness_core::resolve_permission_entry(
-                                        &self.workspace,
+                                        &context.workspace,
                                         &target,
                                     ),
                                 ) {
@@ -3210,7 +3250,7 @@ impl Tool for BuiltinTool {
                         }
                         haarness_core::patch::FileOp::Delete { path } => {
                             // A link is deleted itself, not the file it leads to.
-                            let resolved = self.resolve_entry(&path, &context)?;
+                            let resolved = resolve_entry(&path, &context)?;
                             let existing = entry_diff_body(&resolved).await;
                             tokio::fs::remove_file(&resolved)
                                 .await
@@ -3233,7 +3273,7 @@ impl Tool for BuiltinTool {
                         let value = value.as_str().ok_or_else(|| {
                             CoreError::Invalid("bash workdir must be a string".into())
                         })?;
-                        let path = self.resolve_existing(value, &context)?;
+                        let path = resolve_existing(value, &context)?;
                         if !path.is_dir() {
                             return Err(CoreError::Invalid(format!(
                                 "bash workdir is not a directory: {value}"
@@ -3241,7 +3281,7 @@ impl Tool for BuiltinTool {
                         }
                         path
                     }
-                    None => self.workspace.clone(),
+                    None => context.workspace.clone(),
                 };
                 let timeout = args
                     .get("timeout")
@@ -3337,56 +3377,54 @@ impl Tool for BuiltinTool {
         }
     }
 }
-impl BuiltinTool {
-    fn resolve_existing(&self, value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
-        let path = haarness_core::resolve_permission_path(&self.workspace, value)
-            .canonicalize()
-            .map_err(tool_error)?;
-        self.ensure_within(path, context)
+// Paths resolve where the call works (`ToolContext::workspace`): a chat's own
+// folder, or the project folder.
+fn resolve_existing(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
+    let path = haarness_core::resolve_permission_path(&context.workspace, value)
+        .canonicalize()
+        .map_err(tool_error)?;
+    ensure_within(path, context)
+}
+/// A file the tool removes (a delete, the old name of a move): a link
+/// there is the entry itself, so only the folder holding it is followed.
+fn resolve_entry(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
+    let path = haarness_core::resolve_permission_entry(&context.workspace, value);
+    std::fs::symlink_metadata(&path).map_err(tool_error)?;
+    ensure_within(path, context)
+}
+fn resolve_new(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
+    if value.is_empty() {
+        return Err(CoreError::Invalid("path cannot be empty".into()));
     }
-    /// A file the tool removes (a delete, the old name of a move): a link
-    /// there is the entry itself, so only the folder holding it is followed.
-    fn resolve_entry(&self, value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
-        let path = haarness_core::resolve_permission_entry(&self.workspace, value);
-        std::fs::symlink_metadata(&path).map_err(tool_error)?;
-        self.ensure_within(path, context)
+    let joined = haarness_core::resolve_permission_path(&context.workspace, value);
+    if joined.exists() {
+        return ensure_within(joined.canonicalize().map_err(tool_error)?, context);
     }
-    fn resolve_new(&self, value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
-        if value.is_empty() {
-            return Err(CoreError::Invalid("path cannot be empty".into()));
-        }
-        let joined = haarness_core::resolve_permission_path(&self.workspace, value);
-        if joined.exists() {
-            return self.ensure_within(joined.canonicalize().map_err(tool_error)?, context);
-        }
-        if std::fs::symlink_metadata(&joined)
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            return Err(CoreError::PermissionDenied(format!(
-                "refusing to write through a dangling symlink: {}",
-                joined.display()
-            )));
-        }
-        // `resolve_permission_path` already canonicalized the nearest existing
-        // ancestor and rebuilt the missing suffix. Authorize the exact new
-        // target (the capability carried by this call), not its parent.
-        self.ensure_within(joined, context)
+    if std::fs::symlink_metadata(&joined).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(CoreError::PermissionDenied(format!(
+            "refusing to write through a dangling symlink: {}",
+            joined.display()
+        )));
     }
-    fn ensure_within(&self, path: PathBuf, context: &ToolContext) -> CoreResult<PathBuf> {
-        let root = self.workspace.canonicalize().map_err(tool_error)?;
-        let output_root = tool_output_dir();
-        let is_tool_output = output_root
-            .canonicalize()
-            .is_ok_and(|output_root| path.starts_with(output_root));
-        let is_authorized_external = context.authorized_external_paths.contains(&path);
-        if !path.starts_with(&root) && !is_tool_output && !is_authorized_external {
-            return Err(CoreError::PermissionDenied(format!(
-                "external directory: {}",
-                path.display()
-            )));
-        }
-        Ok(path)
+    // `resolve_permission_path` already canonicalized the nearest existing
+    // ancestor and rebuilt the missing suffix. Authorize the exact new
+    // target (the capability carried by this call), not its parent.
+    ensure_within(joined, context)
+}
+fn ensure_within(path: PathBuf, context: &ToolContext) -> CoreResult<PathBuf> {
+    let root = context.workspace.canonicalize().map_err(tool_error)?;
+    let output_root = tool_output_dir();
+    let is_tool_output = output_root
+        .canonicalize()
+        .is_ok_and(|output_root| path.starts_with(output_root));
+    let is_authorized_external = context.authorized_external_paths.contains(&path);
+    if !path.starts_with(&root) && !is_tool_output && !is_authorized_external {
+        return Err(CoreError::PermissionDenied(format!(
+            "external directory: {}",
+            path.display()
+        )));
     }
+    Ok(path)
 }
 
 /// Which files `grep`, `glob` and `list` leave out: those the built-in read
@@ -4769,8 +4807,7 @@ mod tests {
             std::env::temp_dir().join(format!("haarness-language-tools-{}", uuid::Uuid::now_v7()));
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         let language = language_test_service(&workspace);
-        let registry = NativeToolRegistry::new(workspace.clone())
-            .with_language(workspace.clone(), language.clone());
+        let registry = NativeToolRegistry::new(workspace.clone()).with_language(language.clone());
 
         let write = registry.get("write").unwrap();
         let written = write
@@ -5067,6 +5104,185 @@ mod tests {
             .await
             .unwrap();
         assert!(tool.scheduler.list().unwrap().is_empty());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_schedule_made_in_a_chat_folder_runs_there() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-schedule-folder-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("home");
+        let folder = workspace.join("2026-10-24/chat-ab12");
+        tokio::fs::create_dir_all(&folder).await.unwrap();
+        let tool = ScheduleTool {
+            workspace: workspace.clone(),
+            scheduler: Scheduler::with_paths(
+                haarness_scheduler::SchedulerPaths {
+                    config: root.join("config"),
+                    state: root.join("state"),
+                    launchd: root.join("launchd"),
+                    systemd: root.join("systemd"),
+                    windows: root.join("windows"),
+                },
+                PathBuf::from("/opt/bin/haarness"),
+                None,
+                haarness_scheduler::Backend::Launchd,
+                false,
+            ),
+            trust_project: false,
+        };
+        let context = |workspace: &Path| ToolContext {
+            execution: haarness_core::ExecutionSettings::default(),
+            thread_id: ThreadId::new(),
+            turn_id: TurnId::new(),
+            workspace: workspace.to_path_buf(),
+            authorized_external_paths: Vec::new(),
+            cancel: CancellationToken::new(),
+            invoker: None,
+        };
+        let create = |name: &str| {
+            json!({
+                "action": "create",
+                "name": name,
+                "prompt": "summarize",
+                "enabled": false,
+                "trigger": {"type": "cron", "expression": "0 8 * * *"}
+            })
+        };
+        let canonical = folder.canonicalize().unwrap();
+        let in_folder = tool
+            .execute(create("from-chat"), context(&folder))
+            .await
+            .unwrap();
+        assert_eq!(
+            in_folder.metadata["schedule"]["directory"],
+            canonical.display().to_string()
+        );
+        assert_eq!(
+            in_folder.metadata["schedule"]["workspace"],
+            workspace.canonicalize().unwrap().display().to_string()
+        );
+        let in_project = tool
+            .execute(create("from-project"), context(&workspace))
+            .await
+            .unwrap();
+        assert!(in_project.metadata["schedule"].get("directory").is_none());
+        // A chat folder schedules only into itself: any workspace is refused.
+        for named in [root.join("home"), folder.clone()] {
+            let mut named_create = create("elsewhere");
+            named_create["workspace"] = json!(named.display().to_string());
+            let refused = tool
+                .execute(named_create, context(&folder))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&refused, CoreError::Invalid(message) if message.contains("own folder")),
+                "{refused}"
+            );
+        }
+        // Another chat's folder neither sees nor touches it.
+        let other = workspace.join("2026-10-24/chat-cd34");
+        tokio::fs::create_dir_all(&other).await.unwrap();
+        let listed = tool
+            .execute(json!({"action": "list"}), context(&other))
+            .await
+            .unwrap();
+        assert_eq!(listed.metadata["schedule"], json!([]), "{}", listed.text);
+        for action in [
+            json!({"action": "history", "name": "from-chat"}),
+            json!({"action": "run", "name": "from-chat"}),
+            json!({"action": "delete", "name": "from-chat"}),
+            json!({"action": "enable", "name": "from-chat"}),
+            json!({"action": "disable", "name": "from-chat"}),
+            json!({"action": "update", "name": "from-chat", "prompt": "changed"}),
+            json!({"action": "update", "name": "from-project", "prompt": "changed"}),
+        ] {
+            let refused = tool
+                .execute(action.clone(), context(&other))
+                .await
+                .unwrap_err();
+            assert!(
+                refused.to_string().contains("schedule not found"),
+                "{action}: {refused}"
+            );
+        }
+        let mut moved = json!({"action": "update", "name": "from-chat", "prompt": "x"});
+        moved["workspace"] = json!(workspace.display().to_string());
+        assert!(tool.execute(moved, context(&folder)).await.is_err());
+        // Its own chat sees and changes only its own.
+        let own = tool
+            .execute(json!({"action": "list"}), context(&folder))
+            .await
+            .unwrap();
+        let names = own.metadata["schedule"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|schedule| schedule["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["from-chat"]);
+        let updated = tool
+            .execute(
+                json!({"action": "update", "name": "from-chat", "prompt": "summarize again"}),
+                context(&folder),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.metadata["schedule"]["prompt"], "summarize again");
+        tool.execute(
+            json!({"action": "disable", "name": "from-chat"}),
+            context(&folder),
+        )
+        .await
+        .unwrap();
+        tool.execute(
+            json!({"action": "history", "name": "from-chat"}),
+            context(&folder),
+        )
+        .await
+        .unwrap();
+        // A chat without a folder of its own sees only schedules without one,
+        // and can act on no chat's.
+        let projects = tool
+            .execute(json!({"action": "list"}), context(&workspace))
+            .await
+            .unwrap();
+        let names = projects.metadata["schedule"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|schedule| schedule["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["from-project"]);
+        for action in [
+            json!({"action": "history", "name": "from-chat"}),
+            json!({"action": "run", "name": "from-chat"}),
+            json!({"action": "delete", "name": "from-chat"}),
+            json!({"action": "enable", "name": "from-chat"}),
+            json!({"action": "disable", "name": "from-chat"}),
+            json!({"action": "update", "name": "from-chat", "prompt": "changed"}),
+        ] {
+            let refused = tool
+                .execute(action.clone(), context(&workspace))
+                .await
+                .unwrap_err();
+            assert!(
+                refused.to_string().contains("schedule not found"),
+                "{action}: {refused}"
+            );
+        }
+        tool.execute(
+            json!({"action": "update", "name": "from-project", "prompt": "still mine"}),
+            context(&workspace),
+        )
+        .await
+        .unwrap();
+        tool.execute(
+            json!({"action": "delete", "name": "from-chat"}),
+            context(&folder),
+        )
+        .await
+        .unwrap();
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
@@ -6640,7 +6856,6 @@ mod webfetch_tests {
         let workspace = std::env::current_dir().unwrap();
         let tool = BuiltinTool {
             kind: Kind::WebFetch,
-            workspace: workspace.clone(),
             client: web_client(),
             skills: None,
             skill_catalog: Arc::from(""),
@@ -6693,7 +6908,6 @@ mod webfetch_tests {
     fn webfetch_tool() -> BuiltinTool {
         BuiltinTool {
             kind: Kind::WebFetch,
-            workspace: std::env::current_dir().unwrap(),
             client: web_client(),
             skills: None,
             skill_catalog: Arc::from(""),
@@ -6747,7 +6961,7 @@ mod webfetch_tests {
         let output = tool
             .execute(
                 json!({"url": format!("http://{address}/start")}),
-                composite_context(&tool.workspace),
+                composite_context(&std::env::current_dir().unwrap()),
             )
             .await
             .unwrap();
@@ -6832,7 +7046,7 @@ mod webfetch_tests {
         let output = tool
             .execute(
                 json!({"url": format!("http://{address}/start")}),
-                composite_context(&tool.workspace),
+                composite_context(&std::env::current_dir().unwrap()),
             )
             .await
             .unwrap();
@@ -6874,7 +7088,7 @@ mod webfetch_tests {
         let error = tool
             .execute(
                 json!({"url": format!("http://{address}/endless")}),
-                composite_context(&tool.workspace),
+                composite_context(&std::env::current_dir().unwrap()),
             )
             .await
             .unwrap_err();
@@ -6905,7 +7119,7 @@ mod webfetch_tests {
             Duration::from_secs(10),
             tool.execute(
                 json!({"url": format!("http://{address}/large")}),
-                composite_context(&tool.workspace),
+                composite_context(&std::env::current_dir().unwrap()),
             ),
         )
         .await
@@ -6933,7 +7147,7 @@ mod webfetch_tests {
     async fn stop_abandons_a_fetch_whose_body_never_finishes() {
         let (address, server) = stalled_server().await;
         let tool = webfetch_tool();
-        let context = composite_context(&tool.workspace);
+        let context = composite_context(&std::env::current_dir().unwrap());
         let cancel = context.cancel.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(300)).await;

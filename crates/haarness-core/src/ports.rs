@@ -125,8 +125,26 @@ pub trait ThreadRepository: Send + Sync {
             "session archive import is unavailable".into(),
         ))
     }
+    /// Store a new chat. `directory`, when set, is already the chat folder's
+    /// canonical absolute path (the runtime resolves the requested one).
     async fn create_thread(&self, request: CreateThreadRequest) -> CoreResult<Thread>;
     async fn list_threads(&self, include_archived: bool) -> CoreResult<Vec<Thread>>;
+    /// Give chat `id`, which has no folder, the folder `directory` (canonical
+    /// and absolute), and return it as stored.
+    async fn assign_thread_directory(&self, _id: ThreadId, _directory: &str) -> CoreResult<Thread> {
+        Err(CoreError::Storage(
+            "giving a chat a folder is unavailable".into(),
+        ))
+    }
+    /// Whether a chat, archived or not, works in the folder `directory`
+    /// (canonical and absolute, as [`Thread::directory`] holds it).
+    async fn directory_in_use(&self, directory: &str) -> CoreResult<bool> {
+        Ok(self
+            .list_threads(true)
+            .await?
+            .iter()
+            .any(|thread| thread.directory.as_deref() == Some(directory)))
+    }
     async fn get_thread(&self, id: ThreadId) -> CoreResult<Thread>;
     async fn update_thread(&self, id: ThreadId, request: UpdateThreadRequest)
     -> CoreResult<Thread>;
@@ -809,6 +827,14 @@ pub trait SnapshotStore: Send + Sync {
             })
             .collect())
     }
+}
+
+/// Snapshot stores for chats that work in a folder of their own
+/// ([`Thread::directory`]): each folder is checkpointed by itself, so Undo
+/// in one chat never touches another chat's files.
+pub trait SnapshotFolders: Send + Sync {
+    /// The store for `folder`, a canonical folder inside the project.
+    fn open(&self, folder: &std::path::Path) -> CoreResult<Arc<dyn SnapshotStore>>;
 }
 
 #[derive(Debug, Clone)]

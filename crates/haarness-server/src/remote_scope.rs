@@ -122,6 +122,13 @@ pub async fn enforce(State(state): State<ServerState>, request: Request, next: N
             .map(ThreadId)
             .is_some_and(|id| allowed.contains(&id))
     };
+    // A list asked for one chat (`?threadId=`: commands with that chat's
+    // workflows, its tools, its MCP servers) is of a chat of the tree.
+    if url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
+        .any(|(key, value)| key == "threadId" && !visible(&value))
+    {
+        return denied();
+    }
     let permitted = match parts.as_slice() {
         [
             "threads" | "permissions" | "questions" | "info" | "events" | "providers" | "agents"

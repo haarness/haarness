@@ -521,6 +521,7 @@ mod tests {
             cols: 20,
             rows: 4,
             created: false,
+            directory: None,
         };
         let mut terminal = TerminalWorkspace::new(vec![info]);
         let id = terminal.active_id().unwrap();
@@ -553,6 +554,7 @@ mod tests {
             cols: 20,
             rows: 4,
             created: false,
+            directory: None,
         }]);
         let id = terminal.active_id().unwrap();
         (terminal, id)

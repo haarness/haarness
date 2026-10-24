@@ -95,7 +95,18 @@ import { createVoiceInput, launchVoice } from "./voice";
 import { createProjectQueue } from "./project-queue";
 import { createUiSession } from "./ui-session";
 import { createNotifications } from "./notifications";
+import { chatHomeFolder, chatHomePath, isChatHome } from "./chat-home";
+import { quietClosedSocketReads } from "./closed-socket-read";
+import { daemonRunning } from "./daemon-record";
 
+// A connection that went away never interrupts with Electron's error dialog
+// (see closed-socket-read.ts); any other uncaught error still shows it.
+quietClosedSocketReads(process, (error) =>
+  console.warn(
+    "Haarness ignored a read that reached a connection already closed; nothing was lost, and later ones are not logged.\n" +
+      error.stack,
+  ),
+);
 if (process.env.HAARNESS_DESKTOP_DATA)
   app.setPath("userData", resolve(process.env.HAARNESS_DESKTOP_DATA));
 app.setName("Haarness");
@@ -121,15 +132,22 @@ app.on("will-quit", () => {
 });
 // The last saves (open browser tabs, the window size) start as the app quits;
 // let them reach the disk before the process exits, for two seconds at most.
+// The streams end in a setImmediate of before-quit's, which with no window
+// open comes in the same call as this: wait for that turn first, so they end
+// and what their ending saves is written too.
 let saved = false;
 app.on("will-quit", (event) => {
   if (saved) return;
   saved = true;
   event.preventDefault();
-  void Promise.race([
-    written(),
-    new Promise((resolve) => setTimeout(resolve, 2000)),
-  ]).then(() => app.exit());
+  void new Promise((resolve) => setImmediate(resolve))
+    .then(() =>
+      Promise.race([
+        written(),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]),
+    )
+    .then(() => app.exit());
 });
 app.on("quit", () => {
   quitting = true;
@@ -380,6 +398,7 @@ function projectLabel(view: Connection) {
   const presentation = data().values["project-presentation:v1"] as
     | { projects?: Record<string, { name?: unknown } | undefined> }
     | undefined;
+  if (view.chatHome) return say("This computer");
   const name = presentation?.projects?.[projectKey(view)]?.name;
   return typeof name === "string" && name.trim()
     ? name.trim()
@@ -441,7 +460,10 @@ let projectCatalog: Promise<Recent[]> | undefined;
 async function refreshProjects(): Promise<Recent[]> {
   if (projectCatalog) return projectCatalog;
   projectCatalog = (async () => {
-    const local = data().recent.filter((item) => !item.remote);
+    // The chat home is not a project: the catalog never registers it.
+    const local = data().recent.filter(
+      (item) => !item.remote && !item.chatHome,
+    );
     let directory: Recent | undefined;
     for (const item of local) {
       if (
@@ -705,7 +727,7 @@ function installHandlers() {
     const target = notificationPending.get(win.id) ?? null;
     return target;
   });
-  handle("boot", () => ({
+  handle("boot", async () => ({
     preferences: data().preferences,
     recent: data().recent,
     servers: data().servers,
@@ -713,8 +735,15 @@ function installHandlers() {
     platform: process.platform,
     // Settings shows this computer's own paths under it as ~.
     home: homedir(),
+    chatHome: await chatHomePath().then((workspace) => ({
+      id: "local:" + workspace,
+      workspace,
+    })),
     updateConfigured: !!process.env.HAARNESS_UPDATE_URL,
   }));
+  handle("chatHomeRunning", async () =>
+    daemonRunning(await chatHomePath(), { home: homedir() }),
+  );
   handle("preferences", async (_, input) => {
     // A shortcut another app holds is refused before it is saved, and the
     // one saved before stays registered.
@@ -833,9 +862,16 @@ function installHandlers() {
         recent: z.string().optional(),
         /** The folder came from a haarness:// link rather than the user's own choice. */
         deepLink: z.boolean().optional(),
+        /** The chat home ("This computer"): its folder is Haarness's own. */
+        chatHome: z.literal(true).optional(),
       })
       .strict()
       .parse(raw);
+    if (
+      input.chatHome &&
+      Object.keys(input).some((key) => key !== "chatHome")
+    )
+      throw new Error("The chat home is opened on its own");
     // Resolving a network path would already reach its host.
     if (
       input.deepLink &&
@@ -916,7 +952,9 @@ function installHandlers() {
       return kept ? view : null;
     }
 
-    let workspace = input.workspace ?? recent?.workspace;
+    let workspace = input.chatHome
+      ? await chatHomeFolder()
+      : (input.workspace ?? recent?.workspace);
     const url = input.url ?? recent?.url;
     if (!url && !workspace) {
       const result = await dialog.showOpenDialog(win, {
@@ -930,7 +968,26 @@ function installHandlers() {
       workspace = await realpath(workspace!).catch(() => {
         throw new Error(say("The folder in this link was not found."));
       });
-    else if (!url) workspace = await realpath(workspace!);
+    else if (!url) {
+      // A saved chat home whose folder went missing is made again.
+      if (recent?.chatHome && (await isChatHome(recent.workspace)))
+        workspace = await chatHomeFolder();
+      workspace = await realpath(workspace!);
+    }
+    // Chats without a project live in the chat home. Whichever way it is
+    // asked for, it opens as itself: with project configuration off, and
+    // never as a project.
+    // A folder inside it, such as a chat's own folder, opens This computer
+    // on that chat rather than making a project inside the chat home.
+    let askedFolder: string | undefined;
+    if (!url && !(await isChatHome(workspace!))) {
+      const root = await chatHomePath();
+      if (workspace!.startsWith(root + sep)) {
+        askedFolder = workspace;
+        workspace = await chatHomeFolder();
+      }
+    }
+    const home = !url && (await isChatHome(workspace!));
     // A haarness:// link can name any folder. One already in the sidebar
     // opens as it was saved; any other is confirmed first and opens with its
     // project configuration off, so a link can never start a folder's MCP
@@ -1028,11 +1085,14 @@ function installHandlers() {
           )
         : await connectLocal(
             workspace!,
-            linkTrust ??
-              input.trust ??
-              (input.recent ? current?.trust : undefined) ??
-              true,
+            !home &&
+              (linkTrust ??
+                input.trust ??
+                (input.recent ? current?.trust : undefined) ??
+                true),
           );
+      if (home) view.chatHome = true;
+      if (askedFolder) view.askedFolder = askedFolder;
       const saved: Recent = {
         id: view.id,
         label: view.label,
@@ -1043,6 +1103,7 @@ function installHandlers() {
         project: view.project ?? current?.project,
         checkout: view.checkout ?? current?.checkout,
         ...(url ? { url } : {}),
+        ...(home ? { chatHome: true } : {}),
       };
       // A saved project removed from the sidebar while it connected (a row
       // retrying in the background, a notification opening its chat), or
@@ -1070,7 +1131,7 @@ function installHandlers() {
           data().recent = next;
           await persist();
         },
-        after: view.remote
+        after: view.remote || home
           ? undefined
           : async () => {
               await refreshProjects();
@@ -1183,6 +1244,11 @@ function installHandlers() {
         while (held?.has(String(input.path))) await new Promise((done) => setTimeout(done, 20));
       }
       const url = new URL(item.url + "/v1/files/" + spec[1]);
+      // A chat of This computer asks for its own folder's files: the chat
+      // goes in the URL for every action, and paths are its folder's.
+      const { threadId, ...fields } = input;
+      if (threadId !== undefined) url.searchParams.set("threadId", z.string().min(1).max(200).parse(threadId));
+      input = fields;
       if (spec[0] === "GET")
         for (const [key, value] of Object.entries(input))
           url.searchParams.set(key, String(value));
@@ -2185,12 +2251,18 @@ else {
   });
   app.on("before-quit", () => {
     stopBillingWatch();
-    browserHost.dispose();
     notifications.dispose();
-    for (const watch of notificationWatches.values()) watch.stop();
     voice.stop();
-    for (const item of subscriptions.values()) item.client.close();
-    terminals.closeAll();
     for (const child of commands.values()) stopCommand(child);
+    // The streams end in a callback of their own: app.quit() may run inside
+    // a read of one of them (an inspector's evaluate, as Playwright quits the
+    // app), and a socket ended in its own read makes Node throw (see
+    // closed-socket-read.ts).
+    setImmediate(() => {
+      browserHost.dispose();
+      for (const watch of notificationWatches.values()) watch.stop();
+      for (const item of subscriptions.values()) item.client.close();
+      terminals.closeAll();
+    });
   });
 }

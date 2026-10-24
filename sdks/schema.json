@@ -1085,6 +1085,13 @@
               "null"
             ]
           },
+          "directory": {
+            "description": "A working folder of the chat's own, `<date>/<name>` relative to the\nserver's project folder (`2026-10-24/fix-the-tests`): the server\ncreates it and the chat's tools run there, with it as their project\nboundary. When another chat already works in that folder the server\npicks `<name>-2`, `-3`, \u2026; the folder chosen is the thread's\n`directory`. The absolute folder another chat reports shares that\nfolder. Omitted, the chat works in the project folder (in the chat\nhome, in a new folder of its own), or in its parent chat's folder.\nServers that know it list `thread-directory.v1`; older ones ignore it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "oneOf": [
               {
@@ -1472,6 +1479,13 @@
           "content": {
             "type": "string"
           },
+          "directory": {
+            "description": "The chat folder (canonical and absolute) `path` is relative to, when\nthe request named a chat with one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "encoding": {
             "type": "string"
           },
@@ -1591,6 +1605,13 @@
       },
       "FileListing": {
         "properties": {
+          "directory": {
+            "description": "The chat folder (canonical and absolute) the entries' paths are\nrelative to, when the listing was asked for a chat with one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "entries": {
             "items": {
               "$ref": "#/components/schemas/FileEntry"
@@ -4220,6 +4241,13 @@
               "null"
             ]
           },
+          "directory": {
+            "description": "Open the terminal for a chat's folder (a thread's `directory`): given\nas `<date>/<name>` relative to the project folder, as a chat's folder\nis created, or as the absolute folder the thread reports. It must be\nthat chat folder, existing and no link; the shell starts there, and `ifNone` then hands back only a\nterminal opened for the same folder (without it, only one opened\nwithout a folder). Not together with `cwd`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ifNone": {
             "description": "Start a terminal only when the project has none running; otherwise\nreturn its oldest running one. Several windows opening \"a terminal\" at\nonce (after the server was replaced, say) then share one shell instead\nof starting one each.",
             "type": "boolean"
@@ -4298,6 +4326,13 @@
           },
           "cwd": {
             "type": "string"
+          },
+          "directory": {
+            "description": "The chat folder this terminal was opened for (`directory` of its\ncreate), canonical and absolute. Absent for a terminal of the project\nitself.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "$ref": "#/components/schemas/PtyId"
@@ -5262,6 +5297,13 @@
           "createdAt": {
             "format": "date-time",
             "type": "string"
+          },
+          "directory": {
+            "description": "The chat's own working folder, canonical and absolute, when it was\ncreated with one (`directory` of its create): its tools run there,\nand paths outside it are outside its project. Absent for a chat that\nworks in the server's project folder.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "forkOrigin": {
             "oneOf": [
@@ -6376,6 +6418,10 @@
               "null"
             ]
           },
+          "chatHome": {
+            "description": "The computer's chat home (`haarness --chat-home`): the folder Haarness\nkeeps the folders of chats without a project in. It is no project, so\nproject lists leave it out.",
+            "type": "boolean"
+          },
           "createdAt": {
             "format": "date-time",
             "type": "string"
@@ -6767,6 +6813,24 @@
     "/v1/files/action": {
       "post": {
         "operationId": "mutate_file",
+        "parameters": [
+          {
+            "description": "The chat whose folder the request is about: for a chat with a\nfolder of its own, paths are relative to that folder and confined to\nit (a link out of it, to another chat's folder too, is refused).\nOmitted, or for a chat of the project folder, the server's project\nfolder.",
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/ThreadId"
+                }
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -6809,6 +6873,22 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "description": "See [`FileScope::thread_id`].",
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/ThreadId"
+                }
+              ]
+            }
           }
         ],
         "responses": {
@@ -6830,6 +6910,24 @@
       },
       "put": {
         "operationId": "write_file",
+        "parameters": [
+          {
+            "description": "The chat whose folder the request is about: for a chat with a\nfolder of its own, paths are relative to that folder and confined to\nit (a link out of it, to another chat's folder too, is refused).\nOmitted, or for a chat of the project folder, the server's project\nfolder.",
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/ThreadId"
+                }
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -6873,6 +6971,22 @@
             "required": false,
             "schema": {
               "type": "boolean"
+            }
+          },
+          {
+            "description": "See [`FileScope::thread_id`].",
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/ThreadId"
+                }
+              ]
             }
           }
         ],
@@ -6951,6 +7065,22 @@
             "required": false,
             "schema": {
               "type": "boolean"
+            }
+          },
+          {
+            "description": "See [`FileScope::thread_id`].",
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/ThreadId"
+                }
+              ]
             }
           }
         ],

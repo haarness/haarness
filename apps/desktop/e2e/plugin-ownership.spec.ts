@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { stopChatHome } from "./fixtures/chat-home";
 
 const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
 
@@ -76,8 +77,7 @@ test("Claude Code sources stay absent while Haarness plugins work", async () => 
     await app.evaluate(({ dialog }, directory) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
     }, workspace);
-    await page.getByRole("region", { name: "Project home" })
-      .getByRole("button", { name: "Open project", exact: true }).click();
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
     await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Settings", exact: true });
@@ -100,6 +100,7 @@ test("Claude Code sources stay absent while Haarness plugins work", async () => 
     client?.close();
     if (app) await app.close().catch(() => {});
     try { execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30_000 }); } catch {}
+    stopChatHome(binary, env);
     await rm(root, { recursive: true, force: true });
   }
 });

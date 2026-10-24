@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { Haarness, type Thread } from "@haarness/sdk";
+import { stopChatHome } from "./fixtures/chat-home";
 const binary = resolve(
   process.env.HAARNESS_BIN ?? "../../target/debug/haarness",
 );
@@ -165,15 +166,9 @@ test.beforeAll(async () => {
         filePaths: [directory],
       });
     }, directory);
-    if (index)
-      await page
-        .getByRole("button", { name: "Open another project", exact: true })
-        .click();
-    else
-      await page
-        .getByRole("region", { name: "Project home" })
-        .getByRole("button", { name: "Open project", exact: true })
-        .click();
+    await page
+      .getByRole("button", { name: "Open another project", exact: true })
+      .click();
     await expect(project(index ? "beta" : "alpha")).toHaveClass(/current/);
     await expect(page.locator(".application")).toHaveAttribute(
       "data-project-ready",
@@ -255,6 +250,7 @@ test.afterAll(async () => {
         timeout: 30000,
       });
     } catch {}
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true });
 });
 test("background completion opens a collapsed project and preserves both conversation drafts", async () => {

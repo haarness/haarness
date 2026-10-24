@@ -516,6 +516,7 @@ mod tests {
                         created_at: now,
                         updated_at: now,
                         revert: None,
+                        directory: None,
                     },
                     turns: Vec::new(),
                     items: Vec::new(),
@@ -538,6 +539,7 @@ mod tests {
                         created_at: now,
                         updated_at: now,
                         revert: None,
+                        directory: None,
                     },
                     turns: vec![Turn {
                         id: turn,

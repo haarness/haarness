@@ -28,6 +28,7 @@ import { execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { WebSocket } from "ws";
 import { Haarness, type PendingPermissionInfo, type Thread } from "@haarness/sdk";
+import { stopChatHome } from "./fixtures/chat-home";
 
 let app: ElectronApplication, page: Page, temporary: string, site: Server, siteURL: string;
 let env: Record<string, string>,
@@ -101,8 +102,7 @@ test.beforeAll(async () => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
   }, directory);
   await page
-    .getByRole("region", { name: "Project home" })
-    .getByRole("button", { name: "Open project", exact: true })
+    .getByRole("button", { name: "Open another project", exact: true })
     .click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
   endpoint = JSON.parse(
@@ -133,6 +133,7 @@ test.afterAll(async () => {
       timeout: 30000,
     });
   } catch {}
+  stopChatHome(binary, env);
   if (evidence) await writeFile(join(evidence, "fixture-path.txt"), temporary);
   else if (temporary) await rm(temporary, { recursive: true, force: true });
 });
