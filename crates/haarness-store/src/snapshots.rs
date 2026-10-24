@@ -7,6 +7,12 @@
 //! entries that cannot be read (a root-owned directory, a file that keeps
 //! changing while it is read): one such path must not fail every capture,
 //! and no restore ever writes or deletes it.
+//!
+//! The database is shared with the chats' own store, so a capture never
+//! holds its write lock for long: entries are read, hashed and compressed
+//! outside any transaction, and written a batch per short transaction. The
+//! `snapshots` row comes last, so a capture is invisible until it is
+//! complete, and one that never completes (a crash) is removed by retention.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,6 +39,45 @@ const MAX_DIFF_BYTES: usize = 10 * 1024 * 1024;
 const UNREADABLE: &str = "unreadable";
 /// Paths one store warns about before it stays quiet, whatever the tree holds.
 const MAX_WARNED_PATHS: usize = 256;
+/// The most entries, and file content, one capture writes per transaction:
+/// a chat's write waits for one batch at most, however large the tree.
+const BATCH: BatchLimits = BatchLimits {
+    entries: 1024,
+    bytes: 8 * 1024 * 1024,
+};
+/// How long a capture's manifest rows may stand without the `snapshots` row
+/// that completes them before retention takes them for a crashed capture's.
+/// Measured from the time in the capture's v7 id, so a retention pass in
+/// another process sharing the database agrees on it; a day, so a capture
+/// across a laptop's sleep or a clock jump is not taken. This process's own
+/// captures are never taken (see `CAPTURING`).
+const ABANDONED_AFTER_MS: i64 = 24 * 60 * 60 * 1000;
+const BLOB_STORED: &str = "SELECT EXISTS(SELECT 1 FROM snapshot_blobs WHERE hash=?1)";
+
+#[derive(Debug, Clone, Copy)]
+struct BatchLimits {
+    entries: usize,
+    bytes: usize,
+}
+
+/// Where a capture is: after one batch was checked against the stored blobs
+/// (and its new content compressed), and after it was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureStep {
+    Checked,
+    Written,
+}
+
+/// What a capture wrote before its `snapshots` row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Written {
+    /// Manifest rows.
+    files: u64,
+    /// Blobs compressed: content no blob held yet.
+    compressed: u64,
+    /// Blobs it added to the store, each with the rows that name it.
+    blobs: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryKind {
@@ -615,23 +660,81 @@ impl SqliteSnapshotStore {
     /// file adds another copy of it forever. Three things are always kept —
     /// anything newer than `retention`, the most recent `keep_per_thread`
     /// checkpoints of each thread (so undo still has somewhere to go), and
-    /// whatever a pending undo is holding as its backup or base.
+    /// whatever a pending undo is holding as its backup or base. What
+    /// unfinished captures left goes too (see [`Self::sweep`]).
     pub fn prune(
         &self,
         retention: chrono::Duration,
         keep_per_thread: usize,
     ) -> CoreResult<PruneReport> {
-        prune(&self.connection, retention, keep_per_thread)
+        prune(&self.connection, Some((retention, keep_per_thread)))
+    }
+
+    /// The retention pass that keeps every checkpoint: it removes only the
+    /// rows of abandoned captures (see [`ABANDONED_AFTER_MS`]) and the blobs
+    /// no manifest row names any more. A capture still being written keeps
+    /// its rows and their blobs.
+    pub fn sweep(&self) -> CoreResult<PruneReport> {
+        prune(&self.connection, None)
     }
 }
 
+/// The captures this process is writing. A retention pass of this process
+/// never takes one for abandoned, however long it runs (across a laptop's
+/// sleep, or a clock that jumped forward).
+static CAPTURING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// The databases in which a capture of this process failed and left blobs
+/// no manifest row names: the next retention pass there removes them,
+/// though it has nothing else to remove.
+static ORPHANED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Capture `id` is being written, until this is dropped.
+struct Capturing(String);
+
+impl Capturing {
+    fn start(id: &str) -> Self {
+        CAPTURING.lock().insert(id.to_owned());
+        Self(id.to_owned())
+    }
+}
+
+impl Drop for Capturing {
+    fn drop(&mut self) {
+        CAPTURING.lock().remove(&self.0);
+    }
+}
+
+fn database_key(connection: &Connection) -> Option<String> {
+    connection
+        .path()
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+}
+
+/// `expiry` is the retention and the checkpoints kept per thread; without
+/// it every checkpoint is kept.
 fn prune(
     connection: &Mutex<Connection>,
+    expiry: Option<(chrono::Duration, usize)>,
+) -> CoreResult<PruneReport> {
+    let connection = connection.lock();
+    let doomed = match expiry {
+        Some((retention, keep_per_thread)) => {
+            expired_snapshots(&connection, retention, keep_per_thread)?
+        }
+        None => Vec::new(),
+    };
+    let abandoned = abandoned_captures(&connection)?;
+    reclaim(&connection, &doomed, &abandoned)
+}
+
+fn expired_snapshots(
+    connection: &Connection,
     retention: chrono::Duration,
     keep_per_thread: usize,
-) -> CoreResult<PruneReport> {
+) -> CoreResult<Vec<String>> {
     let cutoff = Utc::now() - retention;
-    let connection = connection.lock();
     let mut protected: BTreeSet<String> = BTreeSet::new();
     // A pending undo is live state, never garbage, whatever its age.
     let mut pending = connection
@@ -691,13 +794,40 @@ fn prune(
         }
         doomed.push(id);
     }
-    drop(all);
-    if doomed.is_empty() {
+    Ok(doomed)
+}
+
+/// Remove the `doomed` snapshots and the rows of the `abandoned` captures,
+/// then every blob that no manifest row names any more.
+fn reclaim(
+    connection: &Connection,
+    doomed: &[String],
+    abandoned: &[String],
+) -> CoreResult<PruneReport> {
+    let database = database_key(connection);
+    let orphaned = database
+        .as_ref()
+        .is_some_and(|database| ORPHANED.lock().remove(database));
+    if doomed.is_empty() && abandoned.is_empty() && !orphaned {
         return Ok(PruneReport::default());
     }
+    let reclaimed = reclaim_rows(connection, doomed, abandoned);
+    if reclaimed.is_err()
+        && orphaned
+        && let Some(database) = database
+    {
+        ORPHANED.lock().insert(database);
+    }
+    reclaimed
+}
 
+fn reclaim_rows(
+    connection: &Connection,
+    doomed: &[String],
+    abandoned: &[String],
+) -> CoreResult<PruneReport> {
     let transaction = connection.unchecked_transaction().map_err(storage)?;
-    for id in &doomed {
+    for id in doomed {
         transaction
             .execute("DELETE FROM snapshot_files WHERE snapshot_id=?1", [id])
             .map_err(storage)?;
@@ -705,8 +835,25 @@ fn prune(
             .execute("DELETE FROM snapshots WHERE id=?1", [id])
             .map_err(storage)?;
     }
+    let mut swept = 0;
+    for id in abandoned {
+        // A capture that wrote its `snapshots` row since it was listed is
+        // a snapshot now, and keeps its rows.
+        let removed = transaction
+            .execute(
+                "DELETE FROM snapshot_files WHERE snapshot_id=?1 \
+                 AND NOT EXISTS(SELECT 1 FROM snapshots WHERE id=?1)",
+                [id],
+            )
+            .map_err(storage)?;
+        swept += usize::from(removed > 0);
+    }
     // Blobs are content-addressed and shared, so they only go once the
-    // last manifest that named them is gone.
+    // last manifest that named them is gone. The rows of a capture still
+    // being written name theirs too, so they stay. This scans every
+    // manifest row under the write lock, which on a very large database
+    // can outlast another connection's busy timeout; a sweep in short
+    // batches over an index on `snapshot_files(hash)` would not (follow-up).
     let blobs = transaction
         .execute(
             "DELETE FROM snapshot_blobs WHERE hash NOT IN (SELECT hash FROM snapshot_files)",
@@ -717,7 +864,58 @@ fn prune(
     Ok(PruneReport {
         snapshots: doomed.len(),
         blobs,
+        abandoned: swept,
     })
+}
+
+/// Captures that wrote manifest rows but no `snapshots` row, that this
+/// process is not writing, and that started more than
+/// [`ABANDONED_AFTER_MS`] ago: a crash or a failure stopped them. Any id
+/// that is not a v7 UUID is kept.
+fn abandoned_captures(connection: &Connection) -> CoreResult<Vec<String>> {
+    let cutoff = Utc::now().timestamp_millis() - ABANDONED_AFTER_MS;
+    // One seek per manifest, rather than a scan of every manifest row.
+    let mut next = connection
+        .prepare(
+            "SELECT snapshot_id FROM snapshot_files WHERE snapshot_id>?1 \
+             ORDER BY snapshot_id LIMIT 1",
+        )
+        .map_err(storage)?;
+    let mut published = connection
+        .prepare("SELECT EXISTS(SELECT 1 FROM snapshots WHERE id=?1)")
+        .map_err(storage)?;
+    let mut abandoned = Vec::new();
+    let mut after = String::new();
+    while let Some(id) = next
+        .query_row([&after], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(storage)?
+    {
+        if started_before(&id, cutoff)
+            && !CAPTURING.lock().contains(&id)
+            && !published
+                .query_row([&id], |row| row.get::<_, bool>(0))
+                .map_err(storage)?
+        {
+            abandoned.push(id.clone());
+        }
+        after = id;
+    }
+    Ok(abandoned)
+}
+
+/// Whether a capture id is a v7 UUID whose time is before `cutoff_ms`.
+fn started_before(id: &str, cutoff_ms: i64) -> bool {
+    uuid::Uuid::parse_str(id)
+        .ok()
+        .filter(|id| id.get_version_num() == 7)
+        .and_then(|id| id.get_timestamp())
+        .is_some_and(|time| {
+            let (seconds, nanos) = time.to_unix();
+            i64::try_from(seconds).is_ok_and(|seconds| {
+                seconds.saturating_mul(1000) + i64::from(nanos / 1_000_000) < cutoff_ms
+            })
+        })
 }
 
 fn open_connection(database: impl AsRef<Path>) -> CoreResult<Connection> {
@@ -813,7 +1011,18 @@ impl SqliteSnapshotFolders {
     ) -> CoreResult<PruneReport> {
         let connection = self.inner.connection.lock().clone();
         match connection {
-            Some(connection) => prune(&connection, retention, keep_per_thread),
+            Some(connection) => prune(&connection, Some((retention, keep_per_thread))),
+            None => Ok(PruneReport::default()),
+        }
+    }
+
+    /// The pass that keeps every checkpoint (see
+    /// [`SqliteSnapshotStore::sweep`]). Nothing to do while no folder has
+    /// been opened.
+    pub fn sweep(&self) -> CoreResult<PruneReport> {
+        let connection = self.inner.connection.lock().clone();
+        match connection {
+            Some(connection) => prune(&connection, None),
             None => Ok(PruneReport::default()),
         }
     }
@@ -842,14 +1051,136 @@ impl haarness_core::SnapshotFolders for SqliteSnapshotFolders {
 pub struct PruneReport {
     pub snapshots: usize,
     pub blobs: usize,
+    /// Captures a crash or a failure left unfinished.
+    pub abandoned: usize,
 }
 
 impl SqliteSnapshotStore {
+    /// Run `work` on the blocking pool: captures and diffs read the whole
+    /// tree or its manifests, which must never stall an async worker.
+    async fn blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Self) -> CoreResult<T> + Send + 'static,
+    ) -> CoreResult<T> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || work(&store))
+            .await
+            .map_err(|error| CoreError::Storage(format!("snapshot worker failed: {error}")))?
+    }
+
     fn capture_sync(&self, thread: ThreadId) -> CoreResult<SnapshotInfo> {
         let id = uuid::Uuid::now_v7().to_string();
-        // Discover before opening the transaction; repository size is not a
-        // reason to reject an otherwise valid operation.
+        self.capture_as(&id, thread, BATCH, |_| Ok(()))
+    }
+
+    /// Capture the tree as snapshot `id`. What a failed capture wrote is
+    /// removed again.
+    fn capture_as(
+        &self,
+        id: &str,
+        thread: ThreadId,
+        limits: BatchLimits,
+        step: impl FnMut(CaptureStep) -> CoreResult<()>,
+    ) -> CoreResult<SnapshotInfo> {
+        let _capturing = Capturing::start(id);
+        let mut written = Written::default();
+        let published = self
+            .write_manifest(id, limits, &mut written, step)
+            .and_then(|()| self.publish(id, thread, written));
+        match published {
+            Ok(()) => Ok(SnapshotInfo {
+                id: id.to_owned(),
+                file_count: written.files,
+            }),
+            Err(error) => {
+                self.discard(id, written);
+                Err(error)
+            }
+        }
+    }
+
+    /// Read every managed entry and write its manifest row under `id`, with
+    /// the blob of any content not stored yet. Repository size is not a
+    /// reason to reject an otherwise valid operation; it only means more
+    /// batches. `written` counts what it wrote, also when it fails part
+    /// way; `step` runs between batches (tests act there).
+    fn write_manifest(
+        &self,
+        id: &str,
+        limits: BatchLimits,
+        written: &mut Written,
+        mut step: impl FnMut(CaptureStep) -> CoreResult<()>,
+    ) -> CoreResult<()> {
         let sources = self.source_paths()?;
+        // The capture's first row: the rows of a capture are only ever
+        // removed together, so while it stands, all of them do.
+        let mut first = None;
+        let mut batch: Vec<ScannedEntry> = Vec::new();
+        let mut bytes = 0_usize;
+        for source in &sources {
+            let Some(scanned) = self.capture_entry(source, true) else {
+                continue;
+            };
+            let size = scanned.data.as_ref().map_or(0, Vec::len);
+            // A batch holds one entry at least, whatever its size.
+            if !batch.is_empty()
+                && (batch.len() >= limits.entries || bytes.saturating_add(size) > limits.bytes)
+            {
+                self.write_batch(id, &batch, first.as_deref(), written, &mut step)?;
+                first.get_or_insert_with(|| batch[0].manifest.path.clone());
+                batch.clear();
+                bytes = 0;
+            }
+            bytes += size;
+            batch.push(scanned);
+        }
+        if !batch.is_empty() {
+            self.write_batch(id, &batch, first.as_deref(), written, &mut step)?;
+        }
+        Ok(())
+    }
+
+    /// `first` is the path of the capture's first row, once a batch was
+    /// written.
+    fn write_batch(
+        &self,
+        id: &str,
+        batch: &[ScannedEntry],
+        first: Option<&str>,
+        written: &mut Written,
+        step: &mut impl FnMut(CaptureStep) -> CoreResult<()>,
+    ) -> CoreResult<()> {
+        // Content already stored is not compressed again, so a capture of an
+        // unchanged tree adds manifest rows only.
+        let mut stored = BTreeSet::new();
+        {
+            let connection = self.connection.lock();
+            let mut exists = connection.prepare_cached(BLOB_STORED).map_err(storage)?;
+            for entry in batch {
+                let hash = &entry.manifest.hash;
+                if entry.data.is_some()
+                    && !stored.contains(hash.as_str())
+                    && exists
+                        .query_row([hash], |row| row.get::<_, bool>(0))
+                        .map_err(storage)?
+                {
+                    stored.insert(hash.as_str());
+                }
+            }
+        }
+        let mut blobs = BTreeMap::new();
+        for entry in batch {
+            let hash = entry.manifest.hash.as_str();
+            if let Some(data) = &entry.data
+                && !stored.contains(hash)
+                && !blobs.contains_key(hash)
+            {
+                blobs.insert(hash, compress(data)?);
+                written.compressed += 1;
+            }
+        }
+        step(CaptureStep::Checked)?;
+
         let mut connection = self.connection.lock();
         // IMMEDIATE, not the default DEFERRED: a deferred read-to-write
         // upgrade racing the other connection returns SQLITE_BUSY without
@@ -857,41 +1188,93 @@ impl SqliteSnapshotStore {
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage)?;
-
-        let mut file_count = 0_u64;
-        for source in &sources {
-            let Some(scanned) = self.capture_entry(source, true) else {
-                continue;
-            };
-            file_count += 1;
-            if let Some(data) = scanned.data {
-                let mut encoder =
-                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-                encoder.write_all(&data).map_err(io_error)?;
-                let compressed = encoder.finish().map_err(io_error)?;
-                tx.execute(
+        // Another process's retention pass took the capture for abandoned
+        // and removed its rows: it stops now rather than at its last write.
+        if let Some(first) = first
+            && !tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM snapshot_files WHERE snapshot_id=?1 AND path=?2)",
+                    params![id, first],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(storage)?
+        {
+            return Err(removed_while_written());
+        }
+        let mut added = 0_usize;
+        {
+            let mut exists = tx.prepare_cached(BLOB_STORED).map_err(storage)?;
+            let mut insert_blob = tx
+                .prepare_cached(
                     "INSERT OR IGNORE INTO snapshot_blobs(hash,size,data) VALUES(?1,?2,?3)",
-                    params![
-                        scanned.manifest.hash,
-                        i64::try_from(data.len()).unwrap_or(i64::MAX),
-                        compressed
-                    ],
                 )
                 .map_err(storage)?;
+            let mut insert_file = tx
+                .prepare_cached(
+                    "INSERT INTO snapshot_files(snapshot_id,path,hash,kind,mode,size) \
+                     VALUES(?1,?2,?3,?4,?5,?6)",
+                )
+                .map_err(storage)?;
+            for entry in batch {
+                let manifest = &entry.manifest;
+                if let Some(data) = &entry.data {
+                    let size = i64::try_from(data.len()).unwrap_or(i64::MAX);
+                    if let Some(compressed) = blobs.get(manifest.hash.as_str()) {
+                        added += insert_blob
+                            .execute(params![manifest.hash, size, compressed])
+                            .map_err(storage)?;
+                    } else if !exists
+                        .query_row([&manifest.hash], |row| row.get::<_, bool>(0))
+                        .map_err(storage)?
+                    {
+                        // Stored when the batch was checked, but a retention
+                        // pass (in any process) removed it since. Checked
+                        // again under the write lock, so no manifest row
+                        // names a blob that is gone; once this transaction
+                        // commits, the row keeps its blob.
+                        added += insert_blob
+                            .execute(params![manifest.hash, size, compress(data)?])
+                            .map_err(storage)?;
+                        written.compressed += 1;
+                    }
+                }
+                insert_file
+                    .execute(params![
+                        id,
+                        manifest.path,
+                        manifest.hash,
+                        manifest.kind.database_name(),
+                        manifest.mode.map(i64::from),
+                        i64::try_from(manifest.size).unwrap_or(i64::MAX),
+                    ])
+                    .map_err(storage)?;
             }
-            tx.execute(
-                "INSERT INTO snapshot_files(snapshot_id,path,hash,kind,mode,size) \
-                 VALUES(?1,?2,?3,?4,?5,?6)",
-                params![
-                    id,
-                    scanned.manifest.path,
-                    scanned.manifest.hash,
-                    scanned.manifest.kind.database_name(),
-                    scanned.manifest.mode.map(i64::from),
-                    i64::try_from(scanned.manifest.size).unwrap_or(i64::MAX),
-                ],
+        }
+        tx.commit().map_err(storage)?;
+        drop(connection);
+        written.files += u64::try_from(batch.len()).unwrap_or(u64::MAX);
+        written.blobs += u64::try_from(added).unwrap_or(u64::MAX);
+        step(CaptureStep::Written)
+    }
+
+    /// Make the capture a snapshot by writing its `snapshots` row, the last
+    /// thing it writes. A retention pass that took the capture for an
+    /// abandoned one removed rows it wrote, and then it fails instead of
+    /// becoming a snapshot that lacks files.
+    fn publish(&self, id: &str, thread: ThreadId, written: Written) -> CoreResult<()> {
+        let mut connection = self.connection.lock();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let rows: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM snapshot_files WHERE snapshot_id=?1",
+                [id],
+                |row| row.get(0),
             )
             .map_err(storage)?;
+        if u64::try_from(rows).ok() != Some(written.files) {
+            return Err(removed_while_written());
         }
         tx.execute(
             "INSERT INTO snapshots(id,thread_id,created_at,file_count) VALUES(?1,?2,?3,?4)",
@@ -899,22 +1282,68 @@ impl SqliteSnapshotStore {
                 id,
                 thread.to_string(),
                 Utc::now().to_rfc3339(),
-                i64::try_from(file_count).unwrap_or(i64::MAX)
+                i64::try_from(written.files).unwrap_or(i64::MAX)
             ],
         )
         .map_err(storage)?;
-        tx.commit().map_err(storage)?;
-        Ok(SnapshotInfo { id, file_count })
+        tx.commit().map_err(storage)
     }
+
+    /// Remove the manifest rows of a capture that failed, a batch per
+    /// transaction, and return how many transactions removed some. Rows
+    /// this cannot remove go once the capture is abandoned. The blobs it
+    /// added go with the next retention pass, which scans every manifest
+    /// row for them: one that added none (the content of an unchanged tree
+    /// was all stored) asks for no such scan.
+    fn discard(&self, id: &str, written: Written) -> usize {
+        let mut transactions = 0;
+        loop {
+            let removed = self.connection.lock().execute(
+                "DELETE FROM snapshot_files WHERE rowid IN \
+                 (SELECT rowid FROM snapshot_files WHERE snapshot_id=?1 LIMIT ?2) \
+                 AND NOT EXISTS(SELECT 1 FROM snapshots WHERE id=?1)",
+                params![id, i64::try_from(BATCH.entries).unwrap_or(i64::MAX)],
+            );
+            match removed {
+                Ok(0) => break,
+                Ok(_) => transactions += 1,
+                Err(error) => {
+                    tracing::debug!(snapshot = id, %error, "could not remove a failed capture's entries");
+                    break;
+                }
+            }
+        }
+        if transactions > 0
+            && written.blobs > 0
+            && let Some(database) = database_key(&self.connection.lock())
+        {
+            ORPHANED.lock().insert(database);
+        }
+        transactions
+    }
+}
+
+/// Why a capture fails whose rows a retention pass of another process
+/// removed, taking it for abandoned. It may reach the person as the error
+/// of the tool call that needed the checkpoint.
+fn removed_while_written() -> CoreError {
+    CoreError::Storage(
+        "could not save the undo checkpoint: another Haarness process sharing this data \
+         removed it as unfinished while it was being written; try again"
+            .into(),
+    )
+}
+
+fn compress(data: &[u8]) -> CoreResult<Vec<u8>> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(data).map_err(io_error)?;
+    encoder.finish().map_err(io_error)
 }
 
 #[async_trait]
 impl SnapshotStore for SqliteSnapshotStore {
     async fn capture(&self, thread: ThreadId) -> CoreResult<SnapshotInfo> {
-        let store = self.clone();
-        tokio::task::spawn_blocking(move || store.capture_sync(thread))
-            .await
-            .map_err(|error| CoreError::Storage(format!("snapshot worker failed: {error}")))?
+        self.blocking(move |store| store.capture_sync(thread)).await
     }
 
     /// Legacy snapshots predate paired checkpoints. Preserve their historical
@@ -1034,9 +1463,13 @@ impl SnapshotStore for SqliteSnapshotStore {
     }
 
     async fn diff_live(&self, snapshot_id: &str) -> CoreResult<Vec<FileDiff>> {
-        let before = self.load_manifest(snapshot_id)?;
-        let after = self.scan_manifest()?;
-        self.diff_manifests(&before, &after, true, false, None)
+        let snapshot_id = snapshot_id.to_owned();
+        self.blocking(move |store| {
+            let before = store.load_manifest(&snapshot_id)?;
+            let after = store.scan_manifest()?;
+            store.diff_manifests(&before, &after, true, false, None)
+        })
+        .await
     }
 
     async fn diff_snapshots(
@@ -1044,9 +1477,13 @@ impl SnapshotStore for SqliteSnapshotStore {
         before_snapshot_id: &str,
         after_snapshot_id: &str,
     ) -> CoreResult<Vec<FileDiff>> {
-        let before = self.load_manifest(before_snapshot_id)?;
-        let after = self.load_manifest(after_snapshot_id)?;
-        self.diff_manifests(&before, &after, false, false, None)
+        let (before, after) = (before_snapshot_id.to_owned(), after_snapshot_id.to_owned());
+        self.blocking(move |store| {
+            let before = store.load_manifest(&before)?;
+            let after = store.load_manifest(&after)?;
+            store.diff_manifests(&before, &after, false, false, None)
+        })
+        .await
     }
 
     /// Manifests only: no blob is read to learn that nothing changed.
@@ -1055,7 +1492,11 @@ impl SnapshotStore for SqliteSnapshotStore {
         before_snapshot_id: &str,
         after_snapshot_id: &str,
     ) -> CoreResult<bool> {
-        Ok(self.load_manifest(before_snapshot_id)? != self.load_manifest(after_snapshot_id)?)
+        let (before, after) = (before_snapshot_id.to_owned(), after_snapshot_id.to_owned());
+        self.blocking(
+            move |store| Ok(store.load_manifest(&before)? != store.load_manifest(&after)?),
+        )
+        .await
     }
 
     async fn diff_review(
@@ -1065,13 +1506,19 @@ impl SnapshotStore for SqliteSnapshotStore {
         summary: bool,
         path: Option<&str>,
     ) -> CoreResult<Vec<FileDiff>> {
-        let before = self.load_manifest(before)?;
-        let live = after.is_none();
-        let after = match after {
-            Some(id) => self.load_manifest(id)?,
-            None => self.scan_manifest()?,
-        };
-        self.diff_manifests(&before, &after, live, summary, path)
+        let before = before.to_owned();
+        let after = after.map(str::to_owned);
+        let path = path.map(str::to_owned);
+        self.blocking(move |store| {
+            let before = store.load_manifest(&before)?;
+            let live = after.is_none();
+            let after = match after {
+                Some(id) => store.load_manifest(&id)?,
+                None => store.scan_manifest()?,
+            };
+            store.diff_manifests(&before, &after, live, summary, path.as_deref())
+        })
+        .await
     }
 }
 
@@ -2342,5 +2789,515 @@ mod tests {
         mode(&workspace, 0o000);
         let error = store.capture(ThreadId::new()).await.unwrap_err();
         assert!(matches!(error, CoreError::Storage(_)), "{error}");
+    }
+
+    /// Batches of `entries` entries, whatever their size.
+    fn batches_of(entries: usize) -> BatchLimits {
+        BatchLimits {
+            entries,
+            bytes: usize::MAX,
+        }
+    }
+
+    /// A v7 id as a capture that started `hours` ago has.
+    fn started_hours_ago(hours: u64) -> String {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - hours * 60 * 60;
+        uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, seconds, 0)).to_string()
+    }
+
+    /// What `write_manifest` wrote, if it completed.
+    fn manifest(
+        store: &SqliteSnapshotStore,
+        id: &str,
+        limits: BatchLimits,
+        step: impl FnMut(CaptureStep) -> CoreResult<()>,
+    ) -> CoreResult<Written> {
+        let mut written = Written::default();
+        store
+            .write_manifest(id, limits, &mut written, step)
+            .map(|()| written)
+    }
+
+    fn capture_with(store: &SqliteSnapshotStore, limits: BatchLimits) -> (String, Written) {
+        let id = uuid::Uuid::now_v7().to_string();
+        let written = manifest(store, &id, limits, |_| Ok(())).unwrap();
+        store.publish(&id, ThreadId::new(), written).unwrap();
+        (id, written)
+    }
+
+    /// Whether the next retention pass of `store`'s database scans for the
+    /// blobs a failed capture added.
+    fn blob_scan_scheduled(store: &SqliteSnapshotStore) -> bool {
+        let database = database_key(&store.connection.lock()).unwrap();
+        ORPHANED.lock().contains(&database)
+    }
+
+    #[test]
+    fn a_capture_holds_the_write_lock_for_one_batch_at_most() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for index in 0..20 {
+            fs::write(workspace.join(format!("f{index:02}")), format!("{index}\n")).unwrap();
+        }
+        // Another chat's writes, on a connection that never waits for a lock.
+        let other = Connection::open(guard.0.join("test.db")).unwrap();
+        other.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut writes = 0;
+        let written = manifest(&store, &id, batches_of(3), |_| {
+            other
+                .execute_batch(&format!(
+                    "BEGIN IMMEDIATE; \
+                         INSERT INTO permission_rules(workspace,pattern,decision,created_at) \
+                         VALUES('ws','p{writes}','allow','now'); COMMIT;"
+                ))
+                .map_err(storage)?;
+            writes += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(written.files, 20);
+        assert_eq!(writes, 14, "seven batches, each checked and written");
+        assert!(
+            matches!(store.load_manifest(&id), Err(CoreError::NotFound(_))),
+            "a capture is no snapshot before its last write"
+        );
+        store.publish(&id, ThreadId::new(), written).unwrap();
+        let manifest = store.load_manifest(&id).unwrap();
+        assert_eq!(manifest.len(), 20);
+        assert_eq!(store.load_blob(&manifest["f07"]).unwrap(), b"7\n");
+    }
+
+    #[tokio::test]
+    async fn a_capture_compresses_only_content_no_blob_holds() {
+        // In one batch or across batches, equal content is compressed once.
+        for limits in [BATCH, batches_of(1)] {
+            let (guard, store) = fixture();
+            let workspace = guard.0.join("ws");
+            fs::write(workspace.join("a"), "same\n").unwrap();
+            fs::write(workspace.join("b"), "same\n").unwrap();
+            fs::write(workspace.join("c"), "other\n").unwrap();
+            fs::write(workspace.join("huge.bin"), vec![7_u8; 3 * 1024 * 1024]).unwrap();
+            let (_, first) = capture_with(&store, limits);
+            assert_eq!(
+                first,
+                Written {
+                    files: 4,
+                    compressed: 2,
+                    blobs: 2
+                },
+                "{limits:?}"
+            );
+            let (unchanged, again) = capture_with(&store, limits);
+            assert_eq!(
+                again,
+                Written {
+                    files: 4,
+                    compressed: 0,
+                    blobs: 0
+                },
+                "an unchanged tree compresses nothing: {limits:?}"
+            );
+            fs::write(workspace.join("c"), "edited\n").unwrap();
+            let (edited_id, edited) = capture_with(&store, limits);
+            assert_eq!(edited.compressed, 1, "only the edited file: {limits:?}");
+            assert_eq!(count(&store, "snapshot_blobs"), 3);
+
+            // The recapture restores like any other.
+            assert_eq!(
+                store.restore_delta(&edited_id, &unchanged).await.unwrap(),
+                vec!["c"]
+            );
+            assert_eq!(fs::read_to_string(workspace.join("c")).unwrap(), "other\n");
+        }
+    }
+
+    #[tokio::test]
+    async fn retention_during_a_capture_keeps_the_blobs_it_names() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("a"), "one\n").unwrap();
+        fs::write(workspace.join("b"), "two\n").unwrap();
+        let thread = ThreadId::new();
+        let old = store.capture(thread).await.unwrap();
+        age(&store, &old.id, 30);
+        // A retention pass of another process sharing the database.
+        let elsewhere =
+            SqliteSnapshotStore::open(guard.0.join("test.db"), workspace.clone()).unwrap();
+
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut checked = 0;
+        let mut pruned = None;
+        let written = manifest(&store, &id, batches_of(1), |step| {
+            checked += usize::from(step == CaptureStep::Checked);
+            // `a`'s row is written. `b`'s content was found stored, and
+            // the pass removes it before `b`'s row is written.
+            if step == CaptureStep::Checked && checked == 2 {
+                pruned = Some(elsewhere.prune(chrono::Duration::days(7), 0)?);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            pruned.unwrap(),
+            PruneReport {
+                snapshots: 1,
+                blobs: 1,
+                abandoned: 0
+            },
+            "the expired snapshot goes, and of its blobs only `b`'s: the capture's row names `a`'s"
+        );
+        assert_eq!(
+            written,
+            Written {
+                files: 2,
+                compressed: 1,
+                blobs: 1
+            },
+            "`b`'s content is stored again"
+        );
+        store.publish(&id, thread, written).unwrap();
+
+        fs::write(workspace.join("a"), "changed\n").unwrap();
+        fs::remove_file(workspace.join("b")).unwrap();
+        assert_eq!(store.restore(&id).await.unwrap(), vec!["a", "b"]);
+        assert_eq!(fs::read_to_string(workspace.join("a")).unwrap(), "one\n");
+        assert_eq!(fs::read_to_string(workspace.join("b")).unwrap(), "two\n");
+    }
+
+    #[test]
+    fn a_capture_that_never_completes_is_invisible_and_retention_removes_it() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for name in ["a", "b", "c"] {
+            fs::write(workspace.join(name), format!("{name}\n")).unwrap();
+        }
+        // Stops after its first batch, as a crash would: nothing removes
+        // what it wrote.
+        let stopped = |id: &str| {
+            manifest(&store, id, batches_of(1), |step| match step {
+                CaptureStep::Written => Err(CoreError::Storage("crashed".into())),
+                CaptureStep::Checked => Ok(()),
+            })
+            .unwrap_err();
+        };
+        let crashed = started_hours_ago(25);
+        stopped(&crashed);
+        // One that started just now looks like this while it runs, in this
+        // process or another.
+        fs::write(workspace.join("a"), "a, edited\n").unwrap();
+        let running = uuid::Uuid::now_v7().to_string();
+        stopped(&running);
+
+        assert_eq!(count(&store, "snapshots"), 0);
+        for id in [&crashed, &running] {
+            assert!(matches!(
+                store.load_manifest(id),
+                Err(CoreError::NotFound(_))
+            ));
+        }
+        assert_eq!(count(&store, "snapshot_files"), 2);
+        assert_eq!(
+            store.prune(chrono::Duration::days(7), 20).unwrap(),
+            PruneReport {
+                snapshots: 0,
+                blobs: 1,
+                abandoned: 1
+            },
+            "the crashed capture's row and the blob only it named"
+        );
+        assert_eq!(
+            count(&store, "snapshot_files"),
+            1,
+            "the running capture's row"
+        );
+        assert_eq!(count(&store, "snapshot_blobs"), 1);
+        assert_eq!(
+            store.prune(chrono::Duration::days(7), 20).unwrap(),
+            PruneReport::default()
+        );
+
+        // A capture whose rows a pass took for abandoned cannot complete.
+        let slow = started_hours_ago(25);
+        let written = manifest(&store, &slow, BATCH, |_| Ok(())).unwrap();
+        assert_eq!(
+            store
+                .prune(chrono::Duration::days(7), 20)
+                .unwrap()
+                .abandoned,
+            1
+        );
+        let error = store.publish(&slow, ThreadId::new(), written).unwrap_err();
+        assert!(
+            error.to_string().contains("removed it as unfinished"),
+            "{error}"
+        );
+        assert_eq!(count(&store, "snapshots"), 0);
+
+        // A completed one is never abandoned, however old its id.
+        let done = started_hours_ago(25);
+        let written = manifest(&store, &done, BATCH, |_| Ok(())).unwrap();
+        store.publish(&done, ThreadId::new(), written).unwrap();
+        assert_eq!(
+            store.prune(chrono::Duration::days(7), 20).unwrap(),
+            PruneReport::default()
+        );
+        assert_eq!(store.load_manifest(&done).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn only_old_v7_ids_count_as_started_before_a_cutoff() {
+        let now = Utc::now().timestamp_millis();
+        assert!(started_before(
+            &started_hours_ago(25),
+            now - ABANDONED_AFTER_MS
+        ));
+        assert!(!started_before(
+            &started_hours_ago(23),
+            now - ABANDONED_AFTER_MS
+        ));
+        assert!(!started_before(
+            &uuid::Uuid::now_v7().to_string(),
+            now - ABANDONED_AFTER_MS
+        ));
+        // A random (v4) id carries no time.
+        assert!(!started_before(
+            "0f8fad5b-d9cb-469f-a165-70867728950e",
+            i64::MAX
+        ));
+        assert!(!started_before("not an id", i64::MAX));
+    }
+
+    #[test]
+    fn a_capture_of_this_process_is_never_taken_for_abandoned() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for name in ["a", "b", "c"] {
+            fs::write(workspace.join(name), format!("{name}\n")).unwrap();
+        }
+        // Its id is over a day old, as after a laptop slept through it; the
+        // pass runs on another connection of this process.
+        let id = started_hours_ago(25);
+        let elsewhere =
+            SqliteSnapshotStore::open(guard.0.join("test.db"), workspace.clone()).unwrap();
+        let mut swept = Vec::new();
+        let info = store
+            .capture_as(&id, ThreadId::new(), batches_of(1), |step| {
+                if step == CaptureStep::Written {
+                    swept.push(elsewhere.sweep()?);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(swept, vec![PruneReport::default(); 3]);
+        assert_eq!(info.file_count, 3);
+        assert_eq!(store.load_manifest(&id).unwrap().len(), 3);
+        assert!(
+            !CAPTURING.lock().contains(&id),
+            "done, it is no longer in flight"
+        );
+    }
+
+    #[test]
+    fn a_capture_whose_rows_another_process_removed_stops_at_its_next_batch() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for name in ["a", "b", "c"] {
+            fs::write(workspace.join(name), format!("{name}\n")).unwrap();
+        }
+        // Another process's capture, a day old: this process's pass may take
+        // it for abandoned.
+        let id = started_hours_ago(25);
+        let mut written = 0;
+        let error = manifest(&store, &id, batches_of(1), |step| {
+            if step == CaptureStep::Written {
+                written += 1;
+                assert_eq!(store.sweep()?.abandoned, 1);
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(written, 1, "the next batch stops");
+        assert!(error.to_string().contains("try again"), "{error}");
+        assert_eq!(count(&store, "snapshot_files"), 0);
+    }
+
+    #[test]
+    fn retention_keeps_a_capture_that_completes_while_the_pass_runs() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("a"), "a\n").unwrap();
+        let id = started_hours_ago(25);
+        let written = manifest(&store, &id, BATCH, |_| Ok(())).unwrap();
+        let abandoned = abandoned_captures(&store.connection.lock()).unwrap();
+        assert_eq!(abandoned, vec![id.clone()]);
+        // Another process completes it before the pass removes anything.
+        let elsewhere =
+            SqliteSnapshotStore::open(guard.0.join("test.db"), workspace.clone()).unwrap();
+        elsewhere.publish(&id, ThreadId::new(), written).unwrap();
+        let report = reclaim(&store.connection.lock(), &[], &abandoned).unwrap();
+        assert_eq!(report.abandoned, 0);
+        assert_eq!(report.blobs, 0);
+        let manifest = store.load_manifest(&id).unwrap();
+        assert_eq!(store.load_blob(&manifest["a"]).unwrap(), b"a\n");
+    }
+
+    #[tokio::test]
+    async fn a_failed_capture_that_added_no_blob_schedules_no_blob_scan() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("a"), "a\n").unwrap();
+        fs::write(workspace.join("b"), "b\n").unwrap();
+        store.capture(ThreadId::new()).await.unwrap();
+        store
+            .connection
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON snapshots \
+                 BEGIN SELECT RAISE(ABORT, 'no room'); END;",
+            )
+            .unwrap();
+        // Unchanged: every blob it names was stored already.
+        store.capture(ThreadId::new()).await.unwrap_err();
+        assert_eq!(count(&store, "snapshot_files"), 2);
+        assert!(!blob_scan_scheduled(&store));
+
+        // A new file's content is a blob only the failed capture named.
+        fs::write(workspace.join("c"), "c\n").unwrap();
+        store.capture(ThreadId::new()).await.unwrap_err();
+        assert!(blob_scan_scheduled(&store));
+        assert_eq!(store.sweep().unwrap().blobs, 1);
+        assert!(!blob_scan_scheduled(&store));
+    }
+
+    #[test]
+    fn a_failed_capture_is_removed_a_batch_per_transaction() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for index in 0..2_100 {
+            fs::write(workspace.join(format!("f{index:04}")), format!("{index}\n")).unwrap();
+        }
+        let id = uuid::Uuid::now_v7().to_string();
+        let written = manifest(&store, &id, BATCH, |_| Ok(())).unwrap();
+        assert_eq!(written.blobs, 2_100);
+        assert_eq!(store.discard(&id, written), 3, "1,024, 1,024 and 52 rows");
+        assert_eq!(count(&store, "snapshot_files"), 0);
+        assert!(blob_scan_scheduled(&store));
+    }
+
+    #[tokio::test]
+    async fn a_failed_capture_removes_its_rows_and_the_next_pass_its_blobs() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("kept"), "kept\n").unwrap();
+        let kept = store.capture(ThreadId::new()).await.unwrap();
+        age(&store, &kept.id, 30);
+        // More rows than one removal takes.
+        for index in 0..1_100 {
+            fs::write(workspace.join(format!("f{index:04}")), format!("{index}\n")).unwrap();
+        }
+        store
+            .connection
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON snapshots \
+                 BEGIN SELECT RAISE(ABORT, 'no room'); END;",
+            )
+            .unwrap();
+        let error = store.capture(ThreadId::new()).await.unwrap_err();
+        assert!(error.to_string().contains("no room"), "{error}");
+        assert_eq!(
+            count(&store, "snapshot_files"),
+            1,
+            "only the kept checkpoint's"
+        );
+        assert_eq!(count(&store, "snapshot_blobs"), 1_101);
+
+        // Keeping every checkpoint, however old, the pass removes the blobs
+        // only the failed capture stored.
+        assert_eq!(
+            store.sweep().unwrap(),
+            PruneReport {
+                snapshots: 0,
+                blobs: 1_100,
+                abandoned: 0
+            }
+        );
+        assert_eq!(store.sweep().unwrap(), PruneReport::default());
+        assert_eq!(store.load_manifest(&kept.id).unwrap().len(), 1);
+        store
+            .connection
+            .lock()
+            .execute_batch("DROP TRIGGER refuse")
+            .unwrap();
+        assert_eq!(
+            store.capture(ThreadId::new()).await.unwrap().file_count,
+            1_101
+        );
+    }
+
+    #[test]
+    fn a_batch_holds_no_more_content_than_its_limit() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for name in ["a", "b", "c", "d", "e"] {
+            fs::write(workspace.join(name), "four").unwrap();
+        }
+        // Larger than a batch may hold, so it is a batch of its own.
+        fs::write(workspace.join("f"), "twelve bytes").unwrap();
+        let mut batches = 0;
+        let limits = BatchLimits {
+            entries: 100,
+            bytes: 10,
+        };
+        let written = manifest(&store, &uuid::Uuid::now_v7().to_string(), limits, |step| {
+            batches += usize::from(step == CaptureStep::Written);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(written.files, 6);
+        assert_eq!(batches, 4, "a b, c d, e, f");
+    }
+
+    /// A diff reads the whole tree: the executor that awaits it keeps
+    /// running other tasks meanwhile.
+    #[tokio::test(flavor = "current_thread")]
+    async fn diffs_run_off_the_async_executor() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for index in 0..2_000 {
+            fs::write(workspace.join(format!("f{index:04}")), format!("{index}\n")).unwrap();
+        }
+        let snapshot = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("f0001"), "edited\n").unwrap();
+        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticker = tokio::spawn({
+            let ran = Arc::clone(&ran);
+            async move {
+                loop {
+                    ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        for review in [false, true] {
+            let before = ran.load(std::sync::atomic::Ordering::Relaxed);
+            let files = if review {
+                store.diff_review(&snapshot.id, None, true, None).await
+            } else {
+                store.diff_live(&snapshot.id).await
+            }
+            .unwrap();
+            assert_eq!(files.len(), 1);
+            assert!(
+                ran.load(std::sync::atomic::Ordering::Relaxed) > before,
+                "review: {review}"
+            );
+        }
+        ticker.abort();
     }
 }
