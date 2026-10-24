@@ -29,7 +29,7 @@ import { Button, Icon, Forms, type IconName } from "./ui";
 import { ImageViewer } from "./ImageViewer";
 import { Session } from "./Session";
 import { ProjectHome } from "./ProjectHome";
-import { computers, lastSeen, loadComputers, platformName, signedIn } from "./computers";
+import { accountKnown, computers, lastSeen, loadComputers, platformName, signedIn } from "./computers";
 import { ChatLoading } from "./ChatLoading";
 import { ConversationContext } from "./ConversationContext";
 import { toastAnchor } from "./toast-anchors";
@@ -127,12 +127,17 @@ const serverIcon = (server: { url?: string; cloud?: boolean; host?: string }): I
 export function App() {
   const app = useApp();
   const { state, set } = app;
-  /** Whether there is another server to switch to: one added, another of
-   * your computers listed, or the server shown is not this computer. */
+  /** Whether the switcher showed when Desktop last knew, kept while the
+   * account is read at launch so the sidebar does not shift. */
+  const [switcherBefore, setSwitcherBefore] = createSignal(false);
+  /** Whether there may be another server to switch to: one added, the
+   * server shown is not this computer, or signed in, where your other
+   * computers are listed (read only when the switcher opens). */
   const serverChoices = () =>
     app.servers().length > 1 ||
     computers.items.length > 0 ||
-    state.activeServer !== localServer.id;
+    state.activeServer !== localServer.id ||
+    (accountKnown() ? signedIn() : switcherBefore());
   /** Your other computers in the server switcher, once the account has
    * listed them; the one open now stays listed while it is read again. */
   const computerItems = (): MenuAction[] => {
@@ -465,6 +470,7 @@ export function App() {
       if (typeof raw.sideChatWidth === "number" && Number.isFinite(raw.sideChatWidth))
         setSideWidth(clamp(raw.sideChatWidth, SIDE_MIN, SIDE_MAX));
       if (raw.sideChat === true) setSideOpen(true);
+      if (typeof raw.serverSwitcher === "boolean") setSwitcherBefore(raw.serverSwitcher);
       if (typeof raw.sideChatFront === "boolean") setSideFront(raw.sideChatFront);
       // Restored as it was: neither comes in front of the other.
       if (["files", "diff", "context", "browser"].includes(String(raw.dock)))
@@ -494,6 +500,7 @@ export function App() {
       sideChat: sideOpen(),
       sideChatWidth: sideWidth(),
       sideChatFront: sideFront(),
+      serverSwitcher: accountKnown() ? serverChoices() : switcherBefore(),
     };
     const timer = setTimeout(saveLayout, 200);
     onCleanup(() => clearTimeout(timer));
