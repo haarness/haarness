@@ -76,11 +76,61 @@ pub(crate) fn bound(
     origins: &[Origin],
     limits: ImageLimits,
 ) -> Option<Cut> {
-    struct Image {
-        message: usize,
-        source: String,
-        bytes: usize,
+    let (cut, gone) = {
+        let plan = plan(messages, origins, limits);
+        let gone = plan
+            .images
+            .iter()
+            .zip(&plan.dropped)
+            .filter(|(_, dropped)| **dropped)
+            .map(|(image, _)| (image.message, image.source.to_owned()))
+            .collect::<Vec<_>>();
+        let cut = Cut {
+            images: plan.images.len(),
+            removed: gone.len(),
+            bytes: plan.images.iter().map(|image| image.bytes).sum(),
+            kept: plan.kept,
+        };
+        (cut, gone)
+    };
+    if gone.is_empty() {
+        return None;
     }
+    for (message, source) in gone {
+        replace(&mut messages[message], &source);
+    }
+    Some(cut)
+}
+
+/// How many images `bound` would replace, without changing `messages`.
+pub(crate) fn removed(
+    messages: &[ProviderMessage],
+    origins: &[Origin],
+    limits: ImageLimits,
+) -> usize {
+    plan(messages, origins, limits)
+        .dropped
+        .iter()
+        .filter(|dropped| **dropped)
+        .count()
+}
+
+/// An image a request carries.
+struct Image<'a> {
+    message: usize,
+    source: &'a str,
+    bytes: usize,
+}
+
+/// Which images a cut replaces.
+struct Plan<'a> {
+    images: Vec<Image<'a>>,
+    dropped: Vec<bool>,
+    /// Base64 bytes of the images kept.
+    kept: usize,
+}
+
+fn plan<'a>(messages: &'a [ProviderMessage], origins: &[Origin], limits: ImageLimits) -> Plan<'a> {
     debug_assert_eq!(messages.len(), origins.len());
     let origin = |message: usize| origins.get(message).copied().unwrap_or_default();
     let mut images = Vec::new();
@@ -97,7 +147,7 @@ pub(crate) fn bound(
             if crate::attachments::is_image_source(source) {
                 images.push(Image {
                     message: index,
-                    source: source.clone(),
+                    source,
                     bytes: crate::attachments::sent_bytes(source),
                 });
             }
@@ -144,20 +194,11 @@ pub(crate) fn bound(
             }
         }
     }
-    let removed = dropped.iter().filter(|dropped| **dropped).count();
-    if removed == 0 {
-        return None;
-    }
-    let bytes = images.iter().map(|image| image.bytes).sum();
-    for (image, _) in images.iter().zip(&dropped).filter(|(_, dropped)| **dropped) {
-        replace(&mut messages[image.message], &image.source);
-    }
-    Some(Cut {
-        images: images.len(),
-        removed,
-        bytes,
+    Plan {
+        images,
+        dropped,
         kept,
-    })
+    }
 }
 
 /// Takes the first `source` out of `message`, naming it in the text instead.
@@ -596,6 +637,117 @@ mod tests {
             crowded.bounded(ImageLimits::default()),
             ["p0", "p1", "p2", "p3", "right"]
         );
+    }
+
+    /// The reviewer's fuzz of the cut, at a thousandth of the sizes: random
+    /// chats of turns, steers, replies and screenshots against every kind of
+    /// limit.
+    #[test]
+    fn random_chats_keep_the_cuts_promises() {
+        struct Rng(u64);
+        impl Rng {
+            fn below(&mut self, below: usize) -> usize {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                usize::try_from(self.0 % below as u64).unwrap()
+            }
+        }
+        let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+        let limits = [
+            (25 * 1024, None),
+            (15 * 1024, None),
+            (25 * 1024, Some(100)),
+            (25 * 1024, Some(6)),
+            (10 * 1024, Some(3)),
+        ];
+        let removed_names = |before: &[ProviderMessage], after: &[ProviderMessage]| {
+            let kept = sent(after);
+            sent(before)
+                .into_iter()
+                .filter(|name| !kept.contains(name))
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..2000 {
+            let (mut messages, mut origins) = (Vec::new(), Vec::new());
+            let (mut turn, mut serial) = (None, 0);
+            for _ in 0..=rng.below(30) {
+                let roll = rng.below(100);
+                let (count, prefix, unit, person) = if roll < 15 {
+                    turn = (rng.below(10) > 0).then(TurnId::new);
+                    (rng.below(5), "p", 8, true)
+                } else if roll < 25 {
+                    (usize::from(rng.below(10) < 3), "st", 6, true)
+                } else if roll < 35 {
+                    (0, "", 1, false)
+                } else {
+                    (rng.below(3) + 1, "s", 12, false)
+                };
+                let attachments = (0..count)
+                    .map(|_| {
+                        serial += 1;
+                        image(&format!("{prefix}{serial}"), (rng.below(unit) + 1) * 512)
+                    })
+                    .collect::<Vec<_>>();
+                messages.push(match (person, attachments.is_empty()) {
+                    (_, true) => user(if person { "a message" } else { "a reply" }),
+                    (true, false) => ProviderMessage::Media {
+                        role: "user".into(),
+                        content: "look".into(),
+                        attachments,
+                    },
+                    (false, false) => ProviderMessage::ToolResult {
+                        call_id: "shot".into(),
+                        name: "screenshot".into(),
+                        output: "shot".into(),
+                        is_error: false,
+                        attachments,
+                    },
+                });
+                origins.push(Origin { turn, person });
+            }
+            let (bytes, count) = limits[rng.below(5)];
+            let limits = ImageLimits { bytes, count };
+            let mut full = messages.clone();
+            let cut = bound(&mut full, &origins, limits);
+            // Counting changes nothing and agrees with the cut.
+            assert_eq!(
+                removed(&messages, &origins, limits),
+                cut.map_or(0, |cut| cut.removed)
+            );
+            // Past the limit only the person's own images of one turn stay.
+            if cut.is_some_and(|cut| cut.kept > bytes)
+                || count.is_some_and(|most| sent(&full).len() > most)
+            {
+                let owners = full
+                    .iter()
+                    .zip(&origins)
+                    .filter(|(message, _)| !sent(std::slice::from_ref(*message)).is_empty())
+                    .map(|(_, origin)| *origin)
+                    .collect::<Vec<_>>();
+                assert!(
+                    owners
+                        .iter()
+                        .all(|origin| origin.person && origin.turn.is_some())
+                );
+                assert!(owners.windows(2).all(|pair| pair[0].turn == pair[1].turn));
+            }
+            for at in 1..messages.len() {
+                let mut prefix = messages[..at].to_vec();
+                bound(&mut prefix, &origins[..at], limits);
+                // A later image never brings back one an earlier cut took.
+                let earlier = removed_names(&messages[..at], &prefix);
+                let later = removed_names(&messages, &full);
+                assert!(earlier.iter().all(|name| later.contains(name)));
+                // A side question reuses the turn's request exactly when the
+                // cut has not moved since.
+                let same = removed(&messages[..at], &origins[..at], limits)
+                    == removed(&messages, &origins, limits);
+                let mut reused = prefix;
+                reused.extend_from_slice(&messages[at..]);
+                assert_eq!(same, reused == full);
+            }
+        }
     }
 
     #[test]

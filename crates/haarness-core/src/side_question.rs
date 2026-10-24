@@ -76,12 +76,10 @@ impl PreparedPrompts {
         // request no longer matches: such a question is prepared afresh. The
         // cut replays the history, so only images it adds can move it.
         let limits = snapshot.provider.image_limits(&snapshot.request.model);
-        let removed = |messages: &[ProviderMessage], origins| {
-            crate::image_budget::bound(&mut messages.to_vec(), origins, limits)
-                .map_or(0, |cut| cut.removed)
-        };
         let earlier = origins.get(..snapshot.source.len())?;
-        if removed(messages, origins) != removed(&snapshot.source, earlier) {
+        if crate::image_budget::removed(messages, origins, limits)
+            != crate::image_budget::removed(&snapshot.source, earlier, limits)
+        {
             return None;
         }
         let mut request = snapshot.request.clone();
