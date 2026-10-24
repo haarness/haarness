@@ -10297,9 +10297,10 @@ fn spawn_snapshot_retention(
             let report =
                 tokio::task::spawn_blocking(move || snapshots.prune(retention, keep)).await;
             match report {
-                Ok(Ok(report)) if report.snapshots > 0 => tracing::info!(
+                Ok(Ok(report)) if report.snapshots > 0 || report.abandoned > 0 => tracing::info!(
                     snapshots = report.snapshots,
                     blobs = report.blobs,
+                    abandoned = report.abandoned,
                     "pruned expired workspace checkpoints"
                 ),
                 Ok(Ok(_)) => {}
