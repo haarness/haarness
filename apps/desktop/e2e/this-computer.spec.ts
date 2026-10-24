@@ -443,7 +443,10 @@ test("opening This computer from a project chat shows its new chat at once, and 
   await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
   await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
   await expect.poll(fits).toBe(true);
+  // The heading naming the project follows the language too.
+  await expect(page.locator(".conversation-empty h2")).toHaveText("على ماذا نعمل في pocket-project؟");
   await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on in pocket-project?");
   await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
   await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1280, 820));
   await send("A project chat first");

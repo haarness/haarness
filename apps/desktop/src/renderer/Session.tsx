@@ -2332,7 +2332,9 @@ export function Session() {
                   when={!project()?.chatHome && (group()?.label ?? project()?.label)}
                   fallback={t("What should we work on?")}
                 >
-                  {(name) => projectHeading(t("What should we work on in {project}?"), name)}
+                  {/* Show calls this once, untracked: the fragment's
+                      expression follows a change of language. */}
+                  {(name) => <>{projectHeading(t("What should we work on in {project}?"), name)}</>}
                 </Show>
               </h2>
               {/* Starters are about code; a chat without a folder starts
