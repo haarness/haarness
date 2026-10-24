@@ -25,7 +25,17 @@ fn bad(error: impl std::fmt::Display) -> Failure {
 fn failure(error: Failure) -> CoreError {
     CoreError::Tool(error.1)
 }
+/// Where this process's unit tests keep preview versions: never the real
+/// app-data folder, whatever a test does.
+#[cfg(test)]
+static TEST_DATA: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
+    std::env::temp_dir().join(format!("haarness-preview-data-{}", uuid::Uuid::now_v7()))
+});
+
 fn directory(workspace: &Path) -> Result<PathBuf, Failure> {
+    #[cfg(test)]
+    let root = TEST_DATA.clone();
+    #[cfg(not(test))]
     let root = std::env::var_os("HAARNESS_DATA_DIR")
         .map(|root| PathBuf::from(root).join("data"))
         // HAARNESS_HOME keeps everything under one folder.
@@ -370,6 +380,8 @@ mod tests {
         fs::create_dir_all(root.join("~")).unwrap();
         fs::write(root.join("~/page.html"), "<h1>in the project</h1>").unwrap();
         let workspace = root.canonicalize().unwrap();
+        // Versions a test records stay out of the real app-data folder.
+        assert!(directory(&workspace).unwrap().starts_with(&*TEST_DATA));
         let refused = PreviewTool(workspace.clone())
             .execute(
                 json!({"filePath": "~/page.html"}),
