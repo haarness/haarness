@@ -74,6 +74,12 @@ impl PreparedPrompts {
         request
             .messages
             .extend_from_slice(&messages[snapshot.source.len()..]);
+        // What came since the turn's request (a tool's screenshots) can pass
+        // the provider's image limits; within them nothing changes.
+        crate::image_budget::bound(
+            &mut request.messages,
+            snapshot.provider.image_limits(&request.model),
+        );
         Some((snapshot.provider.clone(), request))
     }
 }
@@ -157,6 +163,86 @@ mod tests {
             attachments: vec![],
         }
     }
+    /// Takes two images in a request and is never asked anything.
+    struct TwoImages;
+
+    #[async_trait::async_trait]
+    impl ModelProvider for TwoImages {
+        fn id(&self) -> &str {
+            "fixture"
+        }
+        fn info(&self) -> haarness_protocol::ProviderInfo {
+            haarness_protocol::ProviderInfo {
+                id: "fixture".into(),
+                name: "Fixture".into(),
+                authenticated: true,
+                models: Vec::new(),
+            }
+        }
+        fn image_limits(&self, _model: &str) -> crate::ImageLimits {
+            crate::ImageLimits {
+                count: Some(2),
+                ..crate::ImageLimits::default()
+            }
+        }
+        async fn stream(
+            &self,
+            _: ProviderRequest,
+            _: tokio_util::sync::CancellationToken,
+        ) -> crate::CoreResult<crate::ProviderStream> {
+            unreachable!("a prepared request is only read")
+        }
+    }
+
+    #[test]
+    fn a_side_question_on_a_prepared_request_holds_its_images_to_the_limits() {
+        let shot = |id: &str| ProviderMessage::ToolResult {
+            call_id: id.into(),
+            name: "screenshot".into(),
+            output: "Screenshot taken".into(),
+            is_error: false,
+            attachments: vec![format!("data:image/png;name={id}.png;base64,AAAA")],
+        };
+        let source = vec![text("Look"), call("a"), shot("a")];
+        let request = ProviderRequest {
+            model: "fixture".into(),
+            system: String::new(),
+            messages: source.clone(),
+            tools: Vec::new(),
+            reasoning_effort: None,
+            output_schema: None,
+            parameters: crate::RequestParameters::default(),
+        };
+        let (thread, turn) = (ThreadId::new(), TurnId::new());
+        let mut prepared = PreparedPrompts::default();
+        prepared.remember(
+            thread,
+            turn,
+            Arc::new(TwoImages),
+            source.clone(),
+            Vec::new(),
+            request,
+        );
+        // Two more screenshots came since the turn's request was sent.
+        let mut messages = source;
+        messages.extend([call("b"), shot("b"), call("c"), shot("c")]);
+        let (_, request) = prepared
+            .request(thread, Some(turn), Vec::new(), &messages)
+            .expect("the prepared request is reused");
+        let sent = request
+            .messages
+            .iter()
+            .filter(|message| {
+                matches!(message, ProviderMessage::ToolResult { attachments, .. } if !attachments.is_empty())
+            })
+            .count();
+        assert_eq!(sent, 1, "three images pass two; the oldest two are noted");
+        assert!(
+            matches!(&request.messages[2], ProviderMessage::ToolResult { output, attachments, .. }
+                if attachments.is_empty() && output.contains("[Image a.png omitted"))
+        );
+    }
+
     #[test]
     fn only_a_side_chats_first_question_carries_the_instructions() {
         let first = prompt("  What changed?\n", true);

@@ -87,7 +87,7 @@ pub(crate) fn bound(messages: &mut [ProviderMessage], limits: ImageLimits) -> Op
     let limit = (limits.bytes, limits.count);
     let target = (
         limits.bytes / 5 * 3,
-        limits.count.map(|count| count / 5 * 3),
+        limits.count.map(|count| count.saturating_mul(3) / 5),
     );
     let mut dropped = vec![false; images.len()];
     // The images still sent, oldest first.
