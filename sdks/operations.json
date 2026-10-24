@@ -1439,6 +1439,9 @@
     },
     "body": {
       "$ref": "#/components/schemas/FileWrite"
+    },
+    "query": {
+      "$ref": "#/components/schemas/FileScope"
     }
   },
   {
@@ -1449,6 +1452,9 @@
     "response": {},
     "body": {
       "$ref": "#/components/schemas/FileAction"
+    },
+    "query": {
+      "$ref": "#/components/schemas/FileScope"
     }
   },
   {

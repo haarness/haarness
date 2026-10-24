@@ -1997,9 +1997,12 @@ async fn vcs_diff(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct FileSearchQuery {
     q: String,
     limit: Option<usize>,
+    /// Search a chat's own folder: results are relative to it.
+    thread_id: Option<ThreadId>,
 }
 /// Fuzzy workspace file search for @-mention completion: ignore-aware walk,
 /// subsequence scoring, best matches first.
@@ -2009,7 +2012,15 @@ async fn search_files(
 ) -> ApiResult<Json<Vec<String>>> {
     let limit = query.limit.unwrap_or(8).min(50);
     let raw_query = query.q;
-    let workspace = state.workspace.clone();
+    // A chat with a folder of its own searches that folder alone.
+    let workspace = match query.thread_id {
+        Some(thread) => state
+            .runtime
+            .chat_folder(thread)
+            .await?
+            .unwrap_or_else(|| state.workspace.clone()),
+        None => state.workspace.clone(),
+    };
     let results = tokio::task::spawn_blocking(move || {
         if let Some(results) = explicit_path_suggestions(&workspace, &raw_query, limit) {
             return results;
