@@ -16,17 +16,22 @@ export const CHAT_HOME_FOLDER = "Chat folders";
 let resolved: string | undefined;
 
 async function resolve(create: boolean) {
-  const folder = join(app.getPath("userData"), CHAT_HOME_FOLDER);
+  const data = app.getPath("userData");
+  const folder = join(data, CHAT_HOME_FOLDER);
   if (create) await mkdir(folder, { recursive: true });
   try {
     return (resolved = await realpath(folder));
   } catch {
-    return folder;
+    // Not made yet: where it will be, as its real path will read.
+    return join(await realpath(data).catch(() => data), CHAT_HOME_FOLDER);
   }
 }
 
 /** The chat home's folder, created when it is missing. */
 export const chatHomeFolder = () => resolve(true);
+/** Where the chat home is or will be, without making it: a window shows
+ * its new chat while its daemon starts. */
+export const chatHomePath = () => resolved ?? resolve(false);
 
 /** Whether `workspace` (a resolved path) is the chat home. */
 export async function isChatHome(workspace: string) {

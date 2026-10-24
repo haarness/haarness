@@ -107,8 +107,6 @@ import {
 } from "./ordering";
 /** Which surface the main column is showing. */
 export type Pane = "chat" | "files" | "diff";
-/** `openingProject` while the chat home opens for the first time. */
-export const CHAT_HOME = "chat-home";
 
 interface State extends Live {
   modelRecents: ModelKey[];
@@ -177,6 +175,10 @@ interface State extends Live {
    * wait up to 10 s for a signed-in provider's list. */
   catalogLoading: boolean;
   openingProject: string;
+  /** What `openingProject` opens on is a new chat. */
+  openingNewChat: boolean;
+  /** Where the chat home is, made or not (see `chatHomeLocation`). */
+  chatHomePath: string;
   /** A switch to another project or checkout is under way, from the click
    * on, before `openingProject` names it. */
   switching: boolean;
@@ -248,6 +250,8 @@ function createApp(saved?: Preferences) {
     ready: false,
     catalogLoading: false,
     openingProject: "",
+    openingNewChat: false,
+    chatHomePath: "",
     switching: false,
     openingChat: 0,
     loadingChat: 0,
@@ -1069,6 +1073,28 @@ function createApp(saved?: Preferences) {
   const chatHome = createMemo(() =>
     visibleLocations().find((location) => location.chatHome),
   );
+  /** The chat home's location: as saved, or before its first opening as it
+   * will be saved, so its new chat can show while its daemon starts. */
+  const chatHomeLocation = (): Recent =>
+    state.recent.find((item) => item.chatHome && !item.remote) ?? {
+      id: "local:" + state.chatHomePath,
+      label: state.chatHomePath.split(/[\\/]/).pop() ?? "",
+      workspace: state.chatHomePath,
+      remote: false,
+      trust: false,
+      chatHome: true,
+    };
+  /**
+   * This computer's new chat is opening (its daemon may be starting): its
+   * message box is ready meanwhile, and a message sent waits for it rather
+   * than for a loading screen.
+   */
+  const homeOpening = () =>
+    state.openingNewChat &&
+    !!state.chatHomePath &&
+    state.openingProject === chatHomeLocation().id;
+  /** Settles once the opening under way (if any) has. */
+  const homeOpened = () => activation?.promise.then(() => {}) ?? Promise.resolve();
   /** The chat home as the sidebar lists it: a group of one location. */
   const chatHomeGroup = createMemo(() => {
     const home = chatHome();
@@ -1115,6 +1141,7 @@ function createApp(saved?: Preferences) {
       set("activeServer", server);
       set("connection", null);
       set("openingProject", "");
+      set("openingNewChat", false);
       set("loadingChat", 0);
       set("projectFailure", null);
       set("selected", "");
@@ -1493,6 +1520,7 @@ function createApp(saved?: Preferences) {
   let newChatAttempt = -1;
   const project = () =>
     state.recent.find((item) => item.id === state.openingProject) ??
+    (homeOpening() ? chatHomeLocation() : undefined) ??
     state.recent.find((item) => item.id === state.connection?.id) ??
     state.connection ??
     undefined;
@@ -1701,10 +1729,15 @@ function createApp(saved?: Preferences) {
       items: [...state.items],
       panel: state.panel,
     };
-    set(
-      "openingProject",
-      input.recent ?? input.workspace ?? (input.chatHome ? CHAT_HOME : "picker"),
-    );
+    batch(() => {
+      set(
+        "openingProject",
+        input.recent ??
+          input.workspace ??
+          (input.chatHome ? chatHomeLocation().id : "picker"),
+      );
+      set("openingNewChat", newChat);
+    });
     if (input.recent && input.recent !== state.connection?.id) {
       selection++;
       batch(() => {
@@ -1845,7 +1878,11 @@ function createApp(saved?: Preferences) {
       if (state.connection?.id !== input.recent) set(previous);
       throw error;
     } finally {
-      if (attempt === connectAttempt) set("openingProject", "");
+      if (attempt === connectAttempt)
+        batch(() => {
+          set("openingProject", "");
+          set("openingNewChat", false);
+        });
     }
   }
   /** The location `id` is open and settled, so nothing needs connecting. */
@@ -2241,6 +2278,7 @@ function createApp(saved?: Preferences) {
     applyRecent(value.recent);
     set("version", value.version);
     set("platform", value.platform);
+    set("chatHomePath", value.chatHome);
     const savedProject = await window.haarness.storage("active-project");
     const savedServer = await window.haarness.storage("active-server");
     const legacy = value.recent.find((item) => item.id === savedProject);
@@ -2259,7 +2297,12 @@ function createApp(saved?: Preferences) {
     const project = locations.find(
       (item) => item.id === (remembered ?? savedProject),
     );
-    if (project) await connect({ recent: project.id });
+    if (project)
+      await connect(
+        { recent: project.id },
+        // This computer's new chat shows at once, as a first launch's does.
+        !!project.chatHome && !(await window.haarness.storage("session:" + project.id)),
+      );
     // No project remembered on this computer: a ready message box, for a
     // chat that needs none.
     else if (server === localServer.id) await openChatHome();
@@ -2448,6 +2491,8 @@ function createApp(saved?: Preferences) {
     chatHomeGroup,
     chatFolder,
     chatDirectory,
+    homeOpening,
+    homeOpened,
     chatFiles,
     startFolderlessChat,
     servers,

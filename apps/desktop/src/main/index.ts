@@ -95,7 +95,7 @@ import { createVoiceInput, launchVoice } from "./voice";
 import { createProjectQueue } from "./project-queue";
 import { createUiSession } from "./ui-session";
 import { createNotifications } from "./notifications";
-import { chatHomeFolder, isChatHome } from "./chat-home";
+import { chatHomeFolder, chatHomePath, isChatHome } from "./chat-home";
 
 if (process.env.HAARNESS_DESKTOP_DATA)
   app.setPath("userData", resolve(process.env.HAARNESS_DESKTOP_DATA));
@@ -710,7 +710,7 @@ function installHandlers() {
     const target = notificationPending.get(win.id) ?? null;
     return target;
   });
-  handle("boot", () => ({
+  handle("boot", async () => ({
     preferences: data().preferences,
     recent: data().recent,
     servers: data().servers,
@@ -718,6 +718,7 @@ function installHandlers() {
     platform: process.platform,
     // Settings shows this computer's own paths under it as ~.
     home: homedir(),
+    chatHome: await chatHomePath(),
     updateConfigured: !!process.env.HAARNESS_UPDATE_URL,
   }));
   handle("preferences", async (_, input) => {
