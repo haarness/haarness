@@ -3807,6 +3807,7 @@ async fn execute_schedule(
                 provider: provider.clone(),
                 model: model.clone(),
                 ultracode: None,
+                directory: None,
             })
             .await?;
         thread_id = Some(thread.id.0);
@@ -4653,6 +4654,7 @@ async fn run_command(
                             provider,
                             model,
                             ultracode: None,
+                            directory: None,
                         })
                         .await?;
                     (thread, true)
@@ -7019,7 +7021,7 @@ impl HotReloadController {
             )
             .with_browser(self.browser.clone())
             .with_management(self.management.clone())
-            .with_language(self.workspace.clone(), self.language.clone())
+            .with_language(self.language.clone())
             .with_claude_instructions(claude_compat(&sources.file_config).instructions()),
         );
         let hooks = (!sources.json_layers.hooks.is_empty()).then(|| {
@@ -7794,7 +7796,7 @@ async fn application_at(
         )
         .with_browser(browser.clone())
         .with_management(management.clone())
-        .with_language(workspace.to_path_buf(), language.clone())
+        .with_language(language.clone())
         .with_claude_instructions(claude_compat(&file_config).instructions()),
     );
     let extensions = extensions::load(paths, workspace, trust).await?;
@@ -7829,15 +7831,30 @@ async fn application_at(
     let project_is_git = workspace_manager
         .project_for_workspace(&registered_workspace.id)?
         .git;
+    let mut folders = None;
     if automatic_snapshots_enabled(file_config.snapshots.as_ref(), project_is_git) {
         match haarness_store::SqliteSnapshotStore::open(&paths.database, workspace.to_path_buf()) {
             Ok(snapshots) => {
                 let snapshots = Arc::new(snapshots);
-                spawn_snapshot_retention(Arc::clone(&snapshots), &snapshot_config);
+                folders = Some(snapshots.folders());
                 runtime = runtime.with_snapshots(snapshots);
             }
             Err(error) => eprintln!("Snapshots disabled: {error}"),
         }
+    }
+    if folder_snapshots_enabled(file_config.snapshots.as_ref()) {
+        if folders.is_none() {
+            match haarness_store::SqliteSnapshotFolders::open(&paths.database) {
+                Ok(opened) => folders = Some(opened),
+                Err(error) => tracing::warn!(%error, "chat folder snapshots disabled"),
+            }
+        }
+        if let Some(folders) = &folders {
+            runtime = runtime.with_folder_snapshots(Arc::new(folders.clone()));
+        }
+    }
+    if let Some(folders) = folders {
+        spawn_snapshot_retention(folders, &snapshot_config);
     }
     let common = std::process::Command::new("git")
         .arg("-C")
@@ -10190,17 +10207,24 @@ impl Default for SnapshotsSection {
     }
 }
 
-/// Reclaim expired checkpoints once at startup and then hourly. Pruning is
-/// blocking SQLite work, so it runs on the blocking pool and never competes
-/// with the turn path; a failure is logged and retried on the next pass.
 // Automatically checkpoint repositories, without scanning an
 // entire general folder such as Downloads. Plain folders can opt in explicitly.
 fn automatic_snapshots_enabled(config: Option<&SnapshotsSection>, git: bool) -> bool {
     config.map_or(git, |config| config.enabled)
 }
 
+/// A chat's own folder ([`haarness_protocol::Thread::directory`]) is
+/// checkpointed unless snapshots are turned off: it holds only that chat's
+/// files, and Undo there has no Git to fall back on.
+fn folder_snapshots_enabled(config: Option<&SnapshotsSection>) -> bool {
+    config.is_none_or(|config| config.enabled)
+}
+
+/// Reclaim expired checkpoints once at startup and then hourly. Pruning is
+/// blocking SQLite work, so it runs on the blocking pool and never competes
+/// with the turn path; a failure is logged and retried on the next pass.
 fn spawn_snapshot_retention(
-    snapshots: Arc<haarness_store::SqliteSnapshotStore>,
+    snapshots: haarness_store::SqliteSnapshotFolders,
     config: &SnapshotsSection,
 ) {
     if config.retention_days == 0 {
@@ -10212,7 +10236,7 @@ fn spawn_snapshot_retention(
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
         loop {
             ticker.tick().await;
-            let snapshots = Arc::clone(&snapshots);
+            let snapshots = snapshots.clone();
             let report =
                 tokio::task::spawn_blocking(move || snapshots.prune(retention, keep)).await;
             match report {
@@ -12737,6 +12761,8 @@ mod tests {
     fn automatic_snapshots_follow_project_type_and_explicit_configuration() {
         assert!(super::automatic_snapshots_enabled(None, true));
         assert!(!super::automatic_snapshots_enabled(None, false));
+        // A chat's own folder is checkpointed unless snapshots are off.
+        assert!(super::folder_snapshots_enabled(None));
         let mut configuration = super::SnapshotsSection::default();
         assert!(super::automatic_snapshots_enabled(
             Some(&configuration),
@@ -12747,6 +12773,7 @@ mod tests {
             Some(&configuration),
             true
         ));
+        assert!(!super::folder_snapshots_enabled(Some(&configuration)));
     }
 
     use std::{ffi::OsString, fs, path::PathBuf, sync::Arc, time::Duration};
@@ -12937,6 +12964,7 @@ mod tests {
                 provider: Some("test".into()),
                 model: Some("test".into()),
                 ultracode: None,
+                directory: None,
             })
             .await
             .unwrap();
@@ -13006,6 +13034,7 @@ mod tests {
                 provider: Some("question-test".into()),
                 model: Some("question-test-1".into()),
                 ultracode: None,
+                directory: None,
             })
             .await
             .unwrap();
@@ -14403,6 +14432,7 @@ request_timeout = 0
             cols: 80,
             rows: 24,
             created: false,
+            directory: None,
         })
         .unwrap()
     }

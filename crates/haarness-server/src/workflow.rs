@@ -560,6 +560,7 @@ impl WorkflowRuntimeAdapter {
                     provider: Some(provider.clone()),
                     model: Some(model.clone()),
                     ultracode: Some(ultracode),
+                    directory: None,
                 })
                 .await
                 .map_err(host_error)?
@@ -634,6 +635,7 @@ impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
                 provider: inherited.as_ref().map(|thread| thread.provider.clone()),
                 model: inherited.as_ref().map(|thread| thread.model.clone()),
                 ultracode: inherited.as_ref().map(|thread| thread.ultracode),
+                directory: None,
             })
             .await
             .map(|thread| thread.id)
@@ -2485,6 +2487,7 @@ mod tests {
                 provider: Some("fabric".into()),
                 model: Some("fixture".into()),
                 ultracode: Some(false),
+                directory: None,
             })
             .await
             .unwrap();
@@ -2636,6 +2639,7 @@ mod tests {
                 provider: Some("fabric".into()),
                 model: Some("fixture".into()),
                 ultracode: Some(false),
+                directory: None,
             })
             .await
             .unwrap();
@@ -2749,6 +2753,7 @@ mod tests {
                 provider: Some("fabric".into()),
                 model: Some("fixture".into()),
                 ultracode: Some(false),
+                directory: None,
             })
             .await
             .unwrap();
@@ -2762,6 +2767,7 @@ mod tests {
                 provider: Some("fabric".into()),
                 model: Some("fixture".into()),
                 ultracode: Some(false),
+                directory: None,
             })
             .await
             .unwrap();
@@ -2837,6 +2843,7 @@ mod tests {
                 provider: Some("fabric".into()),
                 model: Some("fixture".into()),
                 ultracode: Some(false),
+                directory: None,
             })
             .await
             .unwrap();
