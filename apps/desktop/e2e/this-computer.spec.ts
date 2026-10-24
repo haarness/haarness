@@ -502,6 +502,19 @@ test("opening This computer from a project chat shows its new chat at once, and 
     });
   await expect(page.getByRole("button", { name: "Choose working location", exact: true })).toBeVisible();
   await expect.poll(fits).toBe(true);
+  // There the approval pill is its icon alone: Auto and Review are told
+  // apart by their drawings, not by colour only.
+  const pill = page.locator(".approval-mode");
+  await expect(pill).toHaveAccessibleName("Approvals: Review");
+  await expect(pill.locator(".pill-label")).toBeHidden();
+  const drawing = () => pill.locator("svg").evaluate((svg) => svg.innerHTML);
+  const review = await drawing();
+  await pill.click();
+  await expect(pill).toHaveAccessibleName("Approvals: Auto");
+  await expect.poll(drawing).not.toBe(review);
+  await pill.click();
+  await expect(pill).toHaveAccessibleName("Approvals: Review");
+  await expect.poll(drawing).toBe(review);
   await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
   await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
   await expect.poll(fits).toBe(true);

@@ -762,7 +762,7 @@ export function App() {
           ? t("Switch approvals to Review")
           : t("Enable Auto approvals"),
         keywords: "permissions approval auto review allow once",
-        icon: "shield",
+        icon: app.isAutoApproval() ? "approval-review" : "approval-auto",
         disabled: !connected,
         action: () => app.setAutoApproval(!app.isAutoApproval()),
       },
