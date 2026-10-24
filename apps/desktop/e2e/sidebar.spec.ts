@@ -90,10 +90,26 @@ async function createSection(name: string, group: string) {
   await dialog.getByRole("button", { name: "Create", exact: true }).click();
   await expect(titles(section(group))).toContainText([name]);
 }
+/** Where each row's label starts in an open menu, to the pixel. */
+const labelStarts = (menu: Locator) =>
+  menu.locator(":scope > button, :scope > .menu-branch > button").evaluateAll((rows) =>
+    rows.map((row) => {
+      const label = row.querySelector(".menu-item-label");
+      if (label) return Math.round(label.getBoundingClientRect().left);
+      const text = [...row.childNodes].find((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
+      const range = document.createRange();
+      range.selectNodeContents(text!);
+      return Math.round(range.getBoundingClientRect().left);
+    }),
+  );
 async function fileUnder(name: string, group: string) {
   await options(name);
   await item("Section").click();
-  // Sections are a live choice: every row keeps the tick column, New section… too.
+  // Sections are a live choice: every row keeps the tick column, and the
+  // icon column New section…'s icon takes, so the labels line up.
+  const starts = await labelStarts(page.locator(".menu-branch-panel"));
+  expect(starts.length).toBeGreaterThan(1);
+  expect(new Set(starts).size).toBe(1);
   if (process.env.HAARNESS_SCREENSHOTS) {
     for (const theme of ["dark", "light"] as const) {
       await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);

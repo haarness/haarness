@@ -39,6 +39,18 @@ async function selectValue(control: Locator, value: string) {
   const done = control.page().locator(".select-footer").getByRole("button", { name: "Done", exact: true });
   if (await done.isVisible()) await done.click();
 }
+/** Where each row's label starts in an open menu, to the pixel. */
+const labelStarts = (menu: Locator) =>
+  menu.locator(":scope > button, :scope > .menu-branch > button").evaluateAll((rows) =>
+    rows.map((row) => {
+      const label = row.querySelector(".menu-item-label");
+      if (label) return Math.round(label.getBoundingClientRect().left);
+      const text = [...row.childNodes].find((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
+      const range = document.createRange();
+      range.selectNodeContents(text!);
+      return Math.round(range.getBoundingClientRect().left);
+    }),
+  );
 async function selectEffort(model: Locator, value: string) {
   if ((await model.getAttribute("aria-expanded")) !== "true") await model.click();
   const slider = model.page().getByRole("slider", { name: "Reasoning effort", exact: true });
@@ -7502,6 +7514,10 @@ test("one project groups worktree conversations while drafts, permissions, files
     .click();
   const current = page.getByRole("menuitemradio", { name: "Project folder", exact: true });
   await expect(current).toHaveAttribute("aria-checked", "true");
+  // The tick column is kept on every row, so the rows' labels line up.
+  expect(
+    new Set(await labelStarts(page.getByRole("menu", { name: "Choose working location", exact: true }))).size,
+  ).toBe(1);
   if (process.env.HAARNESS_SCREENSHOTS)
     for (const theme of ["dark", "light"] as const) {
       await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
