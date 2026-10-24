@@ -1,6 +1,8 @@
 # Permissions and execution settings
 
-> **User guides:** [Permissions and approvals](https://haarness.ai/docs/security/permissions), [Execution budgets](https://haarness.ai/docs/security/execution-budgets), [Websites in your Chrome](https://haarness.ai/docs/security/permissions#websites-in-your-chrome). This page has the engineering detail.
+How the permission engine decides, what an approval remembers, how shell commands and the scripts they run are read, which files and requests only a person can approve, and the execution budgets that bound tools and agents. For developers working on the runtime and clients, and for operators writing permission rules.
+
+> **User guides:** [Permissions and approvals](https://haarness.ai/docs/security/permissions), [Execution budgets](https://haarness.ai/docs/security/execution-budgets), [Websites in your Chrome](https://haarness.ai/docs/security/permissions#websites-in-your-chrome).
 
 Haarness uses one runtime policy for Desktop, attached TUI, CLI, workflows and nested tools. Ordinary workspace tools already run without approval. These settings reduce repeated prompts and let longer tasks finish while retaining explicit denials, cancellation and ordered writes.
 
@@ -147,7 +149,7 @@ When a connected MCP server declares resources, the model can list and read them
 | `mcp_resource_list` | The server name. Listing every server asks about each server it lists, so a rule about one server still applies. |
 | `mcp_resource_read` | `<server>:<uri>`. **Always** remembers `<server>:*`, every resource of that server and no other. |
 
-In these patterns a server name keeps its letters, digits, `.`, `_` and `-`, and any other character is written `_`, so a rule `docs:*` never reaches a server named `docs:private`. A rule or setting that takes every tool of a server away (`"mcp__docs__*": "deny"`) keeps its resources from the model as well, before either permission is asked: a listing of every server leaves it out, and a read naming it is refused as configured policy. To be asked before reading anything but one server's resources:
+In these patterns a server name keeps its letters, digits, `.`, `_` and `-`, and any other character is written `_`, so a rule `docs:*` never reaches a server named `docs:private`. A rule or setting that takes every tool of a server away (`"mcp__docs__*": "deny"`) keeps its resources from the model as well, before either permission is asked: a listing of every server leaves it out, and a read naming it is refused as configured policy. A resource a person picks from the `@` list in Desktop or the TUI is read without asking, as attaching a file is, and no `PreToolUse` hook runs for it, but a deny for `<server>:<uri>` under the agent the message runs under (or the running turn's agent, for a message sent while one works) still keeps it out of the message (see [MCP resources](REFERENCE.md#plugins-skills-and-tools)). To be asked before reading anything but one server's resources:
 
 ```json
 {

@@ -1,8 +1,11 @@
 # Haarness Python SDK
 
-Unpublished Python 3.10+ synchronous and asynchronous clients for all 116 native and 146 Cloud HTTP
-operations. Includes typed requests/responses, SSE, PTYs,
-attachments and owned local-server helpers.
+Unpublished Python 3.10+ synchronous and asynchronous clients for every native server and Cloud
+HTTP operation, with typed requests/responses, SSE, PTYs, attachments and owned local-server
+helpers. This README is for Python developers using the package; the repository's
+`sdks/README.md` has the full guide and how the SDKs are generated and tested.
+
+> **User guide:** [TypeScript and Python SDKs](https://haarness.ai/docs/server/sdks).
 
 ```sh
 python -m pip install /path/to/haarness/sdks/python
@@ -41,6 +44,12 @@ ends with TransportError. Time spent with an event does not count. Cancel an
 async task to stop waiting. PTY connections ping their server every 20 s by
 themselves and close when it stops answering; `ping(timeout)` asks at once. Client disconnect/cancellation never interrupts
 server work; use interrupt_turn/interrupt_thread_tree for that action.
+
+`btw_stream(id, {"question": ...})` asks a side question and yields its answer
+as it is written (`delta`, `text`, then `done` or `error`), failing with
+TransportError after `idle_timeout=45` seconds of silence; `btw()` answers in one piece.
+`workspace(id)` returns a client bound to one project behind a host gateway
+(`host_projects()` lists them).
 
 No mutations are retried automatically. Reuse requestId for an intentional
 idempotent turn retry. ApiError exposes status/code/retryable/body; network and

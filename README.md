@@ -69,13 +69,14 @@ and TypeScript workflows, and schedules registered with your operating system.
 <td valign="top">
 
 **Extensible all the way down.** MCP servers over stdio, HTTP and SSE with OAuth, Agent Skills,
-plugins and marketplaces, custom agents and slash commands, TypeScript extensions.
+plugins and marketplaces, custom agents and slash commands, lifecycle hooks, TypeScript extensions.
 
 </td>
 <td valign="top">
 
-**Durable by design.** Thread → turn → item history in SQLite, idempotent turns, ordered events with
-replay, and restart recovery that never replays a shell command or an edit.
+**Durable by design.** Every chat, step and tool call is saved as it happens. Close the window or lose
+the connection and the work carries on; after a crash, Haarness keeps what was done and never re-runs a
+command or an edit on its own.
 
 </td>
 </tr>
@@ -110,11 +111,9 @@ $env:HAARNESS_NO_DESKTOP='1'; irm https://haarness.ai/install.ps1 | iex      # C
 
 On Debian and Ubuntu you can also install Desktop system-wide from the
 [download page](https://haarness.ai/download): `sudo apt install ./Haarness-<version>-linux-x64.deb`.
-`haarness desktop` opens Desktop (and installs it first if you skipped it). `haarness doctor` checks an
-install and `haarness upgrade` replaces the CLI with a newer release; `HAARNESS_CHANNEL=preview` selects
-preview builds, `HAARNESS_VERSION` pins one and `HAARNESS_PRODUCT=cli` or `desktop` installs only that one.
-Full guide:
-[Install Haarness](https://haarness.ai/docs/start/install).
+Afterwards, `haarness desktop` opens Desktop (installing it first if you skipped it), `haarness doctor`
+checks the install and `haarness upgrade` installs a newer CLI. Preview builds, pinned versions and
+other options: [Install Haarness](https://haarness.ai/docs/start/install).
 
 ## Quick start
 
@@ -158,12 +157,9 @@ haarness run -m anthropic/claude-sonnet-5-5 --file ./brief.pdf "Check the code a
 haarness run --format json "List the open TODOs"   # newline-delimited JSON records
 ```
 
-`haarness run` uses your default model, else a connected provider's. With no terminal to ask at (a
-script, CI), a permission request is refused and the run stops, naming what was asked: allow it with a
-permission rule, or pass `--yolo` where the damage is bounded. `--auto` instead puts the chat in Auto,
-where it stays for every app until switched back; without a terminal it refuses each request that still
-needs a person, goes on, and exits with status 3 if it refused any. Ctrl-C stops the run's work on the
-server and exits with status 130. See
+With no terminal to ask at (a script, CI), a permission request stops the run and names what was
+asked: allow it with a permission rule, let Auto's reviewer answer with `--auto`, or pass `--yolo`
+where the damage is bounded. Exit codes, JSON records and Ctrl-C:
 [Run a prompt from a script or CI](https://haarness.ai/docs/cli/headless-runs).
 
 ## Everywhere you work
@@ -177,7 +173,7 @@ server and exits with status 130. See
 | **Your Chrome** | Haarness for Chrome lets agents use your own signed-in Chrome; every site asks in each chat. [Use your Chrome](https://haarness.ai/docs/desktop/use-your-chrome) |
 | **Your product** | A versioned `/v1` server API with generated TypeScript and Python SDKs. [API](docs/API.md) · [SDKs](sdks/README.md) |
 | **Haarness Cloud** | Sessions that keep running, schedules, remote control of your own computers, one account for every model. [haarness.ai](https://haarness.ai) |
-| **Your phone** | Follow every chat, approve and answer from the Lock Screen or the notification shade. [Haarness for iPhone](https://github.com/haarness/haarness-ios) · [Haarness for Android](https://github.com/haarness/haarness-android) |
+| **Your phone** | Follow chats on your own computers and in Cloud, and approve or answer from the Lock Screen or a notification. [Haarness for iPhone](https://github.com/haarness/haarness-ios) · [Haarness for Android](https://github.com/haarness/haarness-android) |
 
 <p align="center">
   <img alt="The Haarness terminal UI after a finished chat" src=".github/assets/tui.png" width="100%">
@@ -189,17 +185,15 @@ server and exits with status 130. See
 > Haarness permissions are application-level policy, not an operating-system sandbox. Review
 > approval prompts before allowing tools to operate.
 
-Each chat is in **Review** (the default) or **Auto**, stored on the server and shared by every client:
-**Ctrl+Y** in the TUI or the shield pill in Desktop's composer changes the open chat, and the choice
-survives quitting. In Review, edits and commands inside the project run without asking; Haarness asks
-before using files outside the project, reading secrets such as `.env`, switching agents or generating
-paid media, plus anything your own rules set to ask. Desktop's browser asks about a site only when
-**Settings → Browser** sets it to **Requires approval**. In Auto, a reviewer model answers those requests:
-it approves routine ones once, blocks risky ones with a reason the agent reads, and leaves the rest to
-you with a short note. An ask you configured for a specific command or path still comes to you, and
-Haarness Cloud actions that spend money or delete something always ask, as does a site set to
-**Requires approval** unless **Remember site approvals** is on, and a website in your own Chrome,
-which only a person can allow. See [automatic approvals](docs/AUTO-APPROVALS.md).
+Each chat is in **Review** (the default) or **Auto**, kept on the server so every client agrees:
+**Ctrl+Y** in the TUI or the shield pill in Desktop's composer switches the open chat. In Review, edits
+and commands inside the project run without asking; Haarness asks before it uses files outside the
+project, reads secrets such as `.env`, switches agents or generates paid media, and wherever your own
+rules say to ask. In Auto, a reviewer model answers those requests: it approves routine ones once,
+blocks risky ones with a reason the agent reads, and leaves the rest to you with a short note. Some
+requests always come to a person: an ask you configured for a specific command or path, Haarness Cloud
+actions that spend money or delete something, and websites in your own Chrome. See
+[automatic approvals](docs/AUTO-APPROVALS.md) and [permissions](docs/PERMISSIONS-AND-EXECUTION.md).
 
 | Key | Answer |
 | --- | --- |
@@ -220,14 +214,14 @@ in this chat), and Auto, `--yolo`, hooks and permission rules never answer for y
 
 ## Usage statistics
 
-Usage statistics are on by default. A running Haarness server sends Haarness Cloud a daily summary
-about every six hours: counts of chats and turns (completed, failed, interrupted, run by subagents or
-schedules), tokens, the cost estimate, tool calls and errors by built-in tool, and files changed with
-lines added and removed, per provider and model. Providers and models are named only when Haarness
-ships them; anything else is reported as `custom`, `other`, `local` or `mcp`. The summary also carries a
-random installation id, the app version, the OS and the CPU type, and **never** prompts, answers, code,
-file names, paths or titles. It is linked to your Haarness account when you are signed in and anonymous
-otherwise.
+Usage statistics are on by default. About every six hours, a running Haarness server sends Haarness
+Cloud a summary of each of the last seven days: counts of chats and turns (completed, failed,
+interrupted, run by subagents or by schedules), tokens and estimated cost overall and per model, tool
+calls and errors per built-in tool, and files changed with lines added and removed. Only providers,
+models and tools that Haarness ships are named; anything else is counted as `custom`, `other`, `local`
+or `mcp`. The summary also carries a random installation id, the app version, the OS and the CPU type,
+and **never** prompts, answers, code, file names, paths or titles. It is linked to your Haarness
+account when you are signed in and anonymous otherwise.
 
 Turn it off in Desktop **Settings → General → Share usage statistics**, with `/usage-statistics` in the
 TUI, `haarness telemetry off`, `HAARNESS_TELEMETRY=0` or `DO_NOT_TRACK=1`. `haarness telemetry preview`
@@ -251,9 +245,10 @@ npm run desktop:install
 npm run desktop:dev
 ```
 
-`./scripts/test-all.sh` is the full gate: formatting, architecture boundaries, Clippy, the workspace
-suite, a release build, real provider and recovery flows, and a tmux-driven TUI session. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for the checks each kind of change needs.
+`./scripts/test-all.sh` is the full gate: formatting, crate boundaries, Clippy, the workspace tests, a
+release build, and end-to-end plugin, extension, attach, terminal and TUI flows driven in tmux (these
+also need Python 3, tmux and Bun). See [CONTRIBUTING.md](CONTRIBUTING.md) for the checks each kind of
+change needs.
 
 ## Repository layout
 
@@ -264,7 +259,8 @@ apps/browser-extension/   Haarness for Chrome (MV3)
 packages/browser-driver/  the CDP page driver Desktop and the extension share
 sdks/              generated TypeScript and Python SDKs for the /v1 API
 locales/           17 interface catalogs shared by the TUI and Desktop
-skills/            Agent Skills for working on Haarness itself
+skills/            Agent Skills that test, configure and release Haarness
+scripts/           the full gate, end-to-end and release scripts
 docs/              engineering docs, the reference and dated records
 brand/             the logo, wordmark and app icons
 ```
@@ -279,8 +275,9 @@ DTOs, MCP SDK types, CLI parsing or OpenTUI; outer crates implement those ports,
 - **[Reference](docs/REFERENCE.md)** — every command family, servers and clients, worktrees, the TUI,
   agents and workflows, schedules, plugins, providers and the full configuration.
 - **[Engineering docs](docs/README.md)** — behaviour in detail, the [server API](docs/API.md),
-  [configuration scopes](docs/CONFIGURATION-SCOPES.md), [observability](docs/OBSERVABILITY.md) and
-  dated records.
+  [ACP](docs/ACP.md), [configuration scopes and hooks](docs/CONFIGURATION-SCOPES.md),
+  [schedules](docs/SCHEDULES.md), the [marketplace](docs/MARKETPLACE.md), how the
+  [terminal UI](docs/TUI.md) is built, and dated records.
 
 ## The Haarness family
 

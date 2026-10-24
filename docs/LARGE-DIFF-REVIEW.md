@@ -1,5 +1,9 @@
 # Reviewing large changesets
 
+How Desktop's Review and the TUI's `/diff` stay fast on very large diffs, the review API's bounds, what Git may run during a review, and the scaling tests. For contributors working on Review, the VCS endpoints or clients that page through diffs.
+
+> **User guide:** [Review what changed](https://haarness.ai/docs/desktop/projects-and-panels#review-what-changed).
+
 Desktop loads the changed-file list before requesting patch bodies. Selecting a
 file loads its changes; **Show every file at once** loads files near the visible
 part of the review as you scroll. **Filter changed files** searches the whole

@@ -1,5 +1,9 @@
 # Canvas and file previews
 
+How the `preview` tool, Desktop's sandboxed HTML previews and their saved versions work, with the API, SDK methods and tests behind them. For contributors and for client authors who show previews.
+
+> **User guide:** [Preview pages and use the browser](https://haarness.ai/docs/desktop/previews-and-browser).
+
 Ask Haarness Desktop to create a dashboard, demo or report inside your project. The agent calls `preview` after writing the file, and the Files panel opens beside your conversation. It refreshes when the agent calls `preview` again.
 
 Try: “Create an interactive sales dashboard in `sales.html` using embedded sample data and inline JavaScript, then preview it.”

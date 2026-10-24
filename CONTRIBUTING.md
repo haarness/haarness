@@ -16,8 +16,9 @@ Security problems go to [SECURITY.md](SECURITY.md), never to a public issue.
 ## Development setup
 
 You need the toolchain pinned in `rust-toolchain.toml` (installed by rustup on first use).
-Desktop work additionally needs Node.js 22+ and npm; some packaging steps need Bun (see
-[Desktop](docs/DESKTOP.md)). Normal Rust builds are offline: OpenTUI and ripgrep are vendored.
+Normal Rust builds are offline: OpenTUI and ripgrep are vendored. The end-to-end scripts also need
+Python 3 and tmux, and the extension tests need Bun. Desktop work additionally needs Node.js 22+ and
+npm, and packaging bundles Bun (see [Desktop](docs/DESKTOP.md)).
 
 ```sh
 cargo build -p haarness-cli
@@ -30,7 +31,9 @@ the `target/` cache warm rather than cleaning it between builds.
 
 ## Checks
 
-CI runs these on Linux, macOS and Windows; run the ones your change touches before pushing:
+CI runs these on Linux, macOS and Windows (the boundary script on Linux and macOS); run the ones
+your change touches before pushing, or all of them, with the end-to-end flows, through
+`./scripts/test-all.sh`:
 
 ```sh
 cargo fmt --all -- --check
