@@ -543,6 +543,42 @@ function createApp(saved?: Preferences) {
       await seen;
     }
   }
+  /** A chat in This computer has its own folder, whose workflows join the
+   * commands (`/workflow`), so they are listed for that chat. */
+  const commandQuery = (): { threadId?: string } =>
+    state.connection?.chatHome && state.selected ? { threadId: state.selected } : {};
+  /** The commands for `query`. A chat whose folder cannot be read now (it
+   * was replaced by a link) has no workflows of its own to offer: the
+   * commands without them, and nothing to say about it. */
+  const readCommands = (query: { threadId?: string }) =>
+    api<T.CommandInfo[]>("commands", query).catch((error) => {
+      if (!query.threadId) throw error;
+      return api<T.CommandInfo[]>("commands", {});
+    });
+  // Another chat there has other workflows: its commands are read again.
+  let commandRead = 0;
+  createEffect(
+    on(
+      () => (state.connection?.chatHome ? state.connection.id + "\n" + state.selected : ""),
+      (key) => {
+        if (!key) return;
+        const read = ++commandRead;
+        const connection = state.connection?.id;
+        const query = commandQuery();
+        void readCommands(query)
+          .then((commands) => {
+            if (
+              read === commandRead &&
+              state.connection?.id === connection &&
+              (state.selected || undefined) === query.threadId
+            )
+              set("commands", commands);
+          })
+          .catch(() => {});
+      },
+      { defer: true },
+    ),
+  );
   async function readCatalogs(force: boolean, knownInfo?: T.ServerInfo) {
     const request = ++catalogRequest;
     const current = generation;
@@ -554,7 +590,7 @@ function createApp(saved?: Preferences) {
           : "providers",
       ),
       api<T.AgentProfile[]>("agents"),
-      api<T.CommandInfo[]>("commands"),
+      readCommands(commandQuery()),
       knownInfo ?? api<T.ServerInfo>("info"),
     ]);
     if (current !== generation || request !== catalogRequest) return;
