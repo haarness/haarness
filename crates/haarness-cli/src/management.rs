@@ -2873,7 +2873,11 @@ fn changed_with_scope(
     value
 }
 
+/// A path an import names, as the file tools read it: relative to the
+/// workspace, or in the home folder for `~/…`.
 fn absolutize(workspace: &Path, path: &Path) -> PathBuf {
+    let expanded = haarness_core::expand_home(&path.to_string_lossy()).into_owned();
+    let path = Path::new(&expanded);
     if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -2904,6 +2908,24 @@ mod tests {
     use super::*;
     use haarness_providers::CredentialStore;
     use haarness_server::FilesystemSkillRegistry;
+
+    #[test]
+    fn an_import_path_from_the_home_folder_is_read_there() {
+        let home = haarness_protocol::home_dir().unwrap();
+        let workspace = Path::new("/work/project");
+        assert_eq!(
+            absolutize(workspace, Path::new("~/skills/guide")),
+            home.join("skills/guide")
+        );
+        assert_eq!(
+            absolutize(workspace, Path::new("./~/guide")),
+            workspace.join("./~/guide")
+        );
+        assert_eq!(
+            absolutize(workspace, Path::new("/elsewhere/guide")),
+            Path::new("/elsewhere/guide")
+        );
+    }
 
     #[tokio::test]
     async fn extension_management_defaults_to_local_and_requires_project_trust() {

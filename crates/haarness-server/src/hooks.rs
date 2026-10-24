@@ -965,7 +965,8 @@ fn changed_file(tool: &str, arguments: &Value) -> Option<String> {
         .or_else(|| arguments.get("file_path"))
         .or_else(|| arguments.get("notebook_path"))
         .and_then(Value::as_str)
-        .map(str::to_owned)
+        // The file the tool wrote: `~/notes.md` is in the home folder.
+        .map(|path| haarness_core::expand_home(path).into_owned())
 }
 
 /// Claude Code's `StopFailure` names that a matcher may use although editors
@@ -2212,6 +2213,16 @@ mod tests {
         assert_eq!(events[0]["tool_name"], "write");
         assert_eq!(events[0]["file_path"], "src/lib.rs");
         assert_eq!(events[0]["tool_input"]["content"], "x");
+        // A hook gets the file a `~` path wrote, which it could not expand.
+        let home = haarness_protocol::home_dir().unwrap();
+        assert_eq!(
+            changed_file("write", &json!({"path":"~/notes.md","content":"x"})).as_deref(),
+            Some(home.join("notes.md").to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            changed_file("edit", &json!({"path":"./~/notes.md"})).as_deref(),
+            Some("./~/notes.md")
+        );
     }
 
     fn entry(command: &str, args: &[&str], shell: Option<&str>) -> HookEntry {
