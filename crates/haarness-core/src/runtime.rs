@@ -898,6 +898,8 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
         "too many tokens",
         "prompt is too long",
         "input is too long",
+        // Ollama: "prompt too long; exceeded max context length by 1520 tokens".
+        "prompt too long; exceeded",
     ]
     .iter()
     .any(|marker| message.contains(marker))
@@ -16063,10 +16065,16 @@ mod tests {
             "[upstream_400] model_context_window_exceeded",
             "HTTP 413 Request Entity Too Large",
             "the request exceeds the available context size, try increasing it",
+            "prompt too long; exceeded max context length by 1520 tokens",
+            "prompt too long; exceeded context length by 12 tokens",
+            "Prompt contains 140000 tokens and 0 draft tokens, too large for model with 131072 maximum context length",
+            r#"HTTP 400: {"error":{"message":"model_context_window_exceeded","type":"invalid_request_error"}}"#,
         ] {
             assert!(overflow(message), "{message}");
         }
         for message in [
+            // A limit on images, not on the context: compacting cannot help.
+            "Image too large for model with 20 maximum images",
             "Rate limit reached for gpt-5.5: too many tokens per minute",
             "[upstream_429] RESOURCE_EXHAUSTED: quota exceeded",
             "Too many requests",
