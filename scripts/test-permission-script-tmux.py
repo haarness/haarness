@@ -14,8 +14,9 @@ from e2e_env import clean_env
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-script-tmux-')).resolve()
 workspace = root / 'project'
 (workspace / '.haarness').mkdir(parents=True)
+# Chats start in Auto; the cards here wait for a person, so both projects ask for Review.
 (workspace / '.haarness/config.toml').write_text(
-    '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n[execution]\nshell_timeout_ms=0\n'
+    '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n[execution]\nshell_timeout_ms=0\n'
 )
 (workspace / 'scripts').mkdir()
 deploy = [
@@ -44,7 +45,7 @@ deploy = [
 # command raises is about a folder outside the project.
 plain = root / 'plain'
 (plain / '.haarness').mkdir(parents=True)
-(plain / '.haarness/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n')
+(plain / '.haarness/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n')
 outside = root / 'outside'
 outside.mkdir()
 (outside / 'run.sh').write_text('#!/bin/sh\nprintf ran > ran.txt\n')

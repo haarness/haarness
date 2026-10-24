@@ -106,8 +106,9 @@ png_fixture "$test_root/00-dot-nav/parent image.png"
 mkdir -p "$test_root/config/themes"
 printf -- '[dark]\nbg = "#102030"\n' > "$test_root/config/themes/e2e.toml"
 # Parity defaults auto-run bash/writes; the e2e approval stanzas exercise the
-# prompt flow, so tighten via config exactly as a cautious user would.
-printf -- '[permissions]\nbash = "ask"\nwrite = "ask"\n' > "$test_root/config/config.toml"
+# prompt flow, so tighten via config exactly as a cautious user would, in
+# Review (chats otherwise start in Auto, where the reviewer answers).
+printf -- '[defaults]\napproval_mode = "review"\n[permissions]\nbash = "ask"\nwrite = "ask"\n' > "$test_root/config/config.toml"
 # Haarness-owned command fixture; Claude Code project settings are never imported.
 mkdir -p "$test_root/ws/.haarness/commands"
 printf -- '---\ndescription: Greet someone\nargument-hint: "[name]"\n---\nSay hello to $ARGUMENTS with enthusiasm.\n' > "$test_root/ws/.haarness/commands/hello.md"

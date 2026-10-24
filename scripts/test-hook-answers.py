@@ -166,9 +166,11 @@ elif event == 'StopFailure':
     command = shlex.join(['python3', str(hook), str(log)])
     group = lambda matcher: [{'matcher': matcher, 'hooks': [{'type': 'command', 'command': command}]}]
     ws = root / 'project'
+    # Chats start in Auto, where a hook's Always counts once; Review offers the hook Always.
     write(ws / '.haarness/config.toml', f'''[defaults]
 provider="echo"
 model="echo-1"
+approval_mode="review"
 [permissions]
 bash="ask"
 [providers.mock]
