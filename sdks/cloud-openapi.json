@@ -5704,6 +5704,48 @@
         }
       }
     },
+    "/api/v1/releases/{channel}/chrome-extension/updates.xml": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "The update manifest for Haarness for Chrome installed by policy (`ExtensionInstallForcelist`).",
+        "description": "Chrome reads it to find the channel's current signed package (CRX) and its version.",
+        "operationId": "chrome_extension_updates",
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "gupdate XML naming the extension ID, the CRX address and its Chrome version",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No Haarness for Chrome on this channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/releases/{channel}/{product}": {
       "get": {
         "tags": [
@@ -5762,7 +5804,7 @@
           "releases"
         ],
         "summary": "Select the current or pinned release binary for a platform.",
-        "description": "HEAD answers the headers alone, so an installer learns the SHA-256, version and Content-Location (the file on the\npublic release domain) before downloading.",
+        "description": "HEAD answers the headers alone, so an installer learns the SHA-256, version and Content-Location (the file on the\npublic release domain) before downloading. `os` and `arch` are required except for `chrome-extension`, one build\nfor every platform, whose zip is the default (`kind=crx` for the signed package).",
         "operationId": "download_release",
         "parameters": [
           {
@@ -5784,7 +5826,7 @@
           {
             "name": "os",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -5792,7 +5834,7 @@
           {
             "name": "arch",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -5826,6 +5868,16 @@
                     "format": "int32",
                     "minimum": 0
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "os and arch missing for a per-platform product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             }

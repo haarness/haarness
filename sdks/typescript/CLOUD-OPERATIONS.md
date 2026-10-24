@@ -101,6 +101,7 @@
 | `current_release` | `currentRelease` | `GET /api/v1/releases` |
 | `download_release_artifact` | `downloadReleaseArtifact` | `GET /api/v1/releases/artifacts/{id}` |
 | `release_history` | `releaseHistory` | `GET /api/v1/releases/history` |
+| `chrome_extension_updates` | `chromeExtensionUpdates` | `GET /api/v1/releases/{channel}/chrome-extension/updates.xml` |
 | `product_release` | `productRelease` | `GET /api/v1/releases/{channel}/{product}` |
 | `download_release` | `downloadRelease` | `GET /api/v1/releases/{channel}/{product}/download` |
 | `list_remote_hosts` | `listRemoteHosts` | `GET /api/v1/remote-hosts` |

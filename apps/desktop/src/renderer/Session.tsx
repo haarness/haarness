@@ -382,8 +382,15 @@ export function Session() {
   }
   /* The agent keys belong to the message box, not the window: anywhere else
      Tab and Shift+Tab have to keep moving focus. Popovers in the box claim
-     their keys first by preventing default. */
+     their keys first by preventing default. While work runs, Cmd+. (Ctrl+.
+     elsewhere) is File → Stop response here too, even when it is also the
+     Next agent key: the page sees it before the menu would. */
   function agentKey(event: KeyboardEvent) {
+    if (active() && matchesShortcut(event, "Mod+.", state.platform)) {
+      event.preventDefault();
+      if (!event.repeat && !stopping() && editable()) void app.run(stop);
+      return true;
+    }
     if (controls.busy()) return false;
     const shortcuts = state.preferences.shortcuts;
     for (const [name, step] of [
