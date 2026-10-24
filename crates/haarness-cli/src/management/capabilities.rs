@@ -116,8 +116,7 @@ impl ManagementService {
                 input["scope"] == "global" || self.trust_project,
                 "Project configuration is disabled"
             );
-            crate::extensions::manage(&self.paths, &self.workspace, self.trust_project, input)
-                .await?
+            crate::extensions::manage(&self.paths, &self.workspace, self.trust_project, input)?
         } else {
             let mut input = input.clone();
             if action == "remove" && kind != "mcp" {

@@ -20,6 +20,329 @@ pub struct HaarnessCloudProvider {
     grant: Arc<Grant>,
     models: RwLock<Option<([u8; 32], Arc<crate::live_models::LiveModels>)>>,
 }
+impl HaarnessCloudProvider {
+    pub fn from_environment() -> Option<Self> {
+        Some(Self {
+            client: Client::new(Config::from_env().ok()?).ok()?,
+            grant: Arc::default(),
+            models: RwLock::new(None),
+        })
+    }
+    fn identity(&self) -> Option<[u8; 32]> {
+        if let Some(key) = self.client.config.api_key() {
+            return Some(
+                Sha256::digest(
+                    serde_json::to_vec(&(
+                        self.client.config.api_url.as_str(),
+                        key,
+                        self.client.config.selected_router().ok()?,
+                    ))
+                    .ok()?,
+                )
+                .into(),
+            );
+        }
+        let credentials =
+            haarness_account::credentials::load(&self.client.config.path()).ok()??;
+        if credentials.api_url != self.client.config.api_url.as_str() {
+            return None;
+        }
+        // Be conservative across sign-in changes, including opaque tokens. A renewed
+        // credential gets a fresh catalog; an outage with the same identity keeps it.
+        Some(
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    credentials.api_url,
+                    credentials.access_token,
+                    self.client.config.selected_account(),
+                    self.client.config.selected_router().ok()?,
+                ))
+                .ok()?,
+            )
+            .into(),
+        )
+    }
+
+    fn catalog(&self) -> Option<([u8; 32], Arc<crate::live_models::LiveModels>)> {
+        let identity = self.identity();
+        let mut catalog = self
+            .models
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(identity) = identity else {
+            *catalog = None;
+            return None;
+        };
+        if catalog
+            .as_ref()
+            .is_none_or(|(previous, _)| *previous != identity)
+        {
+            *catalog = Some((
+                identity,
+                Arc::new(crate::live_models::LiveModels::default()),
+            ));
+        }
+        catalog.clone()
+    }
+    async fn transport(&self) -> CoreResult<OpenAiCompatibleProvider> {
+        router_transport(&self.client, &self.grant).await
+    }
+}
+
+async fn router_transport(client: &Client, grant: &Grant) -> CoreResult<OpenAiCompatibleProvider> {
+    let bearer = client.bearer(None).await.map_err(error)?;
+    let account = client.config.selected_account();
+    let router = client.config.selected_router().map_err(error)?;
+    let mut grant = grant.lock().await;
+    if grant
+        .as_ref()
+        .is_none_or(|(token, selected, selected_router, g)| {
+            token != &bearer
+                || selected != &account
+                || selected_router != &router
+                || g.expires_at <= chrono::Utc::now() + chrono::Duration::seconds(30)
+        })
+    {
+        *grant = Some((
+            bearer,
+            account,
+            router,
+            client.router_session().await.map_err(error)?,
+        ));
+    }
+    let g = &grant.as_ref().expect("grant initialized").3;
+    haarness_account::safe_url(&g.router_url).map_err(error)?;
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(error)?;
+    Ok(OpenAiCompatibleProvider::new(CompatibleInstance {
+        id: "haarness".into(),
+        name: "Haarness Cloud".into(),
+        base_url: g.router_url.clone(),
+        api_key: Some(g.token.clone()),
+        models: Vec::new(),
+        discover_models: true,
+        server_output_limit: false,
+        replay_observed_reasoning: false,
+        model_defaults: CompatibleModelDefaults::default(),
+        assume_authenticated: false,
+        headers: ProviderHeaders::default(),
+    })
+    .with_http_client(http)
+    .with_server_output_limit())
+}
+
+/// The router's answer to a grant it no longer accepts.
+fn unauthorized(error: &CoreError) -> bool {
+    matches!(error, CoreError::Provider(message) if message.starts_with("HTTP 401"))
+}
+
+fn error(e: impl std::fmt::Display) -> CoreError {
+    CoreError::Provider(e.to_string())
+}
+
+/// Say what an exhausted Cloud balance means for the person reading it. The
+/// router's 402 reads `[insufficient_credits] insufficient credits: unit
+/// Nanos requested …`, which is accounting, not advice.
+fn readable(error: CoreError) -> CoreError {
+    readable_with(error, " (in the terminal: /billing)")
+}
+
+/// [`readable`] for a Cloud session's own `router` provider, whose chat is
+/// read in a browser or on a phone as often as in a terminal.
+pub(crate) fn readable_router(error: CoreError) -> CoreError {
+    readable_with(error, "")
+}
+
+fn readable_with(error: CoreError, terminal: &str) -> CoreError {
+    let CoreError::Provider(message) = error else {
+        return error;
+    };
+    let advice = if message.contains("[insufficient_credits]") {
+        if message.contains("overage opt-in false") {
+            // Purchased credits only pay once overage is on, so "out of
+            // credits" would be wrong for someone who just bought some.
+            format!(
+                "Your included Haarness Cloud credits are used up. Turn on overage in Billing \
+                 to spend purchased credits, or add credits or choose a plan{terminal}."
+            )
+        } else if message.contains("frozen") {
+            format!(
+                "Your purchased Haarness Cloud credits are on hold. Open Billing in Haarness \
+                 Cloud for details{terminal}."
+            )
+        } else {
+            format!(
+                "You're out of Haarness Cloud credits. Add credits or choose a plan under \
+                 Billing{terminal}."
+            )
+        }
+    } else if message.contains("[upstream_404]") {
+        // The provider stopped serving a model it still lists (a deprecation); Cloud withdraws such models at its
+        // next catalogue refresh.
+        "The provider no longer serves this model. Choose another model.".to_owned()
+    } else if message.contains("[upstream_429]") {
+        "The provider is rate limiting this model right now. Try again in a moment, or choose another model."
+            .to_owned()
+    } else if [
+        "[upstream_500]",
+        "[upstream_502]",
+        "[upstream_503]",
+        "[upstream_529]",
+    ]
+    .iter()
+    .any(|code| message.contains(code))
+    {
+        "The provider is overloaded or unavailable right now. Try again in a moment, or choose another model."
+            .to_owned()
+    } else if message.contains("[payment_required]") {
+        // The router refuses your own provider keys without a plan or trial; nothing is
+        // charged for those requests, but the account needs one to route them.
+        format!(
+            "Routing your own provider keys through Haarness Cloud needs a plan or the free \
+             trial. Start the trial or choose a plan under Billing{terminal}."
+        )
+    } else if message.contains("[budget_exceeded]") {
+        // The limit is checked against the request's worst case: a long
+        // context and a large answer limit can exceed it on their own.
+        "This request could cost more than a spending limit allows. Compact or shorten the \
+         conversation, or raise the limit on the API key in Haarness Cloud."
+            .to_owned()
+    } else if message.contains("[exposure_cap]") {
+        "Too many requests are still settling on this Haarness Cloud account. Wait a moment, \
+         then try again."
+            .to_owned()
+    } else if message.contains("[account_suspended]") {
+        format!(
+            "This Haarness Cloud account is suspended. Open Billing in Haarness Cloud for \
+             details{terminal}."
+        )
+    } else {
+        return CoreError::Provider(message);
+    };
+    CoreError::Provider(advice)
+}
+#[async_trait]
+impl ModelProvider for HaarnessCloudProvider {
+    fn id(&self) -> &str {
+        "haarness"
+    }
+    /// The router transport marks an Anthropic model's prompt for caching
+    /// (`OpenAiCompatibleProvider::marks_prompt_cache`). The scope is the
+    /// signed-in identity's digest.
+    fn explicit_prompt_cache_scope(&self, model: &str) -> Option<String> {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        model
+            .starts_with("anthropic/")
+            .then(|| self.identity())
+            .flatten()
+            .map(|identity| URL_SAFE_NO_PAD.encode(identity))
+    }
+    fn info(&self) -> ProviderInfo {
+        let signed_in = self.client.config.signed_in();
+        ProviderInfo {
+            id: self.id().into(),
+            name: "Haarness Cloud".into(),
+            authenticated: signed_in,
+            models: self
+                .catalog()
+                .map_or_else(Vec::new, |(_, catalog)| catalog.get(&[])),
+        }
+    }
+    async fn refresh_models(&self, force: bool) {
+        let Some((identity, catalog)) = self.catalog() else {
+            return;
+        };
+        catalog
+            .refresh(force, || async {
+                let provider = self.transport().await.ok()?;
+                let models = provider.fetch_models().await?;
+                (self.identity() == Some(identity)).then_some(models)
+            })
+            .await;
+        // Token renewal can change identity while acquiring the router grant. The
+        // old request must not populate a new account's cache; refresh that cache now.
+        if self.identity().is_some_and(|current| current != identity) {
+            if let Some((identity, catalog)) = self.catalog() {
+                catalog
+                    .refresh(force, || async {
+                        let provider = self.transport().await.ok()?;
+                        let models = provider.fetch_models().await?;
+                        (self.identity() == Some(identity)).then_some(models)
+                    })
+                    .await;
+            }
+        }
+    }
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        let transport = tokio::select! { () = cancel.cancelled() => return Err(error("Request cancelled")), result = self.transport() => result? };
+        // A turn can come before anything listed the models (the first one
+        // after start-up). Without the catalog every model would look
+        // text-only, so an image in the conversation would fail the turn.
+        if self
+            .catalog()
+            .is_some_and(|(_, catalog)| catalog.get(&[]).is_empty())
+        {
+            tokio::select! {
+                () = cancel.cancelled() => return Err(error("Request cancelled")),
+                () = self.refresh_models(false) => {}
+            }
+        }
+        let models = self
+            .catalog()
+            .map_or_else(Vec::new, |(_, catalog)| catalog.get(&[]));
+        let mut stream = transport
+            .with_model_info(models.clone())
+            .stream(request.clone(), cancel.clone())
+            .await
+            .map_err(readable)?;
+        let client = self.client.clone();
+        let grant = Arc::clone(&self.grant);
+        let used = grant
+            .lock()
+            .await
+            .as_ref()
+            .map(|(.., session)| session.token.clone());
+        // Cloud can withdraw a grant before it expires (a sign-out elsewhere,
+        // a changed plan), and the router then answers 401 to every request
+        // until the cached copy ages out. Fetch a new grant and ask once more.
+        let mut retry = Some(request);
+        Ok(Box::pin(async_stream::try_stream! {
+            while let Some(event) = futures::StreamExt::next(&mut stream).await {
+                match event {
+                    Err(failure) if retry.is_some() && unauthorized(&failure) => {
+                        let request = retry.take().expect("checked above");
+                        {
+                            // Another request may already have replaced it.
+                            let mut cached = grant.lock().await;
+                            if cached.as_ref().map(|(.., session)| &session.token) == used.as_ref() {
+                                *cached = None;
+                            }
+                        }
+                        let transport = tokio::select! {
+                            () = cancel.cancelled() => Err(CoreError::Cancelled),
+                            result = router_transport(&client, &grant) => result,
+                        }?;
+                        stream = transport
+                            .with_model_info(models.clone())
+                            .stream(request, cancel.clone())
+                            .await
+                            .map_err(readable)?;
+                    }
+                    event => {
+                        retry = None;
+                        yield event.map_err(readable)?;
+                    }
+                }
+            }
+        }))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -405,328 +728,5 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         )
-    }
-}
-impl HaarnessCloudProvider {
-    pub fn from_environment() -> Option<Self> {
-        Some(Self {
-            client: Client::new(Config::from_env().ok()?).ok()?,
-            grant: Arc::default(),
-            models: RwLock::new(None),
-        })
-    }
-    fn identity(&self) -> Option<[u8; 32]> {
-        if let Some(key) = self.client.config.api_key() {
-            return Some(
-                Sha256::digest(
-                    serde_json::to_vec(&(
-                        self.client.config.api_url.as_str(),
-                        key,
-                        self.client.config.selected_router().ok()?,
-                    ))
-                    .ok()?,
-                )
-                .into(),
-            );
-        }
-        let credentials =
-            haarness_account::credentials::load(&self.client.config.path()).ok()??;
-        if credentials.api_url != self.client.config.api_url.as_str() {
-            return None;
-        }
-        // Be conservative across sign-in changes, including opaque tokens. A renewed
-        // credential gets a fresh catalog; an outage with the same identity keeps it.
-        Some(
-            Sha256::digest(
-                serde_json::to_vec(&(
-                    credentials.api_url,
-                    credentials.access_token,
-                    self.client.config.selected_account(),
-                    self.client.config.selected_router().ok()?,
-                ))
-                .ok()?,
-            )
-            .into(),
-        )
-    }
-
-    fn catalog(&self) -> Option<([u8; 32], Arc<crate::live_models::LiveModels>)> {
-        let identity = self.identity();
-        let mut catalog = self
-            .models
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(identity) = identity else {
-            *catalog = None;
-            return None;
-        };
-        if catalog
-            .as_ref()
-            .is_none_or(|(previous, _)| *previous != identity)
-        {
-            *catalog = Some((
-                identity,
-                Arc::new(crate::live_models::LiveModels::default()),
-            ));
-        }
-        catalog.clone()
-    }
-    async fn transport(&self) -> CoreResult<OpenAiCompatibleProvider> {
-        router_transport(&self.client, &self.grant).await
-    }
-}
-
-async fn router_transport(client: &Client, grant: &Grant) -> CoreResult<OpenAiCompatibleProvider> {
-    let bearer = client.bearer(None).await.map_err(error)?;
-    let account = client.config.selected_account();
-    let router = client.config.selected_router().map_err(error)?;
-    let mut grant = grant.lock().await;
-    if grant
-        .as_ref()
-        .is_none_or(|(token, selected, selected_router, g)| {
-            token != &bearer
-                || selected != &account
-                || selected_router != &router
-                || g.expires_at <= chrono::Utc::now() + chrono::Duration::seconds(30)
-        })
-    {
-        *grant = Some((
-            bearer,
-            account,
-            router,
-            client.router_session().await.map_err(error)?,
-        ));
-    }
-    let g = &grant.as_ref().expect("grant initialized").3;
-    haarness_account::safe_url(&g.router_url).map_err(error)?;
-    let http = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(error)?;
-    Ok(OpenAiCompatibleProvider::new(CompatibleInstance {
-        id: "haarness".into(),
-        name: "Haarness Cloud".into(),
-        base_url: g.router_url.clone(),
-        api_key: Some(g.token.clone()),
-        models: Vec::new(),
-        discover_models: true,
-        server_output_limit: false,
-        replay_observed_reasoning: false,
-        model_defaults: CompatibleModelDefaults::default(),
-        assume_authenticated: false,
-        headers: ProviderHeaders::default(),
-    })
-    .with_http_client(http)
-    .with_server_output_limit())
-}
-
-/// The router's answer to a grant it no longer accepts.
-fn unauthorized(error: &CoreError) -> bool {
-    matches!(error, CoreError::Provider(message) if message.starts_with("HTTP 401"))
-}
-
-fn error(e: impl std::fmt::Display) -> CoreError {
-    CoreError::Provider(e.to_string())
-}
-
-/// Say what an exhausted Cloud balance means for the person reading it. The
-/// router's 402 reads `[insufficient_credits] insufficient credits: unit
-/// Nanos requested …`, which is accounting, not advice.
-fn readable(error: CoreError) -> CoreError {
-    readable_with(error, " (in the terminal: /billing)")
-}
-
-/// [`readable`] for a Cloud session's own `router` provider, whose chat is
-/// read in a browser or on a phone as often as in a terminal.
-pub(crate) fn readable_router(error: CoreError) -> CoreError {
-    readable_with(error, "")
-}
-
-fn readable_with(error: CoreError, terminal: &str) -> CoreError {
-    let CoreError::Provider(message) = error else {
-        return error;
-    };
-    let advice = if message.contains("[insufficient_credits]") {
-        if message.contains("overage opt-in false") {
-            // Purchased credits only pay once overage is on, so "out of
-            // credits" would be wrong for someone who just bought some.
-            format!(
-                "Your included Haarness Cloud credits are used up. Turn on overage in Billing \
-                 to spend purchased credits, or add credits or choose a plan{terminal}."
-            )
-        } else if message.contains("frozen") {
-            format!(
-                "Your purchased Haarness Cloud credits are on hold. Open Billing in Haarness \
-                 Cloud for details{terminal}."
-            )
-        } else {
-            format!(
-                "You're out of Haarness Cloud credits. Add credits or choose a plan under \
-                 Billing{terminal}."
-            )
-        }
-    } else if message.contains("[upstream_404]") {
-        // The provider stopped serving a model it still lists (a deprecation); Cloud withdraws such models at its
-        // next catalogue refresh.
-        "The provider no longer serves this model. Choose another model.".to_owned()
-    } else if message.contains("[upstream_429]") {
-        "The provider is rate limiting this model right now. Try again in a moment, or choose another model."
-            .to_owned()
-    } else if [
-        "[upstream_500]",
-        "[upstream_502]",
-        "[upstream_503]",
-        "[upstream_529]",
-    ]
-    .iter()
-    .any(|code| message.contains(code))
-    {
-        "The provider is overloaded or unavailable right now. Try again in a moment, or choose another model."
-            .to_owned()
-    } else if message.contains("[payment_required]") {
-        // The router refuses your own provider keys without a plan or trial; nothing is
-        // charged for those requests, but the account needs one to route them.
-        format!(
-            "Routing your own provider keys through Haarness Cloud needs a plan or the free \
-             trial. Start the trial or choose a plan under Billing{terminal}."
-        )
-    } else if message.contains("[budget_exceeded]") {
-        // The limit is checked against the request's worst case: a long
-        // context and a large answer limit can exceed it on their own.
-        "This request could cost more than a spending limit allows. Compact or shorten the \
-         conversation, or raise the limit on the API key in Haarness Cloud."
-            .to_owned()
-    } else if message.contains("[exposure_cap]") {
-        "Too many requests are still settling on this Haarness Cloud account. Wait a moment, \
-         then try again."
-            .to_owned()
-    } else if message.contains("[account_suspended]") {
-        format!(
-            "This Haarness Cloud account is suspended. Open Billing in Haarness Cloud for \
-             details{terminal}."
-        )
-    } else {
-        return CoreError::Provider(message);
-    };
-    CoreError::Provider(advice)
-}
-#[async_trait]
-impl ModelProvider for HaarnessCloudProvider {
-    fn id(&self) -> &str {
-        "haarness"
-    }
-    /// The router transport marks an Anthropic model's prompt for caching
-    /// (`OpenAiCompatibleProvider::marks_prompt_cache`). The scope is the
-    /// signed-in identity's digest.
-    fn explicit_prompt_cache_scope(&self, model: &str) -> Option<String> {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-        model
-            .starts_with("anthropic/")
-            .then(|| self.identity())
-            .flatten()
-            .map(|identity| URL_SAFE_NO_PAD.encode(identity))
-    }
-    fn info(&self) -> ProviderInfo {
-        let signed_in = self.client.config.signed_in();
-        ProviderInfo {
-            id: self.id().into(),
-            name: "Haarness Cloud".into(),
-            authenticated: signed_in,
-            models: self
-                .catalog()
-                .map_or_else(Vec::new, |(_, catalog)| catalog.get(&[])),
-        }
-    }
-    async fn refresh_models(&self, force: bool) {
-        let Some((identity, catalog)) = self.catalog() else {
-            return;
-        };
-        catalog
-            .refresh(force, || async {
-                let provider = self.transport().await.ok()?;
-                let models = provider.fetch_models().await?;
-                (self.identity() == Some(identity)).then_some(models)
-            })
-            .await;
-        // Token renewal can change identity while acquiring the router grant. The
-        // old request must not populate a new account's cache; refresh that cache now.
-        if self.identity().is_some_and(|current| current != identity) {
-            if let Some((identity, catalog)) = self.catalog() {
-                catalog
-                    .refresh(force, || async {
-                        let provider = self.transport().await.ok()?;
-                        let models = provider.fetch_models().await?;
-                        (self.identity() == Some(identity)).then_some(models)
-                    })
-                    .await;
-            }
-        }
-    }
-    async fn stream(
-        &self,
-        request: ProviderRequest,
-        cancel: CancellationToken,
-    ) -> CoreResult<ProviderStream> {
-        let transport = tokio::select! { () = cancel.cancelled() => return Err(error("Request cancelled")), result = self.transport() => result? };
-        // A turn can come before anything listed the models (the first one
-        // after start-up). Without the catalog every model would look
-        // text-only, so an image in the conversation would fail the turn.
-        if self
-            .catalog()
-            .is_some_and(|(_, catalog)| catalog.get(&[]).is_empty())
-        {
-            tokio::select! {
-                () = cancel.cancelled() => return Err(error("Request cancelled")),
-                () = self.refresh_models(false) => {}
-            }
-        }
-        let models = self
-            .catalog()
-            .map_or_else(Vec::new, |(_, catalog)| catalog.get(&[]));
-        let mut stream = transport
-            .with_model_info(models.clone())
-            .stream(request.clone(), cancel.clone())
-            .await
-            .map_err(readable)?;
-        let client = self.client.clone();
-        let grant = Arc::clone(&self.grant);
-        let used = grant
-            .lock()
-            .await
-            .as_ref()
-            .map(|(.., session)| session.token.clone());
-        // Cloud can withdraw a grant before it expires (a sign-out elsewhere,
-        // a changed plan), and the router then answers 401 to every request
-        // until the cached copy ages out. Fetch a new grant and ask once more.
-        let mut retry = Some(request);
-        Ok(Box::pin(async_stream::try_stream! {
-            while let Some(event) = futures::StreamExt::next(&mut stream).await {
-                match event {
-                    Err(failure) if retry.is_some() && unauthorized(&failure) => {
-                        let request = retry.take().expect("checked above");
-                        {
-                            // Another request may already have replaced it.
-                            let mut cached = grant.lock().await;
-                            if cached.as_ref().map(|(.., session)| &session.token) == used.as_ref() {
-                                *cached = None;
-                            }
-                        }
-                        let transport = tokio::select! {
-                            () = cancel.cancelled() => Err(CoreError::Cancelled),
-                            result = router_transport(&client, &grant) => result,
-                        }?;
-                        stream = transport
-                            .with_model_info(models.clone())
-                            .stream(request, cancel.clone())
-                            .await
-                            .map_err(readable)?;
-                    }
-                    event => {
-                        retry = None;
-                        yield event.map_err(readable)?;
-                    }
-                }
-            }
-        }))
     }
 }

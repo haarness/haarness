@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    Connection, CoreError, CoreResult, Item, ItemData, ItemId, OptionalExtension, RequestId,
+    SqliteStore, ThreadId, TurnId, Utc, params, storage, time,
+};
 use haarness_protocol::{InputQueue, InputQueueAction, PendingInput};
 use rusqlite::{Transaction, TransactionBehavior};
 use std::collections::HashSet;
@@ -31,7 +34,7 @@ pub(super) fn read(db: &Connection, thread: ThreadId) -> CoreResult<InputQueue> 
         .map(|row| serde_json::from_str(&row.map_err(storage)?).map_err(storage))
         .collect::<CoreResult<_>>()?;
     Ok(InputQueue {
-        revision: revision as u64,
+        revision: u64::try_from(revision).map_err(storage)?,
         items,
     })
 }
@@ -181,7 +184,7 @@ pub(super) fn change(
             for (position, id) in ids.iter().enumerate() {
                 tx.execute(
                     "UPDATE pending_inputs SET position=?2 WHERE id=?1",
-                    params![id.to_string(), position as i64],
+                    params![id.to_string(), i64::try_from(position).map_err(storage)?],
                 )
                 .map_err(storage)?;
             }
@@ -282,7 +285,7 @@ pub(super) fn promote(
         },
         created_at: now,
     };
-    tx.execute("INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)",params![item.id.to_string(),thread.to_string(),turn.to_string(),item.sequence as i64,serde_json::to_string(&item.data).map_err(storage)?,time(now)]).map_err(storage)?;
+    tx.execute("INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)",params![item.id.to_string(),thread.to_string(),turn.to_string(),i64::try_from(item.sequence).map_err(storage)?,serde_json::to_string(&item.data).map_err(storage)?,time(now)]).map_err(storage)?;
     tx.execute(
         "UPDATE threads SET updated_at=?2 WHERE id=?1",
         params![thread.to_string(), time(now)],
@@ -295,6 +298,7 @@ pub(super) fn promote(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::*;
     /// A test database in a folder of its own, removed with its journal files
     /// even when the test fails.
     struct Scratch(std::path::PathBuf);

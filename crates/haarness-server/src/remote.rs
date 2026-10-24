@@ -413,7 +413,7 @@ mod tests {
         });
         let host = Arc::new(Busy {
             upstream,
-            closed: Default::default(),
+            closed: std::sync::Mutex::default(),
             kind: std::sync::Mutex::new(ProjectBusy::OtherBuild),
         });
         let router = routes(host.clone(), tokio_util::sync::CancellationToken::new());

@@ -170,10 +170,11 @@ fn legacy_description(front: &str) -> String {
     if !output.is_empty() {
         output.push('\n');
     }
-    output.push_str(&format!(
-        "description: {}\n",
+    let _ = writeln!(
+        output,
+        "description: {}",
         serde_json::to_string(&description).unwrap()
-    ));
+    );
     output.push_str(&lines[end..].join("\n"));
     output
 }
@@ -441,7 +442,10 @@ pub fn tool_names(name: &str) -> Vec<String> {
     .map(str::to_owned)
     .collect()
 }
-pub fn tool_override(tools: &std::collections::HashMap<String, bool>, name: &str) -> Option<bool> {
+pub fn tool_override<S: std::hash::BuildHasher>(
+    tools: &std::collections::HashMap<String, bool, S>,
+    name: &str,
+) -> Option<bool> {
     if let Some(v) = tools.get(name) {
         return Some(*v);
     }
@@ -464,15 +468,15 @@ fn expand_arguments(
 ) -> String {
     let words = shell_words::split(input)
         .unwrap_or_else(|_| input.split_whitespace().map(str::to_owned).collect());
-    let named = names
+    let alternatives = names
         .iter()
         .map(|n| regex::escape(n))
         .collect::<Vec<_>>()
         .join("|");
-    let expression = if named.is_empty() {
+    let expression = if alternatives.is_empty() {
         r"\$ARGUMENTS(?:\[(\d+)\])?|\$(\d+)".into()
     } else {
-        format!(r"\$ARGUMENTS(?:\[(\d+)\])?|\$(\d+)|\$({named})\b")
+        format!(r"\$ARGUMENTS(?:\[(\d+)\])?|\$(\d+)|\$({alternatives})\b")
     };
     let tokens = regex::Regex::new(&expression).expect("escaped argument names");
     let highest = tokens
