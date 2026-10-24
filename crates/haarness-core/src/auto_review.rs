@@ -867,7 +867,8 @@ fn unnamed_deletion(
         .detail
         .get("workdir")
         .and_then(Value::as_str)
-        .map(|dir| workspace.join(dir));
+        // Where the shell tool runs it: `~/other` is in the home folder.
+        .map(|dir| crate::permissions::resolve_permission_path(workspace, dir));
     let home = haarness_protocol::home_dir();
     let kept = Kept::new(home.as_deref(), workspace);
     crate::permissions::bash::outside_deletions(command, workspace, workdir.as_deref())
@@ -1932,6 +1933,44 @@ mod tests {
             )
             .is_none()
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A shell call's `workdir` is where the shell tool runs it: `~/other`
+    /// is in the home folder, never a folder named `~` in the project.
+    #[test]
+    fn a_deletion_in_a_workdir_from_the_home_folder_is_placed_there() {
+        let root = std::env::temp_dir().join(format!("haarness-workdir-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("home/project");
+        std::fs::create_dir_all(workspace.join("sub/build")).unwrap();
+        std::fs::create_dir_all(root.join("home/other/build")).unwrap();
+        let home = root.join("home").canonicalize().unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let _home = crate::permissions::TestHome::set(&home);
+        let request = |workdir: &str| ReviewRequest {
+            permission: "bash".into(),
+            patterns: Vec::new(),
+            detail: json!({ "command": "rm -rf build", "workdir": workdir }),
+            tool: Some(("bash".into(), "c1".into())),
+            thread_id: ThreadId::new(),
+            root_thread_id: ThreadId::new(),
+            turn_id: None,
+        };
+        let found = unnamed_deletion(&request("~/other"), &workspace, "run the tests").unwrap();
+        assert_eq!(
+            Path::new(&found.path),
+            home.join("other/build"),
+            "{found:?}"
+        );
+        assert!(found.placed);
+        assert!(unnamed_deletion(&request("~/other"), &workspace, "clear other/build").is_none());
+        // A folder inside the project stays inside, however it is written.
+        for workdir in ["sub", "~/project/sub"] {
+            assert!(
+                unnamed_deletion(&request(workdir), &workspace, "run the tests").is_none(),
+                "{workdir}"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
