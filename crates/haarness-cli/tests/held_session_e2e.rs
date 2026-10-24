@@ -1,5 +1,6 @@
 //! `haarness run --session` on a chat whose turn another window or run
-//! started: the run says so and stops, and changes nothing in that chat.
+//! started: the run says so and stops, and changes nothing in that chat. A
+//! workflow, which runs in a chat of its own, still runs.
 
 use std::{path::PathBuf, process::Stdio, time::Duration};
 
@@ -33,6 +34,12 @@ impl Fixture {
         std::fs::write(
             fixture.workspace.join(".haarness/config.toml"),
             "[defaults]\nprovider = \"echo\"\nmodel = \"echo-1\"\n[permissions]\nwrite = \"ask\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(fixture.workspace.join(".haarness/workflows")).unwrap();
+        std::fs::write(
+            fixture.workspace.join(".haarness/workflows/hello.js"),
+            "export const meta = { name: \"hello\" }\nreturn \"hello from the workflow\"\n",
         )
         .unwrap();
         fixture
@@ -208,11 +215,41 @@ async fn a_run_for_a_chat_busy_elsewhere_says_so_and_leaves_the_chat_as_it_was()
     )
     .await;
     assert_eq!(turn["status"], "running", "the other turn runs on");
-    api(
-        &server,
-        reqwest::Method::POST,
-        &format!("/permissions/{permission}"),
-        Some(json!({"decision":"reject"})),
-    )
-    .await;
+    // A workflow runs in a chat of its own: the busy chat does not refuse it.
+    if std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        let output = timeout(
+            Duration::from_secs(120),
+            fixture
+                .haarness()
+                .args(["--auto", "run", "--session", &thread, "--workflow", "hello"])
+                .output(),
+        )
+        .await
+        .expect("the workflow run ends")
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("hello from the workflow"),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    } else {
+        eprintln!("skipping the workflow run: Bun is unavailable");
+    }
+    // `--auto` put the busy chat in Auto for the workflow, as it always did,
+    // which may already have answered the other turn's request.
+    let _ = reqwest::Client::new()
+        .post(format!("{}/v1/permissions/{permission}", server.0))
+        .bearer_auth(&server.1)
+        .json(&json!({"decision":"reject"}))
+        .send()
+        .await;
 }

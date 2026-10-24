@@ -4721,7 +4721,9 @@ async fn run_command(
         if approvals.auto {
             // A chat whose turn runs elsewhere refuses this run's prompt: say
             // so before that turn's chat, and the turn with it, goes to Auto.
-            if !created && client.active_turn(thread.id).await?.is_some() {
+            // A workflow runs in a chat of its own and is not refused.
+            if !created && args.workflow.is_none() && client.active_turn(thread.id).await?.is_some()
+            {
                 anyhow::bail!(haarness_core::CHAT_BUSY);
             }
             let set = set_chat_auto(&client, thread.id).await;
