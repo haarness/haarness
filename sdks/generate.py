@@ -17,7 +17,7 @@ BASE = Path(__file__).resolve().parent
 # Methods that took their options first before they took a query: the
 # TypeScript method still accepts options there (`splitQuery`), which works
 # only while no query key is also an option key.
-LATE_QUERIES = {"mcp_servers"}
+LATE_QUERIES = {"mcp_servers", "commands", "workflows", "write_file", "mutate_file"}
 
 
 def request_option_keys():
@@ -251,6 +251,7 @@ def specification():
             {"days": N, "project": S, "currentProject": B, "limit": N}
         ),
         "ToolCatalogQuery": obj({"threadId": S}),
+        "ChatListQuery": obj({"threadId": S}),
         "PtyConnectQuery": obj({"cursor": N}),
         "WorkflowRunsQuery": obj({"threadId": S, "limit": N}),
         "WorkflowRunQuery": obj({"afterSequence": N}),
@@ -267,14 +268,15 @@ def specification():
                 "path": S,
             }
         ),
-        "FileSearchQuery": obj({"q": S, "limit": N}, ("q",)),
+        "FileSearchQuery": obj({"q": S, "limit": N, "threadId": S}, ("q",)),
         "McpServersQuery": obj({"threadId": S, "agent": S}),
         "HostOptions": obj({"version": {"type": "integer", "enum": [1, 2]}}),
         "ExtensionHostOptions": obj(
             {"version": {"type": "integer", "enum": [1]}}, ("version",)
         ),
         "BrowserHostsQuery": obj({"thread": S}),
-        "FileQuery": obj({"path": S, "hidden": B}),
+        "FileQuery": obj({"path": S, "hidden": B, "threadId": S}),
+        "FileScope": obj({"threadId": S}),
         "PreviewVersionQuery": obj({"path": S, "hash": S}, ("path", "hash")),
         "Browse": obj({"path": S, "prefix": S, "hidden": B, "limit": N, "after": S}),
         "BackgroundQuery": obj({"childThreadId": S}),

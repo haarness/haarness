@@ -44,6 +44,11 @@ pub struct WorkspaceInfo {
     /// Refreshed when the registry is read; missing directories remain visible
     /// so users can explicitly clean up stale metadata.
     pub exists: bool,
+    /// The computer's chat home (`haarness --chat-home`): the folder Haarness
+    /// keeps the folders of chats without a project in. It is no project, so
+    /// project lists leave it out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chat_home: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

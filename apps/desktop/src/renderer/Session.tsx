@@ -68,7 +68,7 @@ import { AgentTask } from "./AgentTask";
 import { Shimmer } from "./Shimmer";
 import { agentTasks, taskKey, type AgentTask as Task } from "./agent-tasks";
 import { createDictation } from "./dictation";
-import { ProjectPicker } from "./ProjectPicker";
+import { FolderPicker } from "./FolderPicker";
 import { PlanDock } from "./PlanDock";
 import { currentPlan } from "./plan";
 import { Select } from "./Select";
@@ -297,13 +297,17 @@ export function Session() {
       if (path) paths.push(path);
       else refused++;
     }
-    const root = (connection?.workspace ?? "").replace(/\/+$/, "") + "/";
+    // In This computer a chat's files are those of its own folder (none
+    // before its first message).
+    const scope = app.fileScope();
+    const base = connection?.chatHome ? (app.chatFolder() ?? "") : (connection?.workspace ?? "");
+    const root = base.replace(/\/+$/, "") + "/";
     const written: string[] = [];
     for (const path of paths) {
       const mention =
         connection && root.length > 1 && path.startsWith(root)
           ? await window.haarness
-              .files<FileContent>(connection.id, "read", { path: path.slice(root.length) })
+              .files<FileContent>(connection.id, "read", { path: path.slice(root.length), ...scope })
               .then((file) => (file.encoding === "utf8" ? fileContext(file.path, file.content) : undefined))
               .catch(() => undefined)
           : undefined;
@@ -745,20 +749,26 @@ export function Session() {
     if (!follow() || scrollFrame || toggled) return;
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = 0;
-      // User input can arrive after a stream delta scheduled this frame.
-      if (!follow() || !scrolling) return;
-      // A running step just opened holds the view until more is written.
-      if (quietUntil) {
-        if (
-          scrolling.scrollHeight <= quietUntil.height + 1 &&
-          Math.abs(scrolling.clientHeight - quietUntil.view) < 1
-        )
-          return;
-        quietUntil = undefined;
-      }
-      scrolling.scrollTop = scrolling.scrollHeight;
-      lastTop = scrolling.scrollTop;
+      keepLatest();
     });
+  }
+  /** Following, the view goes to the end now. Called where a change of size
+   * is first known, after layout and before the frame is painted, so no frame
+   * shows the list short of its end, or past it and pulled back. */
+  function keepLatest() {
+    // User input can arrive after a stream delta scheduled this frame.
+    if (!follow() || !scrolling || toggled) return;
+    // A running step just opened holds the view until more is written.
+    if (quietUntil) {
+      if (
+        scrolling.scrollHeight <= quietUntil.height + 1 &&
+        Math.abs(scrolling.clientHeight - quietUntil.view) < 1
+      )
+        return;
+      quietUntil = undefined;
+    }
+    scrolling.scrollTop = scrolling.scrollHeight;
+    lastTop = scrolling.scrollTop;
   }
   function onScroll() {
     trackOutline();
@@ -785,7 +795,7 @@ export function Session() {
   onMount(() => {
     // Markdown, images, virtual rows and panel resizing can change height
     // without a new token. Only follow these reflows while following output.
-    const resize = new ResizeObserver(followLatest);
+    const resize = new ResizeObserver(keepLatest);
     const observe = () => {
       resize.disconnect();
       resize.observe(scrolling);
@@ -1246,6 +1256,7 @@ export function Session() {
             item.id),
     ),
   );
+  let listSize = 0;
   const virtual = createVirtualizer({
     get count() {
       return rows().length;
@@ -1254,12 +1265,27 @@ export function Session() {
     estimateSize: () => 130,
     overscan: 8,
     getItemKey: (index) => rows()[index]?.id ?? index,
+    // A row measured anew (its Markdown drawn, an image in) changes the
+    // list's height inside the virtualizer's own observer, after the
+    // transcript's has run for this frame: following keeps the end there.
+    onChange: (instance) => {
+      const size = instance.getTotalSize();
+      if (size === listSize) return;
+      listSize = size;
+      keepLatest();
+    },
   });
   // A row wholly above the view that grows keeps what is read in place, also
   // while scrolling up (measure-row.ts). The view moves down before the list's
   // height has grown, which near its end would cut the move short, so the
-  // list is made that tall first.
+  // list is made that tall first. Following, the end is kept instead, in the
+  // same callback (onChange above): a move from here would start from where
+  // the view was before the end was last kept, and take it back up. A running
+  // step just opened holds the view, and the end is not kept meanwhile, so a
+  // row above still keeps its place then; one that grows ends the hold, and
+  // the end is kept again in the same callback.
   virtual.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
+    if (follow() && !toggled && !quietUntil) return false;
     if (!keepsRowsAbove(item, instance)) return false;
     const body = instance.scrollElement?.querySelector<HTMLElement>(":scope > .transcript-body");
     if (body && delta > 0) body.style.height = `${instance.getTotalSize() + delta}px`;
@@ -1736,6 +1762,8 @@ export function Session() {
   }
   /** The chats whose Enter waits for the model choices. */
   const waitingForModels = new Set<string>();
+  /** A message waits for This computer's new chat to open. */
+  const [waitingForHome, setWaitingForHome] = createSignal(false);
   /** The send under way in each chat, which a second Enter there waits for. */
   const inFlight = new Map<string, Promise<boolean>>();
   const waitingForSend = new Set<string>();
@@ -1838,6 +1866,23 @@ export function Session() {
       if (owner() === commandOwner && draft().trim() === command[0].trim())
         change("");
       return;
+    }
+    // This computer's new chat is still opening: the message goes once it
+    // has (the send button is busy meanwhile), from where it was typed.
+    if (
+      app.homeOpening() &&
+      (draft().trim() || attachments().length || app.promptContext().length)
+    ) {
+      const pressed = owner();
+      if (waitingForHome()) return;
+      setWaitingForHome(true);
+      try {
+        await app.homeOpened();
+      } finally {
+        setWaitingForHome(false);
+      }
+      if (owner() !== pressed || app.homeOpening() || !state.connection?.chatHome) return;
+      return send(delivery);
     }
     if (
       !project() ||
@@ -2281,14 +2326,20 @@ export function Session() {
                 <Mark />
               </div>
               <h2>
+                {/* Where the chat works is the composer's folder chip; the
+                    heading only says it. */}
                 <Show
-                  when={project()}
-                  fallback={projectHeading(t("{project} to get started"))}
+                  when={!project()?.chatHome && (group()?.label ?? project()?.label)}
+                  fallback={t("What should we work on?")}
                 >
-                  {projectHeading(t("What should we work on in {project}?"))}
+                  {/* Show calls this once, untracked: the fragment's
+                      expression follows a change of language. */}
+                  {(name) => <>{projectHeading(t("What should we work on in {project}?"), name)}</>}
                 </Show>
               </h2>
-              <Show when={project()}>
+              {/* Starters are about code; a chat without a folder starts
+                  from whatever is typed. */}
+              <Show when={project() && !project()!.chatHome}>
                 <div class="suggestions" aria-label={t("Chat starters")}>
                   <For each={projectStarters}>
                     {(item) => (
@@ -2465,21 +2516,6 @@ export function Session() {
       </div>
       <Show when={editable() || pending() || !follow() || todos().length}>
         <div class="composer-area" ref={toastAnchor("composer")}>
-          <Show when={empty()}>
-            <div class="composer-project">
-              <ProjectPicker />
-              <Show when={group()?.git && !group()?.remote}>
-                <MenuButton
-                  label={t("Choose working location")}
-                  icon="branch"
-                  class="location-picker"
-                  text={t(locationName(project()))}
-                  title={project()?.workspace}
-                  items={locationChoices()}
-                />
-              </Show>
-            </div>
-          </Show>
           <Show when={!follow()}>
             <button
               class="jump-latest"
@@ -2642,9 +2678,9 @@ export function Session() {
                 disabled={
                   controls.busy() ||
                   !project() ||
-                  !state.ready ||
-                  !!state.openingProject ||
-                  state.switching
+                  // This computer's new chat takes a message while it opens.
+                  ((!state.ready || !!state.openingProject || state.switching) &&
+                    !app.homeOpening())
                 }
                 placeholder={
                   !project()
@@ -2837,6 +2873,23 @@ export function Session() {
                       },
                     ]}
                   />
+                  <Show when={app.composerShown()}>
+                    <FolderPicker />
+                  </Show>
+                  <Show when={empty() && group()?.git && !group()?.remote}>
+                    <MenuButton
+                      label={t("Choose working location")}
+                      class="location-picker"
+                      content={
+                        <>
+                          <Icon name="branch" size="sm" />
+                          <span class="picker-label">{t(locationName(project()))}</span>
+                        </>
+                      }
+                      title={project()?.workspace}
+                      items={locationChoices()}
+                    />
+                  </Show>
                   {/* In the body, so the composer's own styles stay off the dialog. */}
                   <Show when={screenshotsFor()}>
                     {(open) => (
@@ -2856,7 +2909,7 @@ export function Session() {
                       </Portal>
                     )}
                   </Show>
-                  <Show when={state.connection}>
+                  <Show when={app.composerShown()}>
                     {/* The name carries the mode it shows, so a voice user
                         can say what they see (WCAG 2.5.3); a name that changes
                         with its state cannot also be a pressed toggle. */}
@@ -2875,9 +2928,14 @@ export function Session() {
                         )
                       }
                     >
-                      <Icon name="shield" size="sm" />
+                      <Icon
+                        name={app.isAutoApproval() ? "approval-auto" : "approval-review"}
+                        size="sm"
+                      />
                       {/* The same two names as the TUI and the docs. */}
-                      {app.isAutoApproval() ? t("Auto") : t("Review")}
+                      <span class="pill-label">
+                        {app.isAutoApproval() ? t("Auto") : t("Review")}
+                      </span>
                     </button>
                   </Show>
                   <Show when={remoteShared()}>
@@ -2893,19 +2951,22 @@ export function Session() {
                   </Show>
                 </div>
                 <div class="composer-trailing">
-                  <Show when={state.connection}>
+                  <Show when={app.composerShown()}>
                     <Select
                       class="pill-select agent-select"
-                      disabled={controls.busy()}
+                      disabled={controls.busy() || !state.agents.length}
                       aria-label={t("Agent")}
                       value={selectedAgent()}
                       onChange={(value) => chooseAgent(value)}
-                      options={conversationAgents(state.agents).map(
-                        (agent) => ({
-                          value: agent.id,
-                          label: agent.id,
-                        }),
-                      )}
+                      // Until the agents are read, the one a message would use.
+                      options={
+                        state.agents.length
+                          ? conversationAgents(state.agents).map((agent) => ({
+                              value: agent.id,
+                              label: agent.id,
+                            }))
+                          : [{ value: selectedAgent(), label: selectedAgent() }]
+                      }
                     />
                     <span class="sr-only" role="status">
                       {cycledAgent() && t("Agent: {agent}", { agent: cycledAgent() })}
@@ -2974,6 +3035,7 @@ export function Session() {
                   </Show>
                   <button
                     class="send-button"
+                    aria-busy={waitingForHome() || undefined}
                     aria-label={sendLabel()}
                     title={sendHint()}
                     disabled={
@@ -2981,7 +3043,10 @@ export function Session() {
                       submitting() ||
                       controls.busy() ||
                       stopping() ||
-                      (!showStop() && (!state.ready || state.switching)) ||
+                      waitingForHome() ||
+                      (!showStop() &&
+                        (!state.ready || state.switching) &&
+                        !app.homeOpening()) ||
                       (!showStop() &&
                         !draft().trim() &&
                         !attachments().length &&
@@ -3013,17 +3078,21 @@ export function Session() {
  * right, Haarness answers in the reading column, and everything the engine
  * *did* sits on a single quiet rail beneath the answer.
  */
-/** The new-chat heading with the project picker in it. The word or mark
+/** The new-chat heading with the project's name in it. The word or mark
  * right after the name ("?") stays on its line: a long name gives way with
- * an ellipsis instead of leaving the mark alone on the next line. */
-function projectHeading(template: string) {
+ * an ellipsis instead of leaving the mark alone on the next line. A Cloud
+ * session's title is often a sentence, which must not end in a full stop
+ * before the question mark. */
+function projectHeading(template: string, name: () => string) {
   const [before, after = ""] = template.split("{project}");
   const [, glued = "", rest = ""] = /^(\S*)([\s\S]*)$/.exec(after) ?? [];
   return (
     <>
       {before}
       <span class="heading-project">
-        <ProjectPicker heading />
+        <span class="heading-project-name" title={name()}>
+          {name().replace(/[.!?。！？]+$/u, "")}
+        </span>
         {glued}
       </span>
       {rest}
@@ -3555,7 +3624,7 @@ function Permission(props: {
           {
             label: t("Allow once + Auto"),
             detail: t("Then Auto decides for this chat"),
-            icon: "shield" as const,
+            icon: "approval-auto" as const,
             divider: props.permission.allowAlways !== false,
             run: () => decide("auto"),
           },

@@ -10,6 +10,9 @@ scheduler, which starts the `haarness` executable at the right time. That run st
 folder's server and creates an ordinary chat, so the result appears in the TUI, Desktop and the API
 like any other chat.
 
+A schedule a chat of Desktop's **This computer** makes runs in that chat's own folder, and only that
+chat sees and changes it; see [A chat's own folder](PERMISSIONS-AND-EXECUTION.md#a-chats-own-folder).
+
 ## Managing schedules
 
 ```sh

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, realpath, writeFile, rm, readFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // Real Electron, IPC, disk preferences and project daemons. Only the native
 // folder picker is supplied a deterministic answer. Drag tests use the mouse.
@@ -189,6 +190,7 @@ test.afterEach(async () => {
   for (const directory of directories) {
     execFileSync(binary, ["--workspace", directory, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
   }
+  stopChatHome(binary, env);
   // A removed worktree's folder is gone, which this tolerates.
   for (const directory of checkouts) {
     try {

@@ -25,6 +25,7 @@ import { relativeAge } from "./relative-age";
 import { revealInList } from "./reveal";
 import { searchArchived } from "./UniversalSearch";
 import { focusComposerWhenShown } from "./composer-focus";
+import { revealLabel as folderRevealLabel } from "./FolderPicker";
 import {
   drawnChats,
   emptySelection,
@@ -66,12 +67,7 @@ function ProjectGroup(props: {
   /** The label the catalog gives this project before any custom name. */
   const defaultLabel = () =>
     groupProjects(props.project.locations)[0]?.label ?? props.project.label;
-  const revealLabel = () =>
-    state.platform === "darwin"
-      ? t("Reveal in Finder")
-      : state.platform === "win32"
-        ? t("Show in Explorer")
-        : t("Show in file manager");
+  const revealLabel = () => folderRevealLabel(state.platform);
   const setSection = (section: string) =>
     app.updateProjectMeta(props.project.id, { section });
   /** Existing sections as alternatives, then a way to start a new one. */
@@ -646,23 +642,60 @@ function LocationGroup(props: { project: DesktopProject; location: Recent }) {
   );
 }
 
+/**
+ * This computer: the chats started without a project, each working in a
+ * folder of its own in the chat home, under a heading whose + starts another.
+ * Only this computer's server has it. With no such chat yet it is the
+ * heading alone.
+ */
+export function ComputerChats() {
+  const app = useApp();
+  return (
+    <section class="computer-chats" aria-label={t("This computer")}>
+      <div class="section-label sidebar-heading">
+        <span>{t("This computer")}</span>
+        <div class="section-label-actions">
+          <Button
+            icon="plus"
+            label={t("New chat in {name}", { name: t("This computer") })}
+            onClick={() =>
+              app.run(async () => {
+                await app.startFolderlessChat();
+                document
+                  .querySelector<HTMLTextAreaElement>("[data-composer-input]")
+                  ?.focus();
+              })
+            }
+          />
+        </div>
+      </div>
+      <Show when={app.chatHomeGroup()}>
+        {(home) => <SessionList project={home()} quiet />}
+      </Show>
+    </section>
+  );
+}
+
 /* Without a project this lists every conversation the sidebar can see, which
-   is what the "In one list" organisation renders. */
+   is what the "In one list" organisation renders; This computer's chats
+   keep their own section. `quiet`: an empty list draws nothing. */
 export function SessionList(props: {
   project?: DesktopProject;
   location?: Recent;
+  quiet?: boolean;
 }) {
   const app = useApp();
   const { state } = app;
+  const listed = (location: Recent) =>
+    location.checkout?.exists !== false &&
+    (!props.location || location.id === props.location.id) &&
+    (!!props.project || !location.chatHome);
   const rows = () =>
     app
       .conversations(props.project?.id)
       .filter(
         ({ thread, location }) =>
-          !thread.archived &&
-          !thread.isSubagent &&
-          location.checkout?.exists !== false &&
-          (!props.location || location.id === props.location.id),
+          !thread.archived && !thread.isSubagent && listed(location),
       )
       .sort(
         (a, b) =>
@@ -701,10 +734,7 @@ export function SessionList(props: {
       .conversations(props.project?.id)
       .filter(
         ({ thread, location }) =>
-          thread.archived &&
-          !thread.isSubagent &&
-          location.checkout?.exists !== false &&
-          (!props.location || location.id === props.location.id),
+          thread.archived && !thread.isSubagent && listed(location),
       ).length;
   return (
     <div
@@ -866,7 +896,13 @@ export function SessionList(props: {
         }}
       </For>
       <ScheduledSessions rows={rows()} />
-      <Show when={!order.ordered().length && !split().groups.length}>
+      <Show
+        when={
+          !order.ordered().length &&
+          !split().groups.length &&
+          (!props.quiet || (archived() && !loading() && !failures().length))
+        }
+      >
         <p class="sessions-empty" role="status">
           {failures().length ? (
             ""
@@ -928,7 +964,9 @@ export function SessionList(props: {
                   ? starting()
                     ? t("Starting this Cloud session…")
                     : t("This Cloud session is stopped.")
-                  : props.project &&
+                  : location.chatHome
+                    ? t("Couldn’t open these chats.")
+                    : props.project &&
                       location.id === primaryLocation(props.project).id
                     ? t("Couldn’t open this project.")
                     : t("Couldn’t open {name}.", {

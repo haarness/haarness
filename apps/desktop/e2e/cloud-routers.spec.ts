@@ -3,6 +3,7 @@ import {execFileSync} from "node:child_process";
 import {mkdtemp,mkdir,rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join,resolve} from "node:path";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // Opt in to a local Cloud account with a funded default and configured BYOK router.
 test("Desktop switches Cloud routers live with correct model prices and credit settlement",async()=>{
@@ -50,6 +51,6 @@ test("Desktop switches Cloud routers live with correct model prices and credit s
       else await expect.poll(async()=>BigInt((await page.evaluate(()=>window.haarness.account({action:"billing"}))).includedAi.nanos)<BigInt(before.includedAi.nanos)).toBe(true);
     }
   } finally {
-    await app.close();execFileSync(env.HAARNESS_BIN,["--workspace",workspace,"serve","--stop"],{env,stdio:"ignore"});await rm(root,{recursive:true,force:true});
+    await app.close();execFileSync(env.HAARNESS_BIN,["--workspace",workspace,"serve","--stop"],{env,stdio:"ignore"});stopChatHome(env.HAARNESS_BIN,env);await rm(root,{recursive:true,force:true});
   }
 });

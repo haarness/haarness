@@ -143,8 +143,10 @@ Provider variables such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` work as well
 work on the server; `haarness -c` continues the last chat. Full guide:
 [Your first chat](https://haarness.ai/docs/start/first-session).
 
-In Desktop, choose **Open project** and pick a folder. The **Welcome to Haarness** dialog connects
-Haarness Cloud or a provider; then type in the message box and press Enter. See the
+Desktop opens ready to chat: the **Welcome to Haarness** dialog connects Haarness Cloud or a
+provider, then type in the message box and press Enter. A chat with **No folder** works in a folder
+of its own under **This computer**; pick a project in the message box's folder chip (or **Open
+folder…**) to work in your code instead. See the
 [Desktop first run](docs/DESKTOP.md#first-run) and the full guide,
 [Install and first run](https://haarness.ai/docs/desktop/install).
 

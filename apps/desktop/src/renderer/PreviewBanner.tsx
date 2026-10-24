@@ -124,6 +124,7 @@ export function PreviewBanner(props: { metadata: unknown }) {
       path: value.path,
       mode: "preview",
       preview: true,
+      fromHome: true,
       version: value.version,
       sequence: Date.now(),
     });
@@ -161,6 +162,7 @@ export function PreviewBanner(props: { metadata: unknown }) {
         path: value.path,
         mode: "preview",
         preview: true,
+        fromHome: true,
         sequence: Date.now(),
       });
     } finally {
@@ -246,6 +248,7 @@ export function PreviewBanner(props: { metadata: unknown }) {
                       path: value().path,
                       mode: "preview",
                       preview: true,
+                      fromHome: true,
                       sequence: Date.now(),
                     });
                 }}

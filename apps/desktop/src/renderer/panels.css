@@ -63,6 +63,15 @@
   padding: var(--s1);
   overflow: auto;
 }
+/* A new chat without a project has no folder yet: one quiet line says when
+   it will. */
+.file-tree-note {
+  margin: 0;
+  padding: var(--s2) var(--s1);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  line-height: var(--lh-ui);
+}
 .file-entry {
   display: flex;
   justify-content: flex-start;

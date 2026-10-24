@@ -21,6 +21,10 @@ export interface ProjectLocation {
    * Cloud host id. `remoteWorkspace` names the folder there. */
   remoteHost?: string;
   project?: { id: string; name: string; root: string; git: boolean };
+  /** The chat home: the one folder on this computer that holds the chats
+   * started without a project ("This computer"), each in a folder of its
+   * own. It is never a project. */
+  chatHome?: boolean;
   checkout?: Pick<
     Types.WorkspaceInfo,
     "id" | "name" | "kind" | "branch" | "managed" | "exists"
@@ -35,6 +39,9 @@ export interface Connection extends ProjectLocation {
   remote: boolean;
   trust: boolean;
   info: Types.ServerInfo;
+  /** The chat home opened for a folder inside it (a chat's own folder,
+   * chosen as a folder): its chat opens. */
+  askedFolder?: string;
   /** Existing work uses a compatible earlier runtime until an idle reconnect. */
   upgradePending?: boolean;
 }
@@ -369,8 +376,14 @@ export interface Bridge {
     platform: string;
     /** This computer's home folder. */
     home: string;
+    /** Where the chat home (see `ProjectLocation.chatHome`) is, made or
+     * not, and the location ID it is saved under. */
+    chatHome: { id: string; workspace: string };
     updateConfigured: boolean;
   }>;
+  /** Whether the chat home's daemon runs now, from its own record: nothing
+   * is started for the answer. */
+  chatHomeRunning(): Promise<boolean>;
   connect(input: {
     cloudWorkspace?: string;
     cloudSession?: string;
@@ -388,6 +401,8 @@ export interface Bridge {
     recent?: string;
     /** From a haarness:// link: an unsaved folder is confirmed and opens untrusted. */
     deepLink?: boolean;
+    /** The chat home ("This computer"), created when it is missing. */
+    chatHome?: boolean;
   }): Promise<Connection | null>;
   voice(
     action: "start" | "stop" | "cancel",
