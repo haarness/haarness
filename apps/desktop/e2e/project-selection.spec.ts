@@ -18,6 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 const binary = resolve(
   process.env.HAARNESS_BIN ?? "../../target/release/haarness",
@@ -78,44 +79,24 @@ test.afterEach(async () => {
       timeout: 30000,
     });
   }
+  stopChatHome(binary, env);
   await rm(temporary, { recursive: true, force: true });
 });
 
-test("a fresh desktop shows project home, and canceling never creates a general chat", async () => {
+test("a fresh desktop is a ready chat without a folder, and cancelling the folder chooser leaves it as it was", async () => {
   await launch();
-  const home = page.getByRole("region", { name: "Project home" });
-  await expect(
-    home.getByRole("heading", { name: "Open a project to get started" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("textbox", { name: "Message", exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    page.getByRole("button", { name: "Send message", exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    page.getByRole("button", { name: "Attach", exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    page.getByRole("button", { name: "Open files", exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    page.getByRole("button", { name: "Toggle terminal", exact: true }),
-  ).toHaveCount(0);
-  await expect(page.getByLabel("Chat starters")).toHaveCount(0);
-  // Home's Open project is the one way in shown: the sidebar's list stays
-  // empty, with nothing to organize yet, and the title bar names nothing.
-  await expect(page.getByRole("button", { name: "Open project", exact: true })).toHaveCount(1);
+  await ready();
+  // Nothing to choose first: a chat needs no project on this computer.
+  await expect(page.getByRole("region", { name: "Project home" })).toHaveCount(0);
+  await expect(composer()).toBeEnabled();
+  await expect(page.getByRole("button", { name: /^Folder for new chat: / })).toHaveAccessibleName(
+    "Folder for new chat: No folder",
+  );
+  await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on?");
+  // No project yet: the list stays empty, with nothing to organize.
   await expect(page.locator(".project-list button")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Project list options", exact: true })).toHaveCount(0);
-  await expect(page.locator(".titlebar-caption")).toHaveCount(0);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await expect(
-    page.getByRole("dialog", { name: "Settings", exact: true }),
-  ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Close settings", exact: true })
-    .click();
+  await expect(page.locator(".titlebar-caption")).toHaveText("This computer");
   await app!.evaluate(({ dialog }) => {
     (globalThis as any).projectPickerCalls = 0;
     dialog.showOpenDialog = async () => {
@@ -123,27 +104,29 @@ test("a fresh desktop shows project home, and canceling never creates a general 
       return { canceled: true, filePaths: [] };
     };
   });
+  // New chat starts here, without asking for a folder.
   await page.getByRole("button", { name: "New chat", exact: true }).click();
-  await expect
-    .poll(() => app!.evaluate(() => (globalThis as any).projectPickerCalls))
-    .toBe(1);
-  await expect(
-    home.getByRole("button", { name: "Open project", exact: true }),
-  ).toBeVisible();
-  await home.getByRole("button", { name: "Open project", exact: true }).click();
-  await expect
-    .poll(() => app!.evaluate(() => (globalThis as any).projectPickerCalls))
-    .toBe(2);
-  await expect(home.getByRole("heading")).toHaveText(
-    "Open a project to get started",
-  );
+  await expect(composer()).toBeEnabled();
   // Exercise the native menu's renderer dispatch without requiring OS focus.
   await app!.evaluate(({ BrowserWindow }) => {
     BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", {
       kind: "menu", data: "new",
     });
   });
-  await expect.poll(() => app!.evaluate(() => (globalThis as any).projectPickerCalls)).toBe(3);
+  await expect(composer()).toBeEnabled();
+  expect(await app!.evaluate(() => (globalThis as any).projectPickerCalls)).toBe(0);
+  // Open folder… and the sidebar's + ask for one; cancelling keeps this chat.
+  await page.getByRole("button", { name: /^Folder for new chat: / }).click();
+  await page
+    .getByRole("dialog", { name: "Choose a folder", exact: true })
+    .getByRole("button", { name: "Open folder…", exact: true })
+    .click();
+  await expect.poll(() => app!.evaluate(() => (globalThis as any).projectPickerCalls)).toBe(1);
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
+  await expect.poll(() => app!.evaluate(() => (globalThis as any).projectPickerCalls)).toBe(2);
+  await ready();
+  await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on?");
+  await expect(page.locator(".project-list button")).toHaveCount(0);
   const rejected = await page.evaluate(async () => {
     try {
       await window.haarness.connect({ projectless: true } as any);
@@ -153,28 +136,23 @@ test("a fresh desktop shows project home, and canceling never creates a general 
     }
   });
   expect(rejected).toContain("projectless");
-  expect((await page.evaluate(() => window.haarness.boot())).recent).toEqual(
-    [],
-  );
+  // The only saved location is the chat home, which is no project, and the
+  // older general-chat folder is never made.
+  const recent = (await page.evaluate(() => window.haarness.boot())).recent;
+  expect(recent.map((item) => [item.chatHome, item.project])).toEqual([[true, undefined]]);
   await expect(access(join(temporary, "desktop", "chats"))).rejects.toThrow();
   await page.reload();
-  await expect(home.getByRole("heading")).toHaveText(
-    "Open a project to get started",
-  );
-  await expect(
-    page.getByRole("textbox", { name: "Message", exact: true }),
-  ).toHaveCount(0);
-  await page.screenshot({ path: "test-results/project-required-empty.png" });
+  await ready();
+  await expect(composer()).toBeEnabled();
+  await page.screenshot({ path: "test-results/project-selection-empty.png" });
   await page.setViewportSize({ width: 720, height: 600 });
-  await expect(
-    home.getByRole("button", { name: "Open project", exact: true }),
-  ).toBeInViewport();
+  await expect(composer()).toBeInViewport();
   expect(
-    await home.evaluate(
+    await page.locator(".composer").evaluate(
       (element) => element.scrollWidth <= element.clientWidth,
     ),
   ).toBe(true);
-  await page.screenshot({ path: "test-results/project-home-narrow.png" });
+  await page.screenshot({ path: "test-results/project-selection-narrow.png" });
 });
 
 async function chooseFolder(path: string) {
@@ -200,28 +178,31 @@ async function ready() {
   );
 }
 
+/** With no project remembered, this computer opens on a chat without one,
+ * never on the first saved project. */
 async function forgetSelection() {
   await page.evaluate(async () => {
     await window.haarness.storage("active-project", null);
     await window.haarness.storage("server-project:local", null);
   });
   await page.reload();
-  await expect(
-    page
-      .getByRole("region", { name: "Project home" })
-      .getByRole("heading", { name: "Choose a project", exact: true }),
-  ).toBeVisible();
+  await ready();
+  await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on?");
+  await expect(page.getByRole("button", { name: /^Folder for new chat: / })).toHaveAccessibleName(
+    "Folder for new chat: No folder",
+  );
 }
 
-test("opening from home enables chat, remembers explicit selection, and never selects a saved project implicitly", async () => {
+test("opening a project enables its chats, remembers that choice, and never selects a saved project implicitly", async () => {
   workspace = join(temporary, "chosen-project");
   await mkdir(workspace);
   await launch();
+  await ready();
   await chooseFolder(workspace);
-  await page
-    .getByRole("region", { name: "Project home" })
-    .getByRole("button", { name: "Open project", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
+  await expect(page.locator(".conversation-empty h2")).toHaveText(
+    "What should we work on in chosen-project?",
+  );
   await ready();
   const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await expect(page.locator(".conversation-empty h2")).toHaveText(
@@ -245,11 +226,11 @@ test("opening from home enables chat, remembers explicit selection, and never se
   );
   await expect(composer).toHaveValue("Remember this draft");
   await forgetSelection();
-  const home = page.getByRole("region", { name: "Project home" });
-  await expect(home).toContainText(workspace);
-  await expect(composer).toHaveCount(0);
-  await page.screenshot({ path: "test-results/project-home-recent.png" });
-  await home.getByRole("button", { name: /chosen-project/ }).click();
+  // The project stays saved, a click away in the sidebar and the folder chip.
+  const heading = page.locator(".project-list .project-heading").filter({ hasText: /^chosen-project$/ });
+  await expect(heading).toBeVisible();
+  await page.screenshot({ path: "test-results/project-selection-recent.png" });
+  await heading.click();
   await ready();
   await expect(composer).toHaveValue("Remember this draft");
   await forgetSelection();
@@ -257,12 +238,16 @@ test("opening from home enables chat, remembers explicit selection, and never se
     dialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
   });
   await page.getByRole("button", { name: "New chat", exact: true }).click();
-  await expect(
-    home.getByRole("heading", { name: "Choose a project", exact: true }),
-  ).toBeVisible();
-  await expect(composer).toHaveCount(0);
-  await home.getByRole("button", { name: /chosen-project/ }).click();
+  await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on?");
+  await page.getByRole("button", { name: /^Folder for new chat: / }).click();
+  await page
+    .getByRole("dialog", { name: "Choose a folder", exact: true })
+    .getByRole("option", { name: "chosen-project" })
+    .click();
   await ready();
+  await expect(page.locator(".conversation-empty h2")).toHaveText(
+    "What should we work on in chosen-project?",
+  );
 });
 
 test("a missing remembered project shows recovery instead of opening another saved project", async () => {
@@ -398,12 +383,12 @@ test("legacy general chats reopen as a regular project with history and drafts i
   expect(stored.recent.some((item: any) => "projectless" in item)).toBe(false);
   await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect(composer).toHaveValue("preserved project draft");
-  await expect(page.locator(".composer-project")).toContainText(
-    recent.project!.name,
+  // An ordinary project: the folder chip names it, and This computer stays
+  // the chat home's alone.
+  await expect(page.getByRole("button", { name: /^Folder for new chat: / })).toHaveAccessibleName(
+    "Folder for new chat: " + recent.project!.name,
   );
-  await expect(page.locator(".composer-project")).not.toContainText(
-    "No project",
-  );
+  expect(recent.chatHome).toBeUndefined();
   await expect(
     page.getByRole("button", { name: "Explore code", exact: true }),
   ).toBeVisible();

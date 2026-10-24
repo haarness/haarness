@@ -5,6 +5,7 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 /**
  * Your other computers in Desktop, through a Haarness Cloud this test plays:
@@ -205,6 +206,7 @@ async function fixture(options: { expiresInMs?: number } = {}) {
   const stop = async () => {
     for (const [folder, environment] of [[folders["studio-second"], studioEnv], [folders["studio-project"], studioEnv], [folders.local, env]] as const)
       try { execFileSync(binary, ["--workspace", folder, "serve", "--stop"], { env: environment, stdio: "ignore", timeout: 30000 }); } catch {}
+    stopChatHome(binary, env);
     await cloud.close();
     await rm(root, { recursive: true, force: true }).catch(() => {});
   };
@@ -218,7 +220,7 @@ async function launch(env: Record<string, string>, folder: string) {
   }, folder);
   const page = await app.firstWindow();
   page.setDefaultTimeout(20000);
-  await expect(page.getByRole("button", { name: "Switch server", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "New chat", exact: true })).toBeVisible();
   return { app, page };
 }
 async function close(app: ElectronApplication) {
@@ -236,7 +238,7 @@ test("your other computers open from the server switcher through Haarness Cloud,
   try {
     let page: Page;
     ({ app, page } = await launch(env, folders.local));
-    await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
     await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
     await page.waitForTimeout(1500);
     // Starting the app and opening a project never asks Cloud for computers.
@@ -498,7 +500,7 @@ test("signing out or switching accounts leaves another computer and stops reachi
   try {
     let page: Page;
     ({ app, page } = await launch(env, folders.local));
-    await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
     await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
     await openStudio(page, /studio-project/);
     const studioRequests = cloud.seen.filter((item) => item.path.startsWith(`/api/v1/remote-hosts/${studio}/runtime/`));
@@ -614,19 +616,16 @@ test("a Cloud session's event stream and file reads carry its ticket", async () 
   }
 });
 
-test("signed out, the switcher shows no computers and Settings says how to see them", async () => {
+test("signed out with this computer alone, there is no switcher, and Settings says how to see your computers", async () => {
   const { folders, env, cloud, credentials, stop } = await fixture();
   await rm(credentials);
   let app: ElectronApplication | undefined;
   try {
     let page: Page;
     ({ app, page } = await launch(env, folders.local));
-    await page.getByRole("button", { name: "Switch server", exact: true }).click();
-    const menu = page.getByRole("menu", { name: "Switch server" });
-    await expect(menu.getByRole("menuitem", { name: "Manage servers" })).toBeVisible();
+    // Nothing to switch to: no server saved, and no account to list computers.
     await page.waitForTimeout(1500);
-    await expect(menu.getByText("Your computers", { exact: true })).toHaveCount(0);
-    await page.keyboard.press("Escape");
+    await expect(page.getByRole("button", { name: "Switch server", exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
     await dialog.getByRole("button", { name: "Servers", exact: true }).click();

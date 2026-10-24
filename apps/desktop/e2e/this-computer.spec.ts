@@ -1,0 +1,252 @@
+import { Haarness, type Thread } from "@haarness/sdk";
+import {
+  test,
+  expect,
+  _electron as electron,
+  type ElectronApplication,
+  type Page,
+} from "@playwright/test";
+import { mkdtemp, mkdir, readFile, realpath, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { chatHomeFolder, stopChatHome } from "./fixtures/chat-home";
+
+// Chats without a project: on this computer a first launch is a ready chat,
+// each such chat works in a folder of its own under one chat home, and one
+// daemon serves them all. Real Electron, IPC, daemons and the echo provider.
+
+const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
+let app: ElectronApplication | undefined;
+let page: Page;
+let temporary: string;
+let env: Record<string, string>;
+let project: string;
+let client: Haarness | undefined;
+
+test.beforeEach(async () => {
+  test.setTimeout(300000);
+  temporary = await realpath(await mkdtemp(join(tmpdir(), "haarness-this-computer-")));
+  project = join(temporary, "pocket-project");
+  await mkdir(project);
+  await mkdir(join(temporary, "desktop"));
+  await mkdir(join(temporary, "home"));
+  env = Object.fromEntries(
+    Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  );
+  Object.assign(env, {
+    HAARNESS_BIN: binary,
+    HAARNESS_HOME: join(temporary, "haarness"),
+    HAARNESS_DATA_DIR: join(temporary, "state"),
+    HAARNESS_DESKTOP_DATA: join(temporary, "desktop"),
+    HAARNESS_TEST_PROVIDER: "1",
+    HAARNESS_DESKTOP_TEST: "1",
+    HOME: join(temporary, "home"),
+  });
+  delete env.ELECTRON_RUN_AS_NODE;
+  delete env.ELECTRON_RENDERER_URL;
+});
+
+test.afterEach(async () => {
+  client?.close();
+  client = undefined;
+  await app?.close().catch(() => {});
+  app = undefined;
+  try {
+    execFileSync(binary, ["--workspace", project, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
+  } catch {}
+  stopChatHome(binary, env);
+  await rm(temporary, { recursive: true, force: true });
+});
+
+async function launch() {
+  app = await electron.launch({ args: ["."], env, timeout: 240000 });
+  page = await app.firstWindow();
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1280, 820));
+}
+
+const ready = () =>
+  expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 240000 });
+const composer = () => page.getByRole("textbox", { name: "Message", exact: true });
+const section = () => page.getByRole("region", { name: "This computer", exact: true });
+const rows = () => section().locator(".session-row > button[aria-current]");
+const newChatFolder = () => page.getByRole("button", { name: /^Folder for new chat: / });
+const chatFolder = () => page.getByRole("button", { name: /^Chat folder: / });
+
+/** The chat home's own server, as Desktop connected it (one daemon). */
+function homeClient() {
+  const home = join(temporary, "desktop", "Chat folders");
+  const endpoint = JSON.parse(
+    execFileSync(binary, ["--workspace", home, "--chat-home", "desktop"], {
+      env,
+      input: JSON.stringify({ action: "connect" }),
+      encoding: "utf8",
+      timeout: 240000,
+    }),
+  );
+  return new Haarness({ baseUrl: endpoint.url, token: endpoint.token });
+}
+
+/** The servers running for the chat home (a daemon per workspace). */
+function homeDaemons() {
+  const home = join(temporary, "desktop", "Chat folders");
+  return execFileSync("ps", ["-axww", "-o", "command="], { encoding: "utf8" })
+    .split("\n")
+    .filter((line) => line.includes(home) && /\bserve\b/.test(line) && !/--stop/.test(line)).length;
+}
+
+/** A local date as the chat folders name their day. */
+function today() {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+async function send(text: string) {
+  await composer().fill(text);
+  await composer().press("Enter");
+}
+
+async function settled(thread: string) {
+  await expect.poll(async () => (await client!.activeTurns()).some((turn) => turn.threadId === thread), { timeout: 60000 }).toBe(false);
+}
+
+test("chats without a project: a ready first launch, a folder of their own on one daemon, a project when chosen, kept across a relaunch", async () => {
+  await launch();
+  // A first launch is a ready message box that needs no folder.
+  await ready();
+  await expect(composer()).toBeEnabled();
+  await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
+  await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on?");
+  await expect(page.getByRole("region", { name: "Project home" })).toHaveCount(0);
+  await expect(page.getByLabel("Chat starters")).toHaveCount(0);
+  // This computer alone: nothing to switch to, and its section starts empty.
+  await expect(page.getByRole("button", { name: "Switch server", exact: true })).toHaveCount(0);
+  await expect(section().getByRole("button", { name: "New chat without a folder", exact: true })).toBeVisible();
+  await expect(rows()).toHaveCount(0);
+  await expect(section().locator(".sessions-empty")).toHaveCount(0);
+
+  // The first message gives the chat its folder, named by what it says, and
+  // its tools run there.
+  const home = await realpath(chatHomeFolder(join(temporary, "desktop")));
+  await send('!tool bash {"command":"pwd"}');
+  await expect(rows()).toHaveCount(1);
+  const first = join(home, today(), "tool-bash-command-pwd");
+  await expect.poll(() => stat(first).then((value) => value.isDirectory()).catch(() => false)).toBe(true);
+  client = homeClient();
+  const threads = async () => (await client!.listThreads({ archived: true })) as (Thread & { directory?: string })[];
+  const one = (await threads()).find((thread) => thread.directory === first);
+  expect(one, "the chat reports its folder").toBeTruthy();
+  await settled(one!.id);
+  const ran = (await client.listItems(one!.id)).find((item) => item.data.type === "tool_result");
+  expect(JSON.stringify(ran?.data)).toContain(first);
+  await expect(chatFolder()).toHaveAccessibleName("Chat folder: tool-bash-command-pwd");
+  await expect(page.locator(".titlebar-caption")).toHaveText("This computer");
+
+  // A file it writes lands in that folder, and the Files panel shows it there.
+  await send('!tool write {"path":"notes.txt","content":"written without a project"}');
+  await expect.poll(() => readFile(join(first, "notes.txt"), "utf8").catch(() => "")).toBe("written without a project");
+  await settled(one!.id);
+  await page.getByRole("button", { name: "Show side panel", exact: true }).click();
+  await page.getByRole("button", { name: "Open Files", exact: true }).click();
+  const tree = page.locator(".file-tree");
+  await expect(tree.getByRole("button", { name: "notes.txt", exact: true })).toBeVisible();
+  // Only its own folder: not the day above it, nor another chat's.
+  await expect(tree.getByRole("button", { name: today(), exact: true })).toHaveCount(0);
+  await page.screenshot({ path: test.info().outputPath("chat-folder-files.png") });
+
+  // This computer's + starts another chat, in a folder of its own.
+  await section().getByRole("button", { name: "New chat without a folder", exact: true }).click();
+  await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
+  await expect(composer()).toBeFocused();
+  // Before its first message it has no folder, and the Files panel says so.
+  await expect(page.locator(".file-tree-note")).toBeVisible();
+  await send("Second chat about Lisbon");
+  await expect(rows()).toHaveCount(2);
+  const second = join(home, today(), "second-chat-about-lisbon");
+  await expect.poll(() => stat(second).then((value) => value.isDirectory()).catch(() => false)).toBe(true);
+  expect(second).not.toBe(first);
+  await expect(page.locator(".file-tree-note")).toHaveCount(0);
+  // Both are served by one daemon.
+  expect(homeDaemons()).toBe(1);
+  const two = (await threads()).find((thread) => thread.directory === second)!;
+  expect(two).toBeTruthy();
+  await settled(two.id);
+  // The keyboard reaches its rows as any chat rows: Focus sidebar lands on
+  // the open chat's, and the arrows walk them.
+  await page.keyboard.press("Control+Shift+L");
+  await expect(page.locator(":focus")).toHaveAttribute("aria-current", "true");
+  expect(await page.evaluate(() => !!document.activeElement?.closest(".computer-chats"))).toBe(true);
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator(":focus")).toHaveAttribute("aria-current", "false");
+  expect(await page.evaluate(() => !!document.activeElement?.closest(".computer-chats"))).toBe(true);
+
+  // Choosing a project in the chip sends there instead, and makes no folder.
+  await app!.evaluate(({ dialog }, directory) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
+  }, project);
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
+  await newChatFolder().click();
+  const picker = page.getByRole("dialog", { name: "Choose a folder", exact: true });
+  await expect(picker.getByRole("option", { name: "No folder" })).toHaveAttribute("aria-selected", "true");
+  await picker.getByRole("button", { name: "Open folder…", exact: true }).click();
+  await ready();
+  await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: pocket-project");
+  await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on in pocket-project?");
+  await send("Project message please");
+  await expect(page.locator(".transcript")).toContainText("Echo: Project message please", { timeout: 60000 });
+  await expect(page.locator(".project-list")).toContainText("Echo: Project message please");
+  await expect.poll(() => stat(join(home, today(), "project-message-please")).then(() => true, () => false)).toBe(false);
+  await expect(rows()).toHaveCount(2);
+  await expect(chatFolder()).toHaveAccessibleName("Chat folder: pocket-project");
+  // The chip goes back to No folder, which opens This computer's new chat.
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await newChatFolder().click();
+  await expect(picker.getByRole("option")).toHaveText(["No folder", "pocket-project"]);
+  await picker.getByRole("option", { name: "No folder" }).click();
+  await ready();
+  await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
+
+  // The chat home is never a project.
+  await expect(page.locator(".project-list .project-heading")).toHaveText(["pocket-project"]);
+  const recent = (await page.evaluate(() => window.haarness.boot())).recent;
+  expect(recent.filter((item) => item.chatHome).map((item) => item.workspace)).toEqual([home]);
+  expect(recent.find((item) => item.chatHome)?.project).toBeUndefined();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  await settings.getByRole("button", { name: "Projects", exact: true }).click();
+  await expect(settings).toContainText("pocket-project");
+  await expect(settings).not.toContainText("Chat folders");
+  await page.getByRole("button", { name: "Close settings", exact: true }).click();
+
+  // Search finds these chats, labelled This computer and their folder.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Lisbon");
+  const found = page.getByRole("option").filter({ hasText: "second-chat-about-lisbon" });
+  await expect(found).toContainText("This computer");
+  await found.click();
+  await expect(page.locator(".transcript")).toContainText("Second chat about Lisbon");
+  await expect(chatFolder()).toHaveAccessibleName("Chat folder: second-chat-about-lisbon");
+
+  // Archiving one keeps its folder; it leaves This computer.
+  const titled = section().locator(".session-row").filter({ hasText: /Lisbon/ });
+  await titled.getByRole("button", { name: /^Archive chat / }).click();
+  await expect(rows()).toHaveCount(1);
+  expect((await stat(second)).isDirectory()).toBe(true);
+  await expect.poll(async () => (await client!.getThread(two.id)).archived).toBe(true);
+
+  // A relaunch keeps This computer's chats.
+  client.close();
+  client = undefined;
+  await app!.close();
+  await launch();
+  await ready();
+  await expect(rows()).toHaveCount(1);
+  await expect(page.locator(".project-list .project-heading")).toHaveText(["pocket-project"]);
+  await rows().first().click();
+  await expect(page.locator(".transcript")).toContainText("written without a project");
+  await expect(chatFolder()).toHaveAccessibleName("Chat folder: tool-bash-command-pwd");
+  client = homeClient();
+  expect(homeDaemons()).toBe(1);
+});

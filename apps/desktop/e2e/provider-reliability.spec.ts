@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
+import { stopChatHome } from "./fixtures/chat-home";
 
 test("agent switch discloses model and scope; filtered responses stay visible", async ({}, info) => {
   test.setTimeout(150000);
@@ -46,7 +47,7 @@ test("agent switch discloses model and scope; filtered responses stay visible", 
   try {
     await page.setViewportSize({ width: 1400, height: 950 });
     await app.evaluate(({ dialog }, directory) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] }); }, workspace);
-    await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
     await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
     const connection = JSON.parse(execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], { env, input: '{"action":"connect"}', encoding: "utf8", timeout: 60000 }));
     const client = new Haarness({ baseUrl: connection.url, token: connection.token });
@@ -79,6 +80,7 @@ test("agent switch discloses model and scope; filtered responses stay visible", 
     await app.evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) window.destroy(); }).catch(() => {});
     await app.close().catch(() => {});
     try { execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }); } catch { /* fixture may have stopped */ }
+    stopChatHome(binary, env);
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
@@ -142,7 +144,7 @@ test("a pasted image the provider refuses is left out with a notice and the chat
   try {
     await page.setViewportSize({ width: 1400, height: 950 });
     await app.evaluate(({ dialog }, directory) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] }); }, workspace);
-    await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
     await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
     const connection = JSON.parse(execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], { env, input: '{"action":"connect"}', encoding: "utf8", timeout: 60000 }));
     const client = new Haarness({ baseUrl: connection.url, token: connection.token });
@@ -179,6 +181,7 @@ test("a pasted image the provider refuses is left out with a notice and the chat
     await app.evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) window.destroy(); }).catch(() => {});
     await app.close().catch(() => {});
     try { execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }); } catch { /* fixture may have stopped */ }
+    stopChatHome(binary, env);
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }

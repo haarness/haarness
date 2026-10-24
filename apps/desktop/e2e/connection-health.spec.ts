@@ -13,6 +13,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { createServer as createHttpServer } from "node:http";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // A server connection that dies without closing: the machine slept, the
 // network changed, a proxy froze. Desktop notices it and connects again by
@@ -98,7 +99,7 @@ async function launch() {
   app = await electron.launch({ args: ["."], env });
   page = await app.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
-  await expect(page.getByRole("button", { name: "Switch server", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "New chat", exact: true })).toBeVisible();
 }
 
 async function addServer(name: string, url: string, token: string) {
@@ -188,6 +189,7 @@ test.afterEach(async () => {
         timeout: 30000,
       });
     } catch {}
+    stopChatHome(binary, env);
   }
   await rm(temporary, { recursive: true, force: true });
   expect(errors).toEqual([]);

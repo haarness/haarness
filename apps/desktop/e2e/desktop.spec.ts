@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { stopChatHome } from "./fixtures/chat-home";
 async function selectValue(control: Locator, value: string) {
   control = control.and(control.page().getByRole("combobox"));
   await control.click();
@@ -340,8 +341,7 @@ while True:
       return { canceled: false, filePaths: [directory] };
     };
   }, workspace);
-  await page.getByRole("region", { name: "Project home" })
-    .getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute(
     "data-project-ready",
     "true",
@@ -417,6 +417,7 @@ test.afterAll(async () => {
         { env, stdio: "ignore", timeout: 30_000 },
       );
     } catch {}
+    stopChatHome(binary, env);
   }
   // A stopping server can still be writing its state as the folder goes.
   if (temporary)
@@ -8402,7 +8403,7 @@ test("themed pickers search, stay within the window, support keyboard selection 
   }
 });
 
-test("home project picker requires projects and preserves drafts across selection and reload", async () => {
+test("the folder chip chooses a project or no folder and preserves drafts across selection and reload", async () => {
   await page
     .locator(".project-list .project-heading")
     .filter({ hasText: /^workspace$/ })
@@ -8413,12 +8414,11 @@ test("home project picker requires projects and preserves drafts across selectio
   );
   await newSession();
   const heading = page.locator(".conversation-empty h2");
-  const trigger = heading.getByRole("button", {
-    name: "Choose project",
-    exact: true,
-  });
+  // The heading only names the project; the composer's chip chooses it.
+  await expect(heading.getByRole("button")).toHaveCount(0);
+  const trigger = page.getByRole("button", { name: /^Folder for new chat: / });
   const popup = page.getByRole("dialog", {
-    name: "Choose project",
+    name: "Choose a folder",
     exact: true,
   });
   const search = popup.getByRole("combobox", {
@@ -8437,7 +8437,7 @@ test("home project picker requires projects and preserves drafts across selectio
     popup.getByText("No projects found", { exact: true }),
   ).toBeVisible();
   await expect(
-    popup.getByRole("button", { name: "New project", exact: true }),
+    popup.getByRole("button", { name: "Open folder…", exact: true }),
   ).toBeVisible();
   await search.press("Escape");
   await expect(popup).toHaveCount(0);
@@ -8453,7 +8453,7 @@ test("home project picker requires projects and preserves drafts across selectio
     };
   });
   await trigger.click();
-  await popup.getByRole("button", { name: "New project", exact: true }).click();
+  await popup.getByRole("button", { name: "Open folder…", exact: true }).click();
   await expect(heading).toHaveText("What should we work on in workspace?");
   await expect(composer).toHaveValue("keep this project draft");
 
@@ -8472,7 +8472,7 @@ test("home project picker requires projects and preserves drafts across selectio
     };
   }, directory);
   await trigger.click();
-  await popup.getByRole("button", { name: "New project", exact: true }).click();
+  await popup.getByRole("button", { name: "Open folder…", exact: true }).click();
   await expect(heading).toHaveText("What should we work on in picker-project?");
   await expect(page.locator(".application")).toHaveAttribute(
     "data-project-ready",
@@ -8491,31 +8491,20 @@ test("home project picker requires projects and preserves drafts across selectio
   await search.press("Enter");
   await expect(composer).toHaveValue("keep the other draft");
 
-  for (const picker of [
-    trigger,
-    page.getByRole("button", {
-      name: "Choose project for new chat",
-      exact: true,
-    }),
-  ]) {
-    await picker.click();
-    await expect(
-      popup.getByRole("button", {
-        name: "Don’t work in a project",
-        exact: true,
-      }),
-    ).toHaveCount(0);
-    await expect(
-      popup.getByRole("button", { name: "New project", exact: true }),
-    ).toBeVisible();
-    await search.press("Escape");
-  }
-  await expect(page.locator(".composer-project")).toContainText(
-    "picker-project",
-  );
-  await expect(page.locator(".composer-project")).not.toContainText(
-    "No project",
-  );
+  // On this computer the list leads with No folder, a chat of its own
+  // without a project, whose new-chat draft is its own too.
+  await trigger.click();
+  await expect(popup.getByRole("option").first()).toHaveText("No folder");
+  await popup.getByRole("option", { name: "No folder", exact: true }).click();
+  await expect(heading).toHaveText("What should we work on?");
+  await expect(trigger).toHaveAccessibleName("Folder for new chat: No folder");
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  await expect(composer).toHaveValue("");
+  await trigger.click();
+  await popup.getByRole("option", { name: "picker-project", exact: true }).click();
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  await expect(composer).toHaveValue("keep the other draft");
+  await expect(trigger).toHaveAccessibleName("Folder for new chat: picker-project");
   const parentThreads = await client.listThreads();
   await send("project-context-proof");
   await expect(page.locator(".transcript")).toContainText(
@@ -8540,16 +8529,16 @@ test("home project picker requires projects and preserves drafts across selectio
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
   await trigger.click();
   await expect(
-    popup.getByRole("button", { name: "New project", exact: true }),
+    popup.getByRole("button", { name: "Open folder…", exact: true }),
   ).toHaveAttribute("data-last-action", "true");
-  await popup.getByRole("button", { name: "New project", exact: true }).focus();
+  await popup.getByRole("button", { name: "Open folder…", exact: true }).focus();
   await popup
-    .getByRole("button", { name: "New project", exact: true })
+    .getByRole("button", { name: "Open folder…", exact: true })
     .press("Tab");
   await expect(popup).toHaveCount(0);
   await expect(trigger).toBeFocused();
   await page.screenshot({
-    path: "test-results/home-project-picker-required.png",
+    path: "test-results/composer-folder-chip.png",
   });
   await composer.fill("");
 });
@@ -12102,7 +12091,7 @@ test("memory dialog manages project files, retains conflicting edits and reloads
   await memory.getByRole("button", { name: "Edit memory desktop-memory-proof", exact: true }).click();
   const edit = page.getByRole("dialog", { name: "Edit memory", exact: true });
   await expect(edit.getByLabel("Memory content", { exact: true })).toHaveValue("Keep the desktop editors thin and reuse native services.");
-  const connection = (await page.evaluate(() => window.haarness.boot())).recent.find(item => !item.remote)!;
+  const connection = (await page.evaluate(() => window.haarness.boot())).recent.find(item => !item.remote && !item.chatHome)!;
   const status = await page.evaluate(id => window.haarness.native<any>(id, { action: "asset", kind: "memory", input: { action: "status" } }), connection.id);
   const path = join(status.directory, "desktop-memory-proof.md");
   await writeFile(path, (await readFile(path, "utf8")) + "\nExternal memory edit.\n");

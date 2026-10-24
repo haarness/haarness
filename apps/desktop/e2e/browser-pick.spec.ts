@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // Pick an element in the Haarness browser: the crosshair (or ⇧⌘C) outlines
 // what is under the pointer, a click turns it into a chip in the message box
@@ -213,7 +214,7 @@ test.beforeAll(async () => {
     win.show();
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
   }, workspace);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90_000 });
   endpoint = JSON.parse(
     execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], {
@@ -246,6 +247,7 @@ test.afterAll(async () => {
     try {
       execFileSync(binary, ["--workspace", workspace, "--trust-project", "serve", "--stop"], { env, stdio: "ignore", timeout: 30_000 });
     } catch {}
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });
 
