@@ -920,7 +920,11 @@ fn canonical_tool_permission(tool: &str) -> &str {
 /// current Claude-compatible spelling. They are one authority boundary, so a
 /// policy written with either name must govern calls made through either
 /// alias. Normalize both rules and evaluated operations to prevent an alias
-/// from bypassing a deny/ask decision.
+/// from bypassing a deny/ask decision. Upstream OpenCode names the MCP
+/// resource tools `opencode_list_mcp_resources` and
+/// `opencode_read_mcp_resource`, with the same patterns, and Haarness reads
+/// OpenCode's configuration files: a rule under those names governs
+/// `mcp_resource_list` and `mcp_resource_read`.
 fn normalize_operation_alias(value: &str) -> std::borrow::Cow<'_, str> {
     for (alias, canonical) in [
         ("todo:", "todowrite:"),
@@ -928,6 +932,8 @@ fn normalize_operation_alias(value: &str) -> std::borrow::Cow<'_, str> {
         ("apply_patch:", "edit:"),
         ("patch:", "edit:"),
         ("multiedit:", "edit:"),
+        ("opencode_list_mcp_resources:", "mcp_resource_list:"),
+        ("opencode_read_mcp_resource:", "mcp_resource_read:"),
     ] {
         if let Some(suffix) = value.strip_prefix(alias) {
             return std::borrow::Cow::Owned(format!("{canonical}{suffix}"));
@@ -1669,6 +1675,45 @@ mod tests {
             "todowrite:*",
             "persisted boundaries use the canonical spelling"
         );
+    }
+
+    #[test]
+    fn upstream_resource_tool_names_govern_the_resource_tools() {
+        let mut engine = PermissionEngine::build_defaults();
+        for (pattern, decision) in [
+            ("opencode_read_mcp_resource:*", PermissionDecision::Deny),
+            (
+                "opencode_read_mcp_resource:docs:*",
+                PermissionDecision::Allow,
+            ),
+            ("opencode_list_mcp_resources:wiki", PermissionDecision::Ask),
+        ] {
+            engine.add_rule(rule(pattern, decision));
+        }
+        assert_eq!(
+            engine.evaluate("mcp_resource_read:wiki:wiki://page"),
+            PermissionDecision::Deny
+        );
+        // In its own place in the rule order: the later allow decides.
+        assert_eq!(
+            engine.evaluate("mcp_resource_read:docs:docs://setup"),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            engine.evaluate("mcp_resource_list:wiki"),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            engine.evaluate("mcp_resource_list:docs"),
+            PermissionDecision::Allow
+        );
+        let mut whole = PermissionEngine::build_defaults();
+        whole.add_rule(rule(
+            "opencode_read_mcp_resource:*",
+            PermissionDecision::Deny,
+        ));
+        assert!(whole.disables_tool("mcp_resource_read"));
+        assert!(!whole.disables_tool("mcp_resource_list"));
     }
 
     #[test]
