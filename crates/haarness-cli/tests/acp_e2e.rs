@@ -962,3 +962,44 @@ async fn a_prompt_for_a_session_busy_elsewhere_is_refused_with_the_servers_reaso
     assert!(status.success(), "Haarness ACP process failed");
     daemon_guard.stop().await;
 }
+
+/// A prompt a `UserPromptSubmit` hook blocks is refused with the hook's
+/// reason as an invalid request, not an internal error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_prompt_a_hook_blocks_is_refused_with_the_hooks_reason() {
+    let directory = TestDirectory::new();
+    let config = directory.0.join("workspace/.haarness");
+    std::fs::create_dir_all(&config).expect("create ACP workspace config");
+    std::fs::write(
+        config.join("haarness.json"),
+        json!({"hooks": {"UserPromptSubmit": [{"hooks": [{
+            "type": "command",
+            "command": r#"printf '{"decision":"block","reason":"prompts are paused here"}'"#,
+        }]}]}})
+        .to_string(),
+    )
+    .expect("configure a blocking prompt hook");
+    let (mut daemon_guard, mut child, mut stdin, mut lines, _, _, session) =
+        acp_session(&directory).await;
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":3, "method":"session/prompt",
+               "params":{"sessionId":session, "prompt":[{"type":"text", "text":"hello"}]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let response = receive_response(&mut lines, &mut stdin, 3, &mut messages).await;
+    assert_eq!(response["error"]["code"], -32600, "{response:?}");
+    assert_eq!(
+        response["error"]["message"], "prompt blocked by a hook: prompts are paused here",
+        "{response:?}"
+    );
+
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    daemon_guard.stop().await;
+}
