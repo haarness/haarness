@@ -133,8 +133,14 @@ pub(crate) async fn run(
 /// folder or writes to stdout.
 pub(crate) fn native_host_requested(args: &[OsString]) -> bool {
     let word = |index: usize| args.get(index).and_then(|value| value.to_str());
+    // Chrome never asks for help, so `browser native-host --help` is a person
+    // reading it: clap prints the help instead of starting the bridge.
+    let help = args
+        .iter()
+        .skip(3)
+        .any(|arg| arg == "--help" || arg == "-h");
     word(1).is_some_and(|first| first.starts_with("chrome-extension://"))
-        || (word(1) == Some("browser") && word(2) == Some("native-host"))
+        || (word(1) == Some("browser") && word(2) == Some("native-host") && !help)
 }
 
 /// One line for `haarness doctor`. Never fails.
@@ -174,6 +180,8 @@ mod tests {
             &["haarness", "browser"],
             &["haarness", "open chrome-extension://x"],
             &["haarness", "run", "chrome-extension://x/"],
+            &["haarness", "browser", "native-host", "--help"],
+            &["haarness", "browser", "native-host", "-h"],
         ] {
             assert!(!native_host_requested(&args(other)), "{other:?}");
         }

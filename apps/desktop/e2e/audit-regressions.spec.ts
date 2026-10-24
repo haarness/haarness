@@ -309,6 +309,8 @@ test("audit: Tab moves focus everywhere, agent keys stay in the message box and 
   await expect(button(page, "Allow once")).not.toBeFocused();
   await button(page, "Allow once").click();
   await expect(page.locator(".transcript")).toContainText("keyboard");
+  // While work runs the Next agent key is Stop response (composer.spec.ts); wait for the end.
+  await expect(button(page, "Stop response")).toHaveCount(0);
   // Tab leaves the message box; the agent chords switch and are announced.
   await message.focus();
   await page.keyboard.press("Tab");

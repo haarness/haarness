@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-directories.workspace = true
 haarness-protocol = { path = "../haarness-protocol" }
 serde_json.workspace = true
 thiserror.workspace = true
