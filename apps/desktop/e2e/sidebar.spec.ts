@@ -1083,7 +1083,9 @@ test("sidebar prompt keys move through the open chat's prompts and back to the n
 
 test("sidebar rows show when a chat was last active, and a scheduled run's waiting label and Archive chats' count speak the reader's language", async () => {
   const de: Record<string, string> = JSON.parse(await readFile(resolve("../../locales/de.json"), "utf8"));
-  const alpha = await open("alpha", '[permissions]\nbash="ask"\n');
+  // Chats start in Auto, where the reviewer answers an ask: the scheduled run
+  // waits for a person in Review.
+  const alpha = await open("alpha", 'approval_mode="review"\n[permissions]\nbash="ask"\n');
   await alpha.createThread({ title: "Quiet chat", provider: "echo", model: "echo-1" });
   // The age sits in the row without joining its name.
   const quiet = project("alpha").getByRole("button", { name: "Quiet chat", exact: true });
@@ -1148,7 +1150,9 @@ test("sidebar rows show when a chat was last active, and a scheduled run's waiti
 });
 
 test("sidebar Select chats archives several chats at once, notes a chat still working, and Escape leaves it", async () => {
-  const alpha = await open("alpha", '[permissions]\nbash="ask"\n');
+  // Chats start in Auto, where the reviewer answers an ask: "Two" waits for a
+  // person in Review.
+  const alpha = await open("alpha", 'approval_mode="review"\n[permissions]\nbash="ask"\n');
   const threads: Awaited<ReturnType<Haarness["createThread"]>>[] = [];
   for (const title of ["One", "Two", "Three", "Four"])
     threads.push(await alpha.createThread({ title, provider: "echo", model: "echo-1" }));
