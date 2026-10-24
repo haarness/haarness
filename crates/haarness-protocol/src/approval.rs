@@ -19,13 +19,13 @@ pub const APPROVAL_REVIEW_CAPABILITY: &str = "approval-review.v1";
 pub enum ApprovalMode {
     /// Eligible requests go to a reviewer model, which approves them once,
     /// blocks them, or leaves them to a person.
-    Auto,
     #[default]
+    Auto,
     Review,
 }
 
 /// What a client may ask for. `Inherit` clears this chat's own setting so it
-/// follows the agent that delegated to it (Review at the top level).
+/// follows the agent that delegated to it (Auto at the top level).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalModeSetting {

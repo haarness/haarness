@@ -40,7 +40,10 @@ impl Fixture {
             EventBus::new(256),
             self.workspace.clone(),
             String::new(),
-            RuntimeConfig::default(),
+            RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..RuntimeConfig::default()
+            },
         )
         .with_folder_snapshots(Arc::new(haarness_store::SqliteSnapshotFolders::open(
             &database,

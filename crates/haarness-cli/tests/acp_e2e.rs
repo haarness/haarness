@@ -166,7 +166,7 @@ async fn serves_editor_session_tools_permissions_and_durable_reload_over_acp() {
     std::fs::create_dir_all(workspace.join(".haarness")).expect("create ACP workspace config");
     std::fs::write(
         workspace.join(".haarness/config.toml"),
-        "[permissions]\nwrite = \"ask\"\n",
+        "[defaults]\napproval_mode = \"review\"\n[permissions]\nwrite = \"ask\"\n",
     )
     .expect("configure an approval-requiring ACP tool");
     std::fs::create_dir_all(&home).expect("create isolated ACP home");
@@ -387,7 +387,7 @@ async fn subagent_requests_and_tool_calls_reach_the_client_named_after_the_subag
     std::fs::create_dir_all(workspace.join(".haarness")).expect("create ACP workspace config");
     std::fs::write(
         workspace.join(".haarness/config.toml"),
-        "[permissions]\nwrite = \"ask\"\n",
+        "[defaults]\napproval_mode = \"review\"\n[permissions]\nwrite = \"ask\"\n",
     )
     .expect("configure an approval-requiring ACP tool");
     std::fs::create_dir_all(&home).expect("create isolated ACP home");
@@ -590,7 +590,7 @@ async fn acp_session(
     std::fs::create_dir_all(workspace.join(".haarness")).expect("create ACP workspace config");
     std::fs::write(
         workspace.join(".haarness/config.toml"),
-        "[permissions]\nwrite = \"ask\"\n",
+        "[defaults]\napproval_mode = \"review\"\n[permissions]\nwrite = \"ask\"\n",
     )
     .expect("configure an approval-requiring ACP tool");
     std::fs::create_dir_all(&home).expect("create isolated ACP home");

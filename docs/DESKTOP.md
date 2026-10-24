@@ -45,8 +45,8 @@ While work runs, Send does what **Settings → General → Messages sent while w
    and press Enter (**Settings → General → Send message with** can make it Cmd/Ctrl+Enter). The
    chat is named from your first message; to change the name, choose **Rename** in the **Chat
    actions** menu above the chat, or search for **Rename chat**.
-5. **Answer approvals, or switch to Auto.** The shield pill at the left of the composer reads
-   **Review** (the default) or **Auto**, and applies to the open chat on its server, so the TUI
+5. **Answer approvals, or switch to Review.** The shield pill at the left of the composer reads
+   **Auto** (the default) or **Review**, and applies to the open chat on its server, so the TUI
    and other windows see the same mode. In Review, edits and commands inside the project run
    without asking; Haarness asks before using files outside the project, reading secrets such as
    `.env`, switching agents or generating paid media. The browser asks about a site only when

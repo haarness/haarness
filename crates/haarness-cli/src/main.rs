@@ -10175,6 +10175,8 @@ struct DefaultsSection {
     reasoning_effort: Option<String>,
     ultracode: Option<bool>,
     output_style: Option<String>,
+    /// `auto` (the default) or `review`, for chats with no mode of their own.
+    approval_mode: Option<haarness_protocol::ApprovalMode>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -10438,6 +10440,10 @@ fn merge_defaults(base: &mut DefaultsSection, project: DefaultsSection) {
     if project.output_style.is_some() {
         base.output_style = project.output_style;
     }
+    // Review in any file wins, so a project cannot loosen a person's choice.
+    if base.approval_mode != Some(haarness_protocol::ApprovalMode::Review) {
+        base.approval_mode = project.approval_mode.or(base.approval_mode);
+    }
 }
 
 fn merge_experimental(base: &mut ExperimentalSection, project: ExperimentalSection) {
@@ -10606,6 +10612,7 @@ fn runtime_config(
         custom_agents: Vec::new(),
         disabled_agents: Vec::new(),
         auto_review: haarness_core::AutoReviewSettings::default(),
+        approval_mode: defaults.approval_mode.unwrap_or_default(),
     })
 }
 
@@ -13062,6 +13069,20 @@ mod tests {
 
     /// Serve `runtime` in-process, so tests drive the same HTTP client
     /// functions `haarness run` uses rather than a copy of them.
+    /// Chats start in Auto; these cases watch what a person in Review sees.
+    async fn in_review(client: &haarness_tui::api::ApiClient, chat: ThreadId) {
+        client
+            .set_approval_mode(
+                chat,
+                &haarness_protocol::SetApprovalModeRequest {
+                    mode: haarness_protocol::ApprovalModeSetting::Review,
+                    revision: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
     async fn run_client(
         runtime: &Arc<AgentRuntime>,
         workspace: &std::path::Path,
@@ -15447,6 +15468,7 @@ request_timeout = 0
             })
             .await
             .unwrap();
+        in_review(&client, thread.id).await;
         let turn = client
             .start_turn(
                 thread.id,
@@ -15562,7 +15584,7 @@ request_timeout = 0
             }
         };
         let new_chat = || async {
-            client
+            let chat = client
                 .create_thread(CreateThreadRequest {
                     provider: Some("outside-test".into()),
                     model: Some("outside-test-1".into()),
@@ -15570,7 +15592,9 @@ request_timeout = 0
                 })
                 .await
                 .unwrap()
-                .id
+                .id;
+            in_review(&client, chat).await;
+            chat
         };
 
         let chat = new_chat().await;
@@ -15677,6 +15701,7 @@ request_timeout = 0
             .await
             .unwrap()
             .id;
+        in_review(&client, chat).await;
         let turn = client
             .start_turn(
                 chat,
