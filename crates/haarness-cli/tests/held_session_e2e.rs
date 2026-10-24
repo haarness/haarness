@@ -274,7 +274,8 @@ async fn a_run_for_a_chat_busy_elsewhere_says_so_and_leaves_the_chat_as_it_was()
 /// at the chat's active turn (`active`) answer that none runs: the run looks
 /// before another window starts its turn, which the server then holds when
 /// the run gets that far. With `change_mode`, someone else puts the chat in
-/// Review right after the run first reads its mode (`mode`).
+/// Review right after the run first reads its mode (`mode`); with
+/// `fail_put_back`, every change of the mode after the run's first fails.
 struct Proxy {
     upstream: String,
     client: reqwest::Client,
@@ -282,6 +283,8 @@ struct Proxy {
     hide: AtomicUsize,
     mode: String,
     change_mode: AtomicBool,
+    fail_put_back: bool,
+    mode_writes: AtomicUsize,
 }
 
 async fn forward(State(proxy): State<Arc<Proxy>>, request: Request) -> Response {
@@ -301,6 +304,13 @@ async fn forward(State(proxy): State<Arc<Proxy>>, request: Request) -> Response 
             .is_ok()
     {
         return ([("content-type", "application/json")], "null").into_response();
+    }
+    if request.method() == axum::http::Method::PUT
+        && path == proxy.mode
+        && proxy.mode_writes.fetch_add(1, Ordering::SeqCst) > 0
+        && proxy.fail_put_back
+    {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response();
     }
     let changes_mode = get && path == proxy.mode && proxy.change_mode.swap(false, Ordering::SeqCst);
     let authorization = request.headers().get("authorization").cloned();
@@ -345,6 +355,7 @@ async fn forward(State(proxy): State<Arc<Proxy>>, request: Request) -> Response 
 async fn run_behind_proxy(
     hide: usize,
     change_mode: bool,
+    fail_put_back: bool,
     arguments: &[&str],
 ) -> (Value, std::process::Output, Value) {
     let fixture = Fixture::new();
@@ -390,6 +401,8 @@ async fn run_behind_proxy(
         hide: AtomicUsize::new(hide),
         mode: format!("/v1/threads/{thread}/approval-mode"),
         change_mode: AtomicBool::new(change_mode),
+        fail_put_back,
+        mode_writes: AtomicUsize::new(0),
     });
     let proxied = tokio::spawn(async move {
         axum::serve(listener, Router::new().fallback(forward).with_state(proxy))
@@ -426,7 +439,7 @@ async fn run_behind_proxy(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_run_refused_after_it_looked_puts_the_chats_mode_back() {
-    let (before, output, after) = run_behind_proxy(usize::MAX, false, &["hello"]).await;
+    let (before, output, after) = run_behind_proxy(usize::MAX, false, false, &["hello"]).await;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(stderr.contains(BUSY), "{stderr}");
@@ -438,7 +451,7 @@ async fn a_run_refused_after_it_looked_puts_the_chats_mode_back() {
 /// after the run's own look, which the goal's own look sees.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_goal_refused_after_the_run_looked_puts_the_chats_mode_back() {
-    let (before, output, after) = run_behind_proxy(1, false, &["--goal", "fix it"]).await;
+    let (before, output, after) = run_behind_proxy(1, false, false, &["--goal", "fix it"]).await;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(
@@ -497,7 +510,7 @@ async fn a_run_whose_turn_is_refused_leaves_the_chats_mode() {
 /// put back when the chat refuses the run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_mode_set_while_the_run_switches_is_the_one_put_back() {
-    let (before, output, after) = run_behind_proxy(usize::MAX, true, &["hello"]).await;
+    let (before, output, after) = run_behind_proxy(usize::MAX, true, false, &["hello"]).await;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(stderr.contains(BUSY), "{stderr}");
@@ -507,4 +520,21 @@ async fn a_mode_set_while_the_run_switches_is_the_one_put_back() {
         after["explicit"], true,
         "the other person's own Review stays: {after}"
     );
+}
+
+/// A put-back that fails says, in one line, that the chat stays in Auto.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_put_back_that_fails_says_the_chat_was_left_in_auto() {
+    let (_, output, after) = run_behind_proxy(usize::MAX, false, true, &["hello"]).await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert_eq!(after["mode"], "auto", "{after}");
+    let lines = stderr
+        .lines()
+        .filter(|line| {
+            *line
+                == "The chat was left in Auto: its earlier mode could not be put back (the server answered 503 Service Unavailable)."
+        })
+        .count();
+    assert_eq!(lines, 1, "{stderr}");
 }
