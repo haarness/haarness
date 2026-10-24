@@ -43,7 +43,10 @@ fn runtime_with_tools(
     configure: impl FnOnce(&mut RuntimeConfig),
 ) -> (AgentRuntime, Capturing) {
     let provider = Capturing::default();
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(PermissionRule {
         pattern: "bash:*".into(),
         decision: D::Ask,

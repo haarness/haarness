@@ -1705,6 +1705,17 @@ mod tests {
             })
             .await
             .unwrap();
+        // These cases answer the prompts themselves, as a person would in Review.
+        runtime
+            .set_approval_mode(
+                root.id,
+                haarness_protocol::SetApprovalModeRequest {
+                    mode: haarness_protocol::ApprovalModeSetting::Review,
+                    revision: None,
+                },
+            )
+            .await
+            .unwrap();
         let host = WorkflowRuntimeAdapter::new();
         host.attach(&runtime);
         let run_thread = host

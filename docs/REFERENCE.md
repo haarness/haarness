@@ -510,6 +510,7 @@ agent = "build"
 reasoning_effort = "medium"  # none|minimal|low|medium|high|xhigh|max
 ultracode = false             # durable default for newly created sessions
 output_style = "concise"      # concise|explanatory|formal|minimal, or an output-styles/<name>.md file
+approval_mode = "auto"        # auto|review: the mode of a chat with no setting of its own; review in any file wins
 
 [tui]
 language = "en"               # Explicit UI language; /language opens the 17-language picker

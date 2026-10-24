@@ -97,7 +97,10 @@ async fn fixture() -> Fixture {
 }
 
 async fn fixture_with(provider: Arc<dyn ModelProvider>) -> Fixture {
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     for (pattern, decision) in [
         // Rules match last first: the ask is the default, the denies win.
         ("mcp_resource_read:*", PermissionDecision::Ask),

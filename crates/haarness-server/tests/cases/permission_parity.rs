@@ -59,7 +59,10 @@ async fn assert_success(runtime: &AgentRuntime, thread: &Thread, turn: &Turn) {
 #[tokio::test]
 async fn parity_nested_tasks_with_one_slot_do_not_deadlock() {
     let fixture = Fixture::new();
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.execution.subagent_concurrency = 1;
     config.execution.subagent_depth = 2;
     let runtime = runtime(&fixture.0, config, None);
@@ -90,7 +93,14 @@ async fn parity_nested_tasks_with_one_slot_do_not_deadlock() {
 #[tokio::test]
 async fn parity_default_depth_still_prevents_recursive_delegation() {
     let fixture = Fixture::new();
-    let runtime = runtime(&fixture.0, RuntimeConfig::default(), None);
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        None,
+    );
     let thread = echo_thread(&runtime).await;
     let child = format!(
         "!tool task {}",
@@ -110,7 +120,10 @@ async fn parity_default_depth_still_prevents_recursive_delegation() {
 #[tokio::test]
 async fn parity_definition_shell_asks_then_expands_stdout_and_preserves_failure() {
     let fixture = Fixture::new();
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(rule("bash:*", D::Ask));
     config.commands.push(haarness_protocol::CommandInfo {
         name: "probe".into(),
@@ -165,7 +178,10 @@ async fn parity_installed_helpers_are_readable_but_secrets_and_symlink_escapes_s
     std::fs::write(skills.join("helper.py"), "helper").unwrap();
     std::fs::write(skills.join(".env"), "secret").unwrap();
     std::fs::write(fixture.0.join("outside.txt"), "outside").unwrap();
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.read_roots.push(skills.clone());
     let runtime = Arc::new(runtime(&ws, config, None));
     let thread = echo_thread(&runtime).await;
@@ -232,7 +248,14 @@ async fn parity_secret_reads_follow_the_file_really_opened_and_spare_node_module
     std::fs::write(fixture.0.join(".env"), "secret").unwrap();
     std::fs::write(fixture.0.join("node_modules/pkg/.env"), "fixture").unwrap();
     std::os::unix::fs::symlink(".env", fixture.0.join("notes.txt")).unwrap();
-    let runtime = Arc::new(runtime(&fixture.0, RuntimeConfig::default(), None));
+    let runtime = Arc::new(runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        None,
+    ));
     let thread = echo_thread(&runtime).await;
     // A package's .env fixture is read without asking.
     let result = runtime
@@ -325,8 +348,15 @@ async fn parity_hooks_judge_the_file_a_link_really_opens() {
         std::fs::write(fixture.0.join(".env"), "SECRET_CANARY").unwrap();
         std::os::unix::fs::symlink(".env", fixture.0.join("notes.txt")).unwrap();
         let runtime = Arc::new(
-            runtime(&fixture.0, RuntimeConfig::default(), None)
-                .with_hooks(env_guard_hooks(&fixture.0, event, &log)),
+            runtime(
+                &fixture.0,
+                RuntimeConfig {
+                    approval_mode: haarness_protocol::ApprovalMode::Review,
+                    ..RuntimeConfig::default()
+                },
+                None,
+            )
+            .with_hooks(env_guard_hooks(&fixture.0, event, &log)),
         );
         let thread = echo_thread(&runtime).await;
         // The model path: the hook allows `notes.txt`, but the read opens
@@ -421,7 +451,17 @@ async fn parity_a_link_out_of_the_project_asks_although_a_hook_allowed_its_name(
         })),
         workspace.clone(),
     ));
-    let runtime = Arc::new(runtime(&workspace, RuntimeConfig::default(), None).with_hooks(hooks));
+    let runtime = Arc::new(
+        runtime(
+            &workspace,
+            RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..RuntimeConfig::default()
+            },
+            None,
+        )
+        .with_hooks(hooks),
+    );
     let thread = echo_thread(&runtime).await;
     let turn = send(
         &runtime,
@@ -471,7 +511,17 @@ async fn parity_a_hook_that_sees_the_opened_file_can_still_answer() {
         ),
         fixture.0.clone(),
     ));
-    let runtime = Arc::new(runtime(&fixture.0, RuntimeConfig::default(), None).with_hooks(hooks));
+    let runtime = Arc::new(
+        runtime(
+            &fixture.0,
+            RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..RuntimeConfig::default()
+            },
+            None,
+        )
+        .with_hooks(hooks),
+    );
     let thread = echo_thread(&runtime).await;
     let turn = send(
         &runtime,
@@ -515,7 +565,10 @@ async fn parity_repository_grants_cross_worktrees_and_preserve_other_repositorie
     let db = fixture.0.join("approvals.sqlite");
     let common = main.join(".git").canonicalize().unwrap();
     let store = Arc::new(haarness_store::RepositoryApprovals::open(&db, &common).unwrap());
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(rule("bash:*", D::Ask));
     let first = runtime(&main, config.clone(), None)
         .with_repository_approvals(store.clone())
@@ -580,7 +633,10 @@ async fn parity_repository_grants_cross_worktrees_and_preserve_other_repositorie
 #[tokio::test]
 async fn parity_invalid_repository_reply_keeps_prompt_available() {
     let fixture = Fixture::new();
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(rule("bash:*", D::Ask));
     let runtime = runtime(&fixture.0, config, None);
     let thread = echo_thread(&runtime).await;
@@ -696,7 +752,10 @@ async fn parity_browser_upload_combines_all_gates_and_denies_before_asking() {
     let secret = root.0.join(".env");
     std::fs::write(&secret, "fixture-only").unwrap();
     let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(rule("browser:*", D::Ask));
     let tools = Arc::new(OverlayRegistry {
         native: NativeToolRegistry::new(ws.clone()),
@@ -766,7 +825,14 @@ async fn parity_forced_browser_ask_is_not_skipped_by_default_allow_or_always() {
             executions: executions.clone(),
         })],
     });
-    let runtime = runtime(&fixture.0, RuntimeConfig::default(), Some(tools));
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        Some(tools),
+    );
     let thread = echo_thread(&runtime).await;
     for _ in 0..2 {
         let turn = send(
@@ -868,7 +934,10 @@ async fn parity_native_and_batch_reads_run_concurrently_with_write_barriers() {
                 }),
             ],
         });
-        let mut config = RuntimeConfig::default();
+        let mut config = RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        };
         config.execution.read_parallelism = 2;
         let runtime = runtime(&fixture.0, config, Some(tools));
         let thread = echo_thread(&runtime).await;
@@ -963,7 +1032,10 @@ async fn parity_a_request_names_the_call_that_asks() {
                 release: release.clone(),
             })],
         });
-        let mut config = RuntimeConfig::default();
+        let mut config = RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        };
         config.base_rules.push(rule("read:*asks", D::Ask));
         let runtime = runtime(&fixture.0, config, Some(tools));
         let thread = echo_thread(&runtime).await;
@@ -1047,7 +1119,10 @@ fn snippet_runtime(
     template: &str,
     execution: haarness_protocol::DefinitionExecution,
 ) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<ProviderRequest>>>) {
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.extend(rules);
     config.commands.push(haarness_protocol::CommandInfo {
         name: "probe".into(),

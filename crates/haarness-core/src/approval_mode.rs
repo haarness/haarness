@@ -26,6 +26,8 @@ pub(crate) struct ApprovalModes {
     workspace: String,
     cache: DashMap<ThreadId, Stored>,
     revision: Mutex<Option<u64>>,
+    /// The mode of a chat no setting up its chain decides.
+    pub(crate) fallback: Mutex<ApprovalMode>,
     /// Orders mode changes with permission admission: a request is either
     /// registered before Auto turns on, and released by the change, or it
     /// sees Auto and never prompts. A request Auto's reviewer is deciding is
@@ -37,12 +39,17 @@ pub(crate) struct ApprovalModes {
 }
 
 impl ApprovalModes {
-    pub(crate) fn new(repository: Arc<dyn ThreadRepository>, workspace: String) -> Self {
+    pub(crate) fn new(
+        repository: Arc<dyn ThreadRepository>,
+        workspace: String,
+        fallback: ApprovalMode,
+    ) -> Self {
         Self {
             repository,
             workspace,
             cache: DashMap::new(),
             revision: Mutex::new(None),
+            fallback: Mutex::new(fallback),
             gate: AsyncMutex::new(()),
             reviews: Arc::default(),
         }
@@ -67,7 +74,8 @@ impl ApprovalModes {
     }
 
     /// The mode that applies to `id`: its own setting, else the setting of
-    /// the agent that delegated to it, else Review. A Review anywhere up the
+    /// the agent that delegated to it, else the configured default (Auto
+    /// unless `defaults.approval_mode` says Review). A Review anywhere up the
     /// chain wins, so switching a chat to Review stops its agents' Auto too.
     /// Forks keep their own.
     pub(crate) async fn effective(&self, id: ThreadId) -> CoreResult<ApprovalModeInfo> {
@@ -102,7 +110,7 @@ impl ApprovalModes {
         }
         Ok(match auto {
             Some(source) => info(id, ApprovalMode::Auto, source, true, &versions),
-            None => info(id, ApprovalMode::Review, id, false, &versions),
+            None => info(id, *self.fallback.lock(), id, false, &versions),
         })
     }
 
