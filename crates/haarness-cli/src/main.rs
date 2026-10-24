@@ -10483,11 +10483,12 @@ fn apply_json_goal_config(config: &mut FileConfig, layers: &jsonconfig::JsonLaye
 fn compile_permissions(map: &toml::Table) -> Result<Vec<haarness_core::PermissionRule>> {
     use haarness_core::{PermissionDecision, PermissionRule};
     fn decision(value: &str) -> Result<PermissionDecision> {
-        match value {
+        // In any letter case, as in haarness.json.
+        match value.to_ascii_lowercase().as_str() {
             "allow" => Ok(PermissionDecision::Allow),
             "ask" => Ok(PermissionDecision::Ask),
             "deny" => Ok(PermissionDecision::Deny),
-            other => anyhow::bail!("permission decision must be allow|ask|deny, got {other}"),
+            _ => anyhow::bail!("permission decision must be allow|ask|deny, got {value}"),
         }
     }
     let mut rules = Vec::new();
@@ -16851,6 +16852,11 @@ request_timeout = 0
 
         let bad: toml::Table = toml::from_str(r#"edit = "maybe""#).unwrap();
         assert!(super::compile_permissions(&bad).is_err());
+        let upper: toml::Table = toml::from_str(r#"edit = "Deny""#).unwrap();
+        assert_eq!(
+            super::compile_permissions(&upper).unwrap()[0].decision,
+            PermissionDecision::Deny
+        );
     }
 
     #[test]
