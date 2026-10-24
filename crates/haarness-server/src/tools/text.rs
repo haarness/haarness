@@ -202,6 +202,116 @@ pub(super) fn read_text(
     Ok(text)
 }
 
+/// Bytes of a line `grep` searches: a match further into a longer line is
+/// not found.
+const GREP_LINE_BYTES: usize = 1024 * 1024;
+/// The most files one `grep` searches, and the most lines it returns.
+pub(super) const GREP_MAX_FILES: usize = 20_000;
+pub(super) const GREP_MAX_MATCHES: usize = 10_000;
+
+/// What a `grep` walk found: `path:line:text` lines, the files it left out,
+/// and why it stopped early, if it did.
+pub(super) struct GrepFound {
+    pub(super) matches: Vec<String>,
+    pub(super) skipped: super::Skipped,
+    pub(super) stopped: Option<GrepStop>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GrepStop {
+    Files,
+    Matches,
+}
+
+impl GrepStop {
+    /// The note that ends the output, so a cut list is not read as all there is.
+    pub(super) fn note(self) -> String {
+        match self {
+            Self::Files => format!(
+                "(stopped after searching {GREP_MAX_FILES} files; narrow the pattern or the path)"
+            ),
+            Self::Matches => format!(
+                "(stopped at {GREP_MAX_MATCHES} matching lines; narrow the pattern or the path)"
+            ),
+        }
+    }
+}
+
+/// Searches `root` for `regex` as ripgrep would: .gitignore, .ignore,
+/// repository excludes and hidden files respected, links not followed, so
+/// every file is where it is named. A file that is not UTF-8 throughout is
+/// not searched (as before files were read a line at a time); a secret-named
+/// or denied file is counted, not read. Stop ends it between any two reads.
+pub(super) fn grep_walk(
+    regex: &regex::Regex,
+    root: &Path,
+    workspace: &Path,
+    secrets: &super::SecretFilter,
+    cancel: &CancellationToken,
+) -> CoreResult<GrepFound> {
+    let mut found = GrepFound {
+        matches: Vec::new(),
+        skipped: super::Skipped::default(),
+        stopped: None,
+    };
+    let walk = ignore::WalkBuilder::new(root)
+        .standard_filters(true)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()));
+    for (files, entry) in walk.enumerate() {
+        if cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        if files == GREP_MAX_FILES {
+            found.stopped = Some(GrepStop::Files);
+            break;
+        }
+        if let Some(hidden) = secrets.names_hidden(entry.path()) {
+            found.skipped.count(hidden);
+            continue;
+        }
+        let shown_path = entry
+            .path()
+            .strip_prefix(workspace)
+            .unwrap_or(entry.path())
+            .display()
+            .to_string();
+        let Ok((reader, _)) = open_text(entry.path()) else {
+            continue;
+        };
+        let mut lines = Lines::new(reader, GREP_LINE_BYTES);
+        let mut in_file = Vec::new();
+        let mut number = 0_usize;
+        let text_file = loop {
+            let line = match lines.next_line(cancel) {
+                Ok(Some(line)) => line,
+                Ok(None) => break true,
+                Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
+                Err(_) => break false,
+            };
+            number += 1;
+            let Some(text) = line.text(false) else {
+                break false;
+            };
+            if regex.is_match(&text) {
+                in_file.push(format!("{shown_path}:{number}:{}", shown(&text, line.long)));
+                if found.matches.len() + in_file.len() == GREP_MAX_MATCHES {
+                    found.stopped = Some(GrepStop::Matches);
+                    break true;
+                }
+            }
+        };
+        if text_file {
+            found.matches.append(&mut in_file);
+        }
+        if found.stopped.is_some() {
+            break;
+        }
+    }
+    Ok(found)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +325,27 @@ mod tests {
             found.push((line.bytes, line.long));
         }
         found
+    }
+
+    #[test]
+    fn grep_leaves_text_that_is_not_utf8_unsearched_as_before() {
+        let root = std::env::temp_dir().join(format!("haarness-grep-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("utf8.txt"), "hit\n").unwrap();
+        std::fs::write(root.join("latin1.txt"), b"hit\ncaf\xe9 hit\n").unwrap();
+        let secrets = super::super::SecretFilter::new(&root, ".", &root, None);
+        let regex = regex::Regex::new("hit").unwrap();
+        let cancel = CancellationToken::new();
+        let found = grep_walk(&regex, &root, &root, &secrets, &cancel).unwrap();
+        assert_eq!(found.matches, vec!["utf8.txt:1:hit".to_owned()]);
+        assert_eq!(found.stopped, None);
+        cancel.cancel();
+        assert!(matches!(
+            grep_walk(&regex, &root, &root, &secrets, &cancel),
+            Err(CoreError::Cancelled)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

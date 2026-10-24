@@ -2985,53 +2985,31 @@ impl Tool for BuiltinTool {
                         false,
                     ));
                 }
-                let mut matches = Vec::new();
-                let mut skipped = Skipped::default();
-                let mut partial = false;
-                // Match ripgrep semantics: respect .gitignore,
-                // .ignore, repository excludes, hidden files, and parent
-                // ignore files instead of scanning dependency/build trees.
-                // Links are not followed, so every file is where it is named.
-                for (files, entry) in ignore::WalkBuilder::new(&root)
-                    .standard_filters(true)
-                    .build()
-                    .filter_map(Result::ok)
-                    .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-                    .enumerate()
-                {
-                    if files == 20_000 {
-                        partial = true;
-                        break;
-                    }
-                    if let Some(hidden) = secrets.names_hidden(entry.path()) {
-                        skipped.count(hidden);
-                        continue;
-                    }
-                    if let Ok(text) = std::fs::read_to_string(entry.path()) {
-                        for (index, line) in text.lines().enumerate() {
-                            if regex.is_match(line) {
-                                matches.push(format!(
-                                    "{}:{}:{}",
-                                    entry
-                                        .path()
-                                        .strip_prefix(&context.workspace)
-                                        .unwrap_or(entry.path())
-                                        .display(),
-                                    index + 1,
-                                    line
-                                ));
-                                if matches.len() >= 10_000 {
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                // The walk reads files synchronously, so it runs off the async
+                // workers, as glob's does: a large tree or a slow disk holds
+                // none of them, and Stop ends the call at once.
+                let workspace = context.workspace.clone();
+                let cancel = context.cancel.clone();
+                let walk = tokio::task::spawn_blocking(move || {
+                    text::grep_walk(&regex, &root, &workspace, &secrets, &cancel)
+                });
+                let found = tokio::select! {
+                    () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
+                    found = walk => found.map_err(tool_error)??,
+                };
+                let mut output = with_skipped(
+                    truncate_output(found.matches.join("\n")).await?,
+                    found.skipped,
+                    found.stopped.is_some(),
+                );
+                if let Some(stop) = found.stopped {
+                    output.text = if output.text.is_empty() {
+                        stop.note()
+                    } else {
+                        format!("{}\n\n{}", output.text, stop.note())
+                    };
                 }
-                Ok(with_skipped(
-                    truncate_output(matches.join("\n")).await?,
-                    skipped,
-                    partial,
-                ))
+                Ok(output)
             }
             Kind::Write => {
                 let requested_path = string(&args, "path")?;
@@ -6946,6 +6924,83 @@ export default workflow({
             refused.to_string().contains("is not a regular file"),
             "{refused}"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn grep_in(root: &Path, args: Value, context: ToolContext) -> CoreResult<ToolOutput> {
+        NativeToolRegistry::new(root.to_path_buf())
+            .get("grep")
+            .unwrap()
+            .execute(args, context)
+            .await
+    }
+
+    #[tokio::test]
+    async fn grep_shows_the_head_of_a_long_matching_line() {
+        let (root, _) = read_fixture(
+            "bundle.min.js",
+            format!("needle{}\nshort needle\n", "q".repeat(100_000)).as_bytes(),
+        );
+        let found = grep_in(&root, json!({"pattern":"needle"}), tool_context(&root))
+            .await
+            .unwrap();
+        assert_eq!(
+            found.text,
+            format!(
+                "bundle.min.js:1:needle{}{}\nbundle.min.js:2:short needle",
+                "q".repeat(1_994),
+                text::LINE_CUT
+            )
+        );
+        assert!(found.metadata.get("outputPath").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn grep_stops_at_its_match_limit_and_says_so() {
+        let body = "hit\n".repeat(6_000);
+        let (root, _) = read_fixture("a.txt", body.as_bytes());
+        std::fs::write(root.join("b.txt"), &body).unwrap();
+        std::fs::write(root.join("c.txt"), &body).unwrap();
+        let found = grep_in(&root, json!({"pattern":"hit"}), tool_context(&root))
+            .await
+            .unwrap();
+        // The listing is long enough to be saved whole; it holds the limit
+        // exactly, however many files are left.
+        let saved =
+            std::fs::read_to_string(found.metadata["outputPath"].as_str().unwrap()).unwrap();
+        assert_eq!(saved.lines().count(), 10_000);
+        assert!(
+            found
+                .text
+                .ends_with("(stopped at 10000 matching lines; narrow the pattern or the path)"),
+            "{}",
+            &found.text[found.text.len() - 200..]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn grep_leaves_the_async_workers_free_and_stop_ends_it() {
+        let root = std::env::temp_dir().join(format!("haarness-grep-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let line = format!("{}\n", "w".repeat(200));
+        for index in 0..4_000 {
+            std::fs::write(root.join(format!("f{index}.txt")), line.repeat(20)).unwrap();
+        }
+        let context = tool_context(&root);
+        let cancel = context.cancel.clone();
+        // On this runtime's one thread, Stop can only come while the walk
+        // leaves the thread free.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            cancel.cancel();
+        });
+        let started = std::time::Instant::now();
+        let stopped = grep_in(&root, json!({"pattern":"absent"}), context).await;
+        assert!(matches!(stopped, Err(CoreError::Cancelled)), "{stopped:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
