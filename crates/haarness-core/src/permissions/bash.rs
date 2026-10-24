@@ -236,6 +236,7 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
         text_depth: 0,
         nested_cd: false,
         moved: 0,
+        unplaced: false,
     };
     if !reader.read(command, Depth::default()) {
         return fallback(command);
@@ -245,6 +246,7 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
         written,
         overflow,
         nested_cd,
+        unplaced,
         ..
     } = reader;
     if nested_cd {
@@ -263,7 +265,20 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
         }
     }
     if analysis.patterns.is_empty() && analysis.external_dirs.is_empty() {
-        return fallback(command);
+        let mut fallback = fallback(command);
+        for written in &mut fallback.written {
+            written.incomplete |= unplaced;
+        }
+        return fallback;
+    }
+    if unplaced && analysis.written.is_empty() {
+        let fallback = fallback(command);
+        analysis.patterns.extend(fallback.patterns);
+        analysis.always.extend(fallback.always);
+        analysis.written = fallback.written;
+        for written in &mut analysis.written {
+            written.incomplete = true;
+        }
     }
     // A command written on its own is judged as written, whatever else it
     // is also read from.
@@ -582,6 +597,9 @@ struct Reader<'w> {
     /// How many wrappers that choose a directory (`env -C`, `sudo -D`) the
     /// command being read runs behind.
     moved: u32,
+    /// The line holds backquotes in a here-document no written command
+    /// opens, so the line as one command is a command not read whole.
+    unplaced: bool,
 }
 
 /// The written command whose standard input a program reads.
@@ -907,7 +925,21 @@ impl Reader<'_> {
         // read for the command written last before the document's `<<`: the
         // one on its line, or the last of a loop, a group or an `if` it is
         // attached to.
+        // A document no written command opens (a bare `<<EOF`, `X=1 <<EOF`,
+        // `cd src <<EOF`) is not read: the command written nearest to it, or
+        // the line, counts as one a limit stopped reading.
         if !self.overflow {
+            // The last written command up to each command, and the first
+            // from each on.
+            let mut last = Vec::with_capacity(sources.len() + 1);
+            last.push(None);
+            for (_, source) in &sources {
+                last.push(source.or(*last.last().unwrap_or(&None)));
+            }
+            let mut first = vec![None; sources.len() + 1];
+            for index in (0..sources.len()).rev() {
+                first[index] = sources[index].1.or(first[index + 1]);
+            }
             for heredoc in heredocs {
                 let Some(text) = backquoted(heredoc, command) else {
                     continue;
@@ -916,6 +948,13 @@ impl Reader<'_> {
                 if let Some(source) = before.checked_sub(1).and_then(|index| sources[index].1) {
                     self.source = Some(source);
                     self.nested(&text, depth);
+                } else if let Some(source) = last[before].or(first[before]) {
+                    self.source = Some(source);
+                    self.stopped();
+                } else if depth.text > 0 && self.source.is_some() {
+                    self.stopped();
+                } else {
+                    self.unplaced = true;
                 }
             }
         }
@@ -6594,6 +6633,49 @@ mod here_document_backquotes {
             .find(|written| written.pattern.starts_with("cat > n.md"))
             .unwrap();
         assert!(cat.incomplete, "{:?}", analysis.written);
+    }
+
+    #[test]
+    fn a_document_no_written_command_opens_leaves_the_line_not_read_whole() {
+        let workspace = std::env::current_dir().unwrap();
+        for command in [
+            "{ cd src; } <<EOF\n`rm -rf victim`\nEOF",
+            "cd . <<EOF\n`rm -rf victim`\nEOF",
+            "for d in a; do cd src; done <<EOF\n`rm -rf victim`\nEOF",
+            "X=1 <<EOF\n`rm -rf victim`\nEOF",
+            "> out.txt <<EOF\n`rm -rf victim`\nEOF",
+        ] {
+            let analysis = analyze(command, &workspace);
+            assert!(
+                !analysis.written.is_empty()
+                    && analysis.written.iter().all(|written| written.incomplete),
+                "{command:?}: {:?}",
+                analysis.written
+            );
+        }
+        // A line that starts with `<<` the parser reads as commands.
+        assert!(
+            analyze("<<EOF\n`rm -rf victim`\nEOF", &workspace)
+                .patterns
+                .contains(&"rm -rf victim".to_owned())
+        );
+        // The command written nearest to it, when there is one.
+        let analysis = analyze("echo hi; cd . <<EOF\n`rm -rf victim`\nEOF", &workspace);
+        assert_eq!(analysis.written.len(), 1);
+        assert!(analysis.written[0].incomplete, "{:?}", analysis.written);
+        // Nothing to read, nothing changes.
+        for command in [
+            "{ cd src; } <<'EOF'\n`rm -rf victim`\nEOF",
+            "cd . <<EOF\nplain text\nEOF",
+        ] {
+            assert!(
+                analyze(command, &workspace)
+                    .written
+                    .iter()
+                    .all(|written| !written.incomplete),
+                "{command:?}"
+            );
+        }
     }
 
     #[test]
