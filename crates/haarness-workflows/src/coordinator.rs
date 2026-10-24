@@ -127,16 +127,35 @@ struct WorkflowRunLease {
 /// one fixed folder under the system temporary directory, which on Linux is
 /// shared, so the first user to run a workflow owned it and every other
 /// user's workflows failed with "Permission denied". Resolved like the CLI's
-/// cache, so an isolated install keeps its leases inside its own folder.
+/// cache, so an isolated install keeps its leases inside its own folder:
+/// the cache named with [`use_cache_folder`] (`--data-dir`'s), else
+/// `HAARNESS_DATA_DIR`'s or `HAARNESS_HOME`'s.
 fn lease_directory() -> PathBuf {
+    lease_directory_in(NAMED_CACHE.get().map(PathBuf::as_path))
+}
+
+static NAMED_CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Names the cache folder workflow leases go in for the rest of the
+/// process, as `--data-dir` does for the CLI (`<root>/cache`). The first
+/// name wins.
+pub fn use_cache_folder(folder: PathBuf) {
+    let _ = NAMED_CACHE.set(folder);
+}
+
+fn lease_directory_in(named: Option<&Path>) -> PathBuf {
     let absolute = |key: &str| {
         std::env::var_os(key)
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
     };
-    absolute("HAARNESS_DATA_DIR")
-        .or_else(|| absolute("HAARNESS_HOME"))
-        .map(|root| root.join("cache"))
+    named
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            absolute("HAARNESS_DATA_DIR")
+                .or_else(|| absolute("HAARNESS_HOME"))
+                .map(|root| root.join("cache"))
+        })
         // A test never leaves leases in the person's own cache.
         .or_else(|| {
             (cfg!(test) || haarness_protocol::test_binary())
@@ -1751,5 +1770,14 @@ mod lease_tests {
                 folder.display()
             );
         }
+    }
+
+    #[test]
+    fn a_named_cache_holds_the_leases() {
+        let cache = std::env::temp_dir().join("haarness-named-cache");
+        assert_eq!(
+            super::lease_directory_in(Some(&cache)),
+            cache.join("workflow-leases")
+        );
     }
 }

@@ -1430,9 +1430,10 @@ async fn cli_main() -> Result<()> {
     }
     let base_paths = Paths::new(cli.data_dir.as_deref())?;
     // `--data-dir` holds the server's own files too (preview versions, saved
-    // tool output), as HAARNESS_DATA_DIR always did.
+    // tool output, workflow leases), as HAARNESS_DATA_DIR always did.
     if base_paths.root.is_some() {
         haarness_server::use_data_folder(base_paths.data.clone());
+        haarness_workflows::use_cache_folder(base_paths.cache.clone());
     }
     // An edit of the global configuration or the base folder asks a person;
     // tell the permission engine which folders those are in this process.
