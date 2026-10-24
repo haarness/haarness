@@ -688,52 +688,87 @@ fn render_file_diffs(metadata: &serde_json::Value, width: usize, theme: &Theme) 
     rendered
 }
 
+/// Why a provider refused images that later requests leave out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// It named the image.
+    Named,
+    /// It refused an image without saying which.
+    Unsaid,
+    /// The request had too many images.
+    TooMany,
+    /// The request was too large for its images.
+    TooLarge,
+}
+
+impl Refusal {
+    /// What a `media_omitted` item says the refusal was.
+    fn of(data: &ItemData) -> Self {
+        match data {
+            ItemData::MediaOmitted {
+                too_large: true, ..
+            } => Self::TooLarge,
+            ItemData::MediaOmitted { too_many: true, .. }
+            | ItemData::MediaOmitted { oldest: true, .. } => Self::TooMany,
+            ItemData::MediaOmitted { guessed: true, .. } => Self::Unsaid,
+            _ => Self::Named,
+        }
+    }
+}
+
 /// What the person reads when a provider refused images and later requests
-/// leave them out.
+/// leave them out: the oldest of them, or the newest.
 fn media_omitted_notice(
     language: crate::locale::Language,
     names: &[String],
-    guessed: bool,
+    refusal: Refusal,
     oldest: bool,
-    too_large: bool,
 ) -> String {
     let list = names.join(", ");
     let count = names.len().to_string();
     let (list, count) = (list.as_str(), count.as_str());
-    let (key, value) = match (oldest, guessed, too_large, names.len() == 1) {
-        (true, _, true, true) => (
+    let (key, value) = match (refusal, oldest, names.len() == 1) {
+        (Refusal::TooLarge, true, true) => (
             "The request was too large for the provider, so the oldest image, {name}, is left out of this chat from now on.",
             ("name", list),
         ),
-        (true, _, true, false) => (
+        (Refusal::TooLarge, true, false) => (
             "The request was too large for the provider, so the oldest {count} images are left out of this chat from now on.",
             ("count", count),
         ),
-        (true, _, false, true) => (
-            "The request had too many images for the provider, so the oldest image, {name}, is left out of this chat from now on.",
-            ("name", list),
-        ),
-        (true, _, false, false) => (
-            "The request had too many images for the provider, so the oldest {count} images are left out of this chat from now on.",
-            ("count", count),
-        ),
-        (false, false, _, _) => (
-            "The provider refused {name}, so it is left out of this chat from now on.",
-            ("name", list),
-        ),
-        (false, true, true, true) => (
+        (Refusal::TooLarge, false, true) => (
             "The request was too large for the provider, so the newest image, {name}, is left out of this chat from now on.",
             ("name", list),
         ),
-        (false, true, true, false) => (
+        (Refusal::TooLarge, false, false) => (
             "The request was too large for the provider, so the newest images, {names}, are left out of this chat from now on.",
             ("names", list),
         ),
-        (false, true, false, true) => (
+        (Refusal::TooMany, true, true) => (
+            "The request had too many images for the provider, so the oldest image, {name}, is left out of this chat from now on.",
+            ("name", list),
+        ),
+        (Refusal::TooMany, true, false) => (
+            "The request had too many images for the provider, so the oldest {count} images are left out of this chat from now on.",
+            ("count", count),
+        ),
+        (Refusal::TooMany, false, true) => (
+            "The request had too many images for the provider, so the newest image, {name}, is left out of this chat from now on.",
+            ("name", list),
+        ),
+        (Refusal::TooMany, false, false) => (
+            "The request had too many images for the provider, so the newest images, {names}, are left out of this chat from now on.",
+            ("names", list),
+        ),
+        (Refusal::Named, _, _) => (
+            "The provider refused {name}, so it is left out of this chat from now on.",
+            ("name", list),
+        ),
+        (Refusal::Unsaid, _, true) => (
             "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.",
             ("name", list),
         ),
-        (false, true, false, false) => (
+        (Refusal::Unsaid, _, false) => (
             "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.",
             ("names", list),
         ),
@@ -767,77 +802,98 @@ mod workflow_tests {
     }
 
     #[test]
-    fn a_request_with_too_many_images_names_the_oldest_left_out() {
+    fn a_request_with_too_many_images_names_the_images_left_out() {
+        use super::Refusal;
         let names = |names: &[&str]| {
             names
                 .iter()
                 .map(|&name| name.to_owned())
                 .collect::<Vec<_>>()
         };
-        let notice = |list: &[&str], guessed, oldest, too_large| {
+        let notice = |list: &[&str], refusal, oldest| {
             super::media_omitted_notice(
                 crate::locale::Language::English,
                 &names(list),
-                guessed,
+                refusal,
                 oldest,
-                too_large,
             )
         };
         assert_eq!(
-            notice(&["a.png"], false, true, false),
+            notice(&["a.png"], Refusal::TooMany, true),
             "The request had too many images for the provider, so the oldest image, a.png, is left out of this chat from now on."
         );
         assert_eq!(
-            notice(&["a.png", "b.png", "c.png"], false, true, false),
+            notice(&["a.png", "b.png", "c.png"], Refusal::TooMany, true),
             "The request had too many images for the provider, so the oldest 3 images are left out of this chat from now on."
         );
+        // When leaving out older images would not have helped, the newest go.
         assert_eq!(
-            notice(&["d.png"], true, false, false),
+            notice(&["b.png", "c.png"], Refusal::TooMany, false),
+            "The request had too many images for the provider, so the newest images, b.png, c.png, are left out of this chat from now on."
+        );
+        assert_eq!(
+            notice(&["d.png"], Refusal::Unsaid, false),
             "The provider refused an image without saying which, so the newest one, d.png, is left out of this chat from now on."
         );
         assert_eq!(
             super::media_omitted_notice(
                 crate::locale::Language::German,
                 &names(&["a.png", "b.png"]),
-                false,
-                true,
-                false
+                Refusal::TooMany,
+                true
             ),
             "Die Anfrage hatte zu viele Bilder für den Anbieter. Daher bleiben die 2 ältesten Bilder in diesem Chat ab jetzt außen vor."
         );
+        // The record's flags, as the server sets them.
+        let record = |guessed, oldest, too_large, too_many| {
+            Refusal::of(&haarness_protocol::ItemData::MediaOmitted {
+                fingerprints: Vec::new(),
+                names: Vec::new(),
+                reason: String::new(),
+                guessed,
+                oldest,
+                too_large,
+                too_many,
+            })
+        };
+        assert_eq!(record(true, false, false, true), Refusal::TooMany);
+        assert_eq!(record(false, true, false, true), Refusal::TooMany);
+        assert_eq!(record(true, false, true, false), Refusal::TooLarge);
+        assert_eq!(record(true, false, false, false), Refusal::Unsaid);
+        assert_eq!(record(false, false, false, false), Refusal::Named);
     }
 
     #[test]
     fn a_request_too_large_says_so_and_names_the_images_left_out() {
+        use super::Refusal;
         let names = |names: &[&str]| {
             names
                 .iter()
                 .map(|&name| name.to_owned())
                 .collect::<Vec<_>>()
         };
-        let notice = |language, list: &[&str], guessed, oldest| {
-            super::media_omitted_notice(language, &names(list), guessed, oldest, true)
+        let notice = |language, list: &[&str], oldest| {
+            super::media_omitted_notice(language, &names(list), Refusal::TooLarge, oldest)
         };
         let english = crate::locale::Language::English;
         assert_eq!(
-            notice(english, &["a.png"], false, true),
+            notice(english, &["a.png"], true),
             "The request was too large for the provider, so the oldest image, a.png, is left out of this chat from now on."
         );
         assert_eq!(
-            notice(english, &["a.png", "b.png"], false, true),
+            notice(english, &["a.png", "b.png"], true),
             "The request was too large for the provider, so the oldest 2 images are left out of this chat from now on."
         );
-        // When leaving out older images would not have helped, the newest go.
         assert_eq!(
-            notice(english, &["big.png"], true, false),
+            notice(english, &["big.png"], false),
             "The request was too large for the provider, so the newest image, big.png, is left out of this chat from now on."
         );
         assert_eq!(
-            notice(english, &["left.png", "right.png"], true, false),
+            notice(english, &["left.png", "right.png"], false),
             "The request was too large for the provider, so the newest images, left.png, right.png, are left out of this chat from now on."
         );
         assert_eq!(
-            notice(crate::locale::Language::German, &["a.png"], false, true),
+            notice(crate::locale::Language::German, &["a.png"], true),
             "Die Anfrage war zu groß für den Anbieter. Daher bleibt das älteste Bild, a.png, in diesem Chat ab jetzt außen vor."
         );
     }
@@ -2435,13 +2491,11 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
             ItemData::MediaOmitted {
                 names,
                 reason,
-                guessed,
                 oldest,
-                too_large,
                 ..
             } => {
-                let notice =
-                    media_omitted_notice(app.language, names, *guessed, *oldest, *too_large);
+                let refusal = Refusal::of(&item.data);
+                let notice = media_omitted_notice(app.language, names, refusal, *oldest);
                 for (index, wrapped) in textwrap::wrap(&notice, width.saturating_sub(4).max(10))
                     .into_iter()
                     .enumerate()

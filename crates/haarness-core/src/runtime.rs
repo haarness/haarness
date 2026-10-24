@@ -8179,6 +8179,11 @@ impl RunnerTask {
             RefusedImages::Oldest(ImageVolume::Bytes)
                 | RefusedImages::Newest(Some(ImageVolume::Bytes))
         );
+        let too_many = matches!(
+            choice,
+            RefusedImages::Oldest(ImageVolume::Count)
+                | RefusedImages::Newest(Some(ImageVolume::Count))
+        );
         let mut fingerprints = Vec::new();
         let mut names = Vec::new();
         for image in refused {
@@ -8205,6 +8210,7 @@ impl RunnerTask {
             guessed,
             oldest,
             too_large,
+            too_many,
         })
         .await?;
         Ok(true)
@@ -16394,6 +16400,7 @@ mod tests {
                 guessed: false,
                 oldest: false,
                 too_large: false,
+                too_many: false,
             },
         ));
         let after = provider_messages(items.clone());

@@ -2545,6 +2545,8 @@
   "The request was too large for the provider, so the oldest {count} images are left out of this chat from now on.": "İstek sağlayıcı için fazla büyüktü; bu yüzden en eski {count} görsel bundan sonra bu sohbette dışarıda bırakılacak.",
   "The request was too large for the provider, so the newest image, {name}, is left out of this chat from now on.": "İstek sağlayıcı için fazla büyüktü; bu yüzden en yeni görsel, {name}, bundan sonra bu sohbette dışarıda bırakılacak.",
   "The request was too large for the provider, so the newest images, {names}, are left out of this chat from now on.": "İstek sağlayıcı için fazla büyüktü; bu yüzden en yeni görseller, {names}, bundan sonra bu sohbette dışarıda bırakılacak.",
+  "The request had too many images for the provider, so the newest image, {name}, is left out of this chat from now on.": "İstekte sağlayıcı için fazla görsel vardı; bu yüzden en yeni görsel, {name}, bundan sonra bu sohbette dışarıda bırakılacak.",
+  "The request had too many images for the provider, so the newest images, {names}, are left out of this chat from now on.": "İstekte sağlayıcı için fazla görsel vardı; bu yüzden en yeni görseller, {names}, bundan sonra bu sohbette dışarıda bırakılacak.",
   "{name} is not an image Haarness can read.": "{name}, Haarness'ın okuyabileceği bir görsel değil.",
   "This link could not be opened.": "Bu bağlantı açılamadı.",
   "Open a project to open links to its files.": "Dosyalarına giden bağlantıları açmak için bir proje açın.",

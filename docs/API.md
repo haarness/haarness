@@ -530,25 +530,26 @@ cut is logged as one `INFO` line of counts.
 When a provider still refuses an image (its type, size, pixels or count, or a
 request too large because of images), the runtime appends a `media_omitted`
 item to the thread with the SHA-256 `fingerprints` of the refused attachment
-sources, their display `names`, the provider's `reason`, `guessed`, `oldest`
-and `too_large`. Every later request of that thread, after restarts and in
-forks, sends a short note in place of those images, so the prompt stays stable
-for caching; the original attachments stay in their messages. When the provider
-names the image by its place in the request (Anthropic's
+sources, their display `names`, the provider's `reason`, `guessed`, `oldest`,
+`too_large` and `too_many`. Every later request of that thread, after restarts
+and in forks, sends a short note in place of those images, so the prompt stays
+stable for caching; the original attachments stay in their messages. When the
+provider names the image by its place in the request (Anthropic's
 `messages.N.content.M`) only that image is left out. A refusal of the request
-for how many images it carries ("too many images") or how large they make it
-(HTTP 413, Gemini's "Request payload size exceeds the limit", recorded with
-`too_large: true` whichever images it leaves out) leaves out the oldest half of
-them by that measure (`oldest: true`), so the newest images then reach the
-model. The turn's own images and those of the last message carrying any stay,
-and so does a file read again among them: the record leaves a source out
-everywhere. When those that stay hold more than half of the refused request by
-that measure, leaving out the others would not help, so the newest go instead
-and the older ones are kept. Any other refusal that names no image leaves out
-the newest images (`guessed: true`): what the last request added is the
-likeliest cause. A refusal before anything streamed is retried once per turn; a
-second refusal in the same turn fails it, and the next turn sends without the
-images. TUI and Desktop show the item as a notice.
+for how many images it carries ("too many images", recorded with
+`too_many: true`) or how large they make it (HTTP 413, Gemini's "Request
+payload size exceeds the limit", recorded with `too_large: true` whichever
+images it leaves out) leaves out the oldest half of them by that measure
+(`oldest: true`), so the newest images then reach the model. The turn's own
+images and those of the last message carrying any stay, and so does a file read
+again among them: the record leaves a source out everywhere. When those that
+stay hold more than half of the refused request by that measure, leaving out
+the others would not help, so the newest go instead and the older ones are
+kept. Any other refusal that names no image leaves out the newest images
+(`guessed: true`): what the last request added is the likeliest cause. A
+refusal before anything streamed is retried once per turn; a second refusal in
+the same turn fails it, and the next turn sends without the images. TUI and
+Desktop show the item as a notice.
 
 Ultracode is an additive, provider-neutral workflow mode. `Thread.ultracode`
 stores the standing session preference; `CreateThreadRequest.ultracode` and
