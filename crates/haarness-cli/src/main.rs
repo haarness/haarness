@@ -10280,35 +10280,40 @@ fn folder_snapshots_enabled(config: Option<&SnapshotsSection>) -> bool {
 /// Reclaim expired checkpoints once at startup and then hourly. Pruning is
 /// blocking SQLite work, so it runs on the blocking pool and never competes
 /// with the turn path; a failure is logged and retried on the next pass.
+/// `retention_days = 0` keeps every checkpoint, and the pass only removes
+/// what unfinished captures left.
 fn spawn_snapshot_retention(
     snapshots: haarness_store::SqliteSnapshotFolders,
     config: &SnapshotsSection,
-) {
-    if config.retention_days == 0 {
-        return;
-    }
-    let retention = chrono::Duration::days(i64::from(config.retention_days));
+) -> tokio::task::JoinHandle<()> {
+    let retention = (config.retention_days > 0)
+        .then(|| chrono::Duration::days(i64::from(config.retention_days)));
     let keep = config.keep_per_thread;
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
         loop {
             ticker.tick().await;
             let snapshots = snapshots.clone();
-            let report =
-                tokio::task::spawn_blocking(move || snapshots.prune(retention, keep)).await;
+            let report = tokio::task::spawn_blocking(move || match retention {
+                Some(retention) => snapshots.prune(retention, keep),
+                None => snapshots.sweep(),
+            })
+            .await;
             match report {
-                Ok(Ok(report)) if report.snapshots > 0 || report.abandoned > 0 => tracing::info!(
-                    snapshots = report.snapshots,
-                    blobs = report.blobs,
-                    abandoned = report.abandoned,
-                    "pruned expired workspace checkpoints"
-                ),
+                Ok(Ok(report)) if report != haarness_store::PruneReport::default() => {
+                    tracing::info!(
+                        snapshots = report.snapshots,
+                        blobs = report.blobs,
+                        abandoned = report.abandoned,
+                        "pruned workspace checkpoints"
+                    );
+                }
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => tracing::warn!(%error, "snapshot retention pass failed"),
                 Err(error) => tracing::warn!(%error, "snapshot retention task panicked"),
             }
         }
-    });
+    })
 }
 
 fn load_config(paths: &Paths, workspace: &Path, trust: bool) -> Result<FileConfig> {
@@ -12864,6 +12869,69 @@ mod tests {
             true
         ));
         assert!(!super::folder_snapshots_enabled(Some(&configuration)));
+    }
+
+    #[tokio::test]
+    async fn the_retention_pass_runs_when_every_checkpoint_is_kept() {
+        use haarness_core::SnapshotStore;
+
+        let root =
+            std::env::temp_dir().join(format!("haarness-retention-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("ws");
+        fs::create_dir_all(&workspace).unwrap();
+        let database = root.join("haarness.db");
+        haarness_store::SqliteStore::open(&database).unwrap();
+        let snapshots =
+            haarness_store::SqliteSnapshotStore::open(&database, workspace.clone()).unwrap();
+        fs::write(workspace.join("kept.txt"), "kept\n").unwrap();
+        snapshots
+            .capture(haarness_protocol::ThreadId::new())
+            .await
+            .unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        // Expired, and no checkpoint is kept per chat.
+        connection
+            .execute(
+                "UPDATE snapshots SET created_at='2000-01-01T00:00:00+00:00'",
+                [],
+            )
+            .unwrap();
+        // A capture that fails at its last write leaves a blob no checkpoint names.
+        connection
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON snapshots \
+                 BEGIN SELECT RAISE(ABORT, 'no room'); END;",
+            )
+            .unwrap();
+        fs::write(workspace.join("failed.txt"), "only the failed capture's\n").unwrap();
+        snapshots
+            .capture(haarness_protocol::ThreadId::new())
+            .await
+            .unwrap_err();
+        let count = |table: &str| {
+            connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(count("snapshot_blobs"), 2);
+
+        let config = super::SnapshotsSection {
+            retention_days: 0,
+            keep_per_thread: 0,
+            ..Default::default()
+        };
+        let task = super::spawn_snapshot_retention(snapshots.folders(), &config);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while count("snapshot_blobs") > 1 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        task.abort();
+        assert_eq!(count("snapshot_blobs"), 1, "the failed capture's blob goes");
+        assert_eq!(count("snapshots"), 1, "every checkpoint stays, however old");
+        drop(connection);
+        let _ = fs::remove_dir_all(root);
     }
 
     use std::{ffi::OsString, fs, path::PathBuf, sync::Arc, time::Duration};
