@@ -297,13 +297,17 @@ export function Session() {
       if (path) paths.push(path);
       else refused++;
     }
-    const root = (connection?.workspace ?? "").replace(/\/+$/, "") + "/";
+    // In This computer a chat's files are those of its own folder (none
+    // before its first message).
+    const scope = app.fileScope();
+    const base = connection?.chatHome ? (app.chatFolder() ?? "") : (connection?.workspace ?? "");
+    const root = base.replace(/\/+$/, "") + "/";
     const written: string[] = [];
     for (const path of paths) {
       const mention =
         connection && root.length > 1 && path.startsWith(root)
           ? await window.haarness
-              .files<FileContent>(connection.id, "read", { path: path.slice(root.length) })
+              .files<FileContent>(connection.id, "read", { path: path.slice(root.length), ...scope })
               .then((file) => (file.encoding === "utf8" ? fileContext(file.path, file.content) : undefined))
               .catch(() => undefined)
           : undefined;

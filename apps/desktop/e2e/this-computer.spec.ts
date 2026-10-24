@@ -174,13 +174,14 @@ test("chats without a project: a ready first launch, a folder of their own on on
     join(first, "chart.png"),
     Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aQx8AAAAASUVORK5CYII=", "base64"),
   );
-  await send("See ![the chart](chart.png) and [the notes](notes.txt), not ![theirs](../other/chart.png)");
+  // A link in the folder that leads out of it is not followed either.
+  await writeFile(join(home, today(), "elsewhere.png"), await readFile(join(first, "chart.png")));
+  await symlink(join(home, today(), "elsewhere.png"), join(first, "sneaky.png"));
+  await send("See ![the chart](chart.png) and [the notes](notes.txt), not ![theirs](../other/chart.png) or ![sneaky](sneaky.png)");
   await settled(one!.id);
   const reply = page.locator(".transcript .markdown").filter({ hasText: "and the notes" }).last();
-  await expect(reply.locator("img.project-image-loaded")).toHaveAttribute(
-    "data-project-path",
-    today() + "/tool-bash-command-pwd/chart.png",
-  );
+  await expect(reply.locator("img.project-image-loaded")).toHaveAttribute("data-project-path", "chart.png");
+  await expect(reply.locator('.project-image[data-project-path="sneaky.png"]')).toBeVisible();
   await expect(reply.locator("img.project-image-loaded")).toHaveCount(1);
   await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
   await reply.getByRole("link", { name: "the notes", exact: true }).click();
@@ -249,6 +250,34 @@ test("chats without a project: a ready first launch, a folder of their own on on
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(() => readFile(join(first, "notes.txt"), "utf8")).toBe("written without a project and an unsaved line");
   await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
+  // Finding files finds the chat's own, however many its neighbours have,
+  // named from its folder: `@`, the Files panel and Search.
+  for (let index = 0; index < 60; index++) await writeFile(join(first, `match-other-${index}.txt`), "theirs\n");
+  await writeFile(join(second, "match-mine.txt"), "mine\n");
+  await rows().filter({ hasText: "Lisbon" }).click();
+  await composer().fill("@match");
+  const mentions = page.locator("#prompt-mentions").getByRole("option");
+  await expect(mentions.filter({ hasText: "match-mine.txt" })).toHaveCount(1);
+  await expect(mentions.filter({ hasText: "match-other" })).toHaveCount(0);
+  await mentions.filter({ hasText: "match-mine.txt" }).click();
+  await expect(page.getByLabel("Attached context", { exact: true })).toContainText("match-mine.txt");
+  await expect(page.getByLabel("Attached context", { exact: true })).not.toContainText(today());
+  // Typed paths still complete from this computer's home folder.
+  await writeFile(join(temporary, "home", "home-note.txt"), "x");
+  await composer().fill("@~/");
+  await expect(page.locator("#prompt-mentions").getByRole("option").filter({ hasText: "home-note.txt" })).toHaveCount(1);
+  await composer().fill("");
+  if (await page.getByRole("button", { name: "Show side panel", exact: true }).isVisible())
+    await page.getByRole("button", { name: "Show side panel", exact: true }).click();
+  await page.getByRole("textbox", { name: "Find files" }).fill("match");
+  await expect(page.locator(".file-tree .file-entry")).toHaveText(["match-mine.txt"]);
+  await page.getByRole("textbox", { name: "Find files" }).fill("");
+  await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("match-mine");
+  await expect(page.getByRole("option").filter({ hasText: "match-mine.txt" })).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await rows().filter({ hasText: "pwd" }).click();
   // A chat whose folder a link stands in for (here, to the first chat's)
   // offers no workflows of its own, and says nothing about it.
   await rows().filter({ hasText: "pwd" }).click();

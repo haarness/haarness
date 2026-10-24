@@ -1224,6 +1224,11 @@ function installHandlers() {
         while (held?.has(String(input.path))) await new Promise((done) => setTimeout(done, 20));
       }
       const url = new URL(item.url + "/v1/files/" + spec[1]);
+      // A chat of This computer asks for its own folder's files: the chat
+      // goes in the URL for every action, and paths are its folder's.
+      const { threadId, ...fields } = input;
+      if (threadId !== undefined) url.searchParams.set("threadId", z.string().min(1).max(200).parse(threadId));
+      input = fields;
       if (spec[0] === "GET")
         for (const [key, value] of Object.entries(input))
           url.searchParams.set(key, String(value));

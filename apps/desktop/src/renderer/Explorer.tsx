@@ -37,21 +37,18 @@ export function Explorer() {
   const pendingOpens = new Map<string, Promise<void>>();
   const pendingSaves = new Map<EditorSession, Promise<void>>();
   const file = () => tabs().find((item) => item.path === selected());
-  /** The folder the panel shows: a chat without a project's own folder
-   * (relative to the chat home), or the whole project (""). */
-  const root = () => app.chatDirectory() ?? "";
-  /** A new chat without a project has no folder until its first message. */
-  const unfoldered = () => !!app.state.connection?.chatHome && !root();
-  /** A path in the shown folder, as the server names it. */
-  const inRoot = (path: string) => (root() ? root() + "/" + path : path);
-  /** A path a chat names, as the server names it: a chat without a project
-   * names its files from its own folder (a reply's link, a tool's file),
-   * while a preview or a search names them from the chat home. */
-  const requested = (path: string) =>
-    root() && path && path !== root() && !path.startsWith(root() + "/") ? inRoot(path) : path;
-  /** A path as the reader sees it: from the shown folder. */
-  const shown = (path: string) =>
-    root() && path.startsWith(root() + "/") ? path.slice(root().length + 1) : path;
+  /** The folder the panel shows: a chat of This computer's own folder,
+   * whose files the server names from it (`fileScope`), or the project's. */
+  const place = () => app.chatFolder() ?? "";
+  /** A chat of This computer before its first message has no folder yet. */
+  const unfoldered = app.unfoldered;
+  /** What every file request carries: the chat its folder belongs to. */
+  const scope = app.fileScope;
+  /** A path as the server names it for previews: from the chat home. */
+  const forPreview = (path: string) => {
+    const folder = app.chatDirectory();
+    return folder ? folder + "/" + path : path;
+  };
   const [selection, setSelection] = createSignal({ from: 0, to: 0 });
   /** The source lines selected in a Markdown file's Preview. */
   const [previewSelection, setPreviewSelection] = createSignal<SourceRange>();
@@ -190,14 +187,14 @@ export function Explorer() {
    * connection starts afresh (leaving one with unsaved edits asks first).
    */
   const kept = new Map<string, { tabs: OpenFile[]; selected: string; edits: Record<string, string>; expanded: ReadonlySet<string> }>();
-  let place = { connection: "", folder: "" };
+  let shownPlace = { connection: "", folder: "" };
   createEffect(
     on(
-      () => [app.state.connection?.id ?? "", root()] as const,
+      () => [app.state.connection?.id ?? "", place()] as const,
       ([connection, folder]) => {
-        const before = place;
+        const before = shownPlace;
         if (before.connection === connection && before.folder === folder) return;
-        place = { connection, folder };
+        shownPlace = { connection, folder };
         if (before.connection !== connection) kept.clear();
         else if (before.folder !== folder && tabs().length)
           kept.set(before.folder, { tabs: tabs(), selected: selected(), edits: edits(), expanded: expanded() });
@@ -236,9 +233,9 @@ export function Explorer() {
     timer = setTimeout(
       () =>
         void window.haarness
-          .api<string[]>(connection, "searchFiles", [{ q, limit: 100 }])
+          .api<string[]>(connection, "searchFiles", [{ q, limit: 100, ...scope() }])
           .then((items) => {
-            if (current === searchGeneration) setResults(app.chatFiles(items));
+            if (current === searchGeneration) setResults(items);
           })
           .catch((error) => {
             if (current === searchGeneration) app.set("error", String(error));
@@ -311,7 +308,7 @@ export function Explorer() {
     if (!id || !value || value.pin || pendingSaves.has(value.editor)) return;
     const generation = workspaceGeneration;
     const disk = await window.haarness
-      .files<FileContent>(id, "read", { path })
+      .files<FileContent>(id, "read", { path, ...scope() })
       .catch(() => undefined);
     const current = tabs().find((item) => item.editor === value.editor);
     // A save or reload that finished meanwhile knows better than this read.
@@ -365,7 +362,7 @@ export function Explorer() {
       const key = JSON.stringify([path, options?.version ?? "current", options?.preview ? intent : 0]);
       let pending = pendingOpens.get(key);
       if (!pending) {
-        pending = window.haarness.files<FileContent>(id, options?.version ? "preview" : "read", { path, ...(options?.version ? { hash: options.version } : {}) })
+        pending = window.haarness.files<FileContent>(id, options?.version ? "preview" : "read", options?.version ? { path: forPreview(path), hash: options.version } : { path, ...scope() })
           .then((value) => {
             if (generation !== workspaceGeneration || (options?.preview && intent !== selectionGeneration)) return;
             if (options?.preview && dirty(path)) {
@@ -423,7 +420,7 @@ export function Explorer() {
     const generation = workspaceGeneration;
     const content = edits()[value.path] ?? value.content;
     const pending = window.haarness.files<FileContent>(id, "write", {
-      path: value.path, content, revision: value.revision,
+      path: value.path, content, revision: value.revision, ...scope(),
     }).then((result) => {
       if (generation !== workspaceGeneration ||
           !tabs().some((item) => item.editor === value.editor)) return;
@@ -443,7 +440,7 @@ export function Explorer() {
       // Someone else wrote the file since it was read. Offer the choice
       // rather than an error that only says to reload.
       const disk = await window.haarness
-        .files<FileContent>(id, "read", { path: value.path })
+        .files<FileContent>(id, "read", { path: value.path, ...scope() })
         .catch(() => undefined);
       if (generation !== workspaceGeneration) return;
       if (disk && disk.revision !== value.revision) return diverged(value.editor, disk);
@@ -459,7 +456,10 @@ export function Explorer() {
     if (!request) return;
     app.set("fileRequest", null);
     if (request.connection !== app.state.connection?.id || (request.thread && request.thread !== app.state.selected)) return;
-    const path = requested(request.path);
+    // A preview names its file from the chat home; the panel, from the
+    // chat's own folder.
+    const path = request.fromHome ? app.fromChatHome(request.path) : request.path;
+    if (path === undefined) return;
     void app.run(() =>
       request.action
         ? create(request.action === "folder")
@@ -491,7 +491,7 @@ export function Explorer() {
       await open(path);
     } catch (error) {
       const folder = await window.haarness
-        .files(id, "list", { path })
+        .files(id, "list", { path, ...scope() })
         .then(() => true, () => false);
       if (generation !== workspaceGeneration) return;
       if (folder) return reveal(path + "/");
@@ -616,15 +616,15 @@ export function Explorer() {
       onSubmit: async (input) => {
         if (generation !== workspaceGeneration) throw Error(t("The working folder changed. Close this dialog and try again."));
         if (directory)
-          await window.haarness.files(id, "action", { action: "mkdir", path: inRoot(input.path) });
+          await window.haarness.files(id, "action", { action: "mkdir", path: input.path, ...scope() });
         else
-          await window.haarness.files(id, "write", { path: inRoot(input.path), content: "", revision: emptyHash });
+          await window.haarness.files(id, "write", { path: input.path, content: "", revision: emptyHash, ...scope() });
       },
     });
     if (!input || generation !== workspaceGeneration) return;
-    reveal(inRoot(input.path));
+    reveal(input.path);
     setVersion((v) => v + 1);
-    if (!directory) await open(inRoot(input.path));
+    if (!directory) await open(input.path);
   }
   async function rename() {
     const value = file();
@@ -632,15 +632,14 @@ export function Explorer() {
     const generation = workspaceGeneration;
     if (!value || !id) return;
     await ask(t("Rename file"), [
-      { name: "target", label: t("New path"), value: shown(value.path), required: true },
+      { name: "target", label: t("New path"), value: value.path, required: true },
     ], {
-      onSubmit: async (raw) => {
+      onSubmit: async (input) => {
         if (generation !== workspaceGeneration) throw Error(t("The working folder changed. Close this dialog and try again."));
-        const input = { target: inRoot(raw.target) };
         // A rename must not race a pending write to the old path.
         await pendingSaves.get(value.editor);
         await window.haarness.files(id, "action", {
-          action: "rename", path: value.path, target: input.target,
+          action: "rename", path: value.path, target: input.target, ...scope(),
         });
         if (generation !== workspaceGeneration) return;
         setTabs((items) => items.map((item) => item.editor === value.editor
@@ -662,7 +661,7 @@ export function Explorer() {
     const value = file(), id = app.state.connection?.id;
     const generation = workspaceGeneration;
     if (!value || !id) return;
-    const disk = await window.haarness.files<FileContent>(id, "read", { path: value.path });
+    const disk = await window.haarness.files<FileContent>(id, "read", { path: value.path, ...scope() });
     if (generation !== workspaceGeneration) return;
     backToEditor();
     adopt(value.editor, disk);
@@ -679,8 +678,8 @@ export function Explorer() {
     const generation = workspaceGeneration;
     const intent = selectionGeneration;
     if (!value?.pin || !id || !await confirm(t("Restore preview version?"), t("The current file is backed up before this version replaces it."), { submit: t("Restore version") })) return;
-    const current = await window.haarness.files<FileContent>(id, "read", { path: value.path }).catch(() => undefined);
-    await window.haarness.files(id, "restore", { path: value.path, hash: value.pin, revision: current?.revision ?? emptyHash });
+    const current = await window.haarness.files<FileContent>(id, "read", { path: value.path, ...scope() }).catch(() => undefined);
+    await window.haarness.files(id, "restore", { path: forPreview(value.path), hash: value.pin, revision: current?.revision ?? emptyHash });
     if (generation === workspaceGeneration && intent === selectionGeneration) await open(value.path, { preview: true });
   }
   async function remove() {
@@ -690,7 +689,7 @@ export function Explorer() {
     if (!value || !id || !(await confirm(t("Delete this file?"), t("{path} will be deleted from the workspace.", { path: value.path }), { submit: t("Delete file"), danger: true }))) return;
     await pendingSaves.get(value.editor);
     if (generation !== workspaceGeneration) return;
-    await window.haarness.files(id, "action", { action: "delete", path: value.path, confirm: true });
+    await window.haarness.files(id, "action", { action: "delete", path: value.path, confirm: true, ...scope() });
     if (generation !== workspaceGeneration) return;
     setEdits((items) => {
       const next = { ...items };
@@ -740,7 +739,7 @@ export function Explorer() {
             fallback={
               <Show when={!unfoldered()}>
               <Tree
-                path={root()}
+                path=""
                 version={version()}
                 hidden={true}
                 selected={selected()}
@@ -755,11 +754,11 @@ export function Explorer() {
               {(path) => (
                 <button
                   class="file-entry"
-                  title={shown(path)}
+                  title={path}
                   onClick={() => app.run(() => open(path))}
                 >
                   <Icon name="file" size="sm" />
-                  <span>{shown(path)}</span>
+                  <span>{path}</span>
                 </button>
               )}
             </For>
@@ -845,7 +844,10 @@ export function Explorer() {
                         app.run(() =>
                           window.haarness.reveal(
                             app.state.connection!.id,
-                            file()!.path,
+                            // From the chat's own folder in This computer.
+                            app.chatFolder()
+                              ? app.chatFolder() + "/" + file()!.path
+                              : file()!.path,
                           ),
                         )
                       }
@@ -1007,7 +1009,7 @@ function Tree(props: {
       .files<{ entries: FileEntry[]; truncated: boolean }>(
         app.state.connection!.id,
         "list",
-        { path: props.path, hidden: props.hidden },
+        { path: props.path, hidden: props.hidden, ...app.fileScope() },
       )
       .then((result) => {
         if (id !== generation) return;

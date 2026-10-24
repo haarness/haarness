@@ -163,9 +163,6 @@ export function createMarkdownDOM(
     project?: {
       /** The project's folders, absolute (`projectRoots`). */
       root: () => readonly string[];
-      /** A chat's own folder, relative to the project: where relative
-       * images start, and which none may leave. */
-      within?: () => string | undefined;
       shown: (path: string) => ShownImage | undefined;
       labels: () => ProjectImageLabels;
     };
@@ -202,7 +199,6 @@ export function createMarkdownDOM(
           (image) => written.get(image) ?? image.getAttribute("src"),
           project.shown,
           project.labels(),
-          project.within?.(),
         );
       if (images) holdRemoteImages(fragment, images.loaded, images.labels(), images.loading);
       nodes(host, between(block), Array.from(fragment.childNodes), block.end);

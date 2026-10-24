@@ -403,7 +403,8 @@ function ReadImage(props: { image: { data: string } | { path: string; size?: num
   const store = useApp();
   const image = props.image;
   const project = imageProject(store.state);
-  const connection = project?.connection;
+  /** What the project's images are remembered under (in This computer, the chat's folder). */
+  const connection = project?.scope;
   /** The file as the read saw it: one of another size is not shown. */
   const same = (shown: ShownImage | undefined) =>
     shown?.data !== undefined && ("data" in image || image.size === undefined || shown.size === image.size)
@@ -414,7 +415,7 @@ function ReadImage(props: { image: { data: string } | { path: string; size?: num
   if ("path" in image && project) {
     // A remembered picture of another size may be from before the read, or
     // after it: the file is read again at once, as if it had been written.
-    if (remembered?.data !== undefined && !same(remembered)) projectFileWritten(project.connection, image.path);
+    if (remembered?.data !== undefined && !same(remembered)) projectFileWritten(project.scope, image.path);
     const reading = new AbortController();
     const off = onProjectImageSettled((scope, path, shown) => {
       // A picture the row shows stays when its file changes or goes.

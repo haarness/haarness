@@ -102,7 +102,8 @@ we work on?" without a project and "…in {project}?" with one. For a chat
 without a project the Files panel shows its own folder, a new terminal opens
 there (each chat has its own terminals), `@` and Search find the files in it,
 a reply's relative image or file link (`![](chart.png)`) starts there and may
-not leave it, `/` offers the workflows in its `.haarness/workflows` (and no
+not leave it (every file read and write asks the server for that chat's folder,
+which names files from it and follows no link out of it), `/` offers the workflows in its `.haarness/workflows` (and no
 other chat's), and Review treats it as a folder without Git. Before its first message there
 is no folder yet, and those panels say so. Search lists these chats with
 **This computer** and the chat's folder.

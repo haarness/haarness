@@ -167,6 +167,9 @@ interface State extends Live {
     /** The agent's preview tool opened it, not the person: it does not come
      * in front of a side chat that shares its place. */
     automatic?: boolean;
+    /** `path` is named from the chat home, as previews name it, rather
+     * than from the chat's own folder. */
+    fromHome?: boolean;
     line?: number;
   } | null;
   terminal: boolean;
@@ -1126,12 +1129,21 @@ function createApp(saved?: Preferences) {
     state.connection?.chatHome
       ? chatFolderPath(state.connection.workspace, chatFolder())
       : undefined;
-  /** The files of the open chat among `paths` found in its workspace: in
-   * This computer only those of its own folder (none before it has one). */
-  const chatFiles = (paths: string[]) => {
-    if (!state.connection?.chatHome) return paths;
-    const root = chatDirectory();
-    return root ? paths.filter((path) => path.startsWith(root + "/")) : [];
+  /** How the open chat's files are asked for: a chat of This computer asks
+   * for its own folder's (the server then names them from that folder, and
+   * keeps every read and write inside it), any other chat for its project's. */
+  const fileScope = (): { threadId?: string } =>
+    state.connection?.chatHome && chatFolder() ? { threadId: state.selected } : {};
+  /** A chat of This computer whose folder is not known yet (its new chat,
+   * before the first message): it has no files to show or open. */
+  const unfoldered = () => !!state.connection?.chatHome && !chatFolder();
+  /** A path the server names from the chat home (a preview, say) as the
+   * open chat names it: from its own folder; undefined outside it. */
+  const fromChatHome = (path: string) => {
+    if (!state.connection?.chatHome) return path;
+    const folder = chatDirectory();
+    if (!folder) return undefined;
+    return path.startsWith(folder + "/") ? path.slice(folder.length + 1) : undefined;
   };
 
   async function clearWorkspace(server: string) {
@@ -2449,7 +2461,7 @@ function createApp(saved?: Preferences) {
       const data = entry.data;
       if (data?.type === "tool_result" && data.name === "preview" && !data.is_error) {
         const info = previewInfo(data.metadata);
-        if (info) set("fileRequest", { connection: state.connection!.id, path: info.path, mode: info.mode, thread: state.selected, preview: true, automatic: true, sequence: envelope.eventId });
+        if (info) set("fileRequest", { connection: state.connection!.id, path: info.path, mode: info.mode, thread: state.selected, preview: true, automatic: true, fromHome: true, sequence: envelope.eventId });
       }
     }
 
@@ -2544,7 +2556,9 @@ function createApp(saved?: Preferences) {
     retryOpening,
     chatHomeLocation,
     composerShown,
-    chatFiles,
+    fileScope,
+    unfoldered,
+    fromChatHome,
     startFolderlessChat,
     servers,
     currentServer,
