@@ -14292,7 +14292,9 @@ fn resolved_pattern(workspace: &Path, target: &str, resolved: &Path) -> Option<S
     let root = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
-    let given = Path::new(target);
+    // `~/notes.txt` names the file in the home folder, which leads nowhere else.
+    let expanded = crate::permissions::expand_home(target);
+    let given = Path::new(expanded.as_ref());
     // `Path` equality ignores `.` components but keeps `..`, so a target
     // with `..` always gets its resolved form checked too.
     let named = if given.is_absolute() {
@@ -16881,6 +16883,13 @@ mod tests {
                 plans[0].external_paths
             );
             assert!(plans[0].resolved.is_empty(), "{tool}");
+            // The tool's own ask names the path once, as written: hooks are
+            // asked once, the card shows no "leads to", and a refusal
+            // suggests one rule.
+            let target = arguments["path"].as_str().unwrap();
+            assert_eq!(plans.len(), 2, "{tool}");
+            assert_eq!(plans[1].patterns, vec![target.to_owned()], "{tool}");
+            assert!(plans[1].resolved.is_empty(), "{tool}");
         }
         std::fs::remove_dir_all(workspace).unwrap();
     }

@@ -587,7 +587,8 @@ impl PermissionEngine {
             .split_once(':')
             .filter(|(permission, _)| *permission == "edit")
             .map(|(_, target)| target)
-            .filter(|target| is_config_path(Path::new(target)))
+            // `~/.config/haarness/config.toml` is the file in the home folder.
+            .filter(|target| is_config_path(Path::new(expand_home(target).as_ref())))
         {
             let name = Path::new(target)
                 .file_name()
@@ -1004,7 +1005,38 @@ fn rule(pattern: &str, decision: PermissionDecision) -> PermissionRule {
 /// The folder a leading `~` names, for tool paths and rules alike, as shell
 /// readings take it: `HOME`, else `USERPROFILE`.
 fn home_folder() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = TEST_HOME.with(|home| home.borrow().clone()) {
+        return Some(home);
+    }
     haarness_protocol::home_dir()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The home folder a test gives its own thread ([`TestHome`]), so a test
+    /// can put a project inside a home folder without changing the
+    /// environment every test shares.
+    static TEST_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While it lives, `~` on this thread names `home`.
+#[cfg(test)]
+pub(crate) struct TestHome;
+
+#[cfg(test)]
+impl TestHome {
+    pub(crate) fn set(home: &Path) -> Self {
+        TEST_HOME.with(|test| *test.borrow_mut() = Some(home.to_path_buf()));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestHome {
+    fn drop(&mut self) {
+        TEST_HOME.with(|test| *test.borrow_mut() = None);
+    }
 }
 
 /// A tool path with a leading `~` read as a shell reads it: `~` alone and
@@ -1880,11 +1912,59 @@ mod tests {
             engine.evaluate("read:./~/.ssh/id_rsa"),
             PermissionDecision::Allow
         );
-        if let Ok(inside) = workspace.strip_prefix(&real_home) {
-            let spelled = format!("read:~/{}/secrets/key", inside.display());
-            assert_eq!(engine.evaluate(&spelled), PermissionDecision::Deny);
-        }
         std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    /// A project in the home folder, as most are: `~/project/…` is a
+    /// project file for its rules, and Haarness's own configuration in the
+    /// home folder asks for an edit written with `~` too.
+    #[test]
+    fn a_project_file_written_from_the_home_folder_meets_the_project_rules() {
+        let root = std::env::temp_dir()
+            .join(format!("haarness-tilde-home-{}", uuid::Uuid::now_v7()))
+            .join("home");
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("secrets")).unwrap();
+        let home = root.canonicalize().unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let _home = TestHome::set(&home);
+        assert_eq!(
+            resolve_permission_path(&workspace, "~/project/secrets/key"),
+            workspace.join("secrets/key")
+        );
+        assert!(names_inside(&workspace, "~/project/secrets/key"));
+        let mut engine = PermissionEngine::build_defaults();
+        engine.add_rule(rule("read:secrets/*", PermissionDecision::Deny));
+        engine.add_rule(rule("edit:~/notes/*", PermissionDecision::Deny));
+        engine.set_workspace(&workspace);
+        for operation in ["read:~/project/secrets/key", "read:secrets/key"] {
+            assert_eq!(
+                engine.evaluate(operation),
+                PermissionDecision::Deny,
+                "{operation}"
+            );
+        }
+        assert_eq!(
+            engine.evaluate("edit:~/notes/todo.md"),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            engine.evaluate(&format!("edit:{}/notes/todo.md", home.display())),
+            PermissionDecision::Deny
+        );
+        // The global configuration folder, named from a home folder that
+        // holds it.
+        if let Some(global) = global_config_dir()
+            && let (Some(parent), Some(name)) = (global.parent(), global.file_name())
+        {
+            drop(_home);
+            let _home = TestHome::set(parent);
+            let edit = format!("edit:~/{}/config.toml", name.to_string_lossy());
+            let evaluation = engine.evaluate_detailed(&edit);
+            assert_eq!(evaluation.decision, PermissionDecision::Ask, "{edit}");
+            assert!(evaluation.protected, "{edit}");
+        }
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
     #[test]
