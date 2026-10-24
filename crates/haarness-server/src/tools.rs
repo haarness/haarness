@@ -661,7 +661,8 @@ impl Tool for LanguageAwareTool {
             {
                 let language = Arc::clone(&self.language);
                 let cancel = context.cancel.clone();
-                tokio::spawn(async move { language.touch(&file, &cancel).await });
+                let root = context.workspace.clone();
+                tokio::spawn(async move { language.touch(&file, &root, &cancel).await });
             }
             return Ok(output);
         }
@@ -685,6 +686,7 @@ impl Tool for LanguageAwareTool {
             .language
             .process_files(
                 paths.iter().map(|(_, path)| path.clone()).collect(),
+                &context.workspace,
                 context.cancel.clone(),
             )
             .await;
@@ -760,7 +762,15 @@ impl Tool for LspTool {
         let character = required_u32(&arguments, "character")?.saturating_sub(1);
         let result = self
             .language
-            .query(operation, &file, line, character, None, &context.cancel)
+            .query(
+                operation,
+                &file,
+                &context.workspace,
+                line,
+                character,
+                None,
+                &context.cancel,
+            )
             .await
             .map_err(CoreError::Tool)?;
         Ok(ToolOutput {

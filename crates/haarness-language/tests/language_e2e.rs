@@ -94,7 +94,9 @@ async fn formats_diagnoses_and_queries_across_language_matrix() {
     for (name, contents) in samples {
         let path = workspace.0.join(name);
         tokio::fs::write(&path, contents).await.unwrap();
-        let report = service.process_file(path.clone(), cancel.clone()).await;
+        let report = service
+            .process_file(path.clone(), &workspace.0, cancel.clone())
+            .await;
         assert_eq!(report.formatted_by, ["mockfmt"]);
         assert_eq!(report.diagnostics.len(), 1, "{name}");
         assert_eq!(report.diagnostics[0].code.as_deref(), Some("mock-error"));
@@ -116,7 +118,7 @@ async fn formats_diagnoses_and_queries_across_language_matrix() {
         Operation::OutgoingCalls,
     ] {
         let result = service
-            .query(operation, &source, 0, 0, None, &cancel)
+            .query(operation, &source, &workspace.0, 0, 0, None, &cancel)
             .await
             .unwrap();
         assert_eq!(result["results"][0]["server"], "mock");
@@ -135,7 +137,7 @@ async fn global_disable_controls_prevent_processes_and_formatting() {
     tokio::fs::write(&source, "BADFMT BROKEN\n").await.unwrap();
     let service = service(&workspace.0, false);
     let report = service
-        .process_file(source.clone(), CancellationToken::new())
+        .process_file(source.clone(), &workspace.0, CancellationToken::new())
         .await;
     assert!(report.formatted_by.is_empty());
     assert!(report.diagnostics.is_empty());
@@ -220,7 +222,7 @@ async fn per_entry_disable_and_missing_commands_fail_open() {
     assert_eq!(service.formatter_status().len(), 1);
     assert_eq!(service.formatter_status()[0].status, "missing");
     let report = service
-        .process_file(source.clone(), CancellationToken::new())
+        .process_file(source.clone(), &workspace.0, CancellationToken::new())
         .await;
     assert!(report.formatted_by.is_empty());
     assert!(report.diagnostics.is_empty());
@@ -258,7 +260,7 @@ async fn per_server_timeouts_override_global_limits_and_remain_cancellable() {
     let cancel = CancellationToken::new();
     assert!(
         service
-            .query(Operation::Hover, &file, 0, 0, None, &cancel)
+            .query(Operation::Hover, &file, &workspace.0, 0, 0, None, &cancel)
             .await
             .is_ok()
     );
@@ -266,7 +268,15 @@ async fn per_server_timeouts_override_global_limits_and_remain_cancellable() {
     cancelled.cancel();
     assert!(
         service
-            .query(Operation::Hover, &file, 0, 0, None, &cancelled)
+            .query(
+                Operation::Hover,
+                &file,
+                &workspace.0,
+                0,
+                0,
+                None,
+                &cancelled
+            )
             .await
             .is_err()
     );
@@ -293,7 +303,7 @@ async fn idle_clients_are_reaped_and_restart_on_demand() {
     );
     let cancel = CancellationToken::new();
     service
-        .query(Operation::Hover, &file, 0, 0, None, &cancel)
+        .query(Operation::Hover, &file, &workspace.0, 0, 0, None, &cancel)
         .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -307,7 +317,7 @@ async fn idle_clients_are_reaped_and_restart_on_demand() {
     .await
     .unwrap();
     service
-        .query(Operation::Hover, &file, 0, 0, None, &cancel)
+        .query(Operation::Hover, &file, &workspace.0, 0, 0, None, &cancel)
         .await
         .unwrap();
     assert_eq!(service.status().await[0].status, "running");
@@ -342,11 +352,13 @@ async fn capacity_reaps_idle_clients_but_preserves_inflight_requests() {
         },
     ));
     let worker = service.clone();
+    let root = workspace.0.clone();
     let active = tokio::spawn(async move {
         worker
             .query(
                 Operation::Hover,
                 &first,
+                &root,
                 0,
                 0,
                 None,
@@ -369,6 +381,7 @@ async fn capacity_reaps_idle_clients_but_preserves_inflight_requests() {
             .query(
                 Operation::Hover,
                 &second,
+                &workspace.0,
                 0,
                 0,
                 None,
@@ -386,6 +399,7 @@ async fn capacity_reaps_idle_clients_but_preserves_inflight_requests() {
         .query(
             Operation::Hover,
             &second,
+            &workspace.0,
             0,
             0,
             None,
@@ -467,7 +481,7 @@ async fn language_servers_and_formatters_never_inherit_the_server_s_private_vari
         .await
         .unwrap();
     let report = service
-        .process_file(source.clone(), CancellationToken::new())
+        .process_file(source.clone(), &workspace.0, CancellationToken::new())
         .await;
     assert_eq!(report.formatted_by, ["mockfmt"]);
     assert_eq!(report.diagnostics.len(), 1);
@@ -481,4 +495,68 @@ async fn language_servers_and_formatters_never_inherit_the_server_s_private_vari
     );
     service.shutdown().await;
     println!("nothing private inherited");
+}
+
+#[tokio::test]
+async fn each_chat_folder_gets_its_own_language_server() {
+    let workspace = Workspace::new();
+    let root = workspace.0.canonicalize().unwrap();
+    let (a, b) = (root.join("2026-10-24/a"), root.join("2026-10-24/b"));
+    for folder in [&a, &b] {
+        std::fs::create_dir_all(folder).unwrap();
+        std::fs::write(folder.join("x.mock"), "entity one\n").unwrap();
+    }
+    let service = LanguageService::new(
+        root.clone(),
+        LspConfig {
+            builtins: false,
+            servers: BTreeMap::from([("mock".into(), server(&[".mock"]))]),
+            ..LspConfig::default()
+        },
+        FormatterConfig::default(),
+    );
+    let cancel = CancellationToken::new();
+    service
+        .query(Operation::Hover, &a.join("x.mock"), &a, 0, 0, None, &cancel)
+        .await
+        .unwrap();
+    // The server of folder b knows only b's files: a server shared with a
+    // would answer with a's file first, which is outside b.
+    let symbols = service
+        .query(
+            Operation::WorkspaceSymbols,
+            &b.join("x.mock"),
+            &b,
+            0,
+            0,
+            Some("entity"),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let places = symbols["results"][0]["result"].as_array().unwrap();
+    assert_eq!(places.len(), 1, "{symbols}");
+    assert!(
+        places[0]["uri"]
+            .as_str()
+            .unwrap()
+            .contains("2026-10-24/b/x.mock"),
+        "{symbols}"
+    );
+    // A folder outside the project is no root.
+    assert!(
+        service
+            .query(
+                Operation::Hover,
+                &a.join("x.mock"),
+                &std::env::temp_dir(),
+                0,
+                0,
+                None,
+                &cancel
+            )
+            .await
+            .is_err()
+    );
+    service.shutdown().await;
 }
