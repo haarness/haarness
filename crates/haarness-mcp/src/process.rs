@@ -222,7 +222,7 @@ fn descendants(snapshot: &str, root: i32) -> Vec<i32> {
             fields.next().and_then(|s| s.parse::<i32>().ok()),
         ) && fields.next().is_none()
             && pid > 1
-            && pid != std::process::id() as i32
+            && pid != std::process::id().cast_signed()
         {
             children.entry(parent).or_default().push(pid);
         }
@@ -332,7 +332,8 @@ mod tests {
         let mut snapshot =
             String::from("1 7000\n7000 7002\n7001 7000\n7002 7001\n9000 1\ninvalid\n");
         for pid in 10000..10150 {
-            snapshot.push_str(&format!("{pid} 7002\n"));
+            use std::fmt::Write as _;
+            let _ = writeln!(snapshot, "{pid} 7002");
         }
         let children = super::descendants(&snapshot, 7000);
         assert_eq!(children.len(), 152);

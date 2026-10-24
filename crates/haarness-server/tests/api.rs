@@ -2690,7 +2690,7 @@ return {{ workflow: "{name}", input: args.input }}
     ]));
     let mut config = haarness_core::RuntimeConfig::default();
     config.commands.push(haarness_protocol::CommandInfo {
-        execution: Default::default(),
+        execution: haarness_protocol::DefinitionExecution::default(),
         name: "DeMo".into(),
         description: "configured collision winner".into(),
         source: None,
@@ -2701,7 +2701,7 @@ return {{ workflow: "{name}", input: args.input }}
         plugin: None,
     });
     config.commands.push(haarness_protocol::CommandInfo {
-        execution: Default::default(),
+        execution: haarness_protocol::DefinitionExecution::default(),
         name: "prompt".into(),
         description: "configured prompt".into(),
         source: None,
@@ -2713,7 +2713,7 @@ return {{ workflow: "{name}", input: args.input }}
     });
     // Even a configured collision cannot replace the reserved manager.
     config.commands.push(haarness_protocol::CommandInfo {
-        execution: Default::default(),
+        execution: haarness_protocol::DefinitionExecution::default(),
         name: "WORKFLOW".into(),
         description: "must lose".into(),
         source: None,
@@ -10020,7 +10020,7 @@ async fn custom_command_expands_server_side_and_switches_agent() {
         {
             let mut config = haarness_core::RuntimeConfig::default();
             config.commands.push(haarness_protocol::CommandInfo {
-                execution: Default::default(),
+                execution: haarness_protocol::DefinitionExecution::default(),
                 name: "review".into(),
                 description: "Review something".into(),
                 source: None,
@@ -11983,7 +11983,7 @@ struct DeferredGate {
 impl Default for DeferredGate {
     fn default() -> Self {
         Self {
-            requests: Default::default(),
+            requests: Arc::default(),
             ready: Arc::new(tokio::sync::Semaphore::new(0)),
             release: Arc::new(tokio::sync::Semaphore::new(0)),
         }

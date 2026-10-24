@@ -549,9 +549,9 @@ fn extract(bytes: &[u8], root: &Path) -> Result<()> {
             "Invalid archive path"
         );
         ensure!(seen.insert(path.clone()), "Duplicate archive entry");
-        let mode = file.unix_mode().unwrap_or_default() & 0o170000;
+        let mode = file.unix_mode().unwrap_or_default() & 0o170_000;
         ensure!(
-            mode == 0 || mode == 0o100000 || mode == 0o040000,
+            mode == 0 || mode == 0o100_000 || mode == 0o040_000,
             "Links and special files are not allowed in marketplace archives"
         );
         total = total

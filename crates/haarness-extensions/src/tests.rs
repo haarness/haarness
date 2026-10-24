@@ -23,7 +23,7 @@ fn fixture(body: &str) -> (tempfile::TempDir, Config) {
 }
 fn context(workspace: &Path) -> ToolContext {
     ToolContext {
-        execution: Default::default(),
+        execution: haarness_core::ExecutionSettings::default(),
         thread_id: ThreadId::new(),
         turn_id: TurnId::new(),
         workspace: workspace.to_path_buf(),

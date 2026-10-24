@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 /// legacy `OPENAI_COMPATIBLE_*` environment configuration, config-declared
 /// `[providers.<id>]` entries, built-in presets (Groq, Mistral, …), and
 /// auto-detected local runtimes (Ollama, LM Studio).
+#[allow(clippy::struct_excessive_bools)] // independent capabilities of one endpoint
 pub struct OpenAiCompatibleProvider {
     client: reqwest::Client,
     id: String,
@@ -53,6 +54,7 @@ pub struct OpenAiCompatibleProvider {
 
 /// Declarative description of a compatible endpoint.
 #[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)] // independent capabilities of one endpoint
 pub struct CompatibleInstance {
     pub id: String,
     pub name: String,
@@ -598,10 +600,10 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
             | "deepseek-v4-flash-vision-exp"
             | "deepseek-v4-pro",
         ) => {
-            info.display_name = if info.id != "deepseek-v4-pro" {
-                "DeepSeek V4.1 Flash".into()
-            } else {
+            info.display_name = if info.id == "deepseek-v4-pro" {
                 "DeepSeek V4 Pro".into()
+            } else {
+                "DeepSeek V4.1 Flash".into()
             };
             info.reasoning = true;
             info.context_window = Some(1_000_000);
@@ -991,9 +993,10 @@ fn known_reasoning_effort_model(provider: &str, model: &str) -> bool {
 
 fn known_reasoning_efforts(provider: &str, model: &str) -> Vec<&'static str> {
     match (provider, model) {
-        ("groq", "openai/gpt-oss-20b" | "openai/gpt-oss-120b") => vec!["low", "medium", "high"],
+        ("groq", "openai/gpt-oss-20b" | "openai/gpt-oss-120b") | ("xai", "grok-4.5") => {
+            vec!["low", "medium", "high"]
+        }
         ("xai", "grok-4.6" | "grok-4.7") => vec!["low", "medium", "high", "xhigh"],
-        ("xai", "grok-4.5") => vec!["low", "medium", "high"],
         (
             "deepseek",
             "deepseek-flash"
@@ -1612,7 +1615,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 ReasoningReplay::Never => {}
             }
             if !mistral_content.is_empty() { provider_metadata["mistral_content"] = json!(mistral_content); }
-            if provider_metadata.as_object().is_some_and(|metadata| metadata.is_empty()) { provider_metadata = Value::Null; }
+            if provider_metadata.as_object().is_some_and(serde_json::Map::is_empty) { provider_metadata = Value::Null; }
             // Report usage before the tool calls, whose arguments may not parse.
             if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
                 yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens };

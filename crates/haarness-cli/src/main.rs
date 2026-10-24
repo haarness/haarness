@@ -1581,7 +1581,8 @@ async fn cli_main() -> Result<()> {
             "haarness.workspace.id" = %current_workspace.id,
         )
     };
-    let outcome = async {
+    // Boxed: every command's future lives in this one, which is too large for the stack.
+    let outcome = Box::pin(async {
         tracing::info!(
             version = env!("CARGO_PKG_VERSION"),
             // `build.rs`: `<sha>[-dirty]`, or `unknown` without this repository's git checkout.
@@ -1753,7 +1754,7 @@ async fn cli_main() -> Result<()> {
         Some(Command::Upgrade(args)) => upgrade::run(args),
         }
     }
-    .instrument(command_span)
+    .instrument(command_span))
     .await;
     // Returned from main, the error reaches only stderr, which a detached
     // server does not have and the TUI hides: the log keeps why it ended.

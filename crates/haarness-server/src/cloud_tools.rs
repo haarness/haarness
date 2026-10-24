@@ -198,7 +198,7 @@ impl Tool for CloudScheduleTool {
    "action":{"type":"string","enum":["list","get","create","update","pause","resume","run","history","delete"]},
    "id":{"type":"string","format":"uuid"},"sessionId":{"type":"string","format":"uuid"},"chatId":{"type":"string","format":"uuid"},
    "name":{"type":"string","minLength":1,"maxLength":200},"prompt":{"type":"string","minLength":1,"maxLength":32768},
-   "at":{"type":"string","format":"date-time"},"everySeconds":{"type":"integer","minimum":60,"maximum":31536000},
+   "at":{"type":"string","format":"date-time"},"everySeconds":{"type":"integer","minimum":60,"maximum":31_536_000},
    "version":{"type":"integer","minimum":1},"enabled":{"type":"boolean"},"cursor":{"type":"string","format":"uuid"},"limit":{"type":"integer","minimum":1,"maximum":100}
   }})
  }

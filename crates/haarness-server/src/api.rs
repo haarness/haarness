@@ -2548,22 +2548,26 @@ async fn queue_input(
     if let Some(running) = state.runtime.running_agent(id) {
         agents.push(Some(running));
     }
-    let response = admit(resources.is_empty(), async move {
-        let _reading = read_mentions(
-            &state,
-            &headers,
-            Mentioning {
-                chat: id,
-                request: request.request_id,
-                agents,
-            },
-            resources,
-            &mut request.text,
-            &mut request.attachments,
-        )
-        .await?;
-        Ok(state.runtime.queue_input(id, request).await?)
-    })
+    // Boxed: the admitted work is too large a future to keep on the stack.
+    let response = admit(
+        resources.is_empty(),
+        Box::pin(async move {
+            let _reading = read_mentions(
+                &state,
+                &headers,
+                Mentioning {
+                    chat: id,
+                    request: request.request_id,
+                    agents,
+                },
+                resources,
+                &mut request.text,
+                &mut request.attachments,
+            )
+            .await?;
+            Ok(state.runtime.queue_input(id, request).await?)
+        }),
+    )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(response)))
 }

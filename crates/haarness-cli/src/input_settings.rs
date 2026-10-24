@@ -281,7 +281,6 @@ pub(super) fn request(
                 request: json!({"action":"view","scope":scope}),
                 confirm: None,
             }],
-            ..ManagementView::default()
         })?);
     }
     Ok(result)
