@@ -63,7 +63,8 @@ pub enum WorkflowRootScope {
     Plugin,
     /// A chat's own folder (`.haarness/workflows` in it): the chat's own
     /// workflows, found for that chat whatever the project configuration
-    /// setting, as the chat could run their source inline anyway.
+    /// setting. Without project configuration they are trusted as inline
+    /// source is: portable ones run, native ones do not.
     Chat,
 }
 
@@ -427,6 +428,20 @@ impl WorkflowCatalog {
                 .canonicalize()
                 .unwrap_or_else(|_| root.path.clone());
             canonical == candidate || canonical.starts_with(candidate)
+        })
+    }
+
+    /// Whether `path` is one of a chat's own workflows (a [`WorkflowRootScope::Chat`] root).
+    #[must_use]
+    pub fn is_chat_path(&self, path: &Path) -> bool {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.roots.iter().any(|root| {
+            root.scope == WorkflowRootScope::Chat
+                && canonical.starts_with(
+                    root.path
+                        .canonicalize()
+                        .unwrap_or_else(|_| root.path.clone()),
+                )
         })
     }
 
@@ -1545,6 +1560,8 @@ return client.fetch(labels.fetch + prose)
         assert_eq!(for_chat.read_catalog_path(&path).unwrap().source, source);
         // The chat's own, not the project's: project configuration stays off.
         assert!(!for_chat.is_project_path(&path));
+        assert!(for_chat.is_chat_path(&path));
+        assert!(!catalog.is_chat_path(&path));
         assert!(for_chat.read_source("homes").is_err());
     }
 

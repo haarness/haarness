@@ -665,8 +665,12 @@ impl WorkflowCoordinator {
                 status_name(run.status)
             )));
         }
+        // Resumed with the catalog it started from, a chat's own included.
+        let catalog = self
+            .catalog_for(run.definition.launch_thread_id.or(run.thread_id))
+            .await;
         self.ensure_source_trusted(
-            &self.catalog(),
+            &catalog,
             run.definition.dialect,
             &run.definition.invocation,
             run.source_path.as_deref().map(Path::new),
@@ -780,6 +784,13 @@ impl WorkflowCoordinator {
         if project_source && dialect == ProtocolDialect::Native && !self.project_trusted {
             return Err(CoreError::PermissionDenied(format!(
                 "native project workflow {invocation} is disabled because project configuration is disabled"
+            )));
+        }
+        // A chat's own workflow is trusted as inline source is.
+        let chat_source = source_path.is_some_and(|path| catalog.is_chat_path(path));
+        if chat_source && dialect == ProtocolDialect::Native && !self.project_trusted {
+            return Err(CoreError::PermissionDenied(format!(
+                "native workflow {invocation} in this chat's folder is disabled because project configuration is disabled; use claude-portable source"
             )));
         }
         if source_path.is_none() && dialect == ProtocolDialect::Native && !self.project_trusted {
