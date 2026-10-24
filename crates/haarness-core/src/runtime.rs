@@ -946,17 +946,9 @@ fn is_provider_image_rejection(error: &CoreError, request_has_images: bool) -> b
                 .any(|marker| message.contains(marker)));
     // Too many bytes, unless the provider says it is the context that is
     // too long: compaction answers that one.
-    let oversized = [
-        "http 413",
-        "status 413",
-        "request entity too large",
-        "request too large",
-        "request_too_large",
-        "payload too large",
-        "maximum allowed number of bytes",
-    ]
-    .iter()
-    .any(|marker| message.contains(marker))
+    let oversized = OVERSIZED_REQUEST
+        .iter()
+        .any(|marker| message.contains(marker))
         && ![
             "context",
             "token",
@@ -977,6 +969,8 @@ struct SentImage {
     block: usize,
     nested: Option<usize>,
     source: String,
+    /// The base64 bytes the provider received for it.
+    bytes: usize,
 }
 
 fn sent_images(messages: &[ProviderMessage]) -> Vec<SentImage> {
@@ -1009,6 +1003,7 @@ fn sent_images(messages: &[ProviderMessage]) -> Vec<SentImage> {
                     block,
                     nested,
                     source: source.clone(),
+                    bytes: crate::attachments::sent_bytes(source),
                 });
             }
         }
@@ -1034,6 +1029,133 @@ fn refused_image<'a>(message: &str, sent: &'a [SentImage]) -> Option<&'a SentIma
             && image.block == block
             && (image.nested.is_none() || image.nested == nested)
     })
+}
+
+/// What a refusal of a request for its images measured: how many there
+/// were, or how many bytes they made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageVolume {
+    Count,
+    Bytes,
+}
+
+/// How the images a refusal leaves out were chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefusedImages {
+    /// The provider named the image.
+    Named,
+    /// The newest message's: what the last request added is the likeliest
+    /// cause. Says what a refusal of the whole request measured.
+    Newest(Option<ImageVolume>),
+    /// The oldest, for a request with too many images or bytes of them.
+    Oldest(ImageVolume),
+}
+
+/// The images a provider's refusal leaves out of the thread (see
+/// `omit_refused_images`), and how they were chosen.
+fn refused_images<'a>(
+    message: &str,
+    sent: &'a [SentImage],
+    current: &HashSet<String>,
+) -> (Vec<&'a SentImage>, RefusedImages) {
+    if let Some(image) = refused_image(message, sent) {
+        return (vec![image], RefusedImages::Named);
+    }
+    let volume = image_volume_refusal(message);
+    if let Some(volume) = volume {
+        let older = oldest_half(sent, current, volume);
+        if !older.is_empty() {
+            return (older, RefusedImages::Oldest(volume));
+        }
+    }
+    let newest = sent.iter().map(|image| image.message).max();
+    (
+        sent.iter()
+            .filter(|image| Some(image.message) == newest)
+            .collect(),
+        RefusedImages::Newest(volume),
+    )
+}
+
+/// The oldest images of a request, half of it by what the refusal measured
+/// (`volume`). The turn's own images (`current`) and those of the last
+/// message that carries any stay, and so does every copy of a source sent
+/// again among them, since the record leaves a source out everywhere. Empty
+/// when those that stay hold more than half the refused request by that
+/// measure: leaving out the others would not answer the refusal, so the
+/// newest go instead and the older ones are kept.
+fn oldest_half<'a>(
+    sent: &'a [SentImage],
+    current: &HashSet<String>,
+    volume: ImageVolume,
+) -> Vec<&'a SentImage> {
+    let measure = |image: &SentImage| match volume {
+        ImageVolume::Count => 1,
+        ImageVolume::Bytes => image.bytes,
+    };
+    let own = |image: &&SentImage| image.nested.is_none() && current.contains(&image.source);
+    let last = sent.iter().map(|image| image.message).max();
+    let stays = |image: &&SentImage| own(image) || Some(image.message) == last;
+    let total = sent.iter().map(measure).sum::<usize>();
+    let share = sent.iter().filter(stays).map(measure).sum::<usize>();
+    if share.saturating_mul(2) > total {
+        return Vec::new();
+    }
+    let staying = sent
+        .iter()
+        .filter(stays)
+        .map(|image| image.source.as_str())
+        .collect::<HashSet<_>>();
+    // Each source once, where it was last sent, oldest first.
+    let mut sources = Vec::new();
+    for image in sent.iter().rev() {
+        if !sources.contains(&image.source.as_str()) {
+            sources.push(image.source.as_str());
+        }
+    }
+    sources.reverse();
+    let mut kept = total;
+    let mut older = Vec::new();
+    for source in sources {
+        if kept.saturating_mul(2) <= total {
+            break;
+        }
+        if staying.contains(source) {
+            continue;
+        }
+        for image in sent.iter().filter(|image| image.source == source) {
+            older.push(image);
+            kept -= measure(image);
+        }
+    }
+    older
+}
+
+/// How providers say a request has too many bytes (Gemini with a 400).
+const OVERSIZED_REQUEST: [&str; 8] = [
+    "http 413",
+    "status 413",
+    "request entity too large",
+    "request too large",
+    "request_too_large",
+    "payload too large",
+    "maximum allowed number of bytes",
+    "payload size exceeds the limit",
+];
+
+/// An image refusal of the request for how many images it carries or how
+/// large they make it, rather than for one of them: leaving out any images
+/// answers it, and the oldest matter least. Says which it was.
+fn image_volume_refusal(message: &str) -> Option<ImageVolume> {
+    let message = message.to_ascii_lowercase();
+    let says = |markers: &[&str]| markers.iter().any(|marker| message.contains(marker));
+    if says(&["too many images", "maximum number of images"]) {
+        Some(ImageVolume::Count)
+    } else if says(&OVERSIZED_REQUEST) {
+        Some(ImageVolume::Bytes)
+    } else {
+        None
+    }
 }
 
 /// Keep transport envelopes in logs while giving the transcript a concise,
@@ -3008,12 +3130,17 @@ impl AgentRuntime {
             &self.memory_context.read(),
             None,
         );
-        let messages = crate::side_question::settled(provider_messages(items));
+        let (messages, mut origins) = provider_messages_with_origins(items);
+        let messages = crate::side_question::settled(messages);
+        origins.truncate(messages.len());
         let catalog = components.tools.list();
-        let prepared =
-            self.prepared_prompts
-                .lock()
-                .request(thread_id, turn_id, catalog.clone(), &messages);
+        let prepared = self.prepared_prompts.lock().request(
+            thread_id,
+            turn_id,
+            catalog.clone(),
+            &messages,
+            &origins,
+        );
         let (provider, mut prepared) = if let Some(prepared) = prepared {
             prepared
         } else {
@@ -3105,6 +3232,11 @@ impl AgentRuntime {
                 system.push_str(crate::side_question::LAZY_INSTRUCTIONS);
             }
             let mut messages = messages;
+            crate::image_budget::bound(
+                &mut messages,
+                &origins,
+                provider.image_limits(&thread.model),
+            );
             messages.extend(reminder.map(|content| ProviderMessage::Text {
                 role: "user".into(),
                 content,
@@ -8047,28 +8179,37 @@ impl RunnerTask {
     /// Leaves the images a provider refused out of this and every later
     /// request of the thread. The record is an item, so a restarted server,
     /// a fork and a replay all leave out the same images and the prompt stays
-    /// the same from one request to the next. A refusal that names no image
-    /// leaves out the newest ones: what the last request added is the
-    /// likeliest cause. False for any other error.
-    async fn omit_refused_images(&self, error: &CoreError, sent: &[SentImage]) -> CoreResult<bool> {
+    /// the same from one request to the next. A refusal of the request for
+    /// the number or size of its images leaves out the oldest half of them
+    /// by that measure (see `oldest_half`), so the newest reach the model.
+    /// Any other refusal that names no image, or one the turn's own images
+    /// (`current`) answer for, leaves out the newest ones: what the last
+    /// request added is the likeliest cause. False for any other error.
+    async fn omit_refused_images(
+        &self,
+        error: &CoreError,
+        sent: &[SentImage],
+        current: &HashSet<String>,
+    ) -> CoreResult<bool> {
         let CoreError::Provider(message) = error else {
             return Ok(false);
         };
         if !is_provider_image_rejection(error, !sent.is_empty()) {
             return Ok(false);
         }
-        let (refused, guessed) = match refused_image(message, sent) {
-            Some(image) => (vec![image], false),
-            None => {
-                let newest = sent.iter().map(|image| image.message).max();
-                (
-                    sent.iter()
-                        .filter(|image| Some(image.message) == newest)
-                        .collect(),
-                    true,
-                )
-            }
-        };
+        let (refused, choice) = refused_images(message, sent, current);
+        let guessed = matches!(choice, RefusedImages::Newest(_));
+        let oldest = matches!(choice, RefusedImages::Oldest(_));
+        let too_large = matches!(
+            choice,
+            RefusedImages::Oldest(ImageVolume::Bytes)
+                | RefusedImages::Newest(Some(ImageVolume::Bytes))
+        );
+        let too_many = matches!(
+            choice,
+            RefusedImages::Oldest(ImageVolume::Count)
+                | RefusedImages::Newest(Some(ImageVolume::Count))
+        );
         let mut fingerprints = Vec::new();
         let mut names = Vec::new();
         for image in refused {
@@ -8083,6 +8224,7 @@ impl RunnerTask {
             turn = %self.turn.id,
             images = fingerprints.len(),
             guessed,
+            oldest,
             %error,
             "provider refused an image; leaving it out"
         );
@@ -8092,6 +8234,9 @@ impl RunnerTask {
             names,
             reason,
             guessed,
+            oldest,
+            too_large,
+            too_many,
         })
         .await?;
         Ok(true)
@@ -8597,8 +8742,23 @@ impl RunnerTask {
                     self.skill_rules.lock().clear();
                     tool_rounds = 0;
                 }
-                let mut messages = provider_messages(items);
+                let current_attachments =
+                    crate::image_budget::turn_attachments(&items, Some(self.turn.id));
+                let (mut messages, origins) = provider_messages_with_origins(items);
                 let source_messages = messages.clone();
+                let image_limits = provider.image_limits(&model);
+                if let Some(cut) = crate::image_budget::bound(&mut messages, &origins, image_limits)
+                {
+                    info!(
+                        thread = %self.thread.id,
+                        turn = %self.turn.id,
+                        images = cut.images,
+                        removed = cut.removed,
+                        bytes = cut.bytes,
+                        kept = cut.kept,
+                        "oldest images left out to fit the provider's request limits"
+                    );
+                }
                 if recovering {
                     messages.push(ProviderMessage::Text { role: "user".into(), content:
                         "The previous provider response ended before completion. Continue from the saved partial response without repeating it. Completed tool results are already in the conversation; do not repeat those actions.".into() });
@@ -8879,7 +9039,10 @@ impl RunnerTask {
                     Ok(stream) => stream,
                     Err(error_value) => {
                         record_span_error(&provider_span, &error_value);
-                        if self.omit_refused_images(&error_value, &sent_images).await? {
+                        if self
+                            .omit_refused_images(&error_value, &sent_images, &current_attachments)
+                            .await?
+                        {
                             if !std::mem::replace(&mut image_retried, true) {
                                 continue 'provider_round;
                             }
@@ -8938,7 +9101,13 @@ impl RunnerTask {
                             // Providers check images before they answer, so a
                             // refusal arrives before anything was streamed.
                             if !saw_provider_event
-                                && self.omit_refused_images(&error_value, &sent_images).await?
+                                && self
+                                    .omit_refused_images(
+                                        &error_value,
+                                        &sent_images,
+                                        &current_attachments,
+                                    )
+                                    .await?
                             {
                                 if !std::mem::replace(&mut image_retried, true) {
                                     continue 'provider_round;
@@ -12870,6 +13039,14 @@ pub fn shorten_title(title: &str, limit: usize) -> String {
 }
 
 fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
+    provider_messages_with_origins(items).0
+}
+
+/// `provider_messages`, with where each message came from, for the image
+/// budget.
+fn provider_messages_with_origins(
+    items: Vec<Item>,
+) -> (Vec<ProviderMessage>, Vec<crate::image_budget::Origin>) {
     let omitted = omitted_media(&items);
     let compaction_sequence = items
         .iter()
@@ -12877,10 +13054,38 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
         .map(|item| item.sequence);
     let mut valid_calls = HashMap::<String, String>::new();
     let mut messages = Vec::new();
-    let mut deferred_queued = HashMap::<ItemId, ProviderMessage>::new();
+    let mut origins = Vec::new();
+    let mut deferred_queued =
+        HashMap::<ItemId, (ProviderMessage, crate::image_budget::Origin)>::new();
     let mut deferred_order = Vec::new();
+    // A forked chat's copied items carry no turn: each message the person
+    // wrote there (not a steer they queued) opens a group of its own, as its
+    // turn did in the parent.
+    let mut group = None;
     for item in provider_visible_items(&items) {
         let item_id = item.id;
+        if item.turn_id.is_none()
+            && matches!(
+                item.data,
+                ItemData::UserMessage {
+                    queued: false,
+                    synthetic: false,
+                    ..
+                }
+            )
+        {
+            group = Some(TurnId(item.id.0));
+        }
+        let mut origin = crate::image_budget::Origin {
+            turn: item.turn_id.or(group),
+            person: matches!(
+                item.data,
+                ItemData::UserMessage {
+                    synthetic: false,
+                    ..
+                }
+            ),
+        };
         let message = match item.data.clone() {
             // A blank message saved before turns refused one; Claude would
             // refuse it on every request.
@@ -12943,7 +13148,7 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                     // unconsumed message is appended after the current
                     // snapshot, preserving both tool adjacency and live steer.
                     deferred_order.push(item_id);
-                    deferred_queued.insert(item_id, message);
+                    deferred_queued.insert(item_id, (message, origin));
                     None
                 } else {
                     Some(message)
@@ -13008,19 +13213,26 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                     attachments,
                 }
             }),
-            ItemData::QueueConsumed { item_id } => deferred_queued.remove(&item_id),
+            ItemData::QueueConsumed { item_id } => {
+                deferred_queued.remove(&item_id).map(|(message, queued)| {
+                    origin = queued;
+                    message
+                })
+            }
             _ => None,
         };
         if let Some(message) = message {
             messages.push(message);
+            origins.push(origin);
         }
     }
     for item_id in deferred_order {
-        if let Some(message) = deferred_queued.remove(&item_id) {
+        if let Some((message, origin)) = deferred_queued.remove(&item_id) {
             messages.push(message);
+            origins.push(origin);
         }
     }
-    messages
+    (messages, origins)
 }
 
 /// Every attachment a provider refused earlier in the thread.
@@ -16532,6 +16744,9 @@ mod tests {
                 names: vec!["shot.png".into()],
                 reason: "image exceeds 5 MB maximum".into(),
                 guessed: false,
+                oldest: false,
+                too_large: false,
+                too_many: false,
             },
         ));
         let after = provider_messages(items.clone());
@@ -16569,6 +16784,7 @@ mod tests {
             "HTTP 400 Bad Request: Provided image is not valid.",
             "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes.",
             r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.1.image.source.base64: image exceeds 5 MB maximum"}}"#,
+            r#"HTTP 400 Bad Request: {"error":{"code":400,"message":"Request payload size exceeds the limit: 20971520 bytes.","status":"INVALID_ARGUMENT"}}"#,
         ] {
             assert!(refused(message), "{message}");
         }
@@ -16586,6 +16802,336 @@ mod tests {
             &CoreError::Provider("HTTP 413 Payload Too Large".into()),
             false
         ));
+    }
+
+    /// An image named `name` whose base64 is `bytes` long.
+    fn sized_image(name: &str, bytes: usize) -> String {
+        format!("data:image/png;name={name};base64,{}", "A".repeat(bytes))
+    }
+
+    fn shot_result(source: String) -> ProviderMessage {
+        ProviderMessage::ToolResult {
+            call_id: "shot".into(),
+            name: "screenshot".into(),
+            output: "Screenshot taken".into(),
+            is_error: false,
+            attachments: vec![source],
+        }
+    }
+
+    /// The names of the images a refusal of `messages` leaves out, and how
+    /// they were chosen.
+    fn left_out(
+        error: &str,
+        messages: &[ProviderMessage],
+        current: &[&str],
+    ) -> (Vec<String>, super::RefusedImages) {
+        let sent = super::sent_images(messages);
+        let current = current.iter().map(|source| (*source).to_owned()).collect();
+        let (images, choice) = super::refused_images(error, &sent, &current);
+        let names = images
+            .iter()
+            .map(|image| crate::attachments::display_name(&image.source))
+            .collect();
+        (names, choice)
+    }
+
+    #[test]
+    fn a_forked_chat_keeps_the_same_images_through_a_cut_as_its_parent() {
+        const MIB: usize = 1024 * 1024;
+        let image = |name: &str, bytes| {
+            format!(
+                "data:image/png;name={name}.png;base64,{}",
+                "A".repeat(bytes)
+            )
+        };
+        // The parent's items carry their turn; a fork's copies carry none.
+        let chat = |turn: Option<TurnId>| {
+            let at = |sequence, data| Item {
+                turn_id: turn,
+                ..item(sequence, data)
+            };
+            let mut items = vec![
+                at(
+                    1,
+                    ItemData::UserMessage {
+                        text: "match this design".into(),
+                        attachments: vec![image("design", 8 * MIB)],
+                        queued: false,
+                        synthetic: false,
+                        command_line: None,
+                    },
+                ),
+                at(
+                    2,
+                    ItemData::UserMessage {
+                        text:
+                            "<system-reminder>\nToday's date is now Saturday.\n</system-reminder>"
+                                .into(),
+                        attachments: Vec::new(),
+                        queued: false,
+                        synthetic: true,
+                        command_line: None,
+                    },
+                ),
+            ];
+            for index in 1..=5_u64 {
+                let call = format!("s{index}");
+                items.push(at(
+                    2 * index + 1,
+                    ItemData::ToolCall {
+                        call_id: call.clone(),
+                        name: "screenshot".into(),
+                        arguments: json!({}),
+                        provider_metadata: serde_json::Value::Null,
+                    },
+                ));
+                items.push(at(
+                    2 * index + 2,
+                    ItemData::ToolResult {
+                        call_id: call.clone(),
+                        name: "screenshot".into(),
+                        output: "Screenshot taken".into(),
+                        is_error: false,
+                        metadata: json!({"attachments": [image(&call, 4 * MIB)]}),
+                    },
+                ));
+            }
+            let (mut messages, origins) = super::provider_messages_with_origins(items);
+            crate::image_budget::bound(&mut messages, &origins, crate::ImageLimits::default());
+            super::sent_images(&messages)
+                .iter()
+                .map(|image| crate::attachments::display_name(&image.source))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(chat(Some(TurnId::new())), ["design.png", "s5.png"]);
+        assert_eq!(chat(None), ["design.png", "s5.png"]);
+    }
+
+    #[test]
+    fn provider_messages_say_who_wrote_each_message_and_in_which_turn() {
+        let turn = Some(TurnId::new());
+        let at = |sequence, data| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let user = |text: &str, queued, synthetic| ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued,
+            synthetic,
+            command_line: None,
+        };
+        let steer = at(4, user("also the footer", true, false));
+        let messages = vec![
+            at(
+                1,
+                ItemData::UserMessage {
+                    text: "match this design".into(),
+                    attachments: vec!["data:image/png;name=design.png;base64,AAAA".into()],
+                    queued: false,
+                    synthetic: false,
+                    command_line: None,
+                },
+            ),
+            at(
+                2,
+                user(
+                    "<system-reminder>\nToday's date is now Saturday.\n</system-reminder>",
+                    false,
+                    true,
+                ),
+            ),
+            at(
+                3,
+                ItemData::ToolCall {
+                    call_id: "shot".into(),
+                    name: "screenshot".into(),
+                    arguments: json!({}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            steer.clone(),
+            at(
+                5,
+                ItemData::ToolResult {
+                    call_id: "shot".into(),
+                    name: "screenshot".into(),
+                    output: "Screenshot taken".into(),
+                    is_error: false,
+                    metadata: json!({"attachments": ["data:image/png;name=s1.png;base64,AAAA"]}),
+                },
+            ),
+            at(6, ItemData::QueueConsumed { item_id: steer.id }),
+            at(
+                7,
+                user(
+                    "<task-result>the child agent finished</task-result>",
+                    true,
+                    true,
+                ),
+            ),
+        ];
+        let (messages, origins) = super::provider_messages_with_origins(messages);
+        let who = messages
+            .iter()
+            .zip(&origins)
+            .map(|(message, origin)| {
+                assert_eq!(origin.turn, turn);
+                let kind = match message {
+                    ProviderMessage::Media { .. } => "photo",
+                    ProviderMessage::Text { content, .. } if content.contains("footer") => "steer",
+                    ProviderMessage::Text { content, .. } if content.contains("task-result") => {
+                        "result"
+                    }
+                    ProviderMessage::Text { .. } => "reminder",
+                    ProviderMessage::ToolCall { .. } => "call",
+                    ProviderMessage::ToolResult { .. } => "shot",
+                };
+                (kind, origin.person)
+            })
+            .collect::<Vec<_>>();
+        // The steer is sent where it was taken in, and is still the person's.
+        assert_eq!(
+            who,
+            [
+                ("photo", true),
+                ("reminder", false),
+                ("call", false),
+                ("shot", false),
+                ("steer", true),
+                ("result", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refusal_for_the_number_of_images_counts_them_and_keeps_a_large_newest_one() {
+        const MIB: usize = 1024 * 1024;
+        let mut messages = (1..=20)
+            .map(|index| shot_result(sized_image(&format!("old-{index:02}.png"), 1024)))
+            .collect::<Vec<_>>();
+        messages.push(shot_result(sized_image("newest.png", 5 * MIB)));
+        let (names, choice) = left_out(
+            "HTTP 400 Bad Request: too many images in the request: 21 > 20",
+            &messages,
+            &[],
+        );
+        assert_eq!(
+            choice,
+            super::RefusedImages::Oldest(super::ImageVolume::Count)
+        );
+        // Half of 21 by number: the oldest 11 small ones, never the newest.
+        let expected = (1..=11)
+            .map(|index| format!("old-{index:02}.png"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, expected);
+
+        // A request too large in bytes loses its large old image first.
+        let mut messages = vec![shot_result(sized_image("big.png", 5 * MIB))];
+        messages.extend(
+            (1..=10).map(|index| shot_result(sized_image(&format!("small-{index}.png"), 1024))),
+        );
+        let (names, choice) = left_out(
+            "HTTP 413 Payload Too Large: request_too_large",
+            &messages,
+            &[],
+        );
+        assert_eq!(
+            choice,
+            super::RefusedImages::Oldest(super::ImageVolume::Bytes)
+        );
+        assert_eq!(names, ["big.png"]);
+    }
+
+    #[test]
+    fn a_size_refusal_the_turns_own_images_answer_for_leaves_out_the_newest() {
+        const MIB: usize = 1024 * 1024;
+        let photo = sized_image("photo.png", 4 * MIB);
+        let mut messages = (1..=3)
+            .map(|index| shot_result(sized_image(&format!("old-{index}.png"), MIB)))
+            .collect::<Vec<_>>();
+        messages.push(ProviderMessage::Media {
+            role: "user".into(),
+            content: "Look at this".into(),
+            attachments: vec![photo.clone()],
+        });
+        // The person's photo is 4 of the 7 MiB: leaving out the older ones
+        // would not answer the refusal, so they are kept.
+        let refusal = "HTTP 413 Payload Too Large: request_too_large";
+        let (names, choice) = left_out(refusal, &messages, &[&photo]);
+        assert_eq!(
+            (names, choice),
+            (
+                vec!["photo.png".to_owned()],
+                super::RefusedImages::Newest(Some(super::ImageVolume::Bytes))
+            )
+        );
+
+        // Beside twelve older ones it is less than half, and the older go.
+        let mut many = (1..=12)
+            .map(|index| shot_result(sized_image(&format!("old-{index}.png"), MIB)))
+            .collect::<Vec<_>>();
+        many.push(messages.pop().unwrap());
+        let (names, choice) = left_out(refusal, &many, &[&photo]);
+        assert_eq!(
+            choice,
+            super::RefusedImages::Oldest(super::ImageVolume::Bytes)
+        );
+        assert!(!names.contains(&"photo.png".to_owned()), "{names:?}");
+    }
+
+    #[test]
+    fn a_size_refusal_the_last_screenshot_answers_for_leaves_it_out_and_keeps_the_older() {
+        const MIB: usize = 1024 * 1024;
+        let photo = sized_image("photo.png", MIB);
+        let mut messages = vec![ProviderMessage::Media {
+            role: "user".into(),
+            content: "Look at this".into(),
+            attachments: vec![photo.clone()],
+        }];
+        messages.extend(
+            (1..=6).map(|index| shot_result(sized_image(&format!("old-{index}.png"), MIB))),
+        );
+        messages.push(shot_result(sized_image("last.png", 12 * MIB)));
+        // A provider that takes less than the 19 MiB sent refused it. The
+        // photo and the last screenshot are 13 MiB of it: leaving out the six
+        // older ones would leave a request still too large, so the last goes.
+        let (names, choice) = left_out(
+            "HTTP 413 Payload Too Large: request_too_large",
+            &messages,
+            &[&photo],
+        );
+        assert_eq!(
+            (names, choice),
+            (
+                vec!["last.png".to_owned()],
+                super::RefusedImages::Newest(Some(super::ImageVolume::Bytes))
+            )
+        );
+    }
+
+    #[test]
+    fn a_file_read_again_is_left_out_only_with_every_copy() {
+        // The model wrote out.png and read it, then read it again after
+        // three screenshots. Its source is one path, and the record leaves a
+        // source out everywhere, so the newest read must keep it.
+        let out = "/work/out.png".to_owned();
+        let mut messages = vec![shot_result(out.clone())];
+        messages.extend(
+            ["a", "b", "c"].map(|name| shot_result(sized_image(&format!("{name}.png"), 1024))),
+        );
+        messages.push(shot_result(out));
+        let (names, choice) = left_out(
+            "HTTP 400 Bad Request: too many images in the request: 5 > 4",
+            &messages,
+            &[],
+        );
+        assert_eq!(
+            choice,
+            super::RefusedImages::Oldest(super::ImageVolume::Count)
+        );
+        assert_eq!(names, ["a.png", "b.png", "c.png"]);
     }
 
     #[test]

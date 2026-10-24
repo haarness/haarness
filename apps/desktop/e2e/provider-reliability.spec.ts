@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { stopChatHome } from "./fixtures/chat-home";
 
@@ -175,6 +176,148 @@ test("a pasted image the provider refuses is left out with a notice and the chat
     expect(requests.map(request => request.images)).toEqual([["messages.0.content.1|image/jpeg"], []]);
     const items = await client.listItems(thread.id);
     expect(items.some(item => item.data.type === "error")).toBe(false);
+    expect(errors).toEqual([]);
+  } finally {
+    await page.screenshot({ path: info.outputPath("final.png") }).catch(() => {});
+    await app.evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) window.destroy(); }).catch(() => {});
+    await app.close().catch(() => {});
+    try { execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }); } catch { /* fixture may have stopped */ }
+    stopChatHome(binary, env);
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test("a provider that takes fewer images gets the newest, and the notice names the oldest left out", async ({}, info) => {
+  test.setTimeout(150000);
+  const requests: string[][] = [];
+  // Anthropic's Messages API, refusing a request with more than one image without naming any; in a chat
+  // that says TOO_LARGE, refusing one with more than two as too large.
+  const server = createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    if (request.method === "GET") {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ data: [{ id: "claude-sonnet-4-6", type: "model" }], has_more: false }));
+      return;
+    }
+    const messages: { content: { type: string; source?: { data: string } }[] | string }[] = JSON.parse(body).messages;
+    const images = messages.flatMap(message => Array.isArray(message.content)
+      ? message.content.flatMap(block => block.type === "image" ? [block.source!.data] : [])
+      : []);
+    requests.push(images);
+    if (body.includes("TOO_LARGE") ? images.length > 2 : images.length > 1) {
+      const tooLarge = body.includes("TOO_LARGE");
+      response.statusCode = tooLarge ? 413 : 400;
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ type: "error", error: tooLarge
+        ? { type: "request_too_large", message: "Request exceeds the maximum size" }
+        : { type: "invalid_request_error", message: `Too many images in the request: ${images.length} > 1` } }));
+      return;
+    }
+    response.setHeader("Content-Type", "text/event-stream");
+    for (const event of [
+      { type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 0 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: `ANSWERED_WITH_${images.length}_IMAGE` } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 4 } },
+      { type: "message_stop" },
+    ]) response.write(`data: ${JSON.stringify(event)}\n\n`);
+    response.end();
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing fixture address");
+  const root = await realpath(await mkdtemp(join(tmpdir(), "haarness-oldest-images-")));
+  const workspace = join(root, "workspace");
+  await mkdir(join(workspace, ".haarness"), { recursive: true });
+  await writeFile(join(workspace, ".haarness/config.toml"), '[defaults]\nprovider="anthropic"\nmodel="claude-sonnet-4-6"\n[lsp]\nenabled=false\n');
+  execFileSync("git", ["init", "-q", workspace]);
+  const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
+  const env: Record<string, string> = {
+    ...process.env, HAARNESS_BIN: binary, HAARNESS_HOME: join(root, "home"), HAARNESS_DATA_DIR: join(root, "data"),
+    HAARNESS_DESKTOP_DATA: join(root, "desktop"), HAARNESS_DESKTOP_TEST: "1",
+    ANTHROPIC_API_KEY: "fixture-key", ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`,
+  };
+  delete env.ELECTRON_RUN_AS_NODE;
+  delete env.ELECTRON_RENDERER_URL;
+  const app = await electron.launch({ args: ["."], env, timeout: 60000 });
+  const page = await app.firstWindow();
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  const theme = async (value: "light" | "dark") => {
+    await app.evaluate(({ nativeTheme }, value) => { nativeTheme.themeSource = value; }, value);
+    await page.emulateMedia({ colorScheme: value });
+    await expect.poll(() => page.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)).toBe(value === "dark");
+  };
+  try {
+    await page.setViewportSize({ width: 1400, height: 950 });
+    await app.evaluate(({ dialog }, directory) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] }); }, workspace);
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+    const connection = JSON.parse(execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], { env, input: '{"action":"connect"}', encoding: "utf8", timeout: 60000 }));
+    const client = new Haarness({ baseUrl: connection.url, token: connection.token });
+    const thread = await client.createThread({ title: "Oldest image proof", provider: "anthropic", model: "claude-sonnet-4-6" });
+    await page.locator(".sessions").getByRole("button", { name: thread.title, exact: true }).click();
+    // Two 1x1 PNGs: the provider takes the first alone, then refuses both.
+    const first = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+    const second = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC";
+    const third = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPQqDgBAAI0AWkYRiUPAAAAAElFTkSuQmCC";
+    for (const [name, data] of [["first.png", first], ["second.png", second]]) {
+      await client.startTurn(thread.id, { requestId: randomUUID(), text: `Look at ${name}`, attachments: [`data:image/png;name=${name};base64,${data}`] });
+      await expect.poll(async () => (await client.activeTurns()).length, { timeout: 30000 }).toBe(0);
+    }
+    const notice = page.locator(".notice-inline.media-omitted");
+    await expect(notice).toContainText("The request had too many images for the provider, so the oldest image, first.png, is left out of this chat from now on.", { timeout: 30000 });
+    await expect(notice).toContainText("Too many images in the request: 2 > 1");
+    await expect(page.locator(".transcript")).toContainText("ANSWERED_WITH_1_IMAGE");
+    // The newest image reached the model on the retry.
+    expect(requests.map(images => images.length)).toEqual([1, 2, 1]);
+    expect(requests[2][0]).toBe(requests[1][1]);
+    const items = await client.listItems(thread.id);
+    expect(items.some(item => item.data.type === "error")).toBe(false);
+    await notice.scrollIntoViewIfNeeded();
+    for (const value of ["light", "dark"] as const) {
+      await theme(value);
+      await page.locator(".transcript").screenshot({ path: info.outputPath(`oldest-image-notice-${value}.png`) });
+    }
+    await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+    try {
+      await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+      await expect(notice).toContainText("لذا ستُستبعد أقدم صورة، first.png،");
+      await page.locator(".transcript").screenshot({ path: info.outputPath("oldest-image-notice-dark-rtl.png") });
+      await theme("light");
+      await page.locator(".transcript").screenshot({ path: info.outputPath("oldest-image-notice-light-rtl.png") });
+    } finally {
+      await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+    }
+
+    // A request too large for its images says so: two images fit, the third's request is refused, and the
+    // two oldest go.
+    requests.length = 0;
+    const large = await client.createThread({ title: "Too large proof", provider: "anthropic", model: "claude-sonnet-4-6" });
+    await page.locator(".sessions").getByRole("button", { name: large.title, exact: true }).click();
+    for (const [name, data] of [["first.png", first], ["second.png", second], ["third.png", third]]) {
+      await client.startTurn(large.id, { requestId: randomUUID(), text: `TOO_LARGE: look at ${name}`, attachments: [`data:image/png;name=${name};base64,${data}`] });
+      await expect.poll(async () => (await client.activeTurns()).length, { timeout: 30000 }).toBe(0);
+    }
+    const tooLarge = page.locator(".notice-inline.media-omitted");
+    await expect(tooLarge).toContainText("The request was too large for the provider, so the oldest 2 images are left out of this chat from now on.", { timeout: 30000 });
+    expect(requests.map(images => images.length)).toEqual([1, 2, 3, 1]);
+    expect(requests[3][0]).toBe(requests[2][2]);
+    await tooLarge.scrollIntoViewIfNeeded();
+    for (const value of ["light", "dark"] as const) {
+      await theme(value);
+      await page.locator(".transcript").screenshot({ path: info.outputPath(`too-large-notice-${value}.png`) });
+    }
+    await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+    try {
+      await expect(tooLarge).toContainText("كان الطلب أكبر مما يقبله الموفر");
+      await page.locator(".transcript").screenshot({ path: info.outputPath("too-large-notice-dark-rtl.png") });
+    } finally {
+      await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+    }
     expect(errors).toEqual([]);
   } finally {
     await page.screenshot({ path: info.outputPath("final.png") }).catch(() => {});
