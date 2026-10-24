@@ -37,7 +37,8 @@ def write(path, content):
 
 def workspace(label, config):
     ws = root / label
-    write(ws / '.haarness/config.toml', '[defaults]\nprovider="echo"\nmodel="echo-1"\n')
+    # Chats start in Auto; the asks here wait for a person, so every workspace asks for Review.
+    write(ws / '.haarness/config.toml', '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n')
     write(ws / '.haarness/haarness.json', json.dumps(config, indent=1))
     write(ws / '.env', CANARY + '\n')
     (ws / 'notes.txt').symlink_to('.env')

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Real Haarness server + real OpenTUI in tmux: Auto/Review permission lifecycle,
-the approval card at several terminal sizes, and the --auto flag.
+the approval card at several terminal sizes, the --auto flag, and the mode a chat
+with no setting of its own starts in (Review when the person's configuration says
+so, whatever the project says; Auto when no file sets it).
 
 HAARNESS_E2E_FRAMES names a folder for captured frames (ANSI and text);
 by default they land beside the other evidence."""
@@ -12,8 +14,19 @@ root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-auto-e2e-')).resolve()
 workspace = root / 'workspace'
 workspace.mkdir()
 (workspace / '.haarness').mkdir()
-(workspace / '.haarness' / 'config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash = { "*" = "ask", "printf denied-proof*" = "deny" }\n')
+rules = '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash = { "*" = "ask", "printf denied-proof*" = "deny" }\n'
+(workspace / '.haarness' / 'config.toml').write_text(rules)
+# The person's configuration asks for Review and the project for Auto: Review in any file wins,
+# so this folder's chats start in Review.
+(root / 'data' / 'config').mkdir(parents=True)
+(root / 'data' / 'config' / 'haarness.json').write_text(json.dumps({'defaults': {'approval_mode': 'review'}}))
+(workspace / 'haarness.json').write_text(json.dumps({'defaults': {'approval_mode': 'auto'}}))
 env = dict(os.environ, HAARNESS_DATA_DIR=str(root/'data'), HAARNESS_TEST_PROVIDER='1', HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1')
+# The same rules in a folder, on data of its own, where no file sets a mode: its chats start in Auto.
+unset = root / 'unset'
+(unset / '.haarness').mkdir(parents=True)
+(unset / '.haarness' / 'config.toml').write_text(rules)
+unset_env = dict(env, HAARNESS_DATA_DIR=str(root/'unset-data'))
 name = 'haarness-auto-' + str(os.getpid())
 endpoint = None
 checks = []
@@ -23,8 +36,8 @@ frames.mkdir(parents=True, exist_ok=True)
 def run(args, **kwargs):
     return subprocess.run(args, check=True, text=True, capture_output=True, **kwargs).stdout
 
-def connect():
-    return json.loads(run([str(binary), '--workspace', str(workspace), '--trust-project', 'desktop'], env=env, input='{"action":"connect"}', timeout=120))
+def connect(folder=workspace, environment=env):
+    return json.loads(run([str(binary), '--workspace', str(folder), '--trust-project', 'desktop'], env=environment, input='{"action":"connect"}', timeout=120))
 
 def api(path, value=None, method=None):
     req = urllib.request.Request(endpoint['url']+path, data=None if value is None else json.dumps(value).encode(), headers={'Authorization':'Bearer '+endpoint['token'], 'Content-Type':'application/json'}, method=method)
@@ -67,8 +80,8 @@ def card(pane):
     end=next((index for index in range(tops[-1],len(rows)) if 'Allow once' in rows[index] or 'Confirm' in rows[index]),len(rows)-1)
     return '\n'.join(rows[tops[-1]:end+1])
 
-def launch(thread, mode='review', width=160, height=40, extra=()):
-    args=['env',*[k+'='+env[k] for k in ['HAARNESS_DATA_DIR','HAARNESS_TEST_PROVIDER','HAARNESS_DEFAULT_PROVIDER','HAARNESS_DEFAULT_MODEL']],str(binary),'--workspace',str(workspace),'--trust-project',*extra,'--thread',thread]
+def launch(thread, mode='review', width=160, height=40, extra=(), folder=workspace, environment=env):
+    args=['env',*[k+'='+environment[k] for k in ['HAARNESS_DATA_DIR','HAARNESS_TEST_PROVIDER','HAARNESS_DEFAULT_PROVIDER','HAARNESS_DEFAULT_MODEL']],str(binary),'--workspace',str(folder),'--trust-project',*extra,'--thread',thread]
     run(['tmux','new-session','-d','-x',str(width),'-y',str(height),'-s',name,shlex.join(args)])
     until(lambda:mode in capture(), mode+' mode not visible at launch')
 
@@ -86,8 +99,8 @@ def start(thread, text):
 def finished():
     until(lambda:not api('/v1/turns/active'), 'turn did not finish')
 
-def proof(file, expected):
-    path = workspace/file
+def proof(file, expected, folder=workspace):
+    path = folder/file
     until(lambda:path.exists() and path.read_text()==expected, 'missing execution proof '+file)
     finished()
 
@@ -98,6 +111,9 @@ def check(label):
 try:
     endpoint = connect()
     thread = api('/v1/threads', {'title':'Auto mode verification','provider':'echo','model':'echo-1'})['id']
+    mode = api('/v1/threads/'+thread+'/approval-mode')
+    assert mode['mode']=='review' and not mode['explicit'], mode
+    check("a new chat starts in Review when the person's configuration says so, though the project says auto")
     text = '!tool bash '+json.dumps({'command':'printf once-proof > once.txt'})
     start(thread,text)
     until(lambda:len(api('/v1/permissions'))==1,'initial permission missing')
@@ -250,9 +266,35 @@ try:
     ran=[item['id'] for item in api('/v1/threads') if item['title']=='Run auto flag']
     assert len(ran)==1 and api('/v1/threads/'+ran[0]+'/approval-mode')['mode']=='auto', ran
     check('haarness run --auto puts its chat in Auto, so a run nobody watches gets its requests approved; a plain run is refused')
+
+    # Where no file sets a mode, a new chat is in Auto: the reviewer approves an
+    # ask once or blocks it, and deny rules still refuse.
+    run(['tmux','kill-session','-t',name])
+    endpoint = connect(unset, unset_env)
+    fresh = api('/v1/threads', {'title':'No setting verification','provider':'echo','model':'echo-1'})['id']
+    mode = api('/v1/threads/'+fresh+'/approval-mode')
+    assert mode['mode']=='auto' and not mode['explicit'], mode
+    start(fresh,'!tool bash '+json.dumps({'command':'printf unset-proof > unset.txt'}))
+    proof('unset.txt','unset-proof',unset)
+    assert not api('/v1/permissions')
+    start(fresh,'!tool bash '+json.dumps({'command':'printf blocked-proof > blocked.txt'})+' [review:deny]')
+    finished()
+    assert not (unset/'blocked.txt').exists()
+    assert 'Auto review blocked this action' in json.dumps(api('/v1/threads/'+fresh+'/items'))
+    start(fresh,'!tool bash '+json.dumps({'command':'printf denied-proof > denied.txt'}))
+    finished()
+    assert not (unset/'denied.txt').exists() and not api('/v1/permissions')
+    check('with no setting in any file a new chat is in Auto: the reviewer approves an ask once or blocks it, and a deny rule still refuses')
+    launch(fresh,'approvals: auto',folder=unset,environment=unset_env)
+    check('the TUI opens a chat with no setting in Auto')
+    plain=subprocess.run([str(binary),'--workspace',str(unset),'run','--title','Unset run','!tool bash '+json.dumps({'command':'printf unset-run-proof > unset-run.txt'})],env=unset_env,input='',text=True,capture_output=True,timeout=120)
+    assert plain.returncode==0, plain.stderr
+    proof('unset-run.txt','unset-run-proof',unset)
+    check('a plain haarness run there gets its ask answered by the reviewer instead of refused')
     print(f'{len(checks)} real-server TUI scenarios passed.',flush=True)
     (root/'tui.txt').write_text(capture())
 finally:
     subprocess.run(['tmux','kill-session','-t',name],capture_output=True)
     subprocess.run([str(binary),'--workspace',str(workspace),'serve','--stop'],env=env,capture_output=True,timeout=30)
+    subprocess.run([str(binary),'--workspace',str(unset),'serve','--stop'],env=unset_env,capture_output=True,timeout=30)
     e2e_scratch.settle(root)

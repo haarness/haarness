@@ -54,8 +54,9 @@ with tempfile.TemporaryDirectory(prefix="haarness-navigation-") as directory:
     root = Path(directory)
     project = root / "project"
     (project / ".haarness").mkdir(parents=True)
+    # Chats start in Auto; the approval cards here wait for a person, so ask for Review.
     (project / ".haarness/config.toml").write_text(
-        '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n'
+        '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n'
     )
     (project / "fixture.txt").write_text("navigation fixture\n")
     for args in [["init", "-b", "main"], ["add", "."], ["-c", "user.name=Nav Test", "-c", "user.email=nav@example.test", "commit", "-m", "Fixture"]]:

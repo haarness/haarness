@@ -24,7 +24,8 @@ home = root / 'app' / 'Chat folders'
 project = root / 'project'
 for folder in (home, project, data / 'config'):
     folder.mkdir(parents=True)
-(data / 'config/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n')
+# Chats start in Auto; a write into another chat's folder must wait for a person, so ask for Review.
+(data / 'config/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n')
 binary = str(pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve())
 env = clean_env()
 env.update(

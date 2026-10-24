@@ -61,6 +61,8 @@ marker = root/'helper-ran'
 (state/'config/config.toml').write_text('''[defaults]
 provider = "echo"
 model = "echo-1"
+# Chats start in Auto; the review log case needs a request that waits for a person.
+approval_mode = "review"
 
 [mcp.keyed]
 transport = "streamable_http"

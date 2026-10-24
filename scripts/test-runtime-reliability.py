@@ -153,8 +153,9 @@ try:
             (workspace / '.haarness').mkdir(parents=True)
             (workspace / 'AGENTS.md').write_text('PROJECT_WIRE_MARKER: explain fixture decisions briefly.\n')
             # The mock is on 127.0.0.1, where providers wait as long as it takes
-            # unless configured: tune the built-in provider to a short limit.
-            (workspace / '.haarness/config.toml').write_text(f'[defaults]\nprovider="{provider}"\nmodel="{model}"\n[permissions]\n"*"="deny"\n"mcp__fixture__*"="allow"\n[lazy_tools]\nmode="always"\n[lsp]\nenabled=false\n[providers.{provider}]\nstream_idle_timeout={IDLE_LIMIT}\n')
+            # unless configured: tune the built-in provider to a short limit. Review (chats otherwise
+            # start in Auto) shows in the TUI once it is up, and keeps any ask a side question raised waiting.
+            (workspace / '.haarness/config.toml').write_text(f'[defaults]\nprovider="{provider}"\nmodel="{model}"\napproval_mode="review"\n[permissions]\n"*"="deny"\n"mcp__fixture__*"="allow"\n[lazy_tools]\nmode="always"\n[lsp]\nenabled=false\n[providers.{provider}]\nstream_idle_timeout={IDLE_LIMIT}\n')
             run(['git', 'init', '-q', str(workspace)])
             launcher = home / '.local/bin/haarness-fixture-mcp'
             launcher.write_text('#!' + sys.executable + '\n' + '''import json,os,sys,time
