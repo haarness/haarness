@@ -102,14 +102,23 @@ const labelStarts = (menu: Locator) =>
       return Math.round(range.getBoundingClientRect().left);
     }),
   );
+/** The live choice's tick, as a picker's: a ✓ at the row's trailing end, 8px in. */
+const trailingTick = (menu: Locator) =>
+  menu.locator('[aria-checked="true"]').evaluate((row) => {
+    const tick = row.querySelector(".select-check");
+    return tick
+      ? { text: tick.textContent?.trim(), inset: Math.round(row.getBoundingClientRect().right - tick.getBoundingClientRect().right) }
+      : undefined;
+  });
 async function fileUnder(name: string, group: string) {
   await options(name);
   await item("Section").click();
-  // Sections are a live choice: every row keeps the tick column, and the
-  // icon column New section…'s icon takes, so the labels line up.
+  // Sections are a live choice, ticked at the trailing end as a picker's
+  // option is; their labels line up with New section…'s, beside its icon.
   const starts = await labelStarts(page.locator(".menu-branch-panel"));
   expect(starts.length).toBeGreaterThan(1);
   expect(new Set(starts).size).toBe(1);
+  expect(await trailingTick(page.locator(".menu-branch-panel"))).toEqual({ text: "✓", inset: 8 });
   if (process.env.HAARNESS_SCREENSHOTS) {
     for (const theme of ["dark", "light"] as const) {
       await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
