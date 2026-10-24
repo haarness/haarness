@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from e2e_env import ISOLATED
 
 REPO = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("HAARNESS_BIN", REPO / "target/debug/haarness")).resolve()
@@ -179,7 +180,7 @@ for line in sys.stdin:
     print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}),flush=True)
 ''')
             launcher.chmod(0o755)
-            env = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home), 'HAARNESS_HOME': str(home),
+            env = {**ISOLATED, 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home), 'HAARNESS_HOME': str(home),
                    'HAARNESS_DATA_DIR': str(root / 'data'), 'USER': os.environ.get('USER', 'fixture'), 'LANG': 'en_US.UTF-8',
                    'OPENAI_API_KEY': 'fixture-key', 'ANTHROPIC_API_KEY': 'fixture-key',
                    'OPENAI_BASE_URL': f'http://127.0.0.1:{service.server_port}/v1',

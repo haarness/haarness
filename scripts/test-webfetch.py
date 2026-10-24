@@ -8,6 +8,7 @@ Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
 import http.server, json, os, pathlib, subprocess, tempfile, threading, time, urllib.request, uuid
 import e2e_scratch
+from e2e_env import clean_env
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-webfetch-', dir=os.environ.get('HAARNESS_E2E_DIR'))).resolve()
@@ -73,7 +74,7 @@ port = web.server_port
 (state/'config/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\n'
     f'webfetch = {{ "*" = "allow", "http://127.0.0.1:{port}/private*" = "deny", "http://localhost:{port}/*" = "deny" }}\n'
     'media_generate = "allow"\n')
-env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
+env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(state), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1',
            HAARNESS_IMAGE_GENERATE_URL=f'http://127.0.0.1:{port}/moved')

@@ -16,11 +16,12 @@ use regex::Regex;
 pub const REDACTED: &str = "<redacted>";
 
 /// Whether a setting, flag, header or query parameter of this name carries
-/// a credential: API, access and private keys, secrets, passwords and
-/// passphrases, credentials, tokens, authorization, cookies and signatures.
-/// `pat`, `pass`, `pw`, `cred`, `keys` and `tokens` count only as a word of
-/// their own (`GITHUB_PAT`, `dbPass`), never inside `pattern` or `passage`,
-/// and a bare `pwd` is a working directory.
+/// a credential: API, access and private keys, secrets, passwords,
+/// passphrases and passcodes, credentials, tokens, authorization, cookies
+/// and signatures. `pat`, `pass`, `pw`, `cred`, `keys` and `tokens` count
+/// only as a word of their own (`GITHUB_PAT`, `dbPass`), or a `pass` glued
+/// to an account (`storepass`, `keypass`), never inside `pattern` or
+/// `passage`, and a bare `pwd` is a working directory.
 #[must_use]
 pub fn secret_name(name: &str) -> bool {
     let words = words(name);
@@ -28,19 +29,20 @@ pub fn secret_name(name: &str) -> bool {
     let Some(last) = words.last() else {
         return false;
     };
-    [
-        "apikey",
-        "accesskey",
-        "privatekey",
-        "secret",
-        "password",
-        "passwd",
-        "passphrase",
-        "credential",
-        "bearer",
-    ]
-    .iter()
-    .any(|part| joined.contains(part))
+    passcode(&words)
+        || [
+            "apikey",
+            "accesskey",
+            "privatekey",
+            "secret",
+            "password",
+            "passwd",
+            "passphrase",
+            "credential",
+            "bearer",
+        ]
+        .iter()
+        .any(|part| joined.contains(part))
         || [
             "key",
             "token",
@@ -59,6 +61,71 @@ pub fn secret_name(name: &str) -> bool {
         ]
         .contains(&last.as_str()))
         || (last == "pwd" && words.len() > 1)
+        || account_pass(last)
+}
+
+/// Whether the words of a name end in a passcode or a passphrase, written as
+/// one word or two (`passcode`, `devicePasscode`, `pass_code`,
+/// `PASS_PHRASE`); `bypass_code` holds neither, and `passcode_length` is
+/// its length.
+fn passcode(words: &[String]) -> bool {
+    words
+        .last()
+        .is_some_and(|word| word.ends_with("passcode") || word.ends_with("passphrase"))
+        || (words.len() > 1
+            && words[words.len() - 2] == "pass"
+            && matches!(words[words.len() - 1].as_str(), "code" | "phrase"))
+}
+
+/// The accounts a glued `pass` or `pw` opens (`dbpass`, `rootpw`); any
+/// other glued `pass` is a word (`bypass`, `compass`, `trespass`).
+const ACCOUNTS: [&str; 16] = [
+    "user", "db", "admin", "root", "login", "proxy", "ftp", "smtp", "mail", "ldap", "ssh", "mysql",
+    "pg", "redis", "store", "key",
+];
+
+/// Whether `word` is a `pass` or `pw` glued to one of [`ACCOUNTS`].
+fn account_pass(word: &str) -> bool {
+    ["pass", "pw"].iter().any(|end| {
+        word.strip_suffix(end)
+            .is_some_and(|start| ACCOUNTS.iter().any(|account| start.ends_with(account)))
+    })
+}
+
+/// Whether a name in free text is a credential's that the `KEYS` rules of
+/// [`text`] do not catch: a passcode or passphrase (see [`passcode`]), a
+/// last word `pass`, `pw` or `pwd` after another word (`DB_PASS`, `dbPass`,
+/// `MYSQL_PWD`, `x-pw`), or a `pass` or `pw` glued to an account
+/// (`DBPASS`). A bare `pass`, `pw` or `pwd` stays readable, as in
+/// `tests pass: 3` or `PWD=/home/me`.
+fn pass_name(name: &str) -> bool {
+    let words = words(name);
+    let Some(last) = words.last() else {
+        return false;
+    };
+    passcode(&words)
+        || (words.len() > 1 && matches!(last.as_str(), "pass" | "pw" | "pwd"))
+        || account_pass(last)
+}
+
+/// Whether a [`pass_name`] counts tests rather than names a password
+/// (`tests_pass=12`, `num_pass: 7`): only then does a number under it stay.
+fn count_name(name: &str) -> bool {
+    words(name)
+        .iter()
+        .any(|word| ["tests", "num", "total", "count", "passed", "failed"].contains(&word.as_str()))
+}
+
+/// Whether a [`pass_name`] flag switches something rather than takes a
+/// password (`--skip-pass`, `--ask-pass`, `--no-pass`): what follows it is
+/// the next argument.
+fn switch_name(name: &str) -> bool {
+    let words = words(name);
+    words.len() > 1
+        && [
+            "skip", "no", "ask", "allow", "require", "force", "check", "test", "tests", "lint",
+        ]
+        .contains(&words[0].as_str())
 }
 
 /// The words of a name, lower case: `X-Api-Key`, `api_key` and `apiKey` are
@@ -87,20 +154,75 @@ fn words(name: &str) -> Vec<String> {
     words
 }
 
-/// Whether a URL query or fragment parameter of this name carries a
-/// credential: any [`secret_name`], and also a whole `code` (an OAuth code,
-/// a function key), `jwt`, `ticket`, `otp` or `totp`, an `auth`, `access` or
-/// `mfa` code, and a name holding `hmac` or `passcode`.
-fn secret_parameter(name: &str) -> bool {
-    let joined = words(name).concat();
+/// Words that say what a glued key opens or who holds it (`apikeys`,
+/// `sshkeys`).
+const HOLDERS: [&str; 17] = [
+    "api",
+    "auth",
+    "app",
+    "access",
+    "private",
+    "priv",
+    "secret",
+    "session",
+    "master",
+    "encryption",
+    "signing",
+    "subscription",
+    "license",
+    "client",
+    "shared",
+    "account",
+    "ssh",
+];
+
+/// Whether a URL query or fragment parameter of this name, holding `value`,
+/// carries a credential: any [`secret_name`], and also a whole `code` (an
+/// OAuth code, a function key), a whole or last word `jwt`, `bearer`,
+/// `ticket`, `otp` or `totp` (`x-otp`), an `auth`, `access` or `mfa` code,
+/// and a name holding `hmac` or `passcode`.
+///
+/// Parameter names glue their words together more often than settings do,
+/// so these count too: a last word that ends in `pwd` (`pwd`, `adminpwd`,
+/// `userpwds`), a `pass` or `pw` glued to the account it opens (`userpass`,
+/// `dbpass`, `rootpw`), keys glued to what they open (`apikeys`), and tokens
+/// glued to the word before them (`apitokens`) unless the value counts them
+/// (`maxtokens=4096`). Any other glued `pass` stays readable (`bypass`,
+/// `compass`, `trespass`), and so do `keyword` and `show_pw_hint`.
+fn secret_parameter(name: &str, value: &str) -> bool {
+    let words = words(name);
+    let joined = words.concat();
+    let last = words.last().map_or("", String::as_str);
     secret_name(name)
         || ["code", "jwt", "ticket", "otp", "totp"].contains(&joined.as_str())
+        || ["jwt", "bearer", "ticket", "otp", "totp"].contains(&last)
         || ["authcode", "accesscode", "mfacode"]
             .iter()
             .any(|end| joined.ends_with(end))
         || ["hmac", "passcode"]
             .iter()
             .any(|part| joined.contains(part))
+        || last.ends_with("pwd")
+        || last.ends_with("pwds")
+        || account_pass(last)
+        || HOLDERS.iter().any(|holder| {
+            last.strip_suffix("keys")
+                .is_some_and(|start| start.ends_with(holder))
+        })
+        || (last.len() > "tokens".len() && last.ends_with("tokens") && !token_count(value))
+}
+
+/// Whether a parameter value is a count rather than a credential: a number,
+/// or `null`, `undefined`, `none`, `auto` or `inf` written in its place, or
+/// a switch's `true` or `false` (`showtokens=true`).
+fn token_count(value: &str) -> bool {
+    let number = value.strip_prefix('-').unwrap_or(value);
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, "0"));
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    (digits(whole) && digits(fraction))
+        || ["null", "undefined", "none", "auto", "inf", "true", "false"]
+            .iter()
+            .any(|word| value.eq_ignore_ascii_case(word))
 }
 
 /// `pairs` (`a=1&b=2`, a query or fragment) with the value of each
@@ -117,7 +239,7 @@ fn parameters(pairs: &str) -> Cow<'_, str> {
                 .next()
                 .map(|(name, _)| name.into_owned())
                 .unwrap_or_default();
-            if value.is_empty() || value == REDACTED || !secret_parameter(&name) {
+            if value.is_empty() || value == REDACTED || !secret_parameter(&name, value) {
                 return Cow::Borrowed(pair);
             }
             hidden = true;
@@ -315,12 +437,33 @@ fn urls_in_text(text: &str) -> Cow<'_, str> {
 }
 
 /// The arguments of a command with credentials hidden: the value after a
-/// credential flag (`--api-key VALUE`), a header flag (`-H VALUE`) or a
-/// `user:password` flag (`-u VALUE`), the value of `--token=VALUE` and
+/// credential flag (`--api-key VALUE`, `-storepass VALUE`), a header flag
+/// (`-H VALUE`), a `user:password` flag (`-u VALUE`), OpenSSL's
+/// `-passin pass:VALUE` and `sshpass -p VALUE`, the value of `--token=VALUE` and
 /// `API_KEY=VALUE`, and any argument that is itself a bearer token, a JWT,
-/// a private key or a URL carrying credentials.
+/// a private key, a URL carrying credentials or a `user:password@host`
+/// written without a scheme.
 #[must_use]
 pub fn args(args: &[String]) -> Vec<String> {
+    // `sshpass -p PASSWORD`: among sshpass's own options (before the
+    // command it runs), `-p` takes the password, not a port.
+    let mut sshpass = None;
+    if let Some(at) = args
+        .iter()
+        .position(|arg| arg.rsplit(['/', '\\']).next() == Some("sshpass"))
+    {
+        let mut index = at + 1;
+        while let Some(option) = args.get(index).filter(|arg| arg.starts_with('-')) {
+            match option.as_str() {
+                "-p" => {
+                    sshpass = Some(index + 1);
+                    break;
+                }
+                "-f" | "-d" | "-P" => index += 2,
+                _ => index += 1,
+            }
+        }
+    }
     args.iter()
         .enumerate()
         .map(|(index, arg)| {
@@ -328,13 +471,30 @@ pub fn args(args: &[String]) -> Vec<String> {
                 .checked_sub(1)
                 .and_then(|previous| args.get(previous))
                 .and_then(|previous| flag_name(previous));
-            if previous.is_some_and(|flag| takes_credential(flag, arg)) {
+            let password = sshpass == Some(index);
+            if password || previous.is_some_and(|flag| takes_credential(flag, arg)) {
                 REDACTED.to_owned()
             } else {
                 arg_value(arg).into_owned()
             }
         })
         .collect()
+}
+
+/// [`args`] for the arguments of `command`: an MCP server whose command is
+/// `sshpass` has its `-p` password in the first arguments.
+#[must_use]
+pub fn command_args(command: Option<&str>, arguments: &[String]) -> Vec<String> {
+    let sshpass = command
+        .and_then(|command| command.rsplit(['/', '\\']).next())
+        .is_some_and(|name| name == "sshpass");
+    if !sshpass {
+        return args(arguments);
+    }
+    let mut all = Vec::with_capacity(arguments.len() + 1);
+    all.push("sshpass".to_owned());
+    all.extend_from_slice(arguments);
+    args(&all).split_off(1)
 }
 
 /// The name of a `-x` or `--name` flag that takes its value as the next
@@ -357,8 +517,20 @@ fn takes_credential(name: &str, value: &str) -> bool {
     match name {
         "H" | "header" => true,
         "u" | "user" => value.contains(':'),
+        // `--pass PASSWORD`, OpenSSL's `-passin pass:PASSWORD`; `env:`,
+        // `file:`, `fd:` and `stdin` name where it is.
+        "pass" | "passin" | "passout" => !pass_source(value),
         _ => !name.starts_with("no-") && secret_name(name),
     }
+}
+
+/// Whether the value of a `--pass` or `-passin` flag names where the
+/// password is (`env:VAR`, `file:path`, `fd:3`, `stdin`) rather than holds it.
+fn pass_source(value: &str) -> bool {
+    ["env:", "file:", "fd:"]
+        .iter()
+        .any(|source| value.starts_with(source))
+        || value == "stdin"
 }
 
 fn arg_value(arg: &str) -> Cow<'_, str> {
@@ -382,7 +554,10 @@ fn arg_value(arg: &str) -> Cow<'_, str> {
     if bearer_or_jwt(arg) {
         return Cow::Borrowed(REDACTED);
     }
-    urls_in(arg)
+    match urls_in(arg) {
+        Cow::Borrowed(_) => bare_userinfo(arg, REDACTED),
+        Cow::Owned(shown) => Cow::Owned(bare_userinfo(&shown, REDACTED).into_owned()),
+    }
 }
 
 /// A bearer token of some length, or a JSON Web Token.
@@ -406,8 +581,9 @@ fn bearer_or_jwt(text: &str) -> bool {
 /// Replaces obvious credential shapes in free text with `[redacted]`:
 /// credential headers, `Bearer`/`Basic` values, curl user flags,
 /// `key=value`, `key: value` and `--key value` pairs whose key names a
-/// credential, URL user info, JWTs, well-known token prefixes and long opaque
-/// runs. Over-redaction is fine; this is for log lines and messages, not data.
+/// credential, URL user info and a `user:password@host` written without a
+/// scheme, JWTs, well-known token prefixes and long opaque runs.
+/// Over-redaction is fine; this is for log lines and messages, not data.
 #[must_use]
 pub fn text(text: &str) -> String {
     const KEYS: &str = r"token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth|cookie|credential|session";
@@ -427,6 +603,11 @@ pub fn text(text: &str) -> String {
             (r#"(?i)\b(bearer|basic)[ \t]+[^\s"',;]+"#.to_owned(), "${1} [redacted]"),
             (
                 format!(r#"(?i)(^|[^\w-])(--(?:proxy-)?user(?:=|[ \t]+))({VALUE}|[^\s"',;&]+)"#),
+                "${1}${2}[redacted]",
+            ),
+            // `sshpass -p PASSWORD`, whose `-p` is no port.
+            (
+                r#"(?i:\b(sshpass))((?:[ \t]+(?:-[fdP][ \t]*[^\s-]\S*|-[a-oq-zA-Z]\S*))*[ \t]+-p[ \t]*)("[^"\r\n]*"?|'[^'\r\n]*'?|[^\s"',;&]+)"#.to_owned(),
                 "${1}${2}[redacted]",
             ),
             // `-u user:password`, but not `sort -u file`.
@@ -457,13 +638,143 @@ pub fn text(text: &str) -> String {
         })
         .collect()
     });
-    let mut text = userinfo(text).into_owned();
+    // Names the `KEYS` rules miss (see `pass_name`), as a pair and as a flag
+    // followed by its value. Every one of them holds `pass` or `pw`.
+    static NAMED: LazyLock<[Regex; 2]> = LazyLock::new(|| {
+        [
+            format!(r#"(?i)\b([\w.-]*(?:pass|pw)[\w.-]*)(["']?[ \t]*[=:][ \t]*)({VALUE}|[^\s"',;&]+)"#),
+            format!(r#"(?i)(^|[^\w-])(--?([\w.-]*(?:pass|pw)[\w.-]*))[ \t]+({VALUE}|[^\s"',;&-][^\s"',;&]*)"#),
+        ]
+        .map(|pattern| Regex::new(&pattern).expect("static redaction pattern"))
+    });
+    // A query or fragment parameter outside a URL with a scheme
+    // (`GET /cb?code=…`), named as `url` reads names.
+    static PARAMETER: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"([?&#])([A-Za-z0-9_.%+-]{1,128})=([^&\s"'#]+)"#)
+            .expect("static parameter pattern")
+    });
+    // `--pass PASSWORD` and OpenSSL's `-passin pass:PASSWORD`; `env:`,
+    // `file:`, `fd:` and `stdin` name where the password is.
+    static PASS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(&format!(
+            r#"(^|[^\w-])(--?pass(?:in|out)?[ \t]+)({VALUE}|[^\s"',;&]+)"#
+        ))
+        .expect("static pass pattern")
+    });
+    let mut text = bare_userinfo(&userinfo(text), "[redacted]").into_owned();
     for (pattern, replacement) in RULES.iter() {
         if pattern.is_match(&text) {
             text = pattern.replace_all(&text, *replacement).into_owned();
         }
     }
+    if PASS.is_match(&text) {
+        text = PASS
+            .replace_all(&text, |found: &regex::Captures<'_>| {
+                let value = &found[3];
+                if pass_source(value) || value.starts_with("[redacted]") {
+                    found[0].to_owned()
+                } else if value.starts_with("pass:") {
+                    format!("{}{}pass:[redacted]", &found[1], &found[2])
+                } else {
+                    format!("{}{}[redacted]", &found[1], &found[2])
+                }
+            })
+            .into_owned();
+    }
+    let [pairs, flags] = &*NAMED;
+    if pairs.is_match(&text) {
+        text = pairs
+            .replace_all(&text, |found: &regex::Captures<'_>| {
+                let value = &found[3];
+                let count = value.bytes().all(|byte| byte.is_ascii_digit());
+                let shell = found[2]
+                    .trim_start_matches(['"', '\''])
+                    .trim_start()
+                    .starts_with('=');
+                if pass_name(&found[1]) && hides(value, shell) && !(count && count_name(&found[1]))
+                {
+                    format!("{}{}[redacted]", &found[1], &found[2])
+                } else {
+                    found[0].to_owned()
+                }
+            })
+            .into_owned();
+    }
+    if flags.is_match(&text) {
+        text = flags
+            .replace_all(&text, |found: &regex::Captures<'_>| {
+                if pass_name(&found[3]) && !switch_name(&found[3]) && hides(&found[4], false) {
+                    format!("{}{} [redacted]", &found[1], &found[2])
+                } else {
+                    found[0].to_owned()
+                }
+            })
+            .into_owned();
+    }
+    if PARAMETER.is_match(&text) {
+        text = PARAMETER
+            .replace_all(&text, |found: &regex::Captures<'_>| {
+                let name = url::form_urlencoded::parse(found[2].as_bytes())
+                    .next()
+                    .map(|(name, _)| name.into_owned())
+                    .unwrap_or_default();
+                let value = &found[3];
+                if hides(value, true) && path_parameter(&name, value) {
+                    format!("{}{}=[redacted]", &found[1], &found[2])
+                } else {
+                    found[0].to_owned()
+                }
+            })
+            .into_owned();
+    }
     text
+}
+
+/// Whether a value found under a credential's name in free text is hidden:
+/// anything but what is hidden already (`[redacted]@host` included) and a
+/// flag's `true` or `false`; and, after a shell's `=` (`shell`), an
+/// unquoted or double-quoted `$NAME`, `${…}` or `$(…)`, which the text names
+/// rather than holds. A single-quoted `'$…'` or a YAML `key: $…` is a value.
+fn hides(value: &str, shell: bool) -> bool {
+    static EXPANSION: LazyLock<Regex> = LazyLock::new(|| {
+        // A command substitution with spaces reaches here cut: `$(cat`.
+        Regex::new(r#"^"?\$(?:[A-Za-z_][A-Za-z0-9_]*"?$|\{|\()"#).expect("static expansion pattern")
+    });
+    let unquoted = value.trim_matches(['"', '\'']);
+    !(value.starts_with("[redacted]")
+        || value.starts_with(REDACTED)
+        || (shell && EXPANSION.is_match(value))
+        || unquoted.eq_ignore_ascii_case("true")
+        || unquoted.eq_ignore_ascii_case("false"))
+}
+
+/// Whether a parameter of a path written without a scheme holds a
+/// credential, as [`secret_parameter`] says, except for a key named after
+/// what it sorts, caches or indexes (`sort_key`, `cache_key`,
+/// `primary_key`), which names a field, never a secret.
+fn path_parameter(name: &str, value: &str) -> bool {
+    const FIELDS: [&str; 12] = [
+        "sort",
+        "cache",
+        "primary",
+        "foreign",
+        "partition",
+        "idempotency",
+        "routing",
+        "shard",
+        "dedup",
+        "dedupe",
+        "lookup",
+        "index",
+    ];
+    let words = words(name);
+    if let [first, key] = words.as_slice()
+        && key == "key"
+        && FIELDS.contains(&first.as_str())
+    {
+        return false;
+    }
+    secret_parameter(name, value)
 }
 
 /// `text` with each URL's user name and password replaced by `[redacted]`:
@@ -594,6 +905,290 @@ fn user_credential(scheme: Option<&str>, name: &str) -> bool {
         }) && !name.contains([
             '"', '\'', '<', '>', ',', ';', '(', ')', '[', ']', '{', '}', '|', '`', '\\',
         ]))
+}
+
+/// `text` with the user name and password of each `user:password@host`
+/// written without a scheme replaced by `mark`, as a proxy or `CONNECT`
+/// target (`curl -x user:pw@proxy:3128`, `https_proxy=user:pw@proxy:3128`)
+/// or a database address (`root:pw@tcp(db:3306)/app`) reads. As for a URL,
+/// everything up to the last `@` goes, so a raw `@` in the password does too.
+///
+/// The user name is a word with no `:` that starts the text or follows a
+/// space, a quote, a bracket, `|`, `` ` ``, `=`, `,`, `;`, `/`, `?`, `#`,
+/// `@` or `\`; the password and host run to a space (not a
+/// backslash-escaped one), `"`, `/`, `?`, `#` or `\`, so a Windows path is
+/// never read as one and the text is read in linear time. A password never
+/// starts with `@`, `/`, `<` or a space, so `npm:@scope/pkg`, `host:/path`,
+/// `MAIL FROM:<me@example.com>` and `name: me@example.com` stay, nor with
+/// the `-` of a shell default (`${USER:-root}@host`); and the host and path
+/// of an scp target (`alex@host:icon@2x.png`) are no user and password.
+/// See [`hidden_userinfo`] for what else stays.
+fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
+    // What may stand before a user name.
+    fn head(byte: u8) -> bool {
+        byte.is_ascii_whitespace()
+            || matches!(
+                byte,
+                b'"' | b'\''
+                    | b'('
+                    | b'<'
+                    | b'>'
+                    | b'['
+                    | b']'
+                    | b'{'
+                    | b'}'
+                    | b'|'
+                    | b'`'
+                    | b'='
+                    | b','
+                    | b';'
+                    | b'/'
+                    | b'?'
+                    | b'#'
+                    | b'@'
+                    | b'\\'
+            )
+    }
+    let bytes = text.as_bytes();
+    let mut shown = String::new();
+    let mut copied = 0;
+    let mut at = 0;
+    // Whether `at` may start a user name.
+    let mut start = true;
+    // The word a cut password was last looked for in.
+    let mut word = None;
+    while at < bytes.len() {
+        if !start {
+            start = head(bytes[at]);
+            at += 1;
+            continue;
+        }
+        let user = at;
+        let mut colon = at;
+        while colon < bytes.len() && bytes[colon] != b':' && !head(bytes[colon]) {
+            colon += 1;
+        }
+        if colon == bytes.len() {
+            break;
+        }
+        if bytes[colon] != b':' {
+            // A character that may stand before a user name: the next one
+            // may start one.
+            at = colon + 1;
+            continue;
+        }
+        let password = colon + 1;
+        // A shell default (`${USER:-root}@host`) is no user name.
+        let default = user >= 2 && &bytes[user - 2..user] == b"${";
+        if bytes.get(password).is_none_or(|&byte| {
+            byte.is_ascii_whitespace()
+                || matches!(byte, b'"' | b'/' | b'?' | b'#' | b'@' | b'<')
+                || (default && byte == b'-')
+        }) {
+            at = password;
+            start = false;
+            continue;
+        }
+        let mut end = password;
+        while let Some(&byte) = bytes.get(end) {
+            match byte {
+                b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_whitespace) => end += 2,
+                b'\\' | b'"' | b'/' | b'?' | b'#' => break,
+                _ if byte.is_ascii_whitespace() => break,
+                _ => end += 1,
+            }
+        }
+        if end > password
+            && matches!(bytes.get(end), Some(b'/' | b'#' | b'?' | b'\\'))
+            && !text[password..end].contains('@')
+        {
+            // `user:p/ss@proxy:3128`: a password holding a raw `/`, `#`, `?`
+            // or `\` ends the run early. It runs on to the last `@` of the
+            // word when a host and port follow it there.
+            end = bare_password_end(bytes, end, &mut word).unwrap_or(end);
+        }
+        let found = &text[user..end];
+        if let Some(last) = found.rfind('@')
+            && !scp_target(bytes, user, &found[last + 1..])
+            && let Some(hidden) = hidden_userinfo(&found[..last], &found[last + 1..])
+        {
+            shown.push_str(&text[copied..user]);
+            shown.push_str(&found[..hidden]);
+            shown.push_str(mark);
+            copied = user + last;
+        }
+        at = end;
+        start = false;
+    }
+    if copied == 0 {
+        return Cow::Borrowed(text);
+    }
+    shown.push_str(&text[copied..]);
+    Cow::Owned(shown)
+}
+
+/// Whether the bare `host:path@after` starting at `user` is the target of an
+/// scp or ssh command (`scp alex@host:icon@2x.png .`): a plain account name
+/// and `@` right before it, at the start of a word, and no port after the
+/// last `@`, which a proxy's `alex@corp:pw@proxy:8080` has.
+fn scp_target(bytes: &[u8], user: usize, after: &str) -> bool {
+    if user < 2 || bytes[user - 1] != b'@' {
+        return false;
+    }
+    let account = bytes[..user - 1]
+        .iter()
+        .rposition(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')))
+        .map_or(0, |index| index + 1);
+    let plain = account < user - 1 && (account == 0 || bytes[account - 1].is_ascii_whitespace());
+    let host = after
+        .find(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
+        })
+        .map_or(after.len(), |end| end);
+    plain && !after[host..].starts_with(':')
+}
+
+/// Where the `user:p/ss@host:port` that a raw `/`, `#`, `?` or `\` cut at
+/// `cut` ends: past the host and port after the last `@` of the word; `None`
+/// unless a host and a port follow that `@`. `word` keeps, for the word last
+/// read, its end, its last `@` and where the host and port after that `@`
+/// end, which every cut inside it shares, so a long word is read once.
+fn bare_password_end(bytes: &[u8], cut: usize, word: &mut Option<BareWord>) -> Option<usize> {
+    let read = match *word {
+        Some(read) if cut < read.end => read,
+        _ => {
+            let read = BareWord::read(bytes, cut);
+            *word = Some(read);
+            read
+        }
+    };
+    read.last.filter(|&at| at > cut)?;
+    read.port_end
+}
+
+/// A word [`bare_password_end`] read: where it ends, its last `@`, and where
+/// a host and a port after that `@` end, when they do.
+#[derive(Clone, Copy)]
+struct BareWord {
+    end: usize,
+    last: Option<usize>,
+    port_end: Option<usize>,
+}
+
+impl BareWord {
+    fn read(bytes: &[u8], from: usize) -> Self {
+        let mut end = from;
+        let mut last = None;
+        while let Some(&byte) = bytes.get(end) {
+            match byte {
+                b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_whitespace) => end += 2,
+                _ if byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'`') => break,
+                b'@' => {
+                    last = Some(end);
+                    end += 1;
+                }
+                _ => end += 1,
+            }
+        }
+        let end = end.min(bytes.len());
+        let port_end = last.and_then(|at| {
+            let host = at
+                + 1
+                + bytes[at + 1..end].iter().position(|byte| {
+                    !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+                })?;
+            if host == at + 1 || bytes[host] != b':' {
+                return None;
+            }
+            let port = host
+                + 1
+                + bytes[host + 1..end]
+                    .iter()
+                    .position(|byte| !byte.is_ascii_digit())
+                    .unwrap_or(end - host - 1);
+            (port > host + 1 && (port == end || bytes[port] == b'/')).then_some(port)
+        });
+        Self {
+            end,
+            last,
+            port_end,
+        }
+    }
+}
+
+/// For `info@after`, a bare `user:password@host` that [`bare_userinfo`]
+/// found: where in `info` the hidden part starts (after an address label
+/// such as `mailto:`), or `None` when it holds no credential.
+///
+/// Only shapes that cannot be a user and password stay: what pins an image
+/// or a package rather than names a host (`alpine:3.19@sha256:…`,
+/// `node:20@v1.2.3`); an `npm:` or `jsr:` spec (`npm:pkg@1.0`); a time
+/// (`10:15@home`, `3:30pm@office`, `2026-10-24T08:00:00Z@db1`) or a ratio
+/// (`16:9@2x`); and an address after a label that names one: `mailto:`,
+/// `sip:`, `xmpp:`, `acct:`, a cloud member kind (`serviceAccount:`,
+/// `group:`, `domain:`, `principal:`), a mail or search field (`from:`,
+/// `to:`, `cc:`, `bcc:`, `email:`, Go's `Email:`), unless a second `:` says
+/// it holds a password. `user:alex@example.com` is hidden: it reads as a
+/// user and password too.
+fn hidden_userinfo(info: &str, after: &str) -> Option<usize> {
+    // An image digest (`sha256:` with a letter, which no port has, or a
+    // long hex run, also after the free-text masker hid it) or a version.
+    static PINNED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?i)^(?:(?:sha\d+|md5):[\da-f]*[a-f][\da-f]*|[a-z\d]+(?:[+._-][a-z\d]+)*:(?:[\da-f]{32,}|\[redacted\]|<redacted>)|v?\d+\.\d+\.\d+(?:[-+][\w.-]*)?)",
+        )
+        .expect("static pinned pattern")
+    });
+    // A time: `10:15`, `10:15:30.5`, `3:30pm`, `2026-10-24T08:00:00Z`.
+    static TIME: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)^(?:\d{4}-\d{2}-\d{2}t)?\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[ap]m|[+-]\d{2}:?\d{2})?$")
+            .expect("static time pattern")
+    });
+    let pinned = PINNED.find(after).is_some_and(|found| {
+        !after[found.end()..].starts_with(|next: char| {
+            next.is_alphanumeric() || matches!(next, '_' | '.' | ':' | '-')
+        })
+    });
+    let (scheme, rest) = info.split_once(':')?;
+    let numeric = |part: &str, more: &[u8]| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || more.contains(&byte))
+    };
+    if pinned
+        || TIME.is_match(info)
+        || (numeric(scheme, b"") && numeric(rest, b":."))
+        || (["npm", "jsr"]
+            .iter()
+            .any(|spec| scheme.eq_ignore_ascii_case(spec))
+            && !rest.is_empty()
+            && !rest.contains([':', '@']))
+    {
+        return None;
+    }
+    if [
+        "mailto",
+        "sip",
+        "sips",
+        "xmpp",
+        "acct",
+        "serviceaccount",
+        "group",
+        "domain",
+        "principal",
+        "from",
+        "to",
+        "cc",
+        "bcc",
+        "email",
+    ]
+    .iter()
+    .any(|address| scheme.eq_ignore_ascii_case(address))
+    {
+        return rest.contains(':').then_some(scheme.len() + 1);
+    }
+    Some(0)
 }
 
 /// At most `max` characters, ending with `…` when cut. Never splits a char.
@@ -808,6 +1403,93 @@ mod tests {
     }
 
     #[test]
+    fn free_text_hides_passcodes_passphrases_and_a_pass_pw_or_pwd_after_another_word() {
+        for (input, output) in [
+            ("export DB_PASS=PRIVATE", "export DB_PASS=[redacted]"),
+            ("dbPass: PRIVATE next", "dbPass: [redacted] next"),
+            (
+                "MYSQL_PWD=PRIVATE mysql -u root app",
+                "MYSQL_PWD=[redacted] mysql -u root app",
+            ),
+            (
+                "SSHPASS=PRIVATE sshpass -e ssh host",
+                "SSHPASS=[redacted] sshpass -e ssh host",
+            ),
+            ("DBPASS='PRIVATE PART' ./run", "DBPASS=[redacted] ./run"),
+            ("x-pw: PRIVATE", "x-pw: [redacted]"),
+            ("passphrase=PRIVATE", "passphrase=[redacted]"),
+            ("PASS_PHRASE=PRIVATE", "PASS_PHRASE=[redacted]"),
+            (
+                "gpg --batch --passphrase 'PRIVATE PART' -d f.gpg",
+                "gpg --batch --passphrase [redacted] -d f.gpg",
+            ),
+            ("passcode: 1234", "passcode: [redacted]"),
+            ("pass_code=1234&next=1", "pass_code=[redacted]&next=1"),
+            (
+                r#"{"devicePasscode":"PRIVATE","ok":1}"#,
+                r#"{"devicePasscode":[redacted],"ok":1}"#,
+            ),
+            (
+                "tool --db-pass PRIVATE --verbose",
+                "tool --db-pass [redacted] --verbose",
+            ),
+        ] {
+            assert_eq!(text(input), output, "{input}");
+            assert_eq!(text(output), output, "{output}");
+        }
+        for kept in [
+            "tests pass: 3, fail: 0",
+            "PWD=/Users/me/project OLDPWD=/tmp",
+            "pass=ok pw: x",
+            "bypass=1 compass: north trespass=no",
+            "bypass_code=ABC",
+            "passenger: Alex",
+            "hasPassphrase=false passcode: True",
+            "passcode_length=6 passcodeLength: 6",
+            "--db-pass true",
+            "npm run pass:all",
+            "pwsh -NoProfile -Command Get-Date",
+            // Test counts and switches named after passing.
+            "tests_pass=12 tests_fail=0 num_pass: 7, num_fail: 1 lint_pass: true",
+            "--skip-pass build --ask-pass playbook.yml",
+            "DB_PASS=[redacted]@h DB_PASS=$DB_PASSWORD",
+        ] {
+            assert_eq!(text(kept), kept);
+        }
+        // A password is hidden when it is a number too, unless the name
+        // counts tests; and when it starts with `$` but is no shell
+        // expansion (single-quoted, after a YAML `:`, after a flag).
+        assert_eq!(
+            text("DB_PASS=123456 MYSQL_ROOT_PWD=4242 --db-pass 99"),
+            "DB_PASS=[redacted] MYSQL_ROOT_PWD=[redacted] --db-pass [redacted]"
+        );
+        for (input, output) in [
+            (
+                "VNC_PASS=123456 WIFI_PASS=12345678 API_PASS=987654",
+                "VNC_PASS=[redacted] WIFI_PASS=[redacted] API_PASS=[redacted]",
+            ),
+            ("db_pass: $ecretPRIVATE", "db_pass: [redacted]"),
+            ("DB_PASS='$PRIVATE'", "DB_PASS=[redacted]"),
+            ("--db-pass '$PRIVATEx'", "--db-pass [redacted]"),
+            (
+                "keytool -storepass $PRIVATEab -list",
+                "keytool -storepass [redacted] -list",
+            ),
+        ] {
+            assert_eq!(text(input), output, "{input}");
+        }
+        assert_eq!(
+            text(r#"DB_PASS=$(cat /run/secrets/db) DB_PASS="${DB_PASSWORD}""#),
+            r#"DB_PASS=$(cat /run/secrets/db) DB_PASS="${DB_PASSWORD}""#
+        );
+        assert_eq!(
+            args(&["--passcode", "1234", "PASS_CODE=5678"].map(str::to_owned)),
+            ["--passcode", REDACTED, "PASS_CODE=<redacted>"]
+        );
+        assert!(!secret_name("bypass_code"));
+    }
+
+    #[test]
     fn free_text_hides_a_url_user_and_password_up_to_the_last_at_before_the_host() {
         for (input, output) in [
             ("http://user:p@ss3cret@proxy", "http://[redacted]@proxy"),
@@ -904,6 +1586,410 @@ mod tests {
     }
 
     #[test]
+    fn free_text_hides_credential_parameters_of_a_path_without_a_scheme() {
+        for (input, output) in [
+            (
+                "GET /cb?code=PRIVATE1234&state=s failed: 400",
+                "GET /cb?code=[redacted]&state=s failed: 400",
+            ),
+            (
+                "GET /x?pwd=/PRIVATE+base64== 200",
+                "GET /x?pwd=[redacted] 200",
+            ),
+            (
+                "GET /x?db_pwd=/PRIVATEab 200",
+                "GET /x?db_pwd=[redacted] 200",
+            ),
+            (
+                "/maps?maps_key=PRIVATE&user_key=PRIVATE&write_key=PRIVATE&pusher_key=PRIVATE&openai_key=PRIVATE",
+                "/maps?maps_key=[redacted]&user_key=[redacted]&write_key=[redacted]&pusher_key=[redacted]&openai_key=[redacted]",
+            ),
+            (
+                "GET /x?qlikTicket=PRIVATE-abc&x=1",
+                "GET /x?qlikTicket=[redacted]&x=1",
+            ),
+            (
+                "/x?api_key=PRIVATE&key=PRIVATE",
+                "/x?api_key=[redacted]&key=[redacted]",
+            ),
+            (
+                "GET /p?n=1&pwd=PRIVATE returned 401",
+                "GET /p?n=1&pwd=[redacted] returned 401",
+            ),
+            ("/login?x-otp=123456", "/login?x-otp=[redacted]"),
+            (
+                "/cb#dbpass=PRIVATE&userpw=PRIVATE&ticket=PRIVATE",
+                "/cb#dbpass=[redacted]&userpw=[redacted]&ticket=[redacted]",
+            ),
+            ("/x?api%5Fkey=PRIVATE", "/x?api%5Fkey=[redacted]"),
+        ] {
+            assert_eq!(text(input), output, "{input}");
+            assert_eq!(text(output), output, "{output}");
+        }
+        for kept in [
+            "GET /search?q=hello&page=2 200",
+            "/x?keyword=k&bypass=1&compass=2#install",
+            "a=1&b=2&state=s",
+            "/x?code=&next=1",
+            // A switch is a bit, a shell names a value, and these keys sort,
+            // cache or index.
+            "?pass=false&key=true&passcode=TRUE",
+            "GET /v1/items?sort_key=name&cache_key=abc&primary_key=id",
+            "cd /tmp&&pwd=$(pwd) echo",
+        ] {
+            assert_eq!(text(kept), kept);
+        }
+    }
+
+    #[test]
+    fn free_text_hides_a_user_and_password_written_without_a_scheme() {
+        let sha = "ab12".repeat(16);
+        for (input, output) in [
+            (
+                "curl -x user:PRIVATE@proxy.fixture.test:3128 https://x.test",
+                "curl -x [redacted]@proxy.fixture.test:3128 https://x.test",
+            ),
+            (
+                "https_proxy=user:PRIVATE@proxy.fixture.test:3128",
+                "https_proxy=[redacted]@proxy.fixture.test:3128",
+            ),
+            (
+                "dsn root:PRIVATE@tcp(127.0.0.1:3306)/app",
+                "dsn [redacted]@tcp(127.0.0.1:3306)/app",
+            ),
+            (
+                "CONNECT user:PRIVATE@h.fixture.test:443 HTTP/1.1",
+                "CONNECT [redacted]@h.fixture.test:443 HTTP/1.1",
+            ),
+            (
+                ":PRIVATE@h.fixture.test:443",
+                "[redacted]@h.fixture.test:443",
+            ),
+            ("user:p@ss@h.fixture.test", "[redacted]@h.fixture.test"),
+            ("user:PRIVATE@[::1]:443", "[redacted]@[::1]:443"),
+            (
+                r"host=user:pa\ ss@h.fixture.test:443",
+                "host=[redacted]@h.fixture.test:443",
+            ),
+            (
+                "getaddrinfo ENOTFOUND user:PRIVATE@h.fixture.test",
+                "getaddrinfo ENOTFOUND [redacted]@h.fixture.test",
+            ),
+            (
+                "proxy answered 407 for 'user:PRIVATE@h.fixture.test:443'",
+                "proxy answered 407 for '[redacted]@h.fixture.test:443'",
+            ),
+            (
+                r#"{"proxy":"user:PRIVATE@h.fixture.test:3128"}"#,
+                r#"{"proxy":"[redacted]@h.fixture.test:3128"}"#,
+            ),
+            (
+                "->user:pw@h.fixture.test:443",
+                "->[redacted]@h.fixture.test:443",
+            ),
+            ("[net]user:pw@h:443", "[net][redacted]@h:443"),
+            ("a|user:pass@host", "a|[redacted]@host"),
+            ("a/user:pw@h:443", "a/[redacted]@h:443"),
+            (
+                r"CORP\alex:PRIVATE@proxy:8080",
+                r"CORP\[redacted]@proxy:8080",
+            ),
+            // A spec or an address that says it holds a password.
+            (
+                "npm:user:PRIVATE@h.fixture.test",
+                "[redacted]@h.fixture.test",
+            ),
+            ("npm:a@b@h.fixture.test", "[redacted]@h.fixture.test"),
+            (
+                "mailto:user:PRIVATE@h.fixture.test",
+                "mailto:[redacted]@h.fixture.test",
+            ),
+            // A host named like a digest algorithm or with a version-like
+            // address and a port is still a host.
+            (
+                "CONNECT user:PRIVATE@sha256:8080",
+                "CONNECT [redacted]@sha256:8080",
+            ),
+            ("user:PRIVATE@10.0.0.1:3128", "[redacted]@10.0.0.1:3128"),
+            ("1000:PRIVATE@h.fixture.test", "[redacted]@h.fixture.test"),
+            // When in doubt, hidden: an address-like password, a label that
+            // names a user, a capital or a `-`, `::` in the password, a proxy
+            // reached as `alex@corp`, a host with no port.
+            ("db=root:PRIVATE@/app", "db=[redacted]@/app"),
+            (
+                "root:PRIVATE@unix(/tmp/mysql.sock)/app",
+                "[redacted]@unix(/tmp/mysql.sock)/app",
+            ),
+            (
+                "user:PRIVATE@[2001:db8::1]:3128",
+                "[redacted]@[2001:db8::1]:3128",
+            ),
+            (
+                "Admin:PRIVATE@db.fixture.test:5432",
+                "[redacted]@db.fixture.test:5432",
+            ),
+            (
+                "admin:S3cretPRIVATE.pw@db.example.com",
+                "[redacted]@db.example.com",
+            ),
+            (
+                "export https_proxy=alex:PRIVATEHunter2@proxy.corp.example.com",
+                "export https_proxy=[redacted]@proxy.corp.example.com",
+            ),
+            (
+                "db=Root:PRIVATE@tcp(db:3306)/app",
+                "db=[redacted]@tcp(db:3306)/app",
+            ),
+            ("SA:PRIVATE@sqlhost", "[redacted]@sqlhost"),
+            ("dsn root:PRIVATE@db.internal", "dsn [redacted]@db.internal"),
+            (
+                "https_proxy=alex@corp.example.com:PRIVATE@proxy.corp.example.com:8080",
+                "https_proxy=alex@[redacted]@proxy.corp.example.com:8080",
+            ),
+            (
+                "user:PRIVATE-x@proxy.example.com:3128",
+                "[redacted]@proxy.example.com:3128",
+            ),
+            (
+                "user:-PRIVATE@proxy.example.com:3128",
+                "[redacted]@proxy.example.com:3128",
+            ),
+            (
+                "admin:Pa::PRIVATE@proxy.example.com:3128",
+                "[redacted]@proxy.example.com:3128",
+            ),
+            (
+                "user:PRIVATE@proxy.corp.local",
+                "[redacted]@proxy.corp.local",
+            ),
+            (
+                "member=user:PRIVATE@example.com",
+                "member=[redacted]@example.com",
+            ),
+            ("Owner:PRIVATE@localhost", "[redacted]@localhost"),
+        ] {
+            assert_eq!(text(input), output, "{input}");
+            assert_eq!(text(output), output, "{output}");
+        }
+        for kept in [
+            "git@github.com:org/repo.git",
+            "scp build.tgz alex@h.fixture.test:/tmp/",
+            "ssh -J alex@jump.fixture.test:2222 alex@h.fixture.test",
+            "rsync -a alex@h.fixture.test::module/ out/",
+            "npm:some-ext@1.2.0",
+            "npm:@scope/ext@1.2.0-beta.1",
+            "spec=npm:some-ext@latest jsr:x@^2.0.0",
+            "mailto:someone@h.fixture.test",
+            "sip:alice@h.fixture.test xmpp:bob@h.fixture.test",
+            "img:tag@sha256:abc",
+            "node:20@v1.2.3 ruby:3.3@3.3.0",
+            "Signed-off-by: Alex <alex@h.fixture.test>",
+            "From: alex@h.fixture.test",
+            r"C:\proj\node_modules\@types\node\index.d.ts",
+            r"C:\proj\node_modules\.pnpm\react@18.2.0\node_modules\react",
+            "C:/proj/node_modules/@babel/core/lib/index.js",
+            "listening on 127.0.0.1:4096, [::1]:4096",
+            "refs/heads/main@{1} HEAD@{2026-10-24 08:00:00}",
+            r#"{"name":"a:b","email":"someone@h.fixture.test"}"#,
+            r#"{\"url\":\"http://localhost:3000\",\"email\":\"me@example.com\"}"#,
+            "at async run (node:internal/process/task_queues:95:5)",
+            "go: example.com/m@v1.0.0: missing go.sum entry",
+            "meet 10:15@home, 10:15:30@main, icon 16:9@2x",
+            "--iam-account=serviceAccount:ci@proj.iam.gserviceaccount.com",
+            // Addresses after a label that names one: cloud members, mail
+            // headers and search fields, and Go's struct printing.
+            r#""members": ["group:devs@example.com", "domain:example.com"]"#,
+            "principal:alex@example.com",
+            "> MAIL FROM:<alex@example.com> SIZE=1024",
+            "> RCPT TO:<bob@example.com>",
+            "search from:alice@example.com to:bob@example.com cc:c@example.com bcc:d@example.com",
+            "email:alex@example.com,name:Alex",
+            "To:alex@example.com",
+            r#"level=info msg="created user" user={ID:42 Email:alex@example.com Role:admin}"#,
+            "&{Name:alex Email:alex@example.com Admin:false}",
+            // Shell defaults, ssh targets and protocol specs.
+            "ssh ${DEPLOY_USER:-deploy}@${HOST} uptime",
+            "scp build.tgz ${USER:-root}@10.0.0.5:/tmp/",
+            "scp alex@build.fixture.test:icon@2x.png .",
+            // Times.
+            "backup finished 2026-10-24T08:00:00Z@db1 in 3s",
+            "call me at 3:30pm@office, time 12:30:45.123@worker-3",
+        ] {
+            assert_eq!(text(kept), kept);
+        }
+        // A digest's hex is a long run the free-text masker hides anyway.
+        assert_eq!(
+            text(&format!("pulled alpine:3.19@sha256:{sha}")),
+            "pulled alpine:3.19@sha256:[redacted]"
+        );
+        assert_eq!(
+            text("pulled alpine:3.19@sha256:[redacted]"),
+            "pulled alpine:3.19@sha256:[redacted]"
+        );
+        // MCP arguments in those forms stay as written, so they stay editable.
+        let kept = [
+            "--member=group:devs@example.com",
+            "serviceAccount:ci@proj.iam.gserviceaccount.com",
+            "alex@build.fixture.test:icon@2x.png",
+            "${USER:-root}@10.0.0.5:/tmp/",
+            "Email:alex@example.com",
+            "2026-10-24T08:00:00Z@db1",
+        ]
+        .map(str::to_owned);
+        assert_eq!(args(&kept), kept);
+        assert_eq!(
+            args(
+                &[
+                    "--proxy",
+                    "user:PRIVATE@proxy.fixture.test:3128",
+                    "HTTPS_PROXY=user:PRIVATE@proxy.fixture.test:3128",
+                    "git@github.com:org/repo.git",
+                    "npm:some-ext@1.2.0",
+                ]
+                .map(str::to_owned)
+            ),
+            [
+                "--proxy",
+                "<redacted>@proxy.fixture.test:3128",
+                "HTTPS_PROXY=<redacted>@proxy.fixture.test:3128",
+                "git@github.com:org/repo.git",
+                "npm:some-ext@1.2.0",
+            ]
+        );
+    }
+
+    #[test]
+    fn free_text_hides_openssl_keytool_and_sshpass_passwords_and_a_bare_one_holding_a_slash() {
+        for (input, output) in [
+            (
+                "openssl pkcs12 -export -in c.pem -out c.p12 -passout pass:PRIVATE",
+                "openssl pkcs12 -export -in c.pem -out c.p12 -passout pass:[redacted]",
+            ),
+            (
+                "openssl rsa -in k.pem -passin pass:PRIVATE -out plain.pem",
+                "openssl rsa -in k.pem -passin pass:[redacted] -out plain.pem",
+            ),
+            (
+                "openssl enc -aes256 -pass pass:PRIVATE -in f",
+                "openssl enc -aes256 -pass pass:[redacted] -in f",
+            ),
+            (
+                "keytool -genkeypair -keystore ks.jks -storepass PRIVATE -keypass PRIVATE",
+                "keytool -genkeypair -keystore ks.jks -storepass [redacted] -keypass [redacted]",
+            ),
+            (
+                "jarsigner -keystore ks.jks -storepass PRIVATE app.apk alias",
+                "jarsigner -keystore ks.jks -storepass [redacted] app.apk alias",
+            ),
+            (
+                "sshpass -p PRIVATE ssh alex@host",
+                "sshpass -p [redacted] ssh alex@host",
+            ),
+            (
+                "sshpass -P assword: -p PRIVATE ssh h",
+                "sshpass -P assword: -p [redacted] ssh h",
+            ),
+            (
+                "--user admin --pass PRIVATE",
+                "--user [redacted] --pass [redacted]",
+            ),
+            ("tool -pass PRIVATE -in f", "tool -pass [redacted] -in f"),
+            (
+                "openssl enc -pass 'pass:PRIVATE two' -in f",
+                "openssl enc -pass [redacted] -in f",
+            ),
+            (
+                "sshpass -v -p 'PRIVATE PART' ssh alex@host",
+                "sshpass -v -p [redacted] ssh alex@host",
+            ),
+            (
+                "proxy user:p/PRIVATE@proxy.fixture.test:3128",
+                "proxy [redacted]@proxy.fixture.test:3128",
+            ),
+            (
+                "proxy user:p#PRIVATE@proxy.fixture.test:3128/x",
+                "proxy [redacted]@proxy.fixture.test:3128/x",
+            ),
+            (
+                r"proxy user:pa\PRIVATE@proxy.fixture.test:3128",
+                "proxy [redacted]@proxy.fixture.test:3128",
+            ),
+            (
+                "proxy user:p?PRIVATE@10.0.0.1:8080 refused",
+                "proxy [redacted]@10.0.0.1:8080 refused",
+            ),
+        ] {
+            assert_eq!(text(input), output, "{input}");
+            assert_eq!(text(output), output, "{output}");
+        }
+        for kept in [
+            "openssl rsa -in k.pem -passin env:KEY_PASS -passout file:pw.txt -pass fd:3 -pass stdin",
+            "ssh -p 2222 alex@host && scp -P 2222 f alex@host:/tmp",
+            "node:internal/process/task_queues:95:5",
+            "image=registry.fixture.test:5000/app:1.0@sha256:abc123",
+            r"C:\proj\x@y.fixture.test:80",
+            "see a:b/c@d and x:y#z@w",
+        ] {
+            assert_eq!(text(kept), kept);
+        }
+        assert_eq!(
+            args(
+                &[
+                    "-passin",
+                    "pass:PRIVATE",
+                    "-passout",
+                    "env:KEY_PASS",
+                    "-storepass",
+                    "PRIVATE",
+                    "--proxy",
+                    "user:p/PRIVATE@proxy.fixture.test:3128",
+                ]
+                .map(str::to_owned)
+            ),
+            [
+                "-passin",
+                REDACTED,
+                "-passout",
+                "env:KEY_PASS",
+                "-storepass",
+                REDACTED,
+                "--proxy",
+                "<redacted>@proxy.fixture.test:3128",
+            ]
+        );
+        assert_eq!(
+            args(&["sshpass", "-p", "PRIVATE", "ssh", "-p", "22", "h"].map(str::to_owned)),
+            ["sshpass", "-p", REDACTED, "ssh", "-p", "22", "h"]
+        );
+        assert_eq!(
+            args(&["ssh", "-p", "22", "h"].map(str::to_owned)),
+            ["ssh", "-p", "22", "h"]
+        );
+    }
+
+    #[test]
+    fn free_text_reads_long_runs_of_bare_user_names_and_passwords_quickly() {
+        let started = std::time::Instant::now();
+        for run in [
+            "a@".repeat(100_000),
+            ",a:".repeat(100_000),
+            "user:pass@".repeat(20_000),
+            format!("a:{}@x", "\\ ".repeat(100_000)),
+            ":".repeat(200_000),
+            "a:b:".repeat(100_000),
+            "x(".repeat(100_000),
+            "a:b/".repeat(100_000),
+            format!("a:b/{}@h:1", "c/".repeat(100_000)),
+            // Every cut shares the word's host, read once.
+            format!("{}@{}", "a:b/".repeat(40_000), "h".repeat(160_000)),
+        ] {
+            let _ = bare_userinfo(&run, "[redacted]");
+            let _ = text(&run);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
     fn free_text_reads_long_runs_of_slashes_and_authorities_quickly() {
         let started = std::time::Instant::now();
         for run in [
@@ -950,6 +2036,64 @@ mod tests {
         assert_eq!(
             urls_in("cannot reach https://user:pa/ss@h.fixture.test/x: refused"),
             "cannot reach https://<redacted>@h.fixture.test/x: refused"
+        );
+    }
+
+    #[test]
+    fn a_url_hides_parameters_whose_names_glue_a_credential_word_to_another() {
+        for name in [
+            "pwd",
+            "PWD",
+            "pwds",
+            "userpwd",
+            "adminpwd",
+            "oldpwd",
+            "userpwds",
+            "userpass",
+            "dbpass",
+            "adminpass",
+            "superuserpass",
+            "rootpw",
+            "userpw",
+            "apitokens",
+            "authtokens",
+            "apikeys",
+            "sshkeys",
+            "x-otp",
+            "x-jwt",
+            "x-ticket",
+            "x-bearer",
+        ] {
+            // A number under a glued `tokens` name counts them.
+            let values: &[&str] = if name.ends_with("tokens") {
+                &["PRIVATE"]
+            } else {
+                &["PRIVATE", "1234"]
+            };
+            for value in values {
+                assert_eq!(
+                    url(&format!("https://h.fixture.test/x?a=1&{name}={value}&b=2")),
+                    format!("https://h.fixture.test/x?a=1&{name}=<redacted>&b=2"),
+                    "{name}={value}"
+                );
+                assert_eq!(
+                    urls_in(&format!(
+                        "GET https://h.fixture.test/cb#{name}={value}&state=s failed: 401"
+                    )),
+                    format!("GET https://h.fixture.test/cb#{name}=<redacted>&state=s failed: 401"),
+                    "{name}={value}"
+                );
+            }
+        }
+        // A glued token count, a glued `pass` that opens nothing, and words
+        // that only hold the letters.
+        let kept = "https://h.fixture.test/?bypass=1&compass=2&trespass=3&surpass=4&passenger=5\
+                    &pattern=a&show_pw_hint=5&keyword=k&monkeys=6&maxtokens=4096&prompttokens=null\
+                    &maxtokens=auto&tokenizer=bpe&sid=4&state=s&showtokens=true";
+        assert!(matches!(url(kept), Cow::Borrowed(_)), "{}", url(kept));
+        assert_eq!(
+            url("https://h.fixture.test/?apitokens=4096x"),
+            "https://h.fixture.test/?apitokens=<redacted>"
         );
     }
 

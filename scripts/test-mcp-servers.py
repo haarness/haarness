@@ -20,6 +20,7 @@ Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
 import json, os, pathlib, subprocess, sys, tempfile, time, urllib.error, urllib.request, uuid
 import e2e_scratch, e2e_tmux
+from e2e_env import clean_env
 
 repo = pathlib.Path(__file__).resolve().parents[1]
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
@@ -53,7 +54,7 @@ settings.write_text(json.dumps({
         'silent': server('prompts.py', timeoutMs=2000, env={'CANCEL_LOG': str(root/'prompt-cancels')}),
     },
 }, indent=2) + '\n')
-env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
+env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(root/'data'), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_TEST_KEYCHAIN_FILE=str(keychain), LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8')
 session = f'haarness-mcp-servers-{os.getpid()}'

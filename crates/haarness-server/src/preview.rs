@@ -25,31 +25,13 @@ fn bad(error: impl std::fmt::Display) -> Failure {
 fn failure(error: Failure) -> CoreError {
     CoreError::Tool(error.1)
 }
-/// Where this process's unit tests keep preview versions: never the real
-/// app-data folder, whatever a test does.
-#[cfg(test)]
-static TEST_DATA: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
-    std::env::temp_dir().join(format!("haarness-preview-data-{}", uuid::Uuid::now_v7()))
-});
-
+/// Where a workspace's preview versions live, under the server's data folder.
+#[must_use]
+pub fn versions_folder(workspace: &Path) -> Option<PathBuf> {
+    directory(workspace).ok()
+}
 fn directory(workspace: &Path) -> Result<PathBuf, Failure> {
-    #[cfg(test)]
-    let root = TEST_DATA.clone();
-    #[cfg(not(test))]
-    let root = std::env::var_os("HAARNESS_DATA_DIR")
-        .map(|root| PathBuf::from(root).join("data"))
-        // HAARNESS_HOME keeps everything under one folder.
-        .or_else(|| {
-            std::env::var_os("HAARNESS_HOME")
-                .map(PathBuf::from)
-                .filter(|root| root.is_absolute())
-                .map(|root| root.join("data"))
-        })
-        .or_else(|| {
-            directories::ProjectDirs::from("dev", "haarness", "haarness")
-                .map(|p| p.data_local_dir().to_owned())
-        })
-        .ok_or_else(|| bad("Preview storage is unavailable"))?;
+    let root = crate::data_folder().ok_or_else(|| bad("Preview storage is unavailable"))?;
     Ok(root.join("preview").join(files::hash(
         workspace
             .canonicalize()
@@ -381,7 +363,9 @@ mod tests {
         fs::write(root.join("~/page.html"), "<h1>in the project</h1>").unwrap();
         let workspace = root.canonicalize().unwrap();
         // Versions a test records stay out of the real app-data folder.
-        assert!(directory(&workspace).unwrap().starts_with(&*TEST_DATA));
+        if let Some(project) = directories::ProjectDirs::from("dev", "haarness", "haarness") {
+            assert!(!directory(&workspace).unwrap().starts_with(project.data_local_dir()));
+        }
         let refused = PreviewTool(workspace.clone())
             .execute(
                 json!({"filePath": "~/page.html"}),

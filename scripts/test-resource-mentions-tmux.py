@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import e2e_scratch  # noqa: E402
 from e2e_tmux import pane_command  # noqa: E402
+from e2e_env import clean_env  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("HAARNESS_BIN", ROOT / "target/debug/haarness")).resolve()
@@ -71,7 +72,7 @@ def server(**env):
     "mcp": {"docs": server(LIST_DELAY_FILE=str(delay)), "wiki": server(LIST_SLOW="1", LIST_DELAY_FILE=str(delay)),
             "closed": server()},
 }, indent=2) + "\n")
-env = {k: v for k, v in os.environ.items() if not k.startswith("HAARNESS_")}
+env = clean_env()
 env.update(
     HAARNESS_HOME=str(root / "home"),
     HAARNESS_DATA_DIR=str(root / "data"),

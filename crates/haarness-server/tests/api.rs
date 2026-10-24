@@ -13036,31 +13036,43 @@ async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
+/// A test never writes preview versions or saved tool output into the data
+/// folder of the person running it (Upstream PR #1145's rule): a test binary
+/// gets a data folder of its own under the system temp folder.
+#[test]
+fn tests_never_resolve_the_persons_own_data_folder() {
+    if std::env::var_os("HAARNESS_DATA_DIR").is_some()
+        || std::env::var_os("HAARNESS_HOME").is_some()
+    {
+        return;
+    }
+    let folder = haarness_server::data_folder().unwrap();
+    assert!(
+        folder.starts_with(std::env::temp_dir()),
+        "{}",
+        folder.display()
+    );
+    if let Some(project) = directories::ProjectDirs::from("dev", "haarness", "haarness") {
+        assert!(
+            !folder.starts_with(project.data_local_dir()),
+            "{}",
+            folder.display()
+        );
+    }
+    if let Some(home) = haarness_protocol::home_dir() {
+        assert!(
+            !folder.starts_with(home.join(".local/share")),
+            "{}",
+            folder.display()
+        );
+    }
+    let workspace = std::env::temp_dir();
+    assert!(preview_versions(&workspace).starts_with(folder.join("preview")));
+}
+
 /// Where `preview` keeps a workspace's versions, as the server finds it.
 fn preview_versions(workspace: &std::path::Path) -> std::path::PathBuf {
-    use sha2::Digest as _;
-    let root = std::env::var_os("HAARNESS_DATA_DIR")
-        .map(|root| std::path::PathBuf::from(root).join("data"))
-        .or_else(|| {
-            std::env::var_os("HAARNESS_HOME")
-                .map(std::path::PathBuf::from)
-                .filter(|root| root.is_absolute())
-                .map(|root| root.join("data"))
-        })
-        .unwrap_or_else(|| {
-            directories::ProjectDirs::from("dev", "haarness", "haarness")
-                .unwrap()
-                .data_local_dir()
-                .to_owned()
-        });
-    let key = sha2::Sha256::digest(
-        workspace
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .as_bytes(),
-    );
-    root.join("preview").join(format!("{key:x}"))
+    haarness_server::preview::versions_folder(workspace).unwrap()
 }
 
 #[tokio::test]

@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { stopChatHome } from "./fixtures/chat-home";
+import { isolatedEnv } from "./fixtures/isolated-env";
 
 // A card leaving the conversation, and the turn it held going on to its end,
 // move the transcript once for each thing that comes or goes, frame by frame:
@@ -193,9 +194,7 @@ test.beforeAll(async () => {
     join(project, ".haarness/config.toml"),
     '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n',
   );
-  env = Object.fromEntries(
-    Object.entries(process.env).filter(([key, value]) => value !== undefined && !key.startsWith("HAARNESS_")),
-  ) as Record<string, string>;
+  env = isolatedEnv();
   Object.assign(env, {
     HAARNESS_BIN: binary,
     HAARNESS_HOME: join(root, "home"),
