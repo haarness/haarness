@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { stopChatHome } from "./fixtures/chat-home";
+import { isolatedEnv } from "./fixtures/isolated-env";
 
 const binary = resolve(
   process.env.HAARNESS_BIN ?? "../../target/debug/haarness",
@@ -42,14 +43,7 @@ test.beforeEach(async () => {
     join(application, "node_modules"),
     "junction",
   );
-  env = Object.fromEntries(
-    Object.entries(process.env).filter(
-      ([key, value]) =>
-        value !== undefined &&
-        !key.startsWith("HAARNESS_") &&
-        !["ELECTRON_RUN_AS_NODE", "ELECTRON_RENDERER_URL"].includes(key),
-    ),
-  ) as Record<string, string>;
+  env = isolatedEnv(["ELECTRON_RUN_AS_NODE", "ELECTRON_RENDERER_URL"]);
   Object.assign(env, {
     HAARNESS_BIN: binary,
     HAARNESS_DATA_DIR: join(temporary, "data"),

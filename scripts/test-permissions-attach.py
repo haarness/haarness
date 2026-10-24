@@ -2,6 +2,7 @@
 """Real server and attached TUI: ordinary tools, manual approvals and retired policy migration."""
 import http.server, json, os, pathlib, shlex, subprocess, tempfile, threading, time, urllib.request, urllib.error
 import e2e_scratch
+from e2e_env import clean_env
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-permissions-attach-')).resolve()
@@ -13,7 +14,7 @@ legacy = state/'data/sandbox.json'; legacy.write_text('{"profile":"offline","all
 (workspace/'.env').write_text('TEST_ONLY=read-approval-proof')
 (workspace/'service.env').write_text('TEST_ONLY=named-env-proof')
 (workspace/'.env.example').write_text('EXAMPLE=public-proof')
-env = {k:v for k,v in os.environ.items() if not k.startswith('HAARNESS_')}
+env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(state), HAARNESS_HOME=str(root/'home'), HAARNESS_SERVER_TOKEN='', HAARNESS_SERVER_PASSWORD='', HAARNESS_TEST_PROVIDER='1', HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1')
 name = 'haarness-permissions-'+str(os.getpid()); url = None; checks = []
 class Web(http.server.BaseHTTPRequestHandler):

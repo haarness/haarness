@@ -1,7 +1,9 @@
 """The end-to-end harnesses keep a test run away from the person's home and from Haarness Cloud: no usage
 statistics are reported, and the harnesses that pass only `--data-dir` give the run a home of its own."""
+import ast
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -31,10 +33,40 @@ class UsageStatisticsTests(unittest.TestCase):
         finally:
             fixture.tmp.cleanup()
 
-    def test_harnesses_that_build_their_own_environment_turn_usage_statistics_off(self):
+    def test_a_clean_environment_drops_the_persons_settings_and_puts_isolation_back(self):
+        import e2e_env
+
+        env = e2e_env.clean_env(
+            "AWS_",
+            base={"PATH": "/bin", "HAARNESS_HOME": "/real", "HAARNESS_TELEMETRY": "1", "AWS_PROFILE": "p"},
+        )
+        self.assertEqual(env, {"PATH": "/bin", **e2e_env.ISOLATED})
+        self.assertEqual(e2e_env.ISOLATED["HAARNESS_TELEMETRY"], "0")
+
+    def test_no_harness_leaves_out_every_haarness_setting_without_putting_isolation_back(self):
+        # Dropping every HAARNESS_* variable also drops HAARNESS_TELEMETRY=0 and a closed
+        # HAARNESS_CLOUD_API_URL, so a script uses e2e_env.clean_env (a spec, isolated-env.ts) instead.
+        drop = re.compile(
+            r"not\s+\w+\.startswith\(\s*\(?\s*['\"]HAARNESS_"
+            r"|startswith\(\s*['\"]HAARNESS_['\"]\s*\)\s+and\s+\w+\s+not\s+in"
+        )
+        allowlist = re.compile(r"os\.environ\.items\(\)\s+if\s+\w+\s+in\s+\(")
+        python = sorted([*(ROOT / "scripts").glob("*.py"), *(ROOT / "sdks/tests").glob("*.py")])
+        self.assertGreater(len(python), 50)
+        for path in python:
+            text = path.read_text()
+            self.assertIsNone(drop.search(text), path.name)
+            if "clean_env(" in text and path.name != "e2e_env.py":
+                imports = [node for node in ast.walk(ast.parse(text)) if isinstance(node, ast.ImportFrom)]
+                self.assertTrue(any(node.module == "e2e_env" for node in imports), path.name)
+            if allowlist.search(text):
+                self.assertTrue("ISOLATED" in text or "HAARNESS_TELEMETRY" in text, path.name)
+        specs = sorted((ROOT / "apps/desktop/e2e").rglob("*.ts"))
+        self.assertGreater(len(specs), 30)
+        for path in specs:
+            if path.name != "isolated-env.ts":
+                self.assertNotIn('startsWith("HAARNESS_")', path.read_text(), path.name)
         for path, line in [
-            ("scripts/test-extensions.py", 'HAARNESS_TELEMETRY="0"'),
-            ("scripts/test-marketplace.py", 'HAARNESS_TELEMETRY="0"'),
             ("apps/desktop/playwright.config.ts", 'process.env.HAARNESS_TELEMETRY ??= "0";'),
             ("scripts/test-all.sh", 'export HAARNESS_TELEMETRY="${HAARNESS_TELEMETRY:-0}"'),
         ]:

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import electron from "electron";
+import { isolatedEnv } from "./fixtures/isolated-env";
 
 for (const outcome of ["resolve", "reject"] as const) {
   test(`quit during startup exits cleanly when preferences ${outcome} during native teardown`, async () => {
@@ -40,14 +41,7 @@ for (const outcome of ["resolve", "reject"] as const) {
       import(${JSON.stringify(pathToFileURL(resolve("out/main/index.js")).href)});
     `,
     );
-    const env = Object.fromEntries(
-      Object.entries(process.env).filter(
-        ([key, value]) =>
-          value !== undefined &&
-          !key.startsWith("HAARNESS_") &&
-          !["ELECTRON_RUN_AS_NODE", "ELECTRON_RENDERER_URL"].includes(key),
-      ),
-    );
+    const env = isolatedEnv(["ELECTRON_RUN_AS_NODE", "ELECTRON_RENDERER_URL"]);
     Object.assign(env, {
       HAARNESS_DESKTOP_DATA: join(directory, "desktop"),
       HAARNESS_DATA_DIR: join(directory, "data"),

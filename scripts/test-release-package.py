@@ -3,6 +3,7 @@
 check that the standalone CLI carries Haarness for Chrome."""
 import json, os, platform, shutil, subprocess, tempfile
 from pathlib import Path
+from e2e_env import clean_env
 root=Path(__file__).resolve().parents[1]
 name='haarness.exe' if platform.system()=='Windows' else 'haarness'
 versions=json.loads((root/'apps/desktop/package.json').read_text())
@@ -28,7 +29,7 @@ cli=Path(os.environ.get('HAARNESS_BIN') or root/'target'/'release'/name)
 with tempfile.TemporaryDirectory(prefix='haarness-cli-chrome-') as scratch:
     scratch=Path(scratch)
     alone=scratch/'bin'/name;alone.parent.mkdir();shutil.copy2(cli,alone)
-    env={k:v for k,v in os.environ.items() if not k.startswith(('HAARNESS_','XDG_'))}
+    env=clean_env('XDG_')
     env.update(HOME=str(scratch/'home'),USERPROFILE=str(scratch/'home'),HAARNESS_DATA_DIR=str(scratch/'data'),HAARNESS_BROWSER_MANIFEST_DIR=str(scratch/'profile'/'NativeMessagingHosts'))
     (scratch/'home').mkdir()
     status=json.loads(subprocess.check_output([str(alone),'browser','status','--json'],env=env,text=True))

@@ -4,6 +4,7 @@ the CLI and Desktop (skipped with --no-desktop or HAARNESS_NO_DESKTOP=1)."""
 import hashlib, http.server, os, platform, pty, shutil, subprocess, tempfile, threading, sys
 from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
+from e2e_env import clean_env
 ROOT=Path(__file__).resolve().parents[1]
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self,*args): pass
@@ -98,7 +99,7 @@ with tempfile.TemporaryDirectory(prefix='haarness-install-both-') as d:
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     def run(name,args=(),extra=None,piped=False):
         root=d/name;state['queries'].clear()
-        env={k:v for k,v in os.environ.items() if not k.startswith(('HAARNESS_','XDG_','DISPLAY','WAYLAND_DISPLAY'))}
+        env=clean_env('XDG_', 'DISPLAY', 'WAYLAND_DISPLAY')
         env.update(HOME=str(root/'home'),XDG_DATA_HOME=str(root/'share'),HAARNESS_RELEASE_URL=f'http://127.0.0.1:{server.server_port}',
                    HAARNESS_CHANNEL='preview',HAARNESS_INSTALL_DIR=str(root/'bin'),HAARNESS_DESKTOP_DIR=str(root/'apps'),DISPLAY=':0')
         env.update(extra or {})
@@ -123,7 +124,7 @@ with tempfile.TemporaryDirectory(prefix='haarness-install-both-') as d:
         print('PASS: the default install puts the CLI and Desktop in their folders'+(', signed ad hoc' if macos else ''))
         # On a terminal (stderr stays one under `curl | sh`) each download says what it is and shows progress.
         leader,follower=pty.openpty();root=d/'progress';state['queries'].clear()
-        env={k:v for k,v in os.environ.items() if not k.startswith(('HAARNESS_','XDG_'))}
+        env=clean_env('XDG_')
         env.update(HOME=str(root/'home'),HAARNESS_RELEASE_URL=f'http://127.0.0.1:{server.server_port}',HAARNESS_CHANNEL='preview',
                    HAARNESS_INSTALL_DIR=str(root/'bin'),HAARNESS_PRODUCT='cli')
         (root/'home').mkdir(parents=True)
