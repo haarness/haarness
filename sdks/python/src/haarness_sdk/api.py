@@ -447,13 +447,13 @@ class Api(Transport):
         """GET /v1/files/content."""
         return cast("T.FileContent", self.request('GET', f'/v1/files/content', query=query, binary_body=False, binary_response=False, options=options))
 
-    def write_file(self, body: T.FileWrite, *, options: RequestOptions | None = None) -> T.FileContent:
+    def write_file(self, body: T.FileWrite, query: T.FileScope | None = None, *, options: RequestOptions | None = None) -> T.FileContent:
         """PUT /v1/files/content."""
-        return cast("T.FileContent", self.request('PUT', f'/v1/files/content', body=body, binary_body=False, binary_response=False, options=options))
+        return cast("T.FileContent", self.request('PUT', f'/v1/files/content', body=body, query=query, binary_body=False, binary_response=False, options=options))
 
-    def mutate_file(self, body: T.FileAction, *, options: RequestOptions | None = None) -> T.JsonValue:
+    def mutate_file(self, body: T.FileAction, query: T.FileScope | None = None, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/files/action."""
-        return cast("T.JsonValue", self.request('POST', f'/v1/files/action', body=body, binary_body=False, binary_response=False, options=options))
+        return cast("T.JsonValue", self.request('POST', f'/v1/files/action', body=body, query=query, binary_body=False, binary_response=False, options=options))
 
     def preview_version(self, query: T.PreviewVersionQuery, *, options: RequestOptions | None = None) -> T.FileContent:
         """GET /v1/files/preview."""
@@ -952,13 +952,13 @@ class AsyncApi(AsyncTransport):
         """GET /v1/files/content."""
         return cast("T.FileContent", await self.request('GET', f'/v1/files/content', query=query, binary_body=False, binary_response=False, options=options))
 
-    async def write_file(self, body: T.FileWrite, *, options: RequestOptions | None = None) -> T.FileContent:
+    async def write_file(self, body: T.FileWrite, query: T.FileScope | None = None, *, options: RequestOptions | None = None) -> T.FileContent:
         """PUT /v1/files/content."""
-        return cast("T.FileContent", await self.request('PUT', f'/v1/files/content', body=body, binary_body=False, binary_response=False, options=options))
+        return cast("T.FileContent", await self.request('PUT', f'/v1/files/content', body=body, query=query, binary_body=False, binary_response=False, options=options))
 
-    async def mutate_file(self, body: T.FileAction, *, options: RequestOptions | None = None) -> T.JsonValue:
+    async def mutate_file(self, body: T.FileAction, query: T.FileScope | None = None, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/files/action."""
-        return cast("T.JsonValue", await self.request('POST', f'/v1/files/action', body=body, binary_body=False, binary_response=False, options=options))
+        return cast("T.JsonValue", await self.request('POST', f'/v1/files/action', body=body, query=query, binary_body=False, binary_response=False, options=options))
 
     async def preview_version(self, query: T.PreviewVersionQuery, *, options: RequestOptions | None = None) -> T.FileContent:
         """GET /v1/files/preview."""
