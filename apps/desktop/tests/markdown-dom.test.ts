@@ -23,8 +23,8 @@ test("markdown is sanitized by a DOMPurify instance of its own", async () => {
 // DOMPurify 3.4.17 fixes GHSA-c6gr-qvv4-5v3f (an `attributeName` rewriting a
 // link in XHTML mode), GHSA-cg2g-xh64-v4q7 (template expressions in shadow
 // roots) and GHSA-mrv2-3pqr-j5jr (in-place hooks that detach another node).
-// Markdown uses none of those modes, but Mermaid shares the default instance,
-// so the app ships the fixed release.
+// Markdown's sanitizer uses none of those modes; the app ships the fixed
+// release anyway, so no later use of them can bring the bugs back.
 test("the app ships a DOMPurify with the October 2026 advisories fixed", async () => {
   const { default: DOMPurify } = await import("dompurify");
   const at = (version: string) => version.split(".").map(Number);
