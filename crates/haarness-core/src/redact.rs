@@ -16,11 +16,11 @@ use regex::Regex;
 pub const REDACTED: &str = "<redacted>";
 
 /// Whether a setting, flag, header or query parameter of this name carries
-/// a credential: API, access and private keys, secrets, passwords and
-/// passphrases, credentials, tokens, authorization, cookies and signatures.
-/// `pat`, `pass`, `pw`, `cred`, `keys` and `tokens` count only as a word of
-/// their own (`GITHUB_PAT`, `dbPass`), never inside `pattern` or `passage`,
-/// and a bare `pwd` is a working directory.
+/// a credential: API, access and private keys, secrets, passwords,
+/// passphrases and passcodes, credentials, tokens, authorization, cookies
+/// and signatures. `pat`, `pass`, `pw`, `cred`, `keys` and `tokens` count
+/// only as a word of their own (`GITHUB_PAT`, `dbPass`), never inside
+/// `pattern` or `passage`, and a bare `pwd` is a working directory.
 #[must_use]
 pub fn secret_name(name: &str) -> bool {
     let words = words(name);
@@ -28,19 +28,20 @@ pub fn secret_name(name: &str) -> bool {
     let Some(last) = words.last() else {
         return false;
     };
-    [
-        "apikey",
-        "accesskey",
-        "privatekey",
-        "secret",
-        "password",
-        "passwd",
-        "passphrase",
-        "credential",
-        "bearer",
-    ]
-    .iter()
-    .any(|part| joined.contains(part))
+    passcode(&words)
+        || [
+            "apikey",
+            "accesskey",
+            "privatekey",
+            "secret",
+            "password",
+            "passwd",
+            "passphrase",
+            "credential",
+            "bearer",
+        ]
+        .iter()
+        .any(|part| joined.contains(part))
         || [
             "key",
             "token",
@@ -59,6 +60,50 @@ pub fn secret_name(name: &str) -> bool {
         ]
         .contains(&last.as_str()))
         || (last == "pwd" && words.len() > 1)
+}
+
+/// Whether the words of a name end in a passcode or a passphrase, written as
+/// one word or two (`passcode`, `devicePasscode`, `pass_code`,
+/// `PASS_PHRASE`); `bypass_code` holds neither, and `passcode_length` is
+/// its length.
+fn passcode(words: &[String]) -> bool {
+    words
+        .last()
+        .is_some_and(|word| word.ends_with("passcode") || word.ends_with("passphrase"))
+        || (words.len() > 1
+            && words[words.len() - 2] == "pass"
+            && matches!(words[words.len() - 1].as_str(), "code" | "phrase"))
+}
+
+/// The accounts a glued `pass` or `pw` opens (`dbpass`, `rootpw`); any
+/// other glued `pass` is a word (`bypass`, `compass`, `trespass`).
+const ACCOUNTS: [&str; 14] = [
+    "user", "db", "admin", "root", "login", "proxy", "ftp", "smtp", "mail", "ldap", "ssh", "mysql",
+    "pg", "redis",
+];
+
+/// Whether `word` is a `pass` or `pw` glued to one of [`ACCOUNTS`].
+fn account_pass(word: &str) -> bool {
+    ["pass", "pw"].iter().any(|end| {
+        word.strip_suffix(end)
+            .is_some_and(|start| ACCOUNTS.iter().any(|account| start.ends_with(account)))
+    })
+}
+
+/// Whether a name in free text is a credential's that the `KEYS` rules of
+/// [`text`] do not catch: a passcode or passphrase (see [`passcode`]), a
+/// last word `pass`, `pw` or `pwd` after another word (`DB_PASS`, `dbPass`,
+/// `MYSQL_PWD`, `x-pw`), or a `pass` or `pw` glued to an account
+/// (`DBPASS`). A bare `pass`, `pw` or `pwd` stays readable, as in
+/// `tests pass: 3` or `PWD=/home/me`.
+fn pass_name(name: &str) -> bool {
+    let words = words(name);
+    let Some(last) = words.last() else {
+        return false;
+    };
+    passcode(&words)
+        || (words.len() > 1 && matches!(last.as_str(), "pass" | "pw" | "pwd"))
+        || account_pass(last)
 }
 
 /// The words of a name, lower case: `X-Api-Key`, `api_key` and `apiKey` are
@@ -101,9 +146,6 @@ fn words(name: &str) -> Vec<String> {
 /// (`maxtokens=4096`). Any other glued `pass` stays readable (`bypass`,
 /// `compass`, `trespass`), and so do `keyword` and `show_pw_hint`.
 fn secret_parameter(name: &str, value: &str) -> bool {
-    const ACCOUNTS: [&str; 10] = [
-        "user", "db", "admin", "root", "login", "proxy", "ftp", "smtp", "mail", "ldap",
-    ];
     const HOLDERS: [&str; 17] = [
         "api",
         "auth",
@@ -137,10 +179,7 @@ fn secret_parameter(name: &str, value: &str) -> bool {
             .any(|part| joined.contains(part))
         || last.ends_with("pwd")
         || last.ends_with("pwds")
-        || ["pass", "pw"].iter().any(|word| {
-            last.strip_suffix(word)
-                .is_some_and(|start| ACCOUNTS.iter().any(|account| start.ends_with(account)))
-        })
+        || account_pass(last)
         || HOLDERS.iter().any(|holder| {
             last.strip_suffix("keys")
                 .is_some_and(|start| start.ends_with(holder))
@@ -514,13 +553,54 @@ pub fn text(text: &str) -> String {
         })
         .collect()
     });
+    // Names the `KEYS` rules miss (see `pass_name`), as a pair and as a flag
+    // followed by its value. Every one of them holds `pass` or `pw`.
+    static NAMED: LazyLock<[Regex; 2]> = LazyLock::new(|| {
+        [
+            format!(r#"(?i)\b([\w.-]*(?:pass|pw)[\w.-]*)(["']?[ \t]*[=:][ \t]*)({VALUE}|[^\s"',;&]+)"#),
+            format!(r#"(?i)(^|[^\w-])(--?([\w.-]*(?:pass|pw)[\w.-]*))[ \t]+({VALUE}|[^\s"',;&-][^\s"',;&]*)"#),
+        ]
+        .map(|pattern| Regex::new(&pattern).expect("static redaction pattern"))
+    });
     let mut text = userinfo(text).into_owned();
     for (pattern, replacement) in RULES.iter() {
         if pattern.is_match(&text) {
             text = pattern.replace_all(&text, *replacement).into_owned();
         }
     }
+    let [pairs, flags] = &*NAMED;
+    if pairs.is_match(&text) {
+        text = pairs
+            .replace_all(&text, |found: &regex::Captures<'_>| {
+                if pass_name(&found[1]) && hides(&found[3]) {
+                    format!("{}{}[redacted]", &found[1], &found[2])
+                } else {
+                    found[0].to_owned()
+                }
+            })
+            .into_owned();
+    }
+    if flags.is_match(&text) {
+        text = flags
+            .replace_all(&text, |found: &regex::Captures<'_>| {
+                if pass_name(&found[3]) && hides(&found[4]) {
+                    format!("{}{} [redacted]", &found[1], &found[2])
+                } else {
+                    found[0].to_owned()
+                }
+            })
+            .into_owned();
+    }
     text
+}
+
+/// Whether a value found under a credential's name in free text is hidden:
+/// anything but what is hidden already and a flag's `true` or `false`.
+fn hides(value: &str) -> bool {
+    let unquoted = value.trim_matches(['"', '\'']);
+    !(value == "[redacted]"
+        || unquoted.eq_ignore_ascii_case("true")
+        || unquoted.eq_ignore_ascii_case("false"))
 }
 
 /// `text` with each URL's user name and password replaced by `[redacted]`:
@@ -862,6 +942,63 @@ mod tests {
             text("--token=a\n--token b"),
             "--token=[redacted]\n--token [redacted]"
         );
+    }
+
+    #[test]
+    fn free_text_hides_passcodes_passphrases_and_a_pass_pw_or_pwd_after_another_word() {
+        for (input, output) in [
+            ("export DB_PASS=PRIVATE", "export DB_PASS=[redacted]"),
+            ("dbPass: PRIVATE next", "dbPass: [redacted] next"),
+            (
+                "MYSQL_PWD=PRIVATE mysql -u root app",
+                "MYSQL_PWD=[redacted] mysql -u root app",
+            ),
+            (
+                "SSHPASS=PRIVATE sshpass -e ssh host",
+                "SSHPASS=[redacted] sshpass -e ssh host",
+            ),
+            ("DBPASS='PRIVATE PART' ./run", "DBPASS=[redacted] ./run"),
+            ("x-pw: PRIVATE", "x-pw: [redacted]"),
+            ("passphrase=PRIVATE", "passphrase=[redacted]"),
+            ("PASS_PHRASE=PRIVATE", "PASS_PHRASE=[redacted]"),
+            (
+                "gpg --batch --passphrase 'PRIVATE PART' -d f.gpg",
+                "gpg --batch --passphrase [redacted] -d f.gpg",
+            ),
+            ("passcode: 1234", "passcode: [redacted]"),
+            ("pass_code=1234&next=1", "pass_code=[redacted]&next=1"),
+            (
+                r#"{"devicePasscode":"PRIVATE","ok":1}"#,
+                r#"{"devicePasscode":[redacted],"ok":1}"#,
+            ),
+            (
+                "tool --db-pass PRIVATE --verbose",
+                "tool --db-pass [redacted] --verbose",
+            ),
+        ] {
+            assert_eq!(text(input), output, "{input}");
+            assert_eq!(text(output), output, "{output}");
+        }
+        for kept in [
+            "tests pass: 3, fail: 0",
+            "PWD=/Users/me/project OLDPWD=/tmp",
+            "pass=ok pw: x",
+            "bypass=1 compass: north trespass=no",
+            "bypass_code=ABC",
+            "passenger: Alex",
+            "hasPassphrase=false passcode: True",
+            "passcode_length=6 passcodeLength: 6",
+            "--db-pass true",
+            "npm run pass:all",
+            "pwsh -NoProfile -Command Get-Date",
+        ] {
+            assert_eq!(text(kept), kept);
+        }
+        assert_eq!(
+            args(&["--passcode", "1234", "PASS_CODE=5678"].map(str::to_owned)),
+            ["--passcode", REDACTED, "PASS_CODE=<redacted>"]
+        );
+        assert!(!secret_name("bypass_code"));
     }
 
     #[test]
