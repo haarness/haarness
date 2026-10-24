@@ -1079,9 +1079,10 @@ fn refused_images<'a>(
 /// (`volume`). The turn's own images (`current`) and those of the last
 /// message that carries any stay, and so does every copy of a source sent
 /// again among them, since the record leaves a source out everywhere. Empty
-/// when the turn's own images hold more than half the request or pass the
-/// provider's `limits`: leaving out the others would not answer the refusal,
-/// so the newest go instead and the older ones are kept.
+/// when the turn's own images hold more than half the request, or they and
+/// the last message's together pass the provider's `limits`: leaving out the
+/// others would not answer the refusal, so the newest go instead and the
+/// older ones are kept.
 fn oldest_half<'a>(
     sent: &'a [SentImage],
     current: &HashSet<String>,
@@ -1093,27 +1094,32 @@ fn oldest_half<'a>(
         ImageVolume::Bytes => image.bytes,
     };
     let own = |image: &&SentImage| image.nested.is_none() && current.contains(&image.source);
+    let last = sent.iter().map(|image| image.message).max();
+    let stays = |image: &&SentImage| own(image) || Some(image.message) == last;
     let total = sent.iter().map(measure).sum::<usize>();
-    let (own_count, own_bytes) = sent
-        .iter()
-        .filter(own)
-        .fold((0_usize, 0_usize), |(count, bytes), image| {
-            (count + 1, bytes.saturating_add(image.bytes))
-        });
+    let tally = |keep: &dyn Fn(&&SentImage) -> bool| {
+        sent.iter()
+            .filter(keep)
+            .fold((0_usize, 0_usize), |(count, bytes), image| {
+                (count + 1, bytes.saturating_add(image.bytes))
+            })
+    };
+    let (own_count, own_bytes) = tally(&own);
     let own_share = match volume {
         ImageVolume::Count => own_count,
         ImageVolume::Bytes => own_bytes,
     };
+    // What stays must fit for leaving out the rest to answer the refusal.
+    let (staying_count, staying_bytes) = tally(&stays);
     if own_share.saturating_mul(2) > total
-        || own_bytes > limits.bytes
-        || limits.count.is_some_and(|most| own_count > most)
+        || staying_bytes > limits.bytes
+        || limits.count.is_some_and(|most| staying_count > most)
     {
         return Vec::new();
     }
-    let last = sent.iter().map(|image| image.message).max();
     let staying = sent
         .iter()
-        .filter(|image| own(image) || Some(image.message) == last)
+        .filter(stays)
         .map(|image| image.source.as_str())
         .collect::<HashSet<_>>();
     // Each source once, where it was last sent, oldest first.
@@ -16664,6 +16670,37 @@ mod tests {
             super::RefusedImages::Oldest(super::ImageVolume::Bytes)
         );
         assert!(!names.contains(&"photo.png".to_owned()), "{names:?}");
+    }
+
+    #[test]
+    fn a_size_refusal_the_last_screenshot_answers_for_leaves_it_out_and_keeps_the_older() {
+        const MIB: usize = 1024 * 1024;
+        let photo = sized_image("photo.png", MIB);
+        let mut messages = vec![ProviderMessage::Media {
+            role: "user".into(),
+            content: "Look at this".into(),
+            attachments: vec![photo.clone()],
+        }];
+        messages.extend(
+            (1..=6).map(|index| shot_result(sized_image(&format!("old-{index}.png"), MIB))),
+        );
+        messages.push(shot_result(sized_image("last.png", 4 * MIB)));
+        // The photo and the last screenshot alone (5 MiB) pass a 3 MiB limit:
+        // leaving out the six older ones would not answer the refusal.
+        let limits = crate::ImageLimits {
+            bytes: 3 * MIB,
+            count: None,
+        };
+        let (names, choice) = left_out(
+            "HTTP 413 Payload Too Large: request_too_large",
+            &messages,
+            &[&photo],
+            limits,
+        );
+        assert_eq!(
+            (names, choice),
+            (vec!["last.png".to_owned()], super::RefusedImages::Newest)
+        );
     }
 
     #[test]
