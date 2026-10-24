@@ -6405,27 +6405,30 @@ mod backslash_lines {
             assert_eq!(shell_reading(command), command, "{command:?}");
         }
         // Past 64 here-documents, every backslash line reads as before.
-        let mut many: String = (0..65)
-            .map(|index| format!("cat <<D{index}\nD{index}\n"))
-            .collect();
+        let mut many = String::new();
+        for index in 0..65 {
+            let _ =
+                std::fmt::Write::write_fmt(&mut many, format_args!("cat <<D{index}\nD{index}\n"));
+        }
         many.push_str("true\n\\rm -rf victim");
         assert_eq!(shell_reading(&many), many);
     }
 
     #[test]
     fn the_shell_reading_costs_no_more_than_the_line_s_length() {
+        use std::fmt::Write as _;
         // `<<` thirty thousand times in a string, then as many backslash
         // lines: with every `<<` taken for a delimiter, or the tree searched
         // from its root for each line, this took seconds where one parse of
         // the line takes milliseconds.
         let mut line = String::from("echo '");
         for word in 0..30_000 {
-            line.push_str(&format!("<<w{word} "));
+            let _ = write!(line, "<<w{word} ");
         }
         line.push('\'');
         let plain = line.clone();
         for word in 0..30_000 {
-            line.push_str(&format!("\n\\x{word}"));
+            let _ = write!(line, "\n\\x{word}");
         }
         let started = std::time::Instant::now();
         let mut parser = tree_sitter::Parser::new();
@@ -6446,7 +6449,7 @@ mod backslash_lines {
         // backslashes.
         let mut without = plain;
         for word in 0..30_000 {
-            without.push_str(&format!("\nx{word}"));
+            let _ = write!(without, "\nx{word}");
         }
         let workspace = std::env::current_dir().unwrap();
         let started = std::time::Instant::now();
