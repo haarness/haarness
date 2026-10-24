@@ -225,7 +225,7 @@ impl Service {
             .await
             .map_err(|error| {
                 event_task.abort();
-                internal(error)
+                refused(&error)
             })?;
         self.active
             .lock()
@@ -1323,6 +1323,19 @@ fn internal(error: impl std::fmt::Display) -> agent_client_protocol::Error {
     agent_client_protocol::Error::internal_error().data(error.to_string())
 }
 
+/// A prompt the server refused (a chat whose turn another window or run
+/// started, a hook that blocks the prompt, an unknown agent) is an invalid
+/// request whose message is the server's own sentence, which editors show;
+/// a failure of anything else is an internal error.
+fn refused(error: &anyhow::Error) -> agent_client_protocol::Error {
+    if !haarness_tui::api::refusal_status(error).is_some_and(|status| status.is_client_error()) {
+        return internal(error);
+    }
+    let mut refusal = agent_client_protocol::Error::invalid_request();
+    refusal.message = error.to_string();
+    refusal
+}
+
 fn not_found(error: impl std::fmt::Display) -> agent_client_protocol::Error {
     agent_client_protocol::Error::resource_not_found(None).data(error.to_string())
 }
@@ -1330,6 +1343,35 @@ fn not_found(error: impl std::fmt::Display) -> agent_client_protocol::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The server's refusal reaches the editor as its sentence; a failure of
+    /// the server or the connection stays an internal error.
+    #[test]
+    fn a_refused_prompt_is_an_invalid_request_with_the_servers_sentence() {
+        let refusal = |status| {
+            anyhow::Error::new(haarness_tui::api::ApiRefusal {
+                status,
+                code: Some("conflict".into()),
+                message: "conflict: This chat already has a turn running.".into(),
+            })
+        };
+        let error = refused(&refusal(reqwest::StatusCode::CONFLICT));
+        assert_eq!(
+            error.code,
+            agent_client_protocol::Error::invalid_request().code
+        );
+        assert_eq!(error.message, "This chat already has a turn running.");
+        let error = refused(&refusal(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
+        assert_eq!(
+            error.code,
+            agent_client_protocol::Error::internal_error().code
+        );
+        let error = refused(&anyhow::anyhow!("connection refused"));
+        assert_eq!(
+            error.code,
+            agent_client_protocol::Error::internal_error().code
+        );
+    }
 
     #[test]
     fn initialize_advertises_every_prompt_block_it_accepts() {
