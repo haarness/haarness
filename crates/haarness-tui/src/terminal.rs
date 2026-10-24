@@ -417,6 +417,10 @@ pub(crate) fn in_use() -> bool {
 /// from a panic hook: every step is best-effort and none can panic.
 pub fn restore_terminal() {
     ON_SCREEN.store(false, Ordering::Relaxed);
+    // Unit tests that hand the terminal over never touch the real one.
+    if cfg!(test) {
+        return;
+    }
     // Clear the title we set so the shell's own title comes back.
     let _ = write!(io::stdout(), "\x1b]0;\x07");
     let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
@@ -488,6 +492,9 @@ impl TerminalGuard {
 /// Re-arm raw mode, the alternate screen, paste/mouse tracking, and enhanced
 /// keyboard reporting after an external program or SIGCONT returns control.
 pub fn resume_terminal() -> Result<()> {
+    if cfg!(test) {
+        return Ok(());
+    }
     activate_terminal()
 }
 
