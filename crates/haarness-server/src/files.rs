@@ -530,15 +530,23 @@ pub async fn mutate_file(
     Ok(result)
 }
 
-/// A folder inside the scope, held open once its real place is checked:
-/// files are made, renamed and removed in that folder, not wherever its path
-/// leads later, so a link put in place of the folder (or of one above it)
-/// between the check and the change is not followed.
+/// A folder inside the scope, held once its real place is checked: files are
+/// made, renamed and removed in that folder, not wherever its path leads
+/// later, so a link put in place of the folder (or of one above it) between
+/// the check and the change is not followed.
 struct Bound {
+    held: Held,
+}
+
+enum Held {
+    /// The folder itself, open (and the real path it was opened by):
+    /// changes are made relative to it.
     #[cfg(unix)]
-    folder: fs::File,
-    #[cfg(not(unix))]
-    real: PathBuf,
+    Open(std::os::fd::OwnedFd, PathBuf),
+    /// Its real path, checked again right before each change: where the
+    /// system has no folder handles (Windows), or none it lets this process
+    /// open (a write-only drop-box folder on macOS).
+    Checked(PathBuf),
 }
 
 impl Bound {
@@ -559,23 +567,36 @@ impl Bound {
         inside(&root, &real)?;
         #[cfg(unix)]
         {
-            let opened = fs::File::open(&real).map_err(io(FOLDER_GONE))?;
-            if !opened.metadata().map_err(bad)?.is_dir() {
+            let opened = match open_folder(&real) {
+                Ok(opened) => opened,
+                // Searchable but not readable: hold its checked path.
+                Err(nix::errno::Errno::EACCES) => {
+                    return Ok(Self {
+                        held: Held::Checked(real),
+                    });
+                }
+                Err(error) => return Err(errno(error)),
+            };
+            let stat = nix::sys::stat::fstat(&opened).map_err(errno)?;
+            if !is_folder(stat.st_mode) {
                 return Err(bad("Not a folder"));
             }
             // Where the opened folder really is, not where its path leads now.
-            inside(&root, &held_path(&opened, &real)?)?;
-            Ok(Self { folder: opened })
+            inside(&root, &held_path(&opened, &stat, &real)?)?;
+            Ok(Self {
+                held: Held::Open(opened, real),
+            })
         }
         #[cfg(not(unix))]
-        Ok(Self { real })
+        Ok(Self {
+            held: Held::Checked(real),
+        })
     }
 
-    /// Without folder handles: the path must still lead to the checked folder.
-    #[cfg(not(unix))]
-    fn still(&self) -> Result<&Path, Failure> {
-        if self.real.canonicalize().ok().as_deref() == Some(self.real.as_path()) {
-            Ok(&self.real)
+    /// The checked path, when it still leads to the folder that was checked.
+    fn still(path: &Path) -> Result<&Path, Failure> {
+        if path.canonicalize().ok().as_deref() == Some(path) {
+            Ok(path)
         } else {
             Err(bad("Path escapes the workspace"))
         }
@@ -584,34 +605,34 @@ impl Bound {
     /// A new, empty file of its own name, for a write to replace a file with.
     fn create_temporary(&self) -> Result<(fs::File, std::ffi::OsString), Failure> {
         let name = std::ffi::OsString::from(format!(".haarness-edit-{}", uuid::Uuid::now_v7()));
-        #[cfg(unix)]
-        {
-            use nix::{fcntl::OFlag, sys::stat::Mode};
-            let file = nix::fcntl::openat(
-                &self.folder,
-                name.as_os_str(),
-                OFlag::O_CREAT
-                    | OFlag::O_EXCL
-                    | OFlag::O_WRONLY
-                    | OFlag::O_NOFOLLOW
-                    | OFlag::O_CLOEXEC,
-                Mode::from_bits_truncate(0o666),
-            )
-            .map_err(errno)?;
-            Ok((fs::File::from(file), name))
-        }
-        #[cfg(not(unix))]
-        {
-            let file = fs::OpenOptions::new()
+        let file = match &self.held {
+            #[cfg(unix)]
+            Held::Open(folder, _) => {
+                use nix::{fcntl::OFlag, sys::stat::Mode};
+                fs::File::from(
+                    nix::fcntl::openat(
+                        folder,
+                        name.as_os_str(),
+                        OFlag::O_CREAT
+                            | OFlag::O_EXCL
+                            | OFlag::O_WRONLY
+                            | OFlag::O_NOFOLLOW
+                            | OFlag::O_CLOEXEC,
+                        Mode::from_bits_truncate(0o666),
+                    )
+                    .map_err(errno)?,
+                )
+            }
+            Held::Checked(path) => fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(self.still()?.join(&name))
-                .map_err(bad)?;
-            Ok((file, name))
-        }
+                .open(Self::still(path)?.join(&name))
+                .map_err(bad)?,
+        };
+        Ok((file, name))
     }
 
-    /// Move `name` to `target` in `into` (this folder or another bound one),
+    /// Move `name` to `target` in `into` (this folder or another held one),
     /// replacing a file there.
     fn rename(
         &self,
@@ -619,77 +640,83 @@ impl Bound {
         into: &Self,
         target: &std::ffi::OsStr,
     ) -> Result<(), Failure> {
-        #[cfg(unix)]
-        {
-            nix::fcntl::renameat(&self.folder, name, &into.folder, target).map_err(errno)
+        match (&self.held, &into.held) {
+            #[cfg(unix)]
+            (Held::Open(from, _), Held::Open(to, _)) => {
+                nix::fcntl::renameat(from, name, to, target).map_err(errno)
+            }
+            _ => fs::rename(self.path_of(name)?, into.path_of(target)?).map_err(bad),
         }
-        #[cfg(not(unix))]
-        {
-            fs::rename(self.still()?.join(name), into.still()?.join(target)).map_err(bad)
+    }
+
+    /// `name` in this folder by path, for the changes that cannot be made
+    /// relative to an open folder.
+    fn path_of(&self, name: &std::ffi::OsStr) -> Result<PathBuf, Failure> {
+        match &self.held {
+            #[cfg(unix)]
+            Held::Open(folder, real) => {
+                let stat = nix::sys::stat::fstat(folder).map_err(errno)?;
+                Ok(held_path(folder, &stat, real)?.join(name))
+            }
+            Held::Checked(path) => Ok(Self::still(path)?.join(name)),
         }
     }
 
     fn mkdir(&self, name: &std::ffi::OsStr) -> Result<(), Failure> {
-        #[cfg(unix)]
-        {
-            nix::sys::stat::mkdirat(
-                &self.folder,
+        match &self.held {
+            #[cfg(unix)]
+            Held::Open(folder, _) => nix::sys::stat::mkdirat(
+                folder,
                 name,
                 nix::sys::stat::Mode::from_bits_truncate(0o777),
             )
-            .map_err(errno)
-        }
-        #[cfg(not(unix))]
-        {
-            fs::create_dir(self.still()?.join(name)).map_err(bad)
+            .map_err(errno),
+            Held::Checked(path) => fs::create_dir(Self::still(path)?.join(name)).map_err(bad),
         }
     }
 
     /// Whether `name` is there, and whether it is a folder (a link is not).
     fn kind(&self, name: &std::ffi::OsStr) -> Result<Option<bool>, Failure> {
-        #[cfg(unix)]
-        {
-            match nix::sys::stat::fstatat(
-                &self.folder,
-                name,
-                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
-            ) {
-                Ok(stat) => Ok(Some(
-                    (stat.st_mode & nix::sys::stat::SFlag::S_IFMT.bits())
-                        == nix::sys::stat::SFlag::S_IFDIR.bits(),
-                )),
-                Err(nix::errno::Errno::ENOENT) => Ok(None),
-                Err(error) => Err(errno(error)),
+        match &self.held {
+            #[cfg(unix)]
+            Held::Open(folder, _) => {
+                match nix::sys::stat::fstatat(
+                    folder,
+                    name,
+                    nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+                ) {
+                    Ok(stat) => Ok(Some(is_folder(stat.st_mode))),
+                    Err(nix::errno::Errno::ENOENT) => Ok(None),
+                    Err(error) => Err(errno(error)),
+                }
             }
-        }
-        #[cfg(not(unix))]
-        {
-            match fs::symlink_metadata(self.still()?.join(name)) {
+            Held::Checked(path) => match fs::symlink_metadata(Self::still(path)?.join(name)) {
                 Ok(meta) => Ok(Some(meta.is_dir())),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(bad(error)),
-            }
+            },
         }
     }
 
     fn remove(&self, name: &std::ffi::OsStr, directory: bool) -> Result<(), Failure> {
-        #[cfg(unix)]
-        {
-            use nix::unistd::UnlinkatFlags;
-            let flag = if directory {
-                UnlinkatFlags::RemoveDir
-            } else {
-                UnlinkatFlags::NoRemoveDir
-            };
-            nix::unistd::unlinkat(&self.folder, name, flag).map_err(errno)
-        }
-        #[cfg(not(unix))]
-        {
-            let path = self.still()?.join(name);
-            if directory {
-                fs::remove_dir(path).map_err(bad)
-            } else {
-                fs::remove_file(path).map_err(bad)
+        match &self.held {
+            #[cfg(unix)]
+            Held::Open(folder, _) => {
+                use nix::unistd::UnlinkatFlags;
+                let flag = if directory {
+                    UnlinkatFlags::RemoveDir
+                } else {
+                    UnlinkatFlags::NoRemoveDir
+                };
+                nix::unistd::unlinkat(folder, name, flag).map_err(errno)
+            }
+            Held::Checked(path) => {
+                let path = Self::still(path)?.join(name);
+                if directory {
+                    fs::remove_dir(path).map_err(bad)
+                } else {
+                    fs::remove_file(path).map_err(bad)
+                }
             }
         }
     }
@@ -705,39 +732,64 @@ fn errno(error: nix::errno::Errno) -> Failure {
     io(FILE_GONE)(std::io::Error::from_raw_os_error(error as i32))
 }
 
-/// The path the system has for the folder `opened` holds, which a link put
-/// in place of `checked` since does not change.
 #[cfg(unix)]
-fn held_path(opened: &fs::File, checked: &Path) -> Result<PathBuf, Failure> {
+fn is_folder(mode: nix::libc::mode_t) -> bool {
+    (mode & nix::sys::stat::SFlag::S_IFMT.bits()) == nix::sys::stat::SFlag::S_IFDIR.bits()
+}
+
+/// Open the folder `path` names to make changes in it. Linux opens it as a
+/// place only (`O_PATH`), which a folder one may write in but not read
+/// (`-wx`, a drop box) allows; elsewhere it is opened for reading.
+#[cfg(unix)]
+fn open_folder(path: &Path) -> nix::Result<std::os::fd::OwnedFd> {
+    use nix::{fcntl::OFlag, sys::stat::Mode};
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let access = OFlag::O_PATH;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let access = OFlag::O_RDONLY;
+    nix::fcntl::open(
+        path,
+        access | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+}
+
+/// The path the system has for the folder `opened` holds, which a link put
+/// in place of `checked` since does not change. Where the system cannot say
+/// (Linux without `/proc`), `checked` itself, as long as it still names that
+/// very folder (the same device and inode); otherwise the change is refused.
+#[cfg(unix)]
+fn held_path(
+    opened: &std::os::fd::OwnedFd,
+    stat: &nix::sys::stat::FileStat,
+    checked: &Path,
+) -> Result<PathBuf, Failure> {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
-        let _ = checked;
         let mut path = PathBuf::new();
-        nix::fcntl::fcntl(opened, nix::fcntl::FcntlArg::F_GETPATH(&mut path)).map_err(errno)?;
-        Ok(path)
+        if nix::fcntl::fcntl(opened, nix::fcntl::FcntlArg::F_GETPATH(&mut path)).is_ok() {
+            return Ok(path);
+        }
     }
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::fd::AsRawFd as _;
-        let _ = checked;
-        fs::read_link(format!("/proc/self/fd/{}", opened.as_raw_fd())).map_err(bad)
-    }
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "linux",
-        target_os = "android"
-    )))]
-    {
-        // No way to ask: the checked path must still be that very folder.
-        use std::os::unix::fs::MetadataExt as _;
-        let held = opened.metadata().map_err(bad)?;
-        let named = fs::metadata(checked).map_err(bad)?;
-        if (held.dev(), held.ino()) == (named.dev(), named.ino()) {
-            Ok(checked.to_path_buf())
-        } else {
-            Err(bad("Path escapes the workspace"))
+        if let Ok(path) = fs::read_link(format!("/proc/self/fd/{}", opened.as_raw_fd())) {
+            return Ok(path);
         }
+    }
+    let _ = opened;
+    same_folder(stat, checked)
+}
+
+/// `checked`, when it still names the folder `stat` describes.
+#[cfg(unix)]
+fn same_folder(stat: &nix::sys::stat::FileStat, checked: &Path) -> Result<PathBuf, Failure> {
+    let named = nix::sys::stat::stat(checked).map_err(errno)?;
+    if (stat.st_dev, stat.st_ino) == (named.st_dev, named.st_ino) {
+        Ok(checked.to_path_buf())
+    } else {
+        Err(bad("Path escapes the workspace"))
     }
 }
 
@@ -889,6 +941,83 @@ mod tests {
         held.rename(&temporary, &into, std::ffi::OsStr::new("moved"))
             .unwrap();
         assert!(root.join("sub-real/made/moved").is_file());
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_change_lands_in_a_folder_one_may_write_in_but_not_read() {
+        use std::{ffi::OsStr, os::unix::fs::PermissionsExt as _};
+        let base = std::env::temp_dir().join(format!("haarness-drop-box-{}", uuid::Uuid::now_v7()));
+        let root = base.join("workspace");
+        let outside = base.join("outside");
+        fs::create_dir_all(root.join("drop")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let root = root.canonicalize().unwrap();
+        let drop_box = root.join("drop");
+        let mode = |mode| fs::set_permissions(&drop_box, fs::Permissions::from_mode(mode));
+        mode(0o300).unwrap();
+        let changed = (|| {
+            let held = Bound::open(&root, &drop_box)?;
+            let (mut file, temporary) = held.create_temporary()?;
+            file.write_all(b"dropped").map_err(bad)?;
+            held.rename(&temporary, &held, OsStr::new("note.txt"))?;
+            held.mkdir(OsStr::new("inner"))?;
+            let kinds = (
+                held.kind(OsStr::new("note.txt"))?,
+                held.kind(OsStr::new("inner"))?,
+            );
+            held.mkdir(OsStr::new("gone"))?;
+            held.remove(OsStr::new("gone"), true)?;
+            // The folder moved aside and a link out put in its place: a
+            // change lands in the folder or is refused, never outside.
+            fs::rename(&drop_box, root.join("drop-real")).map_err(bad)?;
+            std::os::unix::fs::symlink(&outside, &drop_box).map_err(bad)?;
+            let late = held.mkdir(OsStr::new("late"));
+            Ok::<_, Failure>((kinds, late))
+        })();
+        let real = root.join("drop-real");
+        let _ = fs::set_permissions(&real, fs::Permissions::from_mode(0o755));
+        let _ = mode(0o755);
+        let (kinds, late) = changed.unwrap();
+        assert_eq!(kinds, (Some(false), Some(true)));
+        assert_eq!(
+            fs::read_to_string(real.join("note.txt")).unwrap(),
+            "dropped"
+        );
+        assert!(real.join("inner").is_dir());
+        assert!(!real.join("gone").exists());
+        assert!(late.is_err() || real.join("late").is_dir(), "{late:?}");
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing outside"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn without_a_path_for_the_open_folder_the_checked_path_must_still_name_it() {
+        let base =
+            std::env::temp_dir().join(format!("haarness-same-folder-{}", uuid::Uuid::now_v7()));
+        let outside = base.join("outside");
+        fs::create_dir_all(base.join("sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let base = base.canonicalize().unwrap();
+        let sub = base.join("sub");
+        let opened = open_folder(&sub).unwrap();
+        let stat = nix::sys::stat::fstat(&opened).unwrap();
+        assert_eq!(same_folder(&stat, &sub), Ok(sub.clone()));
+        fs::rename(&sub, base.join("sub-real")).unwrap();
+        std::os::unix::fs::symlink(&outside, &sub).unwrap();
+        assert_eq!(
+            same_folder(&stat, &sub),
+            Err(bad("Path escapes the workspace"))
+        );
+        assert!(same_folder(&stat, &base.join("gone")).is_err());
+        assert_eq!(
+            same_folder(&stat, &base.join("sub-real")),
+            Ok(base.join("sub-real"))
+        );
         fs::remove_dir_all(base).unwrap();
     }
     #[cfg(unix)]

@@ -1537,3 +1537,61 @@ async fn search_in_a_git_project_finds_files_committed_under_build_folder_names(
         assert_eq!(search(query).await, [path], "{query}");
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn files_can_be_written_into_a_folder_one_may_write_in_but_not_read() {
+    use std::os::unix::fs::PermissionsExt as _;
+    /// Gives the folder its reading back, also when an assertion fails.
+    struct Readable(PathBuf);
+    impl Drop for Readable {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.runtime();
+    let drop_box = fixture.workspace.join("drop");
+    std::fs::create_dir_all(&drop_box).unwrap();
+    std::fs::set_permissions(&drop_box, std::fs::Permissions::from_mode(0o300)).unwrap();
+    let readable = Readable(drop_box.clone());
+    let (base, _handle) = served(&fixture, runtime).await;
+    let client = reqwest::Client::new();
+    let written = client
+        .put(format!("{base}/v1/files/content"))
+        .bearer_auth("fixture-token")
+        .json(&json!({"path": "drop/note.txt", "content": "dropped", "revision": hash("")}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        written.status().is_success(),
+        "{}",
+        written.text().await.unwrap()
+    );
+    let action = |body: Value| {
+        client
+            .post(format!("{base}/v1/files/action"))
+            .bearer_auth("fixture-token")
+            .json(&body)
+            .send()
+    };
+    for body in [
+        json!({"action": "mkdir", "path": "drop/inner"}),
+        json!({"action": "rename", "path": "drop/note.txt", "target": "drop/renamed.txt"}),
+    ] {
+        let answer = action(body.clone()).await.unwrap();
+        assert!(
+            answer.status().is_success(),
+            "{body}: {}",
+            answer.text().await.unwrap()
+        );
+    }
+    drop(readable);
+    assert_eq!(
+        std::fs::read_to_string(drop_box.join("renamed.txt")).unwrap(),
+        "dropped"
+    );
+    assert!(drop_box.join("inner").is_dir());
+    assert!(!drop_box.join("note.txt").exists());
+}
