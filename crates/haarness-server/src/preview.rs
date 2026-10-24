@@ -364,7 +364,11 @@ mod tests {
         let workspace = root.canonicalize().unwrap();
         // Versions a test records stay out of the real app-data folder.
         if let Some(project) = directories::ProjectDirs::from("dev", "haarness", "haarness") {
-            assert!(!directory(&workspace).unwrap().starts_with(project.data_local_dir()));
+            assert!(
+                !directory(&workspace)
+                    .unwrap()
+                    .starts_with(project.data_local_dir())
+            );
         }
         let refused = PreviewTool(workspace.clone())
             .execute(
