@@ -1337,6 +1337,27 @@ async fn the_file_apis_work_in_a_chat_s_own_folder_when_asked_for_that_chat() {
         .unwrap();
     assert_eq!(planted.status(), reqwest::StatusCode::FORBIDDEN);
     assert!(!folder(&b).join("planted.txt").exists());
+    // A chat folder someone deleted is not made again by the file APIs.
+    std::fs::remove_dir_all(folder(&b)).unwrap();
+    for path in [
+        format!("/files/list?threadId={}", b.id),
+        format!("/files/content?path=secret.txt&threadId={}", b.id),
+    ] {
+        assert_eq!(
+            get(path.clone()).await.unwrap().status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    let written = client
+        .put(format!("{base}/v1/files/content?threadId={}", b.id))
+        .bearer_auth("fixture-token")
+        .json(&json!({"path": "new.txt", "content": "x", "revision": hash("")}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(written.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(!folder(&b).exists());
 }
 
 /// A file's revision as the file API computes it.

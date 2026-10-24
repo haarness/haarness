@@ -121,6 +121,8 @@ pub(crate) async fn root_for(
         return Ok((state.workspace.clone(), None));
     };
     match state.runtime.chat_folder(thread).await {
+        // Someone deleted it: these calls never make it again.
+        Ok(Some(folder)) if !folder.is_dir() => Err((StatusCode::NOT_FOUND, FOLDER_GONE.into())),
         Ok(Some(folder)) => {
             let shown = folder.display().to_string();
             Ok((folder, Some(shown)))
