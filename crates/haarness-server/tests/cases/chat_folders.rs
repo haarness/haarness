@@ -357,6 +357,69 @@ async fn the_api_refuses_a_folder_outside_the_project_and_says_it_takes_one() {
             .iter()
             .any(|command| command["name"] == "mine")
     );
+
+    // A published chat lists for itself only, never for another chat.
+    let other = client
+        .post(format!("{base}/v1/threads"))
+        .bearer_auth("fixture-token")
+        .json(&json!({"provider": "echo", "model": "echo-1", "directory": "2026-10-24/other"}))
+        .send()
+        .await
+        .unwrap()
+        .json::<Thread>()
+        .await
+        .unwrap();
+    std::fs::create_dir_all(folder(&other).join(".haarness/workflows")).unwrap();
+    std::fs::write(
+        folder(&other).join(".haarness/workflows/theirs.js"),
+        "export const meta = { name: 'theirs' }\nreturn 1\n",
+    )
+    .unwrap();
+    let scoped = |path: String| {
+        client
+            .get(path)
+            .bearer_auth("fixture-token")
+            .header("x-haarness-remote-thread", created.id.to_string())
+            .send()
+    };
+    assert_eq!(
+        scoped(format!("{base}/v1/commands?threadId={}", created.id))
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::OK
+    );
+    for path in [
+        format!("{base}/v1/commands?threadId={}", other.id),
+        format!("{base}/v1/tools?threadId={}", other.id),
+        format!("{base}/v1/commands?threadId=not-an-id"),
+    ] {
+        assert_eq!(
+            scoped(path.clone()).await.unwrap().status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+
+    // A chat folder a link now stands in for is not followed for a list.
+    std::fs::remove_dir_all(folder(&created)).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(folder(&other), folder(&created)).unwrap();
+        for path in [
+            format!("{base}/v1/workflows?threadId={}", created.id),
+            format!("{base}/v1/commands?threadId={}", created.id),
+        ] {
+            let refused = client
+                .get(path.clone())
+                .bearer_auth("fixture-token")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST, "{path}");
+            assert!(!refused.text().await.unwrap().contains("theirs"), "{path}");
+        }
+    }
 }
 
 #[tokio::test]

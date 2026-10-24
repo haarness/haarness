@@ -1734,6 +1734,19 @@ impl AgentRuntime {
         }
     }
 
+    /// The folder of its own chat `id` works in, as work that only reads
+    /// sees it: `None` for a chat of the project folder, an error when the
+    /// folder is no longer a real chat folder (a link put in its place).
+    pub async fn chat_folder(&self, id: ThreadId) -> CoreResult<Option<PathBuf>> {
+        let thread = self.repository.get_thread(id).await?;
+        if thread.directory.is_none() {
+            return Ok(None);
+        }
+        self.thread_workspace(&thread, FolderAccess::Read)
+            .await
+            .map(Some)
+    }
+
     /// `thread` for work that only reads where it works: in the chat home a
     /// chat without a folder is given one first.
     async fn reading_thread(&self, id: ThreadId) -> CoreResult<Thread> {

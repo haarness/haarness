@@ -75,17 +75,13 @@ pub(crate) async fn execute(
     }
 }
 
-/// The folder chat `thread_id` works in, when it is one of its own.
+/// The folder chat `thread_id` works in, when it is one of its own; refused
+/// when a link stands in for it, which is never followed.
 pub(crate) async fn chat_folder_of(
     state: &ServerState,
     thread_id: ThreadId,
 ) -> CoreResult<Option<std::path::PathBuf>> {
-    Ok(state
-        .runtime
-        .get_thread(thread_id)
-        .await?
-        .directory
-        .map(std::path::PathBuf::from))
+    state.runtime.chat_folder(thread_id).await
 }
 
 /// The workflows a chat working in `folder` (or the project's chats) can run.
