@@ -4727,14 +4727,13 @@ async fn run_command(
             if refusable && client.active_turn(thread.id).await?.is_some() {
                 anyhow::bail!(haarness_core::CHAT_BUSY);
             }
-            let previous = if refusable {
-                Some(client.approval_mode(thread.id).await?)
+            if refusable {
+                let (previous, set) = switch_to_auto(&client, thread.id).await?;
+                earlier = EarlierMode::of(&previous, set.revision);
             } else {
-                None
-            };
-            let set = set_chat_auto(&client, thread.id).await;
-            let set = discard_refused_chat(&client, &thread, created, set).await?;
-            earlier = previous.and_then(|previous| EarlierMode::of(&previous, set.revision));
+                let set = set_chat_auto(&client, thread.id, None).await;
+                discard_refused_chat(&client, &thread, created, set).await?;
+            }
         }
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
@@ -4961,21 +4960,50 @@ async fn require_shared_approval_modes(client: &haarness_tui::api::ApiClient) ->
     Ok(())
 }
 
-/// Put a chat in Auto on its server, whatever it was.
+/// Put a chat in Auto on its server: whatever it was, or only while its mode
+/// is still at `revision`.
 async fn set_chat_auto(
     client: &haarness_tui::api::ApiClient,
     thread: ThreadId,
+    revision: Option<String>,
 ) -> Result<haarness_protocol::ApprovalModeInfo> {
     client
         .set_approval_mode(
             thread,
             &haarness_protocol::SetApprovalModeRequest {
                 mode: haarness_protocol::ApprovalModeSetting::Auto,
-                revision: None,
+                revision,
             },
         )
         .await
         .context("Could not put this chat in Auto")
+}
+
+/// Put a chat the run did not create in Auto: its mode before, and after.
+/// The switch names the version it read, so a mode someone sets between the
+/// read and the switch is read again, never lost when it is put back.
+async fn switch_to_auto(
+    client: &haarness_tui::api::ApiClient,
+    thread: ThreadId,
+) -> Result<(
+    haarness_protocol::ApprovalModeInfo,
+    haarness_protocol::ApprovalModeInfo,
+)> {
+    let mut attempt = 0;
+    loop {
+        let previous = client.approval_mode(thread).await?;
+        match set_chat_auto(client, thread, Some(previous.revision.clone())).await {
+            Ok(set) => return Ok((previous, set)),
+            Err(error)
+                if attempt < 2
+                    && haarness_tui::api::refusal_status(&error)
+                        == Some(reqwest::StatusCode::CONFLICT) =>
+            {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// The setting `--auto` replaced on a chat the run did not create, and the

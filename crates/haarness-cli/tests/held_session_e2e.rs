@@ -491,3 +491,20 @@ async fn a_run_whose_turn_is_refused_leaves_the_chats_mode() {
     assert_eq!(after["mode"], before["mode"], "{after}");
     assert_eq!(after["explicit"], before["explicit"], "{after}");
 }
+
+/// Someone puts the chat in Review between the run's read of its mode and
+/// its switch to Auto: the switch reads again, and that Review is what is
+/// put back when the chat refuses the run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mode_set_while_the_run_switches_is_the_one_put_back() {
+    let (before, output, after) = run_behind_proxy(usize::MAX, true, &["hello"]).await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains(BUSY), "{stderr}");
+    assert_eq!(before["explicit"], false, "{before}");
+    assert_eq!(after["mode"], "review", "{after}");
+    assert_eq!(
+        after["explicit"], true,
+        "the other person's own Review stays: {after}"
+    );
+}
