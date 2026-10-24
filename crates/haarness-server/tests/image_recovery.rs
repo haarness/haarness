@@ -1,5 +1,7 @@
 //! A provider that refuses an image must not break the chat: the image is
 //! left out of every later request, durably, and the request is retried once.
+//! A chat with more images than a provider takes in one request sends the
+//! newest of them.
 
 use std::{
     path::PathBuf,
@@ -13,8 +15,8 @@ use std::{
 use async_trait::async_trait;
 use futures::stream;
 use haarness_core::{
-    AgentRuntime, CoreError, CoreResult, EventBus, ModelProvider, ProviderEvent, ProviderMessage,
-    ProviderRequest, ProviderStream, RuntimeConfig, StaticProviderRegistry,
+    AgentRuntime, CoreError, CoreResult, EventBus, ImageLimits, ModelProvider, ProviderEvent,
+    ProviderMessage, ProviderRequest, ProviderStream, RuntimeConfig, StaticProviderRegistry,
 };
 use haarness_protocol::{
     CreateThreadRequest, ItemData, ProviderInfo, RequestId, StartTurnRequest, ThreadId, Turn,
@@ -29,10 +31,14 @@ const PNG: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 
 /// Refuses every request that carries an image, the way Anthropic refuses
-/// one over its size limit, once `refusing` is set.
+/// one over its size limit, once `refusing` is set; or, with `most`, every
+/// request with more images than that.
 #[derive(Default)]
 struct Picky {
     refusing: AtomicBool,
+    most: Mutex<Option<usize>>,
+    /// The image count it tells the runtime it takes.
+    declared: Mutex<Option<usize>>,
     error: Mutex<String>,
     requests: Mutex<Vec<ProviderRequest>>,
 }
@@ -62,12 +68,23 @@ impl ModelProvider for Picky {
             models: vec![],
         }
     }
+    fn image_limits(&self, _model: &str) -> ImageLimits {
+        ImageLimits {
+            count: *self.declared.lock().unwrap(),
+            ..ImageLimits::default()
+        }
+    }
     async fn stream(
         &self,
         request: ProviderRequest,
         _: CancellationToken,
     ) -> CoreResult<ProviderStream> {
-        let refuse = self.refusing.load(Ordering::SeqCst) && images(&request) > 0;
+        let refuse = (self.refusing.load(Ordering::SeqCst) && images(&request) > 0)
+            || self
+                .most
+                .lock()
+                .unwrap()
+                .is_some_and(|most| images(&request) > most);
         self.requests.lock().unwrap().push(request);
         if refuse {
             let error = CoreError::Provider(self.error.lock().unwrap().clone());
@@ -307,4 +324,79 @@ fn base64_png() -> Vec<u8> {
     base64::engine::general_purpose::STANDARD
         .decode(PNG)
         .unwrap()
+}
+
+/// The names of the images a request carries, in order.
+fn sent(request: &ProviderRequest) -> Vec<String> {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| match message {
+            ProviderMessage::Media { attachments, .. }
+            | ProviderMessage::ToolResult { attachments, .. } => attachments.clone(),
+            _ => Vec::new(),
+        })
+        .map(|source| {
+            let name = source.split(";name=").nth(1).unwrap_or_default();
+            name.split(';').next().unwrap_or_default().to_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn past_the_providers_image_count_the_oldest_are_noted_and_the_newest_sent() {
+    let fixture = Fixture::new("HTTP 400 Bad Request: too many images in the request: 21 > 20");
+    *fixture.provider.most.lock().unwrap() = Some(20);
+    *fixture.provider.declared.lock().unwrap() = Some(20);
+    let runtime = fixture.runtime();
+    let thread = thread(&runtime).await;
+    for index in 1..=20 {
+        let name = format!("shot-{index:02}.png");
+        let done = turn(
+            &runtime,
+            thread,
+            &format!("Look {index}"),
+            vec![image(&name)],
+        )
+        .await;
+        assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    }
+    assert!(
+        fixture
+            .requests()
+            .iter()
+            .all(|request| images(request) <= 20)
+    );
+
+    // The 21st screenshot passes the count: the oldest nine are noted, and
+    // the newest twelve, this one among them, are sent at once.
+    let done = turn(&runtime, thread, "Look 21", vec![image("shot-21.png")]).await;
+    assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 1, "no request was refused");
+    let expected = (10..=21)
+        .map(|index| format!("shot-{index:02}.png"))
+        .collect::<Vec<_>>();
+    assert_eq!(sent(&requests[0]), expected);
+    let ProviderMessage::Text { content, .. } = &requests[0].messages[0] else {
+        panic!("{:?}", requests[0].messages[0]);
+    };
+    assert_eq!(
+        content,
+        "Look 1\n[Image shot-01.png omitted: the oldest images are left out to keep the request within the provider's limits]"
+    );
+    let noted = serde_json::to_string(&requests[0].messages[..36]).unwrap();
+
+    // The next turns carry the same noted history, byte for byte, until
+    // the kept images pass the count again.
+    let done = turn(&runtime, thread, "Look 22", vec![image("shot-22.png")]).await;
+    assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    let requests = fixture.requests();
+    assert_eq!(sent(&requests[0]).len(), 13);
+    assert_eq!(
+        serde_json::to_string(&requests[0].messages[..36]).unwrap(),
+        noted
+    );
+    let items = runtime.items(thread, None).await.unwrap();
+    assert!(omissions(&items).is_empty(), "nothing is left out for good");
 }

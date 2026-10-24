@@ -193,6 +193,15 @@ impl GeminiProvider {
 
 #[async_trait]
 impl ModelProvider for GeminiProvider {
+    /// The Gemini API takes 20 MB in a request that carries its images
+    /// inline, text included; the images get 15 MiB of it. Vertex AI takes
+    /// more and keeps the default.
+    fn image_limits(&self, _model: &str) -> haarness_core::ImageLimits {
+        haarness_core::ImageLimits {
+            bytes: 15 * 1024 * 1024,
+            ..haarness_core::ImageLimits::default()
+        }
+    }
     async fn refresh_models(&self, force: bool) {
         self.live_models
             .refresh(force, || self.fetch_models())

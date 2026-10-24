@@ -239,6 +239,15 @@ impl ModelProvider for HaarnessCloudProvider {
             .flatten()
             .map(|identity| URL_SAFE_NO_PAD.encode(identity))
     }
+    /// The router passes an Anthropic model's request on to Anthropic,
+    /// whose image count limits apply.
+    fn image_limits(&self, model: &str) -> haarness_core::ImageLimits {
+        if model.starts_with("anthropic/") {
+            crate::anthropic::image_limits(&self.info().models, model)
+        } else {
+            haarness_core::ImageLimits::default()
+        }
+    }
     fn info(&self) -> ProviderInfo {
         let signed_in = self.client.config.signed_in();
         ProviderInfo {

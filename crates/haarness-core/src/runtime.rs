@@ -2992,6 +2992,7 @@ impl AgentRuntime {
             &self.memory_context.read(),
             None,
         );
+        let current_attachments = crate::image_budget::turn_attachments(&items, turn_id);
         let messages = crate::side_question::settled(provider_messages(items));
         let catalog = components.tools.list();
         let prepared =
@@ -3089,6 +3090,11 @@ impl AgentRuntime {
                 system.push_str(crate::side_question::LAZY_INSTRUCTIONS);
             }
             let mut messages = messages;
+            crate::image_budget::bound(
+                &mut messages,
+                provider.image_limits(&thread.model),
+                &current_attachments,
+            );
             messages.extend(reminder.map(|content| ProviderMessage::Text {
                 role: "user".into(),
                 content,
@@ -8573,8 +8579,25 @@ impl RunnerTask {
                     self.skill_rules.lock().clear();
                     tool_rounds = 0;
                 }
+                let current_attachments =
+                    crate::image_budget::turn_attachments(&items, Some(self.turn.id));
                 let mut messages = provider_messages(items);
                 let source_messages = messages.clone();
+                if let Some(cut) = crate::image_budget::bound(
+                    &mut messages,
+                    provider.image_limits(&model),
+                    &current_attachments,
+                ) {
+                    info!(
+                        thread = %self.thread.id,
+                        turn = %self.turn.id,
+                        images = cut.images,
+                        removed = cut.removed,
+                        bytes = cut.bytes,
+                        kept = cut.kept,
+                        "oldest images left out to fit the provider's request limits"
+                    );
+                }
                 if recovering {
                     messages.push(ProviderMessage::Text { role: "user".into(), content:
                         "The previous provider response ended before completion. Continue from the saved partial response without repeating it. Completed tool results are already in the conversation; do not repeat those actions.".into() });
