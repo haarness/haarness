@@ -72,6 +72,8 @@ struct CoordinatorHost {
     /// reported as pending for the launch thread while it was delivered.
     coordinator: std::sync::OnceLock<std::sync::Weak<WorkflowCoordinator>>,
     pending_while_notified: Mutex<Vec<u32>>,
+    /// The chat folder every chat of this host works in, when set.
+    chat_folder: std::sync::OnceLock<PathBuf>,
 }
 
 impl CoordinatorHost {
@@ -86,6 +88,7 @@ impl CoordinatorHost {
             notifications: Mutex::new(Vec::new()),
             coordinator: std::sync::OnceLock::new(),
             pending_while_notified: Mutex::new(Vec::new()),
+            chat_folder: std::sync::OnceLock::new(),
         }
     }
 
@@ -136,6 +139,10 @@ impl CoordinatorHost {
 
 #[async_trait]
 impl WorkflowRuntimeHost for CoordinatorHost {
+    async fn chat_folder(&self, _thread: ThreadId) -> Option<PathBuf> {
+        self.chat_folder.get().cloned()
+    }
+
     async fn create_run_thread(
         &self,
         parent: Option<ThreadId>,
@@ -725,6 +732,72 @@ async fn coordinator_runs_discovered_portable_project_source_without_native_trus
         .expect("restricted project workflow runs without native trust");
     assert_eq!(completed.status, WorkflowRunStatus::Completed);
     assert_eq!(completed.result, Some(json!("ok")));
+}
+
+#[tokio::test]
+async fn a_chat_folder_s_native_workflow_needs_project_configuration_as_inline_source_does() {
+    let home = tempfile::tempdir().expect("chat home fixture");
+    let folder = home.path().join("2026-10-24/chat-ab12");
+    let workflows = folder.join(".haarness/workflows");
+    fs::create_dir_all(&workflows).expect("chat workflows");
+    fs::write(
+        workflows.join("nat.ts"),
+        r#"export default workflow({ name: "nat", async run() { return "no" } })"#,
+    )
+    .expect("native chat workflow");
+    let store = Arc::new(SqliteStore::in_memory().expect("workflow store"));
+    let host = Arc::new(CoordinatorHost::new(Arc::clone(&store), 0));
+    host.chat_folder.set(folder.clone()).expect("chat folder");
+    let coordinator = |trusted| {
+        Arc::new(WorkflowCoordinator::new(
+            Arc::clone(&store) as Arc<dyn WorkflowRepository>,
+            Arc::new(
+                haarness_workflow_catalog::WorkflowCatalog::for_workspace(home.path())
+                    .with_project_config(trusted),
+            ),
+            WorkflowExecutor::new(ExecutorConfig {
+                bun_path: Some(std::env::current_exe().expect("test executable")),
+                ..ExecutorConfig::default()
+            }),
+            Arc::clone(&host) as Arc<dyn WorkflowRuntimeHost>,
+            EventBus::new(128),
+            home.path().to_path_buf(),
+            trusted,
+        ))
+    };
+    let chat = ThreadId::new();
+    for request in [
+        WorkflowStartRequest {
+            name: Some("nat".into()),
+            thread_id: Some(chat),
+            ..WorkflowStartRequest::default()
+        },
+        WorkflowStartRequest {
+            path: Some(workflows.join("nat.ts").display().to_string()),
+            thread_id: Some(chat),
+            ..WorkflowStartRequest::default()
+        },
+    ] {
+        let error = coordinator(false)
+            .start(request)
+            .await
+            .expect_err("a native chat workflow stays gated without project configuration");
+        assert!(
+            matches!(&error, CoreError::PermissionDenied(message)
+                if message.contains("this chat's folder") && message.contains("project configuration")),
+            "{error}"
+        );
+    }
+    // Found for that chat only.
+    assert!(
+        coordinator(false)
+            .start(WorkflowStartRequest {
+                name: Some("nat".into()),
+                ..WorkflowStartRequest::default()
+            })
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
