@@ -567,6 +567,12 @@ pub fn text(text: &str) -> String {
         ]
         .map(|pattern| Regex::new(&pattern).expect("static redaction pattern"))
     });
+    // A query or fragment parameter outside a URL with a scheme
+    // (`GET /cb?code=…`), named as `url` reads names.
+    static PARAMETER: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"([?&#])([A-Za-z0-9_.%+-]{1,128})=([^&\s"'#]+)"#)
+            .expect("static parameter pattern")
+    });
     let mut text = bare_userinfo(&userinfo(text), "[redacted]").into_owned();
     for (pattern, replacement) in RULES.iter() {
         if pattern.is_match(&text) {
@@ -590,6 +596,22 @@ pub fn text(text: &str) -> String {
             .replace_all(&text, |found: &regex::Captures<'_>| {
                 if pass_name(&found[3]) && hides(&found[4]) {
                     format!("{}{} [redacted]", &found[1], &found[2])
+                } else {
+                    found[0].to_owned()
+                }
+            })
+            .into_owned();
+    }
+    if PARAMETER.is_match(&text) {
+        text = PARAMETER
+            .replace_all(&text, |found: &regex::Captures<'_>| {
+                let name = url::form_urlencoded::parse(found[2].as_bytes())
+                    .next()
+                    .map(|(name, _)| name.into_owned())
+                    .unwrap_or_default();
+                let value = &found[3];
+                if value != "[redacted]" && value != REDACTED && secret_parameter(&name, value) {
+                    format!("{}{}=[redacted]", &found[1], &found[2])
                 } else {
                     found[0].to_owned()
                 }
@@ -1247,6 +1269,37 @@ mod tests {
             "http://localhost:${PORT}/api/@scope/pkg",
             "http://localhost:$PORT/api/@scope/pkg",
             "['https://h.fixture.test','me@x.fixture.test']",
+        ] {
+            assert_eq!(text(kept), kept);
+        }
+    }
+
+    #[test]
+    fn free_text_hides_credential_parameters_of_a_path_without_a_scheme() {
+        for (input, output) in [
+            (
+                "GET /cb?code=PRIVATE&state=s failed: 400",
+                "GET /cb?code=[redacted]&state=s failed: 400",
+            ),
+            (
+                "GET /p?n=1&pwd=PRIVATE returned 401",
+                "GET /p?n=1&pwd=[redacted] returned 401",
+            ),
+            ("/login?x-otp=123456", "/login?x-otp=[redacted]"),
+            (
+                "/cb#dbpass=PRIVATE&userpw=PRIVATE&ticket=PRIVATE",
+                "/cb#dbpass=[redacted]&userpw=[redacted]&ticket=[redacted]",
+            ),
+            ("/x?api%5Fkey=PRIVATE", "/x?api%5Fkey=[redacted]"),
+        ] {
+            assert_eq!(text(input), output, "{input}");
+            assert_eq!(text(output), output, "{output}");
+        }
+        for kept in [
+            "GET /search?q=hello&page=2 200",
+            "/x?keyword=k&bypass=1&compass=2#install",
+            "a=1&b=2&state=s",
+            "/x?code=&next=1",
         ] {
             assert_eq!(text(kept), kept);
         }
