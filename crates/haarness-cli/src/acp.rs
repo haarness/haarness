@@ -1091,9 +1091,15 @@ fn finish(turn: Turn) -> AcpResult<PromptResponse> {
     match turn.status {
         TurnStatus::Completed => Ok(PromptResponse::new(StopReason::EndTurn)),
         TurnStatus::Interrupted => Ok(PromptResponse::new(StopReason::Cancelled)),
-        TurnStatus::Failed => Err(internal(
-            turn.error.unwrap_or_else(|| "Haarness turn failed".into()),
-        )),
+        TurnStatus::Failed => {
+            let error = turn.error.unwrap_or_else(|| "Haarness turn failed".into());
+            // A hook's block refuses the prompt, as the server refuses one
+            // before a turn starts (see `refused`).
+            match haarness_core::prompt_blocked(&error) {
+                Some(refusal) => Err(invalid_request(refusal)),
+                None => Err(internal(error)),
+            }
+        }
         TurnStatus::Queued | TurnStatus::Running => Err(internal(
             "Haarness emitted turn.finished for a non-terminal turn",
         )),
@@ -1323,16 +1329,22 @@ fn internal(error: impl std::fmt::Display) -> agent_client_protocol::Error {
     agent_client_protocol::Error::internal_error().data(error.to_string())
 }
 
-/// A prompt the server refused (a chat whose turn another window or run
-/// started, a hook that blocks the prompt, an unknown agent) is an invalid
-/// request whose message is the server's own sentence, which editors show;
-/// a failure of anything else is an internal error.
+/// A prompt the server refused before its turn started (a chat whose turn
+/// another window or run started, an unknown agent) is an invalid request
+/// whose message is the server's own sentence, which editors show; a failure
+/// of anything else is an internal error. A hook that blocks the prompt
+/// fails the turn instead, and `finish` refuses it the same way.
 fn refused(error: &anyhow::Error) -> agent_client_protocol::Error {
     if !haarness_tui::api::refusal_status(error).is_some_and(|status| status.is_client_error()) {
         return internal(error);
     }
+    invalid_request(&error.to_string())
+}
+
+/// An invalid request whose message is `message`.
+fn invalid_request(message: &str) -> agent_client_protocol::Error {
     let mut refusal = agent_client_protocol::Error::invalid_request();
-    refusal.message = error.to_string();
+    message.clone_into(&mut refusal.message);
     refusal
 }
 

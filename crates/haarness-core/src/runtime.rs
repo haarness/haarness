@@ -1043,6 +1043,20 @@ fn user_facing_error(error: &CoreError) -> String {
     describe_error(error, None)
 }
 
+/// How a turn whose prompt a `UserPromptSubmit` hook blocked fails:
+/// `prompt blocked by a hook: <reason>`.
+pub const PROMPT_BLOCKED: &str = "prompt blocked by a hook: ";
+
+/// The refusal a failed turn's stored error holds when a `UserPromptSubmit`
+/// hook blocked its prompt (`prompt blocked by a hook: <reason>`), without
+/// the error's category: what an editor shows as the prompt's refusal.
+#[must_use]
+pub fn prompt_blocked(turn_error: &str) -> Option<&str> {
+    turn_error
+        .strip_prefix("invalid request: ")
+        .filter(|refusal| refusal.starts_with(PROMPT_BLOCKED))
+}
+
 /// Why a chat refused input, as a notice quotes it: the refusal's own words,
 /// without the category the error type adds ("invalid request: …").
 #[must_use]
@@ -8279,9 +8293,7 @@ impl RunnerTask {
                         decision = hooks.user_prompt_submit(self.thread.id, &self.request.text) => decision,
                     };
                     if let Some(reason) = decision.block {
-                        return Err(CoreError::Invalid(format!(
-                            "prompt blocked by a hook: {reason}"
-                        )));
+                        return Err(CoreError::Invalid(format!("{PROMPT_BLOCKED}{reason}")));
                     }
                     prompt_context = decision.context;
                 }
@@ -15047,6 +15059,26 @@ mod tests {
         );
         assert_eq!(other(CoreError::Tool("x".into())), ("tool", "tool"));
         assert_eq!(other(CoreError::Storage("x".into())), ("other", "unknown"));
+    }
+
+    /// A hook's block is read back from the error a failed turn stores, as
+    /// the runtime words it; other invalid requests are not.
+    #[test]
+    fn a_turn_a_prompt_hook_blocked_says_so_in_its_stored_error() {
+        let stored = super::user_facing_error(&CoreError::Invalid(format!(
+            "{}secrets in the prompt",
+            super::PROMPT_BLOCKED
+        )));
+        assert_eq!(
+            super::prompt_blocked(&stored),
+            Some("prompt blocked by a hook: secrets in the prompt")
+        );
+        let other = super::user_facing_error(&CoreError::Invalid("Unknown agent: nope".into()));
+        assert_eq!(super::prompt_blocked(&other), None);
+        assert_eq!(
+            super::prompt_blocked("prompt blocked by a hook: not stored this way"),
+            None
+        );
     }
 
     /// Every provider's way of saying the output limit ended a round, and
