@@ -3126,12 +3126,17 @@ impl AgentRuntime {
             &self.memory_context.read(),
             None,
         );
-        let messages = crate::side_question::settled(provider_messages(items));
+        let (messages, mut origins) = provider_messages_with_origins(items);
+        let messages = crate::side_question::settled(messages);
+        origins.truncate(messages.len());
         let catalog = components.tools.list();
-        let prepared =
-            self.prepared_prompts
-                .lock()
-                .request(thread_id, turn_id, catalog.clone(), &messages);
+        let prepared = self.prepared_prompts.lock().request(
+            thread_id,
+            turn_id,
+            catalog.clone(),
+            &messages,
+            &origins,
+        );
         let (provider, mut prepared) = if let Some(prepared) = prepared {
             prepared
         } else {
@@ -3223,7 +3228,11 @@ impl AgentRuntime {
                 system.push_str(crate::side_question::LAZY_INSTRUCTIONS);
             }
             let mut messages = messages;
-            crate::image_budget::bound(&mut messages, provider.image_limits(&thread.model));
+            crate::image_budget::bound(
+                &mut messages,
+                &origins,
+                provider.image_limits(&thread.model),
+            );
             messages.extend(reminder.map(|content| ProviderMessage::Text {
                 role: "user".into(),
                 content,
@@ -8714,10 +8723,11 @@ impl RunnerTask {
                 }
                 let current_attachments =
                     crate::image_budget::turn_attachments(&items, Some(self.turn.id));
-                let mut messages = provider_messages(items);
+                let (mut messages, origins) = provider_messages_with_origins(items);
                 let source_messages = messages.clone();
                 let image_limits = provider.image_limits(&model);
-                if let Some(cut) = crate::image_budget::bound(&mut messages, image_limits) {
+                if let Some(cut) = crate::image_budget::bound(&mut messages, &origins, image_limits)
+                {
                     info!(
                         thread = %self.thread.id,
                         turn = %self.turn.id,
@@ -12896,6 +12906,14 @@ pub fn shorten_title(title: &str, limit: usize) -> String {
 }
 
 fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
+    provider_messages_with_origins(items).0
+}
+
+/// `provider_messages`, with where each message came from, for the image
+/// budget.
+fn provider_messages_with_origins(
+    items: Vec<Item>,
+) -> (Vec<ProviderMessage>, Vec<crate::image_budget::Origin>) {
     let omitted = omitted_media(&items);
     let compaction_sequence = items
         .iter()
@@ -12903,10 +12921,22 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
         .map(|item| item.sequence);
     let mut valid_calls = HashMap::<String, String>::new();
     let mut messages = Vec::new();
-    let mut deferred_queued = HashMap::<ItemId, ProviderMessage>::new();
+    let mut origins = Vec::new();
+    let mut deferred_queued =
+        HashMap::<ItemId, (ProviderMessage, crate::image_budget::Origin)>::new();
     let mut deferred_order = Vec::new();
     for item in provider_visible_items(&items) {
         let item_id = item.id;
+        let mut origin = crate::image_budget::Origin {
+            turn: item.turn_id,
+            person: matches!(
+                item.data,
+                ItemData::UserMessage {
+                    synthetic: false,
+                    ..
+                }
+            ),
+        };
         let message = match item.data.clone() {
             // A blank message saved before turns refused one; Claude would
             // refuse it on every request.
@@ -12969,7 +12999,7 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                     // unconsumed message is appended after the current
                     // snapshot, preserving both tool adjacency and live steer.
                     deferred_order.push(item_id);
-                    deferred_queued.insert(item_id, message);
+                    deferred_queued.insert(item_id, (message, origin));
                     None
                 } else {
                     Some(message)
@@ -13034,19 +13064,26 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                     attachments,
                 }
             }),
-            ItemData::QueueConsumed { item_id } => deferred_queued.remove(&item_id),
+            ItemData::QueueConsumed { item_id } => {
+                deferred_queued.remove(&item_id).map(|(message, queued)| {
+                    origin = queued;
+                    message
+                })
+            }
             _ => None,
         };
         if let Some(message) = message {
             messages.push(message);
+            origins.push(origin);
         }
     }
     for item_id in deferred_order {
-        if let Some(message) = deferred_queued.remove(&item_id) {
+        if let Some((message, origin)) = deferred_queued.remove(&item_id) {
             messages.push(message);
+            origins.push(origin);
         }
     }
-    messages
+    (messages, origins)
 }
 
 /// Every attachment a provider refused earlier in the thread.
@@ -16444,6 +16481,103 @@ mod tests {
             .map(|image| crate::attachments::display_name(&image.source))
             .collect();
         (names, choice)
+    }
+
+    #[test]
+    fn provider_messages_say_who_wrote_each_message_and_in_which_turn() {
+        let turn = Some(TurnId::new());
+        let at = |sequence, data| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let user = |text: &str, queued, synthetic| ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued,
+            synthetic,
+            command_line: None,
+        };
+        let steer = at(4, user("also the footer", true, false));
+        let messages = vec![
+            at(
+                1,
+                ItemData::UserMessage {
+                    text: "match this design".into(),
+                    attachments: vec!["data:image/png;name=design.png;base64,AAAA".into()],
+                    queued: false,
+                    synthetic: false,
+                    command_line: None,
+                },
+            ),
+            at(
+                2,
+                user(
+                    "<system-reminder>\nToday's date is now Saturday.\n</system-reminder>",
+                    false,
+                    true,
+                ),
+            ),
+            at(
+                3,
+                ItemData::ToolCall {
+                    call_id: "shot".into(),
+                    name: "screenshot".into(),
+                    arguments: json!({}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            steer.clone(),
+            at(
+                5,
+                ItemData::ToolResult {
+                    call_id: "shot".into(),
+                    name: "screenshot".into(),
+                    output: "Screenshot taken".into(),
+                    is_error: false,
+                    metadata: json!({"attachments": ["data:image/png;name=s1.png;base64,AAAA"]}),
+                },
+            ),
+            at(6, ItemData::QueueConsumed { item_id: steer.id }),
+            at(
+                7,
+                user(
+                    "<task-result>the child agent finished</task-result>",
+                    true,
+                    true,
+                ),
+            ),
+        ];
+        let (messages, origins) = super::provider_messages_with_origins(messages);
+        let who = messages
+            .iter()
+            .zip(&origins)
+            .map(|(message, origin)| {
+                assert_eq!(origin.turn, turn);
+                let kind = match message {
+                    ProviderMessage::Media { .. } => "photo",
+                    ProviderMessage::Text { content, .. } if content.contains("footer") => "steer",
+                    ProviderMessage::Text { content, .. } if content.contains("task-result") => {
+                        "result"
+                    }
+                    ProviderMessage::Text { .. } => "reminder",
+                    ProviderMessage::ToolCall { .. } => "call",
+                    ProviderMessage::ToolResult { .. } => "shot",
+                };
+                (kind, origin.person)
+            })
+            .collect::<Vec<_>>();
+        // The steer is sent where it was taken in, and is still the person's.
+        assert_eq!(
+            who,
+            [
+                ("photo", true),
+                ("reminder", false),
+                ("call", false),
+                ("shot", false),
+                ("steer", true),
+                ("result", false),
+            ]
+        );
     }
 
     #[test]
