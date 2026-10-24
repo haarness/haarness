@@ -34,11 +34,13 @@ class Fixture:
             # would send them to Haarness Cloud a minute after it starts).
             "HAARNESS_TELEMETRY": "0",
         }
-        # Use explicit echo defaults and an ask rule to test approval round-trips.
+        # Use explicit echo defaults, Review and an ask rule to test approval
+        # round-trips (a chat with no setting of its own is otherwise in Auto).
         config = self.workspace / ".haarness"
         config.mkdir()
         (config / "config.toml").write_text(
-            '[defaults]\nprovider="echo"\nmodel="echo-1"\n\n[permissions]\nbash="ask"\n'
+            '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n\n'
+            '[permissions]\nbash="ask"\n'
         )
         (config / "commands").mkdir()
         (config / "commands" / "greet.md").write_text(
