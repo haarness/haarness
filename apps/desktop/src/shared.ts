@@ -381,6 +381,9 @@ export interface Bridge {
     chatHome: { id: string; workspace: string };
     updateConfigured: boolean;
   }>;
+  /** Whether the chat home's daemon runs now, from its own record: nothing
+   * is started for the answer. */
+  chatHomeRunning(): Promise<boolean>;
   connect(input: {
     cloudWorkspace?: string;
     cloudSession?: string;

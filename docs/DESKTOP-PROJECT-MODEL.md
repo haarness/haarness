@@ -83,11 +83,15 @@ serves it: Desktop starts it with
 marks the folder as [the chat home](REFERENCE.md#the-chat-home) and keeps
 project configuration off (no ancestor `.haarness`, `AGENTS.md` or repository
 approvals). It is saved once
-among the desktop's locations. Its daemon starts only when This computer is
-used: its new chat or one of its chats is shown, its + or No folder is chosen,
-or Search is open; until then the sidebar lists its chats from the cache of
-the last session, and once used they are followed live, running work
-included. It is never a
+among the desktop's locations. Its chats are followed live (running and
+waiting marks, notifications) from launch when work may be going on there:
+its daemon already runs, which Desktop reads from the daemon's own record
+(`<cache>/workspaces/*/runtime.json`, its process alive and its server
+answering) without starting anything, or one of its chats was running or
+waiting for an answer when Haarness last quit. Otherwise its daemon starts
+only when This computer is used: its new chat or one of its chats is shown,
+its + or No folder is chosen, or Search is open; until then the sidebar lists
+its chats from the cache of the last session. It is never a
 project: Settings → Projects, the project lists of Search and the folder chip,
 `desktop projects`, the host catalog and other computers leave it out. Only
 this computer has it; remote servers and other computers still open a project

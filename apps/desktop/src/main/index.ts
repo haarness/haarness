@@ -97,6 +97,7 @@ import { createUiSession } from "./ui-session";
 import { createNotifications } from "./notifications";
 import { chatHomeFolder, chatHomePath, isChatHome } from "./chat-home";
 import { quietClosedSocketReads } from "./closed-socket-read";
+import { daemonRunning } from "./daemon-record";
 
 // A connection that went away never interrupts with Electron's error dialog
 // (see closed-socket-read.ts); any other uncaught error still shows it.
@@ -740,6 +741,9 @@ function installHandlers() {
     })),
     updateConfigured: !!process.env.HAARNESS_UPDATE_URL,
   }));
+  handle("chatHomeRunning", async () =>
+    daemonRunning(await chatHomePath(), { home: homedir() }),
+  );
   handle("preferences", async (_, input) => {
     // A shortcut another app holds is refused before it is saved, and the
     // one saved before stays registered.
