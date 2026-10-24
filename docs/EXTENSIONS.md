@@ -1,6 +1,10 @@
 # TypeScript and JavaScript extensions
 
-> **User guide:** [Add a custom tool with an extension](https://haarness.ai/docs/cli/extensions). This page has the engineering detail.
+How to write, install and configure an extension, the hooks it can use, where it is
+discovered, and how its process is trusted and run. For extension authors and for
+contributors changing the extension host (`crates/haarness-extensions`).
+
+> **User guide:** [Add a custom tool with an extension](https://haarness.ai/docs/cli/extensions).
 
 Haarness extensions add tools and change chat behavior through a versioned,
 typed API. Authors write TypeScript or JavaScript; the application and its
@@ -24,10 +28,13 @@ haarness
 The starter is named after its folder (`./my-extension` becomes `my_extension`;
 `--name` chooses another), so it registers `ext__my_extension__greet`. Ask
 Haarness to greet someone and it can call the tool. Registered tools also appear
-in `/tools` and the REST tool catalog, with source `extension:my_extension`;
-ordinary availability controls and lazy tool loading apply.
+in `/tools`, Desktop's **Settings → Tools** (under the extension's own name) and
+the REST tool catalog, with source `extension:my_extension`; ordinary
+availability controls and lazy tool loading apply.
 
-The generated extension needs no SDK download or build step:
+`init` writes `index.ts`, `api.d.ts` and a `package.json` whose
+`haarness.extension` names `index.ts`. The generated extension needs no SDK
+download or build step:
 
 ```ts
 import type { Extension } from "./api"
@@ -51,7 +58,7 @@ export default {
   },
   hooks: {
     chat() {
-      return { context: "Use the greeting tool for explicit greeting requests." }
+      return { context: "Use the greeting tool when the user asks for a greeting." }
     },
   },
 } satisfies Extension
@@ -78,7 +85,15 @@ haarness extension disable my_extension
 haarness extension enable my_extension
 haarness extension remove my_extension  # unregister it; preserve its files
 # Names or the 1-based indices shown by list are accepted.
+haarness extension install ./my-extension --project  # this project only (alias: --local)
 ```
+
+Every `extension` command takes `--project` to manage the project's
+`.haarness/extensions.json` instead of the global file. Desktop's
+**Settings → Extensions** (shown while Desktop uses a server on this computer)
+manages the same lists with a **Global** or **Project** scope: the
+**Enable extensions** switch, **Install extension**, a switch per entry and
+remove. The TUI has no extension command.
 
 `install` explicitly trusts and validates the code, then enables extensions.
 `check` executes initializers and validates API versions, names, hooks, and tool
@@ -111,7 +126,8 @@ lowercase letters, digits, or single underscores (double underscores are reserve
 
 ## Discovery and configuration
 
-The global configuration is `extensions.json` beside Haarness's `config.toml`.
+The global configuration is `extensions.json` in the global configuration folder
+(beside `haarness.json` and `config.toml`, normally `~/.config/haarness/`).
 `extension list` prints its exact path. It starts disabled:
 
 ```json
@@ -122,8 +138,16 @@ The global configuration is `extensions.json` beside Haarness's `config.toml`.
 }
 ```
 
-An installed entry has `source` (absolute file path), `enabled`, and `options`
-(JSON). `entries` also accepts a bare source string or a
+Project files layer on top: `.haarness/extensions.json` in each folder from the
+Git worktree root down to the selected folder, read after the global file (and
+skipped when project configuration is disabled). A field a layer sets replaces
+the one before it, so changing one timeout keeps the others; an entry for a
+source already listed replaces the earlier one; a layer with `enabled: false`
+disables its own entries. A project with no file of its own inherits the global
+switch and timeouts.
+
+An installed entry has `source` (an absolute path; a relative one is read from
+the folder of the file that lists it), `enabled`, and `options` (JSON). `entries` also accepts a bare source string or a
 `["<source>", {options}]` tuple; both mean an enabled entry, and the tuple's
 second element becomes `context.options`. Plugin and extension declarations in
 `haarness.json{,c}` (`extensions: [...]`, path or npm entries of `plugin: [...]`)
@@ -137,10 +161,12 @@ When enabled, Haarness also discovers `.ts`, `.mts`, `.js`, and `.mjs` entry
 files directly inside:
 
 - `extensions/` beside the global configuration;
-- `.haarness/extensions/` in the selected workspace (unless project configuration is disabled);
+- `.haarness/extensions/` beside each project `extensions.json` layer, from the
+  Git worktree root down to the selected folder (unless project configuration
+  is disabled);
 - `extensions/` inside enabled, installed plugin bundles.
 
-Type declaration files are excluded. Put helper modules in subdirectories so
+Type declaration files (`.d.ts`, `.d.mts`) are excluded. Put helper modules in subdirectories so
 they are not treated as additional entrypoints. Extension discovery follows the extension enable setting. Project sources participate by default; `--disable-project-config` or `HAARNESS_DISABLE_PROJECT_CONFIG=1` excludes them. To disable one
 discovered entry, put its absolute source path in `entries` with `enabled:false`,
 or disable/remove its enclosing plugin.
@@ -244,6 +270,12 @@ support termination; this is not an OS sandbox. Native filesystem/network
 calls made inside an extension are not individually intercepted by tool
 permissions. Choose MCP when you want a separately managed tool server.
 
+Because extension code can answer approvals, an agent's `edit`, `write`,
+`multiedit` or `apply_patch` of `.haarness/extensions.json`, any file under
+`.haarness/extensions/`, or the global folder's `extensions.json` and
+`extensions/` (also where a link leads) always asks a person first; see
+[Haarness's own configuration files](PERMISSIONS-AND-EXECUTION.md#haarnesss-own-configuration-files).
+
 Rust serializes calls within one extension process; different extensions have
 independent processes. Cancelling or timing out an in-flight call terminates its host. Cancelling a
 queued call leaves the call ahead of it running. Failed calls are never
@@ -273,4 +305,4 @@ provider HTTP fixture, real Bun processes, the running Haarness server, and a
 tmux-rendered TUI. It requires Bun, Python 3, and tmux. It does not use paid
 models or modify the user's installed plugins.
 
-See [extension budgets and plan-mode observation](PERMISSIONS-AND-EXECUTION.md) for scoped configuration examples. Existing timeout defaults remain unchanged.
+See [extension budgets](PERMISSIONS-AND-EXECUTION.md#extension-budgets) and [skills and plan mode](PERMISSIONS-AND-EXECUTION.md#skills-and-plan-mode) for scoped configuration examples and plan-mode observation.

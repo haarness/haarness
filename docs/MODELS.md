@@ -1,6 +1,11 @@
 # Model catalogs
 
-> **User guide:** [Choose a provider and model](https://haarness.ai/docs/providers/overview). This page has the engineering detail.
+How Haarness decides which models exist, what they are called and what they cost:
+live discovery and its timing, the fallback catalog, display names, the reviewed price
+table, and a dated record of provider request changes. For contributors who change
+providers or catalogs, and for anyone working out why a model is or is not listed.
+
+> **User guides:** [Choose a provider and model](https://haarness.ai/docs/providers/overview), [What a model request costs](https://haarness.ai/docs/cloud/model-costs).
 
 Live discovery determines which models are available. A successful list replaces
 previous membership, including when the provider returns an empty list. Static
@@ -43,9 +48,20 @@ Desktop and TUI model pickers contain connected providers only; with nothing
 connected, `/models` and the composer's model pill open the connect flow
 instead. Desktop resolves
 removed/disconnected selections to an available model and sends the pair actually
-shown in the composer. With no available model it opens Providers while preserving
-the chat draft. Schedule pickers also use connected models and validate the choice
+shown in the composer. With no available model it opens **Connect a provider** while
+preserving the chat draft. Desktop opens a project without waiting for its model
+lists; a message sent while they still load waits for them, so it goes to the model
+the composer then shows, and is given up if another chat or project is shown
+meanwhile. Schedule pickers also use connected models and validate the choice
 before saving. Refreshing the picker does not interrupt running turns.
+
+Desktop's **Settings → Providers** lists the connected providers, each with its
+models behind a count, plus **Refresh models** (`POST /v1/providers/refresh`);
+the full catalog is in **Connect a provider**. **Settings → Models** lists the
+connected providers' models, and **Show all** adds the rest. From the CLI,
+`haarness models [PROVIDER]` prints the catalog the server would use, with live
+discovery where credentials allow; `--verbose` prints context, output,
+capability and pricing metadata as JSON.
 
 Display names are centralized in `crates/haarness-protocol/src/model-names.json`,
 shared by the Rust protocol helper and Desktop. Provider-supplied names take
@@ -104,6 +120,16 @@ one that adds or ends a long-context tier. The script reads OpenRouter's catalog
 but never a provider's page: confirming a price is a person's job. Fix or add the
 entry in haarness-cloud from the provider's page with today's `checked` date,
 then `--sync` copies the table here.
+
+## Provider requests: 2026-10-18 to 2026-10-22
+
+No catalog or price entries changed; these change what Haarness sends.
+
+| Area | Change |
+| --- | --- |
+| Reasoning between tool calls | A server the user set up (a configured custom provider, the local Ollama and LM Studio runtimes, `OPENAI_COMPATIBLE_*`) gets the model's reasoning back on the assistant message that carries a tool call, in the field it streamed it in (`reasoning_content` or `reasoning`); structured `reasoning_details` stay the replay when the server sent them. DeepSeek, Moonshot and Z.ai still receive `reasoning_content` on every assistant message. Built-in services and managed gateways (Azure OpenAI, GitHub Copilot, routers) get nothing back their API does not document. Stored reasoning names the provider that produced it and goes back only to that provider, so a chat moved from DeepSeek to another endpoint does not send DeepSeek's reasoning there (`ReasoningReplay` in `crates/haarness-providers/src/openai_compatible.rs`). |
+| Blank text | Claude refuses a text block that is empty or only whitespace with a 400, which once broke a chat whose model sent `"\n\n"` before a tool call. Whitespace-only replies and blank user messages are no longer sent to any model, and a turn started over the API with blank text, no attachment and no command is refused. The Anthropic adapter leaves out blank text beside an image and in an image-only tool result; Bedrock does the same, and sends `(document attached)` where a document needs text and `(no output)` for an empty tool result. `scripts/test-claude-blank-text.py` drives the built-in Anthropic provider against a mock. |
+| Bedrock names | A Bedrock Claude id is named by the bare id it carries, whatever its region prefix and version tag (see the display names above); `scripts/test-model-labels.py` checks it through the real CLI and server with no network. |
 
 ## Gemini 4 Argon: 2026-10-15
 

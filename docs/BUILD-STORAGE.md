@@ -1,5 +1,7 @@
 # Keeping local builds small
 
+The Cargo profile settings that keep a Haarness checkout's `target/` small, and how to clean it safely. It is for contributors building Haarness locally.
+
 Routine Haarness builds and tests use line-table debug information and retain incremental compilation for fast edits. The sibling Haarness Router workspace uses the same settings. File/line backtraces remain available; inspecting local variables in a native debugger requires the explicit `debugger` profile.
 
 ```sh
