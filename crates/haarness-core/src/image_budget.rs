@@ -4,21 +4,26 @@
 //! request: too many bytes (a 413) or too many images. Refused, the request
 //! would fail on every later turn, and leaving out the image that request
 //! added would hide each new screenshot in turn. So before a request is sent,
-//! once its images pass the provider's [`ImageLimits`], the oldest are
-//! replaced with a short note until the rest fit in three fifths of them: the
-//! newest images always reach the model.
+//! once its images pass the provider's [`ImageLimits`], older images are
+//! replaced with a short note, and the newest always reach the model.
 //!
 //! The cut is a replay over the images in order: each one joins the kept
-//! total, and whenever that total passes a limit the oldest are dropped down
-//! to the lower mark. A new image moves the cut only when the kept images
-//! pass a limit again, not on every request, so the replaced prefix, and the
-//! provider's prompt cache with it, stays the same between cuts. A cut never
-//! takes what the person attached to their messages in the turn it happens
-//! in; when those alone pass a limit the request goes as it is, and a refusal
-//! is handled as before. That turn is the one the image that passed the limit
-//! belongs to, as the history records it, not the turn now running, so a new
-//! turn replays every earlier cut the same way and its first request reads
-//! the cache too. Stored messages are never changed.
+//! total, and when the message holding it takes that total past a limit the
+//! cut happens there. It never takes what the person attached to their own
+//! messages in that message's turn. It replaces the oldest of the other
+//! images that came before, down to three fifths of the limits (the lower
+//! mark); what it cannot reach that way stays. The images of the message that
+//! passed the limit go only when they and the person's images together still
+//! pass the limit itself, oldest first and only until the request fits; when
+//! the person's images alone pass it the request goes as it is, and a refusal
+//! is handled as before.
+//!
+//! A new image moves the cut only when the kept images pass a limit again,
+//! not on every request, so the replaced prefix, and the provider's prompt
+//! cache with it, stays the same between cuts. Which turn an image belongs to
+//! is what the history records, not the turn now running, so a new turn
+//! replays every earlier cut the same way and its first request reads the
+//! cache too. Stored messages are never changed.
 
 use std::collections::HashSet;
 
@@ -123,16 +128,20 @@ pub(crate) fn bound(
             let origin = origin(message);
             origin.person && turn.is_some() && origin.turn == turn
         };
-        let mut position = 0;
-        while over(kept, count, target) && position < sent.len() {
-            let oldest = &images[sent[position]];
-            if own(oldest.message) {
-                position += 1;
-                continue;
+        // The images before this message go down to the lower mark; this
+        // message's only while the request would still pass the limit.
+        for (mark, newest) in [(target, false), (limit, true)] {
+            let mut position = 0;
+            while over(kept, count, mark) && position < sent.len() {
+                let oldest = &images[sent[position]];
+                if own(oldest.message) || (oldest.message == image.message) != newest {
+                    position += 1;
+                    continue;
+                }
+                dropped[sent.remove(position)] = true;
+                kept -= oldest.bytes;
+                count -= 1;
             }
-            dropped[sent.remove(position)] = true;
-            kept -= oldest.bytes;
-            count -= 1;
         }
     }
     let removed = dropped.iter().filter(|dropped| **dropped).count();
@@ -534,6 +543,58 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&sent_next[..sent_first.len()]).unwrap(),
             serde_json::to_string(&sent_first).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_newest_screenshot_stays_while_it_fits_beside_the_persons_images() {
+        // Four photos of 4.7 MiB hold 18.8 of the 25 MiB, above the 15 MiB
+        // mark. Each cut takes the older screenshots and keeps the newest.
+        let photos = |count: usize, bytes: usize| ProviderMessage::Media {
+            role: "user".into(),
+            content: "make it look like these".into(),
+            attachments: (0..count)
+                .map(|index| image(&format!("p{index}"), bytes))
+                .collect(),
+        };
+        let chat = |shots: &[&str], bytes| {
+            Chat::default()
+                .opens(photos(4, 47 * MIB / 10))
+                .add(user(REMINDER), false)
+                .shots(shots, bytes)
+        };
+        let shots = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"];
+        assert_eq!(
+            chat(&shots[..5], 3 * MIB / 2).bounded(ImageLimits::default()),
+            ["p0", "p1", "p2", "p3", "s5"]
+        );
+        assert_eq!(
+            chat(&shots, 3 * MIB / 2).bounded(ImageLimits::default()),
+            ["p0", "p1", "p2", "p3", "s9"]
+        );
+        // On Bedrock three photos of 3.5 MiB hold 10.5 of 15 MiB, above 9.
+        let bedrock = ImageLimits {
+            bytes: 15 * MIB,
+            count: None,
+        };
+        let photographed = Chat::default()
+            .opens(photos(3, 7 * MIB / 2))
+            .add(user(REMINDER), false)
+            .shots(&shots[..5], MIB);
+        assert_eq!(photographed.bounded(bedrock), ["p0", "p1", "p2", "s5"]);
+        // A screenshot that cannot fit beside the photos goes, oldest first
+        // of its message, until the request fits.
+        let two = ProviderMessage::ToolResult {
+            call_id: "two".into(),
+            name: "screenshot".into(),
+            output: "two screens".into(),
+            is_error: false,
+            attachments: vec![image("left", 4 * MIB), image("right", 4 * MIB)],
+        };
+        let crowded = Chat::default().opens(photos(4, 5 * MIB)).add(two, false);
+        assert_eq!(
+            crowded.bounded(ImageLimits::default()),
+            ["p0", "p1", "p2", "p3", "right"]
         );
     }
 
