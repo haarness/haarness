@@ -1574,17 +1574,39 @@ impl Tool for ScheduleTool {
             .and_then(Value::as_str)
             .ok_or_else(|| CoreError::Invalid("schedule action is required".into()))?;
         validate_schedule_input(input)?;
-        let reference = || {
-            input
+        // A chat that works in a folder of its own sees and changes only the
+        // schedules made in that folder, and schedules only into it.
+        let own_folder = chat_folder(&self.workspace, &context);
+        if own_folder.is_some() && input.get("workspace").is_some_and(|value| !value.is_null()) {
+            return Err(CoreError::Invalid(
+                "A chat with a folder of its own schedules only into its own folder; leave out workspace.".into(),
+            ));
+        }
+        let reference = || -> CoreResult<String> {
+            let reference = input
                 .get("id")
                 .or_else(|| input.get("name"))
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
                     CoreError::Invalid(format!("schedule id or name is required for {action}"))
-                })
+                })?;
+            let Some(folder) = &own_folder else {
+                return Ok(reference.to_owned());
+            };
+            match self.scheduler.find(reference).map_err(schedule_error)? {
+                Some(schedule) if in_folder(&schedule, folder) => Ok(schedule.id.to_string()),
+                // Another chat's schedule reads as no schedule at all.
+                _ => Err(CoreError::Tool(format!("schedule not found: {reference}"))),
+            }
         };
         match action {
-            "list" => schedule_output("Schedules", &self.scheduler.list().map_err(schedule_error)?),
+            "list" => {
+                let mut schedules = self.scheduler.list().map_err(schedule_error)?;
+                if let Some(folder) = &own_folder {
+                    schedules.retain(|schedule| in_folder(schedule, folder));
+                }
+                schedule_output("Schedules", &schedules)
+            }
             "history" => {
                 let reference = reference()?;
                 let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(20);
@@ -1592,12 +1614,12 @@ impl Tool for ScheduleTool {
                     &format!("Schedule history {reference}"),
                     &self
                         .scheduler
-                        .history(reference, usize::try_from(limit).unwrap_or(20))
+                        .history(&reference, usize::try_from(limit).unwrap_or(20))
                         .map_err(schedule_error)?,
                 )
             }
             "run" => {
-                let reference = reference()?.to_owned();
+                let reference = reference()?;
                 let scheduler = self.scheduler.clone();
                 let run = tokio::task::spawn_blocking(move || scheduler.run_now(&reference))
                     .await
@@ -1608,14 +1630,14 @@ impl Tool for ScheduleTool {
             "delete" => {
                 let removed = self
                     .scheduler
-                    .remove(reference()?)
+                    .remove(&reference()?)
                     .map_err(schedule_error)?;
                 schedule_output(&format!("Removed schedule {}", removed.name), &removed)
             }
             "enable" | "disable" => {
                 let schedule = self
                     .scheduler
-                    .toggle(reference()?, action == "enable")
+                    .toggle(&reference()?, action == "enable")
                     .map_err(schedule_error)?;
                 schedule_output(
                     &format!(
@@ -1633,7 +1655,7 @@ impl Tool for ScheduleTool {
             "update" => {
                 let schedule = self
                     .scheduler
-                    .update(reference()?, schedule_update(input)?)
+                    .update(&reference()?, schedule_update(input)?)
                     .map_err(schedule_error)?;
                 schedule_output(&format!("Updated schedule {}", schedule.name), &schedule)
             }
@@ -1644,10 +1666,7 @@ impl Tool for ScheduleTool {
                     .map(PathBuf::from);
                 // Made in a chat with a folder of its own (not the project
                 // folder), its runs work in that folder too.
-                let directory = named
-                    .is_none()
-                    .then(|| chat_folder(&self.workspace, &context))
-                    .flatten();
+                let directory = own_folder.clone();
                 let workspace = named.unwrap_or_else(|| self.workspace.clone());
                 let schedule = self
                     .scheduler
@@ -1676,6 +1695,15 @@ impl Tool for ScheduleTool {
             ))),
         }
     }
+}
+
+/// Whether `schedule` was made in the chat folder `folder` (canonical).
+fn in_folder(schedule: &haarness_scheduler::Schedule, folder: &Path) -> bool {
+    schedule
+        .directory
+        .as_deref()
+        .and_then(|directory| directory.canonicalize().ok())
+        .is_some_and(|directory| directory == folder)
 }
 
 /// The call's working folder when it is a chat's own folder rather than the
@@ -5139,11 +5167,92 @@ mod tests {
             .await
             .unwrap();
         assert!(in_project.metadata["schedule"].get("directory").is_none());
-        // Named for another workspace, it works there and not in the chat's folder.
-        let mut named = create("elsewhere");
-        named["workspace"] = json!(root.join("home").display().to_string());
-        let elsewhere = tool.execute(named, context(&folder)).await.unwrap();
-        assert!(elsewhere.metadata["schedule"].get("directory").is_none());
+        // A chat folder schedules only into itself: any workspace is refused.
+        for named in [root.join("home"), folder.clone()] {
+            let mut named_create = create("elsewhere");
+            named_create["workspace"] = json!(named.display().to_string());
+            let refused = tool
+                .execute(named_create, context(&folder))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&refused, CoreError::Invalid(message) if message.contains("own folder")),
+                "{refused}"
+            );
+        }
+        // Another chat's folder neither sees nor touches it.
+        let other = workspace.join("2026-10-24/chat-cd34");
+        tokio::fs::create_dir_all(&other).await.unwrap();
+        let listed = tool
+            .execute(json!({"action": "list"}), context(&other))
+            .await
+            .unwrap();
+        assert_eq!(listed.metadata["schedule"], json!([]), "{}", listed.text);
+        for action in [
+            json!({"action": "history", "name": "from-chat"}),
+            json!({"action": "run", "name": "from-chat"}),
+            json!({"action": "delete", "name": "from-chat"}),
+            json!({"action": "enable", "name": "from-chat"}),
+            json!({"action": "disable", "name": "from-chat"}),
+            json!({"action": "update", "name": "from-chat", "prompt": "changed"}),
+            json!({"action": "update", "name": "from-project", "prompt": "changed"}),
+        ] {
+            let refused = tool
+                .execute(action.clone(), context(&other))
+                .await
+                .unwrap_err();
+            assert!(
+                refused.to_string().contains("schedule not found"),
+                "{action}: {refused}"
+            );
+        }
+        let mut moved = json!({"action": "update", "name": "from-chat", "prompt": "x"});
+        moved["workspace"] = json!(workspace.display().to_string());
+        assert!(tool.execute(moved, context(&folder)).await.is_err());
+        // Its own chat sees and changes only its own.
+        let own = tool
+            .execute(json!({"action": "list"}), context(&folder))
+            .await
+            .unwrap();
+        let names = own.metadata["schedule"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|schedule| schedule["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["from-chat"]);
+        let updated = tool
+            .execute(
+                json!({"action": "update", "name": "from-chat", "prompt": "summarize again"}),
+                context(&folder),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.metadata["schedule"]["prompt"], "summarize again");
+        tool.execute(
+            json!({"action": "disable", "name": "from-chat"}),
+            context(&folder),
+        )
+        .await
+        .unwrap();
+        tool.execute(
+            json!({"action": "history", "name": "from-chat"}),
+            context(&folder),
+        )
+        .await
+        .unwrap();
+        // The project's own chats see every schedule, as before.
+        let everything = tool
+            .execute(json!({"action": "list"}), context(&workspace))
+            .await
+            .unwrap();
+        assert_eq!(everything.metadata["schedule"].as_array().unwrap().len(), 2);
+        tool.execute(
+            json!({"action": "delete", "name": "from-chat"}),
+            context(&folder),
+        )
+        .await
+        .unwrap();
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
