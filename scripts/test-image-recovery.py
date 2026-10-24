@@ -5,7 +5,11 @@ Proves, end to end: images are typed and shrunk on arrival (a large PNG, a JPEG
 named .png, an iPhone HEIC on macOS); a provider's 400 "image exceeds 5 MB"
 leaves that image out, durably, and the turn still completes after one retry;
 the next turn and a turn after a daemon restart send no image and the same
-prompt bytes; the TUI shows the notice.
+prompt bytes; the TUI shows the notice. A chat with more screenshots than the
+provider takes in one request sends the newest: past Anthropic's 32 MB the
+oldest are noted before the request goes, in steps that keep the prompt
+prefix between them; a provider that refuses more than 20 images gets the
+newest after one refusal, and the TUI says the oldest are left out.
 """
 import base64
 import http.server
@@ -13,7 +17,6 @@ import json
 import os
 from pathlib import Path
 import platform
-import shlex
 import shutil
 import struct
 import subprocess
@@ -25,6 +28,7 @@ import uuid
 import zlib
 
 import e2e_scratch
+import e2e_tmux
 
 REPO = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get('HAARNESS_BIN', REPO / 'target/debug/haarness')).resolve()
@@ -32,6 +36,11 @@ EVIDENCE = Path(os.environ.get('HAARNESS_IMAGE_EVIDENCE', REPO / 'target/image-r
 EVIDENCE.mkdir(parents=True, exist_ok=True)
 REQUESTS = []
 REJECT = 'REJECT_IMAGES'
+# A chat whose first message holds one of these meets a provider that refuses
+# more than 20 images in a request, or more than Anthropic's 32 MB.
+CAP_IMAGES = 'CAP_IMAGES'
+CAP_BYTES = 'CAP_BYTES'
+MOST_BYTES = 32 * 1024 * 1024
 
 
 def run(args, **kwargs):
@@ -86,6 +95,33 @@ def jpeg_size(data):
     raise AssertionError('no JPEG frame header')
 
 
+def random_png(width, height):
+    """A PNG of random pixels, which no encoder can shrink."""
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+    header = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+    rows = b''.join(b'\0' + os.urandom(width * 3) for _ in range(height))
+    return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', header) + chunk(b'IDAT', zlib.compress(rows, 1)) + chunk(b'IEND', b'')
+
+
+def image_data(body):
+    """The base64 of every image block in order, nested tool results included."""
+    found = []
+    for message in body.get('messages', []):
+        content = message.get('content')
+        for block in content if isinstance(content, list) else []:
+            inner = block.get('content') if block.get('type') == 'tool_result' else None
+            for item in [block, *(inner if isinstance(inner, list) else [])]:
+                if item.get('type') == 'image':
+                    found.append(item['source']['data'])
+    return found
+
+
+def first_text(body):
+    content = body['messages'][0]['content']
+    return content if isinstance(content, str) else ' '.join(block.get('text', '') for block in content)
+
+
 def image_blocks(body):
     """(path, media type) of every image block, nested tool results included."""
     found = []
@@ -113,10 +149,26 @@ class Provider(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps({'data': [{'id': 'claude-sonnet-4-6', 'type': 'model'}], 'has_more': False}).encode())
 
+    def refuse(self, status, kind, message):
+        data = json.dumps({'type': 'error', 'error': {'type': kind, 'message': message}}).encode()
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        length = int(self.headers['Content-Length'])
+        body = json.loads(self.rfile.read(length))
+        body['bytes'] = length
         REQUESTS.append(body)
         images = image_blocks(body)
+        opening = first_text(body) if body.get('messages') else ''
+        if CAP_IMAGES in opening and len(images) > 20:
+            # No image named: the request as a whole has too many.
+            return self.refuse(400, 'invalid_request_error', f'Too many images in the request: {len(images)} > 20')
+        if CAP_BYTES in opening and length > MOST_BYTES:
+            return self.refuse(413, 'request_too_large', 'Request exceeds the maximum size')
         if images and REJECT in json.dumps(body.get('messages', [])):
             # Anthropic's wording, naming the first image by its place.
             error = {'type': 'error', 'error': {'type': 'invalid_request_error',
@@ -252,18 +304,89 @@ try:
         results.append({'check': 'JPEG named .png sent as image/jpeg; HEIC converted to JPEG with sips'})
         print('PASS types: misnamed JPEG and HEIC reach the provider as JPEG', flush=True)
 
-    # 5. The TUI shows the notice in the transcript.
-    command = shlex.join(['env', *[f'{key}={value}' for key, value in env.items()], *args, '--thread', thread])
-    run(['tmux', '-L', socket, 'new-session', '-d', '-x', '140', '-y', '45', '-s', session, command])
+    # 5. Past Anthropic's 32 MB the oldest screenshots are noted before the
+    # request goes. Random 1100x1100 PNGs keep their 3.6 MB (4.8 MB of
+    # base64): the sixth passes 25 MiB, and the newest three are sent.
+    shots = workspace / 'shots'
+    shots.mkdir()
+    big_thread = api('/threads', {'title': 'Many screenshots', 'provider': 'anthropic', 'model': 'claude-sonnet-4-6'})['id']
+    encoded = {}
+    kept_counts = []
+    previous = None
+    for index in range(1, 11):
+        shot = shots / f'big-{index:02}.png'
+        shot.write_bytes(random_png(1100, 1100))
+        encoded[base64.b64encode(shot.read_bytes()).decode()] = shot.name
+        text = f'{CAP_BYTES}: screenshot {index}' if index == 1 else f'Screenshot {index}'
+        state, sent = turn(big_thread, text, [str(shot)])
+        assert state['status'] == 'completed', (index, state)
+        assert len(sent) == 1, f'turn {index}: {len(sent)} requests; one was refused'
+        assert sent[0]['bytes'] <= MOST_BYTES, (index, sent[0]['bytes'])
+        names = [encoded.get(data, '?') for data in image_data(sent[0])]
+        assert names[-1] == shot.name, (index, names)
+        assert names == sorted(names) and len(set(names)) == len(names), names
+        noted = json.dumps(sent[0]['messages']).count('omitted: the oldest images are left out')
+        assert noted == index - len(names), (index, noted, names)
+        kept_counts.append(len(names))
+        # Between two cuts each request carries the history of the one before
+        # it unchanged: the provider's cache prefix.
+        if previous is not None and kept_counts[-1] == kept_counts[-2] + 1:
+            prefix = json.dumps(clean(previous['messages']), sort_keys=True)
+            again = json.dumps(clean(sent[0]['messages'][:len(previous['messages'])]), sort_keys=True)
+            assert prefix == again, f'turn {index}: the history before it changed'
+        previous = sent[0]
+    assert kept_counts == [1, 2, 3, 4, 5, 3, 4, 5, 3, 4], kept_counts
+    assert not any(item['data']['type'] in ('media_omitted', 'error') for item in api(f'/threads/{big_thread}/items'))
+    results.append({'check': 'past 25 MiB the oldest are noted, no request refused, the newest sent',
+                    'imagesPerRequest': kept_counts})
+    print(f'PASS byte budget: images per request {kept_counts}, none refused', flush=True)
 
-    def pane():
-        return run(['tmux', '-L', socket, 'capture-pane', '-p', '-J', '-S', '-200', '-t', session])
-    screen = until(lambda: (lambda text: text if 'The provider refused retina.png' in text else None)(pane()),
-                   'TUI notice missing', timeout=60)
+    # 6. A provider that refuses more than 20 images, without naming one,
+    # gets the newest after one refusal: the oldest half is left out.
+    capped = api('/threads', {'title': 'Twenty screenshots', 'provider': 'anthropic', 'model': 'claude-sonnet-4-6'})['id']
+    small = {}
+    for index in range(1, 23):
+        shot = shots / f'shot-{index:02}.png'
+        shot.write_bytes(random_png(48, 32))
+        small[base64.b64encode(shot.read_bytes()).decode()] = shot.name
+        text = f'{CAP_IMAGES}: screenshot {index}' if index == 1 else f'Screenshot {index}'
+        state, sent = turn(capped, text, [str(shot)])
+        assert state['status'] == 'completed', (index, state)
+        names = [small.get(data, '?') for data in image_data(sent[-1])]
+        assert names[-1] == shot.name, f'turn {index}: the newest screenshot did not reach the model: {names}'
+        if index == 21:
+            assert len(sent) == 2, f'expected one refusal, then the retry; saw {len(sent)} requests'
+            assert len(image_data(sent[0])) == 21 and len(names) <= 20, (len(image_data(sent[0])), names)
+            refused_round = names
+        else:
+            assert len(sent) == 1, (index, len(sent))
+    omitted = [item['data'] for item in api(f'/threads/{capped}/items') if item['data']['type'] == 'media_omitted']
+    assert len(omitted) == 1 and omitted[0].get('oldest') and not omitted[0].get('guessed'), omitted
+    left_out = omitted[0]['names']
+    assert left_out == [f'shot-{index:02}.png' for index in range(1, len(left_out) + 1)], left_out
+    assert 'Too many images' in omitted[0]['reason'], omitted
+    results.append({'check': 'a 20-image provider gets the newest after one refusal',
+                    'leftOut': left_out, 'retried': refused_round})
+    print(f'PASS image count: the oldest {len(left_out)} left out, the newest reached the model', flush=True)
+
+    # 7. The TUI shows both notices in the transcript.
+    def pane(name):
+        return run(['tmux', '-L', socket, 'capture-pane', '-p', '-J', '-S', '-200', '-t', name])
+
+    def show(name, chat, wanted):
+        run(['tmux', '-L', socket, 'new-session', '-d', '-x', '140', '-y', '45', '-s', name,
+             e2e_tmux.pane_command(env, args + ['--thread', chat])])
+        return until(lambda: (lambda text: text if wanted in text else None)(pane(name)),
+                     f'TUI notice {wanted!r} missing', timeout=60)
+    screen = show(session, thread, 'The provider refused retina.png')
     (EVIDENCE / 'tui.txt').write_text(screen)
     assert 'left out of this chat from now on' in screen
-    results.append({'check': 'TUI transcript shows the notice', 'capture': str(EVIDENCE / 'tui.txt')})
-    print('PASS TUI shows the notice', flush=True)
+    screen = show(session + '-capped', capped, f'so the oldest {len(left_out)} are left out')
+    (EVIDENCE / 'tui-oldest.txt').write_text(screen)
+    assert 'The request had too many images for the provider' in ' '.join(screen.split()), screen
+    results.append({'check': 'TUI transcript shows the notices', 'capture': str(EVIDENCE / 'tui.txt'),
+                    'oldest': str(EVIDENCE / 'tui-oldest.txt')})
+    print('PASS TUI shows the notices', flush=True)
     (EVIDENCE / 'results.json').write_text(json.dumps(results, indent=2))
     print('evidence:', EVIDENCE)
 finally:
