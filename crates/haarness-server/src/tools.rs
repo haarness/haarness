@@ -3393,62 +3393,40 @@ fn fold(path: &Path) -> String {
     path.to_string_lossy().to_lowercase()
 }
 
-/// Whether `folder` ignores letter case. When it cannot tell, it says no,
-/// and a patch takes names exactly as written, as it always did.
+/// Whether `folder` ignores letter case: another letter case of a name in
+/// it leads to that entry. Each folder is asked, so a case-sensitive disk
+/// mounted inside one that is not counts as what it is. When it cannot
+/// tell (no name with a letter), it says no, and a patch takes names
+/// exactly as written, as it always did.
 fn folds_case(folder: &Path) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        macos_folds_case(folder).unwrap_or(false)
-    }
-    // Another letter case of a name in the folder leads to that entry.
-    #[cfg(not(target_os = "macos"))]
-    {
-        let Ok(entries) = std::fs::read_dir(folder) else {
-            return false;
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return false;
+    };
+    for entry in entries.flatten().take(64) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
         };
-        for entry in entries.flatten().take(64) {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            let swapped: String = name
-                .chars()
-                .map(|letter| {
-                    if letter.is_ascii_lowercase() {
-                        letter.to_ascii_uppercase()
-                    } else {
-                        letter.to_ascii_lowercase()
-                    }
-                })
-                .collect();
-            if swapped == name {
-                continue;
-            }
-            let (named, other) = (folder.join(name), folder.join(swapped));
-            #[cfg(unix)]
-            return same_link(&named, &other);
-            #[cfg(not(unix))]
-            return same_file(&named, &other);
+        let swapped: String = name
+            .chars()
+            .map(|letter| {
+                if letter.is_ascii_lowercase() {
+                    letter.to_ascii_uppercase()
+                } else {
+                    letter.to_ascii_lowercase()
+                }
+            })
+            .collect();
+        if swapped == name {
+            continue;
         }
-        false
+        let (named, other) = (folder.join(name), folder.join(swapped));
+        #[cfg(unix)]
+        return same_link(&named, &other);
+        #[cfg(not(unix))]
+        return same_file(&named, &other);
     }
-}
-
-/// What macOS says of the disk holding `folder`, per folder, so a
-/// case-sensitive disk mounted inside one that is not counts as what it is.
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)] // one pathconf call, on a string this function owns
-fn macos_folds_case(folder: &Path) -> Option<bool> {
-    use std::os::unix::ffi::OsStrExt as _;
-    let path = std::ffi::CString::new(folder.as_os_str().as_bytes()).ok()?;
-    // SAFETY: `path` is NUL-terminated and outlives the call, which only
-    // reads it.
-    let sensitive = unsafe { nix::libc::pathconf(path.as_ptr(), nix::libc::_PC_CASE_SENSITIVE) };
-    match sensitive {
-        0 => Some(true),
-        1 => Some(false),
-        _ => None,
-    }
+    false
 }
 
 /// The one write a patch operation makes.
@@ -6584,6 +6562,7 @@ export default workflow({
         let sensitive = PathBuf::from(sensitive).canonicalize().unwrap();
         let digits = sensitive.join(std::process::id().to_string());
         std::fs::create_dir(&digits).unwrap();
+        std::fs::write(digits.join("Probe.txt"), "").unwrap();
         assert!(!folds_case(&sensitive));
         assert!(!folds_case(&digits));
         // Two files whose names differ only in case stay two files.
