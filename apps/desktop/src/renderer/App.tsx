@@ -18,7 +18,7 @@ import {
   onMount,
   onCleanup,
 } from "solid-js";
-import { CHAT_HOME, useApp } from "./state";
+import { useApp } from "./state";
 import {
   isWorktree,
   locationName,
@@ -1170,7 +1170,7 @@ export function App() {
         <div class="titlebar-session">
           {/* Nothing before a project opens: the sidebar's wordmark already
               names the app. */}
-          <Show when={state.connection}>
+          <Show when={state.connection || app.homeOpening()}>
             <Icon name={app.project()?.chatHome ? "computer" : "folder"} size="sm" />
             <span class="titlebar-caption">
               {app.project()?.chatHome
@@ -1184,9 +1184,9 @@ export function App() {
                 <span>{t(locationName(app.project()))}</span>
               </span>
             </Show>
-            <Show when={state.connection!.remote}>
+            <Show when={state.connection?.remote}>
               <Show
-                when={state.connection!.remoteHost}
+                when={state.connection?.remoteHost}
                 fallback={
                   <span class="badge">{app.currentServer().cloud ? t("Cloud session") : t("Remote")}</span>
                 }
@@ -1550,13 +1550,14 @@ export function App() {
                 </div>
               </Show>
               <div class="workspace-content">
-                <Show when={state.panel === "chat" && loading()}>
+                {/* This computer's new chat shows its message box while it
+                    opens, never a loading screen. */}
+                <Show when={state.panel === "chat" && loading() && !app.homeOpening()}>
                   <ChatLoading
                     label={
                       state.openingChat || state.loadingChat
                         ? t("Loading chat…")
                         : state.openingProject &&
-                            state.openingProject !== CHAT_HOME &&
                             !state.recent.some(
                               (item) => item.id === state.openingProject && item.chatHome,
                             )
@@ -1572,7 +1573,8 @@ export function App() {
                   class="persistent-panel"
                   style={{
                     display:
-                      state.panel === "chat" && state.connection && !loading()
+                      state.panel === "chat" &&
+                      (app.homeOpening() || (state.connection && !loading()))
                         ? "flex"
                         : "none",
                   }}

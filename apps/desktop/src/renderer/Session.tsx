@@ -1736,6 +1736,8 @@ export function Session() {
   }
   /** The chats whose Enter waits for the model choices. */
   const waitingForModels = new Set<string>();
+  /** A message waits for This computer's new chat to open. */
+  const [waitingForHome, setWaitingForHome] = createSignal(false);
   /** The send under way in each chat, which a second Enter there waits for. */
   const inFlight = new Map<string, Promise<boolean>>();
   const waitingForSend = new Set<string>();
@@ -1838,6 +1840,23 @@ export function Session() {
       if (owner() === commandOwner && draft().trim() === command[0].trim())
         change("");
       return;
+    }
+    // This computer's new chat is still opening: the message goes once it
+    // has (the send button is busy meanwhile), from where it was typed.
+    if (
+      app.homeOpening() &&
+      (draft().trim() || attachments().length || app.promptContext().length)
+    ) {
+      const pressed = owner();
+      if (waitingForHome()) return;
+      setWaitingForHome(true);
+      try {
+        await app.homeOpened();
+      } finally {
+        setWaitingForHome(false);
+      }
+      if (owner() !== pressed || app.homeOpening() || !state.connection?.chatHome) return;
+      return send(delivery);
     }
     if (
       !project() ||
@@ -2631,9 +2650,9 @@ export function Session() {
                 disabled={
                   controls.busy() ||
                   !project() ||
-                  !state.ready ||
-                  !!state.openingProject ||
-                  state.switching
+                  // This computer's new chat takes a message while it opens.
+                  ((!state.ready || !!state.openingProject || state.switching) &&
+                    !app.homeOpening())
                 }
                 placeholder={
                   !project()
@@ -2826,7 +2845,7 @@ export function Session() {
                       },
                     ]}
                   />
-                  <Show when={state.connection}>
+                  <Show when={state.connection || app.homeOpening()}>
                     <FolderPicker />
                   </Show>
                   <Show when={empty() && group()?.git && !group()?.remote}>
@@ -2858,7 +2877,7 @@ export function Session() {
                       </Portal>
                     )}
                   </Show>
-                  <Show when={state.connection}>
+                  <Show when={state.connection || app.homeOpening()}>
                     {/* The name carries the mode it shows, so a voice user
                         can say what they see (WCAG 2.5.3); a name that changes
                         with its state cannot also be a pressed toggle. */}
@@ -2895,19 +2914,22 @@ export function Session() {
                   </Show>
                 </div>
                 <div class="composer-trailing">
-                  <Show when={state.connection}>
+                  <Show when={state.connection || app.homeOpening()}>
                     <Select
                       class="pill-select agent-select"
-                      disabled={controls.busy()}
+                      disabled={controls.busy() || !state.agents.length}
                       aria-label={t("Agent")}
                       value={selectedAgent()}
                       onChange={(value) => chooseAgent(value)}
-                      options={conversationAgents(state.agents).map(
-                        (agent) => ({
-                          value: agent.id,
-                          label: agent.id,
-                        }),
-                      )}
+                      // Until the agents are read, the one a message would use.
+                      options={
+                        state.agents.length
+                          ? conversationAgents(state.agents).map((agent) => ({
+                              value: agent.id,
+                              label: agent.id,
+                            }))
+                          : [{ value: selectedAgent(), label: selectedAgent() }]
+                      }
                     />
                     <span class="sr-only" role="status">
                       {cycledAgent() && t("Agent: {agent}", { agent: cycledAgent() })}
@@ -2976,6 +2998,7 @@ export function Session() {
                   </Show>
                   <button
                     class="send-button"
+                    aria-busy={waitingForHome() || undefined}
                     aria-label={sendLabel()}
                     title={sendHint()}
                     disabled={
@@ -2983,7 +3006,10 @@ export function Session() {
                       submitting() ||
                       controls.busy() ||
                       stopping() ||
-                      (!showStop() && (!state.ready || state.switching)) ||
+                      waitingForHome() ||
+                      (!showStop() &&
+                        (!state.ready || state.switching) &&
+                        !app.homeOpening()) ||
                       (!showStop() &&
                         !draft().trim() &&
                         !attachments().length &&

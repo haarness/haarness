@@ -373,6 +373,8 @@ export interface Bridge {
     platform: string;
     /** This computer's home folder. */
     home: string;
+    /** The chat home's folder (see `ProjectLocation.chatHome`), made or not. */
+    chatHome: string;
     updateConfigured: boolean;
   }>;
   connect(input: {
