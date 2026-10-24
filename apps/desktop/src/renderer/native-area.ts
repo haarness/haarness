@@ -107,17 +107,23 @@ export function dialogFrame(element: Element): Frame | undefined {
  * when the anchor is beside it and the layer fits there, else the whole window.
  * The layer keeps `preferred` width where it can and shrinks to `minimum`.
  * Opened in a dialog (`frame`), it keeps 8px inside the dialog's box when it
- * fits there, rather than hanging over what the dialog covers.
+ * fits there, rather than hanging over what the dialog covers; one that
+ * cannot start where its anchor starts then ends where it ends, so an edge
+ * still lines up with the control.
  */
 export function floatingBox(anchor: DOMRect, preferred: number, minimum = preferred, frame?: Frame) {
   const gutter = 8;
   const span = floatingSpan(anchor, minimum);
   const inside = frame && { start: Math.max(span.start, frame.left), end: Math.min(span.end, frame.right) };
-  const { start, end } = inside && inside.end - inside.start - gutter * 2 >= minimum ? inside : span;
+  const framed = !!inside && inside.end - inside.start - gutter * 2 >= minimum;
+  const { start, end } = framed ? inside : span;
   const width = Math.max(0, Math.min(preferred, end - start - gutter * 2));
+  const ended = anchor.right - width;
+  const left =
+    framed && anchor.left + width > end - gutter && ended >= start + gutter ? ended : anchor.left;
   return {
     width,
-    left: Math.max(start + gutter, Math.min(anchor.left, end - width - gutter)),
+    left: Math.max(start + gutter, Math.min(left, end - width - gutter)),
   };
 }
 
