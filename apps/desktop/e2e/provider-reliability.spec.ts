@@ -269,7 +269,7 @@ test("a provider that takes fewer images gets the newest, and the notice names t
       await expect.poll(async () => (await client.activeTurns()).length, { timeout: 30000 }).toBe(0);
     }
     const notice = page.locator(".notice-inline.media-omitted");
-    await expect(notice).toContainText("The request had too many images for the provider, so the oldest one, first.png, is left out of this chat from now on.", { timeout: 30000 });
+    await expect(notice).toContainText("The request had too many images for the provider, so the oldest image, first.png, is left out of this chat from now on.", { timeout: 30000 });
     await expect(notice).toContainText("Too many images in the request: 2 > 1");
     await expect(page.locator(".transcript")).toContainText("ANSWERED_WITH_1_IMAGE");
     // The newest image reached the model on the retry.
@@ -303,7 +303,7 @@ test("a provider that takes fewer images gets the newest, and the notice names t
       await expect.poll(async () => (await client.activeTurns()).length, { timeout: 30000 }).toBe(0);
     }
     const tooLarge = page.locator(".notice-inline.media-omitted");
-    await expect(tooLarge).toContainText("The request was too large for the provider, so the oldest 2 are left out of this chat from now on.", { timeout: 30000 });
+    await expect(tooLarge).toContainText("The request was too large for the provider, so the oldest 2 images are left out of this chat from now on.", { timeout: 30000 });
     expect(requests.map(images => images.length)).toEqual([1, 2, 3, 1]);
     expect(requests[3][0]).toBe(requests[2][2]);
     await tooLarge.scrollIntoViewIfNeeded();

@@ -1043,8 +1043,8 @@ enum RefusedImages {
     /// The provider named the image.
     Named,
     /// The newest message's: what the last request added is the likeliest
-    /// cause.
-    Newest,
+    /// cause. Says what a refusal of the whole request measured.
+    Newest(Option<ImageVolume>),
     /// The oldest, for a request with too many images or bytes of them.
     Oldest(ImageVolume),
 }
@@ -1060,7 +1060,8 @@ fn refused_images<'a>(
     if let Some(image) = refused_image(message, sent) {
         return (vec![image], RefusedImages::Named);
     }
-    if let Some(volume) = image_volume_refusal(message) {
+    let volume = image_volume_refusal(message);
+    if let Some(volume) = volume {
         let older = oldest_half(sent, current, volume, limits);
         if !older.is_empty() {
             return (older, RefusedImages::Oldest(volume));
@@ -1071,7 +1072,7 @@ fn refused_images<'a>(
         sent.iter()
             .filter(|image| Some(image.message) == newest)
             .collect(),
-        RefusedImages::Newest,
+        RefusedImages::Newest(volume),
     )
 }
 
@@ -8191,9 +8192,13 @@ impl RunnerTask {
             return Ok(false);
         }
         let (refused, choice) = refused_images(message, sent, current, limits);
-        let guessed = choice == RefusedImages::Newest;
+        let guessed = matches!(choice, RefusedImages::Newest(_));
         let oldest = matches!(choice, RefusedImages::Oldest(_));
-        let too_large = choice == RefusedImages::Oldest(ImageVolume::Bytes);
+        let too_large = matches!(
+            choice,
+            RefusedImages::Oldest(ImageVolume::Bytes)
+                | RefusedImages::Newest(Some(ImageVolume::Bytes))
+        );
         let mut fingerprints = Vec::new();
         let mut names = Vec::new();
         for image in refused {
@@ -16646,7 +16651,10 @@ mod tests {
             left_out(refusal, &messages, &[&photo], crate::ImageLimits::default());
         assert_eq!(
             (names, choice),
-            (vec!["photo.png".to_owned()], super::RefusedImages::Newest)
+            (
+                vec!["photo.png".to_owned()],
+                super::RefusedImages::Newest(Some(super::ImageVolume::Bytes))
+            )
         );
 
         // So does a photo larger than the provider takes at all.
@@ -16661,7 +16669,10 @@ mod tests {
         let (names, choice) = left_out(refusal, &many, &[&photo], small);
         assert_eq!(
             (names, choice),
-            (vec!["photo.png".to_owned()], super::RefusedImages::Newest)
+            (
+                vec!["photo.png".to_owned()],
+                super::RefusedImages::Newest(Some(super::ImageVolume::Bytes))
+            )
         );
         // Within the limits, the older ones go.
         let (names, choice) = left_out(refusal, &many, &[&photo], crate::ImageLimits::default());
@@ -16699,7 +16710,10 @@ mod tests {
         );
         assert_eq!(
             (names, choice),
-            (vec!["last.png".to_owned()], super::RefusedImages::Newest)
+            (
+                vec!["last.png".to_owned()],
+                super::RefusedImages::Newest(Some(super::ImageVolume::Bytes))
+            )
         );
     }
 

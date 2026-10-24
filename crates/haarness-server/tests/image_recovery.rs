@@ -312,6 +312,14 @@ async fn a_request_too_large_for_its_images_leaves_out_the_newest_image_file() {
         omissions(&items),
         vec![(vec!["photo.png".to_owned()], true)]
     );
+    // The notice says the request was too large, not that an image was bad.
+    assert!(items.iter().any(|item| matches!(
+        item.data,
+        ItemData::MediaOmitted {
+            too_large: true,
+            ..
+        }
+    )));
     assert!(
         !items
             .iter()

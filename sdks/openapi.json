@@ -3281,7 +3281,7 @@
                 "type": "string"
               },
               "too_large": {
-                "description": "With `oldest`: the request was too large, rather than carrying\ntoo many images.",
+                "description": "The provider refused the request as too large for its images,\nrather than for one of them or for how many there were; with\n`oldest` or `guessed`.",
                 "type": "boolean"
               },
               "type": {

@@ -385,7 +385,7 @@ try:
     screen = show(session, thread, 'The provider refused retina.png')
     (EVIDENCE / 'tui.txt').write_text(screen)
     assert 'left out of this chat from now on' in screen
-    screen = show(session + '-capped', capped, f'so the oldest {len(left_out)} are left out')
+    screen = show(session + '-capped', capped, f'so the oldest {len(left_out)} images are left out')
     (EVIDENCE / 'tui-oldest.txt').write_text(screen)
     assert 'The request had too many images for the provider' in ' '.join(screen.split()), screen
     results.append({'check': 'TUI transcript shows the notices', 'capture': str(EVIDENCE / 'tui.txt'),

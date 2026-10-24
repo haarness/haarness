@@ -698,42 +698,47 @@ fn media_omitted_notice(
     too_large: bool,
 ) -> String {
     let list = names.join(", ");
-    if oldest && too_large && names.len() == 1 {
-        language.format(
-            "The request was too large for the provider, so the oldest one, {name}, is left out of this chat from now on.",
-            &[("name", &list)],
-        )
-    } else if oldest && too_large {
-        language.format(
-            "The request was too large for the provider, so the oldest {count} are left out of this chat from now on.",
-            &[("count", &names.len().to_string())],
-        )
-    } else if oldest && names.len() == 1 {
-        language.format(
-            "The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.",
-            &[("name", &list)],
-        )
-    } else if oldest {
-        language.format(
-            "The request had too many images for the provider, so the oldest {count} are left out of this chat from now on.",
-            &[("count", &names.len().to_string())],
-        )
-    } else if !guessed {
-        language.format(
+    let count = names.len().to_string();
+    let (list, count) = (list.as_str(), count.as_str());
+    let (key, value) = match (oldest, guessed, too_large, names.len() == 1) {
+        (true, _, true, true) => (
+            "The request was too large for the provider, so the oldest image, {name}, is left out of this chat from now on.",
+            ("name", list),
+        ),
+        (true, _, true, false) => (
+            "The request was too large for the provider, so the oldest {count} images are left out of this chat from now on.",
+            ("count", count),
+        ),
+        (true, _, false, true) => (
+            "The request had too many images for the provider, so the oldest image, {name}, is left out of this chat from now on.",
+            ("name", list),
+        ),
+        (true, _, false, false) => (
+            "The request had too many images for the provider, so the oldest {count} images are left out of this chat from now on.",
+            ("count", count),
+        ),
+        (false, false, _, _) => (
             "The provider refused {name}, so it is left out of this chat from now on.",
-            &[("name", &list)],
-        )
-    } else if names.len() == 1 {
-        language.format(
+            ("name", list),
+        ),
+        (false, true, true, true) => (
+            "The request was too large for the provider, so the newest image, {name}, is left out of this chat from now on.",
+            ("name", list),
+        ),
+        (false, true, true, false) => (
+            "The request was too large for the provider, so the newest images, {names}, are left out of this chat from now on.",
+            ("names", list),
+        ),
+        (false, true, false, true) => (
             "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.",
-            &[("name", &list)],
-        )
-    } else {
-        language.format(
+            ("name", list),
+        ),
+        (false, true, false, false) => (
             "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.",
-            &[("names", &list)],
-        )
-    }
+            ("names", list),
+        ),
+    };
+    language.format(key, &[value])
 }
 
 #[cfg(test)]
@@ -780,11 +785,11 @@ mod workflow_tests {
         };
         assert_eq!(
             notice(&["a.png"], false, true, false),
-            "The request had too many images for the provider, so the oldest one, a.png, is left out of this chat from now on."
+            "The request had too many images for the provider, so the oldest image, a.png, is left out of this chat from now on."
         );
         assert_eq!(
             notice(&["a.png", "b.png", "c.png"], false, true, false),
-            "The request had too many images for the provider, so the oldest 3 are left out of this chat from now on."
+            "The request had too many images for the provider, so the oldest 3 images are left out of this chat from now on."
         );
         assert_eq!(
             notice(&["d.png"], true, false, false),
@@ -798,32 +803,42 @@ mod workflow_tests {
                 true,
                 false
             ),
-            "Die Anfrage hatte zu viele Bilder für den Anbieter. Daher bleiben die ältesten 2 in diesem Chat ab jetzt außen vor."
+            "Die Anfrage hatte zu viele Bilder für den Anbieter. Daher bleiben die 2 ältesten Bilder in diesem Chat ab jetzt außen vor."
         );
     }
 
     #[test]
-    fn a_request_too_large_says_so_and_names_the_oldest_left_out() {
+    fn a_request_too_large_says_so_and_names_the_images_left_out() {
         let names = |names: &[&str]| {
             names
                 .iter()
                 .map(|&name| name.to_owned())
                 .collect::<Vec<_>>()
         };
-        let notice = |language, list: &[&str]| {
-            super::media_omitted_notice(language, &names(list), false, true, true)
+        let notice = |language, list: &[&str], guessed, oldest| {
+            super::media_omitted_notice(language, &names(list), guessed, oldest, true)
         };
+        let english = crate::locale::Language::English;
         assert_eq!(
-            notice(crate::locale::Language::English, &["a.png"]),
-            "The request was too large for the provider, so the oldest one, a.png, is left out of this chat from now on."
+            notice(english, &["a.png"], false, true),
+            "The request was too large for the provider, so the oldest image, a.png, is left out of this chat from now on."
         );
         assert_eq!(
-            notice(crate::locale::Language::English, &["a.png", "b.png"]),
-            "The request was too large for the provider, so the oldest 2 are left out of this chat from now on."
+            notice(english, &["a.png", "b.png"], false, true),
+            "The request was too large for the provider, so the oldest 2 images are left out of this chat from now on."
+        );
+        // When leaving out older images would not have helped, the newest go.
+        assert_eq!(
+            notice(english, &["big.png"], true, false),
+            "The request was too large for the provider, so the newest image, big.png, is left out of this chat from now on."
         );
         assert_eq!(
-            notice(crate::locale::Language::German, &["a.png", "b.png"]),
-            "Die Anfrage war zu groß für den Anbieter. Daher bleiben die ältesten 2 in diesem Chat ab jetzt außen vor."
+            notice(english, &["left.png", "right.png"], true, false),
+            "The request was too large for the provider, so the newest images, left.png, right.png, are left out of this chat from now on."
+        );
+        assert_eq!(
+            notice(crate::locale::Language::German, &["a.png"], false, true),
+            "Die Anfrage war zu groß für den Anbieter. Daher bleibt das älteste Bild, a.png, in diesem Chat ab jetzt außen vor."
         );
     }
 
