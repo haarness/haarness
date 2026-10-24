@@ -28,7 +28,9 @@ export function ModelPicker(props: {
   const index = () => Math.max(0, steps().indexOf(valid()));
   const unavailable = () => !!effort() && valid() !== effort();
   async function choose(value: string) {
-    if (busy() || props.disabled) return;
+    // The model shown, picked again, is not a change: nothing is written and
+    // the rows stay as they are.
+    if (busy() || props.disabled || value === props.value) return;
     const next = props.options.find(
       (option) => String(option.value) === value,
     );

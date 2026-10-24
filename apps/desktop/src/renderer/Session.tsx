@@ -351,8 +351,11 @@ export function Session() {
     const id = draftProject();
     setChoices((items) => ({ ...items, [id]: { ...items[id], ...value } }));
   };
-  /** Apply an agent the way the composer's picker does. */
+  /** Apply an agent the way the composer's picker does. The agent already
+   * shown, picked again, changes nothing: a new chat keeps the model chosen
+   * for it, and a chat is not rewritten (and marked as just active). */
   function chooseAgent(id: string) {
+    if (id === selectedAgent()) return;
     void app.run(async () => {
       if (!thread()) {
         setChoice({ agent: id, provider: undefined, model: undefined });
@@ -2203,8 +2206,13 @@ export function Session() {
           " · " +
           shortPath(location.workspace),
         icon: isWorktree(location) ? ("branch" as const) : ("folder" as const),
-        run: () =>
-          void app.run(() => app.connect({ recent: location.id }, true)),
+        // The location the chat works in is the live choice; picking it again
+        // leaves the project open as it is rather than opening it anew.
+        checked: location.id === project()?.id,
+        run: () => {
+          if (location.id !== project()?.id)
+            void app.run(() => app.connect({ recent: location.id }, true));
+        },
       })),
     {
       label: t("New worktree…"),

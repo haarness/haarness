@@ -3525,6 +3525,16 @@ test("new chats select concrete models, honor configuration and remember availab
       "smart-model/smart-preferred",
     );
     await selectValue(model, "smart-model/smart-other");
+    // The agent shown, picked again, is not a change: the new chat keeps the
+    // model chosen for it rather than going back to the configured default.
+    await selectValue(
+      page.getByRole("combobox", { name: "Agent", exact: true }),
+      "build",
+    );
+    await expect(model).toHaveAttribute(
+      "data-value",
+      "smart-model/smart-other",
+    );
     const connection = await open("remembered-model", catalog);
     await expect(model).toHaveAttribute(
       "data-value",
@@ -3560,6 +3570,35 @@ test("new chats select concrete models, honor configuration and remember availab
       provider: "smart-model",
       model: "smart-other",
     });
+    // In a chat, the agent and model shown, picked again, write nothing: the
+    // chat was rewritten and its sidebar age said "now".
+    const updated = () =>
+      page.evaluate(
+        async (connection) =>
+          (
+            await window.haarness.api<{ updatedAt: string }[]>(
+              connection,
+              "listThreads",
+              [],
+            )
+          )[0].updatedAt,
+        connection,
+      );
+    let settled = "";
+    await expect
+      .poll(async () => {
+        const before = settled;
+        settled = await updated();
+        return before === settled;
+      }, { intervals: [500] })
+      .toBe(true);
+    await selectValue(model, "smart-model/smart-other");
+    await selectValue(
+      page.getByRole("combobox", { name: "Agent", exact: true }),
+      "build",
+    );
+    await page.waitForTimeout(500);
+    expect(await updated()).toBe(settled);
     expect(received.length).toBeGreaterThan(0);
     expect(received.every((request) => request.model === "smart-other")).toBe(
       true,
@@ -7447,6 +7486,27 @@ test("one project groups worktree conversations while drafts, permissions, files
   const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await composer.fill("A draft shared between working locations");
   const count = (await client.listThreads()).length;
+  // The folder the chat works in is the menu's live choice. Picking it again
+  // leaves the project as it is: before, the project was opened anew, its
+  // chats left the sidebar and came back, and unsaved file edits were asked
+  // about.
+  await page.evaluate(() => {
+    const seen = ((window as any).repicked = { reopened: false });
+    const root = document.querySelector(".application")!;
+    new MutationObserver(() => {
+      if (root.getAttribute("data-project-ready") !== "true") seen.reopened = true;
+    }).observe(root, { attributes: true, attributeFilter: ["data-project-ready"] });
+  });
+  await page
+    .getByRole("button", { name: "Choose working location", exact: true })
+    .click();
+  const current = page.getByRole("menuitemradio", { name: "Project folder", exact: true });
+  await expect(current).toHaveAttribute("aria-checked", "true");
+  await current.click();
+  await expect(page.getByRole("menu", { name: "Choose working location", exact: true })).toHaveCount(0);
+  await page.waitForTimeout(500);
+  expect(await page.evaluate(() => (window as any).repicked)).toEqual({ reopened: false });
+  await expect(composer).toHaveValue("A draft shared between working locations");
   await page
     .getByRole("button", { name: "Choose working location", exact: true })
     .click();
@@ -7989,8 +8049,9 @@ test("worktree discovery, missing checkouts and inactive-project menus retain th
     .getByRole("button", { name: "Choose working location", exact: true })
     .click();
   await expect(
-    page.getByRole("menuitem", { name: "Discovered checkout", exact: true }),
+    page.getByRole("menuitemradio", { name: "Discovered checkout", exact: true }),
   ).toHaveCount(0);
+  await expect(page.getByRole("menuitemradio", { name: "Project folder", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await menu("Show unavailable worktrees (1)");
   await expect(discovered).toContainText("Folder not found");
