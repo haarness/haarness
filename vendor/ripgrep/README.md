@@ -27,6 +27,10 @@ The executable cache is below `$HAARNESS_HOME/cache`, `$XDG_CACHE_HOME/haarness`
 or `~/.cache/haarness`, in a version/target/content-hash directory. First use is
 locked across processes and published atomically. Missing, corrupt, or
 non-executable cached files repair themselves; executable symlinks are rejected.
+When the cache cannot be written (a read-only home, a relative `HAARNESS_HOME`,
+a link in the cache), shell calls and terminals still start, with PATH as it is,
+so they find any `rg` installed there; the log says so once per process, and
+each later call tries the cache again. `haarness doctor` reports the failure.
 Shell tool setup restores PATH after login profiles, so their PATH resets do not
 hide the bundled binary. Interactive terminals inherit PATH; user shell startup
 configuration can still intentionally override that environment.
