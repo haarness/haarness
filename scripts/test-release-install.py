@@ -174,6 +174,16 @@ with tempfile.TemporaryDirectory(prefix='haarness-install-both-') as d:
         root,r=run('unknown',['--desktop-only'])
         assert r.returncode!=0 and 'Unknown option' in r.stderr and not (root/'bin').exists(),(r.stdout,r.stderr)
         print('PASS: an unknown option is refused before anything is installed')
+        # A release URL that only starts like a loopback one: curl reads `localhost:` as a user name and sends the
+        # request, over plain HTTP, to the host after the `@`. Refused before any request, as a backslash is.
+        port=server.server_port
+        for name,url in [('userinfo',f'http://localhost:@127.0.0.1:{port}'),('password',f'http://127.0.0.1:1@127.0.0.1:{port}'),
+                         ('backslash',f'http://127.0.0.1:{port}\\@example.invalid')]:
+            state['heads'].clear()
+            root,r=run(name,extra={'HAARNESS_PRODUCT':'cli','HAARNESS_RELEASE_URL':url})
+            assert r.returncode!=0 and 'Release URL cannot hold' in r.stderr,(name,r.stdout,r.stderr)
+            assert not state['queries'] and not state['heads'] and not (root/'bin').exists(),(name,state)
+        print('PASS: a release URL with a user name, a password or a backslash is refused before any request')
         # A service that names the file's address on its release domain: the bytes come from there, the checksum and
         # version from the service, and an interrupted download continues on the release domain.
         address='http://127.0.0.1:{port}/edge/{product}/file'
