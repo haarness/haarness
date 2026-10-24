@@ -21,7 +21,7 @@ workspace = root/'project'; workspace.mkdir()
 state = root/'state'; (state/'config').mkdir(parents=True); (state/'data').mkdir()
 SECRETS = ['hunter2', 'fixture-url-secret', 'fixture-arg-secret', 'fixture-flag-secret',
            'fixture-clone-secret', 'fixture-instruction-secret', 'fixture-command-secret',
-           'fixture-review-secret', 'fixture-inner-secret', 'fixture-at']
+           'fixture-review-secret', 'fixture-inner-secret', 'fixture-at', 'fixture-proxy-secret']
 
 # A remote MCP server that wants OAuth and offers a `file:` sign-in link, and one that writes down the
 # headers its client sent.
@@ -69,7 +69,7 @@ timeoutMs = 2000
 [mcp.local]
 transport = "stdio"
 command = "/nonexistent/fixture-mcp"
-args = ["--api-key", "fixture-arg-secret", "--token", "fixture-flag-secret", "--region", "eu"]
+args = ["--api-key", "fixture-arg-secret", "--token", "fixture-flag-secret", "--region", "eu", "--proxy", "fixture:fixture-proxy-secret@127.0.0.1:3128"]
 enabled = false
 
 [permissions]
@@ -187,7 +187,8 @@ try:
     assert keyed['config']['url'] == 'http://<redacted>@127.0.0.1:9/mcp?api_key=<redacted>&region=eu', keyed
     local = json.loads(cli('mcp', 'get', 'local'))
     clean(json.dumps(local), 'mcp get')
-    assert local['config']['args'] == ['--api-key', '<redacted>', '--token', '<redacted>', '--region', 'eu'], local
+    assert local['config']['args'] == ['--api-key', '<redacted>', '--token', '<redacted>', '--region', 'eu',
+                                       '--proxy', '<redacted>@127.0.0.1:3128'], local
     shown = cli('mcp', 'get', 'keyed', '--show-secrets')
     assert 'fixture-url-secret' in shown and 'hunter2' in shown, shown
     check('haarness mcp get hides URL and argument credentials and shows them with --show-secrets')
@@ -209,7 +210,8 @@ try:
     kept = json.loads(cli('mcp', 'get', 'keyed', '--show-secrets'))['config']['url']
     assert kept == 'http://someone:hunter2@127.0.0.1:9/mcp?api_key=fixture-url-secret&region=eu', kept
     kept = json.loads(cli('mcp', 'get', 'local', '--show-secrets'))['config']['args']
-    assert kept == ['--api-key', 'fixture-arg-secret', '--token', 'fixture-flag-secret', '--region', 'eu'], kept
+    assert kept == ['--api-key', 'fixture-arg-secret', '--token', 'fixture-flag-secret', '--region', 'eu',
+                    '--proxy', 'fixture:fixture-proxy-secret@127.0.0.1:3128'], kept
     check('the settings view and edit form hide them, and saving the form unchanged keeps the real values')
 
     # Edited arguments (as the model's mcp_manage or a person sends them): each hidden value stays
