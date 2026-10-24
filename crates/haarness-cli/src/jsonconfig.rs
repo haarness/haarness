@@ -2084,6 +2084,18 @@ pub fn migrate_toml(config_toml: &Path, notices: &mut Vec<String>) -> Result<()>
             json.insert("default_agent".into(), Value::String(agent.into()));
         }
     }
+    // A config.toml that does not load (an action that is no action, a
+    // table where a pattern's action belongs) stays as it is, so it keeps
+    // refusing to start rather than run without its bad entry.
+    if let Some(permissions) = parsed.get("permissions").and_then(toml::Value::as_table)
+        && let Err(error) = super::compile_permissions(permissions)
+    {
+        notices.push(format!(
+            "{} kept as TOML (its permissions do not load: {error})",
+            config_toml.display()
+        ));
+        return Ok(());
+    }
     if let Some(permissions) = parsed.get("permissions").and_then(toml::Value::as_table) {
         // In the order `config.toml` applied them, so `haarness.json` decides
         // exactly as it did.
@@ -3829,6 +3841,31 @@ mod tests {
             "{text}"
         );
         assert_eq!(text.lines().count(), 2, "{text}");
+    }
+
+    #[test]
+    fn a_config_toml_whose_permissions_do_not_load_is_not_migrated() {
+        for text in [
+            "[permissions.bash]\n\"echo s*\" = \"deny\"\n\"echo secret*\" = \"dney\"\n",
+            "[permissions.bash]\n\"echo secret*\" = \"deny\"\n[permissions.bash.extra]\n\"x\" = \"allow\"\n",
+        ] {
+            let root = std::env::temp_dir()
+                .join(format!("haarness-migrate-refused-{}", uuid::Uuid::now_v7()));
+            fs::create_dir_all(&root).unwrap();
+            let toml = root.join("config.toml");
+            fs::write(&toml, text).unwrap();
+            let mut notices = Vec::new();
+            migrate_toml(&toml, &mut notices).unwrap();
+            assert_eq!(fs::read_to_string(&toml).unwrap(), text);
+            assert!(!root.join("haarness.json").exists(), "{text}");
+            assert!(
+                notices
+                    .iter()
+                    .any(|notice| notice.contains("kept as TOML (its permissions do not load")),
+                "{notices:?}"
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 
     #[test]
