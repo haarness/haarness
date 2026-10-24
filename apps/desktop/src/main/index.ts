@@ -2194,12 +2194,18 @@ else {
   });
   app.on("before-quit", () => {
     stopBillingWatch();
-    browserHost.dispose();
     notifications.dispose();
-    for (const watch of notificationWatches.values()) watch.stop();
     voice.stop();
-    for (const item of subscriptions.values()) item.client.close();
-    terminals.closeAll();
     for (const child of commands.values()) stopCommand(child);
+    // The streams end in a callback of their own: app.quit() may run inside
+    // a read of one of them (an inspector's evaluate, as Playwright quits the
+    // app), and a socket ended in its own read makes Node throw (see
+    // closed-socket-read.ts).
+    setImmediate(() => {
+      browserHost.dispose();
+      for (const watch of notificationWatches.values()) watch.stop();
+      for (const item of subscriptions.values()) item.client.close();
+      terminals.closeAll();
+    });
   });
 }
