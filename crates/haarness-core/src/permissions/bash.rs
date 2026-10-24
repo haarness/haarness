@@ -651,6 +651,7 @@ impl Reader<'_> {
         let mut command_nodes: Vec<(tree_sitter::Node<'_>, Option<tree_sitter::Node<'_>>)> =
             Vec::new();
         let mut redirects = Vec::new();
+        let mut heredocs = Vec::new();
         let mut previous = HashMap::new();
         let mut wrappers = HashMap::new();
         // The statement whose here-document or here-string a command reads,
@@ -678,6 +679,9 @@ impl Reader<'_> {
             }
             if node.kind() == "file_redirect" {
                 redirects.push(node);
+            }
+            if node.kind() == "heredoc_redirect" {
+                heredocs.push(node);
             }
             if node.kind() == "ERROR" {
                 errors.push(node);
@@ -773,7 +777,9 @@ impl Reader<'_> {
         }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
         let continued = command.contains("\\\n");
-        let mut read_documents = HashSet::new();
+        // The written command each command node is read for, by where the
+        // node starts.
+        let mut sources: Vec<(usize, Option<usize>)> = Vec::new();
 
         for (node, parent) in command_nodes {
             if self.overflow {
@@ -831,6 +837,7 @@ impl Reader<'_> {
                     }
                 }
             }
+            sources.push((node.start_byte(), self.source));
             let assigned = node
                 .named_children(&mut cursor)
                 .any(|child| child.kind() == "variable_assignment");
@@ -874,18 +881,21 @@ impl Reader<'_> {
             {
                 self.nested(&joined, depth);
             }
-            // An unquoted here-document's `…` substitutions run as the shell
-            // writes the document, where the parser keeps them as text. Each
-            // document is read once, for the first command that reads it.
-            if let Some(statement) = parent
-                .filter(|parent| parent.kind() == "redirected_statement")
-                .or_else(|| documents.get(&node.id()).copied())
-                && read_documents.insert(statement.id())
-            {
-                for redirect in children(statement) {
-                    if let Some(text) = backquoted(redirect, command) {
-                        self.nested_within_limits(&text, depth);
-                    }
+        }
+        // An unquoted here-document's `…` substitutions run as the shell
+        // writes the document, where the parser keeps them as text. They are
+        // read for the command written last before the document's `<<`: the
+        // one on its line, or the last of a loop, a group or an `if` it is
+        // attached to.
+        if !self.overflow {
+            for heredoc in heredocs {
+                let Some(text) = backquoted(heredoc, command) else {
+                    continue;
+                };
+                let before = sources.partition_point(|(start, _)| *start < heredoc.start_byte());
+                if let Some(source) = before.checked_sub(1).and_then(|index| sources[index].1) {
+                    self.source = Some(source);
+                    self.nested(&text, depth);
                 }
             }
         }
@@ -1143,21 +1153,6 @@ impl Reader<'_> {
         self.read_bytes += text.len();
         self.texts.insert(key);
         self.read(text, depth);
-    }
-
-    /// [`nested`](Self::nested) for text a line runs that is no command's
-    /// own (an unquoted here-document's `…`): when it would pass a limit it
-    /// is left unread rather than marking the command incomplete, so a long
-    /// document never makes a narrower rule refuse the line.
-    fn nested_within_limits(&mut self, text: &str, depth: Depth) {
-        if depth.text < MAX_NESTING
-            && depth.hops < MAX_HOPS
-            && text.len() <= MAX_NESTED_BYTES
-            && self.read_bytes + text.len() <= MAX_READ_BYTES
-            && self.nested_commands < MAX_NESTED_COMMANDS
-        {
-            self.nested(text, depth);
-        }
     }
 
     /// Read what a command runs: the rest of a wrapper's words, or the text
@@ -2828,10 +2823,11 @@ fn backquoted(redirect: tree_sitter::Node<'_>, source: &str) -> Option<String> {
     if !text.contains('`') {
         return None;
     }
-    // `$(…)` and `${…}` there are read already.
+    // `$(…)` there is read already; backquotes in a `${…}` (`${X:-`…`}`)
+    // are text to the parser too.
     let skipped: Vec<(usize, usize)> = children(*body)
         .into_iter()
-        .filter(|part| matches!(part.kind(), "command_substitution" | "expansion"))
+        .filter(|part| part.kind() == "command_substitution")
         .map(|part| {
             (
                 part.start_byte() - body.start_byte(),
@@ -6507,6 +6503,42 @@ mod here_document_backquotes {
             "{:?}",
             analysis.deletions
         );
+    }
+
+    #[test]
+    fn a_here_document_of_a_loop_a_group_or_an_if_and_one_in_an_expansion_are_read_too() {
+        for command in [
+            "while read -r l; do echo \"$l\"; done <<EOF\n`rm -rf victim`\nEOF",
+            "for i in 1; do cat; done <<EOF\n`rm -rf victim`\nEOF",
+            "until false; do cat; break; done <<EOF\n`rm -rf victim`\nEOF",
+            "if true; then cat; fi <<EOF\n`rm -rf victim`\nEOF",
+            "{ cat; } <<EOF\n`rm -rf victim`\nEOF",
+            "(cat) <<EOF\n`rm -rf victim`\nEOF",
+            "cat > n.md <<EOF\n${X:-`rm -rf victim`}\nEOF",
+            "cat > n.md <<EOF\n${X:=`rm -rf victim`}\nEOF",
+            "cat > n.md <<EOF\n${X/a/`rm -rf victim`}\nEOF",
+        ] {
+            assert!(
+                readings(command).contains(&"rm -rf victim".to_owned()),
+                "{command:?}: {:?}",
+                readings(command)
+            );
+        }
+    }
+
+    #[test]
+    fn a_document_past_the_reading_limits_leaves_its_command_not_read_whole() {
+        let command = format!(
+            "bash -c '{}' ; cat > n.md <<EOF\n`rm -rf victim`\nEOF",
+            vec!["true"; 4096].join(";")
+        );
+        let analysis = analyze(&command, &std::env::current_dir().unwrap());
+        let cat = analysis
+            .written
+            .iter()
+            .find(|written| written.pattern.starts_with("cat > n.md"))
+            .unwrap();
+        assert!(cat.incomplete, "{:?}", analysis.written);
     }
 
     #[test]
