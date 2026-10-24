@@ -1416,7 +1416,14 @@ fn login_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
             ));
         }
         crate::connect::LoginState::Failed(error) => {
-            body.extend(wrap_panel_text(error, content, "", theme.danger));
+            // Haarness's own reasons are in the catalog; a server's or a
+            // provider's are shown as they came.
+            body.extend(wrap_panel_text(
+                language.text(error),
+                content,
+                "",
+                theme.danger,
+            ));
             body.push(Line::empty());
             body.push(line(
                 language.text("Enter to try again, or Esc to go back."),

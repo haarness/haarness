@@ -2871,5 +2871,6 @@
   "about 1 day left at this pace": "bu hızla yaklaşık 1 gün kaldı",
   "about {count} days left at this pace": "bu hızla yaklaşık {count} gün kaldı",
   "Can't reach the server · still waiting": "Sunucuya ulaşılamıyor · beklemeye devam ediliyor",
-  "Theme {file} not loaded: {reason}": "{file} teması yüklenmedi: {reason}"
+  "Theme {file} not loaded: {reason}": "{file} teması yüklenmedi: {reason}",
+  "The server did not answer in time": "Sunucu zamanında yanıt vermedi"
 }

@@ -593,7 +593,7 @@
   "Search tools": "Поиск инструментов",
   "Find a tool…": "Найти инструмент…",
   "1 tool": "1 инструмент",
-  "{count} tools": "{count} инструментов",
+  "{count} tools": "Инструменты: {count}",
   "1 turned off": "выключено: 1",
   "{count} turned off": "выключено: {count}",
   "No tool matches that search.": "Ни один инструмент не соответствует запросу.",
@@ -2866,10 +2866,11 @@
   "starting": "запуск",
   "running in background": "работает в фоне",
   "1 tool call": "1 вызов инструмента",
-  "{count} tool calls": "Вызовов инструментов: {count}",
+  "{count} tool calls": "Вызовы инструментов: {count}",
   "less than a day left at this pace": "при таком темпе осталось меньше дня",
   "about 1 day left at this pace": "при таком темпе остался примерно 1 день",
-  "about {count} days left at this pace": "Дней при таком темпе: около {count}",
+  "about {count} days left at this pace": "При таком темпе осталось дней: около {count}",
   "Can't reach the server · still waiting": "Сервер недоступен · ожидание продолжается",
-  "Theme {file} not loaded: {reason}": "Тема {file} не загружена: {reason}"
+  "Theme {file} not loaded: {reason}": "Тема {file} не загружена: {reason}",
+  "The server did not answer in time": "Сервер не ответил вовремя"
 }
