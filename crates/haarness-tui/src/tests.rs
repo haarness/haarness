@@ -141,6 +141,7 @@ fn fixture_workspace_catalog() -> haarness_protocol::WorkspaceListResponse {
         created_at: now,
         last_opened_at: now,
         exists: true,
+        chat_home: false,
     };
     let managed = haarness_protocol::WorkspaceInfo {
         id: "workspace-review".into(),
@@ -155,6 +156,7 @@ fn fixture_workspace_catalog() -> haarness_protocol::WorkspaceListResponse {
         created_at: now,
         last_opened_at: now,
         exists: true,
+        chat_home: false,
     };
     let missing = haarness_protocol::WorkspaceInfo {
         id: "workspace-missing".into(),
@@ -169,6 +171,7 @@ fn fixture_workspace_catalog() -> haarness_protocol::WorkspaceListResponse {
         created_at: now,
         last_opened_at: now,
         exists: false,
+        chat_home: false,
     };
     haarness_protocol::WorkspaceListResponse {
         projects: vec![project],

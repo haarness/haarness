@@ -109,6 +109,11 @@ struct Cli {
     #[arg(long, global = true, env = "HAARNESS_DISABLE_PROJECT_CONFIG",
         value_parser = clap::builder::BoolishValueParser::new())]
     disable_project_config: bool,
+    /// Make --workspace this computer's chat home: the folder that holds the
+    /// folders of chats without a project. It stays one, runs without project
+    /// configuration and is left out of project lists.
+    #[arg(long, global = true)]
+    chat_home: bool,
     /// Log verbosity for the haarness crates: trace|debug|info|warn|error.
     /// Overrides HAARNESS_LOG / RUST_LOG. Logs always also land in
     /// <data>/logs/ regardless of this flag.
@@ -1400,6 +1405,14 @@ async fn cli_main() -> Result<()> {
     let cli = {
         use clap::FromArgMatches as _;
         let matches = cli_command().get_matches_from(normalize_natural_language_args(args));
+        if chat_home_unnamed(&matches) {
+            cli_command()
+                .error(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "--chat-home needs the folder it makes the chat home: --workspace <folder>",
+                )
+                .exit();
+        }
         Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
     };
     if let Some(Command::Serve(ServeArgs {
@@ -1414,12 +1427,6 @@ async fn cli_main() -> Result<()> {
     if !matches!(cli.command, Some(Command::Doctor | Command::Logs { .. })) {
         require_system_certificates()?;
     }
-    let project_config = !cli.disable_project_config;
-    let project_config_override = if cli.disable_project_config {
-        Some(false)
-    } else {
-        cli.trust_project.then_some(true)
-    };
     let base_paths = Paths::new(cli.data_dir.as_deref())?;
     // An edit of the global configuration or the base folder asks a person;
     // tell the permission engine which folders those are in this process.
@@ -1543,10 +1550,25 @@ async fn cli_main() -> Result<()> {
         .canonicalize()
         .context("canonicalize workspace")?;
     let workspace_manager = base_paths.workspace_manager()?;
-    let current_workspace = workspace_manager
-        .register_local(&workspace)
-        .map_err(anyhow::Error::new)?;
-    let migrate_legacy = workspace_manager.registered_count()? == 1;
+    let current_workspace = if cli.chat_home {
+        workspace_manager.register_chat_home(&workspace)
+    } else {
+        workspace_manager.register_local(&workspace)
+    }
+    .map_err(anyhow::Error::new)?;
+    // The chat home (named so once, it stays one) holds chats without a
+    // project: no project's configuration applies there.
+    let chat_home = current_workspace.chat_home;
+    let disable_project_config = cli.disable_project_config || chat_home;
+    let project_config = !disable_project_config;
+    let project_config_override = if disable_project_config {
+        Some(false)
+    } else {
+        cli.trust_project.then_some(true)
+    };
+    // The pre-workspace database belongs to the first project, never to the
+    // chat home.
+    let migrate_legacy = !chat_home && workspace_manager.registered_count()? == 1;
     let paths = base_paths.scoped(&current_workspace.id, migrate_legacy)?;
     let command_span = if long_running {
         tracing::Span::none()
@@ -1955,6 +1977,13 @@ fn misspelled_subcommand(args: &[OsString]) -> Option<(String, String)> {
     fits.then(|| (typo.to_owned(), command.get_name().to_owned()))
 }
 
+/// `--chat-home` without `--workspace`: whatever folder a command happens to
+/// run in must not become the chat home, so it is named.
+fn chat_home_unnamed(matches: &clap::ArgMatches) -> bool {
+    matches.get_flag("chat_home")
+        && matches.value_source("workspace") != Some(clap::parser::ValueSource::CommandLine)
+}
+
 /// Where a global option means something: only in these commands, or in
 /// every command but these.
 enum GlobalScope {
@@ -1997,6 +2026,23 @@ const GLOBAL_SCOPES: &[(&str, GlobalScope)] = &[
             "upgrade",
             "doctor",
             "logs",
+            "browser",
+        ]),
+    ),
+    (
+        "chat_home",
+        GlobalScope::Except(&[
+            "login",
+            "logout",
+            "account",
+            "cloud",
+            "telemetry",
+            "upgrade",
+            "doctor",
+            "logs",
+            "profile",
+            "stats",
+            "insights",
             "browser",
         ]),
     ),
@@ -12731,6 +12777,38 @@ mod tests {
         assert_eq!(super::url_port("http://127.0.0.1:41000"), Some(41000));
         assert_eq!(super::url_port("http://[::1]:4096/"), Some(4096));
         assert_eq!(super::url_port("http://localhost"), None);
+    }
+
+    #[test]
+    fn the_chat_home_is_named_by_its_folder() {
+        let parse = |args: &[&str]| super::cli_command().try_get_matches_from(args).unwrap();
+        for args in [
+            &[
+                "haarness",
+                "--workspace",
+                "/tmp/chats",
+                "--chat-home",
+                "desktop",
+            ][..],
+            &[
+                "haarness",
+                "desktop",
+                "--chat-home",
+                "--workspace",
+                "/tmp/chats",
+            ],
+        ] {
+            let matches = parse(args);
+            assert!(!super::chat_home_unnamed(&matches), "{args:?}");
+            use clap::FromArgMatches as _;
+            assert!(super::Cli::from_arg_matches(&matches).unwrap().chat_home);
+        }
+        assert!(super::chat_home_unnamed(&parse(&[
+            "haarness",
+            "--chat-home",
+            "desktop"
+        ])));
+        assert!(!super::chat_home_unnamed(&parse(&["haarness", "desktop"])));
     }
 
     #[test]
