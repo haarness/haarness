@@ -1583,6 +1583,7 @@ pub(crate) async fn refresh_mentions(app: &mut App, client: &ApiClient) {
             suggestions.extend(crate::resource_mentions::suggestions(app, &query));
             app.ask_resources(client);
             app.mention_suggestions = suggestions;
+            app.list_generation += 1;
             app.selection = 0;
             app.select_wanted();
         }

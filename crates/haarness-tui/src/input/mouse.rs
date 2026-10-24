@@ -161,10 +161,10 @@ impl Press {
     }
 }
 
-/// The request a control answers, so a card replaced under a held press is
-/// not answered by its release: a permission's id (and whether an "always"
-/// answer waits for its confirmation, which changes what the chips do), a
-/// question's id.
+/// The request a control answers, so a card or list replaced under a held
+/// press is not acted on by its release: a permission's id (and whether an
+/// "always" answer waits for its confirmation, which changes what the chips
+/// do), a question's id, a list row's list and item.
 fn request_of(app: &App, target: Option<&HitTarget>) -> Option<String> {
     match target? {
         HitTarget::PermissionOption(_) | HitTarget::PermissionFocus => app
@@ -173,6 +173,7 @@ fn request_of(app: &App, target: Option<&HitTarget>) -> Option<String> {
         HitTarget::QuestionChoice(_) => app
             .first_pending_question()
             .map(|pending| pending.question_id.clone()),
+        HitTarget::MenuRow(index) => Some(app.menu_row_key(*index)),
         _ => None,
     }
 }

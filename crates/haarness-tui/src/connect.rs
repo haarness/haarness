@@ -814,6 +814,7 @@ impl App {
         providers: Vec<haarness_protocol::ProviderInfo>,
         client: &ApiClient,
     ) {
+        self.list_generation += 1;
         let said = (self.models_loading && self.notice == "Loading models…")
             || self.notice
                 == crate::state::unconnected_notice(&self.providers, &self.thread.provider);
