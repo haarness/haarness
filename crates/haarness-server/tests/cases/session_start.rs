@@ -55,7 +55,10 @@ async fn session_start_runs_for_a_chat_but_not_for_one_started_inside_it() {
         EventBus::new(256),
         workspace.clone(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     )
     .with_hooks(starts.clone());
     let chat = echo_thread(&runtime).await;

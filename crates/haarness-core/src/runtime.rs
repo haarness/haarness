@@ -1512,6 +1512,7 @@ impl AgentRuntime {
         let approval_modes = Arc::new(crate::approval_mode::ApprovalModes::new(
             repository.clone(),
             workspace.display().to_string(),
+            config.approval_mode,
         ));
         Self {
             repository,
@@ -1941,6 +1942,7 @@ impl AgentRuntime {
         before_swap();
         let commands = config.commands.clone();
         let agents = config.custom_agents.clone();
+        *self.approval_modes.fallback.lock() = config.approval_mode;
         *self.components.write() = Arc::new(RuntimeComponents {
             providers,
             tools,

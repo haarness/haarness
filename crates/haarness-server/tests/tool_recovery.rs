@@ -181,7 +181,10 @@ fn error(items: &[haarness_protocol::Item], id: &str) -> String {
 
 #[tokio::test]
 async fn provider_receives_field_feedback_then_corrects_and_reads_real_file() {
-    let fixture = Fixture::new(RuntimeConfig::default());
+    let fixture = Fixture::new(RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    });
     let items = fixture
         .run(vec![
             vec![call("bad", "Read", json!({"path":42}))],
@@ -215,7 +218,10 @@ fn asks_to_continue(request: &ProviderRequest) -> bool {
 
 #[tokio::test]
 async fn gemini_malformed_call_alone_is_retried_with_the_recovery_note() {
-    let fixture = Fixture::new(RuntimeConfig::default());
+    let fixture = Fixture::new(RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    });
     let items = fixture.run(vec![vec![malformed()]]).await;
     assert!(items.iter().any(
         |item| matches!(&item.data, ItemData::AssistantMessage { text } if text == "Recovered")
@@ -233,7 +239,10 @@ async fn gemini_malformed_call_alone_is_retried_with_the_recovery_note() {
 
 #[tokio::test]
 async fn gemini_malformed_call_runs_the_valid_calls_before_it_and_continues() {
-    let fixture = Fixture::new(RuntimeConfig::default());
+    let fixture = Fixture::new(RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    });
     let items = fixture
         .run(vec![vec![
             call("valid", "Read", json!({"path":"sample.txt"})),
@@ -255,7 +264,10 @@ async fn gemini_malformed_call_runs_the_valid_calls_before_it_and_continues() {
 
 #[tokio::test]
 async fn direct_and_runtime_owned_tools_validate_before_prompting_or_writing() {
-    let fixture = Fixture::new(RuntimeConfig::default());
+    let fixture = Fixture::new(RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    });
     let thread = fixture.thread().await;
     let failure = fixture
         .runtime
@@ -304,7 +316,10 @@ async fn direct_and_runtime_owned_tools_validate_before_prompting_or_writing() {
 
 #[tokio::test]
 async fn batch_retains_valid_results_and_precise_invalid_child_feedback() {
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.tool_availability.insert("write".into(), false);
     let fixture = Fixture::new(config);
     let items = fixture
@@ -361,7 +376,10 @@ async fn batch_retains_valid_results_and_precise_invalid_child_feedback() {
 
 #[tokio::test]
 async fn unknown_disabled_and_deferred_errors_have_distinct_recovery_instructions() {
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.tool_availability.insert("write".into(), false);
     config.base_rules.push(PermissionRule {
         pattern: "bash:*".into(),
@@ -470,7 +488,13 @@ impl HookPort for Rewrite {
 
 #[tokio::test]
 async fn hook_rewritten_arguments_are_revalidated_on_direct_and_provider_paths() {
-    let fixture = Fixture::with_hooks(RuntimeConfig::default(), Some(Arc::new(Rewrite)));
+    let fixture = Fixture::with_hooks(
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        Some(Arc::new(Rewrite)),
+    );
     let thread = fixture.thread().await;
     let failure = fixture
         .runtime
@@ -510,7 +534,10 @@ fn all_native_tools_advertise_compilable_validation_schemas() {
 
 #[tokio::test]
 async fn documented_legacy_inputs_keep_their_existing_execution_semantics() {
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(PermissionRule {
         pattern: "bash:*".into(),
         decision: PermissionDecision::Allow,
@@ -588,7 +615,10 @@ impl HookPort for ShellEnv {
 
 #[tokio::test]
 async fn shell_env_hooks_add_variables_without_touching_bash_arguments() {
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(PermissionRule {
         pattern: "bash:*".into(),
         decision: PermissionDecision::Allow,
@@ -680,7 +710,10 @@ impl HookPort for RewritingAllow {
 
 #[tokio::test]
 async fn a_permission_request_hook_allowing_other_input_leaves_the_prompt_to_the_person() {
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(PermissionRule {
         pattern: "bash:*".into(),
         decision: PermissionDecision::Ask,
@@ -794,7 +827,10 @@ impl HookPort for EchoingAllow {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_permission_request_hook_handing_back_the_same_input_still_allows() {
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(PermissionRule {
         pattern: "bash:*".into(),
         decision: PermissionDecision::Ask,
@@ -896,7 +932,10 @@ impl HookPort for FirstAllow {
 
 /// Runs `echo one`, then `echo two` in a later round, under `bash:*` ask.
 async fn echo_twice(hook: Arc<FirstAllow>) -> (Fixture, Vec<haarness_protocol::Item>) {
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(PermissionRule {
         pattern: "bash:*".into(),
         decision: PermissionDecision::Ask,
@@ -953,7 +992,13 @@ async fn a_permission_request_hooks_allow_without_always_is_asked_again() {
 #[tokio::test]
 async fn a_permission_request_hook_cannot_answer_always_for_an_edit_of_haarness_config() {
     let hook = FirstAllow::new(true);
-    let fixture = Fixture::with_hooks(RuntimeConfig::default(), Some(hook.clone()));
+    let fixture = Fixture::with_hooks(
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        Some(hook.clone()),
+    );
     *fixture.provider.rounds.lock().unwrap() = vec![vec![call(
         "config",
         "write",
@@ -1071,7 +1116,10 @@ fn question() -> ProviderEvent {
 #[tokio::test]
 async fn a_pre_tool_use_hook_answers_a_question_without_asking() {
     let fixture = Fixture::with_hooks(
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
         Some(Arc::new(AnswersQuestions(json!([["Unit tests"]])))),
     );
     let items = fixture.run(vec![vec![question()]]).await;
@@ -1105,7 +1153,10 @@ async fn a_pre_tool_use_hook_answers_a_question_without_asking() {
 #[tokio::test]
 async fn answers_that_do_not_fit_leave_the_question_to_the_person() {
     let fixture = Fixture::with_hooks(
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
         Some(Arc::new(AnswersQuestions(json!([
             ["Unit tests"],
             ["Full suite"]
@@ -1228,7 +1279,10 @@ async fn a_pre_tool_use_block_or_deny_stops_a_question() {
         (true, "denied by a PreToolUse hook"),
     ] {
         let fixture = Fixture::with_hooks(
-            RuntimeConfig::default(),
+            RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..RuntimeConfig::default()
+            },
             Some(Arc::new(StopsQuestions { deny })),
         );
         let items = fixture.run(vec![vec![question()]]).await;

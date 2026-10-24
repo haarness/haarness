@@ -11,6 +11,7 @@ import { applyLanguage, t } from "./i18n";
 import {
   alreadySettled,
   autoApproval,
+  newChatAuto,
   approveAndEnable,
   canAutoApprove,
   createAutoApprover,
@@ -430,8 +431,10 @@ function createApp(saved?: Preferences) {
     connection = state.connection?.id ?? "",
     thread = state.selected,
   ) {
-    if (thread && sharedApprovals(connection))
-      return state.approvalShared[connection]?.[thread]?.mode === "auto";
+    if (sharedApprovals(connection))
+      return thread
+        ? state.approvalShared[connection]?.[thread]?.mode === "auto"
+        : newChatAuto(state.approvalModes, connection);
     return autoApproval(
       state.approvalModes,
       connection,
@@ -2140,25 +2143,25 @@ function createApp(saved?: Preferences) {
       [options],
     );
     const created = { at: Date.now(), stream: hydration };
-    // A new chat starts in the mode chosen for new chats here. The server
-    // keeps it, so other windows and the phone see the same mode.
-    if (
-      sharedApprovals(connection) &&
-      autoApproval(state.approvalModes, connection, "")
-    ) {
+    // A new chat starts in the mode chosen for new chats here, if one was;
+    // otherwise in the server's default (Auto unless configured to Review).
+    // The server keeps it, so other windows and the phone see the same mode.
+    const chosen = state.approvalModes[connection]?.["*"];
+    if (sharedApprovals(connection) && chosen !== undefined) {
       try {
         rememberApprovalMode(
           connection,
           await window.haarness.api<T.ApprovalModeInfo>(
             connection,
             "setApprovalMode",
-            [thread.id, { mode: "auto" }],
+            [thread.id, { mode: chosen ? "auto" : "review" }],
           ),
         );
       } catch (error) {
         set("error", String(error));
       }
-    }
+    } else if (sharedApprovals(connection))
+      await loadApprovalMode(connection, thread.id);
     // The sender may clear the starter draft once it has a conversation owner.
     const initialDraft = state.drafts["new:" + draftScope] ?? "";
     onCreated?.(thread.id);

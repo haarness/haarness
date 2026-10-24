@@ -210,7 +210,13 @@ async fn set_auto(runtime: &AgentRuntime, thread: haarness_protocol::ThreadId) {
 
 #[tokio::test]
 async fn chrome_sites_ask_in_auto_and_turning_auto_on_never_answers_them() {
-    let fixture = chrome(RuntimeConfig::default(), false);
+    let fixture = chrome(
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        false,
+    );
     let runtime = &fixture.runtime;
     let thread = echo_thread(runtime).await;
     let turn = runtime
@@ -270,7 +276,10 @@ async fn chrome_sites_ask_in_auto_and_turning_auto_on_never_answers_them() {
 
 #[tokio::test]
 async fn hooks_and_configured_allow_rules_never_approve_chrome_sites() {
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     for pattern in ["*", "browser_site:*", "browser_site:chrome-*"] {
         config.base_rules.push(PermissionRule {
             pattern: pattern.into(),
@@ -310,7 +319,10 @@ async fn hooks_and_configured_allow_rules_never_approve_chrome_sites() {
     assert_eq!(fixture.executions.load(Ordering::SeqCst), 1);
 
     // Configured rules may still refuse.
-    let mut config = RuntimeConfig::default();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
     config.base_rules.push(PermissionRule {
         pattern: "browser_site:chrome-*".into(),
         decision: D::Deny,
@@ -333,6 +345,7 @@ async fn hooks_and_configured_allow_rules_never_approve_chrome_sites() {
 #[tokio::test]
 async fn a_yolo_server_still_asks_and_remembers_nothing() {
     let config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
         auto_approve: true,
         ..RuntimeConfig::default()
     };
@@ -366,7 +379,13 @@ async fn a_yolo_server_still_asks_and_remembers_nothing() {
 
 #[tokio::test]
 async fn allow_in_this_chat_covers_that_chat_only_and_is_never_saved() {
-    let fixture = chrome(RuntimeConfig::default(), false);
+    let fixture = chrome(
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        false,
+    );
     let runtime = &fixture.runtime;
     let thread = echo_thread(runtime).await;
     let other = echo_thread(runtime).await;
@@ -469,7 +488,13 @@ fn scheduled_request(text: &str) -> StartTurnRequest {
 
 #[tokio::test]
 async fn a_scheduled_run_and_everything_it_starts_fail_at_once_instead_of_waiting() {
-    let fixture = chrome(RuntimeConfig::default(), false);
+    let fixture = chrome(
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        false,
+    );
     let runtime = &fixture.runtime;
     // The run itself, as the scheduler starts it.
     let root = scheduled_thread(runtime).await;
@@ -560,7 +585,13 @@ async fn a_scheduled_run_and_everything_it_starts_fail_at_once_instead_of_waitin
 async fn a_person_in_a_scheduled_chat_or_its_fork_is_asked() {
     // Later turns in a run's chat, and anything in a fork of it, have a
     // person to answer: the Chrome site is asked, not refused.
-    let fixture = chrome(RuntimeConfig::default(), false);
+    let fixture = chrome(
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        false,
+    );
     let runtime = &fixture.runtime;
     let root = scheduled_thread(runtime).await;
     let turn = runtime
@@ -589,7 +620,13 @@ async fn a_person_in_a_scheduled_chat_or_its_fork_is_asked() {
 async fn yolo_clients_and_their_workflow_agents_still_ask() {
     // ACP --yolo, and the agents a --yolo chat's workflow starts, approve
     // their own requests with the question tool off; a person still answers.
-    let fixture = chrome(RuntimeConfig::default(), false);
+    let fixture = chrome(
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        false,
+    );
     let runtime = &fixture.runtime;
     let chat = echo_thread(runtime).await;
     let workflow = child_thread(runtime, chat.id).await;
@@ -634,7 +671,13 @@ async fn yolo_clients_and_their_workflow_agents_still_ask() {
 
 #[tokio::test]
 async fn a_published_chat_cannot_answer_chrome_sites() {
-    let fixture = chrome(RuntimeConfig::default(), false);
+    let fixture = chrome(
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        false,
+    );
     let runtime = fixture.runtime.clone();
     let thread = echo_thread(&runtime).await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -766,7 +809,10 @@ async fn other_site_approvals_still_follow_auto_and_always() {
         EventBus::new(256),
         workspace.0.clone(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     );
     let thread = echo_thread(&runtime).await;
     let turn = runtime
@@ -804,7 +850,10 @@ async fn chrome_server(access: haarness_server::auth::ServerAccess) -> Server {
         EventBus::new(256),
         workspace.0.clone(),
         String::new(),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let handle = haarness_server::api::serve_with_access(

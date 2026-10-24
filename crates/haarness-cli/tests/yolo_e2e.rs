@@ -35,6 +35,14 @@ impl Fixture {
         ] {
             std::fs::create_dir_all(directory).expect("create yolo fixture directory");
         }
+        // Chats start in Auto; a plain run here must meet Review to show
+        // that --yolo approves nothing beyond its own run.
+        std::fs::create_dir_all(fixture.data.join("config")).expect("create yolo config");
+        std::fs::write(
+            fixture.data.join("config/config.toml"),
+            "[defaults]\napproval_mode = \"review\"\n",
+        )
+        .expect("put the fixture's chats in Review");
         fixture
     }
 
