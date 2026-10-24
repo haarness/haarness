@@ -210,6 +210,45 @@ test("file links in a reply open project files in the Files panel; others say wh
   expect(errors).toEqual([]);
 });
 
+test("a link's label goes where its link points, and tags written in a reply stay in its text", async ({}, info) => {
+  test.setTimeout(180000);
+  const thread = await client.createThread({ title: "Prose fixture", provider: "echo", model: "echo-1" });
+  await page.locator(".sessions").getByRole("button", { name: "Prose fixture", exact: true }).click();
+  const prose = "Replace <path> with the file, then <text>run it</text> and <title> stays.";
+  const text = [
+    prose,
+    "Mail [<dev@example.com>](src/a.ts:150) or [[inner](https://example.test/inner)](docs/guide.md).",
+    'An icon <svg viewBox="0 0 8 8" width="8" height="8"><rect width="8" height="8" fill="teal"/></svg> draws.',
+  ].join("\n\n");
+  const turn = await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text });
+  await client.waitTurn(turn.id);
+  const reply = page.locator(".message.assistant .markdown").last();
+  await expect(reply).toContainText("Echo:");
+  // Read as markup, `<path>` took the rest of its paragraph with it.
+  await expect(reply).toContainText(prose);
+  await expect(page.locator(".message.user").last()).toContainText(prose);
+  await expect(reply.locator("svg rect")).toHaveCount(1);
+  // One link per label, to the label's own address: no empty anchor before it.
+  await expect(reply.locator("a")).toHaveCount(2);
+  await expect(reply.getByRole("link", { name: "dev@example.com", exact: true })).toHaveAttribute("href", "src/a.ts:150");
+  await expect(reply.getByRole("link", { name: "inner", exact: true })).toHaveAttribute("href", "docs/guide.md");
+  await reply.getByRole("link", { name: "dev@example.com", exact: true }).click();
+  const activeTab = page.locator(".file-tabs .active");
+  await expect(activeTab).toContainText("a.ts");
+  await expect(page.locator(".file-preview .cm-activeLine")).toHaveText("export const line150 = 150;");
+  await reply.getByRole("link", { name: "inner", exact: true }).click();
+  await expect(activeTab).toContainText("guide.md");
+  for (const theme of ["light", "dark"] as const) {
+    await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await reply.screenshot({ path: join(process.env.HAARNESS_SCREENSHOTS ?? info.outputPath(""), `reply-prose-tags-${theme}.png`) });
+  }
+  await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
+  // Nothing went to the mail app or the web.
+  expect((await calls()).shell).toEqual([["openExternal", "mailto:me@example.test?subject=Hi"]]);
+  expect(errors).toEqual([]);
+});
+
 test("a haarness:// link opens a saved folder directly and confirms any other, which opens untrusted", async ({}, info) => {
   test.setTimeout(180000);
   const deepLink = (url: string) =>

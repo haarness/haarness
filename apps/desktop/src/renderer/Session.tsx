@@ -113,6 +113,7 @@ import { isWorktree, locationName } from "../projects";
 import { createWorktree } from "./worktrees";
 import { ChangePreview, ToolActivity } from "./ToolActivity";
 import { Mark } from "./brand";
+import { ChatLoading } from "./ChatLoading";
 import { matchesShortcut, shortcutLabel, shortcutText } from "./search";
 import {
   awaitsApproval,
@@ -351,11 +352,16 @@ export function Session() {
     const id = draftProject();
     setChoices((items) => ({ ...items, [id]: { ...items[id], ...value } }));
   };
-  /** Apply an agent the way the composer's picker does. */
+  /** Apply an agent the way the composer's picker does. The agent already
+   * shown, picked again, is chosen for a new chat without dropping the model
+   * chosen for it, and a chat that has that agent is not rewritten (and
+   * marked as just active). */
   function chooseAgent(id: string) {
+    const same = id === selectedAgent();
+    if (same && thread()) return;
     void app.run(async () => {
       if (!thread()) {
-        setChoice({ agent: id, provider: undefined, model: undefined });
+        setChoice(same ? { agent: id } : { agent: id, provider: undefined, model: undefined });
         return;
       }
       await app.api("updateThread", state.selected, { agent: id });
@@ -2109,7 +2115,12 @@ export function Session() {
     if (!key || !connection) return;
     const selected = state.selected;
     const project = draftProject();
-    if (selected) {
+    const chat = thread();
+    // A chat that already has this model is not rewritten (and marked as
+    // just active) when the model shown is picked again; one shown a
+    // fallback for a model gone from the catalog is given it. Either way the
+    // pick is remembered for new chats.
+    if (selected && (chat?.provider !== key.provider || chat?.model !== key.model)) {
       await window.haarness.api(connection, "updateThread", [selected, key]);
       if (state.connection?.id === connection) await app.refresh();
     }
@@ -2203,8 +2214,13 @@ export function Session() {
           " · " +
           shortPath(location.workspace),
         icon: isWorktree(location) ? ("branch" as const) : ("folder" as const),
-        run: () =>
-          void app.run(() => app.connect({ recent: location.id }, true)),
+        // The location the chat works in is the live choice; picking it again
+        // leaves the project open as it is rather than opening it anew.
+        checked: location.id === project()?.id,
+        run: () => {
+          if (location.id !== project()?.id)
+            void app.run(() => app.connect({ recent: location.id }, true));
+        },
       })),
     {
       label: t("New worktree…"),
@@ -2519,6 +2535,12 @@ export function Session() {
             onJump={jumpToPrompt}
             onWheel={outlineWheel}
           />
+        </Show>
+        {/* Another chat of this project reading its history keeps the box and
+            the frame on screen; the mark waits, then fades in over the
+            transcript alone. */}
+        <Show when={!!state.loadingChat && !rows().length && !stream()?.text && !stream()?.reasoning}>
+          <ChatLoading label={t("Loading chat…")} />
         </Show>
       </div>
       <Show when={editable() || pending() || !follow() || todos().length}>

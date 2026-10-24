@@ -93,17 +93,62 @@ export function floatingSpan(anchor: DOMRect, minimum = 0) {
     : { start: 0, end: window.innerWidth };
 }
 
+/** The box of a dialog, which a layer opened inside it stays in where it fits. */
+export type Frame = Pick<DOMRect, "left" | "right" | "top" | "bottom">;
+
+/** The box of the dialog `element` is in (Settings, a form), if any. */
+export function dialogFrame(element: Element): Frame | undefined {
+  const box = element.closest('dialog, [role="dialog"]')?.getBoundingClientRect();
+  return box && box.width > 0 && box.height > 0 ? box : undefined;
+}
+
 /**
  * Horizontal placement for a layer opened from `anchor`: beside the browser
  * when the anchor is beside it and the layer fits there, else the whole window.
  * The layer keeps `preferred` width where it can and shrinks to `minimum`.
+ * Opened in a dialog (`frame`), it keeps 8px inside the dialog's box when it
+ * fits there, rather than hanging over what the dialog covers; one that
+ * cannot start where its anchor starts then ends where it ends, so an edge
+ * still lines up with the control.
  */
-export function floatingBox(anchor: DOMRect, preferred: number, minimum = preferred) {
+export function floatingBox(anchor: DOMRect, preferred: number, minimum = preferred, frame?: Frame) {
   const gutter = 8;
-  const { start, end } = floatingSpan(anchor, minimum);
+  const span = floatingSpan(anchor, minimum);
+  const inside = frame && { start: Math.max(span.start, frame.left), end: Math.min(span.end, frame.right) };
+  const framed = !!inside && inside.end - inside.start - gutter * 2 >= minimum;
+  const { start, end } = framed ? inside : span;
   const width = Math.max(0, Math.min(preferred, end - start - gutter * 2));
+  const ended = anchor.right - width;
+  const left =
+    framed && anchor.left + width > end - gutter && ended >= start + gutter ? ended : anchor.left;
   return {
     width,
-    left: Math.max(start + gutter, Math.min(anchor.left, end - width - gutter)),
+    left: Math.max(start + gutter, Math.min(left, end - width - gutter)),
   };
+}
+
+/** How short a popover whose `list` scrolls may get: five of its rows. */
+export function shortestList(popup: HTMLElement, list: HTMLElement) {
+  const height = popup.getBoundingClientRect().height;
+  const row = list.querySelector('[role="option"]')?.getBoundingClientRect().height ?? 0;
+  return Math.min(height, height - list.getBoundingClientRect().height + 5 * row);
+}
+
+/**
+ * Where a layer `height` tall, opened `gap` below or above `anchor`, sits
+ * inside a dialog's box, 8px in from its edges: below when it fits there,
+ * else above. A list that scrolls can be shortened to the larger room, down to
+ * `shortest`; the result then says the `height` to give it. Undefined when it
+ * does not fit: the layer is placed against the window, as outside a dialog.
+ */
+export function frameTop(anchor: DOMRect, height: number, gap: number, frame?: Frame, shortest = height) {
+  if (!frame) return undefined;
+  const gutter = 8;
+  const below = frame.bottom - gutter - (anchor.bottom + gap);
+  const above = anchor.top - gap - (frame.top + gutter);
+  if (height <= below) return { top: anchor.bottom + gap };
+  if (height <= above) return { top: anchor.top - gap - height };
+  const room = Math.floor(Math.max(below, above));
+  if (room < shortest) return undefined;
+  return { top: below >= above ? anchor.bottom + gap : anchor.top - gap - room, height: room };
 }

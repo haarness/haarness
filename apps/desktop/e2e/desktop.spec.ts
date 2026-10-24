@@ -39,6 +39,30 @@ async function selectValue(control: Locator, value: string) {
   const done = control.page().locator(".select-footer").getByRole("button", { name: "Done", exact: true });
   if (await done.isVisible()) await done.click();
 }
+/** Where each row's label starts in an open menu, to the pixel. */
+const labelStarts = (menu: Locator) =>
+  menu.locator(":scope > button, :scope > .menu-branch > button").evaluateAll((rows) =>
+    rows.map((row) => {
+      const label = row.querySelector(".menu-item-label");
+      if (label) return Math.round(label.getBoundingClientRect().left);
+      const text = [...row.childNodes].find((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
+      const range = document.createRange();
+      range.selectNodeContents(text!);
+      return Math.round(range.getBoundingClientRect().left);
+    }),
+  );
+/** Where the live choice's tick sits, and how far in: in a column of its own
+ * before the label ("start"), or at the row's end as a picker's ✓ ("end"). */
+const tickPlace = (menu: Locator) =>
+  menu.locator('[aria-checked="true"]').evaluate((row) => {
+    const box = row.getBoundingClientRect();
+    const end = row.querySelector(".select-check");
+    const start = row.querySelector(".menu-check svg");
+    if (end && !start)
+      return { place: "end", glyph: end.textContent?.trim(), inset: Math.round(box.right - end.getBoundingClientRect().right) };
+    if (start && !end) return { place: "start", inset: Math.round(start.getBoundingClientRect().left - box.left) };
+    return undefined;
+  });
 async function selectEffort(model: Locator, value: string) {
   if ((await model.getAttribute("aria-expanded")) !== "true") await model.click();
   const slider = model.page().getByRole("slider", { name: "Reasoning effort", exact: true });
@@ -3525,6 +3549,16 @@ test("new chats select concrete models, honor configuration and remember availab
       "smart-model/smart-preferred",
     );
     await selectValue(model, "smart-model/smart-other");
+    // The agent shown, picked again, is not a change: the new chat keeps the
+    // model chosen for it rather than going back to the configured default.
+    await selectValue(
+      page.getByRole("combobox", { name: "Agent", exact: true }),
+      "build",
+    );
+    await expect(model).toHaveAttribute(
+      "data-value",
+      "smart-model/smart-other",
+    );
     const connection = await open("remembered-model", catalog);
     await expect(model).toHaveAttribute(
       "data-value",
@@ -3560,6 +3594,35 @@ test("new chats select concrete models, honor configuration and remember availab
       provider: "smart-model",
       model: "smart-other",
     });
+    // In a chat, the agent and model shown, picked again, write nothing: the
+    // chat was rewritten and its sidebar age said "now".
+    const updated = () =>
+      page.evaluate(
+        async (connection) =>
+          (
+            await window.haarness.api<{ updatedAt: string }[]>(
+              connection,
+              "listThreads",
+              [],
+            )
+          )[0].updatedAt,
+        connection,
+      );
+    let settled = "";
+    await expect
+      .poll(async () => {
+        const before = settled;
+        settled = await updated();
+        return before === settled;
+      }, { intervals: [500] })
+      .toBe(true);
+    await selectValue(model, "smart-model/smart-other");
+    await selectValue(
+      page.getByRole("combobox", { name: "Agent", exact: true }),
+      "build",
+    );
+    await page.waitForTimeout(500);
+    expect(await updated()).toBe(settled);
     expect(received.length).toBeGreaterThan(0);
     expect(received.every((request) => request.model === "smart-other")).toBe(
       true,
@@ -3573,6 +3636,25 @@ test("new chats select concrete models, honor configuration and remember availab
     await page
       .locator(".composer")
       .screenshot({ path: "test-results/concrete-model-composer.png" });
+    // Picked again in a chat, the model shown is still remembered for new
+    // chats: here it takes over from one picked in a new chat meanwhile.
+    await selectValue(model, "smart-model/smart-preferred");
+    await page.evaluate(
+      async ({ connection, id }) =>
+        window.haarness.api(connection, "updateThread", [id, { title: "Remembered model chat" }]),
+      { connection, id: (threads[0] as unknown as { id: string }).id },
+    );
+    await page
+      .locator(".project-list")
+      .getByRole("button", { name: "Remembered model chat", exact: true })
+      .click();
+    await expect(model).toHaveAttribute("data-value", "smart-model/smart-other");
+    await selectValue(model, "smart-model/smart-other");
+    await open("remembered-again", catalog);
+    await expect(model).toHaveAttribute(
+      "data-value",
+      "smart-model/smart-other",
+    );
     await page
       .getByRole("region", { name: "Project workspace", exact: true })
       .getByRole("button", { name: "workspace", exact: true })
@@ -7447,6 +7529,40 @@ test("one project groups worktree conversations while drafts, permissions, files
   const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await composer.fill("A draft shared between working locations");
   const count = (await client.listThreads()).length;
+  // The folder the chat works in is the menu's live choice. Picking it again
+  // leaves the project as it is: before, the project was opened anew, its
+  // chats left the sidebar and came back, and unsaved file edits were asked
+  // about.
+  await page.evaluate(() => {
+    const seen = ((window as any).repicked = { reopened: false });
+    const root = document.querySelector(".application")!;
+    new MutationObserver(() => {
+      if (root.getAttribute("data-project-ready") !== "true") seen.reopened = true;
+    }).observe(root, { attributes: true, attributeFilter: ["data-project-ready"] });
+  });
+  await page
+    .getByRole("button", { name: "Choose working location", exact: true })
+    .click();
+  const current = page.getByRole("menuitemradio", { name: "Project folder", exact: true });
+  await expect(current).toHaveAttribute("aria-checked", "true");
+  // Ticked at its trailing end, as a picker's option is; the labels stay
+  // beside their icons, where they were before the menu had a tick.
+  const locations = page.getByRole("menu", { name: "Choose working location", exact: true });
+  expect(new Set(await labelStarts(locations)).size).toBe(1);
+  expect(await tickPlace(locations)).toEqual({ place: "end", glyph: "✓", inset: 8 });
+  if (process.env.HAARNESS_SCREENSHOTS)
+    for (const theme of ["dark", "light"] as const) {
+      await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page
+        .getByRole("menu", { name: "Choose working location", exact: true })
+        .screenshot({ path: join(process.env.HAARNESS_SCREENSHOTS, `location-menu-${theme}.png`) });
+    }
+  await current.click();
+  await expect(page.getByRole("menu", { name: "Choose working location", exact: true })).toHaveCount(0);
+  await page.waitForTimeout(500);
+  expect(await page.evaluate(() => (window as any).repicked)).toEqual({ reopened: false });
+  await expect(composer).toHaveValue("A draft shared between working locations");
   await page
     .getByRole("button", { name: "Choose working location", exact: true })
     .click();
@@ -7989,8 +8105,9 @@ test("worktree discovery, missing checkouts and inactive-project menus retain th
     .getByRole("button", { name: "Choose working location", exact: true })
     .click();
   await expect(
-    page.getByRole("menuitem", { name: "Discovered checkout", exact: true }),
+    page.getByRole("menuitemradio", { name: "Discovered checkout", exact: true }),
   ).toHaveCount(0);
+  await expect(page.getByRole("menuitemradio", { name: "Project folder", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await menu("Show unavailable worktrees (1)");
   await expect(discovered).toContainText("Folder not found");

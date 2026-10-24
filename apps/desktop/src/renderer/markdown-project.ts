@@ -1,4 +1,4 @@
-import { marked, type TokensList } from "marked";
+import { marked, type Token, type Tokens, type TokensList } from "marked";
 
 export type MarkdownBlock = { raw: string; html: string };
 export type MarkdownProjection = {
@@ -9,12 +9,158 @@ export type MarkdownProjection = {
   references: boolean;
   breaks: boolean;
 };
+
+/**
+ * HTML elements that show their content where they stand, which a reply may
+ * write bare (`<kbd>`, `<br>`, `<ul>` in a table cell) and keep as markup.
+ */
+const SHOWN = new Set([
+  "a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "big", "blockquote", "br", "caption",
+  "center", "cite", "code", "col", "colgroup", "data", "dd", "del", "details", "dfn", "div", "dl", "dt",
+  "em", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr",
+  "i", "img", "ins", "kbd", "li", "main", "mark", "nav", "ol", "p", "picture", "pre", "q", "rp", "rt",
+  "ruby", "s", "samp", "section", "small", "span", "strike", "strong", "sub", "summary", "sup", "table",
+  "tbody", "td", "tfoot", "th", "thead", "time", "tr", "tt", "u", "ul", "var", "wbr",
+]);
+/** Elements written bare around elements of their own: a drawing or a formula. */
+const WRAPPERS = new Set(["svg", "math"]);
+const BARE_TAG = /^<(\/?)([A-Za-z][\w:-]*)\s*(\/?)>$/;
+const BLOCK_TAG = /^ {0,3}<(\/?)([A-Za-z][\w:-]*)\s*(\/?)>/;
+
+/**
+ * The index of the closing tag of the bare `<svg>` or `<math>` at `start`,
+ * when it wraps an element of its own (a path, a `<mi>`), as a drawing or a
+ * formula written without attributes does. Undefined when it wraps only
+ * text or is never closed: then it is a word.
+ */
+function wrapperEnd(tokens: Token[], start: number, name: string) {
+  let depth = 0;
+  let element = false;
+  for (let index = start + 1; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.type !== "html" || token.block) continue;
+    const tag = /^<(\/?)([A-Za-z][\w:-]*)/.exec(token.text);
+    if (!tag) continue;
+    if (tag[2].toLowerCase() !== name) element = true;
+    else if (tag[1]) {
+      if (!depth) return element ? index : undefined;
+      depth--;
+    } else if (!/\/>$/.test(token.text)) {
+      element = true;
+      depth++;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Inside a paragraph, a bare tag that is not such an element is a word of the
+ * reply, as the TUI shows it: `<path>`, `<file>`, `<svg>`, `<title>`. Read as
+ * markup, the sanitizer drops it, and with `<path>` or `<text>` everything
+ * after it in the block (an SVG name outside an svg is removed whole); `<svg>`
+ * and `<title>` hide what follows. Its closing tag in the same run of text
+ * goes with it. A tag with attributes is markup and stays, so an inline SVG
+ * drawing still draws, and so does a bare `<svg>` or `<math>` wrapping
+ * elements of its own.
+ */
+function literalTags(tokens: Token[]) {
+  const open: string[] = [];
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.type !== "html" || token.block) continue;
+    const tag = BARE_TAG.exec(token.text);
+    const name = tag?.[2].toLowerCase();
+    if (!tag || !name || SHOWN.has(name)) continue;
+    if (!tag[1] && !tag[3] && WRAPPERS.has(name)) {
+      const end = wrapperEnd(tokens, index, name);
+      if (end !== undefined) {
+        index = end;
+        continue;
+      }
+    }
+    if (tag[1]) {
+      const at = open.lastIndexOf(name);
+      if (at < 0) continue;
+      open.splice(at, 1);
+    } else if (!tag[3]) open.push(name);
+    tokens[index] = { type: "text", raw: token.raw, text: token.text, escaped: false };
+  }
+}
+
+/**
+ * A block of HTML that starts with such a bare tag (`<path>` alone on a line,
+ * `1. <file>`, a line starting `<title>` or `<form>`) is text of the reply
+ * too: it is read as a paragraph, with its tags shown as words. Block HTML
+ * that starts with an element showing its text (`<details>`, `<div>`,
+ * `<table>`), a tag with attributes, a comment, or a bare `<svg>` or `<math>`
+ * holding elements of its own stays markup.
+ */
+function literalBlock(token: Tokens.HTML, breaks: boolean, type: "paragraph" | "text" = "paragraph") {
+  const tag = BLOCK_TAG.exec(token.text);
+  const name = tag?.[2].toLowerCase();
+  if (!tag || !name || SHOWN.has(name)) return;
+  if (WRAPPERS.has(name) && (tag[1] || /<[A-Za-z]/.test(token.text.slice(tag[0].length)))) return;
+  const text = token.text.replace(/\n+$/, "");
+  const tokens = marked.Lexer.lexInline(text, { gfm: true, breaks });
+  literalTags(tokens);
+  // A closing tag that starts its own block (`</plan>` after the blocks its
+  // opening one began) is a word as that one is; read as markup it left an
+  // empty paragraph.
+  if (tag[1]) {
+    const at = tokens.findIndex((part) => part.type === "html");
+    if (at >= 0) tokens[at] = { type: "text", raw: tokens[at].raw, text: (tokens[at] as Tokens.Tag).text, escaped: false };
+  }
+  // A paragraph of its own, or in a tight list item the item's text.
+  Object.assign(token, { type, text, tokens });
+}
+
+/** A label's tokens with every link in them, at any depth, replaced by its own tokens. */
+const linkless = (tokens: Token[]): Token[] =>
+  tokens.flatMap((token): Token[] =>
+    token.type === "link"
+      ? linkless(token.tokens ?? [])
+      : "tokens" in token && token.tokens
+        ? [{ ...token, tokens: linkless(token.tokens) } as Token]
+        : [token],
+  );
+
+/**
+ * Runs on every token before it is drawn (see `prepare`). A link inside a
+ * link's label (`[<dev@example.com>](url)`, `[[a](x)](y)`) keeps only its
+ * text: an anchor inside an anchor is split by the HTML parser into an empty
+ * link to the label's address and a visible one to the inner address.
+ */
+const replyToken = (breaks: boolean) => (token: Token) => {
+  if (token.type === "html" && token.block) return literalBlock(token as Tokens.HTML, breaks);
+  // Seen before what it holds: a tight item's text is not a paragraph.
+  if (token.type === "list_item" && !token.loose)
+    for (const child of token.tokens ?? [])
+      if (child.type === "html" && child.block) literalBlock(child as Tokens.HTML, breaks, "text");
+  if (token.type === "link" && token.tokens) token.tokens = linkless(token.tokens);
+  if (token.type === "table") {
+    for (const cell of [...token.header, ...token.rows.flat()]) literalTags(cell.tokens);
+    return;
+  }
+  if ("tokens" in token && token.tokens) literalTags(token.tokens);
+};
+const replyTokens = { reply: replyToken(true), file: replyToken(false) };
+
 /**
  * Replies keep the model's single line breaks, as the TUI does: agent output
  * often relies on its line structure. A Markdown file keeps standard
  * paragraphs, where a lone newline is a space.
  */
-export const markdownOptions = (breaks: boolean) => ({ gfm: true, breaks });
+export const markdownOptions = (breaks: boolean) => ({
+  gfm: true,
+  breaks,
+  walkTokens: breaks ? replyTokens.reply : replyTokens.file,
+});
+
+/** What `marked.parse` does with `walkTokens` between lexing and drawing. */
+function prepare<T extends Token[]>(tokens: T, breaks: boolean) {
+  marked.walkTokens(tokens, markdownOptions(breaks).walkTokens);
+  return tokens;
+}
 
 // Shared by all messages in the worker, including live-to-history remounts.
 // Bound bytes as well as entries: one enormous answer must not pin memory.
@@ -30,7 +176,7 @@ function render(raw: string, tokens: TokensList, references: boolean, breaks: bo
     cache.set(key, html);
     return html;
   }
-  const html = marked.parser(tokens, markdownOptions(breaks));
+  const html = marked.parser(prepare(tokens, breaks), markdownOptions(breaks));
   const size = (key.length + html.length) * 2;
   if (!references && size <= limit) {
     cache.set(key, html);
