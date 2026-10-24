@@ -387,6 +387,32 @@ pub(crate) fn on_screen() -> bool {
     ON_SCREEN.load(Ordering::Relaxed)
 }
 
+/// Whether the TUI has handed the terminal to a program of the person's
+/// (`$EDITOR`) and takes it back when that exits.
+static LENT: AtomicBool = AtomicBool::new(false);
+
+/// The terminal handed to `$EDITOR` while this lives: text written to it
+/// meanwhile would land in the editor's screen.
+pub(crate) struct LentTerminal;
+
+impl LentTerminal {
+    pub(crate) fn new() -> Self {
+        LENT.store(true, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for LentTerminal {
+    fn drop(&mut self) {
+        LENT.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Whether the TUI, or a program it handed the terminal to, is drawing on it.
+pub(crate) fn in_use() -> bool {
+    on_screen() || LENT.load(Ordering::Relaxed)
+}
+
 /// Restore the terminal to a usable state. Safe to call more than once and
 /// from a panic hook: every step is best-effort and none can panic.
 pub fn restore_terminal() {
