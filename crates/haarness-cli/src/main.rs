@@ -4718,16 +4718,23 @@ async fn run_command(
         // the server then answers its eligible requests once, for this run,
         // its agents and workflows, and whatever runs in it later, and every
         // app shows the chat in Auto. What always asks is still asked below.
+        let mut earlier = None;
         if approvals.auto {
             // A chat whose turn runs elsewhere refuses this run's prompt: say
             // so before that turn's chat, and the turn with it, goes to Auto.
             // A workflow runs in a chat of its own and is not refused.
-            if !created && args.workflow.is_none() && client.active_turn(thread.id).await?.is_some()
-            {
+            let refusable = !created && args.workflow.is_none();
+            if refusable && client.active_turn(thread.id).await?.is_some() {
                 anyhow::bail!(haarness_core::CHAT_BUSY);
             }
+            let previous = if refusable {
+                Some(client.approval_mode(thread.id).await?)
+            } else {
+                None
+            };
             let set = set_chat_auto(&client, thread.id).await;
-            discard_refused_chat(&client, &thread, created, set).await?;
+            let set = discard_refused_chat(&client, &thread, created, set).await?;
+            earlier = previous.and_then(|previous| EarlierMode::of(&previous, set.revision));
         }
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
@@ -4833,6 +4840,14 @@ async fn run_command(
                     },
                 )
                 .await;
+            // A turn that started elsewhere after the check above: the chat
+            // is not this run's to keep in Auto.
+            if let Err(error) = &turn
+                && haarness_tui::api::refusal_status(error) == Some(reqwest::StatusCode::CONFLICT)
+                && let Some(earlier) = &earlier
+            {
+                earlier.put_back(&client, thread.id).await;
+            }
             let turn = discard_refused_chat(&client, &thread, created, turn).await?;
             let printed_through = if goal {
                 let result =
@@ -4936,7 +4951,10 @@ async fn require_shared_approval_modes(client: &haarness_tui::api::ApiClient) ->
 }
 
 /// Put a chat in Auto on its server, whatever it was.
-async fn set_chat_auto(client: &haarness_tui::api::ApiClient, thread: ThreadId) -> Result<()> {
+async fn set_chat_auto(
+    client: &haarness_tui::api::ApiClient,
+    thread: ThreadId,
+) -> Result<haarness_protocol::ApprovalModeInfo> {
     client
         .set_approval_mode(
             thread,
@@ -4946,8 +4964,88 @@ async fn set_chat_auto(client: &haarness_tui::api::ApiClient, thread: ThreadId) 
             },
         )
         .await
-        .context("Could not put this chat in Auto")?;
-    Ok(())
+        .context("Could not put this chat in Auto")
+}
+
+/// The setting `--auto` replaced on a chat the run did not create, and the
+/// version its change made.
+struct EarlierMode {
+    setting: haarness_protocol::ApprovalModeSetting,
+    revision: String,
+}
+
+impl EarlierMode {
+    /// `previous` as a setting to put back, or `None` when the chat was in
+    /// Auto by its own setting already. `revision` is the one `--auto` set.
+    fn of(previous: &haarness_protocol::ApprovalModeInfo, revision: String) -> Option<Self> {
+        use haarness_protocol::{ApprovalMode, ApprovalModeSetting};
+        let own = previous.explicit && previous.source_thread_id == previous.thread_id;
+        let setting = match (own, previous.mode) {
+            (true, ApprovalMode::Auto) => return None,
+            (true, ApprovalMode::Review) => ApprovalModeSetting::Review,
+            (false, _) => ApprovalModeSetting::Inherit,
+        };
+        Some(Self { setting, revision })
+    }
+
+    /// Put the setting back, unless someone changed the mode since.
+    async fn put_back(&self, client: &haarness_tui::api::ApiClient, thread: ThreadId) {
+        let _ = client
+            .set_approval_mode(
+                thread,
+                &haarness_protocol::SetApprovalModeRequest {
+                    mode: self.setting,
+                    revision: Some(self.revision.clone()),
+                },
+            )
+            .await;
+    }
+}
+
+#[cfg(test)]
+mod earlier_mode_tests {
+    use super::EarlierMode;
+    use haarness_protocol::{ApprovalMode, ApprovalModeInfo, ApprovalModeSetting, ThreadId};
+
+    fn info(mode: ApprovalMode, explicit: bool, own: bool) -> ApprovalModeInfo {
+        let thread = ThreadId::new();
+        ApprovalModeInfo {
+            thread_id: thread,
+            mode,
+            source_thread_id: if own { thread } else { ThreadId::new() },
+            explicit,
+            revision: "r1".into(),
+        }
+    }
+
+    /// What `--auto` puts back: the chat's own Review, nothing when it was in
+    /// Auto by its own setting, and no setting of its own otherwise.
+    #[test]
+    fn auto_puts_back_the_setting_it_replaced() {
+        let back =
+            |previous| EarlierMode::of(&previous, "r2".into()).map(|earlier| earlier.setting);
+        assert_eq!(
+            back(info(ApprovalMode::Review, true, true)),
+            Some(ApprovalModeSetting::Review)
+        );
+        assert_eq!(back(info(ApprovalMode::Auto, true, true)), None);
+        assert_eq!(
+            back(info(ApprovalMode::Review, false, true)),
+            Some(ApprovalModeSetting::Inherit)
+        );
+        // Auto from the agent that delegated to it: the chat's own setting
+        // goes, and it follows that agent again.
+        assert_eq!(
+            back(info(ApprovalMode::Auto, true, false)),
+            Some(ApprovalModeSetting::Inherit)
+        );
+        assert_eq!(
+            EarlierMode::of(&info(ApprovalMode::Review, false, true), "r2".into())
+                .unwrap()
+                .revision,
+            "r2"
+        );
+    }
 }
 
 async fn discard_refused_chat<T>(
