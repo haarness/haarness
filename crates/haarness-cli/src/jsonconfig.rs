@@ -3734,6 +3734,32 @@ mod tests {
     }
 
     #[test]
+    fn a_migrated_config_keeps_its_permission_rules_in_the_order_written() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-migrate-order-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let toml = root.join("config.toml");
+        fs::write(
+            &toml,
+            "[permissions]\nedit = \"ask\"\n\"*\" = \"allow\"\n[permissions.bash]\n\"git push*\" = \"allow\"\n\"git push --force*\" = \"deny\"\n",
+        )
+        .unwrap();
+        let mut notices = Vec::new();
+        migrate_toml(&toml, &mut notices).unwrap();
+        let migrated: Value =
+            serde_json::from_str(&fs::read_to_string(root.join("haarness.json")).unwrap()).unwrap();
+        let mut rules = Vec::new();
+        compile_permission(&mut rules, &migrated["permission"]);
+        let patterns: Vec<&str> = rules.iter().map(|rule| rule.pattern.as_str()).collect();
+        assert_eq!(
+            patterns,
+            vec!["edit:*", "*", "bash:git push*", "bash:git push --force*"]
+        );
+        assert!(root.join("config.toml.migrated").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn goal_harness_defaults_load_from_jsonc() {
         let root =
             std::env::temp_dir().join(format!("haarness-goal-config-{}", uuid::Uuid::now_v7()));
