@@ -21,11 +21,10 @@ Definitions are discovered in this order (`WorkflowCatalog::for_workspace`):
 1. `.haarness/workflows`, then the legacy `.opencode/workflows`, in the
    selected folder and then each parent up to the Git worktree root (the
    nearest folder first)
-2. the global workflow folder: `$HAARNESS_DATA_DIR/config/workflows` or
-   `$HAARNESS_HOME/config/workflows` when set, otherwise the platform
-   configuration folder of the `directories` crate (`~/.config/haarness/workflows`
-   on Linux, `~/Library/Application Support/dev.haarness.haarness/workflows` on
-   macOS, `%APPDATA%\haarness\haarness\config\workflows` on Windows)
+2. the global workflow folder, `workflows` in the global configuration folder:
+   `$HAARNESS_DATA_DIR/config/workflows` or `$HAARNESS_HOME/config/workflows`
+   when set, otherwise `$XDG_CONFIG_HOME/haarness/workflows` or
+   `~/.config/haarness/workflows` on every OS
 3. the legacy global `~/.opencode/workflows` and `~/.config/opencode/workflows`
 4. enabled plugin workflow roots
 
@@ -35,9 +34,15 @@ definitions are namespaced as `plugin-name:workflow-name`. A plugin may use
 array of relative files/directories (default `./workflows/`); every path must
 start with `./` and stay inside the plugin root.
 
-On macOS the global workflow folder is not the `~/.config/haarness/` folder the
-rest of the global configuration uses; a workflow saved in
-`~/.config/haarness/workflows` there is not discovered.
+Older versions read global workflows from the platform folder instead
+(`~/Library/Application Support/dev.haarness.haarness/workflows` on macOS,
+`%APPDATA%\haarness\haarness\config\workflows` on Windows). The first start of
+a version that reads the global folder copies that folder's workflows into it
+once (marker `.workflows-v2`), so the workflows found are the ones found before.
+What the global folder held until then, never read on those systems, is kept
+beside it as `workflows-before-move`; the old folder is kept but no longer read.
+Nothing moves where the two are the same folder, on Linux or through a link. A
+copy that fails prints a warning and is tried again on the next start.
 
 In the TUI, `/workflow` (aliases `/workflows`, `/wf`) opens the searchable
 definitions-and-runs dashboard. In the TUI and Desktop, every discovered

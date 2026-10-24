@@ -395,11 +395,15 @@ class CloudApi(Transport):
         """GET /api/v1/releases/history."""
         return cast("list[T.ReleasePublication]", self.request('GET', f'/api/v1/releases/history', query=query, binary_body=False, binary_response=False, options=options))
 
+    def chrome_extension_updates(self, channel: str, *, options: RequestOptions | None = None) -> str:
+        """GET /api/v1/releases/{channel}/chrome-extension/updates.xml."""
+        return cast("str", self.request('GET', f'/api/v1/releases/{self.segment(channel)}/chrome-extension/updates.xml', binary_body=False, binary_response=False, options=options))
+
     def product_release(self, channel: str, product: str, *, options: RequestOptions | None = None) -> T.ReleaseManifestResponse:
         """GET /api/v1/releases/{channel}/{product}."""
         return cast("T.ReleaseManifestResponse", self.request('GET', f'/api/v1/releases/{self.segment(channel)}/{self.segment(product)}', binary_body=False, binary_response=False, options=options))
 
-    def download_release(self, channel: str, product: str, query: T.DownloadReleaseQuery, *, options: RequestOptions | None = None) -> bytes:
+    def download_release(self, channel: str, product: str, query: T.DownloadReleaseQuery | None = None, *, options: RequestOptions | None = None) -> bytes:
         """GET /api/v1/releases/{channel}/{product}/download."""
         return cast("bytes", self.request('GET', f'/api/v1/releases/{self.segment(channel)}/{self.segment(product)}/download', query=query, binary_body=False, binary_response=True, options=options))
 
@@ -1212,11 +1216,15 @@ class AsyncCloudApi(AsyncTransport):
         """GET /api/v1/releases/history."""
         return cast("list[T.ReleasePublication]", await self.request('GET', f'/api/v1/releases/history', query=query, binary_body=False, binary_response=False, options=options))
 
+    async def chrome_extension_updates(self, channel: str, *, options: RequestOptions | None = None) -> str:
+        """GET /api/v1/releases/{channel}/chrome-extension/updates.xml."""
+        return cast("str", await self.request('GET', f'/api/v1/releases/{self.segment(channel)}/chrome-extension/updates.xml', binary_body=False, binary_response=False, options=options))
+
     async def product_release(self, channel: str, product: str, *, options: RequestOptions | None = None) -> T.ReleaseManifestResponse:
         """GET /api/v1/releases/{channel}/{product}."""
         return cast("T.ReleaseManifestResponse", await self.request('GET', f'/api/v1/releases/{self.segment(channel)}/{self.segment(product)}', binary_body=False, binary_response=False, options=options))
 
-    async def download_release(self, channel: str, product: str, query: T.DownloadReleaseQuery, *, options: RequestOptions | None = None) -> bytes:
+    async def download_release(self, channel: str, product: str, query: T.DownloadReleaseQuery | None = None, *, options: RequestOptions | None = None) -> bytes:
         """GET /api/v1/releases/{channel}/{product}/download."""
         return cast("bytes", await self.request('GET', f'/api/v1/releases/{self.segment(channel)}/{self.segment(product)}/download', query=query, binary_body=False, binary_response=True, options=options))
 

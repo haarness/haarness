@@ -28,7 +28,7 @@ version 1.
 | Editor → Haarness | `initialize`, `session/new`, `session/load`, `session/prompt`, `session/cancel` |
 | Haarness → editor | `session/update` (text, reasoning, tool calls and results, plans), `session/request_permission`, `$/cancel_request` |
 
-`initialize` advertises `loadSession`, image and embedded-context prompts, and MCP over HTTP and SSE
+`initialize` advertises `loadSession`, image, audio and embedded-context prompts, and MCP over HTTP and SSE
 (stdio is always supported).
 
 - **Sessions.** A session id is the Haarness chat id. `cwd` must be absolute and resolve to the

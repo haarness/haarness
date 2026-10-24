@@ -146,9 +146,11 @@ export function Hooks() {
             when={catalog()!.projectTrusted}
             fallback={
               <p class="notice-inline">
-                {t(
-                  "Project hooks are inactive until project configuration is trusted in Settings → Projects. Global and installed plugin hooks can still run.",
-                )}
+                {t("Project configuration is off for this folder, so its hooks don’t run. Global and installed plugin hooks still run.")}
+                {/* Desktop turns it off for a folder a link opened (or for every
+                    folder with HAARNESS_DISABLE_PROJECT_CONFIG); Open project turns the first back on. */}
+                {" "}
+                {t("If a link opened this folder, open it with Open project to turn it on.")}
               </p>
             }
           >

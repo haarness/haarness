@@ -621,6 +621,18 @@ test("the message box keeps the keyboard through a send, and what is typed right
     await menuStop();
     await expect(page.locator(".turn-stopped")).toHaveCount(2);
     await expect(stop).toHaveCount(0);
+    // Its key stops work from the message box too, though it is also the Next
+    // agent key there: while work runs it stops it and leaves the agent as it is.
+    const agent = page.getByRole("combobox", { name: "Agent", exact: true });
+    const chosen = await agent.getAttribute("data-value");
+    await input.fill("!linger 8000 a third slow task");
+    await input.press("Enter");
+    await expect(stop).toBeVisible();
+    await expect(input).toBeFocused();
+    await page.keyboard.press("ControlOrMeta+Period");
+    await expect(page.locator(".turn-stopped")).toHaveCount(3);
+    await expect(stop).toHaveCount(0);
+    await expect(agent).toHaveAttribute("data-value", chosen ?? "");
 
     // A message that cannot go (the chat changed as it was sent) comes back
     // where it was typed, and the chat does not get it.

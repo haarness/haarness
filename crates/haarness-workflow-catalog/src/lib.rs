@@ -2,11 +2,11 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
 };
 
-use directories::ProjectDirs;
 use haarness_protocol::{
     WorkflowDefinition, WorkflowDialect, WorkflowFinding, WorkflowInvalidDefinition,
     WorkflowListResponse, WorkflowMeta, WorkflowSourceResponse,
@@ -314,22 +314,8 @@ impl WorkflowCatalog {
             ]);
         }
 
-        let home = std::env::var_os("HAARNESS_HOME")
-            .map(PathBuf::from)
-            .filter(|root| root.is_absolute());
-        if let Some(root) = std::env::var_os("HAARNESS_DATA_DIR") {
-            roots.push(WorkflowRoot::global(
-                PathBuf::from(root).join("config/workflows"),
-                false,
-            ));
-        } else if let Some(root) = home {
-            // HAARNESS_HOME keeps everything under one folder.
-            roots.push(WorkflowRoot::global(root.join("config/workflows"), false));
-        } else if let Some(project) = ProjectDirs::from("dev", "haarness", "haarness") {
-            roots.push(WorkflowRoot::global(
-                project.config_dir().join("workflows"),
-                false,
-            ));
+        if let Some(config) = global_config_dir(&|name| std::env::var_os(name)) {
+            roots.push(WorkflowRoot::global(config.join("workflows"), false));
         }
 
         if let Some(home) = haarness_protocol::home_dir() {
@@ -653,6 +639,36 @@ fn parse_source(
         Vec::new()
     };
     Ok((meta, dialect, findings))
+}
+
+/// The global configuration folder, as the CLI lays it out
+/// (crates/haarness-cli/src/layout.rs): `$HAARNESS_DATA_DIR/config`, an absolute
+/// `$HAARNESS_HOME/config`, then `$XDG_CONFIG_HOME/haarness` or
+/// `~/.config/haarness` on every OS. The platform's application folder
+/// (`~/Library/Application Support/dev.haarness.haarness` on macOS) is not read:
+/// the CLI copied its workflows here once, and a workflow deleted here must not
+/// come back from there.
+fn global_config_dir(env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    if let Some(root) = env("HAARNESS_DATA_DIR").filter(|root| !root.is_empty()) {
+        return Some(PathBuf::from(root).join("config"));
+    }
+    if let Some(root) = env("HAARNESS_HOME")
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute())
+    {
+        return Some(root.join("config"));
+    }
+    env("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            ["HOME", "USERPROFILE"]
+                .into_iter()
+                .filter_map(env)
+                .find(|home| !home.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })
+        .map(|base| base.join("haarness"))
 }
 
 fn workflow_project_directories(workspace: &Path) -> Vec<PathBuf> {
@@ -1194,7 +1210,10 @@ fn text<'source>(node: Node<'_>, source: &'source str) -> &'source str {
 mod tests {
     use std::fs;
 
-    use super::{WorkflowCatalog, WorkflowDialect, WorkflowRoot, workflow_project_directories};
+    use super::{
+        WorkflowCatalog, WorkflowDialect, WorkflowRoot, global_config_dir,
+        workflow_project_directories,
+    };
 
     struct TempDir(std::path::PathBuf);
 
@@ -1212,6 +1231,49 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn global_workflows_live_in_the_cli_configuration_folder_on_every_os() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| std::ffi::OsString::from(*value))
+            }
+        };
+        let home = std::path::Path::new("/home/a");
+        assert_eq!(
+            global_config_dir(&env(&[("HOME", "/home/a")])),
+            Some(home.join(".config/haarness"))
+        );
+        assert_eq!(
+            global_config_dir(&env(&[("HOME", "/home/a"), ("XDG_CONFIG_HOME", "/xdg")])),
+            Some(std::path::PathBuf::from("/xdg/haarness"))
+        );
+        // A relative XDG_CONFIG_HOME is ignored, as the XDG rules say.
+        assert_eq!(
+            global_config_dir(&env(&[("HOME", "/home/a"), ("XDG_CONFIG_HOME", "xdg")])),
+            Some(home.join(".config/haarness"))
+        );
+        assert_eq!(
+            global_config_dir(&env(&[("HOME", "/home/a"), ("HAARNESS_HOME", "/opt/h")])),
+            Some(std::path::PathBuf::from("/opt/h/config"))
+        );
+        assert_eq!(
+            global_config_dir(&env(&[
+                ("HAARNESS_HOME", "/opt/h"),
+                ("HAARNESS_DATA_DIR", "/d")
+            ])),
+            Some(std::path::PathBuf::from("/d/config"))
+        );
+        // Windows shells set USERPROFILE and no HOME.
+        assert_eq!(
+            global_config_dir(&env(&[("USERPROFILE", "/users/a")])),
+            Some(std::path::PathBuf::from("/users/a/.config/haarness"))
+        );
+        assert_eq!(global_config_dir(&env(&[])), None);
     }
 
     #[test]

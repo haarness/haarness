@@ -349,8 +349,9 @@ struct ServeArgs {
     /// be free.
     #[arg(long)]
     port: Option<u16>,
-    /// Bearer token clients must send. Without one, a local server makes a
-    /// private token for its own clients.
+    /// Bearer token clients must send. Without one (or a password), the
+    /// server answers any program on this computer, which is why it listens
+    /// only on this computer unless `--anonymous` says otherwise.
     #[arg(long, env = "HAARNESS_SERVER_TOKEN", hide_env_values = true)]
     token: Option<String>,
     /// Start (or reuse) the workspace server in the background and return.
