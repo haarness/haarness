@@ -23,6 +23,8 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 
+mod text;
+
 /// Composition-root port for user-managed skills, plugins, MCP servers, and
 /// agent profiles. The server owns provider-facing schemas while the CLI
 /// adapter owns platform paths, compatibility discovery, and credential I/O.
@@ -56,7 +58,7 @@ pub trait ManagementRegistry: Send + Sync {
     ) -> CoreResult<ToolOutput>;
 }
 
-const READ_DESCRIPTION: &str = "Read a text, image, PDF, audio, or video file when you already know its path. Binary document/media results are returned as provider-visible attachments instead of base64 text. The path may be workspace-relative or absolute; external paths still require permission. For text, this returns up to 2000 lines from the start by default. offset is a zero-based line offset and limit is the maximum number of lines (capped at 20000); call read again with a larger offset for later sections. Use grep to locate specific text and glob when the filename is unknown. Use list for directories. Prefer a useful context window over many tiny repeated reads.";
+const READ_DESCRIPTION: &str = "Read a text, image, PDF, audio, or video file when you already know its path. Binary document/media results are returned as provider-visible attachments instead of base64 text. The path may be workspace-relative or absolute; external paths still require permission. For text, this returns up to 2000 lines from the start by default; one read returns at most 2000 lines or 50 KB, cuts lines longer than 2000 characters, and ends with the offset to read on from when the file goes on. offset is a zero-based line offset and limit is the maximum number of lines; call read again with that offset for later sections. Use grep to locate specific text and glob when the filename is unknown. Use list for directories. Prefer a useful context window over many tiny repeated reads.";
 const IMAGE_GENERATE_DESCRIPTION: &str = "Generate exactly one image only when the user explicitly requests an image asset as a deliverable. The optional backend uses HAARNESS_IMAGE_GENERATE_URL, or the OpenAI Images endpoint when OPENAI_API_KEY is configured. Output is saved under .haarness-chat-attachments and returned as provider-visible media. Do not use this for ordinary analysis, diagrams expressible as code, or screenshot inspection.";
 const VIDEO_GENERATE_DESCRIPTION: &str = "Generate exactly one video only when the user explicitly requests a video or animation as the deliverable. This optional backend uses HAARNESS_VIDEO_GENERATE_URL and requires a synchronous JSON response containing base64 media. Output is saved under .haarness-chat-attachments and returned as provider-visible media. Never infer video intent from a visual discussion or attachment.";
 const MAX_GENERATION_RESPONSE_BYTES: usize = 72 * 1024 * 1024;
@@ -2012,12 +2014,10 @@ impl Tool for WorkflowTool {
                     .get("source")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let mut path = input.get("path").and_then(Value::as_str).map(str::to_owned);
-                if let Some(value) = path.as_ref()
-                    && Path::new(value).is_relative()
-                {
-                    path = Some(context.workspace.join(value).display().to_string());
-                }
+                let path = input
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(|value| workflow_path(&context.workspace, value));
                 let name = (source.is_none() && path.is_none())
                     .then(|| input.get("name").and_then(Value::as_str).map(str::to_owned))
                     .flatten();
@@ -2147,6 +2147,18 @@ impl Tool for WorkflowTool {
                 "unknown workflow action: {action}"
             ))),
         }
+    }
+}
+
+/// A workflow file a `start` names: relative to the folder the call works
+/// in, or in the home folder for `~/…`, as for the file tools.
+fn workflow_path(workspace: &Path, value: &str) -> String {
+    let value = haarness_core::expand_home(value);
+    let path = Path::new(value.as_ref());
+    if path.is_relative() {
+        workspace.join(path).display().to_string()
+    } else {
+        value.into_owned()
     }
 }
 
@@ -2554,7 +2566,7 @@ impl Tool for BuiltinTool {
                 json!({
                     "path":{"type":"string","description":"Workspace-relative or absolute path to the text, image, PDF, audio, or video file to read."},
                     "offset":{"type":"integer","minimum":0,"description":"Zero-based line offset. Defaults to 0."},
-                    "limit":{"type":"integer","minimum":1,"maximum":20000,"description":"Maximum lines to return. Defaults to 2000 and is capped at 20000."}
+                    "limit":{"type":"integer","minimum":1,"maximum":20000,"description":"Maximum lines to return. Defaults to 2000; one read returns at most 2000 lines or 50 KB."}
                 }),
                 vec!["path"],
             ),
@@ -2872,17 +2884,19 @@ impl Tool for BuiltinTool {
                         }),
                     });
                 }
-                let text = tokio::fs::read_to_string(&path).await.map_err(tool_error)?;
                 let offset = usize_value(&args, "offset").unwrap_or(0);
-                let limit = usize_value(&args, "limit").unwrap_or(2000).min(20_000);
-                let mut output = truncate_output(
-                    text.lines()
-                        .skip(offset)
-                        .take(limit)
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                )
-                .await?;
+                let limit = usize_value(&args, "limit").map(|limit| limit.min(20_000));
+                // A line at a time, off the async workers: a file of any size,
+                // or one long line, holds only what is shown.
+                let file = path.clone();
+                let cancel = context.cancel.clone();
+                let read = tokio::task::spawn_blocking(move || {
+                    text::read_text(&file, offset, limit, &cancel)
+                });
+                let mut output = output(tokio::select! {
+                    () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
+                    read = read => read.map_err(tool_error)??,
+                });
                 self.instructions
                     .attach(&mut output, &path, &context.workspace, context.thread_id);
                 Ok(output)
@@ -3017,53 +3031,31 @@ impl Tool for BuiltinTool {
                         false,
                     ));
                 }
-                let mut matches = Vec::new();
-                let mut skipped = Skipped::default();
-                let mut partial = false;
-                // Match ripgrep semantics: respect .gitignore,
-                // .ignore, repository excludes, hidden files, and parent
-                // ignore files instead of scanning dependency/build trees.
-                // Links are not followed, so every file is where it is named.
-                for (files, entry) in ignore::WalkBuilder::new(&root)
-                    .standard_filters(true)
-                    .build()
-                    .filter_map(Result::ok)
-                    .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-                    .enumerate()
-                {
-                    if files == 20_000 {
-                        partial = true;
-                        break;
-                    }
-                    if let Some(hidden) = secrets.names_hidden(entry.path()) {
-                        skipped.count(hidden);
-                        continue;
-                    }
-                    if let Ok(text) = std::fs::read_to_string(entry.path()) {
-                        for (index, line) in text.lines().enumerate() {
-                            if regex.is_match(line) {
-                                matches.push(format!(
-                                    "{}:{}:{}",
-                                    entry
-                                        .path()
-                                        .strip_prefix(&context.workspace)
-                                        .unwrap_or(entry.path())
-                                        .display(),
-                                    index + 1,
-                                    line
-                                ));
-                                if matches.len() >= 10_000 {
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                // The walk reads files synchronously, so it runs off the async
+                // workers, as glob's does: a large tree or a slow disk holds
+                // none of them, and Stop ends the call at once.
+                let workspace = context.workspace.clone();
+                let cancel = context.cancel.clone();
+                let walk = tokio::task::spawn_blocking(move || {
+                    text::grep_walk(&regex, &root, &workspace, &secrets, &cancel)
+                });
+                let found = tokio::select! {
+                    () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
+                    found = walk => found.map_err(tool_error)??,
+                };
+                let mut output = with_skipped(
+                    truncate_output(found.matches.join("\n")).await?,
+                    found.skipped,
+                    found.stopped.is_some(),
+                );
+                if let Some(stop) = found.stopped {
+                    output.text = if output.text.is_empty() {
+                        stop.note()
+                    } else {
+                        format!("{}\n\n{}", output.text, stop.note())
+                    };
                 }
-                Ok(with_skipped(
-                    truncate_output(matches.join("\n")).await?,
-                    skipped,
-                    partial,
-                ))
+                Ok(output)
             }
             Kind::Write => {
                 let requested_path = string(&args, "path")?;
@@ -3089,7 +3081,9 @@ impl Tool for BuiltinTool {
                 let path = resolve_existing(requested_path, &context)?;
                 let before = string(&args, "old")?;
                 let after = string(&args, "new")?;
-                let text = tokio::fs::read_to_string(&path).await.map_err(tool_error)?;
+                let text = text::read_utf8(&path, "edit").await?;
+                let (before, after) = text::crlf_edit(&text, before, after);
+                let (before, after) = (before.as_ref(), after.as_ref());
                 let count = text.matches(before).count();
                 if count != 1 {
                     return Err(CoreError::Tool(format!(
@@ -3121,7 +3115,7 @@ impl Tool for BuiltinTool {
                     .ok_or_else(|| {
                         CoreError::Invalid("edits must contain 1 to 100 entries".into())
                     })?;
-                let original = tokio::fs::read_to_string(&path).await.map_err(tool_error)?;
+                let original = text::read_utf8(&path, "multiedit").await?;
                 let mut updated = original.clone();
                 for (index, edit) in edits.iter().enumerate() {
                     let before = string(edit, "old")?;
@@ -3132,6 +3126,8 @@ impl Tool for BuiltinTool {
                             index + 1
                         )));
                     }
+                    let (before, after) = text::crlf_edit(&updated, before, after);
+                    let (before, after) = (before.as_ref(), after.as_ref());
                     let count = updated.matches(before).count();
                     let replace_all = edit
                         .get("replaceAll")
@@ -3898,7 +3894,8 @@ impl SecretFilter {
                 workspace.to_path_buf(),
             ],
             root: root.to_path_buf(),
-            named_root: workspace.join(requested),
+            // `~/notes` names the home folder, as the tools read it.
+            named_root: workspace.join(haarness_core::expand_home(requested).as_ref()),
             rules,
         }
     }
@@ -4812,6 +4809,11 @@ fn output_preview(text: &str) -> String {
     for line in text.lines().take(TOOL_OUTPUT_MAX_LINES) {
         let size = line.len() + usize::from(!preview.is_empty());
         if bytes + size > TOOL_OUTPUT_MAX_BYTES {
+            // A first line too long to show whole (minified code, a JSON
+            // dump) shows its head, so the preview is never empty.
+            if preview.is_empty() {
+                return text::shown(line, true).into_owned();
+            }
             break;
         }
         preview.push(line);
@@ -7606,6 +7608,461 @@ export default workflow({
             "head preview kept the tail"
         );
         tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[test]
+    fn a_workflow_path_from_the_home_folder_is_read_there() {
+        let home = haarness_protocol::home_dir().unwrap();
+        let workspace = Path::new("/work/project");
+        assert_eq!(
+            workflow_path(workspace, "~/flows/check.ts"),
+            home.join("flows/check.ts").display().to_string()
+        );
+        assert_eq!(
+            workflow_path(workspace, "flows/check.ts"),
+            "/work/project/flows/check.ts"
+        );
+        assert_eq!(
+            workflow_path(workspace, "./~/check.ts"),
+            "/work/project/./~/check.ts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preview_shows_the_head_of_a_first_line_too_long_for_it() {
+        let directory =
+            std::env::temp_dir().join(format!("haarness-output-{}", uuid::Uuid::now_v7()));
+        let body = format!("{}\nsecond", "y".repeat(200_000));
+        let result = truncate_output_at(body, &directory).await.unwrap();
+        assert!(
+            result
+                .text
+                .starts_with(&format!("{}{}", "y".repeat(2_000), text::LINE_CUT)),
+            "{}",
+            &result.text[..80]
+        );
+        assert!(result.text.contains("Full output saved to:"));
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    fn read_fixture(name: &str, body: &[u8]) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("haarness-read-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join(name), body).unwrap();
+        (root.clone(), root.join(name))
+    }
+
+    async fn read_text_of(root: &Path, args: Value) -> CoreResult<ToolOutput> {
+        let registry = NativeToolRegistry::new(root.to_path_buf());
+        registry
+            .get("read")
+            .unwrap()
+            .execute(args, tool_context(root))
+            .await
+    }
+
+    #[tokio::test]
+    async fn read_shows_the_head_of_a_line_that_never_ends() {
+        let root = std::env::temp_dir().join(format!("haarness-read-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        // 40 MiB on one line, as a minified bundle or a JSON dump.
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(root.join("bundle.min.js")).unwrap();
+            let chunk = "x".repeat(1024 * 1024);
+            for _ in 0..40 {
+                file.write_all(chunk.as_bytes()).unwrap();
+            }
+            file.write_all(b"\nlast line\n").unwrap();
+        }
+        let result = read_text_of(&root, json!({"path":"bundle.min.js"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.text,
+            format!("{}{}\nlast line", "x".repeat(2_000), text::LINE_CUT)
+        );
+        // Shown inline: nothing is copied to the tool output folder.
+        assert!(result.metadata.get("outputPath").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_stops_at_fifty_kilobytes_and_says_where_to_go_on() {
+        let body = (0..3_000)
+            .map(|line| format!("line {line:04} {}", "z".repeat(90)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (root, _) = read_fixture("long.txt", body.as_bytes());
+        let first = read_text_of(&root, json!({"path":"long.txt","limit":3000}))
+            .await
+            .unwrap();
+        let (shown, note) = first.text.rsplit_once("\n\n").unwrap();
+        assert!(shown.len() <= 50 * 1024, "{}", shown.len());
+        let count = shown.lines().count();
+        assert!(count > 400 && count < 3_000, "{count}");
+        assert_eq!(
+            note,
+            format!("(stopped at 50 KB; read on with offset={count})")
+        );
+        assert!(first.metadata.get("outputPath").is_none());
+        let next = read_text_of(&root, json!({"path":"long.txt","offset":count,"limit":1}))
+            .await
+            .unwrap();
+        assert_eq!(
+            next.text,
+            format!(
+                "{}\n\n(more lines follow; read on with offset={})",
+                body.lines().nth(count).unwrap(),
+                count + 1
+            )
+        );
+        // A limit, the default one or one the call gives, ending before the
+        // file does says where to go on.
+        let short = (0..2_500)
+            .map(|line| format!("{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(root.join("short.txt"), &short).unwrap();
+        let default = read_text_of(&root, json!({"path":"short.txt"}))
+            .await
+            .unwrap();
+        assert!(
+            default
+                .text
+                .ends_with("1999\n\n(more lines follow; read on with offset=2000)"),
+            "{}",
+            &default.text[default.text.len() - 80..]
+        );
+        let given = read_text_of(&root, json!({"path":"short.txt","limit":500}))
+            .await
+            .unwrap();
+        assert!(
+            given
+                .text
+                .ends_with("499\n\n(more lines follow; read on with offset=500)"),
+            "{}",
+            &given.text[given.text.len() - 60..]
+        );
+        let rest = read_text_of(&root, json!({"path":"short.txt","offset":2000}))
+            .await
+            .unwrap();
+        assert!(rest.text.ends_with("\n2499") && !rest.text.contains("more lines"));
+        // A limit inside the budget reads the lines it always did.
+        let small = read_text_of(&root, json!({"path":"long.txt","offset":10,"limit":5}))
+            .await
+            .unwrap();
+        assert_eq!(
+            small.text,
+            format!(
+                "{}\n\n(more lines follow; read on with offset=15)",
+                body.lines().skip(10).take(5).collect::<Vec<_>>().join("\n")
+            )
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_splits_lines_as_it_always_did() {
+        for body in [
+            "one\ntwo\nthree\n",
+            "one\r\ntwo\r\nthree",
+            "\n\nthird\n\n",
+            "",
+            "lone\rreturn\n",
+        ] {
+            let (root, _) = read_fixture("f.txt", body.as_bytes());
+            for (offset, limit) in [(0, 2000), (1, 1), (2, 5), (9, 3)] {
+                let result =
+                    read_text_of(&root, json!({"path":"f.txt","offset":offset,"limit":limit}))
+                        .await
+                        .unwrap();
+                let shown = body.lines().skip(offset).take(limit).count();
+                let mut expected = body
+                    .lines()
+                    .skip(offset)
+                    .take(limit)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if body.lines().count() > offset + limit {
+                    expected = format!(
+                        "{expected}\n\n(more lines follow; read on with offset={})",
+                        offset + shown
+                    );
+                }
+                assert_eq!(result.text, expected, "{body:?} {offset} {limit}");
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_long_cjk_or_accented_line_reads_as_utf8() {
+        let body = format!("{}\na{}\nend\n", "日".repeat(3_000), "é".repeat(5_000));
+        let (root, _) = read_fixture("wide.txt", body.as_bytes());
+        let result = read_text_of(&root, json!({"path":"wide.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.text,
+            format!(
+                "{}{cut}\na{}{cut}\nend",
+                "日".repeat(2_000),
+                "é".repeat(1_999),
+                cut = text::LINE_CUT
+            )
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_shows_text_that_is_not_utf8_and_refuses_binary_data() {
+        let (root, _) = read_fixture("latin1.txt", b"caf\xe9\nna\xefve\n");
+        let result = read_text_of(&root, json!({"path":"latin1.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.text,
+            "caf\u{fffd}\nna\u{fffd}ve\n\n(this file is not UTF-8: bytes that do not decode show as \u{fffd}; edit cannot change it, and write would replace those bytes)"
+        );
+        let refused = NativeToolRegistry::new(root.clone())
+            .get("edit")
+            .unwrap()
+            .execute(
+                json!({"path":"latin1.txt","old":"na","new":"no"}),
+                tool_context(&root),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("latin1.txt is not UTF-8 text, so edit cannot change it"),
+            "{refused}"
+        );
+        // A NUL near the start marks binary data: only UTF-8 shows, as before.
+        std::fs::write(root.join("blob.bin"), b"\x00\x01\xff\xfe").unwrap();
+        let refused = read_text_of(&root, json!({"path":"blob.bin"}))
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("holds binary data"),
+            "{refused}"
+        );
+        std::fs::write(root.join("nul.txt"), b"a\x00b\n").unwrap();
+        let shown = read_text_of(&root, json!({"path":"nul.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(shown.text, "a\u{0}b");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_refuses_a_pipe_rather_than_waiting_on_it() {
+        let root = std::env::temp_dir().join(format!("haarness-read-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(root.join("pipe"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let refused = read_text_of(&root, json!({"path":"pipe"}))
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("is not a regular file"),
+            "{refused}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn grep_in(root: &Path, args: Value, context: ToolContext) -> CoreResult<ToolOutput> {
+        NativeToolRegistry::new(root.to_path_buf())
+            .get("grep")
+            .unwrap()
+            .execute(args, context)
+            .await
+    }
+
+    #[tokio::test]
+    async fn grep_shows_the_head_of_a_long_matching_line() {
+        let (root, _) = read_fixture(
+            "bundle.min.js",
+            format!("needle{}\nshort needle\n", "q".repeat(100_000)).as_bytes(),
+        );
+        let found = grep_in(&root, json!({"pattern":"needle"}), tool_context(&root))
+            .await
+            .unwrap();
+        assert_eq!(
+            found.text,
+            format!(
+                "bundle.min.js:1:needle{}{}\nbundle.min.js:2:short needle",
+                "q".repeat(1_994),
+                text::LINE_CUT
+            )
+        );
+        assert!(found.metadata.get("outputPath").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn grep_stops_at_its_match_limit_and_says_so() {
+        let body = "hit\n".repeat(6_000);
+        let (root, _) = read_fixture("a.txt", body.as_bytes());
+        std::fs::write(root.join("b.txt"), &body).unwrap();
+        std::fs::write(root.join("c.txt"), &body).unwrap();
+        let found = grep_in(&root, json!({"pattern":"hit"}), tool_context(&root))
+            .await
+            .unwrap();
+        // The listing is long enough to be saved whole; it holds the limit
+        // exactly, however many files are left.
+        let saved =
+            std::fs::read_to_string(found.metadata["outputPath"].as_str().unwrap()).unwrap();
+        assert_eq!(saved.lines().count(), 10_000);
+        assert!(
+            found
+                .text
+                .ends_with("(stopped at 10000 matching lines; narrow the pattern or the path)"),
+            "{}",
+            &found.text[found.text.len() - 200..]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn grep_leaves_the_async_workers_free_and_stop_ends_it() {
+        let root = std::env::temp_dir().join(format!("haarness-grep-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let line = format!("{}\n", "w".repeat(200));
+        for index in 0..4_000 {
+            std::fs::write(root.join(format!("f{index}.txt")), line.repeat(20)).unwrap();
+        }
+        let context = tool_context(&root);
+        let cancel = context.cancel.clone();
+        // On this runtime's one thread, Stop can only come while the walk
+        // leaves the thread free.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            cancel.cancel();
+        });
+        let started = std::time::Instant::now();
+        let stopped = grep_in(&root, json!({"pattern":"absent"}), context).await;
+        assert!(matches!(stopped, Err(CoreError::Cancelled)), "{stopped:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn edit_in(root: &Path, tool: &str, args: Value) -> CoreResult<ToolOutput> {
+        NativeToolRegistry::new(root.to_path_buf())
+            .get(tool)
+            .unwrap()
+            .execute(args, tool_context(root))
+            .await
+    }
+
+    #[tokio::test]
+    async fn an_edit_of_several_lines_meets_a_file_with_crlf_line_ends() {
+        let (root, file) = read_fixture("main.c", b"int a() {\r\n    one();\r\n}\r\n");
+        // What read shows, without the `\r`.
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"    one();\n}","new":"    two();\n    three();\n}"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"int a() {\r\n    two();\r\n    three();\r\n}\r\n"
+        );
+        edit_in(
+            &root,
+            "multiedit",
+            json!({"path":"main.c","edits":[
+                {"old":"two();\n    three();","new":"four();"},
+                {"old":"{\n","new":"{\n    // start\n","replaceAll":true}
+            ]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"int a() {\r\n    // start\r\n    four();\r\n}\r\n"
+        );
+        // A one-line old with lines added: they end in CRLF too.
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"    four();","new":"    four();\n    five();"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"int a() {\r\n    // start\r\n    four();\r\n    five();\r\n}\r\n"
+        );
+        // Lines added in a stretch of LF lines, or in a CSV cell that holds
+        // bare LF, end in LF as their neighbours do.
+        std::fs::write(&file, b"h1\r\nh2\r\nlf1\nlf2\nh3\r\nh4\r\n").unwrap();
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"lf1","new":"lf1\nlf1b"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"h1\r\nh2\r\nlf1\nlf1b\nlf2\nh3\r\nh4\r\n"
+        );
+        std::fs::write(&file, b"id,note\r\n1,\"line a\nline b\"\r\n2,x\r\n3,y\r\n").unwrap();
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"line a","new":"line A\nline A2"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"id,note\r\n1,\"line A\nline A2\nline b\"\r\n2,x\r\n3,y\r\n"
+        );
+        // Two places still refuse, as an LF file does.
+        std::fs::write(&file, b"x\r\ny\r\nx\r\ny\r\n").unwrap();
+        let ambiguous = edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"x\ny","new":"z"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(ambiguous.to_string().contains("found 2"), "{ambiguous}");
+        // A file mostly of LF line ends is matched as written.
+        std::fs::write(&file, b"a\nb\nc\r\nd\n").unwrap();
+        let missed = edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"c\nd","new":"z"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(missed.to_string().contains("found 0"), "{missed}");
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"a\nb","new":"ab"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"ab\nc\r\nd\n");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

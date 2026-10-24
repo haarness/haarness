@@ -46,7 +46,7 @@ pub use goal::{MAX_GOAL_CHARS, apply_goal_action, goal_line, legacy_goal_state, 
 pub use permissions::bash::is_obviously_read_only as bash_is_obviously_read_only;
 pub use permissions::{
     CONFIG_EDIT_RULE, EXPLICIT_GRANT_PREFIX, PermissionDecision, PermissionEngine, PermissionRule,
-    explicit_decision, explicit_granted, forget_rule_links, global_config_dir_from,
+    expand_home, explicit_decision, explicit_granted, forget_rule_links, global_config_dir_from,
     is_base_config_path, is_config_path, is_global_config_path, is_secret_path,
     resolve_permission_entry, resolve_permission_path, set_base_config_dir, set_global_config_dir,
 };
