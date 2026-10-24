@@ -142,7 +142,7 @@ test("a closed socket's read is noted once and shows no dialog; every other erro
   assert.equal(dialogs.length, 1);
 });
 
-test("the listeners that were there hear every other error as before", () => {
+test("the listener that was there hears every other error as before", () => {
   const target = new EventEmitter();
   const heard: unknown[][] = [];
   target.on("uncaughtException", function (this: unknown, ...args: unknown[]) {
@@ -153,8 +153,35 @@ test("the listeners that were there hear every other error as before", () => {
   target.emit("uncaughtException", other, "unhandledRejection");
   target.emit("uncaughtException", reported, "uncaughtException");
   assert.deepEqual(heard, [[target, other, "unhandledRejection"]]);
-  // Without a listener there (outside Electron), nothing is changed.
+});
+
+test("anything but Electron's one listener is left as it is, with nothing installed", () => {
+  const recorded: Error[] = [];
+  // No listener (outside Electron).
   const bare = new EventEmitter();
-  quietClosedSocketReads(bare, () => {});
+  quietClosedSocketReads(bare, (error) => recorded.push(error));
   assert.equal(bare.listenerCount("uncaughtException"), 0);
+  // Two listeners: both keep hearing everything, this error too.
+  const two = new EventEmitter();
+  const heard: string[] = [];
+  const first = (error: Error) => heard.push("first " + error.message);
+  const second = (error: Error) => heard.push("second " + error.message);
+  two.on("uncaughtException", first);
+  two.on("uncaughtException", second);
+  quietClosedSocketReads(two, (error) => recorded.push(error));
+  assert.deepEqual(two.rawListeners("uncaughtException"), [first, second]);
+  two.emit("uncaughtException", reported, "uncaughtException");
+  assert.deepEqual(heard, ["first " + reported.message, "second " + reported.message]);
+  // One added with once(): it still hears only the first error, and the
+  // next finds no listener, as before.
+  const once = new EventEmitter();
+  const heardOnce: Error[] = [];
+  once.once("uncaughtException", (error: Error) => heardOnce.push(error));
+  const wrapper = once.rawListeners("uncaughtException")[0];
+  quietClosedSocketReads(once, (error) => recorded.push(error));
+  assert.deepEqual(once.rawListeners("uncaughtException"), [wrapper]);
+  once.emit("uncaughtException", reported, "uncaughtException");
+  assert.deepEqual(heardOnce, [reported]);
+  assert.equal(once.listenerCount("uncaughtException"), 0);
+  assert.deepEqual(recorded, [], "nothing is noted where nothing was installed");
 });

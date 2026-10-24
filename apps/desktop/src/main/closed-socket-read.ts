@@ -38,21 +38,25 @@ export function closedSocketRead(error: unknown): error is RangeError {
 type Listener = (error: Error, origin: string) => void;
 interface Target {
   listeners(event: "uncaughtException"): Function[];
-  removeAllListeners(event: "uncaughtException"): unknown;
+  rawListeners(event: "uncaughtException"): Function[];
+  removeListener(event: "uncaughtException", listener: Listener): unknown;
   on(event: "uncaughtException", listener: Listener): unknown;
 }
 
 /**
  * Notes a closed socket's read once (`record`) and goes on; every other
- * uncaught exception goes to the listeners that were there, as before. In
- * Electron's main process that is Electron's own, which shows its dialog
- * only while it is the one listener: this one takes its place, so it still
- * is. Without a listener there (outside Electron) nothing changes.
+ * uncaught exception goes to the listener that was there, as before. In
+ * Electron's main process that is Electron's own, the one listener, which
+ * shows its dialog only while it is the one: this one takes its place, so
+ * it still is. Anything else there (no listener outside Electron, several,
+ * or one added with `once`, which `listeners()` would show unwrapped) is
+ * left as it is, with nothing installed.
  */
 export function quietClosedSocketReads(target: Target, record: (error: RangeError) => void) {
-  const earlier = target.listeners("uncaughtException");
-  if (!earlier.length) return;
-  target.removeAllListeners("uncaughtException");
+  const present = target.rawListeners("uncaughtException");
+  if (present.length !== 1 || present[0] !== target.listeners("uncaughtException")[0]) return;
+  const electron = present[0] as Listener;
+  target.removeListener("uncaughtException", electron);
   let recorded = false;
   target.on("uncaughtException", (error, origin) => {
     if (closedSocketRead(error)) {
@@ -60,6 +64,6 @@ export function quietClosedSocketReads(target: Target, record: (error: RangeErro
       recorded = true;
       return;
     }
-    for (const listener of earlier) listener.call(target, error, origin);
+    electron.call(target, error, origin);
   });
 }
