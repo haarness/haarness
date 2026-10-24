@@ -17319,6 +17319,56 @@ fn review_takes_the_whole_terminal_with_a_tree_a_patch_and_key_hints() {
     );
 }
 
+/// A drag down the review copies code: side by side, only the side it
+/// started on, and in either layout no line numbers, signs or rules.
+#[test]
+fn a_drag_down_the_review_copies_one_side_without_numbers_or_signs() {
+    // The cell just right of the last (or first) `│` on `row`.
+    let after_rule = |line: &Line, last: bool| {
+        let text = line_text(line);
+        let at = if last {
+            text.rfind('│')
+        } else {
+            text.find('│')
+        }
+        .unwrap();
+        u16::try_from(text[..at].width() + 1).unwrap()
+    };
+    let mut app = review_app();
+    let lines = app.lines((160, 24));
+    assert_eq!(
+        viewer_of(&app).layout_in_use(),
+        crate::diffview::DiffLayout::Split
+    );
+    let (_, first) = screen_cell(&lines, "pub const fn label");
+    let new_side = after_rule(&lines[usize::from(first)], true);
+    app.selection_range = Some(((new_side, first), (159, first + 2)));
+    assert_eq!(
+        app.selected_text(),
+        "    pub const fn label(self) -> &'static str {\n            Self::WorkingTree => \"working tree\",\n        }"
+    );
+    // The old side the same way.
+    let old_side = after_rule(&lines[usize::from(first)], false);
+    app.selection_range = Some(((old_side, first), (new_side - 2, first + 1)));
+    assert_eq!(
+        app.selected_text(),
+        "    pub const fn label(self) -> &'static str {\n            Self::WorkingTree => \"working\","
+    );
+
+    let mut app = review_app_unified();
+    let lines = app.lines((160, 24));
+    let (_, first) = screen_cell(&lines, "Self::WorkingTree => \"working\",");
+    let (end, last) = screen_end(&lines, "Self::WorkingTree => \"working tree\",");
+    app.selection_range = Some((
+        (after_rule(&lines[usize::from(first)], false), first),
+        (end, last),
+    ));
+    assert_eq!(
+        app.selected_text(),
+        "            Self::WorkingTree => \"working\",\n            Self::WorkingTree => \"working tree\","
+    );
+}
+
 #[test]
 fn review_paints_added_and_removed_rows_in_their_diff_colors() {
     let app = review_app_unified();
