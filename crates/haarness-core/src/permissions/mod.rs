@@ -1927,7 +1927,7 @@ mod tests {
         std::fs::create_dir_all(workspace.join("secrets")).unwrap();
         let home = root.canonicalize().unwrap();
         let workspace = workspace.canonicalize().unwrap();
-        let _home = TestHome::set(&home);
+        let guard = TestHome::set(&home);
         assert_eq!(
             resolve_permission_path(&workspace, "~/project/secrets/key"),
             workspace.join("secrets/key")
@@ -1957,7 +1957,7 @@ mod tests {
         if let Some(global) = global_config_dir()
             && let (Some(parent), Some(name)) = (global.parent(), global.file_name())
         {
-            drop(_home);
+            drop(guard);
             let _home = TestHome::set(parent);
             let edit = format!("edit:~/{}/config.toml", name.to_string_lossy());
             let evaluation = engine.evaluate_detailed(&edit);
