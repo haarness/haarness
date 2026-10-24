@@ -56,7 +56,10 @@ On this computer a chat needs no project. The sidebar's **This computer**
 section, above Projects, lists these chats; its **+** starts another. With
 none yet it is the heading and its +. A first launch, or this computer with no
 project remembered, opens on a ready message box whose folder chip says **No
-folder**; no folder chooser opens. The top **New chat** starts where you are:
+folder**; no folder chooser opens. It shows at once, also while the chat
+home's daemon starts (no loading screen): the model pill says it is loading,
+and a message sent meanwhile waits for the chat home, its send button busy,
+and then goes. The top **New chat** starts where you are:
 in the open chat's project, or without a folder when This computer's chat (or
 nothing) is open. A project's own New chat starts in that project.
 
@@ -94,7 +97,9 @@ Reveal in Finder; a chat never moves. The new-chat heading reads "What should
 we work on?" without a project and "…in {project}?" with one. For a chat
 without a project the Files panel shows its own folder, a new terminal opens
 there (each chat has its own terminals), `@` and Search find the files in it,
-and Review treats it as a folder without Git. Before its first message there
+a reply's relative image or file link (`![](chart.png)`) starts there and may
+not leave it, `/` offers the workflows in its `.haarness/workflows` (and no
+other chat's), and Review treats it as a folder without Git. Before its first message there
 is no folder yet, and those panels say so. Search lists these chats with
 **This computer** and the chat's folder.
 
