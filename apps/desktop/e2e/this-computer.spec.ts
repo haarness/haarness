@@ -6,7 +6,7 @@ import {
   type ElectronApplication,
   type Page,
 } from "@playwright/test";
-import { mkdtemp, mkdir, readFile, realpath, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -62,8 +62,19 @@ test.afterEach(async () => {
 async function launch() {
   app = await electron.launch({ args: ["."], env, timeout: 240000 });
   page = await app.firstWindow();
+  // Notes whether the full-window loading mark is ever seen: it waits a
+  // third of a second before it fades in, so a mark gone sooner never shows.
+  await page.evaluate(() => {
+    const look = () => {
+      const mark = document.querySelector(".chat-loading");
+      if (mark && Number(getComputedStyle(mark).opacity) > 0.05) (window as any).loadingMarkSeen = true;
+      requestAnimationFrame(look);
+    };
+    look();
+  });
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1280, 820));
 }
+const loadingMarkSeen = () => page.evaluate(() => !!(window as any).loadingMarkSeen);
 
 const ready = () =>
   expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 240000 });
@@ -113,23 +124,25 @@ async function settled(thread: string) {
 
 test("chats without a project: a ready first launch, a folder of their own on one daemon, a project when chosen, kept across a relaunch", async () => {
   await launch();
-  // A first launch is a ready message box that needs no folder.
-  await ready();
+  // A first launch is a ready message box that needs no folder, there while
+  // the chat home's daemon starts, with no loading screen.
   await expect(composer()).toBeEnabled();
   await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
   await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on?");
+  // A message sent meanwhile (the daemon usually still starting) goes once
+  // the chat home is open.
+  await send('!tool bash {"command":"pwd"}');
+  await ready();
+  expect(await loadingMarkSeen()).toBe(false);
   await expect(page.getByRole("region", { name: "Project home" })).toHaveCount(0);
   await expect(page.getByLabel("Chat starters")).toHaveCount(0);
-  // This computer alone: nothing to switch to, and its section starts empty.
+  // This computer alone: nothing to switch to.
   await expect(page.getByRole("button", { name: "Switch server", exact: true })).toHaveCount(0);
   await expect(section().getByRole("button", { name: "New chat without a folder", exact: true })).toBeVisible();
-  await expect(rows()).toHaveCount(0);
-  await expect(section().locator(".sessions-empty")).toHaveCount(0);
 
   // The first message gives the chat its folder, named by what it says, and
   // its tools run there.
   const home = await realpath(chatHomeFolder(join(temporary, "desktop")));
-  await send('!tool bash {"command":"pwd"}');
   await expect(rows()).toHaveCount(1);
   const first = join(home, today(), "tool-bash-command-pwd");
   await expect.poll(() => stat(first).then((value) => value.isDirectory()).catch(() => false)).toBe(true);
@@ -154,6 +167,24 @@ test("chats without a project: a ready first launch, a folder of their own on on
   // Only its own folder: not the day above it, nor another chat's.
   await expect(tree.getByRole("button", { name: today(), exact: true })).toHaveCount(0);
   await page.screenshot({ path: test.info().outputPath("chat-folder-files.png") });
+
+  // A reply's relative image and link name the chat's own folder: the image
+  // shows, the link opens there, and nothing outside it is read.
+  await writeFile(
+    join(first, "chart.png"),
+    Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aQx8AAAAASUVORK5CYII=", "base64"),
+  );
+  await send("See ![the chart](chart.png) and [the notes](notes.txt), not ![theirs](../other/chart.png)");
+  await settled(one!.id);
+  const reply = page.locator(".transcript .markdown").filter({ hasText: "and the notes" }).last();
+  await expect(reply.locator("img.project-image-loaded")).toHaveAttribute(
+    "data-project-path",
+    today() + "/tool-bash-command-pwd/chart.png",
+  );
+  await expect(reply.locator("img.project-image-loaded")).toHaveCount(1);
+  await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
+  await reply.getByRole("link", { name: "the notes", exact: true }).click();
+  await expect(page.locator(".file-tabs").getByRole("button", { name: "notes.txt", exact: true })).toBeVisible();
 
   // This computer's + starts another chat, in a folder of its own.
   await section().getByRole("button", { name: "New chat without a folder", exact: true }).click();
@@ -181,6 +212,39 @@ test("chats without a project: a ready first launch, a folder of their own on on
   await expect(page.locator(":focus")).toHaveAttribute("aria-current", "false");
   expect(await page.evaluate(() => !!document.activeElement?.closest(".computer-chats"))).toBe(true);
 
+  // A workflow in a chat's own folder is one of that chat's commands, and
+  // only that chat's.
+  await mkdir(join(first, ".haarness/workflows"), { recursive: true });
+  await writeFile(
+    join(first, ".haarness/workflows/folderflow.ts"),
+    "export const meta = { name: 'folderflow', description: 'Only in this chat', phases: ['one'] };\nphase('one');\nreturn 1;\n",
+  );
+  await rows().filter({ hasText: "pwd" }).click();
+  await composer().fill("/folderflow");
+  await expect(page.locator("#slash-commands")).toContainText("/folderflow");
+  await composer().fill("");
+  await rows().filter({ hasText: "Lisbon" }).click();
+  await composer().fill("/folderflow");
+  await expect(page.locator("#slash-commands")).toHaveCount(0);
+  await composer().fill("");
+  // A chat whose folder a link stands in for (here, to the first chat's)
+  // offers no workflows of its own, and says nothing about it.
+  await rows().filter({ hasText: "pwd" }).click();
+  await rename(second, second + ".moved");
+  await symlink(first, second);
+  try {
+    await rows().filter({ hasText: "Lisbon" }).click();
+    await composer().fill("/");
+    await expect(page.locator("#slash-commands")).toBeVisible();
+    await composer().fill("/folderflow");
+    await expect(page.locator("#slash-commands")).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await composer().fill("");
+  } finally {
+    await rm(second);
+    await rename(second + ".moved", second);
+  }
+
   // Choosing a project in the chip sends there instead, and makes no folder.
   await app!.evaluate(({ dialog }, directory) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
@@ -204,9 +268,12 @@ test("chats without a project: a ready first launch, a folder of their own on on
   await page.getByRole("button", { name: "New chat", exact: true }).click();
   await newChatFolder().click();
   await expect(picker.getByRole("option")).toHaveText(["No folder", "pocket-project"]);
+  await page.evaluate(() => ((window as any).loadingMarkSeen = false));
   await picker.getByRole("option", { name: "No folder" }).click();
   await ready();
   await expect(newChatFolder()).toHaveAccessibleName("Folder for new chat: No folder");
+  // Going back to This computer shows its message box at once too.
+  expect(await loadingMarkSeen()).toBe(false);
 
   // The chat home is never a project.
   await expect(page.locator(".project-list .project-heading")).toHaveText(["pocket-project"]);
