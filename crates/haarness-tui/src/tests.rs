@@ -9419,6 +9419,230 @@ async fn a_press_that_slips_onto_a_chip_does_not_answer() {
     assert_eq!(crate::terminal::take_copied(), Vec::<String>::new());
 }
 
+/// One mouse report on `row`.
+async fn mouse_at(
+    app: &mut App,
+    client: &crate::api::ApiClient,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+) {
+    crate::input::mouse::handle_mouse(
+        app,
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        },
+        client,
+    )
+    .await
+    .unwrap();
+}
+
+/// Where the Allow once chip of the card on screen starts: (column, row).
+fn allow_once_chip(app: &App) -> (u16, u16) {
+    let chip = app
+        .hit_rows
+        .borrow()
+        .iter()
+        .find(|hit| hit.target == crate::view::frame::HitTarget::PermissionOption(0))
+        .cloned()
+        .expect("Allow once chip is clickable");
+    (
+        u16::try_from(chip.start).unwrap(),
+        u16::try_from(chip.row).unwrap(),
+    )
+}
+
+/// A release answers only the card that was under the press: one that
+/// appeared under a held press, or replaced the one pressed, is not
+/// answered, nor is a chip reached by a press that left it and came back,
+/// or by a press beside it with no motion between.
+#[tokio::test]
+async fn a_release_answers_only_the_card_that_was_pressed() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (client, seen) = sign_in_server(Vec::new()).await;
+    let answered =
+        |seen: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| !seen.lock().unwrap().is_empty();
+
+    // A card appears under a press held on the conversation.
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "perm-a"));
+    let _ = app.lines((100, 40));
+    let (column, row) = allow_once_chip(&app);
+    app.pending_permissions.clear();
+    let _ = app.lines((100, 40));
+    assert_ne!(
+        app.hit_at(usize::from(row), usize::from(column)),
+        Some(crate::view::frame::HitTarget::PermissionOption(0))
+    );
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "perm-a"));
+    let _ = app.lines((100, 40));
+    assert_eq!(
+        allow_once_chip(&app),
+        (column, row),
+        "the chip is under the press"
+    );
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Drag(MouseButton::Left),
+        column + 1,
+        row,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column + 1,
+        row,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !answered(&seen),
+        "a card that appeared under the press: {:?}",
+        seen.lock().unwrap()
+    );
+
+    // Another request replaces the one pressed, in the same place.
+    let _ = app.lines((100, 40));
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    app.pending_permissions = vec![pending_permission_fixture(&thread, "perm-b")];
+    let _ = app.lines((100, 40));
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !answered(&seen),
+        "a card that replaced the pressed one: {:?}",
+        seen.lock().unwrap()
+    );
+
+    // A press on the chip that leaves it and comes back.
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Drag(MouseButton::Left),
+        column + 8,
+        row - 3,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Drag(MouseButton::Left),
+        column + 1,
+        row,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column + 1,
+        row,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !answered(&seen),
+        "a press that left the chip: {:?}",
+        seen.lock().unwrap()
+    );
+
+    // A press beside the chip released on it, with no motion reported.
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column - 1,
+        row,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !answered(&seen),
+        "a press beside the chip: {:?}",
+        seen.lock().unwrap()
+    );
+    assert_eq!(app.pending_permissions.len(), 1);
+
+    // A press and release on the chip still answers it.
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    for _ in 0..200 {
+        if answered(&seen) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.contains("perm-b")),
+        "{:?}",
+        seen.lock().unwrap()
+    );
+}
+
 /// Over text, a drag of one cell copies: both cells of a wide glyph, or a
 /// two-letter word.
 #[tokio::test]
@@ -17392,6 +17616,39 @@ fn a_drag_down_the_review_copies_one_side_without_numbers_or_signs() {
         app.selected_text(),
         "            Self::WorkingTree => \"working\",\n            Self::WorkingTree => \"working tree\","
     );
+}
+
+/// Code in the review is there to be copied: a one-cell drag over it
+/// copies, and a click still moves the cursor.
+#[tokio::test]
+async fn a_one_cell_drag_over_review_code_copies_it() {
+    let mut app = review_app_unified();
+    let client = offline_client();
+    let lines = app.lines((160, 24));
+    let (column, row) = screen_cell(&lines, "Self::WorkingTree => \"working tree\"");
+    let cursor = viewer_of(&app).cursor;
+    crate::terminal::take_copied();
+    mouse_drag(&mut app, &client, row, column, column + 1).await;
+    assert_eq!(crate::terminal::take_copied(), vec!["Se".to_owned()]);
+    assert_eq!(viewer_of(&app).cursor, cursor, "a drag moves no cursor");
+    let _ = app.lines((160, 24));
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    mouse_at(
+        &mut app,
+        &client,
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        row,
+    )
+    .await;
+    assert_ne!(viewer_of(&app).cursor, cursor, "a click moves the cursor");
 }
 
 #[test]

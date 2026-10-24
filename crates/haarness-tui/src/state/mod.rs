@@ -1038,8 +1038,8 @@ pub struct App {
     pub terminal_focused: bool,
     /// Cell-bounded click targets of the last rendered frame.
     pub hit_rows: std::cell::RefCell<Vec<crate::view::frame::HitRegion>>,
-    /// Left-button press position awaiting its release (click detection).
-    pub mouse_down: Option<(u16, u16)>,
+    /// The left press awaiting its release (click detection).
+    pub mouse_down: Option<crate::input::mouse::Press>,
     /// Screen cell last reached by a real mouse-movement event. Storing the
     /// cell rather than only the target keeps repeated targets (for example a
     /// task shown in transcript and sidebar) from highlighting together.
