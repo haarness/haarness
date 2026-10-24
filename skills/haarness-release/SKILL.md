@@ -88,9 +88,10 @@ HAARNESS_BUN=/absolute/path/to/bun-linux-x64-baseline/bun \
 ```
 
 electron-builder's legacy AppImage runtime for arm64 needs the unversioned `libz.so`, which only
-zlib's development package installs, so the arm64 AppImage (0.1.3's too) does not start on a stock
-system; `test-release-linux.py` refuses it. `build.toolsets.appimage: "1.0.3"` (a static type2
-runtime) starts on a stock Ubuntu 22.04 arm64; switching is the owner's call, proven on a desktop.
+zlib's development package installs, so the arm64 AppImage (0.1.3's too) did not start on a stock
+system; `test-release-linux.py` refuses it. Desktop's `package.json` therefore sets
+`build.toolsets.appimage: "1.0.3"` (a static type2 runtime), which starts on a stock Ubuntu 22.04
+arm64; a Linux desktop session has not run it yet.
 
 **Windows** links the C runtime statically (`.cargo/config.toml`), so `haarness.exe` starts on a
 clean machine without the Visual C++ Redistributable, and x64 bundles Bun's baseline build as
