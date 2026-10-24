@@ -82,8 +82,9 @@ impl ModelProvider for Children {
                     usage(4096),
                     finish("max_tokens"),
                 ],
-                // Narration and a call, then the limit in the next round.
-                "narrate" if !answered => vec![
+                // Narration and a call, then the limit (or a round that
+                // writes nothing) in the next round.
+                "narrate" | "narrate then stop" if !answered => vec![
                     ProviderEvent::TextDelta("Let me look.".into()),
                     ProviderEvent::ToolCall {
                         call_id: "child-call".into(),
@@ -97,6 +98,10 @@ impl ModelProvider for Children {
                     ProviderEvent::ReasoningDelta("thinking".into()),
                     usage(4096),
                     finish("length"),
+                ],
+                "narrate then stop" => vec![
+                    ProviderEvent::ReasoningDelta("thinking".into()),
+                    finish("stop"),
                 ],
                 "block" => vec![
                     ProviderEvent::TextDelta("partial".into()),
@@ -209,6 +214,26 @@ async fn a_subagent_whose_last_round_hit_the_limit_marks_its_earlier_text() {
     assert!(
         output.contains(
             "The subagent stopped at its output limit (4096 output tokens) before it finished. Its last text:\n\nLet me look."
+        ),
+        "{output}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn a_subagent_whose_last_round_wrote_nothing_does_not_pass_off_earlier_text_as_its_answer() {
+    let (directory, runtime) = runtime();
+    let thread = echo_thread(&runtime).await;
+    let (turn, items) = delegate(
+        &runtime,
+        thread.id,
+        &serde_json::json!({"prompt":"narrate then stop"}),
+    )
+    .await;
+    let (output, _) = task_result(&items, turn);
+    assert!(
+        output.contains(
+            "<task_result>\nThe subagent ended without writing a reply (finish reason: stop). Its last text:\n\nLet me look.\n</task_result>"
         ),
         "{output}"
     );
