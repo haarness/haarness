@@ -2004,6 +2004,19 @@ struct FileSearchQuery {
     /// Search a chat's own folder: results are relative to it.
     thread_id: Option<ThreadId>,
 }
+/// Dependency and build folders file search leaves out unless the query
+/// names them (`node_modules/react`); a listing still shows them.
+const SEARCH_SKIPS: [&str; 8] = [
+    "node_modules",
+    ".venv",
+    "venv",
+    "target",
+    "dist",
+    "build",
+    "__pycache__",
+    ".next",
+];
+
 /// Fuzzy workspace file search for @-mention completion: ignore-aware walk,
 /// subsequence scoring, best matches first.
 async fn search_files(
@@ -2027,9 +2040,22 @@ async fn search_files(
         }
         let needle = raw_query.to_ascii_lowercase();
         let mut scored: Vec<(i64, String)> = Vec::new();
+        // `.gitignore` and `.ignore` apply in a folder outside Git too, and
+        // a dependency or build folder is not searched unless the query
+        // names it, so a big one cannot use up the walk before the files a
+        // person means.
+        let named = needle.clone();
         let walker = ignore::WalkBuilder::new(&workspace)
             .hidden(true)
+            .require_git(false)
             .max_depth(Some(12))
+            .filter_entry(move |entry| {
+                !(entry.depth() > 0
+                    && entry.file_type().is_some_and(|kind| kind.is_dir())
+                    && entry.file_name().to_str().is_some_and(|name| {
+                        SEARCH_SKIPS.contains(&name) && !named.contains(&name.to_ascii_lowercase())
+                    }))
+            })
             .build();
         for entry in walker.flatten().take(50_000) {
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
