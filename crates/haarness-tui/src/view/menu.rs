@@ -2840,6 +2840,16 @@ mod tests {
             (2, Language::English, "about 2 days left at this pace"),
             (1, Language::German, "bei diesem Tempo noch etwa 1 Tag"),
             (5, Language::German, "bei diesem Tempo noch etwa 5 Tage"),
+            (
+                1,
+                Language::Russian,
+                "при таком темпе осталось дней: около 1",
+            ),
+            (
+                5,
+                Language::Polish,
+                "przy tym tempie pozostało dni: około 5",
+            ),
         ] {
             let lines =
                 billing_preface(&billing(serde_json::json!({ "daysLeft": days })), language);
