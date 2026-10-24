@@ -312,22 +312,29 @@ pub(super) fn grep_walk(
     Ok(found)
 }
 
-/// The `old` and `new` texts of an edit as a file with CRLF line ends spells
-/// them. `read` shows lines without their `\r`, so an `old` of several lines
-/// never occurs in such a file as written: when it does not, and most of the
-/// file's lines end in `\r\n`, both are given those ends. Otherwise, as
-/// they are.
+/// The `old` and `new` texts of an edit as a file whose lines mostly end in
+/// `\r\n` spells them: `read` shows lines without their `\r`, so `old` is
+/// given those ends (an `old` of several lines never occurs as written), and
+/// so is `new`, so the lines it adds end like the rest. An `old` of several
+/// lines that does occur as written is a stretch of LF lines, which keeps
+/// its ends. Any other file's texts stay as they are.
 pub(super) fn crlf_edit<'a>(
     text: &str,
     old: &'a str,
     new: &'a str,
 ) -> (Cow<'a, str>, Cow<'a, str>) {
     let crlf = text.matches("\r\n").count();
-    if !old.contains('\n') || text.contains(old) || crlf * 2 <= text.matches('\n').count() {
+    if crlf * 2 <= text.matches('\n').count() || (old.contains('\n') && text.contains(old)) {
         return (Cow::Borrowed(old), Cow::Borrowed(new));
     }
-    let spell = |value: &str| value.replace("\r\n", "\n").replace('\n', "\r\n");
-    (Cow::Owned(spell(old)), Cow::Owned(spell(new)))
+    let spell = |value: &'a str| {
+        if value.contains('\n') {
+            Cow::Owned(value.replace("\r\n", "\n").replace('\n', "\r\n"))
+        } else {
+            Cow::Borrowed(value)
+        }
+    };
+    (spell(old), spell(new))
 }
 
 #[cfg(test)]

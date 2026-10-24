@@ -453,10 +453,11 @@ with `(stopped at 50 KB; read on with offset=N)`. Text that is not UTF-8 (a
 Latin-1 file) shows `�` for what does not decode; a file with a NUL byte in its
 first 8 KiB is binary data and is shown only when it is UTF-8 throughout the
 part read. A folder, pipe or device is refused instead of waited on. Since
-`read` shows lines without their `\r`, `edit` and `multiedit` match an `old`
-text of several lines in a file whose lines mostly end in CRLF with those line
-ends, and write `new` with them, when it does not occur as written; two matches
-still refuse the edit. Direct prompt attachments use a 20 MiB aggregate limit; Gemini retains
+`read` shows lines without their `\r`, `edit` and `multiedit` give `old` and
+`new` CRLF line ends in a file whose lines mostly end in CRLF, so an `old` of
+several lines matches and the lines `new` adds end like the rest (an `old` of
+several lines that occurs as written, a stretch of LF lines, keeps its ends);
+two matches still refuse the edit. Direct prompt attachments use a 20 MiB aggregate limit; Gemini retains
 its 10 MiB aggregate adapter budget for inline request overhead. OpenAI,
 Anthropic, and Bedrock accept PDF/images; Gemini accepts PDF/image/audio/video.
 OpenAI-compatible Chat endpoints receive their native file, image, or MP3/WAV

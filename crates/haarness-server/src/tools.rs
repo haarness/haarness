@@ -7074,6 +7074,18 @@ export default workflow({
             std::fs::read(&file).unwrap(),
             b"int a() {\r\n    // start\r\n    four();\r\n}\r\n"
         );
+        // A one-line old with lines added: they end in CRLF too.
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"    four();","new":"    four();\n    five();"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"int a() {\r\n    // start\r\n    four();\r\n    five();\r\n}\r\n"
+        );
         // Two places still refuse, as an LF file does.
         std::fs::write(&file, b"x\r\ny\r\nx\r\ny\r\n").unwrap();
         let ambiguous = edit_in(
