@@ -144,7 +144,11 @@ def case_read_text():
     (files / 'latin1.txt').write_bytes(b'caf\xe9 au lait\n')
     output = tool(files, 'read', {'path': 'latin1.txt'})
     assert 'caf� au lait' in output, output
-    passed('a Latin-1 file reads, with U+FFFD for what is not UTF-8')
+    assert 'this file is not UTF-8' in output and 'write would replace those bytes' in output, output
+    output = tool(files, 'edit', {'path': 'latin1.txt', 'old': 'au', 'new': 'with'})
+    assert 'is not UTF-8 text, so edit cannot change it' in output, output
+    assert (files / 'latin1.txt').read_bytes() == b'caf\xe9 au lait\n'
+    passed('a Latin-1 file reads with U+FFFD and a note, and edit refuses it plainly')
 
 
 def case_read_pipe():
