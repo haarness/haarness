@@ -1266,6 +1266,13 @@
               "null"
             ]
           },
+          "directory": {
+            "description": "A working folder of the chat's own, relative to the server's project\nfolder (`/`-separated, no `..`): the server creates it and the chat's\ntools run there, with it as their project boundary. When another chat\nalready works in that folder the server picks `<path>-2`, `-3`, \u2026;\nthe folder chosen is the thread's `directory`. Omitted, the chat works\nin the project folder, or in its parent chat's folder. Servers that\nknow it list `thread-directory.v1`; older ones ignore it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "oneOf": [
               {
@@ -4718,6 +4725,13 @@
               "null"
             ]
           },
+          "directory": {
+            "description": "Open the terminal for a chat's folder (a thread's `directory`): given\nrelative to the project folder, as a chat's folder is created, or as\nthe absolute folder the thread reports. It must exist inside the\nproject; the shell starts there, and `ifNone` then hands back only a\nterminal opened for the same folder (without it, only one opened\nwithout a folder). Not together with `cwd`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ifNone": {
             "description": "Start a terminal only when the project has none running; otherwise\nreturn its oldest running one. Several windows opening \"a terminal\" at\nonce (after the server was replaced, say) then share one shell instead\nof starting one each.",
             "type": "boolean"
@@ -4796,6 +4810,13 @@
           },
           "cwd": {
             "type": "string"
+          },
+          "directory": {
+            "description": "The chat folder this terminal was opened for (`directory` of its\ncreate), canonical and absolute. Absent for a terminal of the project\nitself.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "$ref": "#/components/schemas/PtyId"
@@ -5895,6 +5916,13 @@
           "createdAt": {
             "format": "date-time",
             "type": "string"
+          },
+          "directory": {
+            "description": "The chat's own working folder, canonical and absolute, when it was\ncreated with one (`directory` of its create): its tools run there,\nand paths outside it are outside its project. Absent for a chat that\nworks in the server's project folder.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "forkOrigin": {
             "oneOf": [
@@ -7162,6 +7190,10 @@
               "string",
               "null"
             ]
+          },
+          "chatHome": {
+            "description": "The computer's chat home (`haarness --chat-home`): the folder Haarness\nkeeps the folders of chats without a project in. It is no project, so\nproject lists leave it out.",
+            "type": "boolean"
           },
           "createdAt": {
             "format": "date-time",
