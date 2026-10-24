@@ -238,7 +238,12 @@ test("a link's label goes where its link points, and tags written in a reply sta
   await expect(page.locator(".file-preview .cm-activeLine")).toHaveText("export const line150 = 150;");
   await reply.getByRole("link", { name: "inner", exact: true }).click();
   await expect(activeTab).toContainText("guide.md");
-  await reply.screenshot({ path: info.outputPath("reply-prose-tags.png") });
+  for (const theme of ["light", "dark"] as const) {
+    await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await reply.screenshot({ path: join(process.env.HAARNESS_SCREENSHOTS ?? info.outputPath(""), `reply-prose-tags-${theme}.png`) });
+  }
+  await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
   // Nothing went to the mail app or the web.
   expect((await calls()).shell).toEqual([["openExternal", "mailto:me@example.test?subject=Hi"]]);
   expect(errors).toEqual([]);
