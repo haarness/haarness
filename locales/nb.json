@@ -2545,6 +2545,8 @@
   "The request was too large for the provider, so the oldest {count} images are left out of this chat from now on.": "Forespørselen var for stor for leverandøren, så de {count} eldste bildene utelates fra denne chatten fremover.",
   "The request was too large for the provider, so the newest image, {name}, is left out of this chat from now on.": "Forespørselen var for stor for leverandøren, så det nyeste bildet, {name}, utelates fra denne chatten fremover.",
   "The request was too large for the provider, so the newest images, {names}, are left out of this chat from now on.": "Forespørselen var for stor for leverandøren, så de nyeste bildene, {names}, utelates fra denne chatten fremover.",
+  "The request had too many images for the provider, so the newest image, {name}, is left out of this chat from now on.": "Forespørselen hadde for mange bilder for leverandøren, så det nyeste bildet, {name}, utelates fra denne chatten fremover.",
+  "The request had too many images for the provider, so the newest images, {names}, are left out of this chat from now on.": "Forespørselen hadde for mange bilder for leverandøren, så de nyeste bildene, {names}, utelates fra denne chatten fremover.",
   "{name} is not an image Haarness can read.": "{name} er ikke et bilde Haarness kan lese.",
   "This link could not be opened.": "Lenken kunne ikke åpnes.",
   "Open a project to open links to its files.": "Åpne et prosjekt for å åpne lenker til filene i det.",

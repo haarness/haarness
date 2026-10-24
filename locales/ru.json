@@ -2545,6 +2545,8 @@
   "The request was too large for the provider, so the oldest {count} images are left out of this chat from now on.": "Запрос оказался слишком большим для провайдера, поэтому теперь самые старые изображения ({count}) не отправляются в этом чате.",
   "The request was too large for the provider, so the newest image, {name}, is left out of this chat from now on.": "Запрос оказался слишком большим для провайдера, поэтому теперь самое новое изображение, {name}, не отправляется в этом чате.",
   "The request was too large for the provider, so the newest images, {names}, are left out of this chat from now on.": "Запрос оказался слишком большим для провайдера, поэтому теперь самые новые изображения ({names}) не отправляются в этом чате.",
+  "The request had too many images for the provider, so the newest image, {name}, is left out of this chat from now on.": "В запросе было слишком много изображений для провайдера, поэтому теперь самое новое изображение, {name}, не отправляется в этом чате.",
+  "The request had too many images for the provider, so the newest images, {names}, are left out of this chat from now on.": "В запросе было слишком много изображений для провайдера, поэтому теперь самые новые изображения ({names}) не отправляются в этом чате.",
   "{name} is not an image Haarness can read.": "{name} — не изображение, которое Haarness может прочитать.",
   "This link could not be opened.": "Не удалось открыть эту ссылку.",
   "Open a project to open links to its files.": "Откройте проект, чтобы открывать ссылки на его файлы.",

@@ -487,3 +487,47 @@ async fn geminis_size_refusal_is_recorded_as_a_request_too_large() {
         vec![(vec!["a.png".to_owned(), "b.png".to_owned()], true, true)]
     );
 }
+
+#[tokio::test]
+async fn a_count_refusal_the_turns_own_images_answer_for_leaves_them_out_as_too_many() {
+    let fixture = Fixture::new("HTTP 400 Bad Request: too many images in the request: 3 > 1");
+    *fixture.provider.most.lock().unwrap() = Some(1);
+    let runtime = fixture.runtime();
+    let thread = thread(&runtime).await;
+    let done = turn(&runtime, thread, "a", vec![image("a.png")]).await;
+    assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    // Two of the three images are the turn's own: leaving out the older one
+    // would not answer the refusal, so the newest go and the older stays.
+    let done = turn(
+        &runtime,
+        thread,
+        "b and c",
+        vec![image("b.png"), image("c.png")],
+    )
+    .await;
+    assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    assert_eq!(sent(fixture.requests().last().unwrap()), ["a.png"]);
+    let items = runtime.items(thread, None).await.unwrap();
+    let omitted = items
+        .iter()
+        .filter_map(|item| match &item.data {
+            ItemData::MediaOmitted {
+                names,
+                guessed,
+                oldest,
+                too_many,
+                ..
+            } => Some((names.clone(), *guessed, *oldest, *too_many)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        omitted,
+        vec![(
+            vec!["b.png".to_owned(), "c.png".to_owned()],
+            true,
+            false,
+            true
+        )]
+    );
+}

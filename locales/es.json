@@ -2545,6 +2545,8 @@
   "The request was too large for the provider, so the oldest {count} images are left out of this chat from now on.": "La solicitud era demasiado grande para el proveedor, así que a partir de ahora se omiten en este chat las {count} imágenes más antiguas.",
   "The request was too large for the provider, so the newest image, {name}, is left out of this chat from now on.": "La solicitud era demasiado grande para el proveedor, así que a partir de ahora se omite en este chat la imagen más reciente, {name}.",
   "The request was too large for the provider, so the newest images, {names}, are left out of this chat from now on.": "La solicitud era demasiado grande para el proveedor, así que a partir de ahora se omiten en este chat las imágenes más recientes: {names}.",
+  "The request had too many images for the provider, so the newest image, {name}, is left out of this chat from now on.": "La solicitud tenía demasiadas imágenes para el proveedor, así que a partir de ahora se omite en este chat la imagen más reciente, {name}.",
+  "The request had too many images for the provider, so the newest images, {names}, are left out of this chat from now on.": "La solicitud tenía demasiadas imágenes para el proveedor, así que a partir de ahora se omiten en este chat las imágenes más recientes: {names}.",
   "{name} is not an image Haarness can read.": "{name} no es una imagen que Haarness pueda leer.",
   "This link could not be opened.": "No se pudo abrir este enlace.",
   "Open a project to open links to its files.": "Abre un proyecto para abrir enlaces a sus archivos.",

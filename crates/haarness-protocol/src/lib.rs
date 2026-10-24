@@ -393,6 +393,10 @@ pub enum ItemData {
         /// `oldest` or `guessed`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         too_large: bool,
+        /// The provider refused the request for how many images it carried;
+        /// with `oldest` or `guessed`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        too_many: bool,
     },
     Usage {
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -2545,6 +2545,8 @@
   "The request was too large for the provider, so the oldest {count} images are left out of this chat from now on.": "The request was too large for the provider, so the oldest {count} images are left out of this chat from now on.",
   "The request was too large for the provider, so the newest image, {name}, is left out of this chat from now on.": "The request was too large for the provider, so the newest image, {name}, is left out of this chat from now on.",
   "The request was too large for the provider, so the newest images, {names}, are left out of this chat from now on.": "The request was too large for the provider, so the newest images, {names}, are left out of this chat from now on.",
+  "The request had too many images for the provider, so the newest image, {name}, is left out of this chat from now on.": "The request had too many images for the provider, so the newest image, {name}, is left out of this chat from now on.",
+  "The request had too many images for the provider, so the newest images, {names}, are left out of this chat from now on.": "The request had too many images for the provider, so the newest images, {names}, are left out of this chat from now on.",
   "{name} is not an image Haarness can read.": "{name} is not an image Haarness can read.",
   "This link could not be opened.": "This link could not be opened.",
   "Open a project to open links to its files.": "Open a project to open links to its files.",
