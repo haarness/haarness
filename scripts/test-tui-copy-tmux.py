@@ -241,11 +241,35 @@ with tempfile.TemporaryDirectory(prefix="haarness-copy-", dir=os.environ.get("TU
         assert not approved.exists(), "a press beside the chip answered the card"
         assert "Allow once" in pane(), pane()
         screen("chip-near-miss")
+        # The same with no motion reported between press and release.
+        mouse(0, label - 2, row)
+        mouse(0, label - 1, row, release=True)
+        time.sleep(1.5)
+        assert not approved.exists(), "a press beside the chip, released on it, answered the card"
         mouse(0, label, row)
         mouse(32, label + 1, row)
         mouse(0, label + 1, row, release=True)
         until(lambda: approved.exists(), f"a slip within the chip did not answer:\n{pane()}", timeout=15)
-        checks.append("A press beside Allow once that slips onto it leaves the card waiting; one that slips within it answers")
+        checks.append("A press beside Allow once released on it, with or without motion, leaves the card waiting; "
+                      "one that slips within it answers")
+
+        # A card that appears under a held press is not answered by its release.
+        until(lambda: "Allow once" not in pane(), "the card did not go")
+        later = project / "later.txt"
+        paste('!tool bash ' + json.dumps({"command": f"touch {later}"}))
+        time.sleep(0.3)
+        mouse(0, label, row)
+        keys("Enter")
+        until(lambda: "Allow once" in pane(), "no second approval card")
+        time.sleep(0.5)
+        assert find("Allow once") == (label, row), "the chip is not under the press"
+        screen("card-under-held-press")
+        mouse(32, label + 1, row)
+        mouse(0, label + 1, row, release=True)
+        time.sleep(1.5)
+        assert not later.exists(), "a card that appeared under a held press was answered"
+        assert "Allow once" in pane(), pane()
+        checks.append("A card that appears under a held press stays waiting after the release")
 
         for check in checks:
             print("ok -", check)

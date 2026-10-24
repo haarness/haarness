@@ -1,6 +1,7 @@
 //! Mouse handling: wheel scrolling plus row-click routing through the
-//! frame's hit registry. Press/release on (nearly) the same cell is a click;
-//! anything else is left for drag-selection.
+//! frame's hit registry. A press released on the control it was made on, and
+//! for the same request, is a click; anything else is left for
+//! drag-selection.
 
 use anyhow::Result;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -57,25 +58,38 @@ pub async fn handle_mouse(
         MouseEventKind::Moved => move_hover(app, event.row as usize, event.column as usize),
         MouseEventKind::Down(MouseButton::Left) => {
             move_hover(app, event.row as usize, event.column as usize);
-            app.mouse_down = Some((event.column, event.row));
+            app.mouse_down = Some(Press::at(app, event));
             app.selection_range = None;
         }
         MouseEventKind::Drag(MouseButton::Left) => {
             app.hovered_cell = None;
-            if let Some(anchor) = app.mouse_down {
+            if let Some(mut press) = app.mouse_down.take() {
+                press.moved = true;
+                // Leaving the control, or the request it answers going, ends
+                // the click for good: coming back is a selection.
+                press.left |= !press.still_on(app, event);
                 // A slip that stays on what was pressed is still a click
                 // (see the release), so nothing is painted as selected.
-                app.selection_range = (!slip_on_target(app, anchor, event))
-                    .then_some((anchor, (event.column, event.row)));
+                app.selection_range = (press.left || !press.slip(event))
+                    .then_some((press.cell, (event.column, event.row)));
+                app.mouse_down = Some(press);
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
-            let anchor = app.mouse_down.take();
-            // A press that slipped a cell at most and is still on the same
-            // control is a click: a hand that shifts while it clicks a chip
-            // must not copy a letter of it. A press that slipped onto a
-            // control, or across text, is a selection.
-            if anchor.is_some_and(|anchor| slip_on_target(app, anchor, event)) {
+            let press = app.mouse_down.take();
+            // A click is a release on the control the press was made on, for
+            // the request that was on screen then: a card that appeared under
+            // a held press, or a press beside a chip that ends on it, answers
+            // nothing. A hand that slips a cell on a chip still presses it.
+            let click_here = press.as_ref().is_some_and(|press| {
+                press.still_on(app, event)
+                    && if press.moved {
+                        press.slip(event)
+                    } else {
+                        within_a_cell(press.cell, event)
+                    }
+            });
+            if click_here {
                 app.selection_range = None;
                 return click(app, event.row as usize, event.column as usize, client).await;
             }
@@ -87,8 +101,6 @@ pub async fn handle_mouse(
                     app.notice = "Copied selection".into();
                 }
                 app.selection_range = None;
-            } else if anchor.is_some_and(|anchor| within_a_cell(anchor, event)) {
-                return click(app, event.row as usize, event.column as usize, client).await;
             }
         }
         _ => {}
@@ -101,17 +113,68 @@ fn within_a_cell((column, row): (u16, u16), event: MouseEvent) -> bool {
     event.row == row && event.column.abs_diff(column) <= 1
 }
 
-/// Whether the pointer slipped a cell at most from the press and both are on
-/// the same control. A dialog's own surface is not one: its text is there to
-/// be read and copied.
-fn slip_on_target(app: &App, (column, row): (u16, u16), event: MouseEvent) -> bool {
-    let target = |row: u16, column: u16| {
-        app.hit_at(usize::from(row), usize::from(column))
-            .filter(|target| !matches!(target, HitTarget::DialogSurface | HitTarget::DialogItem(_)))
-    };
-    within_a_cell((column, row), event)
-        && target(row, column)
-            .is_some_and(|pressed| target(event.row, event.column) == Some(pressed))
+/// A left press waiting for its release: where it was made, the control it
+/// was on in the frame on screen then and the request that control answers,
+/// and whether the pointer has moved, or left that control, since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Press {
+    cell: (u16, u16),
+    target: Option<HitTarget>,
+    request: Option<String>,
+    moved: bool,
+    left: bool,
+}
+
+impl Press {
+    fn at(app: &App, event: MouseEvent) -> Self {
+        let target = app.hit_at(event.row as usize, event.column as usize);
+        Self {
+            cell: (event.column, event.row),
+            request: request_of(app, target.as_ref()),
+            target,
+            moved: false,
+            left: false,
+        }
+    }
+
+    /// Whether the pointer is on the control the press was made on, for the
+    /// same request, and never left it.
+    fn still_on(&self, app: &App, event: MouseEvent) -> bool {
+        let target = app.hit_at(event.row as usize, event.column as usize);
+        !self.left && target == self.target && request_of(app, target.as_ref()) == self.request
+    }
+
+    /// Whether a press that moved is a slip of the hand on a control: a cell
+    /// at most, on something a click acts on. Text is there to be selected:
+    /// a dialog's own surface, a review row's code, the conversation.
+    fn slip(&self, event: MouseEvent) -> bool {
+        within_a_cell(self.cell, event)
+            && self.target.as_ref().is_some_and(|target| {
+                !matches!(
+                    target,
+                    HitTarget::DialogSurface
+                        | HitTarget::DialogItem(_)
+                        | HitTarget::DiffBodyRow(_)
+                        | HitTarget::DiffTreeRow(_)
+                )
+            })
+    }
+}
+
+/// The request a control answers, so a card replaced under a held press is
+/// not answered by its release: a permission's id (and whether an "always"
+/// answer waits for its confirmation, which changes what the chips do), a
+/// question's id.
+fn request_of(app: &App, target: Option<&HitTarget>) -> Option<String> {
+    match target? {
+        HitTarget::PermissionOption(_) | HitTarget::PermissionFocus => app
+            .first_pending_permission()
+            .map(|pending| format!("{}:{:?}", pending.permission_id, app.confirm_always)),
+        HitTarget::QuestionChoice(_) => app
+            .first_pending_question()
+            .map(|pending| pending.question_id.clone()),
+        _ => None,
+    }
 }
 
 async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> Result<AppAction> {
