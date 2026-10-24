@@ -51,6 +51,14 @@ const labelStarts = (menu: Locator) =>
       return Math.round(range.getBoundingClientRect().left);
     }),
   );
+/** The live choice's tick, as a picker's: a ✓ at the row's trailing end, 8px in. */
+const trailingTick = (menu: Locator) =>
+  menu.locator('[aria-checked="true"]').evaluate((row) => {
+    const tick = row.querySelector(".select-check");
+    return tick
+      ? { text: tick.textContent?.trim(), inset: Math.round(row.getBoundingClientRect().right - tick.getBoundingClientRect().right) }
+      : undefined;
+  });
 async function selectEffort(model: Locator, value: string) {
   if ((await model.getAttribute("aria-expanded")) !== "true") await model.click();
   const slider = model.page().getByRole("slider", { name: "Reasoning effort", exact: true });
@@ -7514,10 +7522,11 @@ test("one project groups worktree conversations while drafts, permissions, files
     .click();
   const current = page.getByRole("menuitemradio", { name: "Project folder", exact: true });
   await expect(current).toHaveAttribute("aria-checked", "true");
-  // The tick column is kept on every row, so the rows' labels line up.
-  expect(
-    new Set(await labelStarts(page.getByRole("menu", { name: "Choose working location", exact: true }))).size,
-  ).toBe(1);
+  // Ticked at its trailing end, as a picker's option is; the labels stay
+  // beside their icons, where they were before the menu had a tick.
+  const locations = page.getByRole("menu", { name: "Choose working location", exact: true });
+  expect(new Set(await labelStarts(locations)).size).toBe(1);
+  expect(await trailingTick(locations)).toEqual({ text: "✓", inset: 8 });
   if (process.env.HAARNESS_SCREENSHOTS)
     for (const theme of ["dark", "light"] as const) {
       await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
