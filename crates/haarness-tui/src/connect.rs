@@ -133,8 +133,22 @@ pub(crate) struct PendingLogin {
     /// Since when the checks go unanswered (the start of the first that
     /// did), while they do.
     pub(crate) unreachable_since: Option<Instant>,
+    /// Checks gone unanswered in a row.
+    pub(crate) misses: u32,
     /// Whether we managed to hand the URL to a browser ourselves.
     pub opened: bool,
+}
+
+impl PendingLogin {
+    /// Whether the wait screen says the server is not answering: once the
+    /// checks have gone unanswered for as long as one may take, or twice in
+    /// a row, never for one dropped request.
+    pub(crate) fn unreachable(&self) -> bool {
+        self.misses >= 2
+            || self
+                .unreachable_since
+                .is_some_and(|since| since.elapsed() >= CHECK_TIMEOUT)
+    }
 }
 
 /// What one sign-in check came back with.
@@ -146,6 +160,20 @@ pub(crate) enum CheckAnswer {
     Refused(String),
     /// No answer: a dropped connection, a timeout, a gateway in between.
     Unanswered(String),
+}
+
+/// Tell the server to stop waiting for the sign-in `id`, in the background:
+/// nothing waits on the answer, and a sign-in it no longer has is no error.
+fn stop_login(client: &ApiClient, id: &str) {
+    if id.is_empty() {
+        return;
+    }
+    let (client, id) = (client.clone(), id.to_owned());
+    tokio::spawn(async move {
+        let _ = client
+            .manage("providers", &json!({"action":"login_cancel","id":id}))
+            .await;
+    });
 }
 
 /// Ask the server how the sign-in `id` is doing, within [`CHECK_TIMEOUT`].
@@ -229,19 +257,7 @@ impl App {
             // An older server, or no server at all: the picker still opens
             // from what this client already knows, and methods are resolved
             // when a provider is chosen.
-            _ => {
-                self.connect.catalog = self
-                    .providers
-                    .iter()
-                    .map(|provider| ConnectProvider {
-                        id: provider.id.clone(),
-                        name: provider.name.clone(),
-                        connected: provider.authenticated,
-                        models: provider.models.len(),
-                        ..ConnectProvider::default()
-                    })
-                    .collect();
-            }
+            _ => self.connect.catalog = self.known_providers(),
         }
         if let Some(id) = preselect {
             let id = id.trim().to_ascii_lowercase();
@@ -253,6 +269,38 @@ impl App {
             }
             self.notice = format!("No provider called {id} · pick one from the list");
         }
+        self.show_connect_picker();
+        Ok(())
+    }
+
+    /// Back to the picker from a sign-in that failed, from the catalog it was
+    /// opened with: the server may be the reason it failed, and the keys
+    /// must not wait on it.
+    pub(crate) fn return_to_connect_picker(&mut self) {
+        self.connect.provider = None;
+        self.connect.login = None;
+        if self.connect.catalog.is_empty() {
+            self.connect.catalog = self.known_providers();
+        }
+        self.show_connect_picker();
+    }
+
+    /// The providers this client knows, for a picker without the server's
+    /// catalog.
+    fn known_providers(&self) -> Vec<ConnectProvider> {
+        self.providers
+            .iter()
+            .map(|provider| ConnectProvider {
+                id: provider.id.clone(),
+                name: provider.name.clone(),
+                connected: provider.authenticated,
+                models: provider.models.len(),
+                ..ConnectProvider::default()
+            })
+            .collect()
+    }
+
+    fn show_connect_picker(&mut self) {
         // Connected rows are marked in the picker's gutter, so every name
         // starts in the same column.
         let mut entries: Vec<OptionEntry> = self
@@ -290,7 +338,6 @@ impl App {
             kind: OptionsKind::ConnectProvider,
             entries,
         });
-        Ok(())
     }
 
     /// Whether a picker row is a provider that already works. The view marks
@@ -504,6 +551,7 @@ impl App {
                     last_poll: None,
                     check: None,
                     unreachable_since: None,
+                    misses: 0,
                     opened: false,
                 });
                 self.open_overlay(Overlay::ProviderLogin);
@@ -524,6 +572,7 @@ impl App {
             last_poll: None,
             check: None,
             unreachable_since: None,
+            misses: 0,
             opened: false,
         };
         anyhow::ensure!(
@@ -607,6 +656,7 @@ impl App {
         let view = match answer {
             CheckAnswer::Answered(view) => {
                 login.unreachable_since = None;
+                login.misses = 0;
                 view
             }
             CheckAnswer::Refused(error) => {
@@ -614,10 +664,14 @@ impl App {
                 return Ok(());
             }
             CheckAnswer::Unanswered(error) => {
+                login.misses += 1;
                 let since = *login
                     .unreachable_since
                     .get_or_insert_with(|| login.last_poll.unwrap_or_else(Instant::now));
                 if since.elapsed() >= UNREACHABLE_LIMIT {
+                    // The server may still be waiting for the browser, on a
+                    // port a new attempt needs.
+                    stop_login(client, &login.id);
                     login.state = LoginState::Failed(error);
                 }
                 return Ok(());
@@ -645,13 +699,7 @@ impl App {
     pub(crate) fn cancel_login(&mut self, client: &ApiClient) {
         if let Some(login) = self.connect.login.take() {
             if login.state == LoginState::Pending {
-                let client = client.clone();
-                let id = login.id;
-                tokio::spawn(async move {
-                    let _ = client
-                        .manage("providers", &json!({"action":"login_cancel","id":id}))
-                        .await;
-                });
+                stop_login(client, &login.id);
                 self.notice = format!("Sign-in to {} cancelled", login.name);
             }
         }
@@ -663,6 +711,7 @@ impl App {
         let Some(login) = self.connect.login.take() else {
             return Ok(());
         };
+        stop_login(client, &login.id);
         if self.connect.provider.is_none() {
             self.connect.provider = self
                 .connect

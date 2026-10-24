@@ -1904,10 +1904,7 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
         match key.code {
             // A failed sign-in has nothing left to cancel; Escape goes back to
             // the providers, as its "esc back" says.
-            KeyCode::Esc if failed => {
-                app.connect.login = None;
-                app.open_connect_picker(None, client).await?;
-            }
+            KeyCode::Esc if failed => app.return_to_connect_picker(),
             KeyCode::Esc => app.cancel_login(client),
             KeyCode::Enter if failed => app.retry_login(client).await?,
             KeyCode::Enter | KeyCode::Char('o') => app.reopen_login_browser(),
