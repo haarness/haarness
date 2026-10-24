@@ -215,6 +215,7 @@ impl App {
         let width = size.0.max(1) as usize;
         let height = size.1.max(1) as usize;
         self.frame_width.set(width);
+        self.copy_panes.borrow_mut().clear();
         if let Some(terminal) = &self.terminal {
             let lines = crate::pty_view::frame(terminal, self.theme, self.language, width, height);
             return self.finish_frame(lines, Vec::new(), height);
@@ -438,6 +439,10 @@ impl App {
             // The divider belongs to the pane, not its content. Merge one
             // sidebar row (possibly empty) into every row of the region so
             // the rule never breaks around sparse sections.
+            self.copy_panes.borrow_mut().push(frame::CopyPane {
+                rows: region_top..region_end,
+                columns: panel_start..width,
+            });
             for row in region_top..region_end {
                 let side_line = sidebar_rows.next().unwrap_or_else(Line::empty);
                 if let Some(target) = lines.get_mut(row) {
@@ -563,15 +568,12 @@ impl App {
             }
         }
         *self.hit_rows.borrow_mut() = hits;
-        *self.last_frame.borrow_mut() = lines.iter().map(Line::text).collect();
-        if let Some(((row1, col1), (row2, col2))) = self.normalized_selection() {
-            for (row, line) in lines.iter_mut().enumerate() {
-                if row < row1 || row > row2 {
-                    continue;
-                }
-                let from = if row == row1 { col1 } else { 0 };
-                let to = if row == row2 { col2 + 1 } else { usize::MAX };
-                span::highlight_range(line, from, to, &self.theme);
+        *self.last_frame.borrow_mut() = frame::CopyFrame::new(&lines, self.copy_panes.take());
+        // Paint exactly what a release copies: the pane the drag started in,
+        // without decoration.
+        for (row, columns) in self.selection_runs() {
+            if let Some(line) = lines.get_mut(row) {
+                span::highlight_range(line, columns.start, columns.end, &self.theme);
             }
         }
         lines
@@ -827,6 +829,10 @@ fn apply_toast(
     // under the toast must not leave a stray glyph or two beside it.
     let margin = width.saturating_sub(left + card_width);
     lines.resize_with(height, Line::empty);
+    app.copy_panes.borrow_mut().push(frame::CopyPane {
+        rows: top..(top + card.len()).min(height),
+        columns: left..width,
+    });
     for (offset, mut row) in card.into_iter().enumerate() {
         if top + offset >= height {
             break;
@@ -953,6 +959,10 @@ fn apply_dialog(
     // beside the card — the last digit of the version, half a word — so it
     // stays blank; a wide margin still shows the chat behind.
     let sliver = left < 6;
+    app.copy_panes.borrow_mut().push(frame::CopyPane {
+        rows: top..top + card_height,
+        columns: left..left + card_width,
+    });
     for (offset, card_line) in card.lines.into_iter().take(card_height).enumerate() {
         let row = top + offset;
         let base = if sliver {
@@ -1082,9 +1092,11 @@ fn merge_columns(
             .push(Span::new(" ".repeat(remaining), theme.muted));
     }
     let panel_padding = sidebar_width.min(2);
-    target
-        .spans
-        .push(Span::new(" ".repeat(panel_padding), theme.surface).on(theme.surface));
+    target.spans.push(
+        Span::new(" ".repeat(panel_padding), theme.surface)
+            .on(theme.surface)
+            .unselectable(),
+    );
     let mut panel_remaining = sidebar_width.saturating_sub(panel_padding);
     for mut span in side.spans {
         if panel_remaining == 0 {

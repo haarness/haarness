@@ -230,6 +230,29 @@ fn native_notification(_message: String) {}
 /// Copy text for the user: OSC 52 (works over SSH and inside tmux with
 /// passthrough) plus the native clipboard tool when one exists.
 pub fn copy_to_clipboard(text: &str) {
+    // Unit tests read what was copied instead of replacing the clipboard of
+    // whoever runs them.
+    #[cfg(test)]
+    {
+        COPIED.with(|copied| copied.borrow_mut().push(text.to_owned()));
+    }
+    #[cfg(not(test))]
+    copy_for_real(text);
+}
+
+#[cfg(test)]
+thread_local! {
+    static COPIED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// What this test thread copied since it last asked.
+#[cfg(test)]
+pub(crate) fn take_copied() -> Vec<String> {
+    COPIED.with(|copied| std::mem::take(&mut *copied.borrow_mut()))
+}
+
+#[cfg(not(test))]
+fn copy_for_real(text: &str) {
     let encoded = base64(text.as_bytes());
     // Cap pathological sizes; terminals commonly reject huge OSC payloads.
     if encoded.len() < 100_000 {
@@ -246,7 +269,7 @@ pub fn copy_to_clipboard(text: &str) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(test)))]
 fn native_copy(tool: &str, text: &str) -> bool {
     use std::process::{Command, Stdio};
     let Ok(mut child) = Command::new(tool)
@@ -263,6 +286,7 @@ fn native_copy(tool: &str, text: &str) -> bool {
     child.wait().map(|status| status.success()).unwrap_or(false)
 }
 
+#[cfg(not(test))]
 fn base64(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);

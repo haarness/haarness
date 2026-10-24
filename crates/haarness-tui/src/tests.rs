@@ -12969,6 +12969,273 @@ fn selection_uses_display_cells_for_wide_glyphs() {
     assert_eq!(app.selected_text(), "界🙂");
 }
 
+/// Where `needle` starts on screen, as a mouse reports it: (column, row).
+fn screen_cell(lines: &[Line], needle: &str) -> (u16, u16) {
+    let row = lines
+        .iter()
+        .position(|line| line_text(line).contains(needle))
+        .unwrap_or_else(|| panic!("{needle:?} is not on screen"));
+    let text = line_text(&lines[row]);
+    let column = text[..text.find(needle).unwrap()].width();
+    (u16::try_from(column).unwrap(), u16::try_from(row).unwrap())
+}
+
+/// The cell just past `needle` on its row.
+fn screen_end(lines: &[Line], needle: &str) -> (u16, u16) {
+    let (column, row) = screen_cell(lines, needle);
+    (column + u16::try_from(needle.width()).unwrap() - 1, row)
+}
+
+/// A drag down a reply beside the docked sidebar copies the reply as it was
+/// written: none of the sidebar's text on the same rows, no reply marker and
+/// no margin. Dragging inside the sidebar copies only the sidebar.
+#[test]
+fn selection_beside_the_sidebar_copies_only_its_own_pane() {
+    let thread = fixture_thread();
+    let items = vec![
+        message_item(
+            1,
+            &thread,
+            ItemData::UserMessage {
+                text: "summarise the plan".into(),
+                attachments: Vec::new(),
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        ),
+        message_item(
+            2,
+            &thread,
+            ItemData::AssistantMessage {
+                text: "alpha one\nbeta two\ngamma three\ndelta four\nepsilon five".into(),
+            },
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = true;
+    let lines = app.lines((120, 40));
+    let panel = 120 - app.sidebar_width(120);
+    assert!(panel < 120, "the sidebar is docked");
+    let (start, end) = (screen_cell(&lines, "alpha"), screen_end(&lines, "five"));
+    let beside: String = lines[usize::from(start.1)..=usize::from(end.1)]
+        .iter()
+        .map(|line| line_text(line).chars().skip(panel).collect::<String>())
+        .collect();
+    assert!(
+        !beside.trim().is_empty(),
+        "the sidebar has text on these rows: {lines:#?}"
+    );
+    app.selection_range = Some((start, end));
+    assert_eq!(
+        app.selected_text(),
+        "alpha one\nbeta two\ngamma three\ndelta four\nepsilon five"
+    );
+    // The highlight is what the release copies: nothing in the sidebar.
+    let painted = app.lines((120, 40));
+    let selected = app.theme.primary;
+    let rows = usize::from(start.1)..=usize::from(end.1);
+    for (row, line) in painted
+        .iter()
+        .enumerate()
+        .filter(|(row, _)| rows.contains(row))
+    {
+        let mut column = 0;
+        for span in &line.spans {
+            if span.bg == Some(selected) && !span.text.trim().is_empty() {
+                assert!(column < panel, "row {row} paints the sidebar");
+            }
+            column += span.width();
+        }
+    }
+
+    // From inside the sidebar, the conversation beside it stays out.
+    let side = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            !line_text(line)
+                .chars()
+                .skip(panel + 2)
+                .collect::<String>()
+                .trim()
+                .is_empty()
+        })
+        .map(|(row, _)| row)
+        .collect::<Vec<_>>();
+    let (first, last) = (side[0], side[side.len() - 1]);
+    let first = u16::try_from(first).unwrap();
+    let last = u16::try_from(last).unwrap();
+    app.selection_range = Some(((u16::try_from(panel).unwrap(), first), (119, last)));
+    let copied = app.selected_text();
+    assert!(!copied.is_empty());
+    for word in ["alpha", "beta", "summarise"] {
+        assert!(!copied.contains(word), "{copied}");
+    }
+}
+
+/// Gutters, rails and quote bars are drawn, not written: a selection leaves
+/// them out. The same glyphs written in a message are copied.
+#[test]
+fn selection_leaves_out_gutters_but_keeps_written_bars() {
+    let thread = fixture_thread();
+    let items = vec![
+        message_item(
+            1,
+            &thread,
+            ItemData::UserMessage {
+                text: "first ask\n▎ my own bar".into(),
+                attachments: Vec::new(),
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        ),
+        message_item(
+            2,
+            &thread,
+            ItemData::ToolCall {
+                call_id: "fails".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": "cargo build"}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        ),
+        message_item(
+            3,
+            &thread,
+            ItemData::ToolResult {
+                call_id: "fails".into(),
+                name: "bash".into(),
+                output: "exit: 1\nerror: first failure\n▏ printed bar".into(),
+                is_error: false,
+                metadata: serde_json::json!({"exit": 1, "truncated": false}),
+            },
+        ),
+        message_item(
+            4,
+            &thread,
+            ItemData::AssistantMessage {
+                text: "Reply start\n▎ written bar\n\n> quoted aside\n\n- listed item".into(),
+            },
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = false;
+    let lines = app.lines((100, 40));
+
+    app.selection_range = Some((
+        screen_cell(&lines, "first ask"),
+        screen_end(&lines, "own bar"),
+    ));
+    assert_eq!(app.selected_text(), "first ask\n▎ my own bar");
+
+    app.selection_range = Some((
+        screen_cell(&lines, "error: first"),
+        screen_end(&lines, "printed bar"),
+    ));
+    assert_eq!(app.selected_text(), "error: first failure\n▏ printed bar");
+
+    // From the start of the row: the reply marker and the margin stay out
+    // too, a quote loses only its bar and a list keeps its marker.
+    let (_, reply) = screen_cell(&lines, "Reply start");
+    app.selection_range = Some(((0, reply), screen_end(&lines, "listed item")));
+    let copied = app.selected_text();
+    let rows: Vec<&str> = copied.lines().filter(|row| !row.is_empty()).collect();
+    assert_eq!(rows[0], "Reply start", "{copied}");
+    assert_eq!(rows[1], "▎ written bar", "{copied}");
+    assert_eq!(rows[2], "quoted aside", "{copied}");
+    assert!(
+        rows[3].ends_with("listed item") && !rows[3].starts_with(' '),
+        "{copied}"
+    );
+}
+
+/// A click whose pointer slips a cell before the release is still a click:
+/// it presses what it is on, paints nothing and copies nothing.
+#[tokio::test]
+async fn a_click_that_moves_one_cell_is_a_click_not_a_copy() {
+    let thread = fixture_thread();
+    let items = vec![
+        message_item(
+            1,
+            &thread,
+            ItemData::ToolCall {
+                call_id: "ok".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": "cat notes"}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        ),
+        message_item(
+            2,
+            &thread,
+            ItemData::ToolResult {
+                call_id: "ok".into(),
+                name: "bash".into(),
+                output: "exit: 0\nfirst line\nsecond line".into(),
+                is_error: false,
+                metadata: serde_json::json!({"exit": 0, "truncated": false}),
+            },
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = false;
+    let id = app.items[1].id;
+    let lines = app.lines((100, 30));
+    let (column, row) = screen_cell(&lines, "cat notes");
+    let client = offline_client();
+    let mouse = |kind, column| MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    crate::terminal::take_copied();
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), column),
+        (MouseEventKind::Drag(MouseButton::Left), column + 1),
+    ] {
+        crate::input::mouse::handle_mouse(&mut app, mouse(kind, column), &client)
+            .await
+            .unwrap();
+    }
+    assert_eq!(app.selection_range, None, "a one-cell slip paints nothing");
+    crate::input::mouse::handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Up(MouseButton::Left), column + 1),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(app.expanded.contains(&id), "the click opened the output");
+    assert_eq!(crate::terminal::take_copied(), Vec::<String>::new());
+    assert_ne!(app.notice, "Copied selection");
+
+    // Two cells is a drag: it copies.
+    let lines = app.lines((100, 30));
+    let (column, row) = screen_cell(&lines, "first line");
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), column),
+        (MouseEventKind::Drag(MouseButton::Left), column + 4),
+        (MouseEventKind::Up(MouseButton::Left), column + 4),
+    ] {
+        crate::input::mouse::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(crate::terminal::take_copied(), vec!["first".to_owned()]);
+}
+
 // ---------------------------------------------------------------------------
 // Shared interaction surfaces: dialogs, toasts, shortcuts,
 // truthful disclosure affordances, and display-cell-correct Unicode input.

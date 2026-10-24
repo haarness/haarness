@@ -223,7 +223,7 @@ fn strip_row(
     width: usize,
     theme: &Theme,
 ) -> Line {
-    let mut spans = vec![Span::new(RAIL, rail)];
+    let mut spans = vec![Span::new(RAIL, rail).unselectable()];
     spans.extend(content);
     let mut line = clamp(spans, width);
     let used: usize = line.spans.iter().map(Span::width).sum();

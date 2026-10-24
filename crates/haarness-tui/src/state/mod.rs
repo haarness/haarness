@@ -13,7 +13,6 @@ use haarness_protocol::{
     Thread, ThreadId, Turn, TurnId, WorkflowDefinition, WorkflowInvalidDefinition, WorkflowRun,
     WorkflowRunStatus, WorkspaceListResponse, WorkspaceRefsResponse,
 };
-use unicode_width::UnicodeWidthChar as _;
 
 use crate::commands::COMMANDS;
 use crate::input::{WorkspaceMutation, WorkspaceRefOperation, composer::Composer};
@@ -1047,8 +1046,11 @@ pub struct App {
     pub hovered_cell: Option<(u16, u16)>,
     /// Screen-anchored drag selection: (anchor, head), char-cell coords.
     pub selection_range: Option<((u16, u16), (u16, u16))>,
-    /// Plain text of the last rendered frame rows, for selection copy.
-    pub last_frame: std::cell::RefCell<Vec<String>>,
+    /// The last rendered frame as a selection copies it.
+    pub last_frame: std::cell::RefCell<crate::view::frame::CopyFrame>,
+    /// Panes drawn into the frame being built (see
+    /// [`crate::view::frame::CopyPane`]).
+    pub copy_panes: std::cell::RefCell<Vec<crate::view::frame::CopyPane>>,
     /// Rendered-lines cache for expensive items (markdown, diffs); entries
     /// are keyed by item and invalidated by width or generation changes.
     pub render_cache: std::cell::RefCell<std::collections::HashMap<ItemId, CachedRender>>,
@@ -1279,7 +1281,8 @@ impl App {
             mouse_down: None,
             hovered_cell: None,
             selection_range: None,
-            last_frame: std::cell::RefCell::new(Vec::new()),
+            last_frame: std::cell::RefCell::default(),
+            copy_panes: std::cell::RefCell::new(Vec::new()),
             render_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             diff_stats: std::cell::RefCell::new(std::collections::HashMap::new()),
             batch_results: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3425,55 +3428,29 @@ impl App {
 }
 
 impl App {
-    /// The drag selection normalized to ((first_row, first_col), (last_row,
-    /// last_col)) in char cells.
-    #[must_use]
-    pub fn normalized_selection(&self) -> Option<((usize, usize), (usize, usize))> {
+    /// The drag selection as ((row, column) where it started, (row, column)
+    /// it reached).
+    fn selection_ends(&self) -> Option<((usize, usize), (usize, usize))> {
         let ((ax, ay), (bx, by)) = self.selection_range?;
-        let a = (ay as usize, ax as usize);
-        let b = (by as usize, bx as usize);
-        Some(if a <= b { (a, b) } else { (b, a) })
+        Some(((ay as usize, ax as usize), (by as usize, bx as usize)))
     }
 
-    /// Text under the current drag selection, extracted from the last frame.
+    /// Text under the current drag selection, extracted from the last frame:
+    /// only the pane the drag started in, without decoration.
     #[must_use]
     pub fn selected_text(&self) -> String {
-        let Some(((row1, col1), (row2, col2))) = self.normalized_selection() else {
+        let Some((anchor, head)) = self.selection_ends() else {
             return String::new();
         };
-        let frame = self.last_frame.borrow();
-        let mut out = Vec::new();
-        for row in row1..=row2.min(frame.len().saturating_sub(1)) {
-            let from = if row == row1 { col1 } else { 0 };
-            let to = if row == row2 { col2 + 1 } else { usize::MAX };
-            let mut cell = 0;
-            let mut slice = String::new();
-            let mut selected_base = false;
-            for character in frame[row].chars() {
-                let cells = character.width().unwrap_or(0);
-                let next = cell + cells;
-                // Mouse columns are display cells, not Unicode scalar
-                // indexes. Intersect the selected cells with each glyph so a
-                // CJK character or emoji is copied whole from either cell.
-                let intersects = if cells == 0 {
-                    selected_base
-                } else {
-                    next > from && cell < to
-                };
-                if intersects {
-                    slice.push(character);
-                }
-                selected_base = intersects;
-                cell = next;
-                if cell >= to && cells > 0 {
-                    // Keep immediately following combining marks, but no
-                    // later visible glyphs.
-                    selected_base = true;
-                }
-            }
-            out.push(slice.trim_end().to_owned());
-        }
-        out.join("\n")
+        self.last_frame.borrow().text(anchor, head)
+    }
+
+    /// The cells to paint as selected: what [`Self::selected_text`] copies.
+    pub(crate) fn selection_runs(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        let Some((anchor, head)) = self.selection_ends() else {
+            return Vec::new();
+        };
+        self.last_frame.borrow().painted(anchor, head)
     }
 }
 

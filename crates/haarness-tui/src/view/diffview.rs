@@ -53,6 +53,19 @@ pub fn frame(
             Vec::new()
         };
         let patch = patch_rows(app, viewer, patch_width, body_height, &mut hits, tree_width);
+        if tree_width > 0 {
+            // The tree and the patch are panes: a drag down the patch never
+            // copies file names beside it.
+            let mut panes = app.copy_panes.borrow_mut();
+            panes.push(crate::view::frame::CopyPane {
+                rows: 2..2 + body_height,
+                columns: 0..tree_width,
+            });
+            panes.push(crate::view::frame::CopyPane {
+                rows: 2..2 + body_height,
+                columns: tree_width + 1..width,
+            });
+        }
         for row in 0..body_height {
             let mut spans = Vec::new();
             if tree_width > 0 {
@@ -62,7 +75,7 @@ pub fn frame(
                         .unwrap_or_else(|| blank(tree_width, theme))
                         .spans,
                 );
-                spans.push(Span::new("│", theme.hairline()));
+                spans.push(Span::new("│", theme.hairline()).unselectable());
             }
             spans.extend(
                 patch

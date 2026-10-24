@@ -1260,7 +1260,11 @@ fn push_row(
     theme: &Theme,
     focused: bool,
 ) {
-    let mut row = vec![Span::new(RAIL, theme.accent).on(theme.overlay)];
+    let mut row = vec![
+        Span::new(RAIL, theme.accent)
+            .on(theme.overlay)
+            .unselectable(),
+    ];
     row.append(&mut spans);
     let used: usize = row.iter().map(Span::width).sum();
     row.push(Span::new(" ".repeat(width.saturating_sub(used)), theme.text).on(theme.overlay));
@@ -1413,7 +1417,13 @@ fn chip_rows(app: &App, width: usize, staged: bool) -> Vec<ChipRow> {
     let chips = chips(app, staged);
     let settling = crate::input::settling_answer(app).is_some();
     let selection = app.permission_selection.min(chips.len() - 1);
-    let start = || vec![Span::new(RAIL, theme.accent).on(theme.overlay)];
+    let start = || {
+        vec![
+            Span::new(RAIL, theme.accent)
+                .on(theme.overlay)
+                .unselectable(),
+        ]
+    };
     let finish = |mut spans: Vec<Span>, column: usize| {
         spans.push(
             Span::new(" ".repeat(width.saturating_sub(column)), theme.text).on(theme.overlay),

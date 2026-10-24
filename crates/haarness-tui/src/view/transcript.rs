@@ -1067,7 +1067,9 @@ pub(crate) fn mark_reply(lines: &mut [Line], theme: &Theme) {
             span.text = rest.to_owned();
         }
     }
-    first.spans.insert(0, Span::new("▸ ", theme.primary));
+    first
+        .spans
+        .insert(0, Span::new("▸ ", theme.primary).unselectable());
 }
 
 /// The user's prompt as a raised block: sage bar, surface background, padded
@@ -1175,7 +1177,7 @@ fn user_block_rows(
                 .iter()
                 .map(|span| span.text.width())
                 .sum::<usize>();
-            let mut spans = vec![Span::new("▎ ", theme.user).on(theme.surface)];
+            let mut spans = vec![Span::new("▎ ", theme.user).on(theme.surface).unselectable()];
             spans.extend(
                 row.spans
                     .into_iter()
@@ -1252,7 +1254,7 @@ fn gutter_row(text: &str, width: usize, color: haarness_opentui::Color, theme: &
         // A hairline quote bar, not a box edge: tool output is subordinate
         // content hanging off the activity row, the same way a prompt hangs
         // off its own bar.
-        Span::new("  ▏ ", theme.hairline()),
+        Span::new("  ▏ ", theme.hairline()).unselectable(),
         Span::new(single_line(text, width.saturating_sub(6)), color),
     ])
 }
@@ -1265,13 +1267,17 @@ fn gutter_rows(
     color: haarness_opentui::Color,
     theme: &Theme,
 ) -> Vec<Line> {
-    wrap_spans(
+    let mut rows = wrap_spans(
         &[Span::new(text.replace('\r', ""), color)],
         width.saturating_sub(2),
         "  ▏ ",
         "  ▏ ",
         theme.hairline(),
-    )
+    );
+    for row in &mut rows {
+        crate::view::span::decorate_prefix(row, "  ▏ ");
+    }
+    rows
 }
 
 /// Older runtimes persisted every tool call as it streamed but buffered the
@@ -2478,9 +2484,12 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
         mark_reply(&mut live, theme);
         if let Some(last) = live.last_mut() {
             if last.width() < width {
-                last.spans.push(Span::new("▌", theme.primary));
+                last.spans
+                    .push(Span::new("▌", theme.primary).unselectable());
             } else {
-                live.push(line("  ▌", theme.primary));
+                live.push(Line::new(vec![
+                    Span::new("  ▌", theme.primary).unselectable(),
+                ]));
             }
         }
         let mut block = TaggedLines::default();
