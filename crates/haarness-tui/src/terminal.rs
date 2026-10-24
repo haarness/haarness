@@ -253,26 +253,71 @@ pub(crate) fn take_copied() -> Vec<String> {
 
 #[cfg(not(test))]
 fn copy_for_real(text: &str) {
+    // The helpers run on a thread of their own, one copy after another, so
+    // one that never exits cannot hold up the TUI; a copy still waiting when
+    // a newer one comes is dropped for it.
+    static COPIES: std::sync::OnceLock<std::sync::mpsc::Sender<String>> =
+        std::sync::OnceLock::new();
     let encoded = base64(text.as_bytes());
     // Cap pathological sizes; terminals commonly reject huge OSC payloads.
     if encoded.len() < 100_000 {
         let _ = write!(io::stdout(), "\x1b]52;c;{encoded}\x07");
         let _ = io::stdout().flush();
     }
-    #[cfg(target_os = "macos")]
-    native_copy("pbcopy", text);
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        if !native_copy("wl-copy", text) {
-            native_copy("xclip", text);
-        }
+    let helpers = clipboard_helpers(std::env::consts::OS);
+    if helpers.is_empty() {
+        return;
+    }
+    let copies = COPIES.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<String>();
+        let _ = std::thread::Builder::new()
+            .name("clipboard".into())
+            .spawn(move || {
+                while let Ok(mut text) = receiver.recv() {
+                    while let Ok(newer) = receiver.try_recv() {
+                        text = newer;
+                    }
+                    for helper in helpers {
+                        if run_clipboard_helper(helper, &text, CLIPBOARD_HELPER_WAIT) {
+                            break;
+                        }
+                    }
+                }
+            });
+        sender
+    });
+    let _ = copies.send(text.to_owned());
+}
+
+/// How long a clipboard helper may take before it is killed.
+#[cfg(not(test))]
+const CLIPBOARD_HELPER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The clipboard tools tried in turn on `os` (as [`std::env::consts::OS`]
+/// names it), each reading the text on stdin so it never shows on a command
+/// line. X11's is its CLIPBOARD selection, the one Ctrl+V and Ctrl+Shift+V
+/// paste, not PRIMARY, which a middle click pastes. Windows has OSC 52 only.
+fn clipboard_helpers(os: &str) -> &'static [&'static [&'static str]] {
+    match os {
+        "macos" => &[&["pbcopy"]],
+        "windows" => &[],
+        _ => &[
+            &["wl-copy"],
+            &["xclip", "-selection", "clipboard"],
+            &["xsel", "--clipboard", "--input"],
+        ],
     }
 }
 
-#[cfg(all(unix, not(test)))]
-fn native_copy(tool: &str, text: &str) -> bool {
+/// Hand `text` to the clipboard tool `command` on its stdin; true when it took
+/// it. A tool that has not exited after `wait` is killed.
+fn run_clipboard_helper(command: &[&str], text: &str, wait: std::time::Duration) -> bool {
     use std::process::{Command, Stdio};
-    let Ok(mut child) = Command::new(tool)
+    let Some((program, arguments)) = command.split_first() else {
+        return false;
+    };
+    let Ok(mut child) = Command::new(program)
+        .args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -280,10 +325,29 @@ fn native_copy(tool: &str, text: &str) -> bool {
     else {
         return false;
     };
-    if let Some(stdin) = child.stdin.as_mut() {
-        let _ = stdin.write_all(text.as_bytes());
+    if let Some(mut stdin) = child.stdin.take() {
+        // Written beside the wait: a tool that stops reading cannot hold it
+        // past `wait`, and once killed its pipe ends the write. A tool that
+        // exits without reading says by its exit whether it took the text.
+        let text = text.to_owned();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(text.as_bytes());
+        });
     }
-    child.wait().map(|status| status.success()).unwrap_or(false)
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -556,9 +620,74 @@ fn launch(target: &std::ffi::OsStr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MOUSE_TRACKING_DISABLE, MOUSE_TRACKING_ENABLE, osc_text, panic_ends_the_tui,
-        parse_background_variant, parse_terminal_rgb,
+        MOUSE_TRACKING_DISABLE, MOUSE_TRACKING_ENABLE, clipboard_helpers, osc_text,
+        panic_ends_the_tui, parse_background_variant, parse_terminal_rgb, run_clipboard_helper,
     };
+
+    /// X11 gets the CLIPBOARD selection that Ctrl+Shift+V pastes, from xclip
+    /// or else xsel, after Wayland's wl-copy; macOS pbcopy; Windows OSC 52
+    /// alone. The Linux tools are not run here (this runs on macOS too).
+    #[test]
+    fn clipboard_helpers_copy_to_the_clipboard_selection() {
+        assert_eq!(clipboard_helpers("macos"), [["pbcopy"].as_slice()]);
+        assert!(clipboard_helpers("windows").is_empty());
+        for os in ["linux", "freebsd"] {
+            assert_eq!(
+                clipboard_helpers(os),
+                [
+                    ["wl-copy"].as_slice(),
+                    ["xclip", "-selection", "clipboard"].as_slice(),
+                    ["xsel", "--clipboard", "--input"].as_slice(),
+                ]
+            );
+        }
+    }
+
+    /// A helper gets the text on stdin; one that never exits is killed at
+    /// the limit instead of holding the copy, also with text larger than a
+    /// pipe holds; one that is missing or fails says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_clipboard_helper_gets_the_text_and_one_that_hangs_is_killed() {
+        use std::time::{Duration, Instant};
+        let directory =
+            std::env::temp_dir().join(format!("haarness-clipboard-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let sink = directory.join("copied");
+        let script = format!("cat > '{}'", sink.display());
+        assert!(run_clipboard_helper(
+            &["sh", "-c", &script],
+            "copied text",
+            Duration::from_secs(10)
+        ));
+        assert_eq!(std::fs::read_to_string(&sink).unwrap(), "copied text");
+
+        let large = "x".repeat(1 << 20);
+        for text in ["short", large.as_str()] {
+            let started = Instant::now();
+            assert!(!run_clipboard_helper(
+                &["sh", "-c", "sleep 30"],
+                text,
+                Duration::from_millis(200)
+            ));
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+        assert!(!run_clipboard_helper(
+            &["sh", "-c", "exit 1"],
+            "x",
+            Duration::from_secs(5)
+        ));
+        assert!(!run_clipboard_helper(
+            &["haarness-no-such-clipboard-tool"],
+            "x",
+            Duration::from_secs(5)
+        ));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn parses_terminal_background_formats_and_selects_readable_variant() {
