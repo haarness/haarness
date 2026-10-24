@@ -36,7 +36,7 @@ A rebuild or an upgrade can change the executable while an earlier daemon is bus
 
 ## Practical scale
 
-Automatic snapshots now default to Git projects. A plain folder such as Downloads is not scanned for automatic checkpoints unless snapshots are explicitly enabled. Snapshot capture runs off the asynchronous server executor and records the complete managed manifest, without the former 10,000-entry rejection. Ignore rules, symlink handling, restore validation, and SQLite atomicity remain intact.
+Automatic snapshots now default to Git projects. A plain folder such as Downloads is not scanned for automatic checkpoints unless snapshots are explicitly enabled. A chat without a project is the exception: its own folder is checkpointed by default, that folder alone, so Undo works there although the chat home is no Git repository (`snapshots.enabled = false` turns it off). Snapshot capture runs off the asynchronous server executor and records the complete managed manifest, without the former 10,000-entry rejection. Ignore rules, symlink handling, restore validation, and SQLite atomicity remain intact.
 
 The explorer no longer truncates directories at 2,000 entries. Extension catalogs have no 64-tool cap; terminals have no 20-session cap; profile archives have no 4,096-file cap; memory search no longer ignores entries after the first 1,000. Profile export deduplicates identical migrated resources while preserving distinct legacy content.
 
@@ -50,28 +50,68 @@ The preferred CLI/TUI management command is `worktree` / `/worktree`. Existing `
 
 See [desktop verification](records/2026-09-07-desktop-verification.md) for executed scenarios and evidence limits.
 
-## Projects are required
+## Chats without a project
 
-Every desktop conversation belongs to a project folder or a remote server's
-workspace. Both project pickers offer existing projects and New project. With
-no project selected, Home shows an Open project action and recent projects for
-the selected server. The composer, conversation starters, and project tools are
-hidden. New chat opens the folder chooser; cancelling keeps Home visible.
-Startup and server switching restore only an explicitly remembered project,
-never the first saved project. An unavailable project offers Retry and Choose
-another project. Sending never creates a hidden working folder.
+On this computer a chat needs no project. The sidebar's **This computer**
+section, above Projects, lists these chats; its **+** starts another. With
+none yet it is the heading and its +. A first launch, or this computer with no
+project remembered, opens on a ready message box whose folder chip says **No
+folder**; no folder chooser opens. The top **New chat** starts where you are:
+in the open chat's project, or without a folder when This computer's chat (or
+nothing) is open. A project's own New chat starts in that project.
 
-Opening a project or an existing conversation shows a centered Haarness mark
-until the selected history is loaded, without flashing the new-chat starters
-or project Home. A newer chat selection supersedes an earlier pending history
-request. The loading animation respects reduced-motion preferences.
+Each such chat works in a folder of its own that Haarness makes when the chat
+is created: `<Desktop userData>/Chat folders/<YYYY-MM-DD>/<name>`, named from
+up to six words of the first message folded to lowercase ASCII (40 characters
+at most; `chat-` and four letters when the message gives no name), with `-2`,
+`-3`… when the name is taken. It is the chat's working directory and its
+boundary, as a project folder is for a project's chats: tools, shell commands,
+plans and Undo's snapshots work there, and a path outside it, a sibling chat's
+folder included, is outside (see [A chat's own
+folder](PERMISSIONS-AND-EXECUTION.md#a-chats-own-folder)). Delegated chats,
+forks and side chats work in their parent's folder. Archiving a chat keeps its
+folder.
 
-Older general-chat records migrate to ordinary projects in their existing
-working folders. Their connection IDs, conversation databases, saved drafts,
-active session, and trust settings stay intact. The legacy `projectless` marker
-is removed from desktop storage at startup, and the IPC connection API no longer
-accepts it. Existing `<desktop userData>/chats` folders remain accessible in the
-Projects list; new general-chat folders are not created.
+All of these folders live in one **chat home**, `Chat folders` in Desktop's
+app data (never Documents, which a cloud drive may sync; never `Chats`, which
+on a case-insensitive disk is the older general-chat folder). One daemon
+serves it: Desktop starts it with
+`haarness --workspace "<userData>/Chat folders" --chat-home desktop`, which
+marks the folder as [the chat home](REFERENCE.md#the-chat-home) and keeps
+project configuration off (no ancestor `.haarness`, `AGENTS.md` or repository
+approvals). It is saved once
+among the desktop's locations, its index is always live, and it is never a
+project: Settings → Projects, the project lists of Search and the folder chip,
+`desktop projects`, the host catalog and other computers leave it out. Only
+this computer has it; remote servers and other computers still open a project
+first, from their Home.
+
+The message box's bottom row carries the folder chip. For a new chat it opens
+a searchable list: **No folder**, the projects in sidebar order, and **Open
+folder…** (the system folder chooser). For a chat that has started it names
+the folder the chat works in, the chat's own folder or its project, and offers
+Reveal in Finder; a chat never moves. The new-chat heading reads "What should
+we work on?" without a project and "…in {project}?" with one. For a chat
+without a project the Files panel shows its own folder, a new terminal opens
+there (each chat has its own terminals), `@` and Search find the files in it,
+and Review treats it as a folder without Git. Before its first message there
+is no folder yet, and those panels say so. Search lists these chats with
+**This computer** and the chat's folder.
+
+The legacy `projectless` marker is removed from desktop storage at startup,
+and the IPC connection API still rejects it. Older general-chat records
+migrated to ordinary projects in their existing working folders, with their
+connection IDs, conversation databases, saved drafts, active session and trust
+settings intact; existing `<desktop userData>/chats` folders stay in the
+Projects list as such.
+
+Startup and server switching restore an explicitly remembered project (This
+computer counts as one), never the first saved project. An unavailable
+project offers Retry and Choose another project. Opening a project or an
+existing conversation shows a centered Haarness mark until the selected
+history is loaded, without flashing the new-chat screen or Home. A newer chat
+selection supersedes an earlier pending history request. The loading
+animation respects reduced-motion preferences.
 
 ## Remote hosts with multiple projects
 
