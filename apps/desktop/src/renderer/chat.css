@@ -586,6 +586,7 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
   flex: 1;
   min-width: 0;
   font-family: var(--mono);
+  font-variant-ligatures: none;
   font-size: var(--ui-sm);
   color: var(--muted);
 }
@@ -625,6 +626,7 @@ html[dir="rtl"] .tool-target {
   display: inline-flex;
   gap: var(--s1);
   font-family: var(--mono);
+  font-variant-ligatures: none;
   font-size: var(--ui-xs);
   font-variant-numeric: tabular-nums;
 }
@@ -741,6 +743,7 @@ html[dir="rtl"] .tool-target {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--mono);
+  font-variant-ligatures: none;
   font-size: var(--ui-xs);
   color: var(--muted);
 }
@@ -804,6 +807,7 @@ html[dir="rtl"] .tool-target {
 }
 .change-path {
   font-family: var(--mono);
+  font-variant-ligatures: none;
   font-size: var(--ui-xs);
   color: var(--muted);
   padding: var(--s1) var(--s3);
@@ -814,6 +818,7 @@ html[dir="rtl"] .tool-target {
 }
 .change-lines {
   font: var(--ui-sm) / 1.6 var(--mono);
+  font-variant-ligatures: none;
   overflow-x: auto;
   max-height: 280px;
   overflow-y: auto;
@@ -1966,6 +1971,7 @@ html[dir="rtl"] .tool-target {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--mono);
+  font-variant-ligatures: none;
 }
 .command-note-dismiss {
   margin-inline-start: auto;
@@ -2108,6 +2114,7 @@ html[dir="rtl"] .tool-target {
 .chrome-approval bdi,
 .chrome-approval code {
   font-family: var(--mono);
+  font-variant-ligatures: none;
   font-size: var(--ui-sm);
 }
 /* Where a linked path really leads, under the path the tool names. */
@@ -2118,6 +2125,7 @@ html[dir="rtl"] .tool-target {
 }
 .approval-target code {
   font-family: var(--mono);
+  font-variant-ligatures: none;
 }
 /* Why Auto's reviewer left the request to the person: quieter than the
    request itself, which is what is being decided. */
@@ -2149,6 +2157,7 @@ html[dir="rtl"] .tool-target {
 }
 .approval-script-note code {
   font-family: var(--mono);
+  font-variant-ligatures: none;
 }
 .approval-script-toggle {
   min-height: 22px;
@@ -2362,6 +2371,7 @@ html[dir="rtl"] .tool-target {
   font-weight: 500;
   overflow-wrap: anywhere;
   font-family: var(--mono);
+  font-variant-ligatures: none;
 }
 .slash-suggestions > button span {
   overflow: hidden;

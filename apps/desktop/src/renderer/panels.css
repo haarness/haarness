@@ -120,6 +120,7 @@
   font-size: var(--ui-sm);
   font-variant-numeric: tabular-nums;
   font-family: var(--mono);
+  font-variant-ligatures: none;
 }
 /* Totals on the left, view controls on the right, one row at the default
    side-panel width; past that the controls wrap as a group and, at the very
@@ -271,6 +272,7 @@
 }
 .diff-file > header strong {
   font-family: var(--mono);
+  font-variant-ligatures: none;
   font-weight: 500;
   min-width: 0;
   overflow: hidden;
@@ -293,6 +295,7 @@
 .diff-lines,
 .diff-split {
   font: var(--ui-sm) / 1.65 var(--mono);
+  font-variant-ligatures: none;
   overflow-x: auto;
   /* Code keeps left-to-right order in Arabic too, like the editor and the terminal. */
   direction: ltr;
@@ -630,7 +633,7 @@
 .preview-banner-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 12px 12px; }
 .preview-banner-actions button, .preview-version-strip button { padding: 4px 9px; background: var(--surface); border: 1px solid var(--border); border-radius: 5px; }
 .preview-banner-actions button[aria-pressed="true"] { background: var(--selected); }
-.preview-code { max-height: 400px; overflow: auto; padding: 12px; font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.preview-code { max-height: 400px; overflow: auto; padding: 12px; font: 12px/1.5 var(--mono); font-variant-ligatures: none; white-space: pre-wrap; overflow-wrap: anywhere; }
 .preview-added { background: #22c55e25; }.preview-removed { background: #ef444425; text-decoration: line-through; }
 .preview-version-strip { padding: 8px 12px; background: var(--surface); display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
 /* The open file moved on under unsaved edits: say so where the edits are. */

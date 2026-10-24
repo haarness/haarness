@@ -305,6 +305,7 @@
 .account-advanced textarea {
   width: 100%;
   font-family: var(--mono);
+  font-variant-ligatures: none;
   font-size: var(--ui-sm);
 }
 .account-create-footer {
@@ -400,6 +401,7 @@ button.account-signout:hover:not(:disabled) {
 }
 .account-code strong {
   font-family: var(--mono);
+  font-variant-ligatures: none;
   font-size: var(--title);
   letter-spacing: 0.12em;
 }
