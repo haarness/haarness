@@ -771,13 +771,11 @@ fn user_credential(scheme: Option<&str>, name: &str) -> bool {
 /// `@` or `\`; the password and host run to a space (not a
 /// backslash-escaped one), `"`, `/`, `?`, `#` or `\`, so a Windows path is
 /// never read as one and the text is read in linear time. A password never
-/// starts with `@`, `/`, `:` or a space, so `npm:@scope/pkg`, `host:/path`,
-/// `crate::path@0x10` and `name: me@example.com` stay. What follows the last `@` may also pin an
-/// image or a package rather than name a host (`alpine:3.19@sha256:…`,
-/// `node:20@v1.2.3`), a time is no user name (`10:15@home`), and an `npm:`
-/// or `jsr:` spec (`npm:pkg@1.0`) or an address after `mailto:`, `sip:`,
-/// `xmpp:` or `acct:` holds no password unless a second `:` says so: those
-/// stay too.
+/// starts with `@`, `/`, `:`, `<`, `-` or a space, so `npm:@scope/pkg`,
+/// `host:/path`, `crate::path@0x10`, `MAIL FROM:<me@example.com>`,
+/// `${USER:-root}@host` and `name: me@example.com` stay, and a word after
+/// an `@` is the host of an ssh target (`alex@host:icon@2x.png`), not a
+/// user name. See [`hidden_userinfo`] for what else stays.
 fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
     // What may stand before a user name.
     fn head(byte: u8) -> bool {
@@ -832,7 +830,8 @@ fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
         }
         let password = colon + 1;
         if bytes.get(password).is_none_or(|&byte| {
-            byte.is_ascii_whitespace() || matches!(byte, b'"' | b'/' | b'?' | b'#' | b'@' | b':')
+            byte.is_ascii_whitespace()
+                || matches!(byte, b'"' | b'/' | b'?' | b'#' | b'@' | b':' | b'<' | b'-')
         }) {
             at = password;
             start = false;
@@ -849,6 +848,7 @@ fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
         }
         let word = &text[user..end];
         if let Some(last) = word.rfind('@')
+            && (user == 0 || bytes[user - 1] != b'@')
             && let Some(hidden) = hidden_userinfo(&word[..last], &word[last + 1..])
         {
             shown.push_str(&text[copied..user]);
@@ -869,6 +869,20 @@ fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
 /// For `info@after`, a bare `user:password@host` that [`bare_userinfo`]
 /// found: where in `info` the hidden part starts (after an address scheme
 /// such as `mailto:`), or `None` when it holds no credential.
+///
+/// These stay: what pins an image or a package rather than names a host
+/// (`alpine:3.19@sha256:…`, `node:20@v1.2.3`); an `npm:` or `jsr:` spec
+/// (`npm:pkg@1.0`); an IPv6 address (`2001:db8::1@eth0`); a time
+/// (`10:15@home`, `3:30pm@office`, `2026-10-24T08:00:00Z@db1`) or a ratio
+/// (`16:9@2x`); an address after `mailto:`, `sip:`, `xmpp:`, `acct:`, a
+/// cloud member kind (`serviceAccount:`, `group:`, `domain:`, `principal:`)
+/// or a mail header or search field (`from:`, `to:`, `cc:`, `bcc:`,
+/// `email:`), unless a second `:` says it holds a password; and an email
+/// address after any label (`user:alex@example.com`, `owner:a@b.co`), or any
+/// address after a capitalised field name as Go prints a struct
+/// (`Email:alex@localhost`). An address there is a local part a mailbox may
+/// have, then a host without a port: emails are common and passwords there
+/// are rare, so `user:pw@proxy:3128` and `root:pw@tcp(db)` still go.
 fn hidden_userinfo(info: &str, after: &str) -> Option<usize> {
     // An image digest (`sha256:` with a letter, which no port has, or a
     // long hex run, also after the free-text masker hid it) or a version.
@@ -878,13 +892,17 @@ fn hidden_userinfo(info: &str, after: &str) -> Option<usize> {
         )
         .expect("static pinned pattern")
     });
+    // A time: `10:15`, `10:15:30.5`, `3:30pm`, `2026-10-24T08:00:00Z`.
+    static TIME: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)^(?:\d{4}-\d{2}-\d{2}t)?\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[ap]m|[+-]\d{2}:?\d{2})?$")
+            .expect("static time pattern")
+    });
     let pinned = PINNED.find(after).is_some_and(|found| {
         !after[found.end()..].starts_with(|next: char| {
             next.is_alphanumeric() || matches!(next, '_' | '.' | ':' | '-')
         })
     });
     let (scheme, rest) = info.split_once(':')?;
-    // A time or a ratio (`10:15@home`, `16:9@2x`).
     let numeric = |part: &str, more: &[u8]| {
         !part.is_empty()
             && part
@@ -892,6 +910,8 @@ fn hidden_userinfo(info: &str, after: &str) -> Option<usize> {
                 .all(|byte| byte.is_ascii_digit() || more.contains(&byte))
     };
     if pinned
+        || info.contains("::")
+        || TIME.is_match(info)
         || (numeric(scheme, b"") && numeric(rest, b":."))
         || (["npm", "jsr"]
             .iter()
@@ -901,11 +921,49 @@ fn hidden_userinfo(info: &str, after: &str) -> Option<usize> {
     {
         return None;
     }
-    if ["mailto", "sip", "sips", "xmpp", "acct"]
-        .iter()
-        .any(|address| scheme.eq_ignore_ascii_case(address))
+    if [
+        "mailto",
+        "sip",
+        "sips",
+        "xmpp",
+        "acct",
+        "serviceaccount",
+        "group",
+        "domain",
+        "principal",
+        "from",
+        "to",
+        "cc",
+        "bcc",
+        "email",
+    ]
+    .iter()
+    .any(|address| scheme.eq_ignore_ascii_case(address))
     {
         return rest.contains(':').then_some(scheme.len() + 1);
+    }
+    // A mailbox's local part, then a host with no port after it.
+    let mailbox = !rest.is_empty()
+        && rest.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'%' | b'+' | b'-')
+        });
+    let host = after
+        .find(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
+        })
+        .map_or(after, |end| &after[..end]);
+    let port = after[host.len()..].starts_with(':');
+    if mailbox && !host.is_empty() && !port {
+        let domain = host.rsplit_once('.').is_some_and(|(name, top)| {
+            !name.is_empty() && top.len() >= 2 && top.bytes().all(|byte| byte.is_ascii_alphabetic())
+        });
+        let field = scheme.starts_with(|character: char| character.is_ascii_uppercase())
+            && scheme
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'));
+        if domain || field {
+            return None;
+        }
     }
     Some(0)
 }
@@ -1336,8 +1394,8 @@ mod tests {
                 "host=[redacted]@h.fixture.test:443",
             ),
             (
-                "getaddrinfo ENOTFOUND user:PRIVATE@h.fixture.test",
-                "getaddrinfo ENOTFOUND [redacted]@h.fixture.test",
+                "getaddrinfo ENOTFOUND user:PRIVATE@h.fixture.test:443",
+                "getaddrinfo ENOTFOUND [redacted]@h.fixture.test:443",
             ),
             (
                 "proxy answered 407 for 'user:PRIVATE@h.fixture.test:443'",
@@ -1375,7 +1433,24 @@ mod tests {
                 "CONNECT [redacted]@sha256:8080",
             ),
             ("user:PRIVATE@10.0.0.1:3128", "[redacted]@10.0.0.1:3128"),
-            ("1000:PRIVATE@h.fixture.test", "[redacted]@h.fixture.test"),
+            (
+                "1000:PRIVATE@h.fixture.test:80",
+                "[redacted]@h.fixture.test:80",
+            ),
+            // A local part a mailbox cannot have, or a host with no name.
+            ("db=root:PRIVATE@/app", "db=[redacted]@/app"),
+            (
+                "root:PRIVATE@unix(/tmp/mysql.sock)/app",
+                "[redacted]@unix(/tmp/mysql.sock)/app",
+            ),
+            (
+                "user:PRIVATE@[2001:db8::1]:3128",
+                "[redacted]@[2001:db8::1]:3128",
+            ),
+            (
+                "Admin:PRIVATE@db.fixture.test:5432",
+                "[redacted]@db.fixture.test:5432",
+            ),
         ] {
             assert_eq!(text(input), output, "{input}");
             assert_eq!(text(output), output, "{output}");
@@ -1405,6 +1480,34 @@ mod tests {
             "at async run (node:internal/process/task_queues:95:5)",
             "go: example.com/m@v1.0.0: missing go.sum entry",
             "meet 10:15@home, 10:15:30@main, icon 16:9@2x",
+            // Addresses after a label, which an email is far more often than a
+            // password: cloud members, mail headers and search fields, Go's
+            // struct printing, and a name a DNS lookup or a log line quotes.
+            "gcloud projects add-iam-policy-binding p --member=user:alex@example.com --role=roles/viewer",
+            "--iam-account=serviceAccount:ci@proj.iam.gserviceaccount.com",
+            r#""members": ["user:alex@example.com", "group:devs@example.com", "domain:example.com"]"#,
+            "principal:alex@example.com",
+            "> MAIL FROM:<alex@example.com> SIZE=1024",
+            "> RCPT TO:<bob@example.com>",
+            "search from:alice@example.com to:bob@example.com cc:c@example.com bcc:d@example.com",
+            "email:alex@example.com,name:Alex",
+            "user.email:alex@example.com AND status:active",
+            "To:alex@example.com",
+            "login ok for account:alex@example.com",
+            r#"level=info msg="created user" user={ID:42 Email:alex@example.com Role:admin}"#,
+            "&{Name:alex Email:alex@example.com Admin:false}",
+            "Owner:alex@localhost",
+            "getaddrinfo ENOTFOUND user:alex@h.fixture.test",
+            "scp host:db@2026.tgz .",
+            // Shell defaults, ssh targets and protocol specs.
+            "ssh ${DEPLOY_USER:-deploy}@${HOST} uptime",
+            "scp build.tgz ${USER:-root}@10.0.0.5:/tmp/",
+            "scp alex@build.fixture.test:icon@2x.png .",
+            r#"resolution: "pkg@patch:pkg@npm%3A1.0.0#~/.yarn/patches/pkg.patch""#,
+            // Times and IPv6 addresses.
+            "backup finished 2026-10-24T08:00:00Z@db1 in 3s",
+            "call me at 3:30pm@office, time 12:30:45.123@worker-3",
+            "2001:db8::1@eth0 [2001:db8::1]:443@x fe80::1%en0@host",
         ] {
             assert_eq!(text(kept), kept);
         }
@@ -1417,6 +1520,17 @@ mod tests {
             text("pulled alpine:3.19@sha256:[redacted]"),
             "pulled alpine:3.19@sha256:[redacted]"
         );
+        // MCP arguments in those forms stay as written, so they stay editable.
+        let kept = [
+            "--member=user:alex@example.com",
+            "serviceAccount:ci@proj.iam.gserviceaccount.com",
+            "alex@build.fixture.test:icon@2x.png",
+            "${USER:-root}@10.0.0.5:/tmp/",
+            "Email:alex@example.com",
+            "2026-10-24T08:00:00Z@db1",
+        ]
+        .map(str::to_owned);
+        assert_eq!(args(&kept), kept);
         assert_eq!(
             args(
                 &[
