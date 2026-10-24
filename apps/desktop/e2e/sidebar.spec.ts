@@ -102,23 +102,27 @@ const labelStarts = (menu: Locator) =>
       return Math.round(range.getBoundingClientRect().left);
     }),
   );
-/** The live choice's tick, as a picker's: a ✓ at the row's trailing end, 8px in. */
-const trailingTick = (menu: Locator) =>
+/** Where the live choice's tick sits, and how far in: in a column of its own
+ * before the label ("start"), or at the row's end as a picker's ✓ ("end"). */
+const tickPlace = (menu: Locator) =>
   menu.locator('[aria-checked="true"]').evaluate((row) => {
-    const tick = row.querySelector(".select-check");
-    return tick
-      ? { text: tick.textContent?.trim(), inset: Math.round(row.getBoundingClientRect().right - tick.getBoundingClientRect().right) }
-      : undefined;
+    const box = row.getBoundingClientRect();
+    const end = row.querySelector(".select-check");
+    const start = row.querySelector(".menu-check svg");
+    if (end && !start)
+      return { place: "end", glyph: end.textContent?.trim(), inset: Math.round(box.right - end.getBoundingClientRect().right) };
+    if (start && !end) return { place: "start", inset: Math.round(start.getBoundingClientRect().left - box.left) };
+    return undefined;
   });
 async function fileUnder(name: string, group: string) {
   await options(name);
   await item("Section").click();
-  // Sections are a live choice, ticked at the trailing end as a picker's
-  // option is; their labels line up with New section…'s, beside its icon.
+  // Sections are a live choice without icons: ticked in a column of their
+  // own, so their labels line up with New section…'s, beside its icon.
   const starts = await labelStarts(page.locator(".menu-branch-panel"));
   expect(starts.length).toBeGreaterThan(1);
   expect(new Set(starts).size).toBe(1);
-  expect(await trailingTick(page.locator(".menu-branch-panel"))).toEqual({ text: "✓", inset: 8 });
+  expect(await tickPlace(page.locator(".menu-branch-panel"))).toEqual({ place: "start", inset: 8 });
   if (process.env.HAARNESS_SCREENSHOTS) {
     for (const theme of ["dark", "light"] as const) {
       await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);

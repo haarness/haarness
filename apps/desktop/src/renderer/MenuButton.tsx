@@ -29,6 +29,10 @@ export interface MenuAction {
   run?: () => void;
 }
 
+/** Choices that carry icons are ticked at the row's end (see MenuItem). */
+const trailingTick = (items: MenuAction[]) =>
+  items.some((item) => item.checked !== undefined && !!item.icon);
+
 /** The hairline between two groups of choices; keyboard navigation skips it. */
 const Divider = (props: { when?: boolean }) => (
   <Show when={props.when}>
@@ -239,6 +243,7 @@ export function MenuButton(props: {
                       <Heading text={item.heading} />
                       <MenuItem
                         item={item}
+                        trailing={trailingTick(props.items)}
                         /* Moving to a sibling folds an open branch, as native
                            menus do. */
                         onPointerEnter={() => setBranch("")}
@@ -332,6 +337,7 @@ export function MenuButton(props: {
                               <Divider when={child.divider} />
                               <MenuItem
                                 item={child}
+                                trailing={trailingTick(item.submenu!)}
                                 onRun={() => {
                                   close(true);
                                   child.run?.();
@@ -354,13 +360,14 @@ export function MenuButton(props: {
 }
 
 /**
- * A leaf choice. `checked` turns it into a radio within its group, ticked at
- * its trailing end as a picker's chosen option is. A choice without an icon
- * keeps the indent an icon would take, so its label lines up with its
- * siblings' wherever they have icons.
+ * A leaf choice. `checked` turns it into a radio within its group, ticked in
+ * a column of its own before the label. In a menu whose choices carry icons
+ * (`trailing`), the icons keep that place and the tick sits at the row's
+ * trailing end instead, as a picker's chosen option's does.
  */
 function MenuItem(props: {
   item: MenuAction;
+  trailing?: boolean;
   onRun: () => void;
   onPointerEnter?: () => void;
 }) {
@@ -379,14 +386,14 @@ function MenuItem(props: {
         props.onRun();
       }}
     >
-      <Show
-        when={props.item.icon}
-        fallback={
-          <Show when={props.item.checked !== undefined}>
-            <span class="menu-indent" aria-hidden="true" />
+      <Show when={props.item.checked !== undefined && !props.trailing}>
+        <span class="menu-check" aria-hidden="true">
+          <Show when={props.item.checked}>
+            <Icon name="check" size="sm" />
           </Show>
-        }
-      >
+        </span>
+      </Show>
+      <Show when={props.item.icon}>
         <Icon name={props.item.icon!} size="sm" />
       </Show>
       <Show when={props.item.detail} fallback={props.item.label}>
@@ -395,7 +402,7 @@ function MenuItem(props: {
           <small>{props.item.detail}</small>
         </span>
       </Show>
-      <Show when={props.item.checked}>
+      <Show when={props.item.checked && props.trailing}>
         <span class="select-check" aria-hidden="true">
           ✓
         </span>
