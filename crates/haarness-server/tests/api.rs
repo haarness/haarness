@@ -6168,6 +6168,150 @@ async fn direct_tool_after_undo_commits_the_boundary_before_mutating() {
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 
+/// A runtime over `workspace` with snapshots on and edits allowed.
+fn undo_fixture(root: &std::path::Path, workspace: &std::path::Path) -> AgentRuntime {
+    let database = root.join("db.sqlite");
+    let store = Arc::new(SqliteStore::open(&database).unwrap());
+    let snapshots = Arc::new(
+        haarness_store::SqliteSnapshotStore::open(&database, workspace.to_path_buf()).unwrap(),
+    );
+    AgentRuntime::with_config(
+        store,
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(haarness_server::NativeToolRegistry::new(
+            workspace.to_path_buf(),
+        )),
+        EventBus::new(64),
+        workspace.to_path_buf(),
+        String::new(),
+        {
+            let mut config = haarness_core::RuntimeConfig::default();
+            config.base_rules.push(haarness_core::PermissionRule {
+                pattern: "write:*".into(),
+                decision: haarness_core::PermissionDecision::Allow,
+            });
+            config
+        },
+    )
+    .with_snapshots(snapshots)
+}
+
+#[tokio::test]
+async fn undo_restores_the_files_a_persons_shell_command_wrote() {
+    let root = std::env::temp_dir().join(format!("haarness-shell-undo-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::write(workspace.join("old.txt"), "kept\n")
+        .await
+        .unwrap();
+    let runtime = undo_fixture(&root, &workspace);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Shell undo fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // A person's own `!` command, as the TUI and Desktop send it.
+    let result = runtime
+        .run_shell(
+            thread.id,
+            "printf new > note.txt && printf changed > old.txt".into(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            &result.data,
+            haarness_protocol::ItemData::ToolResult {
+                is_error: false,
+                ..
+            }
+        ),
+        "{:?}",
+        result.data
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(workspace.join("old.txt"))
+            .await
+            .unwrap(),
+        "changed"
+    );
+    runtime.revert(thread.id, None).await.unwrap();
+    assert!(!workspace.join("note.txt").exists());
+    assert_eq!(
+        tokio::fs::read_to_string(workspace.join("old.txt"))
+            .await
+            .unwrap(),
+        "kept\n"
+    );
+    runtime.unrevert(thread.id).await.unwrap();
+    assert_eq!(
+        tokio::fs::read_to_string(workspace.join("note.txt"))
+            .await
+            .unwrap(),
+        "new"
+    );
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn undo_of_a_move_brings_back_the_old_path_and_removes_the_new() {
+    let root = std::env::temp_dir().join(format!("haarness-move-undo-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(workspace.join("src"))
+        .await
+        .unwrap();
+    tokio::fs::write(workspace.join("src/old.rs"), "fn one() {}\n")
+        .await
+        .unwrap();
+    let runtime = undo_fixture(&root, &workspace);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Move undo fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let patch = "*** Begin Patch\n*** Update File: src/old.rs\n*** Move to: src/new.rs\n@@\n-fn one() {}\n+fn two() {}\n*** End Patch\n";
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&format!(
+                "!tool apply_patch {}",
+                serde_json::json!({ "input": patch })
+            )),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(!workspace.join("src/old.rs").exists());
+    assert_eq!(
+        tokio::fs::read_to_string(workspace.join("src/new.rs"))
+            .await
+            .unwrap(),
+        "fn two() {}\n"
+    );
+    runtime.revert(thread.id, None).await.unwrap();
+    assert_eq!(
+        tokio::fs::read_to_string(workspace.join("src/old.rs"))
+            .await
+            .unwrap(),
+        "fn one() {}\n"
+    );
+    assert!(!workspace.join("src/new.rs").exists());
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
 #[tokio::test]
 async fn duplicate_request_id_is_not_replayed() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
