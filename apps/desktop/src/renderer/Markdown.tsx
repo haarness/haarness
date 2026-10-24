@@ -31,7 +31,9 @@ import { watchOpenImages } from "./ImageViewer";
  * What is read in the transcript's view: the first text that starts inside
  * it, under its middle. Starting inside the view, it holds nothing above it,
  * so an image growing there moves it whole; an image or a placeholder, which
- * may be the one about to come in, is passed over. When no text starts
+ * may be the one about to come in, is passed over, and so is what holds one
+ * (the paragraph beside a narrow placeholder), which would grow under its own
+ * top instead of moving. When no text starts
  * inside it (a tall picture or code block fills it), the end of the row under
  * its centre, which any growth above the view moves as well.
  */
@@ -40,7 +42,12 @@ function readingAnchor(list: HTMLElement, view: DOMRect): { element: HTMLElement
   for (let y = view.top + 1; y < view.bottom; y += 12) {
     const point = document.elementFromPoint(x, y);
     if (!(point instanceof HTMLElement) || point === list || !list.contains(point)) continue;
-    if (point instanceof HTMLImageElement || point.closest(".project-image, .remote-image")) continue;
+    if (
+      point instanceof HTMLImageElement ||
+      point.closest(".project-image, .remote-image") ||
+      point.querySelector("img, .project-image, .remote-image")
+    )
+      continue;
     if (point.getBoundingClientRect().top >= view.top) return { element: point, edge: "top" };
   }
   const row = document.elementFromPoint(x, view.top + view.height / 2)?.closest<HTMLElement>("[data-index]");
