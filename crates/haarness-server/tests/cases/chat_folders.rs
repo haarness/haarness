@@ -304,6 +304,59 @@ async fn the_api_refuses_a_folder_outside_the_project_and_says_it_takes_one() {
             .any(|thread| thread["directory"] == json!(created.directory)),
         "{listed}"
     );
+    // The chat's own workflows are listed for it (as workflows and as
+    // commands), and for nobody else.
+    let workflows = folder(&created).join(".haarness/workflows");
+    std::fs::create_dir_all(&workflows).unwrap();
+    std::fs::write(
+        workflows.join("mine.js"),
+        "export const meta = { name: 'mine', description: 'Mine' }\nreturn 1\n",
+    )
+    .unwrap();
+    let get = |path: String| {
+        let client = client.clone();
+        async move {
+            client
+                .get(path)
+                .bearer_auth("fixture-token")
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let names = |listed: &Value| {
+        listed["workflows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|workflow| workflow["invocation"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let for_chat = get(format!("{base}/v1/workflows?threadId={}", created.id)).await;
+    assert_eq!(names(&for_chat), ["mine"], "{for_chat}");
+    assert!(names(&get(format!("{base}/v1/workflows")).await).is_empty());
+    let commands = get(format!("{base}/v1/commands?threadId={}", created.id)).await;
+    assert!(
+        commands
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command["name"] == "mine"),
+        "{commands}"
+    );
+    let plain = get(format!("{base}/v1/commands")).await;
+    assert!(
+        !plain
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command["name"] == "mine")
+    );
 }
 
 #[tokio::test]
@@ -853,4 +906,85 @@ async fn reading_never_makes_a_deleted_chat_folder_again() {
     // A turn, which may write, does.
     turn(&runtime, thread.id, &pwd()).await;
     assert!(folder(&thread).is_dir());
+}
+
+#[tokio::test]
+async fn a_legacy_chat_and_its_child_share_one_folder_in_the_chat_home() {
+    let fixture = Fixture::new();
+    let database = fixture.root.join("db.sqlite");
+    let store = SqliteStore::open(&database).unwrap();
+    let parent = store
+        .create_thread(CreateThreadRequest {
+            title: Some("Before".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let child = store
+        .create_thread(CreateThreadRequest {
+            parent_id: Some(parent.id),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let (runtime, _) = fixture.chat_home();
+    // The child works first: the line of chats gets one folder.
+    turn(&runtime, child.id, &pwd()).await;
+    let child = runtime.get_thread(child.id).await.unwrap();
+    let parent = runtime.get_thread(parent.id).await.unwrap();
+    assert_eq!(child.directory, parent.directory);
+    assert_eq!(folder(&parent), fresh(&fixture, &parent));
+    // Reading a chat without a folder (a mention's rules) gives it one too.
+    let reader = SqliteStore::open(&database)
+        .unwrap()
+        .create_thread(CreateThreadRequest {
+            title: Some("Reader".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    runtime
+        .resource_mention_policy(Some(reader.id), None)
+        .await
+        .unwrap();
+    assert!(
+        runtime
+            .get_thread(reader.id)
+            .await
+            .unwrap()
+            .directory
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn a_shared_folder_someone_deleted_is_made_again() {
+    let fixture = Fixture::new();
+    let (runtime, _) = fixture.chat_home();
+    let first = chat(&runtime, Some("2026-10-24/shared")).await.unwrap();
+    std::fs::remove_dir_all(folder(&first)).unwrap();
+    // A schedule's run shares the chat's folder by its absolute path.
+    let run = chat(&runtime, first.directory.as_deref()).await.unwrap();
+    assert_eq!(run.directory, first.directory);
+    assert!(folder(&run).is_dir());
+    // Only a chat folder's name is shared or made.
+    for refused in [
+        fixture.workspace.join("2026-10-24/.git"),
+        fixture.workspace.join("2026-10-24/-rf"),
+        fixture.workspace.join("notadate/x"),
+    ] {
+        assert!(
+            chat(&runtime, Some(refused.to_str().unwrap()))
+                .await
+                .is_err()
+        );
+        assert!(!refused.exists());
+    }
 }
