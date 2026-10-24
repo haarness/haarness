@@ -159,8 +159,6 @@ fn folder(failure: Failure) -> Failure {
         failure
     }
 }
-/// `value` as a path inside the workspace, refused when it is absolute,
-/// climbs out, or names Git metadata.
 /// Whether a path part names Git's metadata folder as a file system may read
 /// it: in any letter case (`.GIT` is `.git` on macOS and Windows) and
 /// without the trailing dots and spaces Windows drops. (Unicode
@@ -172,6 +170,8 @@ fn is_git(part: &std::ffi::OsStr) -> bool {
             .eq_ignore_ascii_case(".git")
     })
 }
+/// `value` as a path inside the workspace, refused when it is absolute,
+/// climbs out, or names Git metadata.
 fn relative(value: &str) -> Result<&Path, Failure> {
     let relative = Path::new(value);
     if relative.is_absolute()
