@@ -1114,14 +1114,18 @@ impl SqliteSnapshotStore {
             let Some(scanned) = self.capture_entry(source, true) else {
                 continue;
             };
-            bytes += scanned.data.as_ref().map_or(0, Vec::len);
-            batch.push(scanned);
-            if batch.len() >= limits.entries || bytes >= limits.bytes {
+            let size = scanned.data.as_ref().map_or(0, Vec::len);
+            // A batch holds one entry at least, whatever its size.
+            if !batch.is_empty()
+                && (batch.len() >= limits.entries || bytes.saturating_add(size) > limits.bytes)
+            {
                 self.write_batch(id, &batch, first.as_deref(), &mut written, &mut step)?;
                 first.get_or_insert_with(|| batch[0].manifest.path.clone());
                 batch.clear();
                 bytes = 0;
             }
+            bytes += size;
+            batch.push(scanned);
         }
         if !batch.is_empty() {
             self.write_batch(id, &batch, first.as_deref(), &mut written, &mut step)?;
@@ -3159,6 +3163,30 @@ mod tests {
             store.capture(ThreadId::new()).await.unwrap().file_count,
             1_101
         );
+    }
+
+    #[test]
+    fn a_batch_holds_no_more_content_than_its_limit() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for name in ["a", "b", "c", "d", "e"] {
+            fs::write(workspace.join(name), "four").unwrap();
+        }
+        // Larger than a batch may hold, so it is a batch of its own.
+        fs::write(workspace.join("f"), "twelve bytes").unwrap();
+        let mut batches = 0;
+        let limits = BatchLimits {
+            entries: 100,
+            bytes: 10,
+        };
+        let written = store
+            .write_manifest(&uuid::Uuid::now_v7().to_string(), limits, |step| {
+                batches += usize::from(step == CaptureStep::Written);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(written.files, 6);
+        assert_eq!(batches, 4, "a b, c d, e, f");
     }
 
     /// A diff reads the whole tree: the executor that awaits it keeps
