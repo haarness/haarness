@@ -25,21 +25,13 @@ fn bad(error: impl std::fmt::Display) -> Failure {
 fn failure(error: Failure) -> CoreError {
     CoreError::Tool(error.1)
 }
+/// Where a workspace's preview versions live, under the server's data folder.
+#[must_use]
+pub fn versions_folder(workspace: &Path) -> Option<PathBuf> {
+    directory(workspace).ok()
+}
 fn directory(workspace: &Path) -> Result<PathBuf, Failure> {
-    let root = std::env::var_os("HAARNESS_DATA_DIR")
-        .map(|root| PathBuf::from(root).join("data"))
-        // HAARNESS_HOME keeps everything under one folder.
-        .or_else(|| {
-            std::env::var_os("HAARNESS_HOME")
-                .map(PathBuf::from)
-                .filter(|root| root.is_absolute())
-                .map(|root| root.join("data"))
-        })
-        .or_else(|| {
-            directories::ProjectDirs::from("dev", "haarness", "haarness")
-                .map(|p| p.data_local_dir().to_owned())
-        })
-        .ok_or_else(|| bad("Preview storage is unavailable"))?;
+    let root = crate::data_folder().ok_or_else(|| bad("Preview storage is unavailable"))?;
     Ok(root.join("preview").join(files::hash(
         workspace
             .canonicalize()

@@ -137,6 +137,11 @@ fn lease_directory() -> PathBuf {
     absolute("HAARNESS_DATA_DIR")
         .or_else(|| absolute("HAARNESS_HOME"))
         .map(|root| root.join("cache"))
+        // A test never leaves leases in the person's own cache.
+        .or_else(|| {
+            (cfg!(test) || haarness_protocol::test_binary())
+                .then(|| haarness_protocol::test_folder().join("cache"))
+        })
         .or_else(|| absolute("XDG_RUNTIME_DIR").map(|runtime| runtime.join("haarness")))
         .or_else(|| absolute("XDG_CACHE_HOME").map(|cache| cache.join("haarness")))
         .or_else(|| haarness_protocol::home_dir().map(|home| home.join(".cache").join("haarness")))
@@ -1720,4 +1725,31 @@ fn catalog_error(error: CatalogError) -> CoreError {
 
 fn host_error(error: HostError) -> CoreError {
     CoreError::Tool(error.to_string())
+}
+
+#[cfg(test)]
+mod lease_tests {
+    // Upstream PR #1145's rule: a test never leaves workflow leases in the
+    // cache of the person running it.
+    #[test]
+    fn a_test_never_keeps_leases_in_the_persons_cache() {
+        if std::env::var_os("HAARNESS_DATA_DIR").is_some()
+            || std::env::var_os("HAARNESS_HOME").is_some()
+        {
+            return;
+        }
+        let folder = super::lease_directory();
+        assert!(
+            folder.starts_with(std::env::temp_dir()),
+            "{}",
+            folder.display()
+        );
+        if let Some(home) = haarness_protocol::home_dir() {
+            assert!(
+                !folder.starts_with(home.join(".cache")),
+                "{}",
+                folder.display()
+            );
+        }
+    }
 }

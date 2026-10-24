@@ -1429,6 +1429,11 @@ async fn cli_main() -> Result<()> {
         require_system_certificates()?;
     }
     let base_paths = Paths::new(cli.data_dir.as_deref())?;
+    // `--data-dir` holds the server's own files too (preview versions, saved
+    // tool output), as HAARNESS_DATA_DIR always did.
+    if base_paths.root.is_some() {
+        haarness_server::use_data_folder(base_paths.data.clone());
+    }
     // An edit of the global configuration or the base folder asks a person;
     // tell the permission engine which folders those are in this process.
     haarness_core::set_global_config_dir(base_paths.config_dir().to_path_buf());
