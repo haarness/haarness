@@ -296,10 +296,12 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
 /// The text keeps its length, so every node's range is a range of the line
 /// as written, which every text is read from: patterns, words and
 /// here-documents stay as written. Any other backslash form is read as
-/// before, and so is a line that is a here-document's delimiter once its
-/// backslash is gone (the parser's own delimiters, leading tabs dropped for
-/// `<<-`), a line the parser already starts a command at (after `&&`, `|`,
-/// `;` or a comment line) and one inside quotes or a here-document's text.
+/// before, and so is a line that starts with a here-document's delimiter
+/// once its backslash is gone (the parser's own delimiters: it ends a
+/// document at such a line, blanks before it or not), every backslash line of
+/// a line with more than [`MAX_DELIMITERS`] of them, a line the parser
+/// already starts a command at (after `&&`, `|`, `;` or a comment line) and
+/// one inside quotes or a here-document's text.
 /// It takes one parse and a pass over the line: no shape costs more than its
 /// length.
 fn shell_reading(command: &str) -> std::borrow::Cow<'_, str> {
@@ -352,7 +354,7 @@ fn shell_reading(command: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(command);
     }
     let inside = inside_one_command(tree.root_node(), candidates.iter().map(|(_, at)| *at));
-    let (exact, indented) = delimiters(tree.root_node(), command);
+    let delimiters = delimiters(tree.root_node(), command);
     // The changes made, in order, each only where what is before it in the
     // text as changed so far still leaves its backslash unquoted.
     let mut changed = bytes.to_vec();
@@ -372,13 +374,16 @@ fn shell_reading(command: &str) -> std::borrow::Cow<'_, str> {
             && backslash == at
         {
             let applies = if check + 1 == at {
-                // A body line that would become its here-document's
-                // delimiter stays as it is.
+                // The parser ends a here-document at a line that starts with
+                // its delimiter after blanks, so a body line that would turn
+                // into one (`\EOF`, `\EOFX`) stays as it is.
                 let line = &command[at + 1..];
-                let line = line[..line.find('\n').unwrap_or(line.len())].trim_end_matches('\r');
+                let line =
+                    line[..line.find('\n').unwrap_or(line.len())].trim_start_matches([' ', '\t']);
                 !quoted_feed
-                    && !exact.contains(line)
-                    && !indented.contains(line.trim_start_matches('\t'))
+                    && delimiters.as_ref().is_some_and(|words| {
+                        !words.iter().any(|word| line.starts_with(word.as_str()))
+                    })
             } else {
                 run % 2 == 0
             };
@@ -454,34 +459,33 @@ fn inside_one_command(
     inside
 }
 
+/// How many here-document delimiters one line's backslash lines are compared
+/// with: past it, every such line reads as before.
+const MAX_DELIMITERS: usize = 64;
+
 /// The delimiters of the here-documents the parser finds in `command`, as
-/// the shell compares a line with them (quotes and backslashes gone): those
-/// of `<<` and, apart, those of `<<-`, which leading tabs do not hide.
-fn delimiters(root: tree_sitter::Node<'_>, command: &str) -> (HashSet<String>, HashSet<String>) {
-    let (mut exact, mut indented) = (HashSet::new(), HashSet::new());
+/// the shell compares a line with them (quotes and backslashes gone), once
+/// each, or `None` past [`MAX_DELIMITERS`].
+fn delimiters(root: tree_sitter::Node<'_>, command: &str) -> Option<Vec<String>> {
+    let mut words: Vec<String> = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if node.kind() == "heredoc_redirect" {
-            let parts = children(node);
-            let dash = parts
-                .iter()
-                .any(|part| !part.is_named() && node_text(*part, command) == "<<-");
-            if let Some(start) = parts.iter().find(|part| part.kind() == "heredoc_start") {
-                let word: String = node_text(*start, command)
-                    .trim_start_matches("$'")
-                    .chars()
-                    .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-                    .collect();
-                if dash {
-                    indented.insert(word);
-                } else {
-                    exact.insert(word);
+        if node.kind() == "heredoc_start" {
+            let word: String = node_text(node, command)
+                .trim_start_matches("$'")
+                .chars()
+                .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+                .collect();
+            if !word.is_empty() && !words.contains(&word) {
+                if words.len() == MAX_DELIMITERS {
+                    return None;
                 }
+                words.push(word);
             }
         }
         stack.extend(node.children(&mut node.walk()));
     }
-    (exact, indented)
+    Some(words)
 }
 
 /// The text of a command with its line continuations joined, as the shell
@@ -6381,6 +6385,9 @@ mod backslash_lines {
             "echo $((1<<2))\n\\rm -rf victim",
             // Closed by `rm`, the here-document is over before the line.
             "cat <<rm\nhello\nrm\n\\rm -rf victim",
+            // A body line left as written, since the parser would end the
+            // document at ` EOFX`.
+            "cat <<EOF\n\\EOFX\nEOF\n\\rm -rf victim",
         ] {
             let patterns = analyze(command, &std::env::current_dir().unwrap()).patterns;
             assert!(
@@ -6388,14 +6395,21 @@ mod backslash_lines {
                 "{command:?}: {patterns:?}"
             );
         }
-        // A body line that is the delimiter once its backslash is gone
-        // stays, for `<<-` with leading tabs too.
+        // A body line that starts with a delimiter once its backslash is
+        // gone stays, blanks before it or not.
         for command in [
             "cat <<'EOF'\n\\EOF\nrm -rf victim\nEOF",
+            "cat <<EOF\n\\EOFX\nEOF",
             "cat <<-EOF\n\\\tEOF\nEOF",
         ] {
             assert_eq!(shell_reading(command), command, "{command:?}");
         }
+        // Past 64 here-documents, every backslash line reads as before.
+        let mut many: String = (0..65)
+            .map(|index| format!("cat <<D{index}\nD{index}\n"))
+            .collect();
+        many.push_str("true\n\\rm -rf victim");
+        assert_eq!(shell_reading(&many), many);
     }
 
     #[test]
