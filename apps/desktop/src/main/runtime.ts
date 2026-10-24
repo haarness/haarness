@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Haarness, type ServerAuth } from "@haarness/sdk";
 import type { Connection, DesktopEvent } from "../shared";
 import { localArgs } from "./validation";
+import { isChatHome } from "./chat-home";
 export interface ProjectConnection {
   view: Connection;
   client: Haarness;
@@ -96,13 +97,16 @@ export async function invoke(
   emit?: (event: DesktopEvent) => void,
 ) {
   const binary = await executable();
+  // The chat home always runs with project configuration off, which its flag
+  // says: it marks the folder as the chat home too.
+  const home = await isChatHome(workspace);
   return new Promise<{ output: string; value: unknown }>((resolve, reject) => {
     const child = spawn(
       binary,
       [
         "--workspace",
         workspace,
-        ...(!trust ? ["--disable-project-config"] : []),
+        ...(home ? ["--chat-home"] : !trust ? ["--disable-project-config"] : []),
         ...args,
       ],
       {

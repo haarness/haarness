@@ -109,6 +109,11 @@ struct Cli {
     #[arg(long, global = true, env = "HAARNESS_DISABLE_PROJECT_CONFIG",
         value_parser = clap::builder::BoolishValueParser::new())]
     disable_project_config: bool,
+    /// Make --workspace this computer's chat home: the folder that holds the
+    /// folders of chats without a project. It stays one, runs without project
+    /// configuration and is left out of project lists.
+    #[arg(long, global = true)]
+    chat_home: bool,
     /// Log verbosity for the haarness crates: trace|debug|info|warn|error.
     /// Overrides HAARNESS_LOG / RUST_LOG. Logs always also land in
     /// <data>/logs/ regardless of this flag.
@@ -1400,6 +1405,14 @@ async fn cli_main() -> Result<()> {
     let cli = {
         use clap::FromArgMatches as _;
         let matches = cli_command().get_matches_from(normalize_natural_language_args(args));
+        if chat_home_unnamed(&matches) {
+            cli_command()
+                .error(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "--chat-home needs the folder it makes the chat home: --workspace <folder>",
+                )
+                .exit();
+        }
         Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
     };
     if let Some(Command::Serve(ServeArgs {
@@ -1414,12 +1427,6 @@ async fn cli_main() -> Result<()> {
     if !matches!(cli.command, Some(Command::Doctor | Command::Logs { .. })) {
         require_system_certificates()?;
     }
-    let project_config = !cli.disable_project_config;
-    let project_config_override = if cli.disable_project_config {
-        Some(false)
-    } else {
-        cli.trust_project.then_some(true)
-    };
     let base_paths = Paths::new(cli.data_dir.as_deref())?;
     // An edit of the global configuration or the base folder asks a person;
     // tell the permission engine which folders those are in this process.
@@ -1543,10 +1550,25 @@ async fn cli_main() -> Result<()> {
         .canonicalize()
         .context("canonicalize workspace")?;
     let workspace_manager = base_paths.workspace_manager()?;
-    let current_workspace = workspace_manager
-        .register_local(&workspace)
-        .map_err(anyhow::Error::new)?;
-    let migrate_legacy = workspace_manager.registered_count()? == 1;
+    let current_workspace = if cli.chat_home {
+        workspace_manager.register_chat_home(&workspace)
+    } else {
+        workspace_manager.register_local(&workspace)
+    }
+    .map_err(anyhow::Error::new)?;
+    // The chat home (named so once, it stays one) holds chats without a
+    // project: no project's configuration applies there.
+    let chat_home = current_workspace.chat_home;
+    let disable_project_config = cli.disable_project_config || chat_home;
+    let project_config = !disable_project_config;
+    let project_config_override = if disable_project_config {
+        Some(false)
+    } else {
+        cli.trust_project.then_some(true)
+    };
+    // The pre-workspace database belongs to the first project, never to the
+    // chat home.
+    let migrate_legacy = !chat_home && workspace_manager.registered_count()? == 1;
     let paths = base_paths.scoped(&current_workspace.id, migrate_legacy)?;
     let command_span = if long_running {
         tracing::Span::none()
@@ -1955,6 +1977,13 @@ fn misspelled_subcommand(args: &[OsString]) -> Option<(String, String)> {
     fits.then(|| (typo.to_owned(), command.get_name().to_owned()))
 }
 
+/// `--chat-home` without `--workspace`: whatever folder a command happens to
+/// run in must not become the chat home, so it is named.
+fn chat_home_unnamed(matches: &clap::ArgMatches) -> bool {
+    matches.get_flag("chat_home")
+        && matches.value_source("workspace") != Some(clap::parser::ValueSource::CommandLine)
+}
+
 /// Where a global option means something: only in these commands, or in
 /// every command but these.
 enum GlobalScope {
@@ -1997,6 +2026,23 @@ const GLOBAL_SCOPES: &[(&str, GlobalScope)] = &[
             "upgrade",
             "doctor",
             "logs",
+            "browser",
+        ]),
+    ),
+    (
+        "chat_home",
+        GlobalScope::Except(&[
+            "login",
+            "logout",
+            "account",
+            "cloud",
+            "telemetry",
+            "upgrade",
+            "doctor",
+            "logs",
+            "profile",
+            "stats",
+            "insights",
             "browser",
         ]),
     ),
@@ -3461,6 +3507,7 @@ async fn schedule_command(
                 prompt: args.prompt,
                 request: args.natural,
                 workspace: directory,
+                directory: None,
                 model,
                 agent: args.agent,
                 variant: args.variant,
@@ -3807,6 +3854,11 @@ async fn execute_schedule(
                 provider: provider.clone(),
                 model: model.clone(),
                 ultracode: None,
+                // A schedule made in a chat with a folder of its own works there.
+                directory: schedule
+                    .directory
+                    .as_ref()
+                    .map(|folder| folder.display().to_string()),
             })
             .await?;
         thread_id = Some(thread.id.0);
@@ -4653,6 +4705,7 @@ async fn run_command(
                             provider,
                             model,
                             ultracode: None,
+                            directory: None,
                         })
                         .await?;
                     (thread, true)
@@ -7019,7 +7072,7 @@ impl HotReloadController {
             )
             .with_browser(self.browser.clone())
             .with_management(self.management.clone())
-            .with_language(self.workspace.clone(), self.language.clone())
+            .with_language(self.language.clone())
             .with_claude_instructions(claude_compat(&sources.file_config).instructions()),
         );
         let hooks = (!sources.json_layers.hooks.is_empty()).then(|| {
@@ -7794,7 +7847,7 @@ async fn application_at(
         )
         .with_browser(browser.clone())
         .with_management(management.clone())
-        .with_language(workspace.to_path_buf(), language.clone())
+        .with_language(language.clone())
         .with_claude_instructions(claude_compat(&file_config).instructions()),
     );
     let extensions = extensions::load(paths, workspace, trust).await?;
@@ -7810,6 +7863,10 @@ async fn application_at(
         project_context,
         runtime_config,
     );
+    if registered_workspace.chat_home {
+        // Every chat there works in a folder of its own, whoever creates it.
+        runtime = runtime.as_chat_home();
+    }
     let hooks = (!json_layers.hooks.is_empty()).then(|| {
         Arc::new(haarness_server::ConfiguredHooks::new(
             json_layers.hooks.clone(),
@@ -7829,15 +7886,30 @@ async fn application_at(
     let project_is_git = workspace_manager
         .project_for_workspace(&registered_workspace.id)?
         .git;
-    if automatic_snapshots_enabled(file_config.snapshots.as_ref(), project_is_git) {
+    let mut folders = None;
+    // In the chat home nothing works in the root itself: only chats' folders
+    // are checkpointed there.
+    if !registered_workspace.chat_home
+        && automatic_snapshots_enabled(file_config.snapshots.as_ref(), project_is_git)
+    {
         match haarness_store::SqliteSnapshotStore::open(&paths.database, workspace.to_path_buf()) {
             Ok(snapshots) => {
                 let snapshots = Arc::new(snapshots);
-                spawn_snapshot_retention(Arc::clone(&snapshots), &snapshot_config);
+                folders = Some(snapshots.folders());
                 runtime = runtime.with_snapshots(snapshots);
             }
             Err(error) => eprintln!("Snapshots disabled: {error}"),
         }
+    }
+    if folder_snapshots_enabled(file_config.snapshots.as_ref()) {
+        // Opened when a chat's folder first is: a server none of whose chats
+        // has a folder opens nothing more.
+        let folders = folders
+            .get_or_insert_with(|| haarness_store::SqliteSnapshotFolders::open(&paths.database));
+        runtime = runtime.with_folder_snapshots(Arc::new(folders.clone()));
+    }
+    if let Some(folders) = folders {
+        spawn_snapshot_retention(folders, &snapshot_config);
     }
     let common = std::process::Command::new("git")
         .arg("-C")
@@ -10190,17 +10262,24 @@ impl Default for SnapshotsSection {
     }
 }
 
-/// Reclaim expired checkpoints once at startup and then hourly. Pruning is
-/// blocking SQLite work, so it runs on the blocking pool and never competes
-/// with the turn path; a failure is logged and retried on the next pass.
 // Automatically checkpoint repositories, without scanning an
 // entire general folder such as Downloads. Plain folders can opt in explicitly.
 fn automatic_snapshots_enabled(config: Option<&SnapshotsSection>, git: bool) -> bool {
     config.map_or(git, |config| config.enabled)
 }
 
+/// A chat's own folder ([`haarness_protocol::Thread::directory`]) is
+/// checkpointed unless snapshots are turned off: it holds only that chat's
+/// files, and Undo there has no Git to fall back on.
+fn folder_snapshots_enabled(config: Option<&SnapshotsSection>) -> bool {
+    config.is_none_or(|config| config.enabled)
+}
+
+/// Reclaim expired checkpoints once at startup and then hourly. Pruning is
+/// blocking SQLite work, so it runs on the blocking pool and never competes
+/// with the turn path; a failure is logged and retried on the next pass.
 fn spawn_snapshot_retention(
-    snapshots: Arc<haarness_store::SqliteSnapshotStore>,
+    snapshots: haarness_store::SqliteSnapshotFolders,
     config: &SnapshotsSection,
 ) {
     if config.retention_days == 0 {
@@ -10212,7 +10291,7 @@ fn spawn_snapshot_retention(
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
         loop {
             ticker.tick().await;
-            let snapshots = Arc::clone(&snapshots);
+            let snapshots = snapshots.clone();
             let report =
                 tokio::task::spawn_blocking(move || snapshots.prune(retention, keep)).await;
             match report {
@@ -12710,6 +12789,38 @@ mod tests {
     }
 
     #[test]
+    fn the_chat_home_is_named_by_its_folder() {
+        use clap::FromArgMatches as _;
+        let parse = |args: &[&str]| super::cli_command().try_get_matches_from(args).unwrap();
+        for args in [
+            &[
+                "haarness",
+                "--workspace",
+                "/tmp/chats",
+                "--chat-home",
+                "desktop",
+            ][..],
+            &[
+                "haarness",
+                "desktop",
+                "--chat-home",
+                "--workspace",
+                "/tmp/chats",
+            ],
+        ] {
+            let matches = parse(args);
+            assert!(!super::chat_home_unnamed(&matches), "{args:?}");
+            assert!(super::Cli::from_arg_matches(&matches).unwrap().chat_home);
+        }
+        assert!(super::chat_home_unnamed(&parse(&[
+            "haarness",
+            "--chat-home",
+            "desktop"
+        ])));
+        assert!(!super::chat_home_unnamed(&parse(&["haarness", "desktop"])));
+    }
+
+    #[test]
     fn project_configuration_is_default_on_with_an_explicit_opt_out() {
         let default = super::Cli::try_parse_from(["haarness", "run", "hello"]).unwrap();
         assert!(!default.disable_project_config);
@@ -12737,6 +12848,8 @@ mod tests {
     fn automatic_snapshots_follow_project_type_and_explicit_configuration() {
         assert!(super::automatic_snapshots_enabled(None, true));
         assert!(!super::automatic_snapshots_enabled(None, false));
+        // A chat's own folder is checkpointed unless snapshots are off.
+        assert!(super::folder_snapshots_enabled(None));
         let mut configuration = super::SnapshotsSection::default();
         assert!(super::automatic_snapshots_enabled(
             Some(&configuration),
@@ -12747,6 +12860,7 @@ mod tests {
             Some(&configuration),
             true
         ));
+        assert!(!super::folder_snapshots_enabled(Some(&configuration)));
     }
 
     use std::{ffi::OsString, fs, path::PathBuf, sync::Arc, time::Duration};
@@ -12937,6 +13051,7 @@ mod tests {
                 provider: Some("test".into()),
                 model: Some("test".into()),
                 ultracode: None,
+                directory: None,
             })
             .await
             .unwrap();
@@ -13006,6 +13121,7 @@ mod tests {
                 provider: Some("question-test".into()),
                 model: Some("question-test-1".into()),
                 ultracode: None,
+                directory: None,
             })
             .await
             .unwrap();
@@ -14403,6 +14519,7 @@ request_timeout = 0
             cols: 80,
             rows: 24,
             created: false,
+            directory: None,
         })
         .unwrap()
     }

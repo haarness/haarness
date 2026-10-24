@@ -3,14 +3,14 @@ import { mkdtemp, mkdir, writeFile, readFile, realpath, symlink } from "node:fs/
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { stopChatHome } from "./fixtures/chat-home";
 let app: ElectronApplication, page: Page, root: string, main: string, linked: string, current: string;
 let env: Record<string,string>; const binary=resolve(process.env.HAARNESS_BIN??"../../target/debug/haarness");
 const errors:string[]=[];
 test.describe.configure({mode:"serial"});
-async function choose(path:string,first=false) {
+async function choose(path:string) {
   await app.evaluate(({dialog},path)=>{dialog.showOpenDialog=async()=>({canceled:false,filePaths:[path]});},path);
-  if(first) await page.getByRole("region",{name:"Project home"}).getByRole("button",{name:"Open project",exact:true}).click();
-  else await page.getByRole("button",{name:"Open another project",exact:true}).click();
+  await page.getByRole("button",{name:"Open another project",exact:true}).click();
   current=path;
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready","true",{timeout:60000});
   await expect(page.locator(".titlebar")).toContainText(path.split("/").at(-1)!);
@@ -35,13 +35,14 @@ test.beforeAll(async()=>{
   delete env.ELECTRON_RUN_AS_NODE;delete env.ELECTRON_RENDERER_URL;
   app=await electron.launch({args:["."],env,timeout:60000});page=await app.firstWindow();page.setDefaultTimeout(15000);
   page.on("pageerror",error=>errors.push(error.message));
-  await page.context().tracing.start({screenshots:true,snapshots:true,sources:true});await choose(main,true);
+  await page.context().tracing.start({screenshots:true,snapshots:true,sources:true});await choose(main);
 });
 test.afterEach(async()=>{if(page) await page.screenshot({path:test.info().outputPath("final.png")}).catch(()=>{});});
 test.afterAll(async()=>{
   if(page) await page.context().tracing.stop({path:test.info().outputPath("parity-trace.zip")}).catch(()=>{});
   if(app){await app.evaluate(({BrowserWindow})=>{for(const win of BrowserWindow.getAllWindows())win.destroy();}).catch(()=>{});await app.close().catch(()=>{});}
   for(const workspace of [main,linked])try{execFileSync(binary,["--workspace",workspace,"serve","--stop"],{env,stdio:"ignore",timeout:30000});}catch{}
+  stopChatHome(binary, env);
   await test.info().attach("fixture",{body:root??"not started",contentType:"text/plain"});
 });
 test("repository approval is explicit, survives reload, and follows linked worktrees",async()=>{

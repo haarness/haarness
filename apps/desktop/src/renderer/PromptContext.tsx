@@ -173,6 +173,9 @@ export function PromptContextControls(props: {
   const [caret, setCaret] = createSignal(0),
     [cursor, setCursor] = createSignal(0);
   /** The files the last search found, on its connection. */
+  /** Where files are found: the connection, and in This computer the chat
+   * whose own folder they are named from. */
+  const place = () => (app.state.connection?.id ?? "") + "\n" + (app.fileScope().threadId ?? "");
   const [found, setFound] = createSignal<{ connection?: string; names: string[] }>({ names: [] }),
     [error, setError] = createSignal("");
   const [loading, setLoading] = createSignal(false),
@@ -242,7 +245,7 @@ export function PromptContextControls(props: {
    * list and its top row is most likely the one the search puts there. */
   const files = () => {
     const last = found();
-    if (last.connection !== app.state.connection?.id) return [];
+    if (last.connection !== place()) return [];
     return loading() ? keptFiles(last.names, mention()?.query ?? "") : last.names;
   };
   /** The person moved the highlight since their last keystroke. */
@@ -251,26 +254,29 @@ export function PromptContextControls(props: {
   createEffect(() => {
     const active = open(),
       query = mention()?.query ?? "",
-      connection = app.state.connection?.id;
+      connection = app.state.connection?.id,
+      scope = app.fileScope(),
+      where = place();
     const version = ++generation;
     setCursor(0);
     moved = false;
     setError("");
     setLoading(false);
-    if (!active || !connection) {
+    // A chat of This computer before its first message has no files yet.
+    if (!active || !connection || app.unfoldered()) {
       setFound({ names: [] });
       return;
     }
     setLoading(true);
     const timer = setTimeout(() => {
       void window.haarness
-        .api<string[]>(connection, "searchFiles", [{ q: query, limit: FILE_ROWS }])
+        .api<string[]>(connection, "searchFiles", [{ q: query, limit: FILE_ROWS, ...scope }])
         .then((names) => {
           if (version !== generation) return;
           // A row the person moved to stays highlighted where the new files
           // put it; otherwise the top row is.
           const held = moved ? options()[cursor()] : undefined;
-          setFound({ connection, names });
+          setFound({ connection: where, names });
           setLoading(false);
           const at = held
             ? options().findIndex((option) => option.kind === held.kind && option.name === held.name)
@@ -279,7 +285,7 @@ export function PromptContextControls(props: {
         })
         .catch((reason) => {
           if (version !== generation) return;
-          setFound({ connection, names: [] });
+          setFound({ connection: where, names: [] });
           setError(String(reason));
         })
         .finally(() => {
@@ -311,7 +317,7 @@ export function PromptContextControls(props: {
           : option.kind === "agent"
           ? { kind: "agent" as const, name: option.name }
           : await window.haarness
-              .files<FileContent>(connection, "read", { path: option.name })
+              .files<FileContent>(connection, "read", { path: option.name, ...app.fileScope() })
               .then((file) => {
                 if (file.encoding !== "utf8")
                   throw Error(

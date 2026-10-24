@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // Real Electron, IPC, disk preferences and a project daemon on the echo
 // provider. Only the native folder picker is given a deterministic answer.
@@ -44,7 +45,7 @@ test.beforeAll(async () => {
   await app.evaluate(({ dialog }, directory) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
   }, workspace);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
   const connection = JSON.parse(execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], {
     env, input: JSON.stringify({ action: "connect" }), encoding: "utf8", timeout: 60000,
@@ -79,6 +80,7 @@ test.afterAll(async () => {
   }
   for (const directory of [workspace, ...others.map(other => other.directory)])
     try { execFileSync(binary, ["--workspace", directory, "--trust-project", "serve", "--stop"], { env, stdio: "ignore", timeout: 60000 }); } catch {}
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true, maxRetries: 10 }).catch(() => {});
 });
 

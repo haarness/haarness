@@ -9,6 +9,7 @@ import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
 const evidence = process.env.HAARNESS_USAGE_EVIDENCE;
@@ -34,8 +35,7 @@ async function launch(open = true) {
   // A relaunch reopens the last project by itself.
   if (open)
     await page
-      .getByRole("region", { name: "Project home" })
-      .getByRole("button", { name: "Open project", exact: true })
+      .getByRole("button", { name: "Open another project", exact: true })
       .click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
 }
@@ -79,6 +79,7 @@ test.afterAll(async () => {
   } catch {
     // Already stopped.
   }
+  stopChatHome(binary, env);
   await rm(temporary, { recursive: true, force: true });
 });
 

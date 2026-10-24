@@ -19,7 +19,6 @@ import {
   onProjectImageSettled,
   projectImageElement,
   imageProject,
-  projectRoots,
   readProjectImages,
   relabelProjectImages,
   shownProjectImage,
@@ -31,7 +30,9 @@ import { watchOpenImages } from "./ImageViewer";
  * What is read in the transcript's view: the first text that starts inside
  * it, under its middle. Starting inside the view, it holds nothing above it,
  * so an image growing there moves it whole; an image or a placeholder, which
- * may be the one about to come in, is passed over. When no text starts
+ * may be the one about to come in, is passed over, and so is what holds one
+ * (the paragraph beside a narrow placeholder), which would grow under its own
+ * top instead of moving. When no text starts
  * inside it (a tall picture or code block fills it), the end of the row under
  * its centre, which any growth above the view moves as well.
  */
@@ -40,7 +41,12 @@ function readingAnchor(list: HTMLElement, view: DOMRect): { element: HTMLElement
   for (let y = view.top + 1; y < view.bottom; y += 12) {
     const point = document.elementFromPoint(x, y);
     if (!(point instanceof HTMLElement) || point === list || !list.contains(point)) continue;
-    if (point instanceof HTMLImageElement || point.closest(".project-image, .remote-image")) continue;
+    if (
+      point instanceof HTMLImageElement ||
+      point.closest(".project-image, .remote-image") ||
+      point.querySelector("img, .project-image, .remote-image")
+    )
+      continue;
     if (point.getBoundingClientRect().top >= view.top) return { element: point, edge: "top" };
   }
   const row = document.elementFromPoint(x, view.top + view.height / 2)?.closest<HTMLElement>("[data-index]");
@@ -113,6 +119,10 @@ function keepReading(element: HTMLElement, host: HTMLElement, change: () => void
   requestAnimationFrame(() => requestAnimationFrame(done));
 }
 
+/** Text up to this long is drawn on this thread (about 3 ms here); longer
+ * text is drawn by the worker. */
+const DRAWN_HERE = 64 * 1024;
+
 /**
  * `document` renders a Markdown file, where a lone newline is not a line
  * break. `base` is the folder its relative links start from (the file's own
@@ -137,7 +147,15 @@ export function Markdown(props: {
   function follow(href: string) {
     const connection = app.state.connection;
     const thread = app.state.selected;
-    const target = linkTarget(href, { root: connection?.workspace ?? "", base: props.base });
+    // In a chat of This computer, links start from its own folder and stay
+    // in it; before it has one, no file link opens.
+    const chat = conversation && !!connection?.chatHome;
+    const folder = chat ? app.chatFolder() : undefined;
+    const target = linkTarget(href, {
+      root: chat ? (folder ?? "") : (connection?.workspace ?? ""),
+      base: props.base,
+    });
+    if (chat && !folder && target.kind === "file") return;
     if (target.kind === "web") {
       void window.haarness
         .openLink(connection?.id, thread, target.url)
@@ -235,8 +253,8 @@ export function Markdown(props: {
   const reading = new AbortController();
   const asked = new Set<string>();
   /** A read for this project settled: this reply's placeholders for the path show the image, or why not. */
-  function projectSettled(connection: string, path: string, shown: ShownImage) {
-    if (disposed || !host || connection !== app.state.connection?.id) return;
+  function projectSettled(scope: string, path: string, shown: ShownImage) {
+    if (disposed || !host || scope !== imageProject(app.state)?.scope) return;
     const elements = Array.from(host.querySelectorAll<HTMLElement>(".project-image, img.project-image-loaded")).filter(
       (element) => madeHere(element) && element.dataset.projectPath === path,
     );
@@ -259,6 +277,12 @@ export function Markdown(props: {
   let patch: ReturnType<typeof createMarkdownDOM> | undefined;
   let disposed = false;
   const timers = new Set<ReturnType<typeof setTimeout>>();
+  // A message of the conversation is drawn here as it comes in, so its row
+  // has its full height from its first frame: from the worker it would come
+  // in empty and grow a frame later, moving what is read twice, and a saved
+  // reply taking the place of the live one would leave the list short for
+  // that frame. Text being written, and very long text, go to the worker.
+  const here = conversation && !props.live && props.text.length <= DRAWN_HERE;
   const client = createMarkdownClient((update, live) => {
     if (disposed) return;
     (patch ??= createMarkdownDOM(host, {
@@ -267,10 +291,11 @@ export function Markdown(props: {
       labels: imageLabels,
       project: conversation
         ? {
-            root: () => (app.state.connection ? projectRoots(app.state.connection) : []),
+            // A chat of This computer shows its own folder's images.
+            root: () => imageProject(app.state)?.roots ?? [],
             shown: (path) => {
-              const connection = app.state.connection?.id;
-              const now = connection ? shownProjectImage(connection, path) : undefined;
+              const scope = imageProject(app.state)?.scope;
+              const now = scope ? shownProjectImage(scope, path) : undefined;
               if (!now?.note) return now;
               // A picture this reply already shows stays when its file is
               // gone; only a place still waiting says why.
@@ -304,7 +329,7 @@ export function Markdown(props: {
     }
     host.dataset.markdownReady = "true";
     host.dispatchEvent(new CustomEvent("markdown-ready", { bubbles: true }));
-  });
+  }, here);
   createEffect(() => {
     host.dataset.markdownReady = "false";
     client.update(props.text, !!props.live, !props.document);

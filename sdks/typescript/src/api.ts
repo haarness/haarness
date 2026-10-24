@@ -47,8 +47,9 @@ export class Api extends Transport {
     return this.request("GET", `/v1/agents`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/commands */
-  commands(options: RequestOptions = {}): Promise<Array<T.CommandInfo>> {
-    return this.request("GET", `/v1/commands`, { binaryBody: false, binaryResponse: false, ...options });
+  commands(query: Exclusive<T.ChatListQuery, RequestOptions> = {}, options: RequestOptions = {}): Promise<Array<T.CommandInfo>> {
+    [query, options] = splitQuery(query, options);
+    return this.request("GET", `/v1/commands`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/lsp */
   lspStatus(options: RequestOptions = {}): Promise<Array<T.LanguageStatus>> {
@@ -131,8 +132,9 @@ export class Api extends Transport {
     return this.request("DELETE", `/v1/ptys/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/workflows */
-  workflows(options: RequestOptions = {}): Promise<T.WorkflowListResponse> {
-    return this.request("GET", `/v1/workflows`, { binaryBody: false, binaryResponse: false, ...options });
+  workflows(query: Exclusive<T.ChatListQuery, RequestOptions> = {}, options: RequestOptions = {}): Promise<T.WorkflowListResponse> {
+    [query, options] = splitQuery(query, options);
+    return this.request("GET", `/v1/workflows`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/workflows/{invocation}/source */
   workflowSource(invocation: string, options: RequestOptions = {}): Promise<T.WorkflowSourceResponse> {
@@ -448,12 +450,14 @@ export class Api extends Transport {
     return this.request("GET", `/v1/files/content`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** PUT /v1/files/content */
-  writeFile(body: T.FileWrite, options: RequestOptions = {}): Promise<T.FileContent> {
-    return this.request("PUT", `/v1/files/content`, { body, binaryBody: false, binaryResponse: false, ...options });
+  writeFile(body: T.FileWrite, query: Exclusive<T.FileScope, RequestOptions> = {}, options: RequestOptions = {}): Promise<T.FileContent> {
+    [query, options] = splitQuery(query, options);
+    return this.request("PUT", `/v1/files/content`, { body, query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /v1/files/action */
-  mutateFile(body: T.FileAction, options: RequestOptions = {}): Promise<T.JsonValue> {
-    return this.request("POST", `/v1/files/action`, { body, binaryBody: false, binaryResponse: false, ...options });
+  mutateFile(body: T.FileAction, query: Exclusive<T.FileScope, RequestOptions> = {}, options: RequestOptions = {}): Promise<T.JsonValue> {
+    [query, options] = splitQuery(query, options);
+    return this.request("POST", `/v1/files/action`, { body, query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/files/preview */
   previewVersion(query: T.PreviewVersionQuery, options: RequestOptions = {}): Promise<T.FileContent> {

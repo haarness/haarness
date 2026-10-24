@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { stopChatHome } from "./fixtures/chat-home";
 
 // What the terminal panel sends its shell: the answers a program waits for,
 // never answers to output shown before, and every key, also while its
@@ -60,7 +61,7 @@ exec /bin/bash --noprofile --norc -i
   await app.evaluate(({ dialog }, directory) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
   }, workspace);
-  await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90000 });
   const connection = JSON.parse(
     execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], {
@@ -85,6 +86,7 @@ test.afterAll(async () => {
       timeout: 30_000,
     });
   } catch {}
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });
 
@@ -408,7 +410,7 @@ test("after the server is replaced, the terminal it no longer has gives way to o
   const second = await opened;
   second.on("pageerror", (error) => errors.push(error.message));
   await second.setViewportSize({ width: 1500, height: 950 });
-  const home = second.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true });
+  const home = second.getByRole("button", { name: "Open another project", exact: true });
   await expect(home.or(second.locator('.application[data-project-ready="true"]'))).toBeVisible({ timeout: 90_000 });
   if (await home.isVisible()) await home.click();
   await expect(second.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90_000 });

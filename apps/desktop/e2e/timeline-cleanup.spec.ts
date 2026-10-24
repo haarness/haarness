@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { stopChatHome } from "./fixtures/chat-home";
 
 test("transcript measurements release detached rows across scrolling and session switches", async ({}, info) => {
   const temporary = await realpath(await mkdtemp(join(tmpdir(), "haarness-timeline-")));
@@ -37,7 +38,7 @@ test("transcript measurements release detached rows across scrolling and session
     await app.evaluate(({ dialog }, directory) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
     }, workspace);
-    await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open project", exact: true }).click();
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
     await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
     const connection = JSON.parse(execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], { env, input: '{"action":"connect"}', encoding: "utf8", timeout: 60000 }));
     client = new Haarness({ baseUrl: connection.url, token: connection.token });
@@ -79,6 +80,7 @@ test("transcript measurements release detached rows across scrolling and session
     client?.close();
     await app.close().catch(() => {});
     try { execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }); } catch {}
+    stopChatHome(binary, env);
     await info.attach("fixture", { body: temporary, contentType: "text/plain" });
   }
 });

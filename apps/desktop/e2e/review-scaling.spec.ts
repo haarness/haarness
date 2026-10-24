@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { Haarness } from "@haarness/sdk";
+import { stopChatHome } from "./fixtures/chat-home";
 
 const binary = resolve(
   process.env.HAARNESS_BIN ?? "../../target/debug/haarness",
@@ -122,8 +123,7 @@ test.beforeAll(async () => {
     });
   }, workspace);
   await page
-    .getByRole("region", { name: "Project home" })
-    .getByRole("button", { name: "Open project", exact: true })
+    .getByRole("button", { name: "Open another project", exact: true })
     .click();
   await expect(page.locator(".application")).toHaveAttribute(
     "data-project-ready",
@@ -155,6 +155,7 @@ test.afterAll(async () => {
       stdio: "ignore",
       timeout: 30000,
     });
+  stopChatHome(binary, env);
   if (temporary) await rm(temporary, { recursive: true, force: true });
 });
 

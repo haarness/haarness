@@ -29,6 +29,7 @@ const bridge: Bridge = {
   notificationHandled: (target) => invoke("notificationHandled", target),
   windowAction: (action) => invoke("windowAction", action),
   boot: () => invoke("boot"),
+  chatHomeRunning: () => invoke("chatHomeRunning"),
   connect: (input) => invoke("connect", input),
   voice: (action, id, locale) => invoke("voice", action, id, locale),
   forget: (id) => invoke("forget", id),

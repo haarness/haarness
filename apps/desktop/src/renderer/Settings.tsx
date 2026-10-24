@@ -970,18 +970,27 @@ function Computers() {
 }
 function Projects() {
   const app = useApp();
+  /** Where the open chat works: its project's folder, or for a chat
+   * without a project its own folder (none yet on its new-chat screen; the
+   * chat home itself is no project). */
+  const current = () => {
+    const connection = app.state.connection;
+    if (!connection) return undefined;
+    const path = connection.chatHome ? app.chatFolder() : connection.workspace;
+    return path ? { connection, path } : undefined;
+  };
   return (
     <>
-      <Show when={app.state.connection}>
-        {(connection) => (
+      <Show when={current()}>
+        {(place) => (
           <section class="settings-current-project" aria-label={t("Current working folder")} data-setting="Current working folder">
             <div class="settings-current-project-icon"><Icon name="folder" size="lg" /></div>
             <div class="settings-current-project-details">
               <span class="small muted">{t("Current working folder")}</span>
-              <h3>{connection().workspace.split(/[\\/]/).filter(Boolean).at(-1) || connection().workspace}</h3>
-              <PathText class="settings-current-project-path" path={connection().workspace} local={!connection().remote} />
+              <h3>{place().path.split(/[\\/]/).filter(Boolean).at(-1) || place().path}</h3>
+              <PathText class="settings-current-project-path" path={place().path} local={!place().connection.remote} />
               <span class="small muted">{t(app.currentServer().label)}</span>
-              <Show when={!connection().remote && !connection().trust}>
+              <Show when={!place().connection.remote && !place().connection.trust && !place().connection.chatHome}>
                 <p class="small muted">{t("Project configuration disabled")}</p>
               </Show>
             </div>

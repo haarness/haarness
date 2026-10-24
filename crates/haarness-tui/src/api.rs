@@ -2347,6 +2347,7 @@ mod tests {
             cols: 80,
             rows: 24,
             created: false,
+            directory: None,
         })
         .unwrap();
         let (queries, mut asked) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -3057,6 +3058,7 @@ mod tests {
             cols: 80,
             rows: 24,
             created: false,
+            directory: None,
         })
         .unwrap();
         let (queries, mut asked) = tokio::sync::mpsc::unbounded_channel::<String>();
