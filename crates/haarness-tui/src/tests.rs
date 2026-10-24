@@ -22604,8 +22604,15 @@ fn the_editor_draft_is_private_and_new() {
     let other = crate::DraftFolder::new().unwrap();
     assert_ne!(folder.0, other.0, "each draft gets a folder of its own");
     assert!(folder.0.starts_with(std::env::temp_dir()));
+    // `haarness-compose-` and a random id, never the process number.
     let name = folder.0.file_name().unwrap().to_string_lossy().into_owned();
-    assert!(!name.contains(&std::process::id().to_string()), "{name}");
+    let id = name
+        .strip_prefix("haarness-compose-")
+        .expect("the draft folder's name");
+    assert!(
+        id.len() == 32 && id.chars().all(|character| character.is_ascii_hexdigit()),
+        "{name}"
+    );
     assert_eq!(mode(&folder.0), 0o700);
     let file = folder.write("draft text").unwrap();
     assert_eq!(mode(&file), 0o600);
