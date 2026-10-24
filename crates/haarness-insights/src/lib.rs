@@ -125,6 +125,9 @@ pub struct Report {
     pub detached_items_skipped: u64,
 }
 
+/// How reports name the chat home's chats.
+const CHATS_WITHOUT_A_PROJECT: &str = "Chats without a project";
+
 #[derive(Default, Deserialize)]
 struct Registry {
     #[serde(default)]
@@ -144,6 +147,9 @@ struct Workspace {
     id: String,
     project_id: String,
     path: String,
+    /// The chat home holds the folders of chats without a project.
+    #[serde(default)]
+    chat_home: bool,
 }
 struct Source {
     path: PathBuf,
@@ -429,14 +435,19 @@ fn scan(
             if project_filter.is_some_and(|p| p != project) {
                 continue;
             }
-            let name = registry
-                .projects
-                .iter()
-                .find(|p| p.id == project)
-                .map_or_else(
-                    || format!("Unregistered workspace {id}"),
-                    |p| p.name.clone(),
-                );
+            let name = if registered.is_some_and(|workspace| workspace.chat_home) {
+                // Its folder's name is no project's.
+                CHATS_WITHOUT_A_PROJECT.to_owned()
+            } else {
+                registry
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project)
+                    .map_or_else(
+                        || format!("Unregistered workspace {id}"),
+                        |p| p.name.clone(),
+                    )
+            };
             let path = entry.path().join("haarness.db");
             if path.is_file() {
                 sources.push(Source {

@@ -109,7 +109,8 @@ impl WorkspaceManager {
     }
 
     /// Register an existing directory as a local workspace. Re-registering is
-    /// idempotent and refreshes its branch and last-opened timestamp.
+    /// idempotent and refreshes its branch and last-opened timestamp. The
+    /// chat home stays the chat home (see `register_chat_home`).
     ///
     /// Git and the folder are consulted before the registry lock is taken, so
     /// a folder whose git stalls holds up only this call, never every other
@@ -117,15 +118,42 @@ impl WorkspaceManager {
     /// registry as it was read; the update refuses if that entry changed
     /// meanwhile.
     pub fn register_local(&self, path: &Path) -> Result<WorkspaceInfo> {
+        self.register(path, false)
+    }
+
+    /// Register `path` as the computer's chat home: the folder Haarness keeps
+    /// the folders of chats without a project in. It is a project of its own
+    /// whatever Git says about the folders above it (a chat home inside a
+    /// repository is not part of that repository), it stays the chat home
+    /// when it is registered again, and project lists leave it out.
+    pub fn register_chat_home(&self, path: &Path) -> Result<WorkspaceInfo> {
+        self.register(path, true)
+    }
+
+    fn register(&self, path: &Path, chat_home: bool) -> Result<WorkspaceInfo> {
         let path = canonical_directory(path)?;
-        let identity = project_identity(&path)?;
-        let branch = git_branch(&path);
         let snapshot = self.read_registry_locked()?;
-        let verified = match snapshot
+        let registered = snapshot
             .workspaces
             .iter()
-            .find(|workspace| same_path(Path::new(&workspace.path), &path))
-        {
+            .find(|workspace| same_path(Path::new(&workspace.path), &path));
+        if chat_home && registered.is_some_and(|workspace| workspace.managed) {
+            return Err(WorkspaceError::Invalid(
+                "a worktree Haarness manages cannot be the chat home".into(),
+            ));
+        }
+        let own_root = ProjectIdentity {
+            root: path.clone(),
+            git: false,
+            linked: false,
+        };
+        let (identity, branch) =
+            if chat_home || registered.is_some_and(|workspace| workspace.chat_home) {
+                (None, None)
+            } else {
+                (Some(project_identity(&path)?), git_branch(&path))
+            };
+        let verified = match registered {
             Some(workspace) if workspace.managed => {
                 let project = project_for(&snapshot, workspace)?;
                 verify_workspace_identity(workspace, project)?;
@@ -135,6 +163,17 @@ impl WorkspaceManager {
         };
         self.with_registry_mut(|registry| {
             let now = Utc::now();
+            let index = registry
+                .workspaces
+                .iter()
+                .position(|workspace| same_path(Path::new(&workspace.path), &path));
+            // Marked as the chat home meanwhile, it is its own root all the same.
+            let chat_home =
+                chat_home || index.is_some_and(|index| registry.workspaces[index].chat_home);
+            let identity = match (&identity, chat_home) {
+                (Some(identity), false) => identity,
+                _ => &own_root,
+            };
             let project_id = if let Some(project) = registry
                 .projects
                 .iter_mut()
@@ -153,11 +192,7 @@ impl WorkspaceManager {
                 });
                 id
             };
-            if let Some(index) = registry
-                .workspaces
-                .iter()
-                .position(|workspace| same_path(Path::new(&workspace.path), &path))
-            {
+            if let Some(index) = index {
                 if registry.workspaces[index].managed {
                     let workspace = &registry.workspaces[index];
                     let project = project_for(registry, workspace)?;
@@ -176,6 +211,7 @@ impl WorkspaceManager {
                     } else {
                         WorkspaceKind::Local
                     };
+                    workspace.chat_home = chat_home;
                 }
                 return Ok(workspace.clone());
             }
@@ -197,6 +233,7 @@ impl WorkspaceManager {
                 created_at: now,
                 last_opened_at: now,
                 exists: true,
+                chat_home,
             };
             registry.workspaces.push(workspace.clone());
             Ok(workspace)
@@ -218,9 +255,15 @@ impl WorkspaceManager {
         )
     }
 
+    /// How many project workspaces are registered (the chat home is none).
     /// Registry metadata only: startup must not probe unrelated directories.
     pub fn registered_count(&self) -> Result<usize> {
-        Ok(self.read_registry_locked()?.workspaces.len())
+        Ok(self
+            .read_registry_locked()?
+            .workspaces
+            .iter()
+            .filter(|workspace| !workspace.chat_home)
+            .count())
     }
 
     /// The registered workspaces as stored, without looking at any folder:
@@ -243,8 +286,25 @@ impl WorkspaceManager {
     /// a folder that does not answer within a second shows as last recorded
     /// (see `refresh_folders`), so a slow folder never holds up the list or
     /// another process's registry access.
+    ///
+    /// This is the project catalog: the chat home is no project, so it and
+    /// the project that is only its own are left out.
     pub fn list(&self, current_workspace_id: Option<&str>) -> Result<WorkspaceListResponse> {
         let mut registry = self.read_registry_locked()?;
+        let homes = registry
+            .workspaces
+            .iter()
+            .filter(|workspace| workspace.chat_home)
+            .map(|workspace| workspace.project_id.clone())
+            .collect::<HashSet<_>>();
+        registry.workspaces.retain(|workspace| !workspace.chat_home);
+        registry.projects.retain(|project| {
+            !homes.contains(&project.id)
+                || registry
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.project_id == project.id)
+        });
         refresh_existence(&mut registry);
         registry.projects.sort_by(|a, b| a.name.cmp(&b.name));
         registry.workspaces.sort_by(|a, b| {
@@ -466,6 +526,7 @@ impl WorkspaceManager {
             created_at: now,
             last_opened_at: now,
             exists: true,
+            chat_home: false,
         };
         registry.workspaces.push(workspace.clone());
         if let Err(error) = self.write_registry(&registry) {
@@ -1895,6 +1956,7 @@ mod tests {
             created_at: Utc::now(),
             last_opened_at: Utc::now(),
             exists,
+            chat_home: false,
         };
         let mut workspaces = vec![entry(&fast, false, "old"), entry(&slow, true, "recorded")];
         let patience = Duration::from_secs(2);
@@ -2886,6 +2948,74 @@ mod tests {
             fixture.manager.get(elsewhere.to_str().unwrap()),
             Err(WorkspaceError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn the_chat_home_is_its_own_root_stays_marked_and_is_no_project() {
+        let fixture = Fixture::new();
+        // Inside a repository, as an app's data folder could be.
+        let home = fixture.repository.join("Chat folders");
+        fs::create_dir_all(&home).unwrap();
+        let registered = fixture.manager.register_chat_home(&home).unwrap();
+        assert!(registered.chat_home);
+        assert_eq!(registered.kind, WorkspaceKind::Local);
+        assert_eq!(registered.branch, None);
+        assert_ne!(registered.project_id, fixture.local.project_id);
+        let project = fixture
+            .manager
+            .project_for_workspace(&registered.id)
+            .unwrap();
+        assert_eq!(Path::new(&project.root), home.canonicalize().unwrap());
+        assert!(!project.git);
+        // Registered again as a plain folder (a `--workspace` without the
+        // flag, a sidebar folder), it keeps being the chat home.
+        let again = fixture.manager.register_local(&home).unwrap();
+        assert_eq!(again.id, registered.id);
+        assert!(again.chat_home);
+        assert_eq!(again.project_id, registered.project_id);
+        // Project lists and the count of projects leave it out.
+        let catalog = fixture.manager.list(Some(&registered.id)).unwrap();
+        assert!(
+            catalog
+                .workspaces
+                .iter()
+                .all(|workspace| !workspace.chat_home)
+        );
+        assert!(
+            catalog
+                .projects
+                .iter()
+                .all(|project| project.id != registered.project_id)
+        );
+        assert!(
+            catalog
+                .projects
+                .iter()
+                .any(|project| project.id == fixture.local.project_id)
+        );
+        assert_eq!(fixture.manager.registered_count().unwrap(), 1);
+        // Its record still says what it is.
+        assert!(fixture.manager.get(&registered.id).unwrap().chat_home);
+        // A worktree Haarness manages is never made the chat home.
+        let managed = fixture.create("managed");
+        assert!(matches!(
+            fixture.manager.register_chat_home(Path::new(&managed.path)),
+            Err(WorkspaceError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn a_folder_registered_before_becomes_the_chat_home_in_place() {
+        let fixture = Fixture::new();
+        let home = fixture.repository.join("chats-folder");
+        fs::create_dir_all(&home).unwrap();
+        let plain = fixture.manager.register_local(&home).unwrap();
+        assert!(!plain.chat_home);
+        assert_eq!(plain.project_id, fixture.local.project_id);
+        let home_entry = fixture.manager.register_chat_home(&home).unwrap();
+        assert_eq!(home_entry.id, plain.id, "its chats stay where they were");
+        assert!(home_entry.chat_home);
+        assert_ne!(home_entry.project_id, fixture.local.project_id);
     }
 
     #[test]
