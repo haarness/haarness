@@ -398,12 +398,16 @@ export class CloudApi extends Transport {
   releaseHistory(query: T.ReleaseHistoryQuery = {}, options: RequestOptions = {}): Promise<Array<T.ReleasePublication>> {
     return this.request("GET", `/api/v1/releases/history`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /api/v1/releases/{channel}/chrome-extension/updates.xml */
+  chromeExtensionUpdates(channel: string, options: RequestOptions = {}): Promise<string> {
+    return this.request("GET", `/api/v1/releases/${this.segment(channel)}/chrome-extension/updates.xml`, { binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /api/v1/releases/{channel}/{product} */
   productRelease(channel: string, product: string, options: RequestOptions = {}): Promise<T.ReleaseManifestResponse> {
     return this.request("GET", `/api/v1/releases/${this.segment(channel)}/${this.segment(product)}`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/releases/{channel}/{product}/download */
-  downloadRelease(channel: string, product: string, query: T.DownloadReleaseQuery, options: RequestOptions = {}): Promise<Uint8Array> {
+  downloadRelease(channel: string, product: string, query: T.DownloadReleaseQuery = {}, options: RequestOptions = {}): Promise<Uint8Array> {
     return this.request("GET", `/api/v1/releases/${this.segment(channel)}/${this.segment(product)}/download`, { query, binaryBody: false, binaryResponse: true, ...options });
   }
   /** GET /api/v1/remote-hosts */

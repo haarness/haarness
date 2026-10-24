@@ -1210,6 +1210,17 @@
     }
   },
   {
+    "name": "chrome_extension_updates",
+    "method": "GET",
+    "path": "/api/v1/releases/{channel}/chrome-extension/updates.xml",
+    "pathParams": [
+      "channel"
+    ],
+    "response": {
+      "type": "string"
+    }
+  },
+  {
     "name": "product_release",
     "method": "GET",
     "path": "/api/v1/releases/{channel}/{product}",

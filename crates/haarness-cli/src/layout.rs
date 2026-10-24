@@ -70,7 +70,6 @@ impl Layout {
                     "extensions",
                     "extensions.json",
                     "output-styles",
-                    "workflows",
                 ] {
                     copy_missing(&legacy.config_dir().join(name), &self.config.join(name))?;
                 }
@@ -92,6 +91,20 @@ impl Layout {
                 "Configuration copied without overwriting existing files. Legacy data retained.\n",
             )?;
         }
+        let workflows = self.config.join(".workflows-v2");
+        if !workflows.exists() {
+            match self.adopt_legacy_workflows(legacy) {
+                Ok(()) => fs::write(
+                    workflows,
+                    "Global workflows taken from the legacy folder; the folder they replaced is kept as workflows-before-move. Legacy files retained.\n",
+                )?,
+                // Starting matters more than moving them: the next start tries again.
+                Err(error) => eprintln!(
+                    "haarness: global workflows were not moved to {} yet: {error:#}",
+                    self.config.join("workflows").display()
+                ),
+            }
+        }
         for name in [
             "agents",
             "commands",
@@ -103,6 +116,75 @@ impl Layout {
         }
         Ok(())
     }
+}
+
+impl Layout {
+    /// Until the workflow catalog read `workflows` here, it read the legacy
+    /// folder's, so that one holds the global workflows people have, and the
+    /// one here was never read where the two differ. The legacy one is copied
+    /// into a fresh folder that takes this one's place; this one is kept beside
+    /// it as `workflows-before-move`. Nothing changes when they are the same
+    /// folder (Linux, or one links to the other), and a failure leaves both
+    /// as they were.
+    fn adopt_legacy_workflows(&self, legacy: Option<&directories::ProjectDirs>) -> Result<()> {
+        legacy.map_or(Ok(()), |legacy| {
+            self.adopt_workflows(&legacy.config_dir().join("workflows"))
+        })
+    }
+
+    fn adopt_workflows(&self, source: &Path) -> Result<()> {
+        let target = self.config.join("workflows");
+        if !source.is_dir() {
+            return Ok(());
+        }
+        if fs::canonicalize(source).ok() == fs::canonicalize(&target).ok() && target.exists() {
+            return Ok(());
+        }
+        let fresh = self
+            .config
+            .join(format!(".workflows-moving-{}", uuid::Uuid::now_v7()));
+        let result = (|| -> Result<()> {
+            copy_tree(source, &fresh)?;
+            if fs::symlink_metadata(&target).is_ok() {
+                let mut aside = self.config.join("workflows-before-move");
+                if fs::symlink_metadata(&aside).is_ok() {
+                    aside = self
+                        .config
+                        .join(format!("workflows-before-move-{}", uuid::Uuid::now_v7()));
+                }
+                fs::rename(&target, aside)?;
+            }
+            fs::rename(&fresh, &target)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&fresh);
+        }
+        result.with_context(|| format!("copy {}", source.display()))
+    }
+}
+
+/// `source`'s files and folders into the new folder `target`. A link stays a
+/// link to what it names, as [`copy_missing`] keeps it; one that names nothing
+/// is left out, since nothing could read it.
+fn copy_tree(source: &Path, target: &Path) -> Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let to = target.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            #[cfg(unix)]
+            if let Ok(resolved) = entry.path().canonicalize() {
+                std::os::unix::fs::symlink(resolved, &to)?;
+            }
+        } else if kind.is_dir() {
+            copy_tree(&entry.path(), &to)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
 }
 
 fn adopt_directory(target: &Path, source: &Path) -> Result<()> {
@@ -416,6 +498,72 @@ mod tests {
             adopt_directory(&alias, &old).unwrap();
             fs::write(old.join("active.db"), "live").unwrap();
             assert_eq!(fs::read_to_string(alias.join("active.db")).unwrap(), "live");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn global_workflows_come_from_the_folder_that_was_read() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-workflows-{}", uuid::Uuid::now_v7()));
+        let layout = Layout::resolve(&root, Some(&root.join("home")), |_| None).unwrap();
+        let legacy = root.join("legacy/workflows");
+        let current = layout.config.join("workflows");
+        fs::create_dir_all(legacy.join("nested")).unwrap();
+        fs::create_dir_all(&current).unwrap();
+        // The legacy folder was read: edited, added and deleted there since the
+        // first copy. The current folder holds that stale copy.
+        fs::write(legacy.join("review.ts"), "edited").unwrap();
+        fs::write(legacy.join("nested/added.ts"), "added").unwrap();
+        fs::write(current.join("review.ts"), "first copy").unwrap();
+        fs::write(current.join("deleted.ts"), "deleted since").unwrap();
+        let adopt = || layout.adopt_workflows(&legacy);
+        adopt().unwrap();
+        assert_eq!(
+            fs::read_to_string(current.join("review.ts")).unwrap(),
+            "edited"
+        );
+        assert_eq!(
+            fs::read_to_string(current.join("nested/added.ts")).unwrap(),
+            "added"
+        );
+        assert!(!current.join("deleted.ts").exists());
+        let aside = layout.config.join("workflows-before-move");
+        assert_eq!(
+            fs::read_to_string(aside.join("deleted.ts")).unwrap(),
+            "deleted since"
+        );
+        assert_eq!(
+            fs::read_to_string(legacy.join("review.ts")).unwrap(),
+            "edited"
+        );
+        // The same folder through a link is left alone, and no file is emptied.
+        #[cfg(unix)]
+        {
+            fs::remove_dir_all(&current).unwrap();
+            std::os::unix::fs::symlink(&legacy, &current).unwrap();
+            adopt().unwrap();
+            assert_eq!(
+                fs::read_to_string(legacy.join("review.ts")).unwrap(),
+                "edited"
+            );
+            assert!(
+                fs::symlink_metadata(&current)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+        // A link that names nothing is left out instead of failing.
+        #[cfg(unix)]
+        {
+            fs::remove_file(&current).unwrap();
+            std::os::unix::fs::symlink(root.join("missing"), legacy.join("broken.ts")).unwrap();
+            adopt().unwrap();
+            assert!(fs::symlink_metadata(current.join("broken.ts")).is_err());
+            assert_eq!(
+                fs::read_to_string(current.join("review.ts")).unwrap(),
+                "edited"
+            );
         }
         fs::remove_dir_all(root).unwrap();
     }

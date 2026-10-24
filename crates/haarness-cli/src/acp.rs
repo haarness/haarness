@@ -136,7 +136,11 @@ impl Service {
                 AgentCapabilities::new()
                     .load_session(true)
                     .prompt_capabilities(
-                        PromptCapabilities::new().image(true).embedded_context(true),
+                        // `prompt_content` turns audio blocks into attachments too.
+                        PromptCapabilities::new()
+                            .image(true)
+                            .audio(true)
+                            .embedded_context(true),
                     )
                     .mcp_capabilities(McpCapabilities::new().http(true).sse(true)),
             )
@@ -1325,6 +1329,13 @@ fn not_found(error: impl std::fmt::Display) -> agent_client_protocol::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialize_advertises_every_prompt_block_it_accepts() {
+        let response = Service::initialize(InitializeRequest::new(ProtocolVersion::V1));
+        let prompt = response.agent_capabilities.prompt_capabilities;
+        assert!(prompt.image && prompt.audio && prompt.embedded_context);
+    }
 
     #[test]
     fn converts_mixed_prompt_content() {
