@@ -3332,24 +3332,41 @@ enum Planned {
 /// What a patch's earlier operations leave at each path they touch.
 struct PatchFiles {
     files: HashMap<PathBuf, Planned>,
-    /// The project's disk ignores letter case (macOS's and Windows' do by
-    /// default): `Foo.txt` and `foo.txt` are one file there.
-    fold_case: bool,
+    /// Whether each folder looked at ignores letter case (macOS's and
+    /// Windows' disks do by default): `Foo.txt` and `foo.txt` are one file
+    /// there.
+    folds: parking_lot::Mutex<HashMap<PathBuf, bool>>,
 }
 
 impl PatchFiles {
-    fn new(context: &ToolContext) -> Self {
+    fn new() -> Self {
         Self {
             files: HashMap::new(),
-            fold_case: folds_case(&context.workspace),
+            folds: parking_lot::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Whether the folder that holds `path` ignores letter case. A new
+    /// file's folder may not exist yet; the nearest one that does decides.
+    fn folds(&self, path: &Path) -> bool {
+        let Some(folder) = path.ancestors().skip(1).find(|folder| folder.is_dir()) else {
+            return false;
+        };
+        *self
+            .folds
+            .lock()
+            .entry(folder.to_path_buf())
+            .or_insert_with(|| folds_case(folder))
     }
 
     /// The path an earlier operation gave the file `path` names, and what it
     /// left there.
     fn find(&self, path: &Path) -> Option<(&PathBuf, &Planned)> {
         self.files.get_key_value(path).or_else(|| {
-            let folded = self.fold_case.then(|| fold(path))?;
+            if !self.folds(path) {
+                return None;
+            }
+            let folded = fold(path);
             self.files.iter().find(|(key, _)| fold(key) == folded)
         })
     }
@@ -3360,11 +3377,11 @@ impl PatchFiles {
 
     /// Whether two paths name one file.
     fn same(&self, left: &Path, right: &Path) -> bool {
-        left == right || (self.fold_case && fold(left) == fold(right))
+        left == right || (fold(left) == fold(right) && self.folds(left))
     }
 
     fn insert(&mut self, path: PathBuf, planned: Planned) {
-        if self.fold_case {
+        if self.folds(&path) {
             let folded = fold(&path);
             self.files.retain(|key, _| fold(key) != folded);
         }
@@ -3376,24 +3393,62 @@ fn fold(path: &Path) -> String {
     path.to_string_lossy().to_lowercase()
 }
 
-/// Whether the disk holding `folder` ignores letter case: the folder's path
-/// in swapped case leads to the folder itself.
+/// Whether `folder` ignores letter case. When it cannot tell, it says no,
+/// and a patch takes names exactly as written, as it always did.
 fn folds_case(folder: &Path) -> bool {
-    let Ok(folder) = folder.canonicalize() else {
-        return false;
-    };
-    let text = folder.to_string_lossy();
-    let swapped: String = text
-        .chars()
-        .map(|letter| {
-            if letter.is_ascii_lowercase() {
-                letter.to_ascii_uppercase()
-            } else {
-                letter.to_ascii_lowercase()
+    #[cfg(target_os = "macos")]
+    {
+        macos_folds_case(folder).unwrap_or(false)
+    }
+    // Another letter case of a name in the folder leads to that entry.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return false;
+        };
+        for entry in entries.flatten().take(64) {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let swapped: String = name
+                .chars()
+                .map(|letter| {
+                    if letter.is_ascii_lowercase() {
+                        letter.to_ascii_uppercase()
+                    } else {
+                        letter.to_ascii_lowercase()
+                    }
+                })
+                .collect();
+            if swapped == name {
+                continue;
             }
-        })
-        .collect();
-    swapped != text && same_file(&folder, Path::new(&swapped))
+            let (named, other) = (folder.join(name), folder.join(swapped));
+            #[cfg(unix)]
+            return same_link(&named, &other);
+            #[cfg(not(unix))]
+            return same_file(&named, &other);
+        }
+        false
+    }
+}
+
+/// What macOS says of the disk holding `folder`, per folder, so a
+/// case-sensitive disk mounted inside one that is not counts as what it is.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)] // one pathconf call, on a string this function owns
+fn macos_folds_case(folder: &Path) -> Option<bool> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = std::ffi::CString::new(folder.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `path` is NUL-terminated and outlives the call, which only
+    // reads it.
+    let sensitive = unsafe { nix::libc::pathconf(path.as_ptr(), nix::libc::_PC_CASE_SENSITIVE) };
+    match sensitive {
+        0 => Some(true),
+        1 => Some(false),
+        _ => None,
+    }
 }
 
 /// The one write a patch operation makes.
@@ -3432,7 +3487,7 @@ async fn plan_patch(
     operations: Vec<haarness_core::patch::FileOp>,
     context: &ToolContext,
 ) -> CoreResult<PatchPlan> {
-    let mut planned = PatchFiles::new(context);
+    let mut planned = PatchFiles::new();
     let mut plan = PatchPlan {
         steps: Vec::new(),
         diffs: Vec::new(),
@@ -6510,6 +6565,60 @@ export default workflow({
             );
         }
         tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    /// `HAARNESS_TEST_CASE_SENSITIVE_DIR` names a case-sensitive disk mounted
+    /// inside one that ignores case (a case-sensitive APFS image on macOS),
+    /// for the checks only such a disk can make.
+    #[tokio::test]
+    async fn letter_case_is_folded_only_in_folders_that_ignore_it() {
+        let folder = std::env::temp_dir().join(format!("haarness-fold-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("Probe.txt"), "").unwrap();
+        assert_eq!(folds_case(&folder), folder.join("PROBE.TXT").exists());
+        std::fs::remove_dir_all(folder).unwrap();
+        let Some(sensitive) = std::env::var_os("HAARNESS_TEST_CASE_SENSITIVE_DIR") else {
+            return;
+        };
+        // The mount itself and a folder without letters below it.
+        let sensitive = PathBuf::from(sensitive).canonicalize().unwrap();
+        let digits = sensitive.join(std::process::id().to_string());
+        std::fs::create_dir(&digits).unwrap();
+        assert!(!folds_case(&sensitive));
+        assert!(!folds_case(&digits));
+        // Two files whose names differ only in case stay two files.
+        std::fs::write(digits.join("Foo.txt"), "same\n").unwrap();
+        std::fs::write(digits.join("foo.txt"), "same\n").unwrap();
+        std::fs::write(digits.join("Gone.txt"), "upper\n").unwrap();
+        std::fs::write(digits.join("gone.txt"), "lower\n").unwrap();
+        NativeToolRegistry::new(digits.clone())
+            .get("apply_patch")
+            .unwrap()
+            .execute(
+                json!({"input": concat!(
+                    "*** Begin Patch\n*** Update File: Foo.txt\n@@\n-same\n+upper\n",
+                    "*** Update File: foo.txt\n@@\n-same\n+lower\n",
+                    "*** Delete File: gone.txt\n*** Update File: Gone.txt\n@@\n-upper\n+UPPER\n",
+                    "*** End Patch\n"
+                )}),
+                tool_context(&digits),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(digits.join("Foo.txt")).unwrap(),
+            "upper\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(digits.join("foo.txt")).unwrap(),
+            "lower\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(digits.join("Gone.txt")).unwrap(),
+            "UPPER\n"
+        );
+        assert!(!digits.join("gone.txt").exists());
+        std::fs::remove_dir_all(digits).unwrap();
     }
 
     #[tokio::test]
