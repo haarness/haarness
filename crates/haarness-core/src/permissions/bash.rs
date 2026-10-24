@@ -280,7 +280,8 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
 /// after it becomes more words of the command before (`true` then a line
 /// `\rm -rf x` reads as one `true` command, and the first line of a
 /// here-document that starts with a backslash as words of the line that
-/// opens it). The shell ends the command at that line feed. Only these
+/// opens it), and it takes `\`, a carriage return and a line feed for a line
+/// continuation. The shell ends the command at that line feed. Only these
 /// shapes change, each where the backslash is not itself escaped and the
 /// parser reads the line feed (or the backslash) inside one command:
 ///
@@ -288,9 +289,9 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
 ///   `\./run.sh`): the backslash only stops an alias, and becomes a space;
 /// - a line that is only `\` (it joins the line after it to it): the
 ///   backslash becomes a space, an empty line;
-/// - `\`, a carriage return and a line feed before such a line: the
-///   backslash quotes the carriage return, so the line feed still ends the
-///   command, and the backslash becomes a space.
+/// - `\`, a carriage return and a line feed: the backslash quotes the
+///   carriage return, so the line feed ends the command (`true \` CR LF
+///   `rm -rf x` runs `rm`), and the backslash becomes a space.
 ///
 /// The text keeps its length, so every node's range is a range of the line
 /// as written, which every text is read from: patterns, words and
@@ -302,7 +303,7 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
 /// It takes one parse and a pass over the line: no shape costs more than its
 /// length.
 fn shell_reading(command: &str) -> std::borrow::Cow<'_, str> {
-    if !command.contains("\n\\") {
+    if !command.contains("\n\\") && !command.contains("\\\r\n") {
         return std::borrow::Cow::Borrowed(command);
     }
     let mut parser = tree_sitter::Parser::new();
@@ -338,11 +339,7 @@ fn shell_reading(command: &str) -> std::borrow::Cow<'_, str> {
             at += 2;
             continue;
         }
-        if bytes[at] == b'\\'
-            && !escaped
-            && bytes[at + 1..].starts_with(b"\r\n\\")
-            && bytes.get(at + 4).copied().is_some_and(name)
-        {
+        if bytes[at] == b'\\' && !escaped && bytes[at + 1..].starts_with(b"\r\n") {
             candidates.push((at, at));
             run = 0;
             at += 1;
@@ -487,12 +484,16 @@ fn delimiters(root: tree_sitter::Node<'_>, command: &str) -> (HashSet<String>, H
     (exact, indented)
 }
 
-/// The text of a command with its line continuations inside words joined,
-/// as the shell reads it, when it has one: `r\` at the end of a line and
-/// `m -rf x` on the next is `rm -rf x`, where the parser reads the words `r`
-/// and `m`. A continuation between words, inside single quotes, or at the
-/// start or end of the text changes nothing and gives `None`.
-fn joined_inside_words(text: &str) -> Option<String> {
+/// The text of a command with its line continuations joined, as the shell
+/// reads it, when one touches a word: `r\` at the end of a line and `m -rf
+/// x` on the next is `rm -rf x`, where the parser reads the words `r` and
+/// `m`; `rm\` and ` -rf x` (or `git \` and `push`) are words the parser
+/// reads right, but the command as written keeps the line break where a
+/// rule such as `rm *` or `git push *` looks for a space. With `within`,
+/// only a continuation inside a word counts, the one that changes the words.
+/// A continuation between blanks, inside single quotes, or at the start or
+/// end of the text changes nothing and gives `None`.
+fn joined_continuations(text: &str, within: bool) -> Option<String> {
     let bytes = text.as_bytes();
     let mut joined = String::with_capacity(text.len());
     let (mut single, mut double, mut found) = (false, false, false);
@@ -506,9 +507,11 @@ fn joined_inside_words(text: &str) -> Option<String> {
                 if bytes.get(at + 1) == Some(&b'\n') {
                     let before = at.checked_sub(1).map(|index| bytes[index]);
                     let after = bytes.get(at + 2).copied();
-                    if before.is_some_and(|byte| !byte.is_ascii_whitespace())
-                        && after.is_some_and(|byte| !byte.is_ascii_whitespace())
-                    {
+                    let (before, after) = (
+                        before.is_some_and(|byte| !byte.is_ascii_whitespace()),
+                        after.is_some_and(|byte| !byte.is_ascii_whitespace()),
+                    );
+                    if (before && after) || (!within && (before || after)) {
                         found = true;
                     }
                     joined.push_str(&text[last..at]);
@@ -866,7 +869,9 @@ impl Reader<'_> {
             // `r\<newline>m -rf x`: the shell drops a line continuation
             // inside a word before it reads the line, where the parser reads
             // two words, so the joined text is read again.
-            if continued && let Some(joined) = joined_inside_words(&node_text(node, command)) {
+            if continued
+                && let Some(joined) = joined_continuations(&node_text(node, command), false)
+            {
                 self.nested(&joined, depth);
             }
             // An unquoted here-document's `…` substitutions run as the shell
@@ -3034,7 +3039,7 @@ pub fn is_obviously_read_only(command: &str) -> bool {
     if parser.set_language(&language.into()).is_err() {
         return false;
     }
-    if joined_inside_words(command).is_some() {
+    if joined_continuations(command, true).is_some() {
         return false;
     }
     let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
@@ -3776,7 +3781,7 @@ pub fn script_files(command: &str, cwd: &Path) -> Vec<ScriptFile> {
     }
     // A word the shell joins across lines may name another file than the
     // tree's words do.
-    if joined_inside_words(command).is_some() {
+    if joined_continuations(command, true).is_some() {
         return Vec::new();
     }
     let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
@@ -6315,24 +6320,57 @@ mod backslash_lines {
     }
 
     #[test]
-    fn a_line_continuation_inside_a_word_is_joined() {
+    fn a_line_continuation_that_touches_a_word_is_joined() {
         assert_eq!(readings("r\\\nm -rf victim"), vec!["rm -rf victim"]);
         assert_eq!(readings("git pu\\\nsh --force"), vec!["git push --force"]);
+        // The parser reads these words right, but the command as written
+        // keeps the line break where `rm *` or `git push *` looks for a
+        // space.
+        assert_eq!(readings("rm\\\n -rf victim"), vec!["rm -rf victim"]);
+        assert_eq!(readings("git \\\npush --force"), vec!["git push --force"]);
+        assert_eq!(readings("true\n\\rm\\\n -rf victim"), vec!["rm -rf victim"]);
         assert_eq!(
-            joined_inside_words("echo \"a\\\nb\""),
+            joined_continuations("echo \"a\\\nb\"", true),
             Some("echo \"ab\"".to_owned())
         );
-        // Between words, inside single quotes, or none: nothing to join.
+        assert_eq!(joined_continuations("git \\\npush", true), None);
+        // Between blanks, inside single quotes, or none: nothing to join.
         for text in [
             "cargo test \\\n  -p haarness-core",
             "echo 'a\\\nb'",
             "git status",
-            "a \\\nb",
+            "a \\\n b",
         ] {
-            assert_eq!(joined_inside_words(text), None, "{text:?}");
+            assert_eq!(joined_continuations(text, false), None, "{text:?}");
         }
         assert!(readings("cargo test \\\n  -p haarness-core").is_empty());
         assert!(!is_obviously_read_only("l\\\ns"));
+        // The words the read-only check and the script card read are the
+        // shell's when no word is split.
+        assert!(is_obviously_read_only("ls \\\n-la"));
+    }
+
+    #[test]
+    fn a_backslash_before_a_windows_line_ending_ends_the_command() {
+        for command in [
+            "true \\\r\nrm -rf victim",
+            "git status \\\r\nrm -rf victim",
+            "true\n\\\r\nrm -rf victim",
+            "true\r\n\\\r\nrm -rf victim",
+        ] {
+            assert!(
+                written(command).contains(&"rm -rf victim".to_owned()),
+                "{command:?}: {:?}",
+                written(command)
+            );
+        }
+        // Read as the shell runs it: the line after it is a command of its own.
+        assert_eq!(
+            written("docker run --rm \\\r\n  -v x:/app \\\r\n  node:22 npm test"),
+            vec!["docker run --rm", "-v x:/app", "node:22 npm test"]
+        );
+        // Quoted, it is text.
+        assert_eq!(shell_reading("echo \"a \\\r\nb\""), "echo \"a \\\r\nb\"");
     }
 
     #[test]
