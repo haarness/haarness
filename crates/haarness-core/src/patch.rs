@@ -14,7 +14,9 @@
 //! *** End Patch
 //! ```
 //!
-//! Parsing is pure; applying the operations is an adapter concern.
+//! A `*** End of File` line after a hunk (the Codex spelling) anchors it to
+//! the end of the file. Parsing is pure; applying the operations is an
+//! adapter concern.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOp {
@@ -46,6 +48,9 @@ pub struct Hunk {
     /// Optional `@@ <text>` locator narrowing where the hunk applies.
     pub context_header: Option<String>,
     pub lines: Vec<HunkLine>,
+    /// `*** End of File` closed the hunk: its old lines end the file, and
+    /// lines it only adds go at the end.
+    pub end_of_file: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +59,8 @@ pub enum HunkLine {
     Remove(String),
     Add(String),
 }
+
+const END_OF_FILE: &str = "*** End of File";
 
 pub fn parse_patch(input: &str) -> Result<Vec<FileOp>, String> {
     let mut lines = input.trim_start().lines().peekable();
@@ -105,6 +112,18 @@ pub fn parse_patch(input: &str) -> Result<Vec<FileOp>, String> {
             let mut hunks: Vec<Hunk> = Vec::new();
             while let Some(next) = lines.peek() {
                 let peeked = next.trim_end();
+                if peeked == END_OF_FILE {
+                    lines.next();
+                    match hunks.last_mut() {
+                        Some(hunk) if !hunk.end_of_file => hunk.end_of_file = true,
+                        _ => hunks.push(Hunk {
+                            context_header: None,
+                            lines: Vec::new(),
+                            end_of_file: true,
+                        }),
+                    }
+                    continue;
+                }
                 if peeked.starts_with("*** ") || peeked.trim() == "*** End Patch" {
                     break;
                 }
@@ -117,15 +136,18 @@ pub fn parse_patch(input: &str) -> Result<Vec<FileOp>, String> {
                             (!header.is_empty()).then(|| header.to_owned())
                         },
                         lines: Vec::new(),
+                        end_of_file: false,
                     });
                     continue;
                 }
+                // A line after `*** End of File` starts a hunk of its own.
                 let hunk = match hunks.last_mut() {
-                    Some(hunk) => hunk,
-                    None => {
+                    Some(hunk) if !hunk.end_of_file => hunk,
+                    _ => {
                         hunks.push(Hunk {
                             context_header: None,
                             lines: Vec::new(),
+                            end_of_file: false,
                         });
                         hunks.last_mut().unwrap()
                     }
@@ -156,8 +178,9 @@ pub fn parse_patch(input: &str) -> Result<Vec<FileOp>, String> {
             operations.push(FileOp::Delete {
                 path: path.trim().to_owned(),
             });
-        } else if trimmed.trim().is_empty() {
-            // Blank lines between operations are tolerated.
+        } else if trimmed.trim().is_empty() || trimmed == END_OF_FILE {
+            // Blank lines between operations are tolerated, and so is an
+            // end-of-file marker after an added file's lines.
         } else {
             return Err(format!("unrecognized patch directive: {trimmed:?}"));
         }
@@ -171,11 +194,48 @@ pub fn parse_patch(input: &str) -> Result<Vec<FileOp>, String> {
     Ok(operations)
 }
 
+/// One line of a file: its text and the line break that ends it (`""` for
+/// a last line without one).
+struct Line {
+    text: String,
+    ending: &'static str,
+}
+
 /// Apply parsed hunks to file content. Pure so it is testable without a
 /// filesystem: returns the new content.
+///
+/// Every line keeps its own line break, so a CRLF file stays CRLF; the
+/// lines a hunk adds take the break most of the file's lines end with.
 pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
-    let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
+    let mut lines: Vec<Line> = content
+        .split_inclusive('\n')
+        .map(|line| {
+            let (text, ending) = if let Some(text) = line.strip_suffix("\r\n") {
+                (text, "\r\n")
+            } else if let Some(text) = line.strip_suffix('\n') {
+                (text, "\n")
+            } else {
+                (line, "")
+            };
+            Line {
+                text: text.to_owned(),
+                ending,
+            }
+        })
+        .collect();
     let ends_with_newline = content.is_empty() || content.ends_with('\n');
+    let crlf = lines.iter().filter(|line| line.ending == "\r\n").count();
+    let lf = lines.iter().filter(|line| line.ending == "\n").count();
+    let newline = if crlf > lf { "\r\n" } else { "\n" };
+    // A last line without a break gets one while lines may follow it; the
+    // result ends without one again below.
+    if let Some(last) = lines.last_mut()
+        && last.ending.is_empty()
+    {
+        last.ending = newline;
+    }
+    // Lines only added without a locator go at the end, after every hunk.
+    let mut appended = Vec::new();
     let mut cursor = 0usize;
     for hunk in hunks {
         let old: Vec<&str> = hunk
@@ -186,34 +246,74 @@ pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
                 HunkLine::Add(_) => None,
             })
             .collect();
-        let new: Vec<String> = hunk
-            .lines
-            .iter()
-            .filter_map(|line| match line {
-                HunkLine::Context(text) | HunkLine::Add(text) => Some(text.clone()),
-                HunkLine::Remove(_) => None,
-            })
-            .collect();
+        if old.is_empty() {
+            let added = hunk.lines.iter().filter_map(|line| match line {
+                HunkLine::Add(text) => Some(Line {
+                    text: text.clone(),
+                    ending: newline,
+                }),
+                HunkLine::Context(_) | HunkLine::Remove(_) => None,
+            });
+            match &hunk.context_header {
+                // After the one line the locator names.
+                Some(header) if !hunk.end_of_file => {
+                    let header = header.trim();
+                    let found: Vec<usize> = (cursor..lines.len())
+                        .filter(|&index| lines[index].text.contains(header))
+                        .collect();
+                    match found.as_slice() {
+                        [] => return Err(format!("hunk context not found: {header:?}")),
+                        [index] => {
+                            let at = index + 1;
+                            let before = lines.len();
+                            lines.splice(at..at, added);
+                            cursor = at + (lines.len() - before);
+                        }
+                        _ => {
+                            return Err(format!(
+                                "hunk context is ambiguous ({} matches): {header:?}; retry with a unique @@ locator and more unchanged context lines",
+                                found.len()
+                            ));
+                        }
+                    }
+                }
+                _ => appended.extend(added),
+            }
+            continue;
+        }
         let search_from = match &hunk.context_header {
             Some(header) => {
                 let header = header.trim();
                 lines[cursor..]
                     .iter()
-                    .position(|line| line.contains(header))
+                    .position(|line| line.text.contains(header))
                     .map_or(cursor, |offset| cursor + offset)
             }
             None => cursor,
         };
-        let matches: Vec<usize> = (search_from..=lines.len().saturating_sub(old.len()))
+        let last = lines.len().saturating_sub(old.len());
+        // An end-of-file hunk is tried only where its old lines end the file.
+        let first = if hunk.end_of_file {
+            last.max(search_from)
+        } else {
+            search_from
+        };
+        let matches: Vec<usize> = (first..=last)
             .filter(|&start| {
                 old.iter().enumerate().all(|(offset, expected)| {
                     lines
                         .get(start + offset)
-                        .is_some_and(|actual| actual.trim_end() == expected.trim_end())
+                        .is_some_and(|actual| actual.text.trim_end() == expected.trim_end())
                 })
             })
             .collect();
         match matches.as_slice() {
+            [] if hunk.end_of_file => {
+                return Err(format!(
+                    "hunk context not found at the end of the file: {:?}",
+                    old.first().copied().unwrap_or_default()
+                ));
+            }
             [] => {
                 return Err(format!(
                     "hunk context not found: {:?}",
@@ -221,7 +321,28 @@ pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
                 ));
             }
             [start] => {
-                let replaced: Vec<String> = new;
+                // Context lines keep the break of the line they matched.
+                let mut endings = lines[*start..*start + old.len()]
+                    .iter()
+                    .map(|line| line.ending);
+                let replaced: Vec<Line> = hunk
+                    .lines
+                    .iter()
+                    .filter_map(|line| match line {
+                        HunkLine::Context(text) => Some(Line {
+                            text: text.clone(),
+                            ending: endings.next().unwrap_or(newline),
+                        }),
+                        HunkLine::Remove(_) => {
+                            endings.next();
+                            None
+                        }
+                        HunkLine::Add(text) => Some(Line {
+                            text: text.clone(),
+                            ending: newline,
+                        }),
+                    })
+                    .collect();
                 let count = replaced.len();
                 lines.splice(*start..*start + old.len(), replaced);
                 cursor = start + count;
@@ -235,16 +356,35 @@ pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
             }
         }
     }
-    let mut result = lines.join("\n");
-    if ends_with_newline && !result.is_empty() {
-        result.push('\n');
+    lines.extend(appended);
+    if !ends_with_newline && let Some(last) = lines.last_mut() {
+        last.ending = "";
+    }
+    let mut result = String::with_capacity(content.len());
+    for line in &lines {
+        result.push_str(&line.text);
+        result.push_str(line.ending);
     }
     Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FileOp, HunkLine, apply_hunks, parse_patch};
+    use super::{FileOp, Hunk, HunkLine, apply_hunks, parse_patch};
+
+    /// The hunks of a patch's first (update) operation.
+    fn update_hunks(patch: &str) -> Vec<Hunk> {
+        match parse_patch(patch).unwrap().into_iter().next().unwrap() {
+            FileOp::Update { hunks, .. } => hunks,
+            _ => panic!("expected an update"),
+        }
+    }
+
+    /// `body` applied to `content` as the hunks of one update.
+    fn patched(content: &str, body: &str) -> Result<String, String> {
+        let patch = format!("*** Begin Patch\n*** Update File: f\n{body}*** End Patch\n");
+        apply_hunks(content, &update_hunks(&patch))
+    }
 
     #[test]
     fn parses_add_update_move_and_delete() {
@@ -366,5 +506,107 @@ five\n\
         };
         let updated = apply_hunks("keep me\n", &hunks).unwrap();
         assert_eq!(updated, "kept\n");
+    }
+
+    #[test]
+    fn keeps_each_lines_break_and_adds_lines_with_the_files_own() {
+        let body = "@@\n one\n-two\n+TWO\n+added\n three\n";
+        assert_eq!(
+            patched("one\r\ntwo\r\nthree\r\nfour\r\n", body).unwrap(),
+            "one\r\nTWO\r\nadded\r\nthree\r\nfour\r\n"
+        );
+        // A patch written with CRLF reads the same.
+        assert_eq!(
+            patched(
+                "one\r\ntwo\r\nthree\r\nfour\r\n",
+                &body.replace('\n', "\r\n")
+            )
+            .unwrap(),
+            "one\r\nTWO\r\nadded\r\nthree\r\nfour\r\n"
+        );
+        // In a mixed file each line keeps its own break, a context line
+        // included, and added lines take the one most lines end with.
+        assert_eq!(
+            patched("one\ntwo\nthree\r\nfour\n", body).unwrap(),
+            "one\nTWO\nadded\nthree\r\nfour\n"
+        );
+        assert_eq!(
+            patched("one\r\ntwo\r\nthree\nfour\r\n", body).unwrap(),
+            "one\r\nTWO\r\nadded\r\nthree\nfour\r\n"
+        );
+        // A file without a final line break still ends without one.
+        assert_eq!(
+            patched("one\r\ntwo\r\nthree", "@@\n-three\n+3\n").unwrap(),
+            "one\r\ntwo\r\n3"
+        );
+        assert_eq!(
+            patched("one\r\ntwo", "@@\n+three\n").unwrap(),
+            "one\r\ntwo\r\nthree"
+        );
+        assert_eq!(patched("one\ntwo", "@@\n-two\n").unwrap(), "one");
+    }
+
+    #[test]
+    fn end_of_file_marker_anchors_its_hunk_to_the_end() {
+        let patch = concat!(
+            "*** Begin Patch\n*** Update File: f\n@@\n-x\n+y\n*** End of File\n",
+            "@@ second\n-a\n+b\n*** Add File: g\n+g\n*** End of File\n*** End Patch\n"
+        );
+        let operations = parse_patch(patch).unwrap();
+        assert_eq!(operations.len(), 2);
+        let FileOp::Update { hunks, .. } = &operations[0] else {
+            panic!("expected update");
+        };
+        assert!(hunks[0].end_of_file);
+        assert!(!hunks[1].end_of_file);
+        assert!(matches!(&operations[1], FileOp::Add { content, .. } if content == "g\n"));
+
+        // Only the copy that ends the file matches.
+        let eof = "@@\n-x\n+y\n*** End of File\n";
+        assert_eq!(patched("x\nmid\nx\n", eof).unwrap(), "x\nmid\ny\n");
+        let error = patched("x\nend\n", eof).unwrap_err();
+        assert!(error.contains("at the end of the file"), "{error}");
+        // Lines after the marker start another hunk.
+        assert_eq!(
+            patched("a\nx\n", "@@\n-x\n+y\n*** End of File\n-a\n+b\n").unwrap_err(),
+            "hunk context not found: \"a\""
+        );
+    }
+
+    #[test]
+    fn pure_additions_append_or_follow_their_locator() {
+        assert_eq!(patched("a\nb\n", "@@\n+c\n+d\n").unwrap(), "a\nb\nc\nd\n");
+        assert_eq!(
+            patched("a\nb\n", "@@\n+c\n*** End of File\n").unwrap(),
+            "a\nb\nc\n"
+        );
+        assert_eq!(patched("", "@@\n+first\n").unwrap(), "first\n");
+        assert_eq!(patched("a", "@@\n+b\n").unwrap(), "a\nb");
+        // An addition goes at the end after the other hunks, which still
+        // match from where they would have.
+        assert_eq!(
+            patched("one\ntwo\nthree\n", "@@\n+after\n@@\n one\n-two\n+TWO\n").unwrap(),
+            "one\nTWO\nthree\nafter\n"
+        );
+        // With a locator, right after the one line it names.
+        assert_eq!(
+            patched("fn a() {\n}\nfn b() {\n}\n", "@@ fn b() {\n+    body();\n").unwrap(),
+            "fn a() {\n}\nfn b() {\n    body();\n}\n"
+        );
+        let error = patched("fn a() {\n}\nfn a() {\n}\n", "@@ fn a\n+x\n").unwrap_err();
+        assert!(error.contains("ambiguous (2 matches)"), "{error}");
+        assert_eq!(
+            patched("a\n", "@@ missing\n+x\n").unwrap_err(),
+            "hunk context not found: \"missing\""
+        );
+        // A locator alone narrows the hunk after it (`@@ class` then `@@ fn`).
+        assert_eq!(
+            patched(
+                "impl B {\n    fn run() {\n        old();\n    }\n}\nimpl A {\n    fn run() {\n        old();\n    }\n}\n",
+                "@@ impl A\n@@ fn run\n-        old();\n+        new();\n"
+            )
+            .unwrap(),
+            "impl B {\n    fn run() {\n        old();\n    }\n}\nimpl A {\n    fn run() {\n        new();\n    }\n}\n"
+        );
     }
 }
