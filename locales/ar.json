@@ -2870,5 +2870,6 @@
   "less than a day left at this pace": "يتبقى أقل من يوم بهذا المعدل",
   "about 1 day left at this pace": "يتبقى نحو يوم واحد بهذا المعدل",
   "about {count} days left at this pace": "يتبقى نحو {count} أيام بهذا المعدل",
-  "Can't reach the server · still waiting": "تعذّر الوصول إلى الخادم · ما زال الانتظار جاريًا"
+  "Can't reach the server · still waiting": "تعذّر الوصول إلى الخادم · ما زال الانتظار جاريًا",
+  "Theme {file} not loaded: {reason}": "لم يُحمَّل السمة {file}: {reason}"
 }

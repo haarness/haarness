@@ -489,7 +489,7 @@ async fn prepare(client: ApiClient, previous: &App) -> Result<Connection> {
     }
     app.sync_prompt_history(&client);
     apply_saved_drafts(&mut app, saved);
-    app.themes = config::load_theme_entries();
+    app.themes = config::load_theme_entries().0;
     app.theme_selected = previous.theme_selected;
     app.apply_theme(&previous.theme_name, &previous.theme_variant);
     app.language = previous.language;

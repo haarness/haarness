@@ -319,7 +319,7 @@ static ON_SCREEN: AtomicBool = AtomicBool::new(false);
 /// Whether the TUI is drawing on this terminal now. Anything else written to
 /// it meanwhile stays on screen over the TUI, which redraws only the cells it
 /// changed.
-fn on_screen() -> bool {
+pub(crate) fn on_screen() -> bool {
     ON_SCREEN.load(Ordering::Relaxed)
 }
 

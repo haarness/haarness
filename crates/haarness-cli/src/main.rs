@@ -11838,6 +11838,14 @@ enum BusyServer {
     Reuse,
 }
 
+/// Whether a notice about the server this client starts or reuses is also
+/// printed: to a person at a terminal, unless this process's TUI is drawing
+/// on it (it restarts its server while open), where the text would stay
+/// over the frame. The log has it either way.
+fn notices_on_stderr(stderr_is_terminal: bool, tui_on_screen: bool) -> bool {
+    stderr_is_terminal && !tui_on_screen
+}
+
 /// The daemon keeps the OTEL settings it started with. A client that asks for
 /// trace export and reuses a daemon exporting elsewhere (or nowhere) is told
 /// so; restarting the daemon would cancel turns other windows may be running.
@@ -11857,7 +11865,7 @@ fn warn_trace_endpoint_mismatch(discovery: &RuntimeDiscovery) {
         discovery.pid
     );
     tracing::warn!("{notice}");
-    if io::stderr().is_terminal() {
+    if notices_on_stderr(io::stderr().is_terminal(), haarness_tui::owns_terminal()) {
         eprintln!("haarness: {notice}");
     }
 }
@@ -11897,7 +11905,7 @@ fn notice_base_folder_change(discovery: &RuntimeDiscovery, current: &str, remedy
         wanted.display()
     );
     tracing::warn!("{notice}");
-    if io::stderr().is_terminal() {
+    if notices_on_stderr(io::stderr().is_terminal(), haarness_tui::owns_terminal()) {
         eprintln!("haarness: {notice}");
     }
 }
@@ -11996,7 +12004,8 @@ async fn ensure_workspace_server_at(
                 {
                     let notice = format!("{error}. Using it as it is meanwhile.");
                     tracing::warn!("{notice}");
-                    if io::stderr().is_terminal() {
+                    if notices_on_stderr(io::stderr().is_terminal(), haarness_tui::owns_terminal())
+                    {
                         eprintln!("haarness: {notice}");
                     }
                     warn_trace_endpoint_mismatch(&discovery);
@@ -17345,6 +17354,15 @@ request_timeout = 0
         assert_eq!(config.execution.shell_timeout_ms, 0);
         assert_eq!(config.execution.subagent_concurrency, 6);
         assert_eq!(config.execution.subagent_depth, 3);
+    }
+
+    /// A notice about the server goes to a person's terminal, but never while
+    /// this process's TUI draws on it: the TUI restarts its server while open.
+    #[test]
+    fn server_notices_stay_off_a_terminal_the_tui_draws_on() {
+        assert!(crate::notices_on_stderr(true, false));
+        assert!(!crate::notices_on_stderr(true, true));
+        assert!(!crate::notices_on_stderr(false, false));
     }
 
     #[test]

@@ -2870,5 +2870,6 @@
   "less than a day left at this pace": "under en dag tilbage i dette tempo",
   "about 1 day left at this pace": "omkring 1 dag tilbage i dette tempo",
   "about {count} days left at this pace": "omkring {count} dage tilbage i dette tempo",
-  "Can't reach the server · still waiting": "Kan ikke nå serveren · venter stadig"
+  "Can't reach the server · still waiting": "Kan ikke nå serveren · venter stadig",
+  "Theme {file} not loaded: {reason}": "Temaet {file} blev ikke indlæst: {reason}"
 }
