@@ -51,13 +51,17 @@ const labelStarts = (menu: Locator) =>
       return Math.round(range.getBoundingClientRect().left);
     }),
   );
-/** The live choice's tick, as a picker's: a ✓ at the row's trailing end, 8px in. */
-const trailingTick = (menu: Locator) =>
+/** Where the live choice's tick sits, and how far in: in a column of its own
+ * before the label ("start"), or at the row's end as a picker's ✓ ("end"). */
+const tickPlace = (menu: Locator) =>
   menu.locator('[aria-checked="true"]').evaluate((row) => {
-    const tick = row.querySelector(".select-check");
-    return tick
-      ? { text: tick.textContent?.trim(), inset: Math.round(row.getBoundingClientRect().right - tick.getBoundingClientRect().right) }
-      : undefined;
+    const box = row.getBoundingClientRect();
+    const end = row.querySelector(".select-check");
+    const start = row.querySelector(".menu-check svg");
+    if (end && !start)
+      return { place: "end", glyph: end.textContent?.trim(), inset: Math.round(box.right - end.getBoundingClientRect().right) };
+    if (start && !end) return { place: "start", inset: Math.round(start.getBoundingClientRect().left - box.left) };
+    return undefined;
   });
 async function selectEffort(model: Locator, value: string) {
   if ((await model.getAttribute("aria-expanded")) !== "true") await model.click();
@@ -7526,7 +7530,7 @@ test("one project groups worktree conversations while drafts, permissions, files
   // beside their icons, where they were before the menu had a tick.
   const locations = page.getByRole("menu", { name: "Choose working location", exact: true });
   expect(new Set(await labelStarts(locations)).size).toBe(1);
-  expect(await trailingTick(locations)).toEqual({ text: "✓", inset: 8 });
+  expect(await tickPlace(locations)).toEqual({ place: "end", glyph: "✓", inset: 8 });
   if (process.env.HAARNESS_SCREENSHOTS)
     for (const theme of ["dark", "light"] as const) {
       await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);

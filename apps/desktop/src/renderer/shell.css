@@ -1370,12 +1370,14 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
   font-weight: 500;
   color: var(--muted);
 }
-/* A choice without an icon is indented by a small icon's box. Its tick sits
-   at the row's trailing end, as a picker's chosen option's does. */
-.menu-indent {
+/* Reserve the tick column so a checked and an unchecked row align. */
+.menu-check {
+  display: inline-flex;
   width: 14px;
   flex: none;
+  justify-content: center;
 }
+/* Choices with icons are ticked at the row's end, as a picker's option is. */
 .action-menu button > .select-check {
   margin-inline-start: auto;
 }
