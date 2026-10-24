@@ -1114,9 +1114,24 @@ impl Reader<'_> {
                 continue;
             }
             let raw = node_text(word, source);
-            if let Some(dir) = external_dir(self.workspace, &raw, &argument, complete) {
-                push_unique(&mut self.analysis.external_dirs, glob(&dir));
-            }
+            self.check_folder(&name, &raw, &argument, complete);
+        }
+    }
+
+    /// An argument of a command in [`PATH_COMMANDS`] that leads outside the
+    /// project asks for the folder it reaches. The shell's own `cd` steps
+    /// out of the path as written (`cd -L`, its default), not of where a link
+    /// in it leads, so a `cd` is also judged that way: with `a/l` leading
+    /// deeper into the project, `cd a/l/../../..` reaches the project's
+    /// parent, though followed it is the project itself.
+    fn check_folder(&mut self, name: &str, raw: &str, value: &str, complete: bool) {
+        if let Some(dir) = external_dir(self.workspace, raw, value, complete) {
+            push_unique(&mut self.analysis.external_dirs, glob(&dir));
+        }
+        if name == "cd"
+            && let Some(dir) = cd_dir(self.workspace, raw, value, complete)
+        {
+            push_unique(&mut self.analysis.external_dirs, glob(&dir));
         }
     }
 
@@ -1628,11 +1643,7 @@ impl Reader<'_> {
                 if path.value.starts_with('-') || (name == "chmod" && path.value.starts_with('+')) {
                     continue;
                 }
-                if let Some(dir) =
-                    external_dir(self.workspace, &path.raw, &path.value, path.complete)
-                {
-                    push_unique(&mut self.analysis.external_dirs, glob(&dir));
-                }
+                self.check_folder(&name, &path.raw, &path.value, path.complete);
             }
         }
     }
@@ -3081,6 +3092,35 @@ fn external_dir(workspace: &Path, raw: &str, value: &str, complete: bool) -> Opt
     }
 }
 
+/// Where the shell's own `cd` takes a path from `workspace` when that is
+/// outside the project: by name, each `..` dropping the folder written
+/// before it whatever link that is, then into the folder that names (links
+/// there followed, as the shell enters it). A dynamic part is judged by the
+/// literal start before it, as [`external_dir`] judges it.
+fn cd_dir(workspace: &Path, raw: &str, value: &str, complete: bool) -> Option<PathBuf> {
+    let target = if complete {
+        value
+    } else {
+        value.rfind('/').map_or("", |end| &value[..=end])
+    };
+    if target.is_empty() {
+        return None;
+    }
+    let named = match home_expansion(raw, target) {
+        Some(expanded) => lexical(workspace, &expanded),
+        None => lexical(workspace, Path::new(target)),
+    };
+    let resolved = resolve(workspace, named);
+    if resolved.starts_with(resolve(workspace, Path::new(""))) {
+        return None;
+    }
+    if !complete || resolved.is_dir() {
+        Some(resolved)
+    } else {
+        Some(resolved.parent().unwrap_or(&resolved).to_path_buf())
+    }
+}
+
 /// The folder an unquoted leading `~` expands to: `~` and `~/…` are the
 /// user's home, `~name/…` that user's home, taken as a sibling of this one.
 /// Without a known home the path is put at `/`, which is never the project.
@@ -4426,6 +4466,51 @@ mod regression {
             assert_eq!(
                 analyze(command, &workspace).external_dirs,
                 vec![expected],
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cd_through_a_link_is_also_judged_by_the_path_as_written() {
+        let root = std::env::temp_dir().join(format!("haarness-cd-links-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("deep/er/x")).unwrap();
+        std::fs::create_dir_all(workspace.join("a")).unwrap();
+        std::os::unix::fs::symlink("../deep/er/x", workspace.join("a/l")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), workspace.join("away")).unwrap();
+        std::fs::create_dir_all(root.join("elsewhere/sub")).unwrap();
+        let parent = root.canonicalize().unwrap();
+        // Followed, `a/l/../../..` is the project; the shell's `cd` takes it by
+        // name, which is the project's parent.
+        for command in [
+            "cd a/l/../../.. && touch escaped.txt",
+            "cd a/l/../../../",
+            "cd 'a/l/../../..'",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                vec![glob(&parent)],
+                "{command}"
+            );
+        }
+        // Either reading outside asks: followed, `away/sub/..` is outside.
+        assert_eq!(
+            analyze("cd away/sub/.. && ls", &workspace).external_dirs,
+            vec![glob(&parent.join("elsewhere"))]
+        );
+        // Inside both ways, and other programs' arguments as before.
+        for command in [
+            "cd a/l/.. && ls",
+            "cd a/l && ls",
+            "cd deep/er/x/.. && ls",
+            "touch a/l/../../x",
+            "cat a/l/../../../project/README.md",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
                 "{command}"
             );
         }
