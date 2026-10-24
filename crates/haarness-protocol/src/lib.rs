@@ -142,9 +142,9 @@ pub struct Thread {
     /// confirmation by the next turn).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revert: Option<RevertState>,
-    /// The chat's own working folder, canonical and absolute, when it has
-    /// one ([`CreateThreadRequest::directory`]): its tools run there, and
-    /// paths outside it are outside its project. Absent for a chat that
+    /// The chat's own working folder, canonical and absolute, when it was
+    /// created with one (`directory` of its create): its tools run there,
+    /// and paths outside it are outside its project. Absent for a chat that
     /// works in the server's project folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
@@ -579,9 +579,9 @@ pub struct CreateThreadRequest {
     /// folder (`/`-separated, no `..`): the server creates it and the chat's
     /// tools run there, with it as their project boundary. When another chat
     /// already works in that folder the server picks `<path>-2`, `-3`, …;
-    /// the folder chosen is [`Thread::directory`]. Omitted, the chat works in
-    /// the project folder, or in its parent chat's folder. Servers that know
-    /// it list [`THREAD_DIRECTORY_CAPABILITY`]; older ones ignore it.
+    /// the folder chosen is the thread's `directory`. Omitted, the chat works
+    /// in the project folder, or in its parent chat's folder. Servers that
+    /// know it list `thread-directory.v1`; older ones ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
 }

@@ -52,9 +52,9 @@ pub struct PtyInfo {
     /// one).
     #[serde(default)]
     pub created: bool,
-    /// The chat folder this terminal was opened for
-    /// ([`PtyCreateRequest::directory`]), canonical and absolute. Absent for
-    /// a terminal of the project itself.
+    /// The chat folder this terminal was opened for (`directory` of its
+    /// create), canonical and absolute. Absent for a terminal of the project
+    /// itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
 }
