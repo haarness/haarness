@@ -220,8 +220,8 @@ impl SqliteStore {
                 continue;
             }
             tx.execute(
-                "INSERT INTO threads(id,title,parent_id,archived,agent,provider,model,created_at,updated_at,ultracode,is_subagent,fork_origin_json,schedule_json)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                "INSERT INTO threads(id,title,parent_id,archived,agent,provider,model,created_at,updated_at,ultracode,is_subagent,fork_origin_json,schedule_json,directory)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
                 params![
                     id.to_string(),
                     entry.thread.title,
@@ -236,6 +236,8 @@ impl SqliteStore {
                     entry.thread.parent_id.is_some() && (entry.thread.is_subagent || delegated.contains(id)),
                     entry.thread.fork_origin.as_ref().map(serde_json::to_string).transpose().map_err(super::storage)?,
                     entry.thread.schedule.as_ref().map(serde_json::to_string).transpose().map_err(super::storage)?,
+                    // The runtime names the folder an imported chat works in.
+                    entry.thread.directory,
                 ],
             )
             .map_err(super::storage)?;

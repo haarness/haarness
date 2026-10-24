@@ -191,9 +191,8 @@ impl SqliteSnapshotStore {
     /// The stores of chats' own folders, on this store's connection.
     #[must_use]
     pub fn folders(&self) -> SqliteSnapshotFolders {
-        SqliteSnapshotFolders {
-            connection: Arc::clone(&self.connection),
-        }
+        // Already open, so no database path is needed to open it.
+        SqliteSnapshotFolders::with_connection(PathBuf::new(), Some(Arc::clone(&self.connection)))
     }
 
     /// Walk the complete managed tree. `hidden(false)` means "do not filter
@@ -761,38 +760,80 @@ fn snapshot_root(workspace: PathBuf) -> CoreResult<PathBuf> {
 
 /// The snapshot stores of chats that work in a folder of their own, all on
 /// one connection to the session database: each store captures and restores
-/// only inside its folder.
+/// only inside its folder. A server none of whose chats has a folder never
+/// opens that connection: it is opened when the first folder is.
 #[derive(Clone)]
 pub struct SqliteSnapshotFolders {
-    connection: Arc<Mutex<Connection>>,
+    inner: Arc<FolderStores>,
+}
+
+struct FolderStores {
+    database: PathBuf,
+    connection: Mutex<Option<Arc<Mutex<Connection>>>>,
+    /// One store per folder, so a folder's unreadable paths are warned
+    /// about once and it is looked up once.
+    stores: Mutex<BTreeMap<PathBuf, Arc<SqliteSnapshotStore>>>,
 }
 
 impl SqliteSnapshotFolders {
-    /// For a server whose project folder itself is not checkpointed.
-    pub fn open(database: impl AsRef<Path>) -> CoreResult<Self> {
-        Ok(Self {
-            connection: Arc::new(Mutex::new(open_connection(database)?)),
-        })
+    /// For a server whose project folder itself is not checkpointed: the
+    /// database is opened when a chat's folder first is.
+    #[must_use]
+    pub fn open(database: impl AsRef<Path>) -> Self {
+        Self::with_connection(database.as_ref().to_path_buf(), None)
+    }
+
+    fn with_connection(database: PathBuf, connection: Option<Arc<Mutex<Connection>>>) -> Self {
+        Self {
+            inner: Arc::new(FolderStores {
+                database,
+                connection: Mutex::new(connection),
+                stores: Mutex::default(),
+            }),
+        }
+    }
+
+    fn connection(&self) -> CoreResult<Arc<Mutex<Connection>>> {
+        let mut connection = self.inner.connection.lock();
+        if let Some(open) = connection.as_ref() {
+            return Ok(Arc::clone(open));
+        }
+        let opened = Arc::new(Mutex::new(open_connection(&self.inner.database)?));
+        *connection = Some(Arc::clone(&opened));
+        Ok(opened)
     }
 
     /// The database's retention pass (see [`SqliteSnapshotStore::prune`]):
-    /// every checkpoint of the database, whichever folder it holds.
+    /// every checkpoint of the database, whichever folder it holds. Nothing
+    /// to do while no folder has been opened.
     pub fn prune(
         &self,
         retention: chrono::Duration,
         keep_per_thread: usize,
     ) -> CoreResult<PruneReport> {
-        prune(&self.connection, retention, keep_per_thread)
+        let connection = self.inner.connection.lock().clone();
+        match connection {
+            Some(connection) => prune(&connection, retention, keep_per_thread),
+            None => Ok(PruneReport::default()),
+        }
     }
 }
 
 impl haarness_core::SnapshotFolders for SqliteSnapshotFolders {
     fn open(&self, folder: &Path) -> CoreResult<Arc<dyn SnapshotStore>> {
-        Ok(Arc::new(SqliteSnapshotStore {
-            connection: Arc::clone(&self.connection),
+        if let Some(store) = self.inner.stores.lock().get(folder) {
+            return Ok(Arc::clone(store) as Arc<dyn SnapshotStore>);
+        }
+        let store = Arc::new(SqliteSnapshotStore {
+            connection: self.connection()?,
             workspace: snapshot_root(folder.to_path_buf())?,
             warned: Arc::default(),
-        }))
+        });
+        self.inner
+            .stores
+            .lock()
+            .insert(folder.to_path_buf(), Arc::clone(&store));
+        Ok(store)
     }
 }
 

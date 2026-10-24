@@ -575,13 +575,15 @@ pub struct CreateThreadRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub ultracode: Option<bool>,
-    /// A working folder of the chat's own, relative to the server's project
-    /// folder (`/`-separated, no `..`): the server creates it and the chat's
-    /// tools run there, with it as their project boundary. When another chat
-    /// already works in that folder the server picks `<path>-2`, `-3`, …;
-    /// the folder chosen is the thread's `directory`. Omitted, the chat works
-    /// in the project folder, or in its parent chat's folder. Servers that
-    /// know it list `thread-directory.v1`; older ones ignore it.
+    /// A working folder of the chat's own, `<date>/<name>` relative to the
+    /// server's project folder (`2026-10-24/fix-the-tests`): the server
+    /// creates it and the chat's tools run there, with it as their project
+    /// boundary. When another chat already works in that folder the server
+    /// picks `<name>-2`, `-3`, …; the folder chosen is the thread's
+    /// `directory`. The absolute folder another chat reports shares that
+    /// folder. Omitted, the chat works in the project folder (in the chat
+    /// home, in a new folder of its own), or in its parent chat's folder.
+    /// Servers that know it list `thread-directory.v1`; older ones ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
 }

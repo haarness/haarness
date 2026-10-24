@@ -1628,11 +1628,17 @@ impl Tool for ScheduleTool {
                 schedule_output(&format!("Updated schedule {}", schedule.name), &schedule)
             }
             "create" => {
-                let workspace = input
+                let named = input
                     .get("workspace")
                     .and_then(Value::as_str)
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| self.workspace.clone());
+                    .map(PathBuf::from);
+                // Made in a chat with a folder of its own (not the project
+                // folder), its runs work in that folder too.
+                let directory = named
+                    .is_none()
+                    .then(|| chat_folder(&self.workspace, &context))
+                    .flatten();
+                let workspace = named.unwrap_or_else(|| self.workspace.clone());
                 let schedule = self
                     .scheduler
                     .create(CreateSchedule {
@@ -1640,6 +1646,7 @@ impl Tool for ScheduleTool {
                         prompt: schedule_string(input, "prompt"),
                         request: schedule_string(input, "request"),
                         workspace,
+                        directory,
                         model: schedule_string(input, "model"),
                         agent: schedule_string(input, "agent"),
                         variant: schedule_string(input, "variant"),
@@ -1659,6 +1666,14 @@ impl Tool for ScheduleTool {
             ))),
         }
     }
+}
+
+/// The call's working folder when it is a chat's own folder rather than the
+/// project folder `project`.
+fn chat_folder(project: &Path, context: &ToolContext) -> Option<PathBuf> {
+    let project = project.canonicalize().ok()?;
+    let folder = context.workspace.canonicalize().ok()?;
+    (folder != project).then_some(folder)
 }
 
 fn validate_schedule_input(input: &serde_json::Map<String, Value>) -> CoreResult<()> {
@@ -5053,6 +5068,74 @@ mod tests {
             .await
             .unwrap();
         assert!(tool.scheduler.list().unwrap().is_empty());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_schedule_made_in_a_chat_folder_runs_there() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-schedule-folder-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("home");
+        let folder = workspace.join("2026-10-24/chat-ab12");
+        tokio::fs::create_dir_all(&folder).await.unwrap();
+        let tool = ScheduleTool {
+            workspace: workspace.clone(),
+            scheduler: Scheduler::with_paths(
+                haarness_scheduler::SchedulerPaths {
+                    config: root.join("config"),
+                    state: root.join("state"),
+                    launchd: root.join("launchd"),
+                    systemd: root.join("systemd"),
+                    windows: root.join("windows"),
+                },
+                PathBuf::from("/opt/bin/haarness"),
+                None,
+                haarness_scheduler::Backend::Launchd,
+                false,
+            ),
+            trust_project: false,
+        };
+        let context = |workspace: &Path| ToolContext {
+            execution: haarness_core::ExecutionSettings::default(),
+            thread_id: ThreadId::new(),
+            turn_id: TurnId::new(),
+            workspace: workspace.to_path_buf(),
+            authorized_external_paths: Vec::new(),
+            cancel: CancellationToken::new(),
+            invoker: None,
+        };
+        let create = |name: &str| {
+            json!({
+                "action": "create",
+                "name": name,
+                "prompt": "summarize",
+                "enabled": false,
+                "trigger": {"type": "cron", "expression": "0 8 * * *"}
+            })
+        };
+        let canonical = folder.canonicalize().unwrap();
+        let in_folder = tool
+            .execute(create("from-chat"), context(&folder))
+            .await
+            .unwrap();
+        assert_eq!(
+            in_folder.metadata["schedule"]["directory"],
+            canonical.display().to_string()
+        );
+        assert_eq!(
+            in_folder.metadata["schedule"]["workspace"],
+            workspace.canonicalize().unwrap().display().to_string()
+        );
+        let in_project = tool
+            .execute(create("from-project"), context(&workspace))
+            .await
+            .unwrap();
+        assert!(in_project.metadata["schedule"].get("directory").is_none());
+        // Named for another workspace, it works there and not in the chat's folder.
+        let mut named = create("elsewhere");
+        named["workspace"] = json!(root.join("home").display().to_string());
+        let elsewhere = tool.execute(named, context(&folder)).await.unwrap();
+        assert!(elsewhere.metadata["schedule"].get("directory").is_none());
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
