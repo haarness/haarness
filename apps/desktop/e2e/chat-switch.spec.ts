@@ -166,9 +166,31 @@ test("switching chats keeps the message box on every frame, and a slow history s
   expect(seen).toMatchObject({ boxless: 0, blank: 0, empty: 0 });
   await composer().fill("");
 
+  // Keys pressed right after the click go to the chat clicked, while its
+  // history is still on its way: they went to the sidebar row before.
+  await app.evaluate((_, match) => {
+    const state = globalThis as any;
+    state.match = match;
+    state.held = 0;
+    state.gate = new Promise<void>((resolve) => (state.release = resolve));
+  }, `/v1/threads/${ids["Switch one"]}/items`);
+  await row("Switch one").click();
+  await page.keyboard.type("Typed right away");
+  await expect.poll(() => app.evaluate(() => (globalThis as any).held)).toBe(1);
+  await expect(composer()).toBeFocused();
+  await expect(composer()).toHaveValue("Typed right away");
+  await app.evaluate(() => {
+    const state = globalThis as any;
+    state.match = "";
+    state.release();
+  });
+  await expect(page.locator(".transcript")).toContainText("Echo: Switch one second");
+  await expect(composer()).toHaveValue("Typed right away");
+  await composer().fill("");
+
   // Quick switches back and forth: no frame without the box, and no mark.
   const quick = await sample();
-  for (const title of ["Switch one", "Switch two", "Switch one"]) {
+  for (const title of ["Switch two", "Switch one", "Switch two"]) {
     await row(title).click();
     await expect(page.locator(".transcript")).toContainText(`Echo: ${title} second`);
   }
