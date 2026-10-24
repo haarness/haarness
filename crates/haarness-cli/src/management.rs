@@ -3562,6 +3562,26 @@ mod tests {
         let shown = haarness_core::redact::args(&headers);
         assert_eq!(edited_secret_args(&headers, shown).unwrap(), headers);
         assert!(edited_secret_args(&headers, args(&["-H", hidden])).is_err());
+        // Addresses and ssh targets are shown whole, so a list holding them
+        // can be edited freely; a proxy's password moves with its own text.
+        let existing: Vec<String> = args(&[
+            "--member=user:alex@example.com",
+            "scp",
+            "alex@build.fixture.test:icon@2x.png",
+            "${USER:-root}@10.0.0.5:/tmp/",
+            "--proxy",
+            "user:PRIVATE@proxy.fixture.test:3128",
+        ]);
+        let shown = haarness_core::redact::args(&existing);
+        assert_eq!(shown[..4], existing[..4]);
+        assert_eq!(shown[5], "<redacted>@proxy.fixture.test:3128");
+        let mut next = shown.clone();
+        next.reverse();
+        next.push("-v".into());
+        let mut expected = existing.clone();
+        expected.reverse();
+        expected.push("-v".into());
+        assert_eq!(edited_secret_args(&existing, next).unwrap(), expected);
     }
 
     #[tokio::test]
