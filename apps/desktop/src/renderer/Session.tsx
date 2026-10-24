@@ -3124,17 +3124,22 @@ function Timestamp(props: { value: string }) {
 /** What the person reads when a provider refused images that later requests leave out. */
 function mediaOmittedNotice(names: string[], guessed: boolean, oldest: boolean, tooLarge: boolean) {
   const list = names.join(", ");
+  const one = names.length === 1;
   if (oldest && tooLarge)
-    return names.length === 1
-      ? t("The request was too large for the provider, so the oldest one, {name}, is left out of this chat from now on.", { name: list })
-      : t("The request was too large for the provider, so the oldest {count} are left out of this chat from now on.", { count: names.length });
+    return one
+      ? t("The request was too large for the provider, so the oldest image, {name}, is left out of this chat from now on.", { name: list })
+      : t("The request was too large for the provider, so the oldest {count} images are left out of this chat from now on.", { count: names.length });
   if (oldest)
-    return names.length === 1
-      ? t("The request had too many images for the provider, so the oldest one, {name}, is left out of this chat from now on.", { name: list })
-      : t("The request had too many images for the provider, so the oldest {count} are left out of this chat from now on.", { count: names.length });
+    return one
+      ? t("The request had too many images for the provider, so the oldest image, {name}, is left out of this chat from now on.", { name: list })
+      : t("The request had too many images for the provider, so the oldest {count} images are left out of this chat from now on.", { count: names.length });
   if (!guessed)
     return t("The provider refused {name}, so it is left out of this chat from now on.", { name: list });
-  return names.length === 1
+  if (tooLarge)
+    return one
+      ? t("The request was too large for the provider, so the newest image, {name}, is left out of this chat from now on.", { name: list })
+      : t("The request was too large for the provider, so the newest images, {names}, are left out of this chat from now on.", { names: list });
+  return one
     ? t("The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.", { name: list })
     : t("The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.", { names: list });
 }
