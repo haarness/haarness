@@ -122,7 +122,11 @@ test("lists, menus and suggestions opened in Settings stay inside its panel, and
   test.setTimeout(240000);
   await openSettings();
   let checked = 0;
-  for (const name of ["General", "Browser", "Servers", "Projects", "Providers", "Models", "Agents", "Tools", "Schedules", "About"])
+  // Every section but Marketplace, which reads a catalog from the network.
+  for (const name of [
+    "General", "Browser", "Keyboard shortcuts", "Servers", "Projects", "Profiles", "Providers", "Models", "Agents",
+    "Commands", "Skills", "Tools", "MCP servers", "Plugins", "Extensions", "Hooks", "Schedules", "About",
+  ])
     checked += await checkSection(name, settings());
   // The run must have opened something in Settings itself, near its end.
   expect(checked).toBeGreaterThan(4);
@@ -186,13 +190,13 @@ test("open lists and menus in Settings, in both themes, in a large and a small w
       await last.click();
       await expect(popup()).toBeVisible();
     }, info);
-    await section("Servers");
-    const menu = openers(settings().locator(".settings-content")).and(page.locator('[aria-haspopup="menu"]'));
-    if (await menu.count())
-      await capture(`settings-menu-${size}`, async () => {
-        await menu.last().click();
-        await expect(popup()).toBeVisible();
-      }, info);
+    await section("Profiles");
+    const menu = settings().getByRole("button", { name: "Manage catalog", exact: true });
+    await capture(`settings-menu-${size}`, async () => {
+      await menu.evaluate((element) => element.scrollIntoView({ block: "end" }));
+      await menu.click();
+      await expect(popup()).toBeVisible();
+    }, info);
     await section("Hooks");
     await settings().getByRole("button", { name: "Add hook", exact: true }).first().click();
     const form = page.getByRole("dialog", { name: "Add hook", exact: true });

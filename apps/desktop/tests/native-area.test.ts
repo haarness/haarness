@@ -63,8 +63,11 @@ const settings = { left: 80, right: 1120, top: 70, bottom: 830 };
 
 test("a layer opened in a dialog keeps 8px inside the dialog's box", () => {
   setNativeArea(undefined);
-  // A 200px select at the panel's end: its 240px list moves in, not out.
-  assert.deepEqual(floatingBox(rect(896, 200), 240, 240, settings), { width: 240, left: 1120 - 8 - 240 });
+  // A 200px select at the panel's end: its 240px list ends where the select ends, inside.
+  assert.deepEqual(floatingBox(rect(896, 200), 240, 240, settings), { width: 240, left: 1096 - 240 });
+  assert.deepEqual(floatingBox(rect(1000, 100), 240, 240, settings), { width: 240, left: 1100 - 240 });
+  // A control nearer the edge than 8px: the list keeps 8px in.
+  assert.deepEqual(floatingBox(rect(1040, 76), 240, 240, settings), { width: 240, left: 1120 - 8 - 240 });
   assert.deepEqual(floatingBox(rect(896, 200), 240, 240), { width: 240, left: 896 });
   // A searchable list shrinks to its minimum before leaving the dialog.
   assert.deepEqual(floatingBox(rect(100, 200), 1100, 260, settings), { width: 1024, left: 88 });
