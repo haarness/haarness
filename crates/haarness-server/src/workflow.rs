@@ -616,13 +616,13 @@ fn workflow_agent_tools(configured: Option<&HashMap<String, bool>>) -> HashMap<S
 #[async_trait]
 impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
     async fn chat_folder(&self, thread: ThreadId) -> Option<std::path::PathBuf> {
-        let runtime = self.runtime().ok()?;
-        runtime
-            .get_thread(thread)
-            .await
+        // A folder a link stands in for gives the chat no workflows of its own.
+        self.runtime()
             .ok()?
-            .directory
-            .map(std::path::PathBuf::from)
+            .chat_folder(thread)
+            .await
+            .ok()
+            .flatten()
     }
 
     async fn create_run_thread(
