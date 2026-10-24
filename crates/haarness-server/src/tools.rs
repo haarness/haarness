@@ -6943,6 +6943,29 @@ export default workflow({
     }
 
     #[tokio::test]
+    async fn a_long_cjk_or_accented_line_reads_as_utf8() {
+        let body = format!(
+            "{}\n{}\nend\n",
+            "日".repeat(3_000),
+            format!("a{}", "é".repeat(5_000))
+        );
+        let (root, _) = read_fixture("wide.txt", body.as_bytes());
+        let result = read_text_of(&root, json!({"path":"wide.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.text,
+            format!(
+                "{}{cut}\na{}{cut}\nend",
+                "日".repeat(2_000),
+                "é".repeat(1_999),
+                cut = text::LINE_CUT
+            )
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn read_shows_text_that_is_not_utf8_and_refuses_binary_data() {
         let (root, _) = read_fixture("latin1.txt", b"caf\xe9\nna\xefve\n");
         let result = read_text_of(&root, json!({"path":"latin1.txt"}))

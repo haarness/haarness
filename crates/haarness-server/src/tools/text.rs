@@ -103,18 +103,42 @@ impl<R: BufRead> Lines<R> {
 
 impl<'a> Line<'a> {
     /// The line as text: invalid UTF-8 as U+FFFD when `lossy`, else `None`.
-    /// A line cut short keeps a partial character at its end out.
+    /// A line cut short leaves out a character its cut split, which is no
+    /// sign of text that is not UTF-8.
     pub(super) fn text(&self, lossy: bool) -> Option<Cow<'a, str>> {
-        if lossy {
-            return Some(String::from_utf8_lossy(self.bytes));
-        }
-        match std::str::from_utf8(self.bytes) {
+        let bytes = if self.long {
+            without_split_character(self.bytes)
+        } else {
+            self.bytes
+        };
+        match std::str::from_utf8(bytes) {
             Ok(text) => Some(Cow::Borrowed(text)),
-            Err(error) if self.long && error.error_len().is_none() => Some(Cow::Borrowed(
-                std::str::from_utf8(&self.bytes[..error.valid_up_to()]).ok()?,
-            )),
+            Err(_) if lossy => Some(String::from_utf8_lossy(bytes)),
             Err(_) => None,
         }
+    }
+}
+
+/// `bytes` without a UTF-8 sequence its end cuts short: the bytes after the
+/// last character's first byte, when fewer than that byte announces.
+fn without_split_character(bytes: &[u8]) -> &[u8] {
+    let from = bytes.len().saturating_sub(4);
+    let Some(start) = (from..bytes.len())
+        .rev()
+        .find(|&index| bytes[index] & 0xC0 != 0x80)
+    else {
+        return bytes;
+    };
+    let length = match bytes[start] {
+        0xF0.. => 4,
+        0xE0.. => 3,
+        0xC0.. => 2,
+        _ => 1,
+    };
+    if bytes.len() - start < length {
+        &bytes[..start]
+    } else {
+        bytes
     }
 }
 
@@ -589,6 +613,35 @@ mod tests {
         assert!(cut.ends_with(LINE_CUT));
         assert_eq!(shown("short", false), "short");
         assert_eq!(shown("head", true), format!("head{LINE_CUT}"));
+    }
+
+    /// A cut that splits a character of a long CJK or accented line is no
+    /// sign of text that is not UTF-8.
+    #[test]
+    fn a_long_line_cut_inside_a_character_is_still_utf8() {
+        for line in [
+            "日".repeat(3_000),
+            format!("a{}", "é".repeat(5_000)),
+            "😀".repeat(2_500) + "x",
+        ] {
+            let text = format!("{line}\nnext\n");
+            let mut lines = Lines::new(
+                BufReader::with_capacity(5, text.as_bytes()),
+                READ_LINE_BYTES,
+            );
+            let cancel = CancellationToken::new();
+            let first = lines.next_line(&cancel).unwrap().unwrap();
+            assert!(first.long);
+            for lossy in [true, false] {
+                let decoded = first.text(lossy).unwrap();
+                assert!(
+                    matches!(decoded, Cow::Borrowed(_)),
+                    "{lossy}: {:?}",
+                    &decoded[decoded.len() - 8..]
+                );
+                assert!(line.starts_with(decoded.as_ref()));
+            }
+        }
     }
 
     #[test]
