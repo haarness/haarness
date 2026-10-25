@@ -81,7 +81,8 @@
       "ApprovalMode": {
         "enum": [
           "auto",
-          "review"
+          "review",
+          "yolo"
         ],
         "type": "string"
       },
@@ -116,10 +117,11 @@
         "type": "object"
       },
       "ApprovalModeSetting": {
-        "description": "What a client may ask for. `Inherit` clears this chat's own setting so it\nfollows the agent that delegated to it (Auto at the top level).",
+        "description": "What a client may ask for. `Inherit` clears this chat's own setting so it\nfollows the agent that delegated to it (the server's default at the top\nlevel).",
         "enum": [
           "auto",
           "review",
+          "yolo",
           "inherit"
         ],
         "type": "string"
@@ -780,7 +782,6 @@
           "update",
           "save_agent",
           "ssh_public_key",
-          "archive",
           "delete",
           "ask",
           "messages",
@@ -800,12 +801,6 @@
             "minimum": 0,
             "type": [
               "integer",
-              "null"
-            ]
-          },
-          "archived": {
-            "type": [
-              "boolean",
               "null"
             ]
           },
@@ -3751,7 +3746,7 @@
           },
           "detail": {},
           "explicit": {
-            "description": "Only a person may answer: Auto mode, `--yolo`, hooks and configured\nrules never do, so clients must not answer it automatically. Its\n\"always\" lasts for this chat only (a Chrome site approval).",
+            "description": "Only a person may answer: Auto, Yolo, `--yolo`, hooks and configured\nrules never do, so clients must not answer it automatically. Its\n\"always\" lasts for this chat only (a Chrome site approval).",
             "type": "boolean"
           },
           "operation": {

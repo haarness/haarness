@@ -26,6 +26,8 @@ export interface MenuAction {
   divider?: boolean;
   /** Names the group this item starts, in a quiet caption above it. */
   heading?: string;
+  /** A choice with risk to it: its icon takes the danger colour. */
+  tone?: "danger";
   run?: () => void;
 }
 
@@ -58,10 +60,14 @@ export function MenuButton(props: {
   content?: JSX.Element;
   class?: string;
   title?: string;
+  /** What the trigger's current value does, read after its name. */
+  description?: string;
   disabled?: boolean;
   items: MenuAction[];
   /** A menu that replaces its trigger's value is at least as wide as it. */
   matchWidth?: boolean;
+  /** A class for the open menu, for one that needs more room. */
+  menuClass?: string;
   /** Called each time the menu opens. */
   onOpen?: () => void;
   onKeyDown?: (
@@ -158,6 +164,7 @@ export function MenuButton(props: {
           props.class ?? (props.text || props.content ? "" : "icon-button")
         }
         aria-label={props.label}
+        aria-description={props.description}
         disabled={props.disabled}
         aria-haspopup="menu"
         aria-expanded={open()}
@@ -189,7 +196,7 @@ export function MenuButton(props: {
           <div
             ref={menu}
             id={id}
-            class="action-menu popover"
+            class={"action-menu popover" + (props.menuClass ? " " + props.menuClass : "")}
             role="menu"
             aria-label={props.label}
             tabIndex={-1}
@@ -380,6 +387,7 @@ function MenuItem(props: {
          accessible name stays the verb. */
       aria-label={props.item.label}
       aria-description={props.item.detail}
+      data-tone={props.item.tone}
       disabled={props.item.disabled}
       onClick={(event) => {
         event.stopPropagation();

@@ -43,6 +43,7 @@ import { MenuButton, type MenuAction } from "./MenuButton";
 import { UniversalSearch, archivedSearchRequested, type ArchivedScope } from "./UniversalSearch";
 import { Wordmark } from "./brand";
 import { matchesShortcut, shortcutLabel, type SearchEntry } from "./search";
+import { modeCopy, offeredModes } from "./approval-mode";
 import { registerCyclePanel, stepFocusedPanel, tabButton } from "./tab-cycle";
 import { keyPlace, overlayOpen, stepIndex, stepsChats } from "./keyboard-nav";
 import { agentReveal, awayChats, type BrowserStage } from "./browser-stage";
@@ -767,17 +768,27 @@ export function App() {
       {key:"conversation:side-chat",group:"Project panels",name:t("Open side chat"),keywords:"btw side question aside ask thread",icon:"side-chat",hint:hint("sideChat", "Mod+Shift+J"),disabled:!connected||!state.selected,action:()=>openSide()},
       {key:"side-chat-new",group:"Project panels",name:t("New side chat"),keywords:"btw side question aside ask thread another",icon:"side-chat",disabled:!connected||!state.selected,action:()=>openSide(true)},
       {key:"memory",group:"Chat actions",name:t("Manage memory"),keywords:"project memory index",icon:"layers",disabled:!connected,action:()=>set("memoryOpen",true)},
-      {
-        key: "permission-mode",
-        group: "Chat actions",
-        name: app.isAutoApproval()
-          ? t("Switch approvals to Review")
-          : t("Enable Auto approvals"),
-        keywords: "permissions approval auto review allow once",
-        icon: app.isAutoApproval() ? "approval-review" : "approval-auto",
-        disabled: !connected,
-        action: () => app.setAutoApproval(!app.isAutoApproval()),
-      },
+      // One entry for each mode the chat is not in: Yolo only where the
+      // server offers it.
+      ...offeredModes(app.yoloOffered(), app.approvalMode())
+        .filter((mode) => mode !== app.approvalMode())
+        .map(
+          (mode): SearchEntry => ({
+            key: "permission-mode:" + mode,
+            group: "Chat actions",
+            name:
+              mode === "review"
+                ? t("Switch approvals to Review")
+                : mode === "auto"
+                  ? t("Switch approvals to Auto")
+                  : t("Switch approvals to Yolo"),
+            detail: t(modeCopy[mode].detail),
+            keywords: "permissions approval approvals mode auto review yolo allow once " + mode,
+            icon: modeCopy[mode].icon,
+            disabled: !connected,
+            action: () => app.setApprovalMode(mode),
+          }),
+        ),
       {
         key: "new",
         group: "Commands",

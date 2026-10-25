@@ -12,13 +12,14 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use haarness_protocol::tokens::{self, Tokenizer};
 use haarness_protocol::{
-    BackgroundTaskInfo, BtwEvent, BtwRequest, BtwResponse, CompactRequest, CreateThreadRequest,
-    ForkThreadRequest, GoalActionRequest, GoalActionResponse, GoalCompletion, GoalLogicalTurnEvent,
-    GoalLogicalTurnPhase, GoalState, GoalStatus, GoalUpdateRequest, GoalUpdatedEvent, GoalVerdict,
-    Item, ItemData, ItemId, PendingPermissionInfo, PendingQuestionInfo, PermissionReply,
-    PermissionReplyDecision, QuestionReply, QueueInputRequest, QueueInputResponse, RequestId,
-    SessionArchive, SessionArchiveImportResult, StartTurnRequest, Thread, ThreadActivity, ThreadId,
-    TodoCheckpoint, TodoEntry, ToolCatalogResponse, Turn, TurnId, TurnStatus, UpdateThreadRequest,
+    ApprovalMode, BackgroundTaskInfo, BtwEvent, BtwRequest, BtwResponse, CompactRequest,
+    CreateThreadRequest, ForkThreadRequest, GoalActionRequest, GoalActionResponse, GoalCompletion,
+    GoalLogicalTurnEvent, GoalLogicalTurnPhase, GoalState, GoalStatus, GoalUpdateRequest,
+    GoalUpdatedEvent, GoalVerdict, Item, ItemData, ItemId, PendingPermissionInfo,
+    PendingQuestionInfo, PermissionReply, PermissionReplyDecision, QuestionReply,
+    QueueInputRequest, QueueInputResponse, RequestId, SessionArchive, SessionArchiveImportResult,
+    StartTurnRequest, Thread, ThreadActivity, ThreadId, TodoCheckpoint, TodoEntry,
+    ToolCatalogResponse, Turn, TurnId, TurnStatus, UpdateThreadRequest,
 };
 use parking_lot::{Mutex, RwLock};
 use serde_json::json;
@@ -4829,7 +4830,8 @@ impl AgentRuntime {
             // Same rule as model calls: in a chat in Auto the reviewer
             // answers a workflow's eligible requests (with it off, they are
             // approved once), ordered with mode changes by the gate. A
-            // person's own call there is approved once.
+            // person's own call there is approved once, and in Yolo every
+            // one is.
             let review_on = components.config.auto_review.enabled;
             let reviewable = !asked
                 .iter()
@@ -4882,7 +4884,10 @@ impl AgentRuntime {
             let card_follows = forced
                 || explicit
                 || (review_on && agent_work && reviewer.is_none())
-                || !self.approval_modes.is_auto(thread_id).await;
+                || !matches!(
+                    self.approval_modes.mode(thread_id).await,
+                    ApprovalMode::Auto | ApprovalMode::Yolo
+                );
             let mut script_read = false;
             let mut shown = None;
             if script_card && card_follows {
@@ -4890,12 +4895,27 @@ impl AgentRuntime {
                 script_read = true;
             }
             let approval_gate = self.approval_modes.gate.lock().await;
-            let auto = !forced && !explicit && self.approval_modes.is_auto(thread_id).await;
+            let mode = if forced || explicit {
+                ApprovalMode::Review
+            } else {
+                self.approval_modes.mode(thread_id).await
+            };
+            let auto = mode == ApprovalMode::Auto;
             if auto && (!review_on || !agent_work) {
                 tracing::info!(
                     thread = %thread_id,
                     operation = %operation_for_log(&operation),
                     "approved once (Auto)"
+                );
+                continue;
+            }
+            // In Yolo, as for a `--yolo` turn, every one is approved once
+            // and none is reviewed.
+            if mode == ApprovalMode::Yolo {
+                tracing::info!(
+                    thread = %thread_id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (Yolo)"
                 );
                 continue;
             }
@@ -5437,7 +5457,9 @@ impl AgentRuntime {
 
     /// Change a chat's approval mode for every client. Turning Auto on also
     /// approves, once, the eligible requests already waiting in that chat and
-    /// in the agents that follow its setting.
+    /// in the agents that follow its setting (with the reviewer on, it
+    /// reviews them); turning Yolo on approves every one of them a `--yolo`
+    /// turn would, once.
     pub async fn set_approval_mode(
         &self,
         id: ThreadId,
@@ -5459,13 +5481,43 @@ impl AgentRuntime {
         }
         let auto: Vec<ThreadId> = modes
             .iter()
-            .filter(|mode| mode.mode == haarness_protocol::ApprovalMode::Auto)
+            .filter(|mode| mode.mode == ApprovalMode::Auto)
+            .map(|mode| mode.thread_id)
+            .collect();
+        let yolo: Vec<ThreadId> = modes
+            .iter()
+            .filter(|mode| mode.mode == ApprovalMode::Yolo)
             .map(|mode| mode.thread_id)
             .collect();
         let mut released = Vec::new();
         let mut reviews_started = 0;
         let review_on = self.components().config.auto_review.enabled;
-        if info.mode == haarness_protocol::ApprovalMode::Auto {
+        if info.mode == ApprovalMode::Yolo {
+            // Whatever a `--yolo` turn approves: shown or not, left to a
+            // person by the reviewer or being reviewed now (its review ends
+            // with the approval). Only what a person alone answers stays.
+            let waiting: Vec<String> = self
+                .permissions
+                .iter()
+                .filter(|entry| {
+                    !entry.value().forced
+                        && entry.value().explicit_operations.is_empty()
+                        && yolo.contains(&entry.value().thread_id)
+                })
+                .map(|entry| entry.key().clone())
+                .collect();
+            for permission_id in waiting {
+                if let Some((_, pending)) = self.permissions.remove(&permission_id) {
+                    pending.end_review();
+                    if pending.announced {
+                        self.publish_permission_resolved(&permission_id, &pending, true);
+                    }
+                    let _ = pending.sender.send(PermissionResolution::allowed());
+                    released.push(permission_id);
+                }
+            }
+        }
+        if info.mode == ApprovalMode::Auto {
             let waiting: Vec<String> = self
                 .permissions
                 .iter()
@@ -7337,7 +7389,8 @@ where
             }),
         };
         let gate = approval_modes.gate.lock().await;
-        let auto = approval_modes.is_auto(thread_id).await;
+        let mode = approval_modes.mode(thread_id).await;
+        let auto = mode == ApprovalMode::Auto;
         let Some(mut entry) = permissions.get_mut(id) else {
             drop(gate);
             return receiver
@@ -7345,6 +7398,13 @@ where
                 .map(Reviewed::Resolved)
                 .map_err(|_| CoreError::Cancelled);
         };
+        // The chat went to Yolo while it was reviewed: approved once,
+        // whatever the reviewer said.
+        if mode == ApprovalMode::Yolo {
+            drop(entry);
+            permissions.remove(id);
+            return Ok(Reviewed::Resolved(PermissionResolution::allowed()));
+        }
         match outcome {
             // Out of Auto and back before the review saw it: review again.
             None if auto => {
@@ -7430,11 +7490,14 @@ async fn review_waiting(
         let Some(thread_id) = permissions.get(&id).map(|entry| entry.thread_id) else {
             return;
         };
-        let auto = approval_modes.is_auto(thread_id).await;
+        let mode = approval_modes.mode(thread_id).await;
+        let auto = mode == ApprovalMode::Auto;
         let Some(mut entry) = permissions.get_mut(&id) else {
             return;
         };
         let resolution = match outcome {
+            // The chat went to Yolo: approved once, whatever the reviewer said.
+            _ if mode == ApprovalMode::Yolo => PermissionResolution::allowed(),
             // Out of Auto and back before this review saw it, so the switch
             // back found it still reviewing: review again.
             None if auto => {
@@ -10924,6 +10987,22 @@ impl RunnerTask {
             );
             return Ok(PermissionResolution::allowed());
         }
+        // A chat in Yolo approves once what a `--yolo` turn would, before
+        // hooks and the reviewer. Read under the gate, so no approval follows
+        // a switch away from Yolo that has returned.
+        if !forced && !explicit {
+            let gate = self.approval_modes.gate.lock().await;
+            let yolo = self.approval_modes.mode(self.thread.id).await == ApprovalMode::Yolo;
+            drop(gate);
+            if yolo {
+                tracing::info!(
+                    thread = %self.thread.id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (Yolo)"
+                );
+                return Ok(PermissionResolution::allowed());
+            }
+        }
         if let Some(hooks) = &self.hooks {
             // A hook answers Always only where a person's Always would be
             // offered and kept: not for a request only a person answers, not
@@ -10975,7 +11054,10 @@ impl RunnerTask {
         let card_follows = forced
             || explicit
             || (review_on && !reviewable)
-            || !self.approval_modes.is_auto(self.thread.id).await;
+            || !matches!(
+                self.approval_modes.mode(self.thread.id).await,
+                ApprovalMode::Auto | ApprovalMode::Yolo
+            );
         let mut script_read = false;
         let mut shown = None;
         if script_card && card_follows {
@@ -10991,7 +11073,12 @@ impl RunnerTask {
         let reviewer = (!forced && !explicit && reviewable && review_on)
             .then(|| Arc::new(self.reviewer(plan, detail, tool)));
         let approval_gate = self.approval_modes.gate.lock().await;
-        let auto = !forced && !explicit && self.approval_modes.is_auto(self.thread.id).await;
+        let mode = if forced || explicit {
+            ApprovalMode::Review
+        } else {
+            self.approval_modes.mode(self.thread.id).await
+        };
+        let auto = mode == ApprovalMode::Auto;
         let review_now = auto && reviewer.is_some();
         // Re-evaluate while holding the same lock used to install an Always
         // rule, and register the prompt before releasing it. This closes the
@@ -11020,6 +11107,15 @@ impl RunnerTask {
                     thread = %self.thread.id,
                     operation = %operation_for_log(&operation),
                     "approved once (Auto)"
+                );
+                return Ok(PermissionResolution::allowed());
+            }
+            // Switched to Yolo since the check above.
+            if mode == ApprovalMode::Yolo {
+                tracing::info!(
+                    thread = %self.thread.id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (Yolo)"
                 );
                 return Ok(PermissionResolution::allowed());
             }

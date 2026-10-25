@@ -187,14 +187,16 @@ where the damage is bounded. Exit codes, JSON records and Ctrl-C:
 > Haarness permissions are application-level policy, not an operating-system sandbox. Review
 > approval prompts before allowing tools to operate.
 
-Each chat is in **Review** (the default) or **Auto**, kept on the server so every client agrees:
-**Ctrl+Y** in the TUI or the shield pill in Desktop's composer switches the open chat. In Review, edits
-and commands inside the project run without asking; Haarness asks before it uses files outside the
-project, reads secrets such as `.env`, switches agents or generates paid media, and wherever your own
-rules say to ask. In Auto, a reviewer model answers those requests: it approves routine ones once,
-blocks risky ones with a reason the agent reads, and leaves the rest to you with a short note. Some
-requests always come to a person: an ask you configured for a specific command or path, Haarness Cloud
-actions that spend money or delete something, and websites in your own Chrome. See
+Each chat is in **Review**, **Auto** (the default) or **Yolo**, kept on the server so every client
+agrees: **Ctrl+Y** in the TUI or the approvals pill in Desktop's composer switches the open chat. In
+Review, edits and commands inside the project run without asking; Haarness asks before it uses files
+outside the project, reads secrets such as `.env`, switches agents or generates paid media, and
+wherever your own rules say to ask. In Auto, a reviewer model answers those requests: it approves
+routine ones once, blocks risky ones with a reason the agent reads, and leaves the rest to you with a
+short note; an ask you configured for a specific command or path still comes to you. In Yolo, every
+one of those requests is approved once without asking, and the chat shows it in red. In every mode,
+deny rules hold and some requests always come to a person: Haarness Cloud actions that spend money or
+delete something, edits of Haarness's own configuration, and websites in your own Chrome. See
 [automatic approvals](docs/AUTO-APPROVALS.md) and [permissions](docs/PERMISSIONS-AND-EXECUTION.md).
 
 | Key | Answer |

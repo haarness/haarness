@@ -128,6 +128,10 @@ export const defaults: Preferences = {
     // keep moving keyboard focus, so the defaults are chords.
     agentNext: "Mod+.",
     agentPrev: "Mod+Shift+.",
+    // Steps the chat's approvals Review → Auto → Yolo, as Ctrl+Y does in the
+    // TUI (Ctrl+Y is redo here). A for approvals; no menu, editor or text
+    // field uses Mod+Shift+A.
+    approvalNext: "Mod+Shift+A",
     // Matched wherever the keyboard is: the tabs of the panel that has it.
     tabNext: "Ctrl+Tab",
     tabPrev: "Ctrl+Shift+Tab",
@@ -195,6 +199,7 @@ export function defaultShortcuts(platform: string): Preferences["shortcuts"] {
 /** Shortcuts that may be left unset: the ones added after people could
  * choose their own keys. */
 export const optionalShortcuts = new Set([
+  "approvalNext",
   "pick",
   "sideChat",
   "tabNext",

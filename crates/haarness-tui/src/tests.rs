@@ -23324,3 +23324,133 @@ async fn a_catalog_read_after_assets_updated_does_not_hold_the_event_loop() {
     assert_eq!(arrived.map(|providers| providers.len()), Some(0));
     server.abort();
 }
+
+/// Ctrl+Y goes Review → Auto → Yolo → Review on a server that keeps Yolo,
+/// each notice naming where it goes next, and the band names Yolo in the
+/// danger colour.
+#[tokio::test]
+async fn ctrl_y_cycles_review_auto_yolo_and_the_band_shows_yolo_in_red() {
+    use haarness_protocol::ApprovalMode;
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.approval_server = true;
+    app.approval_yolo = true;
+    let info = |mode: &str, revision: &str| {
+        serde_json::json!({
+            "threadId": thread.id,
+            "mode": mode,
+            "sourceThreadId": thread.id,
+            "explicit": true,
+            "revision": revision,
+        })
+        .to_string()
+    };
+    app.approval_mode = Some(serde_json::from_str(&info("review", "0")).unwrap());
+    let (client, server) = workspace_http_status_client(
+        vec![
+            (200, info("auto", "1")),
+            (200, info("yolo", "2")),
+            (200, info("review", "3")),
+        ],
+        false,
+    )
+    .await;
+    let ctrl_y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
+    crate::input::handle_key(&mut app, ctrl_y, &client)
+        .await
+        .unwrap();
+    assert_eq!(app.chat_approval_mode(), ApprovalMode::Auto);
+    assert!(app.notice.ends_with("ctrl+y for Yolo"), "{}", app.notice);
+    crate::input::handle_key(&mut app, ctrl_y, &client)
+        .await
+        .unwrap();
+    assert_eq!(app.chat_approval_mode(), ApprovalMode::Yolo);
+    assert!(app.auto_permissions, "Yolo answers without asking");
+    assert_eq!(
+        app.notice,
+        "Yolo on for this chat · every request is approved once · ctrl+y to review"
+    );
+    app.notice.clear();
+    let frame = app.lines((140, 40));
+    let band = frame.last().unwrap();
+    assert!(
+        line_text(band).contains("approvals: yolo"),
+        "{}",
+        line_text(band)
+    );
+    assert!(
+        band.spans
+            .iter()
+            .any(|span| span.text.contains("approvals: yolo") && span.fg == app.theme.danger),
+        "Yolo is never unnoticed"
+    );
+    crate::input::handle_key(&mut app, ctrl_y, &client)
+        .await
+        .unwrap();
+    assert_eq!(app.chat_approval_mode(), ApprovalMode::Review);
+    assert!(!app.auto_permissions);
+    let requests = server.await.unwrap();
+    for (request, mode) in requests.iter().zip(["auto", "yolo", "review"]) {
+        assert!(request.starts_with("PUT "), "{request}");
+        assert!(
+            request.contains(&format!("\"mode\":\"{mode}\"")),
+            "{mode}: {request}"
+        );
+    }
+}
+
+/// On a server that cannot keep Yolo, Ctrl+Y goes Auto → Review, and
+/// `/permissions-mode yolo` says why instead of asking the server. On a
+/// server that can, it puts the chat in Yolo.
+#[tokio::test]
+async fn yolo_is_offered_only_where_the_server_keeps_it() {
+    use haarness_protocol::ApprovalMode;
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.approval_server = true;
+    let info = |mode: &str| {
+        serde_json::json!({
+            "threadId": thread.id,
+            "mode": mode,
+            "sourceThreadId": thread.id,
+            "explicit": true,
+            "revision": "1",
+        })
+        .to_string()
+    };
+    app.approval_mode = Some(serde_json::from_str(&info("auto")).unwrap());
+    let (client, server) =
+        workspace_http_status_client(vec![(200, info("review")), (200, info("yolo"))], false).await;
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.chat_approval_mode(), ApprovalMode::Review);
+    app.set_approval_mode(ApprovalMode::Yolo, &client).await;
+    assert_eq!(app.chat_approval_mode(), ApprovalMode::Review);
+    assert_eq!(
+        app.notice,
+        "This server cannot keep a chat in Yolo · update Haarness"
+    );
+    app.approval_yolo = true;
+    app.composer.set_text("/permissions-mode yolo".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        app.chat_approval_mode(),
+        ApprovalMode::Yolo,
+        "{}",
+        app.notice
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2, "{requests:#?}");
+    assert!(requests[1].contains("\"mode\":\"yolo\""), "{}", requests[1]);
+}

@@ -433,7 +433,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command(
         "permissions-mode",
         &["permission-mode"],
-        "Switch approvals: /permissions-mode [review|auto] · ctrl+y",
+        "Switch approvals: /permissions-mode [review|auto|yolo] · ctrl+y",
     ),
     command("help", &["commands", "?"], "Show available commands"),
     command("exit", &["quit", "q"], "Exit Haarness"),
@@ -2340,13 +2340,20 @@ impl App {
             }
 
             "permissions-mode" => match arguments.trim() {
-                "auto" => self.change_approval_mode(true, client).await,
-                "review" | "normal" => self.change_approval_mode(false, client).await,
-                "" => {
-                    self.change_approval_mode(!self.auto_permissions, client)
-                        .await
+                "auto" => {
+                    self.set_approval_mode(haarness_protocol::ApprovalMode::Auto, client)
+                        .await;
                 }
-                _ => self.refuse_command("Usage: /permissions-mode [review|auto]"),
+                "review" | "normal" => {
+                    self.set_approval_mode(haarness_protocol::ApprovalMode::Review, client)
+                        .await;
+                }
+                "yolo" => {
+                    self.set_approval_mode(haarness_protocol::ApprovalMode::Yolo, client)
+                        .await;
+                }
+                "" => self.cycle_approval_mode(client).await,
+                _ => self.refuse_command("Usage: /permissions-mode [review|auto|yolo]"),
             },
             "new" if self.is_untouched_session() => {
                 self.notice = "This session is already new · type to start".into();
@@ -2364,15 +2371,17 @@ impl App {
                     directory: None,
                 };
                 let thread = client.create_thread(request).await?;
-                // A new chat starts in the open chat's mode, as it would
-                // have when Auto belonged to the TUI rather than the chat.
-                if self.approval_server && self.auto_permissions {
-                    let auto = haarness_protocol::SetApprovalModeRequest {
-                        mode: haarness_protocol::ApprovalModeSetting::Auto,
+                // A new chat starts in the open chat's Auto or Yolo, as it
+                // would have when Auto belonged to the TUI rather than the
+                // chat.
+                let mode = self.chat_approval_mode();
+                if self.approval_server && mode != haarness_protocol::ApprovalMode::Review {
+                    let request = haarness_protocol::SetApprovalModeRequest {
+                        mode: mode.setting(),
                         revision: None,
                     };
-                    if let Err(error) = client.set_approval_mode(thread.id, &auto).await {
-                        tracing::warn!(%error, "could not start the new chat in Auto");
+                    if let Err(error) = client.set_approval_mode(thread.id, &request).await {
+                        tracing::warn!(%error, ?mode, "could not start the new chat in the open chat's mode");
                     }
                 }
                 self.refresh_threads(client).await?;

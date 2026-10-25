@@ -1381,6 +1381,14 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
 .action-menu button > .select-check {
   margin-inline-start: auto;
 }
+/* A choice with risk to it (Yolo) shows it in its icon first. */
+.action-menu button[data-tone="danger"] > svg {
+  color: var(--danger);
+}
+/* The approval modes' one-line descriptions read whole. */
+.action-menu.approval-menu {
+  width: 300px;
+}
 
 .session-status.waiting {
   background: var(--accent);

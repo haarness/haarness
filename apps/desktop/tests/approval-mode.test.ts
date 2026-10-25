@@ -7,7 +7,16 @@ import {
   canAutoApprove,
   createAutoApprover,
   describeAlwaysRule,
+  localApprovalMode,
+  modeCopy,
+  MODES,
+  nextMode,
+  offeredModes,
   readApprovalModes,
+  readMode,
+  savedApprovalModes,
+  YOLO_CAPABILITY,
+  type Mode,
 } from "../src/renderer/approval-mode";
 const request = (id: string, threadId = "root"): PendingPermissionInfo => ({
   permissionId: id,
@@ -21,10 +30,10 @@ const request = (id: string, threadId = "root"): PendingPermissionInfo => ({
   createdAt: new Date().toISOString(),
 });
 test("Auto scopes by checkout and conversation; child agents inherit but forks do not", () => {
-  const modes = {
+  const modes = readApprovalModes({
     a: { "*": false, root: true },
     b: { "*": true, manual: false },
-  };
+  });
   const threads = [
     { id: "child", parentId: "root", isSubagent: true },
     { id: "fork", parentId: "root", isSubagent: false },
@@ -37,7 +46,7 @@ test("Auto scopes by checkout and conversation; child agents inherit but forks d
   assert.equal(autoApproval(modes, "other", "root"), false);
   assert.equal(
     autoApproval(
-      { a: { root: true, child: false } },
+      { a: { root: "auto", child: "review" } },
       "a",
       "child",
       threads,
@@ -47,7 +56,54 @@ test("Auto scopes by checkout and conversation; child agents inherit but forks d
   );
   assert.deepEqual(
     readApprovalModes({ a: { "*": true, bad: "true" }, bad: [], null: null }),
-    { a: { "*": true } },
+    { a: { "*": "auto" } },
+  );
+});
+
+test("saved choices read old booleans and Yolo, and save what an older Desktop reads", () => {
+  const read = readApprovalModes({
+    a: { "*": true, review: false, yolo: "yolo", auto: "auto", plain: "review", newer: "paranoid", n: 1 },
+  });
+  assert.deepEqual(read, { a: { "*": "auto", review: "review", yolo: "yolo", auto: "auto", plain: "review" } });
+  // Auto and Review stay booleans on disk; only Yolo is a word.
+  assert.deepEqual(savedApprovalModes(read), {
+    a: { "*": true, review: false, yolo: "yolo", auto: true, plain: false },
+  });
+  assert.deepEqual(readApprovalModes(savedApprovalModes(read)), read);
+  // On a server that does not keep modes, this window answers in any mode but Review.
+  assert.equal(autoApproval({ a: { "*": "yolo" } }, "a", "new"), true);
+  assert.equal(localApprovalMode({ a: { "*": "yolo" } }, "a", "new"), "yolo");
+  assert.equal(localApprovalMode({}, "a", "new"), "review");
+});
+
+test("modes read safely, cycle Review, Auto, Yolo, and Yolo is offered only where the server has it", () => {
+  assert.equal(readMode("auto"), "auto");
+  assert.equal(readMode("yolo"), "yolo");
+  assert.equal(readMode("review"), "review");
+  // A newer server's mode, or none, answers nothing.
+  for (const value of ["paranoid", undefined, null, 3, true]) assert.equal(readMode(value), "review");
+  const cycle = (yolo: boolean) => {
+    const seen: string[] = ["review"];
+    let mode: Mode = "review";
+    for (let step = 0; step < 3; step++) seen.push((mode = nextMode(mode, yolo)));
+    return seen;
+  };
+  assert.deepEqual(cycle(true), ["review", "auto", "yolo", "review"]);
+  assert.deepEqual(cycle(false), ["review", "auto", "review", "auto"]);
+  assert.equal(nextMode("yolo", false), "review");
+  assert.deepEqual(MODES, ["review", "auto", "yolo"]);
+  assert.deepEqual(offeredModes(true), ["review", "auto", "yolo"]);
+  assert.deepEqual(offeredModes(false), ["review", "auto"]);
+  // A chat in Yolo shows its row even where the server stopped offering it.
+  assert.deepEqual(offeredModes(false, "yolo"), ["review", "auto", "yolo"]);
+  assert.equal(YOLO_CAPABILITY, "approval-mode.yolo.v1");
+  assert.deepEqual(
+    MODES.map((mode) => [modeCopy[mode].name, modeCopy[mode].detail]),
+    [
+      ["Review", "Asks before risky steps"],
+      ["Auto", "Answers safe requests without asking"],
+      ["Yolo", "Approves every request without asking"],
+    ],
   );
 });
 test("Auto leaves restricted requests manual", () => {
@@ -281,32 +337,48 @@ test("a reply the server no longer knows was settled already", async () => {
   assert.equal(alreadySettled(new Error("conflict: busy")), false);
 });
 
-test("the shield says Auto asks a reviewer only where the server's does", async () => {
-  const { autoApprovalHint } = await import("../src/renderer/approval-mode");
+test("the pill's tip says what its mode does, and that Auto asks a reviewer only where the server's does", async () => {
+  const { approvalModeHint } = await import("../src/renderer/approval-mode");
   const t = (key: string) => key;
-  assert.match(autoApprovalHint(true, true, t), /a reviewer model approves routine permission requests in this chat/);
-  assert.match(autoApprovalHint(false, true, t), /in new chats here once, and asks you about the rest/);
+  assert.match(approvalModeHint("auto", true, true, t), /a reviewer model approves routine permission requests in this chat/);
+  assert.match(approvalModeHint("auto", false, true, t), /in new chats here once, and asks you about the rest/);
   // auto_review.enabled false, or an older server: no approval-review.v1.
   assert.equal(
-    autoApprovalHint(true, false, t),
-    "Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.",
+    approvalModeHint("auto", true, false, t),
+    "Auto: permission requests in this chat and its agents are allowed once without asking.",
   );
+  assert.match(approvalModeHint("review", true, true, t), /^Review: .* this chat and its agents ask before/);
+  assert.match(approvalModeHint("review", false, false, t), /new chats here ask before/);
+  assert.equal(
+    approvalModeHint("yolo", true, true, t),
+    "Yolo: every permission request in this chat and its agents is approved once without asking. Deny rules still hold, and requests only you can answer still ask.",
+  );
+  assert.match(approvalModeHint("yolo", false, false, t), /^Yolo: every permission request in new chats here/);
+  // A menu, not a toggle: no tip tells the reader to click to switch.
+  for (const mode of MODES)
+    for (const chat of [true, false]) assert.doesNotMatch(approvalModeHint(mode, chat, true, t), /Click/);
 });
 
 test("new chats start in the mode chosen for them here, else in the server's default", async () => {
-  const { newChatAuto } = await import("../src/renderer/approval-mode");
+  const { newChatMode } = await import("../src/renderer/approval-mode");
   // A server that does not name its default (an older one) starts them in Auto.
-  assert.equal(newChatAuto({}, "a"), true);
-  assert.equal(newChatAuto({ a: { root: false } }, "a"), true);
-  assert.equal(newChatAuto({ a: { "*": false } }, "a"), false);
-  assert.equal(newChatAuto({ a: { "*": false } }, "b"), true);
-  // Configured Review, configured Auto, nothing configured (Auto).
-  assert.equal(newChatAuto({}, "a", "review"), false);
-  assert.equal(newChatAuto({ a: { root: true } }, "a", "review"), false);
-  assert.equal(newChatAuto({}, "a", "auto"), true);
-  assert.equal(newChatAuto({}, "a", null), true);
+  assert.equal(newChatMode({}, "a"), "auto");
+  assert.equal(newChatMode({ a: { root: "review" } }, "a"), "auto");
+  assert.equal(newChatMode({ a: { "*": "review" } }, "a"), "review");
+  assert.equal(newChatMode({ a: { "*": "review" } }, "b"), "auto");
+  // Configured Review, Auto, Yolo, nothing configured (Auto), a newer mode.
+  assert.equal(newChatMode({}, "a", "review"), "review");
+  assert.equal(newChatMode({ a: { root: "auto" } }, "a", "review"), "review");
+  assert.equal(newChatMode({}, "a", "auto"), "auto");
+  assert.equal(newChatMode({}, "a", "yolo"), "yolo");
+  assert.equal(newChatMode({}, "a", null), "auto");
+  assert.equal(newChatMode({}, "a", "paranoid"), "review");
   // The choice made here wins either way, as the chat Desktop starts takes it.
-  assert.equal(newChatAuto({ a: { "*": true } }, "a", "review"), true);
-  assert.equal(newChatAuto({ a: { "*": false } }, "a", "auto"), false);
-  assert.equal(newChatAuto({ a: { "*": true } }, "b", "review"), false);
+  assert.equal(newChatMode({ a: { "*": "auto" } }, "a", "review"), "auto");
+  assert.equal(newChatMode({ a: { "*": "review" } }, "a", "yolo"), "review");
+  assert.equal(newChatMode({ a: { "*": "yolo" } }, "a", "review"), "yolo");
+  assert.equal(newChatMode({ a: { "*": "auto" } }, "b", "review"), "review");
+  // A Yolo chosen here counts only where the server offers it.
+  assert.equal(newChatMode({ a: { "*": "yolo" } }, "a", "review", false), "review");
+  assert.equal(newChatMode({ a: { "*": "yolo" } }, "a", undefined, false), "auto");
 });

@@ -1132,7 +1132,7 @@ fn default_true() -> bool {
 pub struct PendingPermissionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_always: Option<bool>,
-    /// Only a person may answer: Auto mode, `--yolo`, hooks and configured
+    /// Only a person may answer: Auto, Yolo, `--yolo`, hooks and configured
     /// rules never do, so clients must not answer it automatically. Its
     /// "always" lasts for this chat only (a Chrome site approval).
     #[serde(default)]

@@ -9,7 +9,7 @@ New to the code? Read the [README](../README.md) quick start and the [reference]
 
 ## Using Haarness
 
-- [Automatic approvals](AUTO-APPROVALS.md): Review and Auto, the per-chat approval mode the server keeps, and Auto's reviewer model.
+- [Automatic approvals](AUTO-APPROVALS.md): Review, Auto and Yolo, the per-chat approval mode the server keeps, and Auto's reviewer model.
 - [Browser alongside chat](BROWSER.md): Desktop's built-in browser and the user's Chrome, choosing between them, agent control, site permissions, local and remote networking.
 - [Canvas and file previews](CANVAS-PREVIEW.md): interactive HTML and file previews in Desktop, saved versions, compare and restore.
 - [Haarness Desktop](DESKTOP.md): first run, where things live, how each surface behaves, and Desktop development and packaging.

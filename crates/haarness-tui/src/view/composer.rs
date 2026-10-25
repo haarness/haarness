@@ -351,26 +351,32 @@ fn status_band(app: &App, width: usize) -> Line {
     //
     // Permission mode names what it is: an agent can be called "review" too.
     // `--yolo` answers this TUI's requests whatever the chat's own mode is.
-    // In Auto or --yolo, requests are answered without asking, which the
-    // band keeps saying ahead of a passing notice's detail (as "auto" when it
-    // must). In Review, the default, a notice wins and the mode takes what
-    // room is left.
-    let answering = app.yolo || app.auto_permissions;
-    let mode = format!(
-        "  {}",
-        app.language.text(if app.yolo {
-            "approvals: --yolo"
-        } else if app.auto_permissions {
-            "approvals: auto"
-        } else {
-            "approvals: review"
-        })
-    );
+    // In Auto, Yolo or --yolo, requests are answered without asking, which
+    // the band keeps saying ahead of a passing notice's detail (as "auto" or
+    // "yolo" when it must). In Review a notice wins and the mode takes what
+    // room is left. A chat that approves everything (Yolo, --yolo) is in the
+    // danger colour, so it is never unnoticed.
+    let chat_mode = app.chat_approval_mode();
+    let answering = app.yolo || chat_mode != haarness_protocol::ApprovalMode::Review;
+    let (long, short) = if app.yolo {
+        ("approvals: --yolo", "--yolo")
+    } else {
+        match chat_mode {
+            haarness_protocol::ApprovalMode::Auto => ("approvals: auto", "auto"),
+            haarness_protocol::ApprovalMode::Yolo => ("approvals: yolo", "yolo"),
+            haarness_protocol::ApprovalMode::Review => ("approvals: review", "review"),
+        }
+    };
+    let mode_style = if app.yolo || chat_mode == haarness_protocol::ApprovalMode::Yolo {
+        theme.danger
+    } else if answering {
+        theme.accent
+    } else {
+        theme.muted
+    };
+    let mode = format!("  {}", app.language.text(long));
     let modes = if answering {
-        vec![
-            mode.clone(),
-            format!("  {}", if app.yolo { "--yolo" } else { "auto" }),
-        ]
+        vec![mode.clone(), format!("  {short}")]
     } else {
         Vec::new()
     };
@@ -474,9 +480,7 @@ fn status_band(app: &App, width: usize) -> Line {
         .or_else(|| (left_width + right_width + mode.width() + 3 <= width).then_some(mode));
     if let Some(mode) = shown_mode {
         let mode_width = mode.width();
-        left.push(
-            Span::new(mode, if answering { theme.accent } else { theme.muted }).on(theme.surface),
-        );
+        left.push(Span::new(mode, mode_style).on(theme.surface));
         left_width += mode_width;
     }
     let mut spans = left;

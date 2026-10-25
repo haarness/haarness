@@ -51,10 +51,14 @@ import { conversationAgents, selectConversationAgent } from "./agent-selection";
 import { providerModelOptions } from "./provider-model-options";
 import {
   alreadySettled,
-  autoApprovalHint,
+  approvalModeHint as modeHint,
   canAutoApprove,
   describeAlwaysRule,
+  modeCopy,
+  nextMode,
+  offeredModes,
   reviewNoteParts,
+  type Mode,
 } from "./approval-mode";
 import {
   chromeApproval,
@@ -205,16 +209,47 @@ export function Session() {
   // rules (permissions/mod.rs): Review does not ask before every edit or
   // command, and browser sites ask only when Settings → Browser says so.
   const approvalModeHint = () =>
-    app.isAutoApproval()
-      ? autoApprovalHint(
-          !!state.selected,
-          // A server that asks a reviewer in Auto says so in its capabilities.
-          !!state.connection?.info.capabilities.includes("approval-review.v1"),
-          t,
-        )
-      : state.selected
-        ? t("Review: edits and commands inside the project run without asking. By default this chat and its agents ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.")
-        : t("Review: edits and commands inside the project run without asking. By default new chats here ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.");
+    modeHint(
+      app.approvalMode(),
+      !!state.selected,
+      // A server that asks a reviewer in Auto says so in its capabilities.
+      !!state.connection?.info.capabilities.includes("approval-review.v1"),
+      t,
+    );
+  /* The approval pill's menu: Review, Auto and, where the server offers
+     it, Yolo, each saying what it does. Picking one needs no confirmation:
+     the row says what it does, and Yolo's red pill stays in sight. */
+  const approvalChoices = (): MenuAction[] => {
+    const current = app.approvalMode();
+    const key = state.preferences.shortcuts.approvalNext;
+    return offeredModes(app.yoloOffered(), current).map((mode, index) => ({
+      label: t(modeCopy[mode].name),
+      detail: t(modeCopy[mode].detail),
+      icon: modeCopy[mode].icon,
+      checked: mode === current,
+      tone: mode === "yolo" ? ("danger" as const) : undefined,
+      heading:
+        index === 0
+          ? key
+            ? t("Approvals") + " · " + shortcutText(key, state.platform)
+            : t("Approvals")
+          : undefined,
+      run: () => void app.run(() => app.setApprovalMode(mode)),
+    }));
+  };
+  /* The approvals key steps Review → Auto → Yolo → Review, as Ctrl+Y does
+     in the TUI; focus stays in the message box, so the mode is announced as
+     well as shown. */
+  const [cycledMode, setCycledMode] = createSignal<Mode | "">("");
+  let cycledModeTimer: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => clearTimeout(cycledModeTimer));
+  function cycleApprovals() {
+    const next = nextMode(app.approvalMode(), app.yoloOffered());
+    void app.run(() => app.setApprovalMode(next));
+    setCycledMode(next);
+    clearTimeout(cycledModeTimer);
+    cycledModeTimer = setTimeout(() => setCycledMode(""), 4000);
+  }
   // Learn whether the chat that just opened is shared, for the composer chip,
   // and again after the event stream reconnects, since a share started or
   // stopped meanwhile sends no event. The server answers from local state: no
@@ -397,8 +432,19 @@ export function Session() {
       if (!event.repeat && !stopping() && editable()) void app.run(stop);
       return true;
     }
-    if (controls.busy()) return false;
     const shortcuts = state.preferences.shortcuts;
+    // Approvals change while work runs too: that is when they matter.
+    if (
+      shortcuts.approvalNext &&
+      matchesShortcut(event, shortcuts.approvalNext, state.platform) &&
+      app.composerShown() &&
+      !state.openingProject
+    ) {
+      event.preventDefault();
+      if (!event.repeat) cycleApprovals();
+      return true;
+    }
+    if (controls.busy()) return false;
     for (const [name, step] of [
       ["agentPrev", -1],
       ["agentNext", 1],
@@ -2942,30 +2988,33 @@ export function Session() {
                     {/* The name carries the mode it shows, so a voice user
                         can say what they see (WCAG 2.5.3); a name that changes
                         with its state cannot also be a pressed toggle. */}
-                    <button
-                      class="pill-select approval-mode"
-                      classList={{ enabled: app.isAutoApproval() }}
-                      disabled={!!state.openingProject}
-                      aria-label={t("Approvals: {mode}", {
-                        mode: app.isAutoApproval() ? t("Auto") : t("Review"),
-                      })}
-                      aria-description={approvalModeHint()}
-                      title={approvalModeHint()}
-                      onClick={() =>
-                        app.run(() =>
-                          app.setAutoApproval(!app.isAutoApproval()),
-                        )
+                    <MenuButton
+                      class={
+                        "pill-select approval-mode" +
+                        (app.approvalMode() === "auto"
+                          ? " enabled"
+                          : app.approvalMode() === "yolo"
+                            ? " yolo"
+                            : "")
                       }
-                    >
-                      <Icon
-                        name={app.isAutoApproval() ? "approval-auto" : "approval-review"}
-                        size="sm"
-                      />
-                      {/* The same two names as the TUI and the docs. */}
-                      <span class="pill-label">
-                        {app.isAutoApproval() ? t("Auto") : t("Review")}
-                      </span>
-                    </button>
+                      disabled={!!state.openingProject}
+                      label={t("Approvals: {mode}", {
+                        mode: t(modeCopy[app.approvalMode()].name),
+                      })}
+                      description={approvalModeHint()}
+                      title={approvalModeHint()}
+                      content={
+                        <>
+                          <Icon name={modeCopy[app.approvalMode()].icon} size="sm" />
+                          {/* The same three names as the TUI and the docs. */}
+                          <span class="pill-label">
+                            {t(modeCopy[app.approvalMode()].name)}
+                          </span>
+                        </>
+                      }
+                      items={approvalChoices()}
+                      menuClass="approval-menu"
+                    />
                   </Show>
                   <Show when={remoteShared()}>
                     <button
@@ -2999,6 +3048,8 @@ export function Session() {
                     />
                     <span class="sr-only" role="status">
                       {cycledAgent() && t("Agent: {agent}", { agent: cycledAgent() })}
+                      {cycledMode() &&
+                        t("Approvals: {mode}", { mode: t(modeCopy[cycledMode() as Mode].name) })}
                     </span>
                     <Show
                       when={!state.catalogLoading && selectedModel()}
@@ -3635,7 +3686,8 @@ function Permission(props: {
     (props.permission.alwaysPatterns ?? []).map((rule) =>
       describeAlwaysRule(category(), rule, { t, shortPath }),
     );
-  const autoOffered = () => !app.isAutoApproval() && canAutoApprove(props.permission);
+  // Offered in Review only: from Yolo it would be a step back.
+  const autoOffered = () => app.approvalMode() === "review" && canAutoApprove(props.permission);
   /* Deny, Always and Allow once share one line, even in a narrow chat:
      every way of allowing more than this request waits in the Always menu,
      Allow once + Auto included. */
