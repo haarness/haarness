@@ -677,19 +677,15 @@ async fn cancellation_interrupts_only_its_own_turn_and_preserves_session() {
 }
 
 #[tokio::test]
-async fn lifecycle_mutations_use_session_routes_and_archive_defaults_to_true() {
+async fn lifecycle_mutations_use_session_routes_and_sessions_have_no_archive() {
     let f = Fixture::new(true).await;
     let cloud = f.cloud(CancellationToken::new()).await;
-    let archived = cloud
+    // Cloud sessions are kept until they are deleted; there is nothing to archive.
+    assert!(cloud
         .session(json!({"action":"archive","sessionId":SESSION}))
         .await
-        .unwrap();
-    assert_eq!(archived["archived"], true);
-    let restored = cloud
-        .session(json!({"action":"archive","sessionId":SESSION,"archived":false}))
-        .await
-        .unwrap();
-    assert_eq!(restored["archived"], false);
+        .is_err());
+    assert_eq!(f.count("PATCH", &format!("/api/v1/sessions/{SESSION}")), 0);
     let renamed = cloud
         .session(json!({"action":"rename","sessionId":SESSION,"title":"Renamed"}))
         .await
