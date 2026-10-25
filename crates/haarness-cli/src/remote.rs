@@ -71,6 +71,24 @@ impl WorkspaceHost for Host {
         set_visible(&self.paths, &id, false)
     }
     async fn target(&self, id: String) -> Result<WorkspaceTarget> {
+        self.resolve(id, false).await
+    }
+    async fn read_target(&self, id: String) -> Result<WorkspaceTarget> {
+        self.resolve_read(id, false).await
+    }
+    /// A chat without a project, published from the chat home, is reachable
+    /// as that one chat; the chat home itself stays this computer's.
+    async fn chat_target(&self, id: String, read: bool) -> Result<WorkspaceTarget> {
+        if read {
+            self.resolve_read(id, true).await
+        } else {
+            self.resolve(id, true).await
+        }
+    }
+}
+
+impl Host {
+    async fn resolve(&self, id: String, chat: bool) -> Result<WorkspaceTarget> {
         ensure!(
             !hidden_projects(&self.paths)?.contains(&id),
             "Project is closed on this remote host; open its folder to reconnect"
@@ -80,7 +98,7 @@ impl WorkspaceHost for Host {
             Ok::<_, anyhow::Error>(paths.workspace_manager()?.get(&id)?)
         })
         .await??;
-        ensure!(!workspace.chat_home, CHAT_HOME_STAYS);
+        ensure!(chat || !workspace.chat_home, CHAT_HOME_STAYS);
         let lock = self
             .locks
             .lock()
@@ -109,8 +127,8 @@ impl WorkspaceHost for Host {
     /// so the project can still be viewed. Only a server that speaks this
     /// build's API and confines a published chat's requests (`remote-chat-scope.v1`)
     /// is read from; anything else keeps the busy answer.
-    async fn read_target(&self, id: String) -> Result<WorkspaceTarget> {
-        let error = match self.target(id.clone()).await {
+    async fn resolve_read(&self, id: String, chat: bool) -> Result<WorkspaceTarget> {
+        let error = match self.resolve(id.clone(), chat).await {
             Err(error) if error.downcast_ref::<ProjectBusy>().is_some() => error,
             other => return other,
         };
@@ -254,10 +272,11 @@ fn set_visible(paths: &Paths, id: &str, visible: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::readable;
+    use super::{CHAT_HOME_STAYS, Host, readable};
     use haarness_protocol::{
         PTY_CAPABILITY, SCHEMA_VERSION, ServerInfo, WORKSPACE_HISTORY_CAPABILITY,
     };
+    use haarness_server::remote::WorkspaceHost as _;
 
     fn info(capabilities: &[&str]) -> ServerInfo {
         ServerInfo {
@@ -291,5 +310,44 @@ mod tests {
         let mut other_schema = info(&full);
         other_schema.schema_version = "0".into();
         assert!(!readable(&other_schema));
+    }
+
+    #[tokio::test]
+    async fn the_chat_home_stays_out_of_project_access_but_a_chat_published_from_it_is_reachable() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-remote-chat-home-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let home = root.join("Chat folders");
+        std::fs::create_dir_all(&home).unwrap();
+        let paths = crate::Paths::new(Some(&root.join("data"))).unwrap();
+        let workspace = paths
+            .workspace_manager()
+            .unwrap()
+            .register_chat_home(&home)
+            .unwrap();
+        assert!(workspace.chat_home);
+        let host = Host {
+            paths,
+            workspace: std::path::PathBuf::from(&workspace.path),
+            url: "http://127.0.0.1:1".into(),
+            token: "home-token".into(),
+            trust: false,
+            locks: tokio::sync::Mutex::default(),
+        };
+        for refused in [
+            host.target(workspace.id.clone()).await,
+            host.read_target(workspace.id.clone()).await,
+        ] {
+            assert_eq!(refused.err().unwrap().to_string(), CHAT_HOME_STAYS);
+        }
+        for read in [true, false] {
+            let target = host.chat_target(workspace.id.clone(), read).await.unwrap();
+            assert_eq!(
+                (target.url.as_str(), target.token.as_str()),
+                ("http://127.0.0.1:1", "home-token")
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 }

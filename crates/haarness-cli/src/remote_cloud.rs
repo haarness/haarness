@@ -1139,7 +1139,7 @@ async fn dispatch(
         anyhow::bail!("Expected a request")
     };
     validate_path(&path, &target, thread)?;
-    if thread.is_some() {
+    if let Some(thread) = thread {
         let segments = path
             .split('?')
             .next()
@@ -1155,9 +1155,12 @@ async fn dispatch(
         } else {
             String::new()
         };
+        // The chat's own scope, so the gateway lets the request through to a
+        // workspace it keeps from project-wide access (the chat home).
         let info = http
             .get(format!("{}{prefix}/v1/info", target.url))
             .bearer_auth(&target.token)
+            .header(REMOTE_THREAD_HEADER, thread.to_string())
             .send()
             .await?
             .error_for_status()?
@@ -4442,5 +4445,72 @@ mod tests {
         }
         connection.abort();
         std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+
+    /// The host gateway lets a published chat reach a workspace it keeps from
+    /// project-wide access (the chat home) only when the request names the
+    /// chat, the connector's scope pre-check included.
+    #[tokio::test]
+    async fn a_published_chats_requests_all_name_the_chat_to_the_host_gateway() {
+        use axum::{Json, Router, http::HeaderMap, http::StatusCode, routing::get};
+        let chat = Uuid::now_v7();
+        let scoped = move |headers: &HeaderMap| {
+            headers
+                .get(REMOTE_THREAD_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value == chat.to_string())
+        };
+        let gateway = Router::new()
+            .route(
+                "/v1/host/workspaces/home/v1/info",
+                get(move |headers: HeaderMap| async move {
+                    if !scoped(&headers) {
+                        return Err(StatusCode::BAD_REQUEST);
+                    }
+                    Ok(Json(json!({"capabilities":["remote-chat-scope.v1"]})))
+                }),
+            )
+            .route(
+                "/v1/host/workspaces/home/v1/threads/{id}",
+                get(move |headers: HeaderMap| async move {
+                    if !scoped(&headers) {
+                        return Err(StatusCode::BAD_REQUEST);
+                    }
+                    Ok(Json(json!({"id": chat})))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = Target {
+            url: format!("http://{}", listener.local_addr().unwrap()),
+            token: "fixture".into(),
+            project: "home".into(),
+            thread: Some(chat),
+        };
+        tokio::spawn(async move { axum::serve(listener, gateway).await.unwrap() });
+        let (send, mut frames) = mpsc::channel(16);
+        let (_input, incoming) = mpsc::channel(WINDOW + 2);
+        let id = Uuid::now_v7();
+        dispatch(
+            Frame::Open {
+                id,
+                method: "GET".into(),
+                path: format!("/v1/host/workspaces/home/v1/threads/{chat}"),
+                headers: vec![],
+                body: String::new(),
+                websocket: false,
+                thread: Some(chat),
+            },
+            target,
+            reqwest::Client::new(),
+            send,
+            Arc::new(Semaphore::new(WINDOW)),
+            incoming,
+        )
+        .await
+        .unwrap();
+        match frames.recv().await.unwrap() {
+            Frame::Head { status, .. } => assert_eq!(status, 200),
+            other => panic!("{other:?}"),
+        }
     }
 }

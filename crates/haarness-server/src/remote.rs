@@ -92,6 +92,17 @@ pub trait WorkspaceHost: Send + Sync {
     async fn read_target(&self, id: String) -> anyhow::Result<WorkspaceTarget> {
         self.target(id).await
     }
+    /// Where a published chat's request goes (the connector names the chat in
+    /// [`crate::remote_scope::HEADER`]). The chat was shared on purpose, so it
+    /// may live in a workspace the host keeps from project-wide access, such
+    /// as the chat home; the workspace server still confines it to that chat.
+    async fn chat_target(&self, id: String, read: bool) -> anyhow::Result<WorkspaceTarget> {
+        if read {
+            self.read_target(id).await
+        } else {
+            self.target(id).await
+        }
+    }
 }
 #[derive(Clone)]
 struct Gateway {
@@ -203,7 +214,9 @@ async fn forward(
         return StatusCode::NOT_FOUND.into_response();
     }
     let read = ws.is_err() && matches!(*request.method(), Method::GET | Method::HEAD);
-    let target = if read {
+    let target = if crate::remote_scope::root(request.headers()).is_some() {
+        gateway.host.chat_target(id.clone(), read).await
+    } else if read {
         gateway.host.read_target(id.clone()).await
     } else {
         gateway.host.target(id.clone()).await
@@ -467,6 +480,87 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(*host.closed.lock().unwrap(), ["w1"]);
+        server.abort();
+    }
+
+    /// A host that keeps one workspace (a chat home) from project-wide access
+    /// but lets a published chat in it through.
+    struct ChatHome {
+        upstream: String,
+    }
+    #[async_trait::async_trait]
+    impl WorkspaceHost for ChatHome {
+        async fn catalog(&self) -> anyhow::Result<WorkspaceListResponse> {
+            anyhow::bail!("unused")
+        }
+        async fn browse(
+            &self,
+            _: Option<String>,
+            _: BrowseOptions,
+        ) -> anyhow::Result<DirectoryListing> {
+            anyhow::bail!("unused")
+        }
+        async fn open(&self, _: String) -> anyhow::Result<WorkspaceInfo> {
+            anyhow::bail!("unused")
+        }
+        async fn target(&self, _: String) -> anyhow::Result<WorkspaceTarget> {
+            anyhow::bail!("Chats without a project stay on their computer")
+        }
+        async fn chat_target(&self, _: String, _: bool) -> anyhow::Result<WorkspaceTarget> {
+            Ok(WorkspaceTarget {
+                url: self.upstream.clone(),
+                token: "home-token".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_published_chat_reaches_a_workspace_kept_from_project_access() {
+        let chat = uuid::Uuid::now_v7().to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = format!("http://{}", listener.local_addr().unwrap());
+        let expected = chat.clone();
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/v1/threads",
+                any(move |headers: axum::http::HeaderMap| async move {
+                    assert_eq!(headers["authorization"], "Bearer home-token");
+                    // The workspace server still confines the request to the chat.
+                    assert_eq!(headers[crate::remote_scope::HEADER], expected.as_str());
+                    Json(serde_json::json!([{"id": "chat"}]))
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        let router = routes(
+            Arc::new(ChatHome { upstream }),
+            tokio_util::sync::CancellationToken::new(),
+        );
+
+        let (status, body) = send(&router, "GET", "/v1/host/workspaces/home/v1/threads").await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "project-wide access stays refused"
+        );
+        assert_eq!(body["error"]["code"], "remote_project");
+
+        for method in ["GET", "POST"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri("/v1/host/workspaces/home/v1/threads")
+                        .header(crate::remote_scope::HEADER, &chat)
+                        .header("content-type", "application/json")
+                        .body(Body::from(if method == "GET" { "" } else { "{}" }))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method}");
+        }
         server.abort();
     }
 }
