@@ -420,7 +420,10 @@ impl Cloud {
             }
             _ => {
                 let mut args = serde_json::to_value(input)?;
-                args.as_object_mut().unwrap().remove("chatId");
+                let fields = args.as_object_mut().unwrap();
+                fields.remove("chatId");
+                // Archiving belongs to chats; sessions have no archived state.
+                fields.remove("archived");
                 args["threadId"] = json!(chat_id);
                 let mut result = self.session(args).await?;
                 result["chatId"] = json!(chat_id);
@@ -444,10 +447,11 @@ impl Cloud {
         }
         let deadline = Instant::now() + Duration::from_secs(seconds);
         if matches!(input.action, SessionAction::List) {
-            let mut extra = format!("&archived={}", input.archived.unwrap_or(false));
-            if let Some(agent) = input.cloud_agent_id {
-                extra.push_str(&format!("&cloudAgentId={agent}"));
-            }
+            // Sessions have no archived state: every one is listed until it is deleted.
+            let extra = input
+                .cloud_agent_id
+                .map(|agent| format!("&cloudAgentId={agent}"))
+                .unwrap_or_default();
             return self.page("sessions", input.cursor, count, &extra).await;
         }
         // Validate before provisioning: malformed asks must not allocate a machine.
@@ -520,12 +524,8 @@ impl Cloud {
                     json!({"sessionId":id,"url":url,"operation":result["operation"],"status":"accepted"}),
                 );
             }
-            SessionAction::Rename | SessionAction::Archive => {
-                let body = if matches!(input.action, SessionAction::Rename) {
-                    json!({"title":required(input.title,"title")?})
-                } else {
-                    json!({"archived":input.archived.unwrap_or(true)})
-                };
+            SessionAction::Rename => {
+                let body = json!({"title":required(input.title,"title")?});
                 return self.api(Method::PATCH, &path, Some(body)).await;
             }
             SessionAction::Start => {

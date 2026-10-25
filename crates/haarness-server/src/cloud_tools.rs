@@ -12,7 +12,7 @@ use std::sync::Arc;
 /// or change or delete Cloud resources.
 // Actions that follow ordinary permission rules: reads, and changes that
 // spend nothing or reduce spending (stopping, interrupting, pausing, titles,
-// archiving, an empty chat). The plan agent's read-only ceiling still denies
+// archiving a chat, an empty chat). The plan agent's read-only ceiling still denies
 // every one that is not a read.
 const MANAGE_QUIET: &[&str] = &["list", "get", "models", "ssh_public_key"];
 const SESSION_QUIET: &[&str] = &[
@@ -24,7 +24,6 @@ const SESSION_QUIET: &[&str] = &[
     "stop",
     "abort",
     "rename",
-    "archive",
 ];
 const CHAT_QUIET: &[&str] = &[
     "list", "get", "messages", "wait", "create", "rename", "archive", "abort",
@@ -66,7 +65,7 @@ impl Tool for CloudTool {
             (
                 "Launch and manage Haarness Cloud sessions on Fly.io using the user's signed-in Haarness account. Requires haarness login, Desktop Sign in to Haarness, or HAARNESS_API_KEY with the needed Cloud permissions; never ask for tokens. Each session owns its configuration, persistent files and conversations. Cloud agents are OPTIONAL reusable templates. create and ask can launch with inline configuration and no cloudAgentId; when supplied, cloudAgentId supplies defaults overridden by configuration. For freestyle work, prefer ask with message, title, and optional configuration, omitting sessionId and cloudAgentId. ask creates, starts, and messages the new session in one call. create only prepares/starts a session; it does not send a message. Use title to name sessions; name is only for save_agent. Remote sessions already have native bash/read/write tools: use permissions.bash for shell policy, never add an MCP shell server just to run commands. To reuse a template, first list/get it with cloud_agent_manage and pass its returned id as cloudAgentId. When the user wants an answer or work performed, use ask with cloudAgentId and message, just as for freestyle work. A create result with messageSubmitted=false has not performed the requested work; follow it with ask using the returned sessionId and await the answer. Use start=false with create to prepare a stopped session and ssh_public_key to get its deploy key. update requires sessionId, version from get, and configuration; omitted fields are preserved, supplied maps replace ({} clears), null resets optional values. Stop and wait until stopped before update, then start to apply. save_agent copies the last saved settings into a reusable template, requires name and version, and does not copy environment secrets; it creates no compute. MCP supports command/args/environment or url/headers, with ${VARIABLE} encrypted environment references. skills maps names to {files: a map containing SKILL.md and optional supporting files}; agents maps names to {prompt,description,mode,model,tools,permission}. Use Cloud UI/API for secrets. ask sends a message to sessionId, or creates a new session when sessionId is omitted. Existing stopped sessions require explicit start; reads never start compute. Use cloud_chat to list/create/manage separate chats sharing this session filesystem. threadId is a chat ID. Omit it only if there is at most one root conversation; multiple chats require an explicit ID. wait waits for turnId or the active turn; messages reads history; abort interrupts only the specified turn/conversation. create/start/ask wait by default, bounded by timeoutSeconds; waits follow live state/completion/approval events and recover with snapshots after disconnection; wait=false returns after acceptance (ask still waits for startup so its message can be submitted). If startup times out with messageSubmitted=false, retry ask with that sessionId once running. A running result at timeout means work continues: use wait with the returned IDs, never resubmit. needs_attention requires the user to open the returned URL for normal permission approval. No remote permissions are auto-approved. Cancelling a synchronous ask best-effort interrupts its submitted turn but preserves the session. stop releases compute and preserves disk; delete permanently removes the session and disk. Archive only hides it and does not stop billing. Only create, send, change, stop or delete when requested by the user. Do not replace local task/session tools with cloud work without user intent.",
                 json!({
-                    "action":{"type":"string","enum":["list","get","create","start","stop","rename","update","save_agent","ssh_public_key","archive","delete","ask","messages","wait","abort"]},
+                    "action":{"type":"string","enum":["list","get","create","start","stop","rename","update","save_agent","ssh_public_key","delete","ask","messages","wait","abort"]},
                     "sessionId":id,"cloudAgentId":{"type":"string","format":"uuid","description":"Optional reusable template ID from cloud_agent_manage list/get. Omit for a freestyle session with inline configuration."},"threadId":id,"turnId":id,
                     "configuration":configuration_schema(),
                     "version":{"type":"integer","minimum":1},
@@ -76,7 +75,6 @@ impl Tool for CloudTool {
                     "title":{"type":"string","minLength":1,"maxLength":200,"description":"Session name for create/ask, or the new title for rename. Use this field to name a session."},
                     "message":{"type":"string","minLength":1,"maxLength":32768},
                     "reasoningEffort":{"type":"string","description":"Supported reasoning level for ask; omit to preserve session defaults."},
-                    "archived":{"type":"boolean","description":"Include archived in list (default false); target state for archive (default true). Set false with action archive to restore."},
                     "wait":{"type":"boolean"},
                     "timeoutSeconds":{"type":"integer","minimum":1,"maximum":600},
                     "after":{"type":"integer","minimum":0,"description":"Read messages after this sequence. Continue with returned nextAfter."}
