@@ -1,6 +1,6 @@
 ---
 name: haarness-release
-description: Build, verify, publish and present Haarness CLI and Electron Desktop releases for macOS, Linux and Windows through the Cloud release API — per-platform builds (glibc-pinned Linux, static-CRT Windows), DMG/ZIP, AppImage/deb and NSIS packages, curl and PowerShell installers, checksums, quarantine, the download page, README/profile/docs install sections, SDK proof, rollback and a final proof report. Use when building, publishing, shipping or install-testing a release; excludes npm and Docker publication.
+description: Build, verify, publish and present Haarness CLI and Electron Desktop releases for macOS, Linux and Windows through the Cloud release API, and deploy the matching Haarness Cloud (web app, API, worker, router, gateway, workspace image) to staging then prod — per-platform builds (glibc-pinned Linux, static-CRT Windows), DMG/ZIP, AppImage/deb and NSIS packages, curl and PowerShell installers, checksums, quarantine, the download page, README/profile/docs install sections, SDK proof, rollback and a final proof report. Use when building, publishing, shipping or install-testing a release; excludes npm and Docker publication.
 ---
 
 # Haarness binary releases
@@ -23,6 +23,10 @@ description: Build, verify, publish and present Haarness CLI and Electron Deskto
   missing from it answers "release platform not found" instead of falling back to an older one.
 - The installers live twice: `install.sh`/`install.ps1` here and
   `haarness-cloud/assets/install.{sh,ps1}`, which the Cloud serves. Keep them identical.
+- A release is the Cloud too: the web app, the API that serves the download page and the
+  release manifests, the worker, router and gateway, and the Fly workspace image that runs the
+  CLI in Cloud sessions. Deploy the Cloud that matches the release (section 5) before the
+  binaries are published through it, and report its tags in the final proof like a platform.
 - Do not limit testing to this recipe. Chase undocumented paths and failures, fix causes, add
   regression checks, and say which proof is local, which is CI and which is public.
 - A blocked CI billing account means the cross-platform jobs did not run: that is unverified,
@@ -44,6 +48,9 @@ Every later step reads the one CLI binary through `HAARNESS_BIN`; Desktop packag
 1. Native and Cloud Git status, HEAD, remotes, current manifests; versions match.
 2. `cargo test --workspace`, Desktop `npm run typecheck` and `npm test`, SDK build/tests,
    `sh scripts/check-commercial-boundary.sh`, `python3 scripts/test-release-publish.py`.
+   In the Cloud checkout: `cargo test --locked --workspace` with
+   `HAARNESS_CLOUD_TEST_DATABASE_URL` set (a missing database skips the store, worker, api,
+   router and gateway tests, which is not proof) and `npm test --prefix web`.
    (`cargo clippy -- -D warnings` has failed on main since the first commit on pedantic lints;
    check that a change adds no new finding instead of reading the total.)
 3. Compile the platforms you are not on. From Linux or macOS, Windows:
@@ -123,7 +130,7 @@ target (checked against Bun's `SHASUMS256.txt`), same steps as above:
   `cargo zigbuild` for both Linux targets (`.2.17`),
   `cargo xwin build` for `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`, `package --
   --linux --x64` / `--arm64` (electron-builder fetches the arm64 Electron), and each NSIS
-  installer in the Wine container as in section 6. `prepare.mjs` runs the bundled Bun to check
+  installer in the Wine container as in section 7. `prepare.mjs` runs the bundled Bun to check
   its version, so the arm64 Linux package needs `qemu-user-static` and `libc6-arm64-cross` with
   `QEMU_LD_PREFIX=/usr/aarch64-linux-gnu`; the same setup runs the arm64 CLI, and Docker's
   `--platform linux/arm64` gives an arm64 distribution for the smoke turn.
@@ -338,7 +345,47 @@ an electron-updater feed (`latest*.yml`), and macOS auto-update would also need 
 Until a feed exists and the packaged app knows its URL, every Desktop upgrade is a manual
 download: say so in the final proof and on the download page, and do not claim auto-update.
 
-## 5. Publish through the Cloud release service
+## 5. Deploy the Cloud
+
+Everything the release is served by comes from `haarness-cloud` (web app, `cloud-api`,
+`cloud-worker`, `cloud-gateway`, `cloud-router`) and from this repository's runtime in the Fly
+workspace image. Deploy both from the pushed commits before publishing the binaries, so the
+download page, the served installers (`assets/install.{sh,ps1}`) and Cloud sessions carry the
+release. The operator's runbook is `~/work/haarness/haarness-deploy` (`docs/operations.md`);
+`kubectl` runs on node1d only (`environments/prod/hosts`).
+
+```sh
+cd ~/work/haarness/haarness-deploy
+# Images are built from `git archive` of pushed refs (CLOUD_REF, ROUTER_REF, CORE_REF default
+# origin/main), never from local work; ~20–30 min on this Mac, Docker running.
+scripts/build-local.sh cloud     VERSION=<YYYYMMDD>-<cloud sha7>     # api(+web), worker, gateway, router
+CORE_REF=v<x.y.z> scripts/build-local.sh workspace VERSION=<YYYYMMDD>-<core sha7>   # when the runtime changed
+
+# Staging first; then check https://staging.haarness.ai (download page, sign-in, a Cloud session).
+#   environments/staging/version.yml: version (cloud) and workspace_version (workspace image)
+ansible-playbook -i environments/staging/hosts playbooks/deploy.yml
+# Then prod with environments/prod/version.yml.
+ansible-playbook playbooks/deploy.yml
+git commit -am "Deployed Cloud <tag> (workspace <tag>) in staging, then prod: <why>" && git push
+```
+
+`deploy.yml` renders the stack, applies the migration Job and waits for it, then rolls every
+workload and waits for the rollouts; `-e restart=true` rolls pods whose tags did not change.
+`ansible-playbook` needs a PyYAML `python3` first on PATH (the ansible one:
+`/opt/homebrew/opt/ansible/libexec/bin/python3`). After each environment:
+
+- `kubectl -n <namespace> get pods` shows the new ReplicaSets ready and the migrate Job
+  `Completed`; `kubectl -n <namespace> logs deploy/haarness-worker --since=10m` has no
+  `job dead-lettered` or repeated `job failed` lines.
+- `curl -fsS https://<host>/healthz` and `/readyz`; `/download` shows the six platforms;
+  `/install.sh` matches `install.sh` here byte for byte.
+- A Cloud session starts and answers (the workspace image), when it was rebuilt.
+
+Roll back by deploying the previous tags from `version.yml`'s history; migrations are forward-only,
+so a rollback across a migration needs the migration's own down path first (`docs/MIGRATIONS.md`
+in the Cloud repository).
+
+## 6. Publish through the Cloud release service
 
 Apply Cloud migrations, build `cloud-api`, restart only the owned test API. It uses its object
 storage and `HAARNESS_CLOUD_API_PUBLIC_URL` for artifact URLs; public deployment needs a
@@ -392,7 +439,7 @@ promotes it without uploading). A published release is never changed: different 
 command warns otherwise. The repository is private, so its release assets reach members only;
 haarness.ai stays the public download.
 
-## 6. Install and run the downloaded bytes, per platform
+## 7. Install and run the downloaded bytes, per platform
 
 ```sh
 curl -fsSL http://127.0.0.1:19080/install.sh | HAARNESS_RELEASE_URL=http://127.0.0.1:19080 \
@@ -449,7 +496,7 @@ unblocks verified bytes. On a terminal each download is named and shows curl's p
 Run the SDK server scenarios against the **installed CLI** (`HAARNESS_BIN=…`) and an owned tmux
 echo-provider chat for the TUI (tmux 3.4+; 3.2a draws ZWJ emoji apart).
 
-## 7. Present the release
+## 8. Present the release
 
 Every place that tells people how to install must list macOS, Linux and Windows with the same
 commands and file kinds:
@@ -466,7 +513,7 @@ commands and file kinds:
 - Preview README rendering before pushing: `gh api -X POST /markdown` (mode gfm, repo context)
   wrapped in github-markdown-css, opened in the browser.
 
-## 8. Regression and SDK proof
+## 9. Regression and SDK proof
 
 Cloud: `cargo test -p cloud-contracts --test openapi_paths` and `cargo test -p cloud-api --test
 releases` with a disposable test database (a missing database skips them; that is not proof):
@@ -476,11 +523,13 @@ regenerate both SDKs after route changes. Run the [SDK release tests](../haarnes
 Clean up test keys, hosts, temporary channels and processes; restore the prior publication on
 failure. Never delete unrelated sessions, apps or build caches.
 
-## 9. Final proof
+## 10. Final proof
 
 Report, in this order:
 
 - Version, source commit, channel, receipt/release ID.
+- Cloud: the `version` and `workspace_version` tags deployed to staging and prod, their source
+  commits, and the `version.yml` commit in haarness-deploy.
 - Per platform: file names, SHA-256 and sizes; how each was proven (native machine, CI run,
   container/Wine/cross-compile, or not at all).
 - Installer results per OS (sh, PowerShell 5.1/7), upgrade, quarantine/unblock.
