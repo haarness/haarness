@@ -293,10 +293,20 @@ test("the shield says Auto asks a reviewer only where the server's does", async 
   );
 });
 
-test("new chats start in Auto unless Review was chosen for them here", async () => {
+test("new chats start in the mode chosen for them here, else in the server's default", async () => {
   const { newChatAuto } = await import("../src/renderer/approval-mode");
+  // A server that does not name its default (an older one) starts them in Auto.
   assert.equal(newChatAuto({}, "a"), true);
   assert.equal(newChatAuto({ a: { root: false } }, "a"), true);
   assert.equal(newChatAuto({ a: { "*": false } }, "a"), false);
   assert.equal(newChatAuto({ a: { "*": false } }, "b"), true);
+  // Configured Review, configured Auto, nothing configured (Auto).
+  assert.equal(newChatAuto({}, "a", "review"), false);
+  assert.equal(newChatAuto({ a: { root: true } }, "a", "review"), false);
+  assert.equal(newChatAuto({}, "a", "auto"), true);
+  assert.equal(newChatAuto({}, "a", null), true);
+  // The choice made here wins either way, as the chat Desktop starts takes it.
+  assert.equal(newChatAuto({ a: { "*": true } }, "a", "review"), true);
+  assert.equal(newChatAuto({ a: { "*": false } }, "a", "auto"), false);
+  assert.equal(newChatAuto({ a: { "*": true } }, "b", "review"), false);
 });

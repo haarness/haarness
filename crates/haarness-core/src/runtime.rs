@@ -5420,6 +5420,13 @@ impl AgentRuntime {
         self.components().config.auto_review.enabled
     }
 
+    /// The mode of a chat no setting up its chain decides: what a new chat
+    /// starts in (`defaults.approval_mode`, Auto unless it says Review).
+    #[must_use]
+    pub fn approval_mode_default(&self) -> haarness_protocol::ApprovalMode {
+        *self.approval_modes.fallback.lock()
+    }
+
     /// The approval mode that applies to a chat, with what decided it.
     pub async fn approval_mode(
         &self,

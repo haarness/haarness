@@ -434,7 +434,11 @@ function createApp(saved?: Preferences) {
     if (sharedApprovals(connection))
       return thread
         ? state.approvalShared[connection]?.[thread]?.mode === "auto"
-        : newChatAuto(state.approvalModes, connection);
+        : newChatAuto(
+            state.approvalModes,
+            connection,
+            state.connection?.info.defaultApprovalMode,
+          );
     return autoApproval(
       state.approvalModes,
       connection,
