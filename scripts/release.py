@@ -52,6 +52,65 @@ def check_macos(args):
     for p in args.packages:
         g=gatekeeper(Path(p));print(f'{Path(p).name}: {g["signer"]}, {g["source"]}')
 
+# Windows trusts a downloaded program by its Authenticode signature: unsigned, SmartScreen warns that it comes from an
+# unknown publisher and Smart App Control may refuse to run it. Release builds sign every Windows program Haarness
+# ships (haarness-deploy's windows-sign.sh, with Azure Artifact Signing) with an RFC 3161 timestamp from Microsoft, so
+# the signatures outlive their certificates. Both chain to the root pinned beside this script.
+AUTHENTICODE_ROOTS=Path(__file__).resolve().parent/'authenticode-roots.pem'
+# Programs Haarness ships as their makers signed them: Bun (Oven's company) and Microsoft's DirectX DLLs in Electron
+# (signed as Microsoft Windows Kits Publisher on arm64). Their signatures must be intact; a new outside signer is a
+# decision, made here.
+AUTHENTICODE_VENDORS={'Codeblog CORP','Microsoft Corporation','Microsoft Windows Kits Publisher'}
+
+def authenticode(path,roots=AUTHENTICODE_ROOTS):
+    # The signer's subject and the state of one Windows program's signature, from osslsigncode (whose exit status
+    # ignores the timestamp): 'trusted' when the file's digest matches, the signature verifies against `roots` and the
+    # timestamp against Microsoft's root; 'intact' when only the digest matches (a signer whose root is not given).
+    r=subprocess.run(['osslsigncode','verify','-in',str(path),'-CAfile',str(roots),'-TSA-CAfile',str(AUTHENTICODE_ROOTS)],capture_output=True,text=True)
+    lines=[l.strip() for l in (r.stdout+r.stderr).splitlines()]
+    value=lambda key:next((l.split(':',1)[1].strip() for l in lines if l.startswith(key)),None)
+    current,calculated=value('Current message digest'),value('Calculated message digest')
+    if not current: return dict(state='unsigned')
+    subject=value('Subject:') or ''
+    signer=next((p[3:] for p in subject.split('/') if p.startswith('CN=')),subject)
+    if current!=calculated: return dict(state='tampered',signer=signer)
+    trusted=r.returncode==0 and 'Signature verification: ok' in lines and 'Timestamp Server Signature verification: ok' in lines
+    return dict(state='trusted' if trusted else 'intact',signer=signer,timestamp=value('The signature is timestamped'))
+
+def windows_programs(path):
+    # (name, file) for a Windows program and every program it carries: an NSIS installer holds its uninstaller, the
+    # NSIS plugins it loads while installing and the app as a 7z archive. Only files with an MZ header count: the app
+    # carries Linux .node files from npm too.
+    yield path.name,path
+    if not path.name.startswith('Haarness-'): return
+    with tempfile.TemporaryDirectory(prefix='haarness-authenticode-') as d:
+        subprocess.run(['7zz','x','-bd','-y',f'-o{d}/installer',str(path)],check=True,stdout=subprocess.DEVNULL)
+        apps=sorted(Path(d,'installer','$PLUGINSDIR').glob('app-*.7z'))
+        if len(apps)!=1: raise ValueError(f'{path.name}: expected one app archive in the installer, found {apps}')
+        subprocess.run(['7zz','x','-bd','-y',f'-o{d}/app',str(apps[0])],check=True,stdout=subprocess.DEVNULL)
+        for f in sorted(Path(d).rglob('*')):
+            if f.is_file() and f.suffix.lower() in ('.exe','.dll','.node') and f.open('rb').read(2)==b'MZ':
+                yield f'{path.name}/{f.relative_to(d).as_posix()}',f
+
+def check_windows(args):
+    # Every Windows program in the given CLIs and installers signed by --publisher, its signature and timestamp
+    # trusted, or signed by one of AUTHENTICODE_VENDORS and intact. --test-ca trusts a throwaway root instead of the
+    # pinned one (to prove the pipeline); the record then says publicTrust false and publish treats it as unsigned.
+    roots=Path(args.test_ca) if args.test_ca else AUTHENTICODE_ROOTS
+    record=dict(publisher=args.publisher,publicTrust=not args.test_ca,files={});bad=[]
+    for p in args.files:
+        path=Path(p);programs=[]
+        for name,f in windows_programs(path):
+            a=authenticode(f,roots);a['name']=name;programs.append(a)
+            ours=a['state']=='trusted' and a['signer']==args.publisher
+            vendor=a['state'] in ('trusted','intact') and a['signer'] in AUTHENTICODE_VENDORS
+            if not (ours or vendor): bad.append(f'{name}: {a["state"]}'+(f', signed by {a["signer"]}' if a.get('signer') else ''))
+            print(f'{name}: {a["state"]}'+(f', {a["signer"]}' if a.get('signer') else ''))
+        record['files'][digest(path)]=dict(file=path.name,signer=programs[0].get('signer'),programs=programs)
+    if bad: raise ValueError('Windows programs not signed as a release needs:\n  '+'\n  '.join(bad))
+    if args.record: Path(args.record).write_text(json.dumps(record,indent=2)+'\n')
+    print(f'PASS {len(args.files)} Windows files, every program in them signed by {args.publisher} or a vendor'+('' if record['publicTrust'] else ' (test root, not publicly trusted)'))
+
 def collect(args):
     revision = subprocess.check_output(['git','rev-parse','HEAD'], cwd=ROOT, text=True).strip()
     dirty = subprocess.check_output(['git','status','--porcelain','--untracked-files=no'], cwd=ROOT, text=True).strip()
@@ -67,6 +126,9 @@ def collect(args):
     if desktop['version'] != version: raise ValueError('CLI and Desktop versions differ')
     out = Path(args.out).resolve(); out.mkdir(parents=True, exist_ok=True)
     artifacts = []
+    # check-windows' record of the Windows files (--authenticode), by SHA-256.
+    record=json.loads(Path(args.authenticode).read_text()) if args.authenticode else {}
+    authenticode_record=record.get('files',{});authenticode_publicly_trusted=bool(record.get('publicTrust'))
     def add(path, product, kind, name=None):
         name = name or path.name
         dest = out/name
@@ -76,6 +138,11 @@ def collect(args):
         if os_name=='macos' and product=='desktop':
             try: artifact['gatekeeper']=gatekeeper(dest)
             except ValueError as e: print(f'Warning, publish will refuse this package: {e}')
+        # check-windows' record of the very same bytes, made where osslsigncode and 7-Zip are (the build container).
+        if os_name=='windows':
+            checked=authenticode_record.get(artifact['sha256'])
+            if checked: artifact['authenticode']=dict(signer=checked['signer'],publicTrust=authenticode_publicly_trusted,programs=len(checked['programs']))
+            else: print(f'Warning, publish will refuse {name} without --allow-unsigned-windows: no check-windows record of it')
         artifacts.append(artifact)
     add(binary,'cli','binary',f'haarness-{os_name}-{arch}'+('.exe' if os_name=='windows' else ''))
     extensions = {'macos':{'dmg','zip'},'linux':{'AppImage','deb'},'windows':{'exe'}}[os_name]
@@ -206,6 +273,7 @@ def request(base,method,path,body=None,headers=None):
 
 def publish(args):
     if args.allow_unsigned and args.channel=='stable': raise ValueError('Stable never ships a Mac Desktop that Gatekeeper rejects')
+    if args.allow_unsigned_windows: print('Warning: publishing Windows files without a publicly trusted signature (SmartScreen warns, Smart App Control may block)')
     indexes=[(Path(p),json.loads(Path(p).read_text())) for p in args.index]
     first=indexes[0][1]; ids=[]; seen=set(); uploads=[]
     # Every artifact is checked before the first upload, so a refused release leaves nothing behind.
@@ -222,6 +290,14 @@ def publish(args):
             if a['os']=='macos' and a['product']=='desktop' and not args.allow_unsigned:
                 if platform.system()=='Darwin': gatekeeper(file)
                 elif not a.get('gatekeeper'): raise ValueError(f'{a["file"]}: no Gatekeeper record; collect it on a Mac that signs with Developer ID and notarizes')
+            # Windows: collect's check-windows record of a publicly trusted signature, the signer checked again on the
+            # very bytes where osslsigncode is installed. Unsigned (or test-signed) is the owner's explicit decision.
+            if a['os']=='windows' and not (args.allow_unsigned or args.allow_unsigned_windows):
+                signed=a.get('authenticode') or {}
+                if not signed.get('publicTrust'): raise ValueError(f'{a["file"]}: no record of a publicly trusted Authenticode signature; sign the Windows build, or pass --allow-unsigned-windows')
+                if shutil.which('osslsigncode'):
+                    now=authenticode(file)
+                    if now['state']!='trusted' or now['signer']!=signed['signer']: raise ValueError(f'{a["file"]}: Authenticode {now}, recorded {signed}')
             uploads.append((file,a))
     for file,a in uploads:
         q={k:a[k] for k in ('product','file','kind','os','arch')};q['version']=first['version']
@@ -308,9 +384,10 @@ def github(args):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='command',required=True)
-    c=sub.add_parser('collect');c.add_argument('--binary',default=str(ROOT/'target/release'/('haarness.exe' if os.name=='nt' else 'haarness')));c.add_argument('--out',default=str(ROOT/'dist/releases'));c.add_argument('--allow-dirty',action='store_true');c.add_argument('--os',choices=['macos','linux','windows'],help='target OS of a cross build');c.add_argument('--arch',choices=['x64','arm64'],help='target architecture of a cross build');c.add_argument('--version',help='version of a cross-built binary that cannot run here');c.add_argument('--desktop-dir',default=str(ROOT/'apps/desktop/release'),help='where electron-builder wrote the packages');c.set_defaults(run=collect)
-    c=sub.add_parser('publish');c.add_argument('--index',nargs='+',required=True);c.add_argument('--url',required=True);c.add_argument('--channel',choices=['preview','stable'],default='preview');c.add_argument('--notes-url');c.add_argument('--receipt',default='release-receipt.json');c.add_argument('--allow-dirty',action='store_true');c.add_argument('--allow-unsigned',action='store_true',help='preview only: publish a Mac Desktop that Gatekeeper rejects');c.set_defaults(run=publish)
+    c=sub.add_parser('collect');c.add_argument('--binary',default=str(ROOT/'target/release'/('haarness.exe' if os.name=='nt' else 'haarness')));c.add_argument('--out',default=str(ROOT/'dist/releases'));c.add_argument('--allow-dirty',action='store_true');c.add_argument('--os',choices=['macos','linux','windows'],help='target OS of a cross build');c.add_argument('--arch',choices=['x64','arm64'],help='target architecture of a cross build');c.add_argument('--version',help='version of a cross-built binary that cannot run here');c.add_argument('--desktop-dir',default=str(ROOT/'apps/desktop/release'),help='where electron-builder wrote the packages');c.add_argument('--authenticode',help="check-windows' record of the Windows files");c.set_defaults(run=collect)
+    c=sub.add_parser('publish');c.add_argument('--index',nargs='+',required=True);c.add_argument('--url',required=True);c.add_argument('--channel',choices=['preview','stable'],default='preview');c.add_argument('--notes-url');c.add_argument('--receipt',default='release-receipt.json');c.add_argument('--allow-dirty',action='store_true');c.add_argument('--allow-unsigned',action='store_true',help='preview only: publish a Mac Desktop that Gatekeeper rejects');c.add_argument('--allow-unsigned-windows',action='store_true',help='publish Windows files without a publicly trusted Authenticode signature (the owner\'s decision)');c.set_defaults(run=publish)
     c=sub.add_parser('github',help='release the published artifacts on the tag\'s GitHub release');c.add_argument('--index',nargs='+',required=True);c.add_argument('--repo',default=os.environ.get('GITHUB_REPOSITORY','haarness/haarness'));c.add_argument('--channel',choices=['preview','stable'],default='preview');c.add_argument('--notes-url');c.set_defaults(run=github)
     c=sub.add_parser('collect-extension',help='package Haarness for Chrome as a zip and a signed CRX');c.add_argument('--extension-dir',default=str(ROOT/'apps/browser-extension/dist/chrome'),help='the unpacked extension: the build, or the folder `haarness browser setup` wrote from a released CLI');c.add_argument('--key',default=str(EXTENSION_KEY));c.add_argument('--version',help='refuse an extension of another version');c.add_argument('--revision',help='the commit a released CLI was built from, when packaging its folder');c.add_argument('--out',default=str(ROOT/'dist/releases/chrome-extension'));c.add_argument('--allow-dirty',action='store_true');c.set_defaults(run=collect_extension)
     c=sub.add_parser('check-macos',help='check that Gatekeeper accepts the app in each downloaded .dmg/.zip');c.add_argument('packages',nargs='+');c.set_defaults(run=check_macos)
+    c=sub.add_parser('check-windows',help='check the Authenticode signature of every Windows program in each CLI and installer (needs osslsigncode and 7zz)');c.add_argument('files',nargs='+');c.add_argument('--publisher',required=True,help="the signing certificate's subject CN");c.add_argument('--test-ca',help='trust this throwaway root instead of the pinned one');c.add_argument('--record',help='write what was checked here, for collect --authenticode');c.set_defaults(run=check_windows)
     args=p.parse_args();args.run(args)
