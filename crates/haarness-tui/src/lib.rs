@@ -250,14 +250,14 @@ pub async fn run_attached_with_auth(
     initial_thread: Option<uuid::Uuid>,
     continue_last: bool,
     fork: bool,
-    open_in_auto: bool,
+    open_in: Option<haarness_protocol::ApprovalMode>,
 ) -> Result<()> {
     Box::pin(run_with_client(
         ApiClient::with_auth(server, auth)?.with_attachment_uploads(),
         initial_thread,
         continue_last,
         fork,
-        open_in_auto,
+        open_in,
     ))
     .await
     .map(|_| ())
@@ -276,7 +276,7 @@ pub async fn run_attached_with_resolver(
         None,
         false,
         false,
-        false,
+        None,
     ))
     .await
     .map(|_| ())
@@ -295,7 +295,7 @@ pub async fn resume_attached_with_resolver(
         None,
         true,
         false,
-        false,
+        None,
     ))
     .await
     .map(|_| ())
@@ -339,9 +339,10 @@ pub struct ApprovalLaunch {
     /// `--yolo`: this TUI approves what its own conversations ask, for as
     /// long as it runs (see [`ApiClient::with_auto_approve`]).
     pub yolo: bool,
-    /// `--auto`: the chat the launch opens goes to Auto on its server, so
-    /// every app shows it and the server answers its eligible requests.
-    pub auto: bool,
+    /// `--auto` or `--approvals <mode>`: the chat the launch opens goes to
+    /// this mode on its server, so every app shows it and the server answers
+    /// its requests as the mode says.
+    pub mode: Option<haarness_protocol::ApprovalMode>,
 }
 
 /// As [`run_with_thread_and_resolver_switching`], forking the selected or
@@ -365,7 +366,7 @@ pub async fn run_with_thread_and_resolver_fork_switching(
         initial_thread,
         continue_last,
         fork,
-        approvals.auto,
+        approvals.mode,
     ))
     .await
 }
@@ -375,7 +376,7 @@ async fn run_with_client(
     initial_thread: Option<uuid::Uuid>,
     continue_last: bool,
     fork: bool,
-    auto: bool,
+    open_in: Option<haarness_protocol::ApprovalMode>,
 ) -> Result<Option<PathBuf>> {
     let initial_info = client.info().await.ok();
     // The server waits for a signed-in provider's list while it has no
@@ -522,11 +523,11 @@ async fn run_with_client(
         &client,
     )
     .await;
-    // `--auto`: the chat opens in Auto on its server, as ctrl+y would put
-    // it, so the server answers what is eligible (including what already
-    // waits) and every other app shows the same mode.
-    if auto {
-        app.change_approval_mode(true, &client).await;
+    // `--auto` or `--approvals`: the chat opens in that mode on its server,
+    // as ctrl+y would put it, so the server answers what the mode lets it
+    // (including what already waits) and every other app shows the same.
+    if let Some(mode) = open_in {
+        app.set_approval_mode(mode, &client).await;
     }
     app.sync_prompt_history(&client);
     servers::restore_drafts(&mut app, &client)?;

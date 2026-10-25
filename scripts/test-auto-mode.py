@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Real Haarness server + real OpenTUI in tmux: Auto/Review permission lifecycle,
-the approval card at several terminal sizes, the --auto flag, and the mode a chat
-with no setting of its own starts in (Review when the person's configuration says
-so, whatever the project says; Auto when no file sets it).
+"""Real Haarness server + real OpenTUI in tmux: Auto/Review/Yolo permission
+lifecycle, the approval card at several terminal sizes, the --auto, --approvals and
+--yolo flags, and the mode a chat with no setting of its own starts in (Review when
+the person's configuration says so, whatever the project says; Auto when no file
+sets it).
 
 HAARNESS_E2E_FRAMES names a folder for captured frames (ANSI and text);
 by default they land beside the other evidence."""
-import json, os, pathlib, shlex, subprocess, tempfile, time, urllib.request, uuid
-import e2e_scratch
+import json, os, pathlib, re, shlex, subprocess, tempfile, time, urllib.request, uuid
+import e2e_scratch, e2e_tmux
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/release/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-auto-e2e-')).resolve()
@@ -81,9 +82,23 @@ def card(pane):
     return '\n'.join(rows[tops[-1]:end+1])
 
 def launch(thread, mode='review', width=160, height=40, extra=(), folder=workspace, environment=env):
-    args=['env',*[k+'='+environment[k] for k in ['HAARNESS_DATA_DIR','HAARNESS_TEST_PROVIDER','HAARNESS_DEFAULT_PROVIDER','HAARNESS_DEFAULT_MODEL']],str(binary),'--workspace',str(folder),'--trust-project',*extra,'--thread',thread]
-    run(['tmux','new-session','-d','-x',str(width),'-y',str(height),'-s',name,shlex.join(args)])
+    # The pane runs with this script's environment, not the tmux server's.
+    args=[str(binary),'--workspace',str(folder),'--trust-project',*extra,'--thread',thread]
+    run(['tmux','new-session','-d','-x',str(width),'-y',str(height),'-s',name,e2e_tmux.pane_command(environment,args)])
     until(lambda:mode in capture(), mode+' mode not visible at launch')
+
+def danger(label):
+    """Whether the band draws `label` in a red (the theme's danger colour):
+    red well above green and blue, which sit close together, unlike the
+    copper accent."""
+    for row in run(['tmux','capture-pane','-p','-e','-t',name+':0.0']).split('\n'):
+        if label in re.sub(r'\x1b\[[0-9;]*m','',row):
+            styled=re.search(r'38;2;(\d+);(\d+);(\d+)m(?:\x1b\[[0-9;]*m)*\s*'+re.escape(label),row)
+            if not styled:
+                return False
+            red,green,blue=map(int,styled.groups())
+            return red-max(green,blue)>=60 and abs(green-blue)<=30
+    return False
 
 def resize(width, height):
     run(['tmux','resize-window','-t',name+':0','-x',str(width),'-y',str(height)])
@@ -123,8 +138,12 @@ try:
     proof('once.txt','once-proof')
     assert api('/v1/threads/'+thread+'/approval-mode')['mode']=='auto'
     check('Ctrl+Y sets Auto on the server and answers the request already waiting')
+    # Ctrl+Y goes on to Yolo, then back to Review.
     keys('C-y')
-    until(lambda:'review' in capture(),'Ctrl+Y did not return to Review')
+    until(lambda:api('/v1/threads/'+thread+'/approval-mode')['mode']=='yolo','Ctrl+Y did not go from Auto to Yolo')
+    keys('C-y')
+    until(lambda:'asks before risky steps' in capture(),'Ctrl+Y did not return to Review')
+    assert api('/v1/threads/'+thread+'/approval-mode')['mode']=='review'
     start(thread,'!tool bash '+json.dumps({'command':'printf u-proof > u.txt'}))
     until(lambda:len(api('/v1/permissions'))==1,'Review did not ask')
     time.sleep(.3)
@@ -191,6 +210,72 @@ try:
     fresh=[item['id'] for item in api('/v1/threads') if item['title'] in ('New chat','New thread')][-1]
     until(lambda:api('/v1/threads/'+fresh+'/approval-mode')['mode']=='auto','/new did not start in Auto')
     check('/new starts in the open chat\'s mode')
+
+    # Yolo: Ctrl+Y goes Review → Auto → Yolo → Review. Yolo approves what
+    # waits, even what the reviewer left to a person, and every new request
+    # once, without a card or a review; deny rules still refuse.
+    run(['tmux','kill-session','-t',name])
+    yolo=api('/v1/threads', {'title':'Yolo verification','provider':'echo','model':'echo-1'})['id']
+    assert api('/v1/threads/'+yolo+'/approval-mode')['mode']=='review'
+    assert 'approval-mode.yolo.v1' in api('/v1/info')['capabilities']
+    start(yolo,'!tool bash '+json.dumps({'command':'printf waited-proof > waited.txt'})+' [review:ask]')
+    until(lambda:len(api('/v1/permissions'))==1,'Review did not ask')
+    launch(yolo)
+    keys('C-y')
+    until(lambda:'ctrl+y for Yolo' in capture(),'Ctrl+Y did not go to Auto, naming Yolo next')
+    until(lambda:(api('/v1/permissions') or [{}])[0].get('review',{}).get('status')=='asked','the reviewer did not leave the request to a person')
+    assert not (workspace/'waited.txt').exists()
+    keys('C-y')
+    until(lambda:'approvals: yolo' in capture() or 'Yolo on for this chat' in capture(),'Ctrl+Y did not go to Yolo')
+    proof('waited.txt','waited-proof')
+    assert api('/v1/threads/'+yolo+'/approval-mode')['mode']=='yolo'
+    check('Ctrl+Y goes Review → Auto → Yolo, and Yolo approves the request Auto\'s reviewer left to a person')
+    start(yolo,'!tool bash '+json.dumps({'command':'printf yolo-proof > yolo.txt'})+' [review:deny]')
+    proof('yolo.txt','yolo-proof')
+    assert not api('/v1/permissions')
+    items=json.dumps(api('/v1/threads/'+yolo+'/items'))
+    assert 'Auto review blocked' not in items, items
+    start(yolo,'!tool bash '+json.dumps({'command':'printf denied-proof > denied.txt'}))
+    finished()
+    assert not (workspace/'denied.txt').exists() and not api('/v1/permissions')
+    check('in Yolo a request runs without a card or a review, and a deny rule still refuses')
+    until(lambda:'approvals: yolo' in capture(),'the band does not name Yolo')
+    assert danger('approvals: yolo'), run(['tmux','capture-pane','-p','-e','-t',name+':0.0'])
+    save('yolo-band')
+    check('the band names Yolo in the danger colour')
+    keys('C-y')
+    until(lambda:'asks before risky steps' in capture(),'Ctrl+Y did not go back to Review')
+    assert api('/v1/threads/'+yolo+'/approval-mode')['mode']=='review'
+    start(yolo,'!tool bash '+json.dumps({'command':'printf yolo-proof > yolo.txt'}))
+    until(lambda:len(api('/v1/permissions'))==1,'Review did not ask after Yolo')
+    keys('n')
+    finished()
+    check('Ctrl+Y returns from Yolo to Review, which asks again: Yolo approved once and remembered nothing')
+    command('/permissions-mode yolo')
+    until(lambda:api('/v1/threads/'+yolo+'/approval-mode')['mode']=='yolo','/permissions-mode yolo did not set Yolo')
+    until(lambda:'approvals: yolo' in capture() or 'Yolo on for this chat' in capture(),'the TUI does not show Yolo')
+    api('/v1/threads/'+yolo+'/approval-mode',{'mode':'review'},'PUT')
+    until(lambda:'approvals: review' in capture() or 'review' in capture().split('\n')[-2],'the TUI did not follow Review set elsewhere')
+    check('/permissions-mode yolo sets Yolo, and the TUI follows a change made elsewhere')
+    run(['tmux','kill-session','-t',name])
+    start(yolo,'!tool bash '+json.dumps({'command':'printf flag-yolo-proof > flag-yolo.txt'}))
+    until(lambda:len(api('/v1/permissions'))==1,'Review did not ask before --approvals yolo')
+    launch(yolo,'approvals: yolo',extra=['--approvals','yolo'])
+    proof('flag-yolo.txt','flag-yolo-proof')
+    assert api('/v1/threads/'+yolo+'/approval-mode')['mode']=='yolo'
+    check('haarness --approvals yolo opens the chat in Yolo on the server and approves what waits')
+    run([str(binary),'--workspace',str(workspace),'run','--approvals','yolo','--title','Run yolo flag','!tool bash '+json.dumps({'command':'printf run-yolo-proof > run-yolo.txt'})+' [review:deny]'],env=env,input='',timeout=120)
+    proof('run-yolo.txt','run-yolo-proof')
+    ran=[item['id'] for item in api('/v1/threads') if item['title']=='Run yolo flag']
+    assert len(ran)==1 and api('/v1/threads/'+ran[0]+'/approval-mode')['mode']=='yolo', ran
+    check('haarness run --approvals yolo keeps its chat in Yolo, so a run nobody watches gets every request approved')
+    run(['tmux','kill-session','-t',name])
+    plain=api('/v1/threads', {'title':'Yolo flag verification','provider':'echo','model':'echo-1'})['id']
+    launch(plain,'approvals: --yolo',extra=['--yolo'])
+    start(plain,'!tool bash '+json.dumps({'command':'printf client-yolo-proof > client-yolo.txt'}))
+    proof('client-yolo.txt','client-yolo-proof')
+    assert api('/v1/threads/'+plain+'/approval-mode')['mode']=='review'
+    check('--yolo still answers for this TUI only and leaves the chat in Review')
 
     # A long command is read in full on the card, at every size, while its
     # answers stay on screen; under 12 rows the card shrinks to one line.

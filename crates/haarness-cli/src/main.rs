@@ -135,8 +135,18 @@ struct Cli {
     /// denials and requests that always ask still hold. A `run` with no
     /// terminal refuses each request that still needs a person and goes on
     /// (five in a row stop it); it exits with status 3 when it refused any.
-    #[arg(long, global = true, conflicts_with = "yolo")]
+    /// The same as `--approvals auto`.
+    #[arg(long, global = true, conflicts_with_all = ["yolo", "approvals"])]
     auto: bool,
+    /// Put the chat this command opens, starts or continues in this approval
+    /// mode on its server, whichever app shows it, until someone changes it:
+    /// review asks before risky steps, auto answers safe requests without
+    /// asking (see --auto), yolo approves every request without asking.
+    /// Permission denials and requests that always ask still hold in every
+    /// mode. Unlike --yolo, which lasts for this command only, the chat keeps
+    /// the mode.
+    #[arg(long, global = true, value_name = "MODE", conflicts_with = "yolo")]
+    approvals: Option<ApprovalsArg>,
     /// Open a specific chat by id. `--session` is an alias.
     #[arg(short = 's', long, global = true, visible_alias = "session")]
     thread: Option<Uuid>,
@@ -149,6 +159,41 @@ struct Cli {
     )]
     continue_last: bool,
 }
+/// The modes `--approvals` takes, in the order every app lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ApprovalsArg {
+    /// Ask before risky steps.
+    Review,
+    /// Answer safe requests without asking.
+    Auto,
+    /// Approve every request without asking.
+    Yolo,
+}
+
+impl From<ApprovalsArg> for haarness_protocol::ApprovalMode {
+    fn from(value: ApprovalsArg) -> Self {
+        match value {
+            ApprovalsArg::Review => Self::Review,
+            ApprovalsArg::Auto => Self::Auto,
+            ApprovalsArg::Yolo => Self::Yolo,
+        }
+    }
+}
+
+impl Cli {
+    /// How this command's chat answers approvals, from `--yolo`, `--auto`
+    /// and `--approvals`.
+    fn approval_launch(&self) -> haarness_tui::ApprovalLaunch {
+        haarness_tui::ApprovalLaunch {
+            yolo: self.yolo,
+            mode: self
+                .approvals
+                .map(Into::into)
+                .or(self.auto.then_some(haarness_protocol::ApprovalMode::Auto)),
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Sign in to your Haarness account to use Cloud models and workspaces.
@@ -1596,6 +1641,7 @@ async fn cli_main() -> Result<()> {
             workspace = %workspace.display(),
             "haarness starting"
         );
+        let approvals = cli.approval_launch();
         match cli.command {
         Some(Command::Remote(args)) => remote_cloud::run(&paths, &workspace, project_config, args).await,
         Some(Command::Desktop) => desktop::run(&paths, &workspace, project_config).await,
@@ -1606,10 +1652,7 @@ async fn cli_main() -> Result<()> {
                 &paths,
                 workspace,
                 project_config,
-                haarness_tui::ApprovalLaunch {
-                    yolo: cli.yolo,
-                    auto: cli.auto,
-                },
+                approvals,
                 cli.thread,
                 cli.continue_last,
             )
@@ -1636,7 +1679,7 @@ async fn cli_main() -> Result<()> {
                 &paths,
                 &workspace,
                 args,
-                cli.auto,
+                approvals.mode,
                 cli.thread,
                 cli.continue_last,
             )
@@ -1647,10 +1690,7 @@ async fn cli_main() -> Result<()> {
                 &paths,
                 &workspace,
                 project_config,
-                haarness_tui::ApprovalLaunch {
-                    yolo: cli.yolo,
-                    auto: cli.auto,
-                },
+                approvals,
                 args,
                 cli.thread,
                 cli.continue_last,
@@ -1662,10 +1702,7 @@ async fn cli_main() -> Result<()> {
                 &paths,
                 workspace,
                 project_config,
-                haarness_tui::ApprovalLaunch {
-                    yolo: cli.yolo,
-                    auto: cli.auto,
-                },
+                approvals,
                 cli.thread,
                 cli.continue_last,
                 args,
@@ -1697,10 +1734,7 @@ async fn cli_main() -> Result<()> {
                 &paths,
                 &current_workspace.id,
                 project_config,
-                haarness_tui::ApprovalLaunch {
-                    yolo: cli.yolo,
-                    auto: cli.auto,
-                },
+                approvals,
                 cli.thread,
                 cli.continue_last,
                 command,
@@ -2014,6 +2048,10 @@ const GLOBAL_SCOPES: &[(&str, GlobalScope)] = &[
     ),
     (
         "auto",
+        GlobalScope::Only(&["tui", "run", "attach", "worktree"]),
+    ),
+    (
+        "approvals",
         GlobalScope::Only(&["tui", "run", "attach", "worktree"]),
     ),
     (
@@ -4088,7 +4126,7 @@ async fn interactive(
         // `--auto` was said of the chat this command opened, not that one.
         initial_thread = None;
         resume = true;
-        approvals.auto = false;
+        approvals.mode = None;
     }
 }
 /// `haarness serve` listens here unless `--port` says otherwise.
@@ -4404,7 +4442,7 @@ async fn attach_command(
     paths: &Paths,
     workspace: &Path,
     args: AttachArgs,
-    auto: bool,
+    open_in: Option<haarness_protocol::ApprovalMode>,
     thread: Option<Uuid>,
     continue_last: bool,
 ) -> Result<()> {
@@ -4414,7 +4452,7 @@ async fn attach_command(
     require_terminal()?;
     let (server, token) =
         attached_endpoint(paths, &args.url, args.token, args.authentication).await?;
-    haarness_tui::run_attached_with_auth(&server, token, thread, continue_last, args.fork, auto)
+    haarness_tui::run_attached_with_auth(&server, token, thread, continue_last, args.fork, open_in)
         .await?;
     // Keep the local workspace argument meaningful for diagnostics and parity
     // with the other entrypoints; execution itself belongs to server /v1/info.
@@ -4555,7 +4593,7 @@ async fn tui_command(
             thread,
             continue_last,
             args.fork,
-            approvals.auto,
+            approvals.mode,
         )
         .await;
     }
@@ -4587,7 +4625,7 @@ async fn tui_command(
         initial_thread = None;
         resume = true;
         fork = false;
-        approvals.auto = false;
+        approvals.mode = None;
     }
 }
 /// Whether reading stdin would return immediately (data waiting, or the
@@ -4671,8 +4709,8 @@ async fn run_command(
         };
         // Checked before a chat exists, so a refusal leaves no empty chat
         // behind.
-        if approvals.auto {
-            require_shared_approval_modes(&client).await?;
+        if let Some(mode) = approvals.mode {
+            require_shared_approval_modes(&client, mode).await?;
         }
         // Checked before a chat exists, so a typo leaves no empty chat behind.
         let requested_model = if args.provider.is_some() || args.model.is_some() {
@@ -4721,31 +4759,37 @@ async fn run_command(
                 }
             };
         chat = Some(thread.id);
-        // `--auto` puts the chat itself in Auto, before anything runs in it:
-        // the server then answers its eligible requests once, for this run,
-        // its agents and workflows, and whatever runs in it later, and every
-        // app shows the chat in Auto. What always asks is still asked below.
+        // `--auto` (or `--approvals`) puts the chat itself in that mode,
+        // before anything runs in it: in Auto the server then answers its
+        // eligible requests once, in Yolo every request, for this run, its
+        // agents and workflows, and whatever runs in it later, and every app
+        // shows the chat in that mode. What always asks is still asked below.
         let mut earlier = None;
-        if approvals.auto {
+        if let Some(mode) = approvals.mode {
             // A chat whose turn runs elsewhere refuses this run's prompt: say
-            // so before that turn's chat, and the turn with it, goes to Auto.
+            // so before that turn's chat, and the turn with it, changes mode.
             // A workflow runs in a chat of its own and is not refused.
             let refusable = !created && args.workflow.is_none();
             if refusable && client.active_turn(thread.id).await?.is_some() {
                 anyhow::bail!(haarness_core::CHAT_BUSY);
             }
             if refusable {
-                let (previous, set) = switch_to_auto(&client, thread.id).await?;
-                earlier = EarlierMode::of(&previous, set.revision);
+                let (previous, set) = switch_chat_mode(&client, thread.id, mode).await?;
+                earlier = EarlierMode::of(&previous, mode, set.revision);
             } else {
-                let set = set_chat_auto(&client, thread.id, None).await;
+                let set = set_chat_mode(&client, thread.id, mode, None).await;
                 discard_refused_chat(&client, &thread, created, set).await?;
             }
         }
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
         stop_on_signal(&client, thread.id, goal, async {
-            let mut watch = RunWatch::new(yolo).auto(approvals.auto).json(json_output);
+            // Auto and Yolo answer requests without a person; with nobody
+            // to ask, a run refuses what still needs one and goes on.
+            let answers = approvals
+                .mode
+                .is_some_and(|mode| mode != haarness_protocol::ApprovalMode::Review);
+            let mut watch = RunWatch::new(yolo).auto(answers).json(json_output);
             if let Some(workflow) = args.workflow {
                 let mut values = serde_json::Map::new();
                 if !prompt.trim().is_empty() {
@@ -4951,47 +4995,67 @@ fn run_attachments(files: &[PathBuf]) -> Result<Vec<String>> {
 /// A run's start was refused (an unknown command, agent or variant): a chat
 /// this run made for it holds nothing, so it is archived rather than left in
 /// the recent list. A continued chat stays as it was.
-/// `--auto` needs a server that keeps the approval mode per chat; an older
-/// one only has the per-run `--yolo`.
-async fn require_shared_approval_modes(client: &haarness_tui::api::ApiClient) -> Result<()> {
+/// The name a message gives an approval mode.
+const fn mode_name(mode: haarness_protocol::ApprovalMode) -> &'static str {
+    match mode {
+        haarness_protocol::ApprovalMode::Auto => "Auto",
+        haarness_protocol::ApprovalMode::Review => "Review",
+        haarness_protocol::ApprovalMode::Yolo => "Yolo",
+    }
+}
+
+/// `--auto` and `--approvals` need a server that keeps the approval mode per
+/// chat, and Yolo one that lists it; an older one only has the per-run
+/// `--yolo`.
+async fn require_shared_approval_modes(
+    client: &haarness_tui::api::ApiClient,
+    mode: haarness_protocol::ApprovalMode,
+) -> Result<()> {
     let info = client.info().await?;
-    if !info
-        .capabilities
-        .iter()
-        .any(|capability| capability == haarness_protocol::APPROVAL_MODE_CAPABILITY)
+    let has = |name: &str| {
+        info.capabilities
+            .iter()
+            .any(|capability| capability == name)
+    };
+    if !has(haarness_protocol::APPROVAL_MODE_CAPABILITY)
+        || (mode == haarness_protocol::ApprovalMode::Yolo
+            && !has(haarness_protocol::APPROVAL_YOLO_CAPABILITY))
     {
         anyhow::bail!(
-            "This Haarness server cannot keep a chat in Auto; update it, or pass --yolo to approve this run's requests"
+            "This Haarness server cannot keep a chat in {}; update it, or pass --yolo to approve this run's requests",
+            mode_name(mode)
         );
     }
     Ok(())
 }
 
-/// Put a chat in Auto on its server: whatever it was, or only while its mode
-/// is still at `revision`.
-async fn set_chat_auto(
+/// Put a chat in `mode` on its server: whatever it was, or only while its
+/// mode is still at `revision`.
+async fn set_chat_mode(
     client: &haarness_tui::api::ApiClient,
     thread: ThreadId,
+    mode: haarness_protocol::ApprovalMode,
     revision: Option<String>,
 ) -> Result<haarness_protocol::ApprovalModeInfo> {
     client
         .set_approval_mode(
             thread,
             &haarness_protocol::SetApprovalModeRequest {
-                mode: haarness_protocol::ApprovalModeSetting::Auto,
+                mode: mode.setting(),
                 revision,
             },
         )
         .await
-        .context("Could not put this chat in Auto")
+        .with_context(|| format!("Could not put this chat in {}", mode_name(mode)))
 }
 
-/// Put a chat the run did not create in Auto: its mode before, and after.
+/// Put a chat the run did not create in `mode`: its mode before, and after.
 /// The switch names the version it read, so a mode someone sets between the
 /// read and the switch is read again, never lost when it is put back.
-async fn switch_to_auto(
+async fn switch_chat_mode(
     client: &haarness_tui::api::ApiClient,
     thread: ThreadId,
+    mode: haarness_protocol::ApprovalMode,
 ) -> Result<(
     haarness_protocol::ApprovalModeInfo,
     haarness_protocol::ApprovalModeInfo,
@@ -4999,7 +5063,7 @@ async fn switch_to_auto(
     let mut attempt = 0;
     loop {
         let previous = client.approval_mode(thread).await?;
-        match set_chat_auto(client, thread, Some(previous.revision.clone())).await {
+        match set_chat_mode(client, thread, mode, Some(previous.revision.clone())).await {
             Ok(set) => return Ok((previous, set)),
             Err(error)
                 if attempt < 2
@@ -5013,26 +5077,37 @@ async fn switch_to_auto(
     }
 }
 
-/// The setting `--auto` replaced on a chat the run did not create, and the
-/// version its change made.
+/// The setting `--auto` or `--approvals` replaced on a chat the run did not
+/// create, the mode it set, and the version its change made.
 struct EarlierMode {
     setting: haarness_protocol::ApprovalModeSetting,
+    set: haarness_protocol::ApprovalMode,
     revision: String,
 }
 
 impl EarlierMode {
     /// `previous` as a setting to put back, or `None` when the chat was in
-    /// Auto by its own setting already. `revision` is the one `--auto` set.
-    fn of(previous: &haarness_protocol::ApprovalModeInfo, revision: String) -> Option<Self> {
-        use haarness_protocol::{ApprovalMode, ApprovalModeSetting};
+    /// `set` by its own setting already. `revision` is the one the run set.
+    fn of(
+        previous: &haarness_protocol::ApprovalModeInfo,
+        set: haarness_protocol::ApprovalMode,
+        revision: String,
+    ) -> Option<Self> {
+        use haarness_protocol::ApprovalModeSetting;
         let own = previous.explicit && previous.source_thread_id == previous.thread_id;
-        let setting = match (own, previous.mode) {
-            (true, ApprovalMode::Auto) => return None,
-            (true, ApprovalMode::Review) => ApprovalModeSetting::Review,
-            (true, ApprovalMode::Yolo) => ApprovalModeSetting::Yolo,
-            (false, _) => ApprovalModeSetting::Inherit,
+        if own && previous.mode == set {
+            return None;
+        }
+        let setting = if own {
+            previous.mode.setting()
+        } else {
+            ApprovalModeSetting::Inherit
         };
-        Some(Self { setting, revision })
+        Some(Self {
+            setting,
+            set,
+            revision,
+        })
     }
 
     /// Put the setting back, unless someone changed the mode since; say so
@@ -5058,7 +5133,8 @@ impl EarlierMode {
             .unwrap_or_default();
         let _ = writeln!(
             io::stderr(),
-            "The chat was left in Auto: its earlier mode could not be put back{answered}."
+            "The chat was left in {}: its earlier mode could not be put back{answered}.",
+            mode_name(self.set)
         );
     }
 }
@@ -5083,8 +5159,10 @@ mod earlier_mode_tests {
     /// Auto by its own setting, and no setting of its own otherwise.
     #[test]
     fn auto_puts_back_the_setting_it_replaced() {
-        let back =
-            |previous| EarlierMode::of(&previous, "r2".into()).map(|earlier| earlier.setting);
+        let back = |previous| {
+            EarlierMode::of(&previous, ApprovalMode::Auto, "r2".into())
+                .map(|earlier| earlier.setting)
+        };
         assert_eq!(
             back(info(ApprovalMode::Review, true, true)),
             Some(ApprovalModeSetting::Review)
@@ -5105,10 +5183,29 @@ mod earlier_mode_tests {
             Some(ApprovalModeSetting::Inherit)
         );
         assert_eq!(
-            EarlierMode::of(&info(ApprovalMode::Review, false, true), "r2".into())
-                .unwrap()
-                .revision,
+            EarlierMode::of(
+                &info(ApprovalMode::Review, false, true),
+                ApprovalMode::Auto,
+                "r2".into()
+            )
+            .unwrap()
+            .revision,
             "r2"
+        );
+        // `--approvals yolo` puts back the chat's own Auto, and nothing
+        // when it was in Yolo by its own setting.
+        let yolo = |previous| {
+            EarlierMode::of(&previous, ApprovalMode::Yolo, "r2".into())
+                .map(|earlier| earlier.setting)
+        };
+        assert_eq!(
+            yolo(info(ApprovalMode::Auto, true, true)),
+            Some(ApprovalModeSetting::Auto)
+        );
+        assert_eq!(yolo(info(ApprovalMode::Yolo, true, true)), None);
+        assert_eq!(
+            yolo(info(ApprovalMode::Yolo, true, false)),
+            Some(ApprovalModeSetting::Inherit)
         );
     }
 }
@@ -12979,12 +13076,38 @@ mod tests {
     /// different from `--yolo`, so the two are not combined.
     #[test]
     fn auto_is_offered_where_a_chat_opens_and_never_beside_yolo() {
+        use haarness_protocol::ApprovalMode;
         let launch = super::Cli::try_parse_from(["haarness", "--auto"]).unwrap();
         assert!(launch.auto && launch.command.is_none() && !launch.yolo);
         let run = super::Cli::try_parse_from(["haarness", "run", "--auto", "hello"]).unwrap();
         assert!(run.auto && matches!(run.command, Some(super::Command::Run(_))));
         assert!(super::Cli::try_parse_from(["haarness", "--auto", "--yolo"]).is_err());
         assert!(super::Cli::try_parse_from(["haarness", "run", "--yolo", "--auto", "x"]).is_err());
+        // `--approvals` names any mode; `--auto` is `--approvals auto`.
+        for (value, mode) in [
+            ("review", ApprovalMode::Review),
+            ("auto", ApprovalMode::Auto),
+            ("yolo", ApprovalMode::Yolo),
+        ] {
+            let run =
+                super::Cli::try_parse_from(["haarness", "run", "--approvals", value, "x"]).unwrap();
+            let approvals = run.approval_launch();
+            assert_eq!(approvals.mode, Some(mode), "{value}");
+            assert!(!approvals.yolo);
+        }
+        assert_eq!(launch.approval_launch().mode, Some(ApprovalMode::Auto));
+        assert_eq!(
+            super::Cli::try_parse_from(["haarness", "--yolo"])
+                .unwrap()
+                .approval_launch(),
+            haarness_tui::ApprovalLaunch {
+                yolo: true,
+                mode: None
+            }
+        );
+        assert!(super::Cli::try_parse_from(["haarness", "--approvals", "sometimes"]).is_err());
+        assert!(super::Cli::try_parse_from(["haarness", "--approvals", "yolo", "--yolo"]).is_err());
+        assert!(super::Cli::try_parse_from(["haarness", "--approvals", "yolo", "--auto"]).is_err());
         let mut command = super::cli_command();
         for name in ["run", "tui", "attach"] {
             let help = command
@@ -12993,6 +13116,7 @@ mod tests {
                 .render_help()
                 .to_string();
             assert!(help.contains("--auto"), "{name}: {help}");
+            assert!(help.contains("--approvals <MODE>"), "{name}: {help}");
         }
         for name in ["serve", "doctor", "acp"] {
             let help = command
@@ -13001,6 +13125,7 @@ mod tests {
                 .render_help()
                 .to_string();
             assert!(!help.contains("--auto"), "{name}: {help}");
+            assert!(!help.contains("--approvals"), "{name}: {help}");
         }
     }
 
