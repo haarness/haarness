@@ -185,9 +185,11 @@ test.beforeAll(async () => {
         "\n---\nReturn UI command evidence.\n",
     );
   }
+  // Chats start in Auto, where the reviewer answers an ask: these tests walk
+  // the card a person answers, so the project asks for Review.
   await writeFile(
     join(workspace, ".haarness", "config.toml"),
-    '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n[providers.desktop-missing-key]\nprotocol="anthropic-messages"\nname="Desktop credential fixture"\nbase_url="http://127.0.0.1:1/v1"\nmodels=["fixture"]\napi_key_env="HAARNESS_TEST_MISSING_KEY"\n',
+    '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n[providers.desktop-missing-key]\nprotocol="anthropic-messages"\nname="Desktop credential fixture"\nbase_url="http://127.0.0.1:1/v1"\nmodels=["fixture"]\napi_key_env="HAARNESS_TEST_MISSING_KEY"\n',
   );
   await writeFile(
     join(workspace, ".haarness", "workflows", "fixture.js"),
@@ -4583,8 +4585,14 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
   await newSession();
   // The pill is named after the mode it shows ("Approvals: Review").
   const toggle = page.getByRole("button", { name: /^Approvals: (Review|Auto)$/ });
+  // Before a chat exists the pill shows Auto, the default, until a mode is
+  // picked for new chats here. Picking Review and then Auto makes Auto
+  // Desktop's own choice, which covers the chats Desktop starts (see below).
+  await expect(toggle).toHaveAccessibleName("Approvals: Auto");
+  await toggle.click();
   await expect(toggle).toHaveAccessibleName("Approvals: Review");
   await toggle.click();
+  await expect(toggle).toHaveAccessibleName("Approvals: Auto");
   await send(
     '!tool bash {"command":"printf workspace-auto-proof > workspace-auto.txt"}',
   );
@@ -4656,7 +4664,7 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
   await mkdir(join(directory, ".haarness"), { recursive: true });
   await writeFile(
     join(directory, ".haarness", "config.toml"),
-    '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n',
+    '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n',
   );
   extraWorkspaces.push(directory);
   await app.evaluate(({ dialog }, path) => {
@@ -4674,8 +4682,10 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
     "true",
   );
   await newSession();
-  await expect(toggle).toHaveAccessibleName("Approvals: Review");
   await send('!tool bash {"command":"printf manual-workspace-proof"}');
+  // Nothing was picked here, so the chat starts in the Review its
+  // configuration names.
+  await expect(toggle).toHaveAccessibleName("Approvals: Review");
   await expect(
     page.getByRole("button", { name: "Allow once", exact: true }),
   ).toBeVisible();
@@ -7167,9 +7177,10 @@ test("minimal navigation and long slash commands stay usable without shifting ch
 test("app rebuilds keep permission-waiting projects usable and upgrade them after work finishes", async () => {
   const directory = join(temporary, "upgrade-project");
   await mkdir(join(directory, ".haarness"), { recursive: true });
+  // Review, so the request waits for a person rather than the Auto reviewer.
   await writeFile(
     join(directory, ".haarness/config.toml"),
-    '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n',
+    '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n',
   );
   extraWorkspaces.push(directory);
   // A separate executable really owns this daemon, reproducing a rebuilt app.
@@ -8262,7 +8273,7 @@ test("large projects remain editable beyond ten thousand snapshot entries and tw
   await mkdir(join(directory, "many"));
   await writeFile(
     join(directory, ".haarness/config.toml"),
-    '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n',
+    '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n',
   );
   // Empty source files reproduce the old entry-count rejection without relying
   // on large byte payloads or a paid model.

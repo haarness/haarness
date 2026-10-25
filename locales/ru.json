@@ -1144,6 +1144,7 @@
   "Interval in seconds": "Интервал в секундах",
   "Start loop": "Запустить цикл",
   "Configure loop": "Настроить цикл",
+  "Configure /{name}": "Настроить /{name}",
   "Stop loop": "Остановить цикл",
   "No loop configured.": "Цикл не настроен.",
   "Use Schedules in settings for durable operating-system jobs.": "Для постоянных задач операционной системы используйте Расписания в настройках.",

@@ -70,7 +70,7 @@ test.beforeAll(async () => {
   await mkdir(join(project, "scripts"), { recursive: true });
   await writeFile(
     join(project, ".haarness/config.toml"),
-    '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n[execution]\nshell_timeout_ms=0\n',
+    '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n[execution]\nshell_timeout_ms=0\n',
   );
   await writeFile(join(project, "scripts/deploy.sh"), deploy.join("\n") + "\n");
   await writeFile(
@@ -82,7 +82,7 @@ test.beforeAll(async () => {
   outside = join(root, "outside");
   await mkdir(join(plain, ".haarness"), { recursive: true });
   await mkdir(outside, { recursive: true });
-  await writeFile(join(plain, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
+  await writeFile(join(plain, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n');
   await writeFile(join(outside, "run.sh"), "#!/bin/sh\nprintf ran > ran.txt\n");
   await chmod(join(outside, "run.sh"), 0o755);
   current = project;

@@ -25,7 +25,7 @@ test.beforeAll(async()=>{
   test.setTimeout(120000);root=await realpath(await mkdtemp(join(tmpdir(),"haarness-permission-parity-ui-")));
   main=join(root,"primary");linked=join(root,"linked");
   await mkdir(join(main,".haarness/commands"),{recursive:true});
-  await writeFile(join(main,".haarness/config.toml"),'[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n[execution]\nshell_timeout_ms=0\nsubagent_concurrency=1\nsubagent_depth=2\n');
+  await writeFile(join(main,".haarness/config.toml"),'[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n[execution]\nshell_timeout_ms=0\nsubagent_concurrency=1\nsubagent_depth=2\n');
   await writeFile(join(main,".haarness/commands/context.md"),'---\ndescription: Read dynamic context\n---\nContext: !`printf DYNAMIC_APPROVAL_PROOF`\n');
   await writeFile(join(main,".env"),"PARITY_SECRET=fixture-only");
   await symlink(".env",join(main,"notes.txt"));

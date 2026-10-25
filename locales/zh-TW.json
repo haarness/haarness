@@ -1144,6 +1144,7 @@
   "Interval in seconds": "間隔（秒）",
   "Start loop": "啟動循環",
   "Configure loop": "設定循環",
+  "Configure /{name}": "設定 /{name}",
   "Stop loop": "停止循環",
   "No loop configured.": "尚未設定循環。",
   "Use Schedules in settings for durable operating-system jobs.": "需要長期執行的系統工作，請使用設定中的排程。",

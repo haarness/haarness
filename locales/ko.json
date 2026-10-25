@@ -1144,6 +1144,7 @@
   "Interval in seconds": "간격(초)",
   "Start loop": "루프 시작",
   "Configure loop": "루프 구성",
+  "Configure /{name}": "/{name} 구성",
   "Stop loop": "루프 중지",
   "No loop configured.": "구성된 루프가 없습니다.",
   "Use Schedules in settings for durable operating-system jobs.": "운영 체제에 계속 남는 작업에는 설정의 일정을 사용하세요.",
