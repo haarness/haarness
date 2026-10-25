@@ -1286,6 +1286,85 @@ async fn the_server_says_auto_asks_a_reviewer_only_while_it_does() {
     }
 }
 
+/// A client shows a chat that does not exist yet in the mode it will start
+/// in: the info names it, Review, Auto or (nothing configured) Auto, and a
+/// reloaded configuration changes it.
+#[tokio::test]
+async fn the_server_names_the_mode_a_new_chat_starts_in() {
+    use haarness_protocol::ApprovalMode;
+    for (configured, expected) in [
+        (Some(ApprovalMode::Review), ApprovalMode::Review),
+        (Some(ApprovalMode::Auto), ApprovalMode::Auto),
+        (None, ApprovalMode::Auto),
+    ] {
+        let workspace = Workspace::new();
+        let (runtime, _provider) = runtime_with(&workspace.0, |config| {
+            config.approval_mode = configured.unwrap_or_default();
+        });
+        let runtime = Arc::new(runtime);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let handle = serve(
+            listener,
+            "mode-token",
+            ServerState {
+                browser: None,
+                management: None,
+                runtime: runtime.clone(),
+                mcp: Arc::new(NoMcp),
+                skills: Arc::new(NoSkills),
+                plugins: None,
+                workflows: None,
+                workspaces: None,
+                workspace_id: None,
+                workspace: workspace.0.clone(),
+                project_trusted: false,
+                language: None,
+            },
+        )
+        .await
+        .unwrap();
+        let info = || async {
+            let info: Value = reqwest::Client::new()
+                .get(format!("http://{}/v1/info", handle.address))
+                .bearer_auth("mode-token")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            serde_json::from_value::<ApprovalMode>(info["defaultApprovalMode"].clone()).unwrap()
+        };
+        assert_eq!(info().await, expected, "{configured:?}");
+        let thread = echo_thread(&runtime).await;
+        let started = runtime.approval_mode(thread.id).await.unwrap();
+        assert_eq!(started.mode, expected, "{configured:?}");
+        assert!(!started.explicit);
+
+        let reloaded = match expected {
+            ApprovalMode::Auto => ApprovalMode::Review,
+            ApprovalMode::Review => ApprovalMode::Auto,
+        };
+        assert!(runtime.replace_components_when_idle(
+            runtime.providers(),
+            Arc::new(NativeToolRegistry::new(workspace.0.clone())),
+            String::new(),
+            RuntimeConfig {
+                approval_mode: reloaded,
+                ..RuntimeConfig::default()
+            },
+            None,
+            || {},
+        ));
+        assert_eq!(info().await, reloaded, "{configured:?} reloaded");
+        let thread = echo_thread(&runtime).await;
+        assert_eq!(
+            runtime.approval_mode(thread.id).await.unwrap().mode,
+            reloaded
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_refusal_nobody_answered_ends_its_request_alone_in_haarnesss_words() {
     let workspace = Workspace::new();
