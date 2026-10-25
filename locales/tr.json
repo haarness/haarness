@@ -1144,6 +1144,7 @@
   "Interval in seconds": "Saniye cinsinden aralık",
   "Start loop": "Döngüyü başlat",
   "Configure loop": "Döngüyü yapılandır",
+  "Configure /{name}": "/{name} yapılandır",
   "Stop loop": "Döngüyü durdur",
   "No loop configured.": "Yapılandırılmış döngü yok.",
   "Use Schedules in settings for durable operating-system jobs.": "Kalıcı işletim sistemi görevleri için ayarlardaki Zamanlamaları kullanın.",

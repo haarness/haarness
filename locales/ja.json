@@ -1144,6 +1144,7 @@
   "Interval in seconds": "間隔（秒）",
   "Start loop": "ループを開始",
   "Configure loop": "ループを設定",
+  "Configure /{name}": "/{name} を設定",
   "Stop loop": "ループを停止",
   "No loop configured.": "ループは設定されていません。",
   "Use Schedules in settings for durable operating-system jobs.": "OS に常駐するジョブには、設定のスケジュールを使用してください。",

@@ -1144,6 +1144,7 @@
   "Interval in seconds": "Intervalo em segundos",
   "Start loop": "Iniciar o loop",
   "Configure loop": "Configurar o loop",
+  "Configure /{name}": "Configurar /{name}",
   "Stop loop": "Parar o loop",
   "No loop configured.": "Nenhum loop configurado.",
   "Use Schedules in settings for durable operating-system jobs.": "Use os Agendamentos nas configurações para tarefas duradouras do sistema operacional.",

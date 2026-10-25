@@ -1144,6 +1144,7 @@
   "Interval in seconds": "Intervall i sekunder",
   "Start loop": "Start løkken",
   "Configure loop": "Konfigurer løkken",
+  "Configure /{name}": "Konfigurer /{name}",
   "Stop loop": "Stopp løkken",
   "No loop configured.": "Ingen løkke er konfigurert.",
   "Use Schedules in settings for durable operating-system jobs.": "Bruk Tidsplaner i innstillingene for varige jobber i operativsystemet.",

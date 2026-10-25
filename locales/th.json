@@ -1144,6 +1144,7 @@
   "Interval in seconds": "ช่วงเวลาเป็นวินาที",
   "Start loop": "เริ่มลูป",
   "Configure loop": "กำหนดค่าลูป",
+  "Configure /{name}": "กำหนดค่า /{name}",
   "Stop loop": "หยุดลูป",
   "No loop configured.": "ยังไม่ได้กำหนดค่าลูป",
   "Use Schedules in settings for durable operating-system jobs.": "ใช้กำหนดการในการตั้งค่าสำหรับงานถาวรของระบบปฏิบัติการ",
