@@ -11,12 +11,17 @@ import { applyLanguage, t } from "./i18n";
 import {
   alreadySettled,
   autoApproval,
-  newChatAuto,
+  localApprovalMode,
+  newChatMode,
   approveAndEnable,
   canAutoApprove,
   createAutoApprover,
   readApprovalModes,
+  readMode,
+  savedApprovalModes,
+  YOLO_CAPABILITY,
   type ApprovalModes,
+  type Mode,
 } from "./approval-mode";
 import { conversationRoot } from "../thread-kinds";
 import {
@@ -112,10 +117,10 @@ export type Pane = "chat" | "files" | "diff";
 
 interface State extends Live {
   modelRecents: ModelKey[];
-  /** This device's Auto choice for new chats per project, and per-chat
-   * choices for servers that predate shared approval modes. */
+  /** This device's mode for new chats per project, and per-chat choices
+   * for servers that predate shared approval modes. */
   approvalModes: ApprovalModes;
-  /** Each chat's Auto/Review setting as its server reports it. */
+  /** Each chat's approval mode as its server reports it. */
   approvalShared: Record<string, Record<string, T.ApprovalModeInfo>>;
   ordering: Ordering;
   expandedProjects: Record<string, boolean>;
@@ -421,39 +426,54 @@ function createApp(saved?: Preferences) {
     }
   }
   async function saveApprovalModes() {
-    const value = JSON.parse(JSON.stringify(state.approvalModes));
+    const value = savedApprovalModes(unwrap(state.approvalModes));
     approvalSave = approvalSave
       .catch(() => {})
       .then(() => window.haarness.storage("approval-modes:v1", value));
     await approvalSave;
   }
-  function isAutoApproval(
+  /** Whether the server shown offers Yolo (`approval-mode.yolo.v1`). */
+  function yoloOffered(connection = state.connection?.id ?? "") {
+    return (
+      sharedApprovals(connection) &&
+      !!state.connection?.info.capabilities.includes(YOLO_CAPABILITY)
+    );
+  }
+  /** The approval mode of `thread`, or of a new chat when there is none. */
+  function approvalMode(
     connection = state.connection?.id ?? "",
     thread = state.selected,
-  ) {
+  ): Mode {
     if (sharedApprovals(connection))
       return thread
-        ? state.approvalShared[connection]?.[thread]?.mode === "auto"
-        : newChatAuto(
+        ? readMode(state.approvalShared[connection]?.[thread]?.mode)
+        : newChatMode(
             state.approvalModes,
             connection,
             state.connection?.info.defaultApprovalMode,
+            yoloOffered(connection),
           );
-    return autoApproval(
+    // A server that does not keep modes has Auto and Review only, answered
+    // by this window.
+    return localApprovalMode(
       state.approvalModes,
       connection,
       thread,
       connection === state.connection?.id
         ? state.threads
         : (indexes()[connection]?.threads ?? []),
-    );
+    ) === "review"
+      ? "review"
+      : "auto";
   }
-  async function setAutoApproval(
-    enabled: boolean,
+  async function setApprovalMode(
+    mode: Mode,
     connection = state.connection?.id ?? "",
     thread = state.selected,
   ) {
     if (!connection) return;
+    // A server without Yolo is never asked for it.
+    if (mode === "yolo" && !yoloOffered(connection)) return;
     approvalRevision++;
     if (thread && sharedApprovals(connection)) {
       const revision = state.approvalShared[connection]?.[thread]?.revision;
@@ -463,7 +483,7 @@ function createApp(saved?: Preferences) {
           await window.haarness.api<T.ApprovalModeInfo>(
             connection,
             "setApprovalMode",
-            [thread, { mode: enabled ? "auto" : "review", ...(revision ? { revision } : {}) }],
+            [thread, { mode, ...(revision ? { revision } : {}) }],
           ),
         );
       } catch (error) {
@@ -476,7 +496,7 @@ function createApp(saved?: Preferences) {
     }
     set("approvalModes", connection, {
       ...state.approvalModes[connection],
-      [thread || "*"]: enabled,
+      [thread || "*"]: mode,
     });
     await saveApprovalModes();
   }
@@ -501,8 +521,8 @@ function createApp(saved?: Preferences) {
         connection === state.connection?.id &&
         selected === state.selected,
       enable: () =>
-        setAutoApproval(
-          true,
+        setApprovalMode(
+          "auto",
           connection,
           selected || request.rootThreadId || request.threadId,
         ),
@@ -993,7 +1013,7 @@ function createApp(saved?: Preferences) {
       const chats = Object.keys(rules).filter((id) => id !== "*");
       if (!chats.length) return;
       for (const thread of chats) {
-        if (!rules[thread]) continue;
+        if (rules[thread] === "review") continue;
         try {
           const current = await window.haarness.api<T.ApprovalModeInfo>(
             connection,
@@ -1006,7 +1026,13 @@ function createApp(saved?: Preferences) {
               await window.haarness.api<T.ApprovalModeInfo>(
                 connection,
                 "setApprovalMode",
-                [thread, { mode: "auto", revision: current.revision }],
+                [
+                  thread,
+                  {
+                    mode: rules[thread] === "yolo" && yoloOffered(connection) ? "yolo" : "auto",
+                    revision: current.revision,
+                  },
+                ],
               ),
             );
         } catch {
@@ -1555,7 +1581,7 @@ function createApp(saved?: Preferences) {
                 state.sidebarLayout === "flat" ||
                 state.searchOpen ||
                 Object.values(state.approvalModes[location.id] ?? {}).some(
-                  Boolean,
+                  (mode) => mode !== "review",
                 ))
             );
           },
@@ -2148,9 +2174,12 @@ function createApp(saved?: Preferences) {
     );
     const created = { at: Date.now(), stream: hydration };
     // A new chat starts in the mode chosen for new chats here, if one was;
-    // otherwise in the server's default (Auto unless configured to Review).
+    // otherwise in the server's default (Auto unless configured to Review
+    // or Yolo).
     // The server keeps it, so other windows and the phone see the same mode.
-    const chosen = state.approvalModes[connection]?.["*"];
+    // A Yolo chosen here counts only where the server offers it.
+    const picked = state.approvalModes[connection]?.["*"];
+    const chosen = picked === "yolo" && !yoloOffered(connection) ? undefined : picked;
     if (sharedApprovals(connection) && chosen !== undefined) {
       try {
         rememberApprovalMode(
@@ -2158,7 +2187,7 @@ function createApp(saved?: Preferences) {
           await window.haarness.api<T.ApprovalModeInfo>(
             connection,
             "setApprovalMode",
-            [thread.id, { mode: chosen ? "auto" : "review" }],
+            [thread.id, { mode: chosen }],
           ),
         );
       } catch (error) {
@@ -2641,8 +2670,9 @@ function createApp(saved?: Preferences) {
   });
   return {
     state,
-    isAutoApproval,
-    setAutoApproval,
+    approvalMode,
+    setApprovalMode,
+    yoloOffered,
     allowOnceAndAuto,
     set,
     api,

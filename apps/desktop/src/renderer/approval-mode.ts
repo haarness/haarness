@@ -6,7 +6,41 @@ import type {
 } from "@haarness/sdk";
 import { isExplicitPermission } from "../chrome";
 
-export type ApprovalModes = Record<string, Record<string, boolean>>;
+/** What a chat's approval mode does: Review asks before risky steps, Auto
+ * answers safe requests without asking, Yolo approves every request
+ * without asking. */
+export type Mode = "review" | "auto" | "yolo";
+/** Servers listing this keep a chat in Yolo; others offer Auto and Review. */
+export const YOLO_CAPABILITY = "approval-mode.yolo.v1";
+/** The order every surface lists the modes in, and cycles through them. */
+export const MODES: readonly Mode[] = ["review", "auto", "yolo"];
+/** A mode a server or saved data names, read for what it does: one this
+ * window does not know (a newer server's) answers nothing, as Review. */
+export function readMode(value: unknown): Mode {
+  return value === "auto" || value === "yolo" ? value : "review";
+}
+/** The mode after `mode` when a person cycles: Review, Auto, Yolo, Review.
+ * Where the server does not offer Yolo, Auto goes back to Review. */
+export function nextMode(mode: Mode, yolo: boolean): Mode {
+  if (mode === "review") return "auto";
+  return mode === "auto" && yolo ? "yolo" : "review";
+}
+/** The modes a person may pick: Yolo only where the server offers it, or
+ * while the chat is in it already, so its row shows what holds. */
+export function offeredModes(yolo: boolean, current?: Mode): Mode[] {
+  return MODES.filter((mode) => mode !== "yolo" || yolo || current === "yolo");
+}
+/** The pill's and the menu's words and drawing for each mode. */
+export const modeCopy: Record<Mode, { name: string; detail: string; icon: "approval-review" | "approval-auto" | "approval-yolo" }> = {
+  review: { name: "Review", detail: "Asks before risky steps", icon: "approval-review" },
+  auto: { name: "Auto", detail: "Answers safe requests without asking", icon: "approval-auto" },
+  yolo: { name: "Yolo", detail: "Approves every request without asking", icon: "approval-yolo" },
+};
+
+/** The modes chosen on this device, by connection and chat ("*" for new
+ * chats). Saved as `true`/`false` for Auto/Review, so an older Desktop still
+ * reads them, and as "yolo". */
+export type ApprovalModes = Record<string, Record<string, Mode>>;
 export function readApprovalModes(value: unknown): ApprovalModes {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(
@@ -16,9 +50,12 @@ export function readApprovalModes(value: unknown): ApprovalModes {
             [
               key,
               Object.fromEntries(
-                Object.entries(modes).filter(
-                  (entry): entry is [string, boolean] =>
-                    typeof entry[1] === "boolean",
+                Object.entries(modes).flatMap(([id, mode]): [string, Mode][] =>
+                  typeof mode === "boolean"
+                    ? [[id, mode ? "auto" : "review"]]
+                    : mode === "auto" || mode === "review" || mode === "yolo"
+                      ? [[id, mode]]
+                      : [],
                 ),
               ),
             ],
@@ -27,15 +64,28 @@ export function readApprovalModes(value: unknown): ApprovalModes {
     ),
   );
 }
-export function autoApproval(
+/** `modes` as saved: what an older Desktop reads stays a boolean. */
+export function savedApprovalModes(modes: ApprovalModes) {
+  return Object.fromEntries(
+    Object.entries(modes).map(([key, rules]) => [
+      key,
+      Object.fromEntries(
+        Object.entries(rules).map(([id, mode]) => [id, mode === "yolo" ? "yolo" : mode === "auto"]),
+      ),
+    ]),
+  );
+}
+/** The mode this device chose for `thread` on a server that does not keep
+ * modes: its own, its delegating chat's, else the one for new chats. */
+export function localApprovalMode(
   modes: ApprovalModes,
   connection: string,
   thread: string,
   threads: Thread[] = [],
   root?: string | null,
-): boolean {
+): Mode {
   const rules = modes[connection];
-  if (!rules) return false;
+  if (!rules) return "review";
   const seen = new Set<string>();
   let id: string | undefined = thread;
   while (id && !seen.has(id)) {
@@ -46,18 +96,33 @@ export function autoApproval(
       (current?.isSubagent ? current.parentId : undefined) ??
       (id !== root ? (root ?? undefined) : undefined);
   }
-  return rules["*"] ?? false;
+  return rules["*"] ?? "review";
+}
+/** Whether this client answers `thread`'s requests itself, on a server that
+ * does not keep modes: any mode but Review. */
+export function autoApproval(
+  modes: ApprovalModes,
+  connection: string,
+  thread: string,
+  threads: Thread[] = [],
+  root?: string | null,
+): boolean {
+  return localApprovalMode(modes, connection, thread, threads, root) !== "review";
 }
 /** The mode a new chat starts in on a server that keeps modes: the one
  * chosen here for new chats, else the server's own default for them
- * (`defaultApprovalMode`, Review where its configuration says so). A
- * server that does not name one starts them in Auto. */
-export function newChatAuto(
+ * (`defaultApprovalMode`, Review or Yolo where its configuration says so).
+ * A server that does not name one starts them in Auto. A Yolo chosen here
+ * counts only where the server offers it (`yolo`). */
+export function newChatMode(
   modes: ApprovalModes,
   connection: string,
-  serverDefault?: ApprovalMode | null,
-): boolean {
-  return modes[connection]?.["*"] ?? serverDefault !== "review";
+  serverDefault?: ApprovalMode | string | null,
+  yolo = true,
+): Mode {
+  const chosen = modes[connection]?.["*"];
+  if (chosen !== undefined && (chosen !== "yolo" || yolo)) return chosen;
+  return serverDefault == null ? "auto" : readMode(serverDefault);
 }
 /** Whether this client may answer a request for the user. An explicit
  * request (a site in the user's own Chrome) always waits for a person. */
@@ -311,18 +376,31 @@ export function alreadySettled(error: unknown): boolean {
   return /\bnot found: permission\b/i.test(message);
 }
 
-/** The shield control's tooltip in Auto: where the server's Auto asks a
- * reviewer (`approval-review.v1`) it says so; otherwise Auto approves once. */
-export function autoApprovalHint(
+/** What the approval pill's mode does, for its tooltip: for the open chat
+ * and its agents (`chat`), or for new chats here. In Auto, a server that
+ * asks a reviewer (`approval-review.v1`) says so; otherwise Auto approves
+ * once. Review is worded after the server's default rules
+ * (permissions/mod.rs): it does not ask before every edit or command. */
+export function approvalModeHint(
+  mode: Mode,
   chat: boolean,
   reviewer: boolean,
   t: (key: string) => string,
 ): string {
-  if (reviewer)
+  if (mode === "yolo")
     return chat
-      ? t("Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest. Click to switch to Review.")
-      : t("Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest. Click to switch to Review.");
+      ? t("Yolo: every permission request in this chat and its agents is approved once without asking. Deny rules still hold, and requests only you can answer still ask.")
+      : t("Yolo: every permission request in new chats here is approved once without asking. Deny rules still hold, and requests only you can answer still ask.");
+  if (mode === "auto") {
+    if (reviewer)
+      return chat
+        ? t("Auto: a reviewer model approves routine permission requests in this chat and its agents once, and asks you about the rest.")
+        : t("Auto: a reviewer model approves routine permission requests in new chats here once, and asks you about the rest.");
+    return chat
+      ? t("Auto: permission requests in this chat and its agents are allowed once without asking.")
+      : t("Auto: permission requests in new chats here are allowed once without asking.");
+  }
   return chat
-    ? t("Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.")
-    : t("Auto: permission requests in new chats here are allowed once without asking. Click to switch to Review.");
+    ? t("Review: edits and commands inside the project run without asking. By default this chat and its agents ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media.")
+    : t("Review: edits and commands inside the project run without asking. By default new chats here ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media.");
 }

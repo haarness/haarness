@@ -110,7 +110,7 @@ A chat can also be created with a folder of its own: `directory`, as `<date>/<na
 - `GET /v1/turns/active`, `GET /v1/turns/{id}`, `POST /interrupt` (`?resume=true` as above), `GET /wait?timeout_ms=N` (default 30 s, at most 300 s; a turn still running then answers `409`)
 - `GET /v1/permissions`, `/v1/questions`; `POST /v1/permissions/{id}`, `/v1/questions/{id}`.
   A pending permission names its `permission` category, `patterns`, the `alwaysPatterns` an Always would remember, `threadId`/`rootThreadId`/`turnId`, and `callId`, the tool call that asks (a batch's step as `<batch call id>:N`; older servers send none); `explicit: true` means only a person may answer it. A request a shell command raises carries `script` (the file the command runs, as read when it asked, or why its text is withheld), and one Auto's reviewer left to a person carries `review`. A question names its `callId` the same way. A permission reply is `{decision, feedback?}` with `once`, `always`, `always_workspace`, `always_repository`, `reject` or `refuse` (for unattended runners); a question reply is `{answer}`. See [Permissions and execution settings](PERMISSIONS-AND-EXECUTION.md) and [automatic approvals](AUTO-APPROVALS.md)
-- `GET`/`PUT /v1/threads/{id}/approval-mode` for the chat's Auto/Review setting, which the server applies for every client (see [automatic approvals](AUTO-APPROVALS.md))
+- `GET`/`PUT /v1/threads/{id}/approval-mode` for the chat's Review, Auto or Yolo setting, which the server applies for every client (see [automatic approvals](AUTO-APPROVALS.md))
 - `POST /v1/mcp/{name}`, `/reconnect`, `/disconnect`, and MCP tool list/call routes
 - `POST /v1/plugins` for install/enable/disable/remove/marketplace actions
 - `GET /v1/workflows`, `/v1/workflows/{invocation}/source`, `/v1/workflows/runs`, and `/v1/workflows/runs/{id}`
@@ -593,6 +593,7 @@ treats a missing one as an older server.
 | Capability | What it promises |
 | --- | --- |
 | `approval-mode.v1` | The server keeps each chat's Auto or Review mode (`/approval-mode`) and answers eligible requests itself; clients never reply automatically |
+| `approval-mode.yolo.v1` | The server also keeps a chat in Yolo (`"mode": "yolo"`), approving every request that would otherwise ask, once; clients offer Yolo only where this is listed |
 | `approval-review.v1` | Auto asks a reviewer model (`auto_review.enabled`, on by default): a request it leaves to a person carries `review` |
 | `btw.v1`, `btw.stream.v1` | Side questions; the second adds the side chat's earlier questions and the streamed `/btw/stream` |
 | `configuration-hot-reload.v1` | Configuration edits apply without a restart, with the reload events above |

@@ -75,6 +75,11 @@ async function selectEffort(model: Locator, value: string) {
   await expect(slider).toHaveAttribute("aria-valuetext", target);
   await model.page().locator(".select-footer").getByRole("button", { name: "Done", exact: true }).click();
 }
+/** Picks a mode from the message box's approvals menu (Review, Auto, Yolo). */
+async function pickApprovals(page: Page, mode: "Review" | "Auto" | "Yolo") {
+  await page.locator(".composer .approval-mode").first().click();
+  await page.getByRole("menuitemradio", { name: mode, exact: true }).click();
+}
 const root = resolve("../..");
 // Packaged tests must attach with the app's actual runtime. Daemon identity
 // includes the executable path, so an external copy would replace its server.
@@ -4136,14 +4141,14 @@ test("Auto approvals allow once, inherit to agents, preserve Review and survive 
     .locator(".composer")
     .screenshot({ path: "test-results/composer-auto.png" });
   // The exact same command must prompt again after Review: Auto never learns an Always rule.
-  await toggle.click();
+  await pickApprovals(page, "Review");
   await start(parent.id, command);
   await expect(
     page.getByRole("button", { name: "Allow once", exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Deny", exact: true }).click();
   await finished();
-  await toggle.click();
+  await pickApprovals(page, "Auto");
   await page.reload();
   await expect(page.locator(".application")).toHaveAttribute(
     "data-project-ready",
@@ -4389,7 +4394,7 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
   // A switch to Review mid-review shows the plain card at once.
   await start("printf switched > review-switched.txt", "stall");
   await expect(activity).toContainText("Reviewing…", { timeout: 5000 });
-  await auto.click();
+  await pickApprovals(page, "Review");
   await expect(review).toBeVisible();
   await expect(card).toBeVisible({ timeout: 3000 });
   await expect(card.locator(".approval-review")).toHaveCount(0);
@@ -4457,7 +4462,7 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await card.screenshot({ path: test.info().outputPath("auto-review-deciding-dark.png") });
   await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
-  await auto.click();
+  await pickApprovals(page, "Review");
   await expect(review).toBeVisible();
   await expect(card.locator(".approval-review")).toHaveCount(0);
   await card.getByRole("button", { name: "Deny", exact: true }).click();
@@ -4561,9 +4566,9 @@ test("Auto from a child view leaves its parent and siblings in Review", async ()
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await page
     .getByRole("combobox", { name: "Search Haarness" })
-    .fill("Enable Auto approvals");
+    .fill("Switch approvals to Auto");
   await expect(
-    page.getByRole("option").filter({ hasText: "Enable Auto approvals" }),
+    page.getByRole("option").filter({ hasText: "Switch approvals to Auto" }),
   ).toHaveAttribute("aria-disabled", "false");
   await page.getByRole("combobox", { name: "Search Haarness" }).press("Escape");
   await page
@@ -4579,6 +4584,165 @@ test("Auto from a child view leaves its parent and siblings in Review", async ()
   await expect(page.getByText(/Auto approval failed/)).toHaveCount(0);
 });
 
+test("Yolo from the approvals menu approves every request in red, and the approvals key steps Review, Auto, Yolo", async () => {
+  test.setTimeout(120000);
+  const shots = process.env.HAARNESS_E2E_SHOTS;
+  const shot = (name: string) => (shots ? join(shots, name) : test.info().outputPath(name));
+  const thread = await client.createThread({
+    title: "Yolo approval verification",
+    provider: "echo",
+    model: "echo-1",
+  });
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness" }).fill(thread.title);
+  await page.getByRole("option").filter({ hasText: thread.title }).first().click();
+  await expect(page.locator(".session-bar-name, .workspace-tab.active")).toContainText(thread.title);
+  const pill = page.locator(".composer .approval-mode").first();
+  await expect(pill).toHaveAccessibleName("Approvals: Review");
+  // One menu: the three modes in order, each saying what it does, the live
+  // one ticked, and the approvals key named in its heading.
+  await pill.click();
+  const menu = page.getByRole("menu", { name: "Approvals: Review", exact: true });
+  await expect(menu).toBeVisible();
+  const rows = menu.getByRole("menuitemradio");
+  await expect(rows).toHaveText([
+    /^Review\s*Asks before risky steps/,
+    /^Auto\s*Answers safe requests without asking/,
+    /^Yolo\s*Approves every request without asking/,
+  ]);
+  await expect(menu.getByRole("menuitemradio", { name: "Review", exact: true })).toHaveAttribute("aria-checked", "true");
+  await expect(menu.locator(".menu-heading")).toHaveText(
+    "Approvals · \u2066" + (process.platform === "darwin" ? "⌘ ⇧ A" : "Ctrl+Shift+A") + "\u2069",
+  );
+  // Every description reads whole.
+  expect(
+    await menu.locator(".menu-item-label small").evaluateAll((lines) =>
+      lines.every((line) => line.scrollWidth <= line.clientWidth + 1),
+    ),
+  ).toBe(true);
+  const yoloRow = menu.getByRole("menuitemradio", { name: "Yolo", exact: true });
+  const danger = await page.evaluate(() => {
+    const probe = document.createElement("span");
+    probe.style.color = "var(--danger)";
+    document.body.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  });
+  expect(await yoloRow.locator("svg").evaluate((svg) => getComputedStyle(svg).color)).toBe(danger);
+  await menu.screenshot({ path: shot("approval-menu-light.png") });
+  // Picking Yolo asks nothing more: the pill turns red and the server keeps it.
+  await yoloRow.click();
+  await expect(menu).toHaveCount(0);
+  await expect(pill).toHaveAccessibleName("Approvals: Yolo");
+  await expect(pill).toHaveClass(/\byolo\b/);
+  await expect(pill).toHaveAttribute("title", /^Yolo: every permission request in this chat and its agents/);
+  // Once its colour has eased in.
+  await expect.poll(() => pill.evaluate((node) => getComputedStyle(node).color)).toBe(danger);
+  await expect.poll(() => client.getApprovalMode(thread.id).then((info) => info.mode)).toBe("yolo");
+  // A request Review would ask about (`bash = "ask"` here) runs, with no card.
+  await client.startTurn(thread.id, {
+    requestId: crypto.randomUUID(),
+    text: '!tool bash {"command":"printf yolo-desktop-proof > yolo-desktop.txt"}',
+  });
+  await settled();
+  expect(await readFile(join(workspace, "yolo-desktop.txt"), "utf8")).toBe("yolo-desktop-proof");
+  expect(await client.listPermissions()).toHaveLength(0);
+  await expect(page.getByRole("alert", { name: "Permission request" })).toHaveCount(0);
+  const message = page.getByRole("textbox", { name: "Message", exact: true });
+  await message.focus();
+  await page.locator(".composer").screenshot({ path: shot("approval-pill-yolo-light.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.locator(".composer").screenshot({ path: shot("approval-pill-yolo-dark.png") });
+  await pill.click();
+  await expect(page.getByRole("menu", { name: "Approvals: Yolo", exact: true })).toBeVisible();
+  await page.getByRole("menu", { name: "Approvals: Yolo", exact: true }).screenshot({ path: shot("approval-menu-dark.png") });
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
+  // Right to left, the pill and its menu keep their words and icons.
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await pill.click();
+  const rtlMenu = page.getByRole("menu").filter({ has: page.getByRole("menuitemradio", { name: "Yolo", exact: true }) });
+  await expect(rtlMenu).toBeVisible();
+  await rtlMenu.evaluate(async () => {
+    await Promise.all(document.getAnimations().map((item) => item.finished.catch(() => undefined)));
+  });
+  await rtlMenu.screenshot({ path: shot("approval-menu-rtl.png") });
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+  // The approvals key steps the chat Review → Auto → Yolo → Review from the
+  // message box, and each step reaches the server.
+  const key = process.platform === "darwin" ? "Meta+Shift+A" : "Control+Shift+A";
+  await message.focus();
+  for (const [name, mode] of [
+    ["Review", "review"],
+    ["Auto", "auto"],
+    ["Yolo", "yolo"],
+    ["Review", "review"],
+  ] as const) {
+    await page.keyboard.press(key);
+    await expect(pill).toHaveAccessibleName("Approvals: " + name);
+    await expect.poll(() => client.getApprovalMode(thread.id).then((info) => info.mode)).toBe(mode);
+  }
+  await expect(message).toBeFocused();
+  // Search offers the two modes the chat is not in.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness" }).fill("yolo");
+  await page.getByRole("option").filter({ hasText: "Switch approvals to Yolo" }).click();
+  await expect(pill).toHaveAccessibleName("Approvals: Yolo");
+  await expect.poll(() => client.getApprovalMode(thread.id).then((info) => info.mode)).toBe("yolo");
+  // A server that does not offer Yolo: the menu has Review and Auto, the
+  // key goes Auto → Review, and a chat already in Yolo still shows it.
+  await app.evaluate(({ ipcMain }) => {
+    const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (...args: any[]) => any> })._invokeHandlers;
+    const strip = (info: any) =>
+      info?.capabilities
+        ? { ...info, capabilities: info.capabilities.filter((item: string) => item !== "approval-mode.yolo.v1") }
+        : info;
+    const connect = handlers.get("haarness:connect")!;
+    const api = handlers.get("haarness:api")!;
+    (globalThis as any).restoreYolo = () => {
+      handlers.set("haarness:connect", connect);
+      handlers.set("haarness:api", api);
+    };
+    handlers.set("haarness:connect", async (event, ...args) => {
+      const result = await connect(event, ...args);
+      if (result.ok && result.value?.info) result.value = { ...result.value, info: strip(result.value.info) };
+      return result;
+    });
+    handlers.set("haarness:api", async (event, raw) => {
+      const result = await api(event, raw);
+      if (result.ok && (raw as { method: string }).method === "info") result.value = strip(result.value);
+      return result;
+    });
+  });
+  try {
+    await page.reload();
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+    await expect(pill).toHaveAccessibleName("Approvals: Yolo");
+    await pill.click();
+    await expect(page.getByRole("menuitemradio")).toHaveText([/^Review/, /^Auto/, /^Yolo/]);
+    await page.getByRole("menuitemradio", { name: "Auto", exact: true }).click();
+    await expect(pill).toHaveAccessibleName("Approvals: Auto");
+    await pill.click();
+    await expect(page.getByRole("menuitemradio")).toHaveText([/^Review/, /^Auto/]);
+    await page.keyboard.press("Escape");
+    await message.focus();
+    await page.keyboard.press(key);
+    await expect(pill).toHaveAccessibleName("Approvals: Review");
+    await expect.poll(() => client.getApprovalMode(thread.id).then((info) => info.mode)).toBe("review");
+  } finally {
+    await app.evaluate(() => (globalThis as any).restoreYolo?.());
+    await page.reload();
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  }
+  await client.setApprovalMode(thread.id, { mode: "review" });
+  expect(errors).toEqual([]);
+});
+
 test("workspace Auto stays scoped across collapsed projects and the new composer fits narrow windows", async () => {
   test.setTimeout(120000);
   await showChat();
@@ -4590,7 +4754,7 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
   // new chats here. Picking Auto makes it Desktop's own choice, which covers
   // the chats Desktop starts (see below).
   await expect(toggle).toHaveAccessibleName("Approvals: Review");
-  await toggle.click();
+  await pickApprovals(page, "Auto");
   await expect(toggle).toHaveAccessibleName("Approvals: Auto");
   await send(
     '!tool bash {"command":"printf workspace-auto-proof > workspace-auto.txt"}',
@@ -4793,7 +4957,7 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
     page.locator(".session-bar-name, .workspace-tab.active"),
   ).toHaveCount(0);
   await expect(toggle).toHaveAccessibleName("Approvals: Auto");
-  await toggle.click();
+  await pickApprovals(page, "Review");
   await expect(toggle).toHaveAccessibleName("Approvals: Review");
   await page.reload();
   await expect(page.locator(".application")).toHaveAttribute(
@@ -11635,8 +11799,8 @@ test("conversation controls undo and redo real files, preserve drafts, and compa
     await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill(name);
     await page.getByRole("option", { name, exact: true }).click();
   };
-  const approval = page.getByRole("button", { name: /^Approvals: (Review|Auto)$/ });
-  if (await approval.getAttribute("aria-label") !== "Approvals: Auto") await approval.click();
+  const approval = page.getByRole("button", { name: /^Approvals: (Review|Auto|Yolo)$/ });
+  if (await approval.getAttribute("aria-label") !== "Approvals: Auto") await pickApprovals(page, "Auto");
   const path = join(workspace, "history-controls.txt");
   const first = '!tool write {"path":"history-controls.txt","content":"first value"}';
   const second = '!tool write {"path":"history-controls.txt","content":"second value"}';

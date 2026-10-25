@@ -1655,6 +1655,16 @@ dialog .notifications {
 .approval-mode.enabled {
   color: var(--accent);
 }
+/* A chat that approves every request is never unnoticed: Yolo is always
+   red, its pill tinted, in every theme. */
+.approval-mode.yolo,
+.approval-mode.yolo:focus {
+  color: var(--danger);
+  background-color: var(--danger-soft);
+}
+.approval-mode.yolo:hover {
+  background-color: color-mix(in srgb, var(--danger) 20%, transparent);
+}
 
 /* Schedule editing uses compact controls instead of wire-format fields. */
 .schedule-card h3 {

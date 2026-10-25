@@ -81,7 +81,7 @@ impl PermissionChoice {
             choices.insert(3, Self::Repository);
         }
         // A chat already in Auto (its reviewer left this one to a person)
-        // has nothing to switch to.
+        // has nothing to switch to, and from Yolo it would be a step back.
         if app.auto_permissions {
             choices.retain(|choice| *choice != Self::Auto);
         }
@@ -825,15 +825,18 @@ pub struct App {
     /// Every unanswered permission prompt in this root conversation, oldest
     /// first — including prompts raised on child-agent threads.
     pub pending_permissions: Vec<PendingPermissionInfo>,
-    /// Whether the open chat is in Auto. On a server with shared approval
-    /// modes this mirrors the server's setting for the chat; on an older
-    /// server it is this TUI launch's own switch. Never a permission rule.
+    /// Whether the open chat answers requests without asking: Auto, or Yolo
+    /// on a server that keeps it. On a server with shared approval modes
+    /// this mirrors the server's setting for the chat; on an older server it
+    /// is this TUI launch's own Auto switch. Never a permission rule.
     pub auto_permissions: bool,
     pub auto_permissions_seen: std::collections::HashMap<String, bool>,
     /// The server applies Auto itself, for every client.
     pub approval_server: bool,
     /// The server's Auto asks a reviewer model (`approval-review.v1`).
     pub approval_reviewer: bool,
+    /// The server can keep a chat in Yolo (`approval-mode.yolo.v1`).
+    pub approval_yolo: bool,
     /// Launched with `--yolo`: this TUI answers every request its open
     /// conversation raises once, and its turns approve their own. The server
     /// is not a yolo server, so other clients' chats still ask.
@@ -1185,6 +1188,7 @@ impl App {
             pending_permissions: Vec::new(),
             auto_permissions: false,
             approval_reviewer: false,
+            approval_yolo: false,
             auto_permissions_seen: std::collections::HashMap::new(),
             approval_server: false,
             yolo: false,
@@ -3327,6 +3331,24 @@ fn relative_time(time: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 impl App {
+    /// The open chat's approval mode: the server's, on a server that keeps
+    /// modes; this launch's own Auto or Review otherwise.
+    #[must_use]
+    pub fn chat_approval_mode(&self) -> haarness_protocol::ApprovalMode {
+        if let Some(info) = self
+            .approval_mode
+            .as_ref()
+            .filter(|info| self.approval_server && info.thread_id == self.thread.id)
+        {
+            return info.mode;
+        }
+        if self.auto_permissions {
+            haarness_protocol::ApprovalMode::Auto
+        } else {
+            haarness_protocol::ApprovalMode::Review
+        }
+    }
+
     /// The permission prompt y/a/w/n answer next: oldest pending.
     pub fn set_auto_permissions(&mut self, enabled: bool) {
         self.keep_permission_choice(|app| app.auto_permissions = enabled);

@@ -137,7 +137,8 @@ pub(crate) async fn answer_permission(
         if crate::api::refusal_code(&error) == Some("not_found") {
             app.permission_answered(&id);
             if choice == 'u' {
-                app.change_approval_mode(true, client).await;
+                app.set_approval_mode(haarness_protocol::ApprovalMode::Auto, client)
+                    .await;
             }
             app.notice = app.language.text("Already answered").into();
             return Ok(());
@@ -149,7 +150,8 @@ pub(crate) async fn answer_permission(
     app.auto_permissions_seen.insert(id.clone(), true);
     app.permission_answered(&id);
     if choice == 'u' {
-        app.change_approval_mode(true, client).await;
+        app.set_approval_mode(haarness_protocol::ApprovalMode::Auto, client)
+            .await;
     }
     Ok(())
 }
@@ -638,8 +640,7 @@ pub async fn handle_key_at(
         return handle_overlay_key(app, key, client).await;
     }
     if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('y') {
-        app.change_approval_mode(!app.auto_permissions, client)
-            .await;
+        app.cycle_approval_mode(client).await;
         return Ok(AppAction::Continue);
     }
     // Permission keys only fire while the prompt owns focus, and only the

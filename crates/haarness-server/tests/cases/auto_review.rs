@@ -1278,23 +1278,31 @@ async fn the_server_says_auto_asks_a_reviewer_only_while_it_does() {
             "{:?}",
             info.capabilities
         );
-        assert!(
-            info.capabilities
-                .iter()
-                .any(|capability| capability == haarness_protocol::APPROVAL_MODE_CAPABILITY)
-        );
+        for listed in [
+            haarness_protocol::APPROVAL_MODE_CAPABILITY,
+            haarness_protocol::APPROVAL_YOLO_CAPABILITY,
+        ] {
+            assert!(
+                info.capabilities
+                    .iter()
+                    .any(|capability| capability == listed),
+                "{listed} missing from {:?}",
+                info.capabilities
+            );
+        }
     }
 }
 
 /// A client shows a chat that does not exist yet in the mode it will start
-/// in: the info names it, Review, Auto or (nothing configured) Auto, and a
-/// reloaded configuration changes it.
+/// in: the info names it, Review, Auto, Yolo or (nothing configured) Auto,
+/// and a reloaded configuration changes it.
 #[tokio::test]
 async fn the_server_names_the_mode_a_new_chat_starts_in() {
     use haarness_protocol::ApprovalMode;
     for (configured, expected) in [
         (Some(ApprovalMode::Review), ApprovalMode::Review),
         (Some(ApprovalMode::Auto), ApprovalMode::Auto),
+        (Some(ApprovalMode::Yolo), ApprovalMode::Yolo),
         (None, ApprovalMode::Auto),
     ] {
         let workspace = Workspace::new();
@@ -1343,7 +1351,8 @@ async fn the_server_names_the_mode_a_new_chat_starts_in() {
 
         let reloaded = match expected {
             ApprovalMode::Auto => ApprovalMode::Review,
-            ApprovalMode::Review => ApprovalMode::Auto,
+            ApprovalMode::Review => ApprovalMode::Yolo,
+            ApprovalMode::Yolo => ApprovalMode::Auto,
         };
         assert!(runtime.replace_components_when_idle(
             runtime.providers(),
@@ -1542,4 +1551,408 @@ async fn another_chats_agent_naming_a_folder_never_lets_its_deletion_through() {
         TurnStatus::Completed
     );
     assert!(!victim.exists());
+}
+
+/// Yolo approves once, without a card, what Review would ask about and Auto
+/// would review, and never asks the reviewer; Review asks again afterwards.
+#[tokio::test]
+async fn yolo_approves_every_request_once_without_asking_or_reviewing() {
+    let workspace = Workspace::new();
+    let (runtime, provider) = runtime_with(&workspace.0, |_| {});
+    let thread = echo_thread(&runtime).await;
+    let mut events = runtime.events().subscribe(None).receiver;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Yolo).await;
+    let info = runtime.approval_mode(thread.id).await.unwrap();
+    assert_eq!(info.mode, haarness_protocol::ApprovalMode::Yolo);
+    assert!(info.explicit);
+    let mut changed = None;
+    while let Ok(event) = events.try_recv() {
+        if event.event_type == "approval_mode.changed" {
+            changed = Some(event.payload);
+        }
+    }
+    assert_eq!(changed.expect("clients hear of it")["mode"], "yolo");
+    // A verdict of deny would block it in Auto: Yolo never asks.
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash("printf yolo > yolo.txt", "deny")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.0.join("yolo.txt")).unwrap(),
+        "yolo"
+    );
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert_eq!(prompts(&items), 0, "Yolo shows no card");
+    assert_eq!(reviews(&provider), 0, "Yolo never asks the reviewer");
+    // A workflow's calls and a person's own are approved once too.
+    let workflow = runtime
+        .run_workflow_tool(
+            thread.id,
+            "bash",
+            json!({"command": "printf '[review:deny]' > workflow.txt"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(!workflow.is_error, "{}", workflow.output.text);
+    assert!(workspace.0.join("workflow.txt").exists());
+    let own = runtime
+        .run_direct_tool(
+            thread.id,
+            "bash",
+            json!({"command": "printf mine > mine.txt"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(!own.is_error, "{}", own.output.text);
+    assert_eq!(reviews(&provider), 0);
+    // Once: back in Review the same command asks.
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Review).await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash("printf again > yolo.txt", "allow")),
+        )
+        .await
+        .unwrap();
+    let asked = pending(&runtime).await;
+    assert!(asked.review.is_none());
+    reply(&runtime, &asked.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+    assert_eq!(
+        std::fs::read_to_string(workspace.0.join("yolo.txt")).unwrap(),
+        "yolo"
+    );
+    assert_eq!(reviews(&provider), 0);
+}
+
+/// What Yolo leaves alone, as `--yolo` does: a deny rule still refuses, the
+/// plan agent still cannot write, a hook that refuses is not asked, and a
+/// request only a person answers (spending, a Chrome site, a configuration
+/// edit) still waits for one.
+#[tokio::test]
+async fn yolo_keeps_deny_rules_ceilings_and_what_only_a_person_answers() {
+    let workspace = Workspace::new();
+    std::fs::create_dir_all(workspace.0.join(".haarness")).unwrap();
+    let (runtime, provider) = runtime_with_tools(
+        &workspace.0,
+        vec![
+            Arc::new(PersonOnly {
+                name: "spend_fixture",
+                explicit: false,
+            }),
+            Arc::new(PersonOnly {
+                name: "chrome_fixture",
+                explicit: true,
+            }),
+        ],
+        |config| {
+            config.base_rules.push(PermissionRule {
+                pattern: "bash:rm *".into(),
+                decision: D::Deny,
+            });
+            config.base_rules.push(PermissionRule {
+                pattern: "edit:*".into(),
+                decision: D::Allow,
+            });
+        },
+    );
+    let thread = echo_thread(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Yolo).await;
+    std::fs::write(workspace.0.join("keep.txt"), "kept").unwrap();
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&bash("rm keep.txt", "allow")))
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    assert!(workspace.0.join("keep.txt").exists(), "a deny rule holds");
+    assert!(runtime.pending_permissions().is_empty());
+    for (call, what) in [
+        ("!tool spend_fixture {}".to_owned(), "spending"),
+        ("!tool chrome_fixture {}".to_owned(), "a Chrome site"),
+        (
+            r#"!tool write {"path":".haarness/haarness.json","content":"{}"}"#.to_owned(),
+            "a configuration edit",
+        ),
+    ] {
+        let turn = runtime
+            .start_turn(thread.id, turn_request(&call))
+            .await
+            .unwrap();
+        let asked = pending(&runtime).await;
+        assert!(asked.review.is_none(), "{what}");
+        reply(&runtime, &asked.permission_id, Reply::Reject).await;
+        wait_done(&runtime, &turn).await;
+    }
+    assert!(!workspace.0.join(".haarness/haarness.json").exists());
+    assert_eq!(reviews(&provider), 0);
+
+    // The plan agent's read-only ceiling holds in Yolo.
+    let plan = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Plan".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            agent: Some("plan".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    set_mode(&runtime, plan.id, ApprovalModeSetting::Yolo).await;
+    let turn = runtime
+        .start_turn(
+            plan.id,
+            turn_request(r#"!tool write {"path":"planned.txt","content":"no"}"#),
+        )
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    assert!(!workspace.0.join("planned.txt").exists());
+    assert!(runtime.pending_permissions().is_empty());
+
+    // A hook is not asked in Yolo, as it is not for `--yolo`.
+    let (runtime, provider) = runtime_with(&workspace.0, |_| {});
+    let runtime = runtime.with_hooks(Arc::new(RefusesRequests));
+    let thread = echo_thread(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Yolo).await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash("printf hooked > hooked.txt", "allow")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(workspace.0.join("hooked.txt").exists());
+    assert_eq!(reviews(&provider), 0);
+}
+
+/// Turning Yolo on approves what already waits in the chat, a request the
+/// reviewer left to a person included, but not what only a person answers
+/// nor another chat's requests.
+#[tokio::test]
+async fn turning_yolo_on_approves_what_waits_except_what_only_a_person_answers() {
+    let workspace = Workspace::new();
+    let (runtime, provider) = runtime_with_tools(
+        &workspace.0,
+        vec![Arc::new(PersonOnly {
+            name: "spend_fixture",
+            explicit: false,
+        })],
+        |_| {},
+    );
+    let thread = echo_thread(&runtime).await;
+    let other = echo_thread(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash("printf asked > asked.txt", "ask")),
+        )
+        .await
+        .unwrap();
+    let asked = pending(&runtime).await;
+    assert_eq!(asked.review.unwrap().status, Status::Asked);
+    let other_turn = runtime
+        .start_turn(
+            other.id,
+            turn_request(&bash("printf other > other.txt", "allow")),
+        )
+        .await
+        .unwrap();
+    for _ in 0..500 {
+        if runtime.pending_permissions().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(runtime.pending_permissions().len(), 2);
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Yolo).await;
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(workspace.0.join("asked.txt").exists());
+    let pending_now = runtime.pending_permissions();
+    assert_eq!(pending_now.len(), 1);
+    assert_eq!(
+        pending_now[0].thread_id, other.id,
+        "another chat still asks"
+    );
+    runtime.interrupt(other_turn.id).await.unwrap();
+    wait_done(&runtime, &other_turn).await;
+    for _ in 0..500 {
+        if runtime.pending_permissions().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // A spending request waiting when Yolo turns on stays a person's.
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Review).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("!tool spend_fixture {}"))
+        .await
+        .unwrap();
+    let spend = pending(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Yolo).await;
+    assert!(
+        runtime
+            .pending_permissions()
+            .iter()
+            .any(|request| request.permission_id == spend.permission_id),
+        "spending waits for a person in Yolo"
+    );
+    reply(&runtime, &spend.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+    assert_eq!(reviews(&provider), 1, "only Auto's request was reviewed");
+}
+
+/// A review still deciding when its chat goes to Yolo ends in an approval,
+/// never a card.
+#[tokio::test]
+async fn switching_to_yolo_mid_review_approves_without_a_card() {
+    let workspace = Workspace::new();
+    let (runtime, provider) = runtime_with(&workspace.0, |_| {});
+    let thread = echo_thread(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    // The review would stall for minutes.
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash("printf late > late.txt", "stall")),
+        )
+        .await
+        .unwrap();
+    reviewing(&provider, 1).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Yolo).await;
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(workspace.0.join("late.txt").exists());
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert_eq!(prompts(&items), 0);
+    assert_eq!(runtime.auto_reviews_running(), 0);
+
+    // A card already shown, under review since Auto turned on, is approved.
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Review).await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&bash("printf shown > shown.txt", "stall")),
+        )
+        .await
+        .unwrap();
+    pending(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
+    reviewing(&provider, 2).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Yolo).await;
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(workspace.0.join("shown.txt").exists());
+    assert!(runtime.pending_permissions().is_empty());
+    running(&runtime, 0).await;
+}
+
+/// Agents a chat in Yolo delegates to follow it; their own setting is
+/// nearer, and a Review up the chain wins over an agent's own Yolo.
+#[tokio::test]
+async fn delegated_agents_follow_yolo_and_a_review_up_the_chain_wins() {
+    use haarness_protocol::ApprovalMode;
+    let workspace = Workspace::new();
+    let (runtime, provider) = runtime_with(&workspace.0, |_| {});
+    let thread = echo_thread(&runtime).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Yolo).await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&tasks_prompt(1, "printf child > child.txt")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(workspace.0.join("child.txt").exists());
+    assert!(runtime.pending_permissions().is_empty());
+    assert_eq!(reviews(&provider), 0, "an agent in Yolo is never reviewed");
+    let child = runtime
+        .list_threads(true)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.is_subagent && item.parent_id == Some(thread.id))
+        .expect("the task ran in a child chat");
+    let inherited = runtime.approval_mode(child.id).await.unwrap();
+    assert_eq!(inherited.mode, ApprovalMode::Yolo);
+    assert_eq!(inherited.source_thread_id, thread.id);
+    assert!(inherited.explicit);
+    // The agent's own Auto is nearer than its chat's Yolo.
+    set_mode(&runtime, child.id, ApprovalModeSetting::Auto).await;
+    let own = runtime.approval_mode(child.id).await.unwrap();
+    assert_eq!(own.mode, ApprovalMode::Auto);
+    assert_eq!(own.source_thread_id, child.id);
+    // A Review up the chain wins over the agent's own Yolo.
+    set_mode(&runtime, child.id, ApprovalModeSetting::Yolo).await;
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Review).await;
+    let reviewed = runtime.approval_mode(child.id).await.unwrap();
+    assert_eq!(reviewed.mode, ApprovalMode::Review);
+    assert_eq!(reviewed.source_thread_id, thread.id);
+    let refused = runtime
+        .set_approval_mode(
+            child.id,
+            SetApprovalModeRequest {
+                mode: ApprovalModeSetting::Yolo,
+                revision: None,
+            },
+        )
+        .await;
+    match refused {
+        Err(haarness_core::CoreError::Conflict(message)) => {
+            assert!(message.contains("Turn on Yolo there instead"), "{message}");
+        }
+        other => panic!("an agent under Review cannot go to Yolo: {other:?}"),
+    }
+    // Inherit clears the chat's own setting: back to the server's default.
+    set_mode(&runtime, thread.id, ApprovalModeSetting::Inherit).await;
+    assert_eq!(
+        runtime.approval_mode(thread.id).await.unwrap().mode,
+        ApprovalMode::Review
+    );
+    // A chat with no setting follows a Yolo default, and so do its agents.
+    let (runtime, provider) = runtime_with(&workspace.0, |config| {
+        config.approval_mode = ApprovalMode::Yolo;
+    });
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&tasks_prompt(1, "printf default > default.txt")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(workspace.0.join("default.txt").exists());
+    assert_eq!(reviews(&provider), 0);
+    let info = runtime.approval_mode(thread.id).await.unwrap();
+    assert_eq!(info.mode, ApprovalMode::Yolo);
+    assert!(!info.explicit);
 }

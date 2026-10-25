@@ -31,8 +31,8 @@ fn string_list(value: &serde_json::Value) -> Vec<String> {
 }
 
 impl App {
-    /// Read the server's Auto/Review setting for the open chat. A server
-    /// that predates shared modes leaves this TUI's own switch in charge.
+    /// Read the server's approval mode for the open chat. A server that
+    /// predates shared modes leaves this TUI's own switch in charge.
     pub async fn refresh_approval_mode(&mut self, client: &ApiClient) {
         // A server that does not answer has not lost its shared modes: turning
         // this TUI's own switch back on with the last chat's Auto would answer
@@ -46,6 +46,7 @@ impl App {
                 };
                 self.approval_server = has(haarness_protocol::APPROVAL_MODE_CAPABILITY);
                 self.approval_reviewer = has(haarness_protocol::APPROVAL_REVIEW_CAPABILITY);
+                self.approval_yolo = has(haarness_protocol::APPROVAL_YOLO_CAPABILITY);
             }
             Err(error) => tracing::debug!(%error, "could not read the server's capabilities"),
         }
@@ -77,24 +78,38 @@ impl App {
             return;
         }
         self.keep_permission_choice(|app| {
-            app.auto_permissions = info.mode == haarness_protocol::ApprovalMode::Auto;
+            app.auto_permissions = info.mode != haarness_protocol::ApprovalMode::Review;
         });
         self.approval_mode = Some(info);
     }
 
-    /// Switch the open chat between Auto and Review. The server keeps it, so
-    /// every window and the phone see the same mode.
-    pub async fn change_approval_mode(&mut self, enabled: bool, client: &ApiClient) {
+    /// Ctrl+Y: the next mode for the open chat, Review → Auto → Yolo →
+    /// Review (Auto → Review where the server cannot keep Yolo).
+    pub async fn cycle_approval_mode(&mut self, client: &ApiClient) {
+        let next = self
+            .chat_approval_mode()
+            .next(self.approval_server && self.approval_yolo);
+        self.set_approval_mode(next, client).await;
+    }
+
+    /// Put the open chat in `mode`. The server keeps it, so every window and
+    /// the phone see the same mode.
+    pub async fn set_approval_mode(
+        &mut self,
+        mode: haarness_protocol::ApprovalMode,
+        client: &ApiClient,
+    ) {
+        use haarness_protocol::ApprovalMode;
+        if mode == ApprovalMode::Yolo && !(self.approval_server && self.approval_yolo) {
+            self.notice = "This server cannot keep a chat in Yolo · update Haarness".into();
+            return;
+        }
         if !self.approval_server {
-            self.set_auto_permissions(enabled);
+            self.set_auto_permissions(mode == ApprovalMode::Auto);
             return;
         }
         let request = haarness_protocol::SetApprovalModeRequest {
-            mode: if enabled {
-                haarness_protocol::ApprovalModeSetting::Auto
-            } else {
-                haarness_protocol::ApprovalModeSetting::Review
-            },
+            mode: mode.setting(),
             revision: self
                 .approval_mode
                 .as_ref()
@@ -103,12 +118,24 @@ impl App {
         match client.set_approval_mode(self.thread.id, &request).await {
             Ok(info) => {
                 self.show_approval_mode(info);
-                self.notice = if enabled && self.approval_reviewer {
-                    "Auto on for this chat · a reviewer model answers requests · ctrl+y to review"
-                } else if enabled {
-                    "Auto on for this chat · requests are allowed once · ctrl+y to review"
-                } else {
-                    "Review · asks before risky steps · ctrl+y for Auto"
+                // Each notice names where ctrl+y goes next.
+                self.notice = match mode {
+                    ApprovalMode::Auto if self.approval_yolo && self.approval_reviewer => {
+                        "Auto on for this chat · a reviewer model answers requests · ctrl+y for Yolo"
+                    }
+                    ApprovalMode::Auto if self.approval_yolo => {
+                        "Auto on for this chat · requests are allowed once · ctrl+y for Yolo"
+                    }
+                    ApprovalMode::Auto if self.approval_reviewer => {
+                        "Auto on for this chat · a reviewer model answers requests · ctrl+y to review"
+                    }
+                    ApprovalMode::Auto => {
+                        "Auto on for this chat · requests are allowed once · ctrl+y to review"
+                    }
+                    ApprovalMode::Yolo => {
+                        "Yolo on for this chat · every request is approved once · ctrl+y to review"
+                    }
+                    ApprovalMode::Review => "Review · asks before risky steps · ctrl+y for Auto",
                 }
                 .into();
             }
