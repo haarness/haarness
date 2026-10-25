@@ -1144,6 +1144,7 @@
   "Interval in seconds": "Interval u sekundama",
   "Start loop": "Pokreni petlju",
   "Configure loop": "Konfiguriši petlju",
+  "Configure /{name}": "Konfiguriši /{name}",
   "Stop loop": "Zaustavi petlju",
   "No loop configured.": "Nijedna petlja nije konfigurisana.",
   "Use Schedules in settings for durable operating-system jobs.": "Za trajne poslove operativnog sistema koristite Rasporede u postavkama.",

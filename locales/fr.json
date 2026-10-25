@@ -1144,6 +1144,7 @@
   "Interval in seconds": "Intervalle en secondes",
   "Start loop": "Démarrer la boucle",
   "Configure loop": "Configurer la boucle",
+  "Configure /{name}": "Configurer /{name}",
   "Stop loop": "Arrêter la boucle",
   "No loop configured.": "Aucune boucle configurée.",
   "Use Schedules in settings for durable operating-system jobs.": "Utilisez les Planifications dans les réglages pour les tâches durables du système d’exploitation.",
