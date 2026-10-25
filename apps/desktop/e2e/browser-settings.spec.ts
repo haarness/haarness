@@ -141,9 +141,10 @@ test.beforeAll(async () => {
     const dir = join(temporary, name);
     directories.push(dir);
     await mkdir(join(dir, ".haarness"), { recursive: true });
+    // Review, so site approvals wait for a person rather than the Auto reviewer.
     await writeFile(
       join(dir, ".haarness/config.toml"),
-      '[defaults]\nprovider="echo"\nmodel="echo-1"\n',
+      '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n',
     );
     await writeFile(join(dir, "upload.txt"), "Server upload 日本");
     for (const args of [
@@ -390,7 +391,7 @@ test("settings search keeps long results readable in narrow, scaled, light and d
       await filter().fill("bro");
       await expect(
         results().getByRole("button", {
-          name: "browser_cpu_analyze Settings › Tools",
+          name: "Browser CPU analyze Settings › Tools",
           exact: true,
         }),
       ).toBeAttached();
@@ -483,12 +484,13 @@ test("settings search keeps long results readable in narrow, scaled, light and d
       ).toBeVisible();
     });
   }
+  // A tool reads as its title and is still found by its name.
   await filter().fill("browser_cpu_analyze");
   const toolResult = results().getByRole("button", {
-    name: "browser_cpu_analyze Settings › Tools",
+    name: "Browser CPU analyze Settings › Tools",
     exact: true,
   });
-  await expect(toolResult).toHaveAttribute("title", "browser_cpu_analyze");
+  await expect(toolResult).toHaveAttribute("title", "Browser CPU analyze");
   await toolResult.click();
   await expect(
     settings().locator('[data-setting="tool:browser_cpu_analyze"]'),
