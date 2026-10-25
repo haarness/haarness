@@ -180,6 +180,7 @@ export async function preferences(input: Partial<Preferences>) {
         sideChat: z.string(),
         agentNext: z.string(),
         agentPrev: z.string(),
+        approvalNext: z.string(),
         tabNext: z.string(),
         tabPrev: z.string(),
         chatPrev: z.string(),

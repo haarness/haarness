@@ -174,6 +174,10 @@ test("keys translated through a variable are in the catalog", () => {
     // Keyboard shortcut names and notes, from `shortcutTitles` and
     // `shortcutDescriptions`.
     "Next agent", "Previous agent", "While the message box has focus",
+    "Next approval mode",
+    // The approval modes' names and lines, from `modeCopy`.
+    "Review", "Auto", "Yolo", "Asks before risky steps",
+    "Answers safe requests without asking", "Approves every request without asking",
     "Pick an element", "Adds part of the browser's page to your message",
     // Settings rows SettingRow translates, and the save dialog's labels from the main process.
     "Diagnostics", "Detailed logging", "Export logs", "Export", "Zip archive",

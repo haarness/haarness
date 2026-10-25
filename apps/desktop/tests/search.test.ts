@@ -305,3 +305,25 @@ test("shortcut fields write Ctrl off macOS and save it as Mod, the same key ther
   assert.equal(shortcutFromField("ctrl+k", "linux"), "Mod+k");
   assert.equal(shortcutFromField("Ctrl+Tab", "darwin"), "Ctrl+Tab");
 });
+
+test("the approvals key is Mod+Shift+A, clashes with nothing, and gives way to a key someone chose", () => {
+  assert.equal(defaults.shortcuts.approvalNext, "Mod+Shift+A");
+  assert.equal(shortcutAccepted("approvalNext", "Mod+Shift+A"), true);
+  // It may be left unset, and set to a named key, as the agent keys may.
+  assert.equal(shortcutAccepted("approvalNext", ""), true);
+  assert.equal(shortcutAccepted("approvalNext", "Shift+Tab"), true);
+  for (const platform of ["darwin", "win32", "linux"])
+    assert.equal(shortcutsClash(defaultShortcuts(platform), platform), false, platform);
+  // Saved before it existed, with Mod+Shift+A on another action: that stays,
+  // and the new key is unset so Settings still saves.
+  const saved = { ...defaults.shortcuts, palette: "Mod+Shift+A" };
+  const before = Object.fromEntries(Object.entries(saved).filter(([name]) => name !== "approvalNext"));
+  const migrated = migrateTabKeys(before, saved, "darwin");
+  assert.equal(migrated.approvalNext, "");
+  assert.equal(migrated.palette, "Mod+Shift+A");
+  assert.equal(shortcutsClash(migrated, "darwin"), false);
+  // It matches by the key, whatever Shift makes of the letter.
+  assert.equal(matchesShortcut({ key: "A", code: "KeyA", metaKey: true, ctrlKey: false, altKey: false, shiftKey: true }, "Mod+Shift+A", "darwin"), true);
+  assert.equal(matchesShortcut({ key: "A", code: "KeyA", metaKey: false, ctrlKey: true, altKey: false, shiftKey: true }, "Mod+Shift+A", "win32"), true);
+  assert.equal(matchesShortcut({ key: "a", code: "KeyA", metaKey: true, ctrlKey: false, altKey: false, shiftKey: false }, "Mod+Shift+A", "darwin"), false);
+});
