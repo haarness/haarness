@@ -843,6 +843,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
         project_trusted: Some(state.project_trusted),
         default_provider,
         default_model,
+        default_approval_mode: Some(state.runtime.approval_mode_default()),
         pid: Some(std::process::id()),
     })
 }

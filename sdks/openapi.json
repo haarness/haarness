@@ -5605,6 +5605,17 @@
               "null"
             ]
           },
+          "defaultApprovalMode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ApprovalMode",
+                "description": "The mode a new chat starts in when nothing chooses one for it\n(`defaults.approval_mode`), so a client can show it before the chat\nexists; absent on older servers, whose new chats start in Auto."
+              }
+            ]
+          },
           "defaultModel": {
             "type": [
               "string",

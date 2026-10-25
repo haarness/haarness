@@ -789,6 +789,11 @@ pub struct ServerInfo {
     pub default_provider: Option<String>,
     #[serde(default)]
     pub default_model: Option<String>,
+    /// The mode a new chat starts in when nothing chooses one for it
+    /// (`defaults.approval_mode`), so a client can show it before the chat
+    /// exists; absent on older servers, whose new chats start in Auto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_approval_mode: Option<ApprovalMode>,
     /// The server's process id, so a local client that found this server in a
     /// runtime record can tell it from another process on a reused port.
     #[serde(default)]

@@ -4585,11 +4585,10 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
   await newSession();
   // The pill is named after the mode it shows ("Approvals: Review").
   const toggle = page.getByRole("button", { name: /^Approvals: (Review|Auto)$/ });
-  // Before a chat exists the pill shows Auto, the default, until a mode is
-  // picked for new chats here. Picking Review and then Auto makes Auto
-  // Desktop's own choice, which covers the chats Desktop starts (see below).
-  await expect(toggle).toHaveAccessibleName("Approvals: Auto");
-  await toggle.click();
+  // Before a chat exists the pill shows the mode it will start in: the
+  // Review this project's configuration names, until a mode is picked for
+  // new chats here. Picking Auto makes it Desktop's own choice, which covers
+  // the chats Desktop starts (see below).
   await expect(toggle).toHaveAccessibleName("Approvals: Review");
   await toggle.click();
   await expect(toggle).toHaveAccessibleName("Approvals: Auto");
@@ -4682,13 +4681,35 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
     "true",
   );
   await newSession();
-  await send('!tool bash {"command":"printf manual-workspace-proof"}');
-  // Nothing was picked here, so the chat starts in the Review its
-  // configuration names.
+  // Nothing was picked here, so the pill shows the Review its configuration
+  // names before the chat exists, and the chat starts in it: an observer
+  // sees every label the pill takes while the chat is created.
   await expect(toggle).toHaveAccessibleName("Approvals: Review");
+  await page.evaluate(() => {
+    const seen = window as unknown as { pillLabels?: string[]; pillWatch?: MutationObserver };
+    seen.pillLabels = [];
+    const read = () => {
+      for (const pill of document.querySelectorAll(".approval-mode")) {
+        const label = pill.getAttribute("aria-label") ?? "";
+        if (!seen.pillLabels!.includes(label)) seen.pillLabels!.push(label);
+      }
+    };
+    read();
+    seen.pillWatch = new MutationObserver(read);
+    seen.pillWatch.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["aria-label"] });
+  });
+  await send('!tool bash {"command":"printf manual-workspace-proof"}');
   await expect(
     page.getByRole("button", { name: "Allow once", exact: true }),
   ).toBeVisible();
+  await expect(toggle).toHaveAccessibleName("Approvals: Review");
+  expect(
+    await page.evaluate(() => {
+      const seen = window as unknown as { pillLabels?: string[]; pillWatch?: MutationObserver };
+      seen.pillWatch?.disconnect();
+      return seen.pillLabels;
+    }),
+  ).toEqual(["Approvals: Review"]);
   await page.getByRole("button", { name: "Deny", exact: true }).click();
   // Collapsing the original project must not stop the Auto consumer.
   const header = page
