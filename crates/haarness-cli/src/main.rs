@@ -5029,6 +5029,7 @@ impl EarlierMode {
         let setting = match (own, previous.mode) {
             (true, ApprovalMode::Auto) => return None,
             (true, ApprovalMode::Review) => ApprovalModeSetting::Review,
+            (true, ApprovalMode::Yolo) => ApprovalModeSetting::Yolo,
             (false, _) => ApprovalModeSetting::Inherit,
         };
         Some(Self { setting, revision })
@@ -5089,6 +5090,10 @@ mod earlier_mode_tests {
             Some(ApprovalModeSetting::Review)
         );
         assert_eq!(back(info(ApprovalMode::Auto, true, true)), None);
+        assert_eq!(
+            back(info(ApprovalMode::Yolo, true, true)),
+            Some(ApprovalModeSetting::Yolo)
+        );
         assert_eq!(
             back(info(ApprovalMode::Review, false, true)),
             Some(ApprovalModeSetting::Inherit)
@@ -10342,7 +10347,8 @@ struct DefaultsSection {
     reasoning_effort: Option<String>,
     ultracode: Option<bool>,
     output_style: Option<String>,
-    /// `auto` (the default) or `review`, for chats with no mode of their own.
+    /// `auto` (the default), `review` or `yolo`, for chats with no mode of
+    /// their own. A project's file may only make it stricter.
     approval_mode: Option<haarness_protocol::ApprovalMode>,
 }
 
@@ -10615,7 +10621,8 @@ fn merge_defaults(base: &mut DefaultsSection, project: DefaultsSection) {
     if project.output_style.is_some() {
         base.output_style = project.output_style;
     }
-    // Review in any file wins, so a project cannot loosen a person's choice.
+    // Review in any file wins, so a project cannot loosen a person's choice
+    // (and a project's Yolo never gets here: `jsonconfig` drops it).
     if base.approval_mode != Some(haarness_protocol::ApprovalMode::Review) {
         base.approval_mode = project.approval_mode.or(base.approval_mode);
     }
