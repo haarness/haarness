@@ -28,7 +28,7 @@ haarness remote enable --chat CHAT_ID --name "Shared investigation"   # backgrou
 haarness remote run --chat CHAT_ID --name "Shared investigation"      # foreground
 ```
 
-Find the native chat ID in its URL or `haarness sessions list --json`. Attachments sent from Cloud clients may be images, PDFs, audio, video or text files (text is read into the message); other files are refused before the message is stored. Published chats include descendants and the project filesystem shared by all its chats; this is not a filesystem sandbox. The remote caller cannot enumerate/read/control other chat histories or host terminals. The machine checks this scope independently of the Cloud relay, and refuses publishing through an older runtime without scope enforcement.
+Find the native chat ID in its URL or `haarness sessions list --json`. Attachments sent from Cloud clients may be images, PDFs, audio, video or text files (text is read into the message); other files are refused before the message is stored. Published chats include descendants and the project filesystem shared by all its chats; this is not a filesystem sandbox. A chat without a project (one of the chat home's) can be published too: its requests reach the chat home's server as that one chat, while the chat home itself stays out of host-wide project access. The remote caller cannot enumerate/read/control other chat histories or host terminals. The machine checks this scope independently of the Cloud relay, and refuses publishing through an older runtime without scope enforcement.
 
 ## What waits on you
 
