@@ -288,7 +288,7 @@ pub(crate) fn overrides_default(bindings: &BTreeMap<String, String>, key: KeyEve
 /// shortcuts. Editing keys (Ctrl+A/E/W/K/U, Ctrl+- undo) work as in any
 /// prompt and are left to the reference.
 const FIXED_KEYS: &[&str] = &[
-    "Fixed: esc esc stop · ctrl+c clear, then stop · alt+enter queue · ctrl+g approval · tab agent · ctrl+y Auto · ctrl+b sidebar · ctrl+t thinking",
+    "Fixed: esc esc stop · ctrl+c clear, then stop · alt+enter queue · ctrl+g approval · tab agent · ctrl+y approvals · ctrl+b sidebar · ctrl+t thinking",
 ];
 
 pub(crate) fn view(input: &Value) -> Result<ManagementView> {
