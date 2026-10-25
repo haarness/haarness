@@ -1,4 +1,9 @@
-import type { PendingPermissionInfo, PermissionReview, Thread } from "@haarness/sdk";
+import type {
+  ApprovalMode,
+  PendingPermissionInfo,
+  PermissionReview,
+  Thread,
+} from "@haarness/sdk";
 import { isExplicitPermission } from "../chrome";
 
 export type ApprovalModes = Record<string, Record<string, boolean>>;
@@ -43,10 +48,16 @@ export function autoApproval(
   }
   return rules["*"] ?? false;
 }
-/** The mode chosen here for new chats on a server that keeps modes:
- * Auto unless Review was picked, as the server's own default. */
-export function newChatAuto(modes: ApprovalModes, connection: string): boolean {
-  return modes[connection]?.["*"] ?? true;
+/** The mode a new chat starts in on a server that keeps modes: the one
+ * chosen here for new chats, else the server's own default for them
+ * (`defaultApprovalMode`, Review where its configuration says so). A
+ * server that does not name one starts them in Auto. */
+export function newChatAuto(
+  modes: ApprovalModes,
+  connection: string,
+  serverDefault?: ApprovalMode | null,
+): boolean {
+  return modes[connection]?.["*"] ?? serverDefault !== "review";
 }
 /** Whether this client may answer a request for the user. An explicit
  * request (a site in the user's own Chrome) always waits for a person. */
