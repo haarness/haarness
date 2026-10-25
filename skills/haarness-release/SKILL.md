@@ -134,6 +134,9 @@ target (checked against Bun's `SHASUMS256.txt`), same steps as above:
   caches in named volumes, then the platform checks: `test-release-package.py` and
   `test-release-linux.py` per Linux architecture (arm64 natively in an arm64 container), each NSIS
   installer's contents, the x64 CLI's `--version` and `doctor` under Wine, and both installer tests.
+  It signs every Windows program and runs `release.py check-windows` before collecting each Windows
+  architecture (Signing, Windows); without the Artifact Signing account it stops unless
+  `WIN_SIGN=test` (throwaway certificate) or `ALLOW_UNSIGNED=1`.
   On Docker Desktop's arm64 kernel the amd64 image runs arm64 programs natively once the arm64 loader
   and C library sit where the kernel looks (`/lib/ld-linux-aarch64.so.1`, `/lib/aarch64-linux-gnu`).
   Rosetta refuses to start an x64 AppImage (the AppImage magic in its ELF header), so the x64 AppImage
@@ -256,10 +259,77 @@ electron-builder deletes its temporary keychain when packaging ends, so a later 
 needs the identity again (its own keychain as the script does, or `--config.dmg.sign=true` during
 packaging), then notarytool, stapler and the gate above. Add and prove it once Actions runs.
 
-New Windows code
-signing certificates need hardware keys (plan for a cloud signing service); the standalone
-`haarness-windows-*.exe` is not signed today, so SmartScreen warns on browser downloads (the
-PowerShell installer unblocks verified bytes).
+**Windows (`release-linux-windows-docker.sh`).** Unsigned, SmartScreen warns on every
+browser-downloaded file ("unknown publisher") and Smart App Control may refuse to run it; releases up
+to 0.1.4 shipped that way (the PowerShell installer unblocks verified bytes). Since June 2023 a code
+signing key must live in hardware, so no `.pfx` exists to hand electron-builder (the workflow's
+`WIN_CSC_LINK` cannot be filled). Signing goes through **Azure Artifact Signing** (formerly Trusted
+Signing): about $10 a month, open to organizations in Japan among others (Microsoft's quickstart,
+2026-10-08), the identity validated once in the Azure portal, certificates that last three days and
+rotate on their own. The account lives in Japan East (`jpe.codesigning.azure.net`);
+`~/.config/haarness-deploy/windows/artifact-signing.env` holds `WIN_SIGN_ENDPOINT`,
+`WIN_SIGN_ACCOUNT`, `WIN_SIGN_PROFILE`, `WIN_SIGN_PUBLISHER` (the certificate's subject CN),
+`AZURE_TENANT_ID` and `AZURE_CLIENT_ID`, and `client-secret` beside it the service principal's
+secret (role "Artifact Signing Certificate Profile Signer" on the account; the secret expires, so
+note its date there). The script fetches an access token per architecture and passes secrets to
+containers by name only.
+
+What is signed, all with jsign 7.6 (`windows-sign.sh` in the `haarness-wine` image; SHA-256 only,
+RFC 3161 timestamp from `timestamp.acs.microsoft.com` so signatures outlive the three-day
+certificates):
+
+- the CLI, before packaging, so the installer carries it byte for byte;
+- the plugin DLLs the NSIS installer loads while it runs (`windows-sign.sh nsis` signs copies of both
+  bundles electron-builder takes them from, NSIS's own `System`, `nsDialogs`, `nsExec`… and
+  `nsis-resources`' `StdUtils`, `UAC`, `nsis7z`…, used through `ELECTRON_BUILDER_NSIS_DIR` and
+  `ELECTRON_BUILDER_NSIS_RESOURCES_DIR`);
+- through `electron-builder-win-signed.cjs` (package.json's `build` plus a sign hook,
+  `forceCodeSigning`): `Haarness.exe`, Electron's DLLs, `elevate.exe`, the uninstaller and the
+  installer.
+
+A file already signed is left alone: Bun ships signed by its maker ("Codeblog CORP", DigiCert) and
+Electron carries Microsoft-signed `dxil.dll` and `d3dcompiler_47.dll` ("Microsoft Windows Kits
+Publisher" on arm64). The app also carries Linux
+`.node` files from npm (msgpackr-extract); only files with an MZ header are signed or checked.
+
+The gate, per architecture, before collect: `release.py check-windows --publisher <CN> --record
+records/authenticode-windows-<arch>.json <installer> <CLI>` opens the installer and its app archive
+and checks every Windows program with osslsigncode: signed by the publisher, signature and timestamp
+chaining to Microsoft Identity Verification Root CA 2020 (pinned in `scripts/authenticode-roots.pem`),
+or signed by a vendor in `AUTHENTICODE_VENDORS` with its digest intact. osslsigncode 2.2 exits 0 when
+the timestamp fails, so its report is read, not its status. `collect --authenticode <record>` stores
+the result on each Windows artifact; `publish` refuses a Windows file without a publicly trusted
+record (and checks the signer again where osslsigncode is installed) unless
+`ALLOW_UNSIGNED_WINDOWS=1` / `--allow-unsigned-windows`, the owner's explicit decision. A tag whose
+`release.py` predates `--authenticode` collects without it: its Windows files then need that flag.
+
+`WIN_SIGN=test` proves the whole path without the account: a throwaway root and certificate under
+`release-<v>/windows-test-signing`, `check-windows --test-ca`, a record with `publicTrust: false`
+that publish treats as unsigned. Proven on 0.1.4 on 2026-10-25: both installers (19 programs each)
+and both CLIs passed check-windows, the package checks still found the release CLI byte for byte and
+the checked Bun, the signed x64 CLI ran `doctor` under Wine, collect recorded the result and publish
+refused it for stable. `ALLOW_UNSIGNED=1` signs nothing.
+
+The account (set up 2026-10-25): Azure subscription "Azure subscription 1" (pay-as-you-go,
+directory `orexhaarness.onmicrosoft.com`, owner orex@haarness.ai with two-step verification),
+resource group `haarness-signing`, Artifact Signing account `haarness` (Japan East, Basic). Identity
+validation (Public, organization "Stack Forward LLC", corporate number 9010603009734, website
+stackforward.dev) was submitted 2026-10-25; the representative completes the ID check from the email
+Microsoft sends, then Microsoft takes 1-20 business days. Build login: app registration
+`haarness-release-signing` (client ID 8a9feb4b-89f4-4050-8128-4586cd4306c9, directory
+f0febf30-c13e-40a5-bfe0-df6044d513c6) with "Artifact Signing Certificate Profile Signer" on the
+account; its client secret expires **2028-10-24** (renew it before then and replace `client-secret`).
+Once validation completes, create the Public Trust certificate profile `haarness-public` on the
+account (Objects, Certificate profiles) with that validation, then run a release build without
+`WIN_SIGN=test`.
+
+Signed is not yet trusted: SmartScreen builds reputation per signing identity from downloads, so a
+new identity may still warn for days to weeks; submit a new release's installer at
+<https://www.microsoft.com/wdsi/filesubmission> (software developer) to speed that up, and keep one
+identity (renewing it does not carry reputation). An electron-updater feed must keep
+`publisherName` equal to the certificate's CN (the config sets it from `WIN_SIGN_PUBLISHER`).
+Docker Desktop mangles a same-path `-v <path>:<path>:ro` mount (the target gains a trailing `o`);
+the script uses `--mount …,readonly`.
 
 **Open launch item: Desktop has no update feed.** Installed Desktop apps check for updates only
 when `HAARNESS_UPDATE_URL` is set in their environment at runtime
