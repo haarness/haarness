@@ -1144,6 +1144,7 @@
   "Interval in seconds": "间隔（秒）",
   "Start loop": "启动循环",
   "Configure loop": "配置循环",
+  "Configure /{name}": "配置 /{name}",
   "Stop loop": "停止循环",
   "No loop configured.": "未配置循环。",
   "Use Schedules in settings for durable operating-system jobs.": "需要长期运行的系统任务，请使用设置中的计划任务。",

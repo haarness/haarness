@@ -11,6 +11,7 @@ import {
   shortcutTitles,
 } from "./settings-catalog";
 import { shortcutLabel, type SearchEntry } from "./search";
+import { toolTitle } from "./settings-lists";
 /**
  * Settings search, in two depths.
  *
@@ -24,21 +25,41 @@ import { shortcutLabel, type SearchEntry } from "./search";
  * files and commands under hundreds of rows nobody opens the palette to find,
  * and cost a round of catalog requests on every connection change.
  */
+/**
+ * One installed item a Settings page lists. Kept as data rather than as a
+ * finished entry, so its section and the word "Settings" follow a change of
+ * language without asking the server again.
+ */
+interface CatalogRow {
+  section: string;
+  /** What the row shows: the item's own name, never run through `t`. */
+  label: string;
+  target: string;
+  keywords: string;
+  key?: string;
+}
+
 export function createSettingsSearch(
   app: ReturnType<typeof useApp>,
   { inventory = true }: { inventory?: boolean } = {},
 ) {
-  const [catalog, setCatalog] = createSignal<SearchEntry[]>([]);
+  const [catalog, setCatalog] = createSignal<CatalogRow[]>([]);
+  /**
+   * `name` is the interface's English for a row of Settings, translated here;
+   * `label`, when given, is shown as it is instead (a tool's, model's or
+   * project's own name). Search matches both.
+   */
   const entry = (
     section: string,
     name: string,
     target?: string,
     keywords = "",
     key?: string,
+    label?: string,
   ): SearchEntry => ({
     key: key ?? `setting:${section}:${target ?? "section"}`,
     group: "Settings",
-    name: t(name),
+    name: label ?? t(name),
     icon: "settings",
     detail: `${t("Settings")} › ${t(settingsTitles[section])}`,
     keywords: name + " " + keywords,
@@ -69,38 +90,42 @@ export function createSettingsSearch(
         ),
       ] as const);
       if (disposed) return;
-      const entries: SearchEntry[] = [];
+      const entries: CatalogRow[] = [];
       const [skills, servers, plugins, tools, hooks, schedules] = results;
       if (skills.status === "fulfilled")
         for (const item of skills.value)
-          entries.push(
-            entry("skills", item.name, "skills:" + item.name, item.description),
-          );
+          entries.push({
+            section: "skills",
+            label: item.name,
+            target: "skills:" + item.name,
+            keywords: item.description,
+          });
       if (servers.status === "fulfilled")
         for (const item of servers.value)
-          entries.push(
-            entry(
-              "mcp",
-              item.name,
-              "mcp:" + item.name,
-              "MCP server integration",
-            ),
-          );
+          entries.push({
+            section: "mcp",
+            label: item.name,
+            target: "mcp:" + item.name,
+            keywords: "MCP server integration",
+          });
+      // A tool reads as its title on the Tools page ("apply_patch" is "Apply
+      // patch"); its name stays findable as a keyword.
       if (tools.status === "fulfilled")
         for (const item of tools.value.tools)
-          entries.push(
-            entry("tools", item.id, "tool:" + item.id, item.description),
-          );
+          entries.push({
+            section: "tools",
+            label: toolTitle(item),
+            target: "tool:" + item.id,
+            keywords: item.id + " " + item.description,
+          });
       if (plugins.status === "fulfilled")
         for (const item of plugins.value)
-          entries.push(
-            entry(
-              "plugins",
-              item.name,
-              "plugin:" + item.name,
-              item.description,
-            ),
-          );
+          entries.push({
+            section: "plugins",
+            label: item.name,
+            target: "plugin:" + item.name,
+            keywords: item.description ?? "",
+          });
       for (const [section, result] of [
         ["hooks", hooks],
         ["schedules", schedules],
@@ -109,14 +134,12 @@ export function createSettingsSearch(
         for (const item of result.value.entries ?? []) {
           const request = item.request as Record<string, unknown>;
           if (request.action === "inspect" && typeof request.id === "string")
-            entries.push(
-              entry(
-                section,
-                item.label,
-                section + ":" + request.id,
-                item.description,
-              ),
-            );
+            entries.push({
+              section,
+              label: item.label,
+              target: section + ":" + request.id,
+              keywords: item.description ?? "",
+            });
         }
       }
       setCatalog(entries);
@@ -132,18 +155,17 @@ export function createSettingsSearch(
         for (const [index, result] of extensions.entries()) {
           if (result.status !== "fulfilled") continue;
           for (const item of result.value.entries ?? [])
-            entries.push(
-              entry(
-                "extensions",
-                item.name || item.source,
+            entries.push({
+              section: "extensions",
+              label: item.name || item.source,
+              target:
                 "extension:" +
-                  (index ? "project" : "global") +
-                  ":" +
-                  item.source,
-                `${item.source} ${index ? "project" : "global"}`,
-                "extension:" + index + ":" + item.source,
-              ),
-            );
+                (index ? "project" : "global") +
+                ":" +
+                item.source,
+              keywords: `${item.source} ${index ? "project" : "global"}`,
+              key: "extension:" + index + ":" + item.source,
+            });
         }
         setCatalog([...entries]);
       }
@@ -214,19 +236,27 @@ export function createSettingsSearch(
                 project.label,
                 "project:" + project.id,
                 project.root,
+                undefined,
+                project.label,
               ),
             ),
           ...app.state.providers.flatMap((provider) =>
-            provider.models.map((model) => ({
-              ...entry(
-                "models",
-                modelName(provider.id, model.id, app.state.providers),
-                "model:" + provider.id + ":" + model.id,
-                model.id + " " + provider.name,
-              ),
-              provider: provider.id,
-            })),
+            provider.models.map((model) => {
+              const name = modelName(provider.id, model.id, app.state.providers);
+              return {
+                ...entry(
+                  "models",
+                  name,
+                  "model:" + provider.id + ":" + model.id,
+                  model.id + " " + provider.name,
+                  undefined,
+                  name,
+                ),
+                provider: provider.id,
+              };
+            }),
           ),
+          // Agents read as the Agents page and the message box name them.
           ...app.state.agents
             .filter((agent) => !agent.hidden)
             .map((agent) =>
@@ -234,7 +264,9 @@ export function createSettingsSearch(
                 "agents",
                 agent.id,
                 "agents:" + agent.id,
-                agent.description,
+                `${agent.name} ${agent.description}`,
+                undefined,
+                agent.id,
               ),
             ),
           ...app.state.commands.map((command) =>
@@ -243,9 +275,13 @@ export function createSettingsSearch(
               "Configure /" + command.name,
               "commands:" + command.name,
               command.description,
+              undefined,
+              t("Configure /{name}", { name: command.name }),
             ),
           ),
-          ...catalog(),
+          ...catalog().map((row) =>
+            entry(row.section, row.label, row.target, row.keywords, row.key, row.label),
+          ),
         ]
       : []),
   ]);

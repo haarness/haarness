@@ -1144,6 +1144,7 @@
   "Interval in seconds": "Odstęp w sekundach",
   "Start loop": "Uruchom pętlę",
   "Configure loop": "Skonfiguruj pętlę",
+  "Configure /{name}": "Konfiguruj /{name}",
   "Stop loop": "Zatrzymaj pętlę",
   "No loop configured.": "Nie skonfigurowano pętli.",
   "Use Schedules in settings for durable operating-system jobs.": "Do trwałych zadań systemu operacyjnego użyj Harmonogramów w ustawieniach.",

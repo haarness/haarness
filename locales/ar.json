@@ -1144,6 +1144,7 @@
   "Interval in seconds": "الفاصل الزمني بالثواني",
   "Start loop": "بدء الحلقة",
   "Configure loop": "تكوين الحلقة",
+  "Configure /{name}": "إعداد /{name}",
   "Stop loop": "إيقاف الحلقة",
   "No loop configured.": "لم يتم تكوين أي حلقة.",
   "Use Schedules in settings for durable operating-system jobs.": "استخدم الجداول في الإعدادات للمهام الدائمة في نظام التشغيل.",

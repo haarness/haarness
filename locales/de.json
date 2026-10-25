@@ -1144,6 +1144,7 @@
   "Interval in seconds": "Intervall in Sekunden",
   "Start loop": "Schleife starten",
   "Configure loop": "Schleife konfigurieren",
+  "Configure /{name}": "/{name} konfigurieren",
   "Stop loop": "Schleife stoppen",
   "No loop configured.": "Keine Schleife konfiguriert.",
   "Use Schedules in settings for durable operating-system jobs.": "Für dauerhafte Aufgaben des Betriebssystems die Zeitpläne in den Einstellungen verwenden.",
