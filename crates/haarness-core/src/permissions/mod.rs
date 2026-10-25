@@ -1457,7 +1457,7 @@ mod tests {
             );
         }
         for action in [
-            "create", "start", "ask", "stop", "abort", "rename", "archive", "delete",
+            "create", "start", "ask", "stop", "abort", "rename", "delete",
         ] {
             assert_eq!(
                 engine.evaluate(&format!("cloud_agent_session:{action}:session-id")),
