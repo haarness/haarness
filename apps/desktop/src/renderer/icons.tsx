@@ -86,7 +86,6 @@ import RefreshCw from "lucide-solid/icons/refresh-cw";
 import Search from "lucide-solid/icons/search";
 import Settings from "lucide-solid/icons/settings";
 import Shield from "lucide-solid/icons/shield";
-import ShieldCheck from "lucide-solid/icons/shield-check";
 import Split from "lucide-solid/icons/split";
 import Square from "lucide-solid/icons/square";
 import SquarePen from "lucide-solid/icons/square-pen";
@@ -97,6 +96,7 @@ import TriangleAlert from "lucide-solid/icons/triangle-alert";
 import Wrench from "lucide-solid/icons/wrench";
 import X from "lucide-solid/icons/x";
 import Zap from "lucide-solid/icons/zap";
+import Sparkles from "lucide-solid/icons/sparkles";
 import Undo from "lucide-solid/icons/undo-2";
 import Redo from "lucide-solid/icons/redo-2";
 
@@ -192,10 +192,12 @@ const catalog = {
   /** Guidance sent into the work under way. */
   steer: CornerDownRight,
   stop: Square,
-  // Approvals: Review asks you; Auto decides for you. Two drawings, so the
-  // pill reads the same with only its icon, in any colour.
+  // Approvals: Review asks you; Auto answers what is safe; Yolo approves
+  // everything. Three drawings, so the pill reads the same with only its
+  // icon, in any colour; Yolo's bolt is the one every client draws.
   "approval-review": Shield,
-  "approval-auto": ShieldCheck,
+  "approval-auto": Sparkles,
+  "approval-yolo": Zap,
   mic: Mic,
   jump: ArrowDown,
   alert: TriangleAlert,
