@@ -835,6 +835,25 @@ fn valid_path_component(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// A project's file may make approvals stricter, never looser: its Yolo
+/// default is ignored, so a checkout cannot make its chats approve
+/// everything. A person's own files may set it.
+fn drop_project_yolo(layers: &mut JsonLayers, config: &mut super::FileConfig, path: &Path) {
+    if !layers.project {
+        return;
+    }
+    let Some(defaults) = config.defaults.as_mut() else {
+        return;
+    };
+    if defaults.approval_mode == Some(haarness_protocol::ApprovalMode::Yolo) {
+        defaults.approval_mode = None;
+        layers.notices.push(format!(
+            "{}: ignored defaults.approval_mode \"yolo\": a project may only make approvals stricter",
+            path.display()
+        ));
+    }
+}
+
 fn apply_toml(layers: &mut JsonLayers, path: &Path) {
     if !path.exists() {
         return;
@@ -842,6 +861,7 @@ fn apply_toml(layers: &mut JsonLayers, path: &Path) {
     let result = (|| -> anyhow::Result<()> {
         let mut config: super::FileConfig = toml::from_str(&fs::read_to_string(path)?)?;
         merge_auto_review(layers, config.auto_review.take(), path);
+        drop_project_yolo(layers, &mut config, path);
         if let Some(small) = config
             .defaults
             .as_ref()
@@ -984,6 +1004,7 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
         match serde_json::from_value::<super::FileConfig>(native) {
             Ok(mut config) => {
                 merge_auto_review(layers, config.auto_review.take(), path);
+                drop_project_yolo(layers, &mut config, path);
                 super::merge_file_config(&mut layers.native, config);
             }
             Err(error) => layers
@@ -2424,6 +2445,29 @@ mod tests {
         .unwrap();
         let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
         assert_eq!(mode(&layers), Some(haarness_protocol::ApprovalMode::Review));
+        // A project never asks for Yolo; a person's own file can, and a
+        // project may still make that stricter.
+        fs::write(
+            workspace.join("haarness.json"),
+            r#"{"defaults": {"approval_mode": "yolo"}}"#,
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(mode(&layers), None);
+        fs::write(
+            config.join("haarness.json"),
+            r#"{"defaults": {"approval_mode": "yolo"}}"#,
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(mode(&layers), Some(haarness_protocol::ApprovalMode::Yolo));
+        fs::write(
+            workspace.join("haarness.json"),
+            r#"{"defaults": {"approval_mode": "auto"}}"#,
+        )
+        .unwrap();
+        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(mode(&layers), Some(haarness_protocol::ApprovalMode::Auto));
         let _ = fs::remove_dir_all(root);
     }
 

@@ -14,6 +14,11 @@ pub const APPROVAL_MODE_CAPABILITY: &str = "approval-mode.v1";
 /// Without it, Auto approves eligible requests once.
 pub const APPROVAL_REVIEW_CAPABILITY: &str = "approval-review.v1";
 
+/// Servers advertising this keep a chat in Yolo: every request that would
+/// go to Auto's reviewer or a person is approved once, without asking, as a
+/// `--yolo` turn does. Clients offer Yolo only where it is listed.
+pub const APPROVAL_YOLO_CAPABILITY: &str = "approval-mode.yolo.v1";
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
@@ -22,16 +27,46 @@ pub enum ApprovalMode {
     #[default]
     Auto,
     Review,
+    /// Every request that would go to the reviewer or a person is approved
+    /// once without asking. Deny rules, the plan agent's read-only ceiling
+    /// and requests only a person answers still hold.
+    Yolo,
 }
 
 /// What a client may ask for. `Inherit` clears this chat's own setting so it
-/// follows the agent that delegated to it (Auto at the top level).
+/// follows the agent that delegated to it (the server's default at the top
+/// level).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalModeSetting {
     Auto,
     Review,
+    Yolo,
     Inherit,
+}
+
+impl ApprovalMode {
+    /// The setting that puts a chat in this mode.
+    #[must_use]
+    pub const fn setting(self) -> ApprovalModeSetting {
+        match self {
+            Self::Auto => ApprovalModeSetting::Auto,
+            Self::Review => ApprovalModeSetting::Review,
+            Self::Yolo => ApprovalModeSetting::Yolo,
+        }
+    }
+
+    /// The mode after this one when a person cycles through them: Review,
+    /// Auto, Yolo, and back to Review. Without `yolo` (a server that does not
+    /// list [`APPROVAL_YOLO_CAPABILITY`]) Auto goes back to Review.
+    #[must_use]
+    pub const fn next(self, yolo: bool) -> Self {
+        match self {
+            Self::Review => Self::Auto,
+            Self::Auto if yolo => Self::Yolo,
+            Self::Auto | Self::Yolo => Self::Review,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -185,6 +220,33 @@ pub fn lenient_review<'de, D: Deserializer<'de>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yolo_reads_and_writes_as_yolo_and_cycles_after_auto() {
+        use ApprovalMode::{Auto, Review, Yolo};
+        assert_eq!(
+            serde_json::from_value::<ApprovalMode>(serde_json::json!("yolo")).unwrap(),
+            Yolo
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalModeSetting::Yolo).unwrap(),
+            serde_json::json!("yolo")
+        );
+        assert_eq!(Yolo.setting(), ApprovalModeSetting::Yolo);
+        let cycle = |yolo| {
+            let mut mode = Review;
+            let mut seen = vec![mode];
+            for _ in 0..3 {
+                mode = mode.next(yolo);
+                seen.push(mode);
+            }
+            seen
+        };
+        assert_eq!(cycle(true), [Review, Auto, Yolo, Review]);
+        assert_eq!(cycle(false), [Review, Auto, Review, Auto]);
+        // A chat already in Yolo on a server that stopped listing it.
+        assert_eq!(Yolo.next(false), Review);
+    }
 
     #[test]
     fn values_a_newer_server_sends_still_decode() {

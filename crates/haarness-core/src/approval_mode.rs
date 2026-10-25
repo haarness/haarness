@@ -75,14 +75,15 @@ impl ApprovalModes {
 
     /// The mode that applies to `id`: its own setting, else the setting of
     /// the agent that delegated to it, else the configured default (Auto
-    /// unless `defaults.approval_mode` says Review). A Review anywhere up the
-    /// chain wins, so switching a chat to Review stops its agents' Auto too.
-    /// Forks keep their own.
+    /// unless `defaults.approval_mode` says Review or Yolo). A Review
+    /// anywhere up the chain wins, so switching a chat to Review stops its
+    /// agents' Auto and Yolo too. Forks keep their own.
     pub(crate) async fn effective(&self, id: ThreadId) -> CoreResult<ApprovalModeInfo> {
         let mut versions = Vec::new();
         let mut seen = HashSet::new();
         let mut current = Some(id);
-        let mut auto = None;
+        // The nearest Auto or Yolo up the chain, and whose it is.
+        let mut nearest = None;
         while let Some(thread_id) = current {
             if !seen.insert(thread_id) || seen.len() > MAX_DEPTH {
                 break;
@@ -99,7 +100,9 @@ impl ApprovalModes {
                 Some(ApprovalMode::Review) => {
                     return Ok(info(id, ApprovalMode::Review, thread_id, true, &versions));
                 }
-                Some(ApprovalMode::Auto) if auto.is_none() => auto = Some(thread_id),
+                Some(mode @ (ApprovalMode::Auto | ApprovalMode::Yolo)) if nearest.is_none() => {
+                    nearest = Some((mode, thread_id));
+                }
                 _ => {}
             }
             current = if thread.is_subagent {
@@ -108,8 +111,8 @@ impl ApprovalModes {
                 None
             };
         }
-        Ok(match auto {
-            Some(source) => info(id, ApprovalMode::Auto, source, true, &versions),
+        Ok(match nearest {
+            Some((mode, source)) => info(id, mode, source, true, &versions),
             None => info(id, *self.fallback.lock(), id, false, &versions),
         })
     }
@@ -132,14 +135,20 @@ impl ApprovalModes {
         Ok(result)
     }
 
-    pub(crate) async fn is_auto(&self, id: ThreadId) -> bool {
+    /// The mode that applies to `id`, Review when it cannot be read: a chat
+    /// whose mode is unknown asks.
+    pub(crate) async fn mode(&self, id: ThreadId) -> ApprovalMode {
         match self.effective(id).await {
-            Ok(info) => info.mode == ApprovalMode::Auto,
+            Ok(info) => info.mode,
             Err(error) => {
                 tracing::warn!(%error, thread = %id, "could not read the approval mode; asking instead");
-                false
+                ApprovalMode::Review
             }
         }
+    }
+
+    pub(crate) async fn is_auto(&self, id: ThreadId) -> bool {
+        self.mode(id).await == ApprovalMode::Auto
     }
 
     /// Store `setting` for `id`. The caller holds `gate`.
@@ -155,13 +164,17 @@ impl ApprovalModes {
                 "Approvals changed in another window. Refresh and try again.".into(),
             ));
         }
-        if setting == ApprovalModeSetting::Auto {
+        let name = match setting {
+            ApprovalModeSetting::Auto => Some("Auto"),
+            ApprovalModeSetting::Yolo => Some("Yolo"),
+            ApprovalModeSetting::Review | ApprovalModeSetting::Inherit => None,
+        };
+        if let Some(name) = name {
             for ancestor in self.ancestors(id).await? {
                 if self.stored(ancestor).await?.mode == Some(ApprovalMode::Review) {
-                    return Err(CoreError::Conflict(
-                        "The chat that started this agent is set to Review. Turn on Auto there instead."
-                            .into(),
-                    ));
+                    return Err(CoreError::Conflict(format!(
+                        "The chat that started this agent is set to Review. Turn on {name} there instead."
+                    )));
                 }
             }
         }
@@ -170,6 +183,7 @@ impl ApprovalModes {
             mode: match setting {
                 ApprovalModeSetting::Auto => Some(ApprovalMode::Auto),
                 ApprovalModeSetting::Review => Some(ApprovalMode::Review),
+                ApprovalModeSetting::Yolo => Some(ApprovalMode::Yolo),
                 ApprovalModeSetting::Inherit => None,
             },
             revision,
@@ -222,7 +236,7 @@ impl ApprovalModes {
 
     /// Chats whose effective mode may change with `id`: itself and the
     /// agents it delegated to, recursively (a Review reaches even those with
-    /// their own Auto).
+    /// their own Auto or Yolo).
     pub(crate) async fn followers(&self, id: ThreadId) -> CoreResult<Vec<ThreadId>> {
         let threads = self.repository.list_threads(true).await?;
         let mut result = vec![id];
