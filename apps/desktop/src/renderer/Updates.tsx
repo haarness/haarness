@@ -202,7 +202,7 @@ export function UpdateSettings() {
           fallback={
             <Show when={update().method !== "off" && !busy()}>
               <button disabled={update().checking} onClick={() => act("check")}>
-                {update().checking ? t("Checking…") : t("Check for updates")}
+                {t("Check for updates")}
               </button>
             </Show>
           }
