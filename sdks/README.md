@@ -305,12 +305,12 @@ and profile-catalog errors also become `ApiError`. Network/decoding errors are
 and async Python preserves `CancelledError`. Authentication is never placed in
 URLs, HTTP redirects are not followed, and PTY authentication uses headers.
 
-## Cloud accounts, sessions and chats
+## Cloud accounts, workspaces and chats
 
 `HaarnessCloud` (TypeScript/Python) and `AsyncHaarnessCloud` (Python) expose every
 documented Cloud operation, including account events, host relay sockets, and scoped runtime adapters.
 This includes identity/OAuth, plans and wallets, billing, API keys and model usage,
-marketplace, devices, reusable agents, session lifecycle and schedules.
+marketplace, devices, reusable agents, workspace lifecycle and schedules.
 See [Cloud methods](CLOUD-OPERATIONS.md) and [Cloud schema](cloud-openapi.json).
 Access remains governed by the server's role and scope checks; administrative
 methods in the inventory do not grant administrative privileges.
@@ -329,19 +329,19 @@ await runtime.capabilities({ action: "disable", kind: "skill", name: "review", s
 await runtime.capabilities({ action: "enable", kind: "skill", name: "review", scope: "local" });
 ```
 
-Changes persist and apply when the runtime is idle. All chats in a Cloud session
+Changes persist and apply when the runtime is idle. All chats in a Cloud workspace
 share these capabilities. Disabling preserves files. Local/global installation
 scope is separate from catalog privacy. `manageResource` / `manage_resource`
 returns resource-specific JSON; TypeScript `managementView()` retains the typed
 server-owned form adapter for management UI resources.
 
-A **Cloud session** owns a machine, configuration and persistent filesystem.
+A **Cloud workspace** owns a machine, configuration and persistent filesystem.
 A **chat** is a root runtime thread on that machine with its own history.
 A **turn** is one response in a chat. Chats share files and compute, and may
 therefore modify the same files. A reusable Cloud agent is an optional template.
-Creating a chat allocates no machine; connecting to a stopped session does not
-start it. Start compute explicitly, then wait for `workspace.observedState` to
-be `running` before connecting.
+Creating a chat allocates no machine; connecting to a stopped workspace does not
+start it. Start compute explicitly, then wait for its `observedState` to be
+`running` before connecting.
 
 ```ts
 import { HaarnessCloud } from "@haarness/sdk";
@@ -349,15 +349,15 @@ const cloud = new HaarnessCloud({
   baseUrl: process.env.HAARNESS_CLOUD_API_URL!,
   token: process.env.HAARNESS_API_KEY,
 });
-const session = cloud.session(sessionId); // an existing running session
+const workspace = cloud.workspace(workspaceId); // an existing running workspace
 try {
-  const chat = await session.chats.create({ title: "Investigate" });
+  const chat = await workspace.chats.create({ title: "Investigate" });
   const reply = await chat.ask("Read README.md and summarize this project");
-  console.log(session.id, chat.id, reply.turn.id, reply.text);
-  const runtime = await session.connect();
+  console.log(workspace.id, chat.id, reply.turn.id, reply.text);
+  const runtime = await workspace.connect();
   console.log(await runtime.listFiles({ path: "" }));
 } finally {
-  await session.close(); // detach only; does not stop compute
+  await workspace.close(); // detach only; does not stop compute
   cloud.close();
 }
 ```
@@ -365,31 +365,32 @@ try {
 ```python
 from haarness_sdk import HaarnessCloud
 with HaarnessCloud(api_url, token=account_access_token) as cloud:
-    session = cloud.session(session_id)  # already running
+    workspace = cloud.workspace(workspace_id)  # already running
     try:
-        chat = session.chats.create({"title": "Investigate"})
+        chat = workspace.chats.create({"title": "Investigate"})
         reply = chat.ask("Read README.md and summarize this project")
-        print(session.id, chat.id, reply["turn"]["id"], reply["text"])
-        print(session.connect().list_files({"path": ""}))
+        print(workspace.id, chat.id, reply["turn"]["id"], reply["text"])
+        print(workspace.connect().list_files({"path": ""}))
     finally:
-        session.close()
+        workspace.close()
 ```
 
 Python async uses `AsyncHaarnessCloud`, `async with`, and awaits the same
-operations. `session.chats.list()` returns root chats, with native pagination
+operations. `workspace.chats.list()` returns root chats, with native pagination
 options; `get(chatId)` selects one explicitly. Chat handles provide metadata,
-rename, archive/restore (of the chat; Cloud sessions themselves have no archive),
+rename, archive/restore (of the chat; Cloud workspaces themselves have no archive),
 messages, ask, send, wait and abort. Wait/abort reject
 a turn belonging to a different chat. The connected runtime exposes the entire
 native API, including files, Git, PTYs, permissions and SSE.
 
-Create a freestyle session with `createSession`/`create_session` and
+Create a freestyle workspace with `newWorkspace`/`new_workspace` and
 `{title, configuration, start, environment, initialPrompt}`. `initialPrompt`
 (`text`, `chatTitle`, `reasoningEffort`, `approvalMode`) is delivered to a new
-chat once the session is up, even after your script exits; the returned handle
+chat once the workspace is up, even after your script exits; the returned handle
 keeps the create response in `created` (Python `created`), and
-`created.session.launch.chatId` is that chat, which `get()` reports on as
-`launch.status`. To use a template, list/get Cloud agents and include its
+`created.workspace.launch.chatId` is that chat, which `get()` reports on as
+`launch.status`. The generated `createWorkspace`/`create_workspace` makes the
+same request and returns the raw `{workspace, operation}` instead of a handle. To use a template, list/get Cloud agents and include its
 `cloudAgentId`. `HaarnessCloud()` with no address uses `HAARNESS_CLOUD_API_URL`,
 else `https://haarness.ai`, as the CLI does. Account credentials authenticate only the account
 API; runtime requests use short-lived attach tickets. Tickets renew before
@@ -416,20 +417,20 @@ WebSocket subscription account; it does not rewrite HTTP request bodies.
 WebSocket. On `ready` or `resync_required`, reload snapshots. On `entity_changed`,
 refresh the affected entity. These events are hints, not a replayable event log.
 The socket is authenticated, bounded, heartbeat-monitored and reconnectable;
-close its iterator/client to detach. Runtime `session.connect().events()` is
+close its iterator/client to detach. Runtime `workspace.connect().events()` is
 SSE carrying chat/turn/file events. Ordinary updates do not require a page reload.
 
-The native app also exposes typed `cloudAgents`, `cloudSessions`, `cloudChats`
+The native app also exposes typed `cloudAgents`, `cloudWorkspaces`, `cloudChats`
 and `cloudSchedules` methods (snake_case in Python) through its signed-in host
 adapter. These use the same intent and permission boundary as the model tools.
-The host's `workspace(id)` helper scopes native methods to an opened workspace.
+The host's `workspace(id)` helper scopes native methods to an opened project.
 
 ## Cloud routers and provider keys
 
 Every account has a default router. Additional routers share the inference service
 and have their own model allowlist and provider credentials. `system` uses Cloud
 credits; `byok` uses your upstream provider account and consumes no Cloud credits
-for model requests. Cloud session compute is billed separately. A BYOK router
+for model requests. Cloud workspace compute is billed separately. A BYOK router
 never falls back to system credentials when a key is missing or fails.
 
 ```ts
@@ -474,13 +475,13 @@ TUI `/router`, or Desktop's Cloud router selector.
 ## Cloud schedules
 
 Cloud schedules run in the Cloud worker even when your laptop and SDK are
-closed. They target explicit `sessionId` and `chatId`. The native `schedule`
+closed. They target explicit `workspaceId` and `chatId`. The native `schedule`
 tool/CLI remains the device-local scheduler; `cloud_schedule` and the Cloud SDK
 methods are a separate surface.
 
 ```ts
 const scheduled = await cloud.createCloudSchedule({
-  sessionId, chatId, name: "Daily review", prompt: "Review the latest changes",
+  workspaceId, chatId, name: "Daily review", prompt: "Review the latest changes",
   everySeconds: 86400,
 }, { headers: { "Idempotency-Key": crypto.randomUUID() } });
 const paused = await cloud.updateCloudSchedule(scheduled.id, {
@@ -506,16 +507,16 @@ be updated in place; the target chat cannot.
 
 The worker checks due work every five seconds. It coalesces missed repeats,
 prevents overlapping runs per schedule and reuses a stable runtime request ID
-on retries. It can wake an existing sleeping session under normal plan and
+on retries. It can wake an existing sleeping workspace under normal plan and
 concurrency limits, with a ten-minute startup deadline. Normal permission
 prompts become `needs_attention`; schedules never auto-approve them. Archived
 or missing target chats pause future execution when detected. Archiving does
 not interrupt an already accepted turn. Pausing/deleting a schedule prevents
 future ticks; deleting cancels pending work but does not abort an accepted turn.
-Use chat abort explicitly for that. Session deletion cancels schedules and
+Use chat abort explicitly for that. Workspace deletion cancels schedules and
 removes its machine, disk and all chats. Terminal schedule history is retained
-for 30 days. Putting a session to sleep (`stop`) retains chats/files and disk
-charges; sessions have no archive, and deleting is how their disk is freed.
+for 30 days. Putting a workspace to sleep (`stop`) retains chats/files and disk
+charges; workspaces have no archive, and deleting is how their disk is freed.
 Closing an SDK handle never stops billable compute.
 
 For upload, use the connected runtime's `writeFile`/`write_file` with `path`,
@@ -523,7 +524,7 @@ For upload, use the connected runtime's `writeFile`/`write_file` with `path`,
 use the empty-content SHA-256 revision. Stale writes return 409. Successful file
 mutations emit `files.updated`; completed turns also invalidate the explorer.
 Model attachments and filesystem uploads are distinct: put ordinary documents
-on the session filesystem when the agent should read them with native tools.
+on the workspace filesystem when the agent should read them with native tools.
 
 ## Generation and verification
 
@@ -582,7 +583,7 @@ manage other keys: creation, update, rotation and revocation require an owner/ad
 The generated API includes key list/create/update/rotate/revoke and self-context methods.
 Grant `models:read` for discovery, `models:invoke` for inference, and appropriate `workspaces`,
 `schedules`, `marketplace` or `billing:read` permissions for Cloud calls. An attach capability
-authorizes full runtime chats, files, terminal and settings in sessions in the key's account.
+authorizes full runtime chats, files, terminal and settings in workspaces in the key's account.
 Expired or revoked keys fail; SDKs never implicitly replace them with OAuth credentials.
 
 

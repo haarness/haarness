@@ -21,7 +21,7 @@ const poll = async (fn, test) => {
 const key = () => ({ headers: { "Idempotency-Key": randomUUID() } });
 const empty =
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-let session;
+let workspace;
 let eventTask;
 const changes = [];
 try {
@@ -33,21 +33,21 @@ try {
     if (!String(error).includes("closed") && error.name !== "AbortError")
       throw error;
   });
-  session = await cloud.createSession({
-    title: "SDK TypeScript shared session",
+  workspace = await cloud.newWorkspace({
+    title: "SDK TypeScript shared workspace",
     configuration: { model: "router/fixture/echo", diskGb: 1 },
     start: true,
   });
   await poll(
-    () => session.get(),
-    (s) => s.workspace.observedState === "running",
+    () => workspace.get(),
+    (s) => s.observedState === "running",
   );
-  const a = await session.chats.create({ title: "first" }),
-    b = await session.chats.create({ title: "second" });
-  assert.equal((await session.chats.list()).length, 2);
+  const a = await workspace.chats.create({ title: "first" }),
+    b = await workspace.chats.create({ title: "second" });
+  assert.equal((await workspace.chats.list()).length, 2);
   await b.rename("renamed");
   assert.equal((await b.get()).title, "renamed");
-  const runtime = await session.connect();
+  const runtime = await workspace.connect();
   const written = await runtime.writeFile({
     path: "typescript-shared.txt",
     content: "shared 雪",
@@ -63,7 +63,7 @@ try {
   assert.equal((await b.messages()).length, 0);
   const schedule = await cloud.createCloudSchedule(
     {
-      sessionId: session.id,
+      workspaceId: workspace.id,
       chatId: a.id,
       name: "TS schedule",
       prompt: "timed hello",
@@ -74,7 +74,7 @@ try {
   );
   const id = schedule.id;
   assert.equal(
-    (await cloud.listCloudSchedules({ sessionId: session.id })).items[0].id,
+    (await cloud.listCloudSchedules({ workspaceId: workspace.id })).items[0].id,
     id,
   );
   await poll(
@@ -98,15 +98,15 @@ try {
     () => cloud.cloudScheduleRuns(id),
     (p) => p.items.find((r) => r.id === run.id)?.status === "completed",
   );
-  await session.stop();
+  await workspace.stop();
   await poll(
-    () => session.get(),
-    (s) => s.workspace.observedState === "stopped",
+    () => workspace.get(),
+    (s) => s.observedState === "stopped",
   );
-  await session.start();
+  await workspace.start();
   await poll(
-    () => session.get(),
-    (s) => s.workspace.observedState === "running",
+    () => workspace.get(),
+    (s) => s.observedState === "running",
   );
   // Reuse the same runtime handle across a generation change; its stale ticket must reattach.
   assert.equal(
@@ -124,18 +124,18 @@ try {
     confirm: true,
   });
   await b.archive();
-  assert.equal((await session.chats.list()).length, 1);
+  assert.equal((await workspace.chats.list()).length, 1);
   assert.ok(
     changes.includes("schedule") && changes.includes("schedule_run"),
     JSON.stringify(changes),
   );
   console.log(
-    "typescript: session/chats, shared files, all schedule endpoints, live schedule WebSocket events and runtime generation reattachment PASS",
+    "typescript: workspace/chats, shared files, all schedule endpoints, live schedule WebSocket events and runtime generation reattachment PASS",
   );
 } finally {
-  if (session) {
+  if (workspace) {
     try {
-      const deletion = await session.delete();
+      const deletion = await workspace.delete();
       assert.equal(
         (
           await poll(
@@ -146,7 +146,7 @@ try {
         "succeeded",
       );
     } finally {
-      await session.close();
+      await workspace.close();
     }
   }
   cloud.close();

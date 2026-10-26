@@ -4,9 +4,9 @@ import { CloudApi } from "./cloud-api.js";
 import { Haarness } from "./index.js";
 import { type RequestOptions } from "./transport.js";
 import type {
-  AgentSessionCreatedResponse,
   AttachResponse,
-  CreateAgentSessionRequest,
+  CreateWorkspaceRequest,
+  WorkspaceOperationResponse,
 } from "./cloud-types.js";
 import type {
   CreateThreadRequest,
@@ -17,9 +17,9 @@ import type {
 export type * as CloudTypes from "./cloud-types.js";
 export type { CloudOptions, CloudEventOptions } from "./cloud-transport.js";
 
-/** Cloud account API. Runtime access is scoped to an explicit session or remote host. */
+/** Cloud account API. Runtime access is scoped to an explicit workspace or remote host. */
 export class HaarnessCloud extends CloudApi {
-  /** Explicit inference key; account OAuth/session credentials are never forwarded. */
+  /** Explicit inference key; account OAuth/sign-in credentials are never forwarded. */
   async router(id: string, apiKey: string): Promise<HaarnessRouter> {
     const router = await this.getRouter(id);
     return new HaarnessRouter({baseUrl:validateGateway(router.routerUrl), token:apiKey, fetch:this.fetcher, timeoutMs:this.timeoutMs});
@@ -42,22 +42,27 @@ export class HaarnessCloud extends CloudApi {
       protected override headers() { return headers(); }
     }({baseUrl: this.baseUrl + path, token: "", fetch: this.fetcher, timeoutMs: this.timeoutMs});
   }
-  /** The fetch function and timeout this client was made with, which its session runtimes use too. */
+  /** The fetch function and timeout this client was made with, which its workspace runtimes use too. */
   runtimeOptions(): { fetch: typeof globalThis.fetch; timeoutMs: number } {
     return { fetch: this.fetcher, timeoutMs: this.timeoutMs };
   }
-  session(sessionId: string): CloudSession {
-    this.segment(sessionId);
-    return new CloudSession(this, sessionId);
+  /** An existing Cloud workspace: its machine, files and chats. */
+  workspace(workspaceId: string): CloudWorkspace {
+    this.segment(workspaceId);
+    return new CloudWorkspace(this, workspaceId);
   }
-  async createSession(
-    body: CreateAgentSessionRequest,
+  /**
+   * Create a workspace (`createWorkspace`) and return its handle. `createWorkspace` itself
+   * answers the raw `{workspace, operation}`.
+   */
+  async newWorkspace(
+    body: CreateWorkspaceRequest = {},
     options?: RequestOptions,
-  ): Promise<CloudSession> {
-    const result = await this.createAgentSession(body, options);
-    const session = this.session(result.session.id);
-    session.created = result;
-    return session;
+  ): Promise<CloudWorkspace> {
+    const result = await this.createWorkspace(body, options);
+    const workspace = this.workspace(result.workspace.id);
+    workspace.created = result;
+    return workspace;
   }
 }
 
@@ -81,10 +86,10 @@ export function validateGateway(value: string): string {
 }
 
 /** One machine/filesystem, with many independent chat histories. close() only detaches. */
-export class CloudSession {
+export class CloudWorkspace {
   readonly chats: CloudChats;
-  /** What `createSession` answered, with the first message's launch (`created.session.launch?.chatId`). */
-  created?: AgentSessionCreatedResponse;
+  /** What `newWorkspace` answered, with the first message's launch (`created.workspace.launch?.chatId`). */
+  created?: WorkspaceOperationResponse;
   private runtime?: Promise<Haarness>;
   private ticket?: AttachResponse;
   private renewing?: Promise<AttachResponse>;
@@ -95,22 +100,22 @@ export class CloudSession {
     this.chats = new CloudChats(this);
   }
   get(options?: RequestOptions) {
-    return this.cloud.getAgentSession(this.id, options);
+    return this.cloud.getWorkspace(this.id, options);
   }
   start(options?: RequestOptions) {
-    return this.cloud.startAgentSession(this.id, options);
+    return this.cloud.startWorkspace(this.id, options);
   }
   stop(options?: RequestOptions) {
-    return this.cloud.stopAgentSession(this.id, options);
+    return this.cloud.stopWorkspace(this.id, options);
   }
   delete(options?: RequestOptions) {
-    return this.cloud.deleteAgentSession(this.id, options);
+    return this.cloud.deleteWorkspace(this.id, options);
   }
   private async credentials(): Promise<AttachResponse> {
     if (this.ticket && Date.parse(this.ticket.expiresAt) > Date.now() + 30_000)
       return this.ticket;
     this.renewing ??= this.cloud
-      .attachAgentSession(this.id)
+      .attachWorkspace(this.id)
       .then((ticket) => {
         validateGateway(ticket.gatewayUrl);
         this.ticket = ticket;
@@ -190,20 +195,20 @@ export class CloudSession {
 }
 
 export class CloudChats {
-  constructor(readonly session: CloudSession) {}
+  constructor(readonly workspace: CloudWorkspace) {}
   async list(
     query: ThreadQuery = {},
     options?: RequestOptions,
   ): Promise<Thread[]> {
     return (
-      await (await this.session.connect()).listThreads(query, options)
+      await (await this.workspace.connect()).listThreads(query, options)
     ).filter((thread) => !thread.parentId);
   }
   async create(
     body: CreateThreadRequest = {},
     options?: RequestOptions,
   ): Promise<CloudChat> {
-    const runtime = await this.session.connect();
+    const runtime = await this.workspace.connect();
     const info = await runtime.info(options);
     const thread = await runtime.createThread(
       {
@@ -219,38 +224,38 @@ export class CloudChats {
   get(chatId: string): CloudChat {
     if (!chatId || chatId === "." || chatId === "..")
       throw new TypeError("chatId is required");
-    return new CloudChat(this.session, chatId);
+    return new CloudChat(this.workspace, chatId);
   }
 }
 
 /** The chat ID is the native thread ID; a turn ID never substitutes for it. */
 export class CloudChat {
   constructor(
-    readonly session: CloudSession,
+    readonly workspace: CloudWorkspace,
     readonly id: string,
   ) {}
-  get sessionId(): string {
-    return this.session.id;
+  get workspaceId(): string {
+    return this.workspace.id;
   }
   async get(options?: RequestOptions) {
-    return (await this.session.connect()).getThread(this.id, options);
+    return (await this.workspace.connect()).getThread(this.id, options);
   }
   async rename(title: string, options?: RequestOptions) {
-    return (await this.session.connect()).updateThread(
+    return (await this.workspace.connect()).updateThread(
       this.id,
       { title },
       options,
     );
   }
   async archive(archived = true, options?: RequestOptions) {
-    return (await this.session.connect()).updateThread(
+    return (await this.workspace.connect()).updateThread(
       this.id,
       { archived },
       options,
     );
   }
   async messages(after?: number, options?: RequestOptions) {
-    return (await this.session.connect()).listItems(
+    return (await this.workspace.connect()).listItems(
       this.id,
       { after },
       options,
@@ -261,13 +266,13 @@ export class CloudChat {
     body: Partial<Omit<StartTurnRequest, "text">> = {},
     options?: RequestOptions,
   ) {
-    return (await this.session.connect()).chat(this.id, text, body, options);
+    return (await this.workspace.connect()).chat(this.id, text, body, options);
   }
   async send(body: StartTurnRequest, options?: RequestOptions) {
-    return (await this.session.connect()).startTurn(this.id, body, options);
+    return (await this.workspace.connect()).startTurn(this.id, body, options);
   }
   private async turn(turnId: string, options?: RequestOptions) {
-    const runtime = await this.session.connect();
+    const runtime = await this.workspace.connect();
     if ((await runtime.getTurn(turnId, options)).threadId !== this.id)
       throw new TypeError("Turn belongs to another chat");
     return runtime;
@@ -282,6 +287,6 @@ export class CloudChat {
   async abort(turnId?: string, options?: RequestOptions) {
     if (turnId)
       return (await this.turn(turnId, options)).interruptTurn(turnId, {}, options);
-    return (await this.session.connect()).interruptThreadTree(this.id, {}, options);
+    return (await this.workspace.connect()).interruptThreadTree(this.id, {}, options);
   }
 }

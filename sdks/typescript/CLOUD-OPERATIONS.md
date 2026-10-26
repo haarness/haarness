@@ -139,15 +139,6 @@
 | `update_cloud_schedule` | `updateCloudSchedule` | `PATCH /api/v1/schedules/{id}` |
 | `run_cloud_schedule` | `runCloudSchedule` | `POST /api/v1/schedules/{id}/run` |
 | `cloud_schedule_runs` | `cloudScheduleRuns` | `GET /api/v1/schedules/{id}/runs` |
-| `list_agent_sessions` | `listAgentSessions` | `GET /api/v1/sessions` |
-| `create_agent_session` | `createAgentSession` | `POST /api/v1/sessions` |
-| `get_agent_session` | `getAgentSession` | `GET /api/v1/sessions/{id}` |
-| `delete_agent_session` | `deleteAgentSession` | `DELETE /api/v1/sessions/{id}` |
-| `update_agent_session` | `updateAgentSession` | `PATCH /api/v1/sessions/{id}` |
-| `attach_agent_session` | `attachAgentSession` | `POST /api/v1/sessions/{id}/attach` |
-| `save_session_agent` | `saveSessionAgent` | `POST /api/v1/sessions/{id}/save-agent` |
-| `start_agent_session` | `startAgentSession` | `POST /api/v1/sessions/{id}/start` |
-| `stop_agent_session` | `stopAgentSession` | `POST /api/v1/sessions/{id}/stop` |
 | `usage_summary` | `usageSummary` | `GET /api/v1/telemetry/usage` |
 | `report_usage` | `reportUsage` | `POST /api/v1/telemetry/usage` |
 | `list_workspaces` | `listWorkspaces` | `GET /api/v1/workspaces` |
@@ -161,6 +152,7 @@
 | `download_export` | `downloadExport` | `GET /api/v1/workspaces/{id}/exports/{operationId}/download` |
 | `list_workspace_operations` | `listWorkspaceOperations` | `GET /api/v1/workspaces/{id}/operations` |
 | `restore_workspace` | `restoreWorkspace` | `POST /api/v1/workspaces/{id}/restore` |
+| `save_workspace_agent` | `saveWorkspaceAgent` | `POST /api/v1/workspaces/{id}/save-agent` |
 | `list_snapshots` | `listSnapshots` | `GET /api/v1/workspaces/{id}/snapshots` |
 | `create_snapshot` | `createSnapshot` | `POST /api/v1/workspaces/{id}/snapshots` |
 | `start_workspace` | `startWorkspace` | `POST /api/v1/workspaces/{id}/start` |

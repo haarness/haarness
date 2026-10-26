@@ -24,9 +24,9 @@ __all__ = [
     "types",
 ]
 
-from .cloud import HaarnessCloud, AsyncHaarnessCloud, CloudSession, AsyncCloudSession, CloudChat, AsyncCloudChat
+from .cloud import HaarnessCloud, AsyncHaarnessCloud, CloudWorkspace, AsyncCloudWorkspace, CloudChat, AsyncCloudChat
 from . import cloud_types
-__all__ += ["HaarnessCloud", "AsyncHaarnessCloud", "CloudSession", "AsyncCloudSession", "CloudChat", "AsyncCloudChat", "cloud_types"]
+__all__ += ["HaarnessCloud", "AsyncHaarnessCloud", "CloudWorkspace", "AsyncCloudWorkspace", "CloudChat", "AsyncCloudChat", "cloud_types"]
 
 from .router import HaarnessRouter, AsyncHaarnessRouter, RouterChatRequest
 from .json_socket import JsonSocket, AsyncJsonSocket

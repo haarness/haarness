@@ -1057,7 +1057,7 @@
           "attention"
         ],
         "summary": "List what waits on a person.",
-        "description": "Open permission requests and questions on the account's connected computers and Cloud sessions, and chats that\nfinished in the last 24 hours, newest first. Metadata only: open the chat to read and answer a request.\nAuth: scope `workspaces`, any member (viewer). API keys: `workspaces:read`; computer items also need\n`remote:read`. Refresh on the `attention` entity event.",
+        "description": "Open permission requests and questions on the account's connected computers and Cloud workspaces, and chats that\nfinished in the last 24 hours, newest first. Metadata only: open the chat to read and answer a request.\nAuth: scope `workspaces`, any member (viewer). API keys: `workspaces:read`; computer items also need\n`remote:read`. Refresh on the `attention` entity event.",
         "operationId": "list_attention",
         "parameters": [
           {
@@ -2660,7 +2660,7 @@
         "tags": [
           "cloud-agents"
         ],
-        "summary": "Delete a template while preserving existing sessions.",
+        "summary": "Delete a template while preserving existing workspaces.",
         "operationId": "delete_cloud_agent",
         "parameters": [
           {
@@ -3901,7 +3901,7 @@
         "tags": [
           "identity"
         ],
-        "summary": "What deleting the caller's account would do: the address to type, whether a two-factor code is needed, the\nsessions destroyed, the plan cancelled, the purchased credits forfeited and each team's outcome.",
+        "summary": "What deleting the caller's account would do: the address to type, whether a two-factor code is needed, the\nCloud workspaces destroyed, the plan cancelled, the purchased credits forfeited and each team's outcome.",
         "description": "Auth: `cookie|bearer` with the `account` scope (not API keys).",
         "operationId": "account_deletion_preview",
         "responses": {
@@ -3941,7 +3941,7 @@
         "tags": [
           "identity"
         ],
-        "summary": "Delete the caller's account, at once and for good. Every sign-in ends (a browser's cookies are cleared), the\nCloud sessions and their files are destroyed, a paid plan is cancelled and the personal account closes with any\nteam nobody else belongs to; the person leaves their other teams. Invoices, payments and the ledger are kept.",
+        "summary": "Delete the caller's account, at once and for good. Every sign-in ends (a browser's cookies are cleared), the\nCloud workspaces and their files are destroyed, a paid plan is cancelled and the personal account closes with any\nteam nobody else belongs to; the person leaves their other teams. Invoices, payments and the ledger are kept.",
         "description": "Auth: `cookie+csrf|bearer` with the `account` scope (not API keys), plus the typed confirmation and, when the\naccount uses two-factor authentication, a current code.",
         "operationId": "account_deletion",
         "requestBody": {
@@ -5161,7 +5161,7 @@
           "push"
         ],
         "summary": "Register a Live Activity's push token.",
-        "description": "A chat the phone follows live: on an iPhone a Live Activity (the id is its `ActivityKit` id, the token its own\npush token), on an Android phone an ongoing notification (`platform: android`, the id the app's, the token the\ndevice's FCM registration token). Cloud updates it while its chat waits on you and ends it when the chat finishes.\nRegistering again refreshes the token. The target must be a computer, shared chat or Cloud session of an account\nyou belong to.\nAuth: native bearer token of a sign-in (refresh family) with scope `account`; cookies and API keys get `403`.",
+        "description": "A chat the phone follows live: on an iPhone a Live Activity (the id is its `ActivityKit` id, the token its own\npush token), on an Android phone an ongoing notification (`platform: android`, the id the app's, the token the\ndevice's FCM registration token). Cloud updates it while its chat waits on you and ends it when the chat finishes.\nRegistering again refreshes the token. The target must be a computer, shared chat or Cloud workspace of an account\nyou belong to.\nAuth: native bearer token of a sign-in (refresh family) with scope `account`; cookies and API keys get `403`.",
         "operationId": "register_live_activity",
         "parameters": [
           {
@@ -6789,7 +6789,7 @@
           "reports"
         ],
         "summary": "Report an agent's reply: why (a fixed reason and an optional note), where it appeared and its text. Google Play\nasks chat apps to let people report offensive AI output without leaving the app; the Haarness apps send it here.",
-        "description": "Auth: `cookie+csrf|bearer` (scope `workspaces`; a member of the chat's account, viewer or above). An API key needs\n`remote:read` for a computer's chat and `workspaces:read` for a Cloud session's. `Idempotency-Key` supported. At\nmost 20 reports per person per hour.",
+        "description": "Auth: `cookie+csrf|bearer` (scope `workspaces`; a member of the chat's account, viewer or above). An API key needs\n`remote:read` for a computer's chat and `workspaces:read` for a Cloud workspace's. `Idempotency-Key` supported. At\nmost 20 reports per person per hour.",
         "operationId": "report_ai_output",
         "requestBody": {
           "content": {
@@ -6843,7 +6843,7 @@
             }
           },
           "404": {
-            "description": "No such computer, shared chat or Cloud session in an account of the caller",
+            "description": "No such computer, shared chat or Cloud workspace in an account of the caller",
             "content": {
               "application/json": {
                 "schema": {
@@ -7582,7 +7582,7 @@
         "tags": [
           "cloud-schedules"
         ],
-        "summary": "Durable Cloud worker scheduling; targets explicit session and chat identities.",
+        "summary": "Durable Cloud worker scheduling; targets explicit workspace and chat identities.",
         "operationId": "list_cloud_schedules",
         "parameters": [
           {
@@ -7614,7 +7614,7 @@
             }
           },
           {
-            "name": "sessionId",
+            "name": "workspaceId",
             "in": "query",
             "required": false,
             "schema": {
@@ -7660,7 +7660,7 @@
         "tags": [
           "cloud-schedules"
         ],
-        "summary": "Durable Cloud worker scheduling; targets explicit session and chat identities.",
+        "summary": "Durable Cloud worker scheduling; targets explicit workspace and chat identities.",
         "operationId": "create_cloud_schedule",
         "parameters": [
           {
@@ -7799,7 +7799,7 @@
         "tags": [
           "cloud-schedules"
         ],
-        "summary": "Durable Cloud worker scheduling; targets explicit session and chat identities.",
+        "summary": "Durable Cloud worker scheduling; targets explicit workspace and chat identities.",
         "operationId": "get_cloud_schedule",
         "parameters": [
           {
@@ -7849,7 +7849,7 @@
         "tags": [
           "cloud-schedules"
         ],
-        "summary": "Durable Cloud worker scheduling; targets explicit session and chat identities.",
+        "summary": "Durable Cloud worker scheduling; targets explicit workspace and chat identities.",
         "operationId": "delete_cloud_schedule",
         "parameters": [
           {
@@ -7892,7 +7892,7 @@
         "tags": [
           "cloud-schedules"
         ],
-        "summary": "Durable Cloud worker scheduling; targets explicit session and chat identities.",
+        "summary": "Durable Cloud worker scheduling; targets explicit workspace and chat identities.",
         "operationId": "update_cloud_schedule",
         "parameters": [
           {
@@ -7954,7 +7954,7 @@
         "tags": [
           "cloud-schedules"
         ],
-        "summary": "Durable Cloud worker scheduling; targets explicit session and chat identities.",
+        "summary": "Durable Cloud worker scheduling; targets explicit workspace and chat identities.",
         "operationId": "run_cloud_schedule",
         "parameters": [
           {
@@ -8014,7 +8014,7 @@
         "tags": [
           "cloud-schedules"
         ],
-        "summary": "Durable Cloud worker scheduling; targets explicit session and chat identities.",
+        "summary": "Durable Cloud worker scheduling; targets explicit workspace and chat identities.",
         "operationId": "cloud_schedule_runs",
         "parameters": [
           {
@@ -8062,614 +8062,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Page_CloudScheduleRunDto"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Permission denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/sessions": {
-      "get": {
-        "tags": [
-          "cloud-agents"
-        ],
-        "summary": "List the account's sessions, newest first. Every session is listed until it is deleted.",
-        "operationId": "list_agent_sessions",
-        "parameters": [
-          {
-            "name": "cloudAgentId",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int32",
-              "minimum": 0
-            }
-          },
-          {
-            "name": "accountId",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Page_AgentSessionDto"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Authentication required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Permission denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "cloud-agents"
-        ],
-        "summary": "Create an isolated Fly session with its own configuration. cloudAgentId is optional; configuration overrides supplied fields from the template/defaults. start=false prepares it stopped. `initialPrompt` makes Cloud send a first message into a new chat once the session is ready (requires start; capability `session_initial_prompt`); `session.launch` reports its chat id and delivery.",
-        "operationId": "create_agent_session",
-        "parameters": [
-          {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "description": "Reuse on retries",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateAgentSessionRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentSessionCreatedResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Authentication required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Permission denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/sessions/{id}": {
-      "get": {
-        "tags": [
-          "cloud-agents"
-        ],
-        "summary": "Read a session, its runtime status and the delivery of its first message (launch).",
-        "operationId": "get_agent_session",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentSessionDto"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Authentication required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Permission denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "cloud-agents"
-        ],
-        "summary": "Destroy a session and its persistent disk.",
-        "operationId": "delete_agent_session",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "202": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkspaceOperationResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Authentication required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Permission denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      },
-      "patch": {
-        "tags": [
-          "cloud-agents"
-        ],
-        "summary": "Rename/archive or update session configuration and write-only environment. Configuration/environment updates require the current version and a stopped runtime. Supplied maps replace; omitted fields are preserved.",
-        "operationId": "update_agent_session",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateAgentSessionRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentSessionDto"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Authentication required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Permission denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/sessions/{id}/attach": {
-      "post": {
-        "tags": [
-          "cloud-agents"
-        ],
-        "summary": "Mint a short-lived session gateway ticket.",
-        "operationId": "attach_agent_session",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AttachResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Authentication required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Permission denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/sessions/{id}/save-agent": {
-      "post": {
-        "tags": [
-          "cloud-agents"
-        ],
-        "summary": "Save a session's current configuration as an inert template with a fresh SSH key.\nRequires the current session version. Environment is copied only when includeEnvironment=true.",
-        "operationId": "save_session_agent",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SaveSessionAgentRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Saved template",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CloudAgentDto"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Permission denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Stale session revision",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/sessions/{id}/start": {
-      "post": {
-        "tags": [
-          "cloud-agents"
-        ],
-        "summary": "Resume a session with its latest saved configuration and persistent files.",
-        "operationId": "start_agent_session",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "202": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkspaceOperationResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Authentication required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Permission denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/sessions/{id}/stop": {
-      "post": {
-        "tags": [
-          "cloud-agents"
-        ],
-        "summary": "Stop session compute while preserving its disk.",
-        "operationId": "stop_agent_session",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "202": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkspaceOperationResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Authentication required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             }
@@ -8837,8 +8229,8 @@
         "tags": [
           "workspaces"
         ],
-        "summary": "The workspaces of an account.",
-        "description": "Auth: `cookie|bearer`. Cursor-paginated (§5.1): `{items, nextCursor}`, `limit` 1..=200 (default 50).",
+        "summary": "The workspaces of an account, newest first. Every workspace is listed until it is deleted.",
+        "description": "Auth: `cookie|bearer`. Cursor-paginated (§5.1): `{items, nextCursor}`, `limit` 1..=100 (default 50).",
         "operationId": "list_workspaces",
         "parameters": [
           {
@@ -8852,8 +8244,19 @@
             }
           },
           {
+            "name": "cloudAgentId",
+            "in": "query",
+            "description": "Only workspaces started from this template",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
             "name": "cursor",
             "in": "query",
+            "description": "`nextCursor` of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -8862,7 +8265,7 @@
           {
             "name": "limit",
             "in": "query",
-            "description": "1..=200, default 50",
+            "description": "1..=100, default 50",
             "required": false,
             "schema": {
               "type": "integer",
@@ -8918,8 +8321,8 @@
         "tags": [
           "workspaces"
         ],
-        "summary": "Create a workspace (and, unless `start = false`, start it).",
-        "description": "Auth: `cookie+csrf|bearer`, role ≥ builder, bearer scope `workspaces`. Answers `202` with the workspace and the\n`provision` operation; poll `GET /api/v1/operations/{id}/events` for progress.",
+        "summary": "Create a workspace (and, unless `start = false`, start it), blank or from a Cloud agent template.",
+        "description": "Auth: `cookie+csrf|bearer`, role ≥ builder, bearer scope `workspaces`. `cloudAgentId` is optional;\n`configuration` overrides the fields it supplies over the template or the defaults. `initialPrompt` makes Cloud\nsend a first message into a new chat once the workspace is ready (requires start; capability\n`workspace_initial_prompt`); `workspace.launch` reports its chat id and delivery. Answers `202` with the\nworkspace and the `provision` operation; poll `GET /api/v1/operations/{id}/events` for progress.",
         "operationId": "create_workspace",
         "parameters": [
           {
@@ -8969,7 +8372,7 @@
             }
           },
           "400": {
-            "description": "`validation_failed`: `name`, `diskGb` (1..=500) or `template.url`",
+            "description": "`validation_failed`: `title`, `configuration`, `initialPrompt.*`, or a deprecated field",
             "content": {
               "application/json": {
                 "schema": {
@@ -9090,8 +8493,8 @@
         "tags": [
           "workspaces"
         ],
-        "summary": "One workspace.",
-        "description": "Auth: `cookie|bearer`. A workspace of another tenant is a `404`, never a `403`.",
+        "summary": "One workspace: its settings, runtime status and the delivery of its first message (`launch`).",
+        "description": "Auth: `cookie|bearer`. A workspace of another tenant is a `404`, never a `403`. Every `{id}` also accepts the\nid the workspace had before the rename.",
         "operationId": "get_workspace",
         "parameters": [
           {
@@ -9142,7 +8545,7 @@
         "tags": [
           "workspaces"
         ],
-        "summary": "Delete a workspace.",
+        "summary": "Delete a workspace and its persistent disk.",
         "description": "Auth: `cookie+csrf|bearer`, bearer scope `workspaces`. Asynchronous: the row moves to `Deleting` and the\nreturned operation finishes the teardown.",
         "operationId": "delete_workspace",
         "parameters": [
@@ -9238,8 +8641,8 @@
         "tags": [
           "workspaces"
         ],
-        "summary": "Rename a workspace or change its idle timeout or keep-alive.",
-        "description": "Auth: `cookie+csrf|bearer`, bearer scope `workspaces`.",
+        "summary": "Rename a workspace, change its settings and write-only environment, or its idle timeout or keep-alive.",
+        "description": "Auth: `cookie+csrf|bearer`, bearer scope `workspaces`. Configuration/environment updates require the current\n`version` and a stopped workspace; supplied maps replace, omitted fields are kept.",
         "operationId": "patch_workspace",
         "parameters": [
           {
@@ -9287,7 +8690,7 @@
             }
           },
           "400": {
-            "description": "`validation_failed`: `name`, or `idleTimeoutSecs` outside 1..=86400",
+            "description": "`validation_failed`: `title`, `configuration`, or `idleTimeoutSecs` outside 1..=86400",
             "content": {
               "application/json": {
                 "schema": {
@@ -9327,7 +8730,7 @@
             }
           },
           "409": {
-            "description": "`conflict`: the new name is taken in the account",
+            "description": "`conflict`: a stale `version`, or settings saved while the workspace runs",
             "content": {
               "application/json": {
                 "schema": {
@@ -9787,6 +9190,76 @@
           },
           "409": {
             "description": "`invalid_state` (the workspace must be Stopped), `conflict` (a restore is already queued) or `idempotency_mismatch`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/save-agent": {
+      "post": {
+        "tags": [
+          "workspaces"
+        ],
+        "summary": "Save a workspace's current configuration as an inert template with a fresh SSH key.\nRequires the current workspace version. Environment is copied only when includeEnvironment=true.",
+        "operationId": "save_workspace_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveWorkspaceAgentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Saved template",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudAgentDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale workspace revision",
             "content": {
               "application/json": {
                 "schema": {
@@ -12480,11 +11953,11 @@
       },
       "AccountDeletionPreviewDto": {
         "type": "object",
-        "description": "`GET /api/v1/me/deletion`: what deleting the caller's account does, shown before they confirm. Deleted: the\nperson's sign-ins, devices, keys, computers, Cloud sessions with their files, backups and exports, and the\npersonal account with any team nobody else belongs to. Kept: invoices, payments and the ledger, which the law\nrequires, and the audit trail.",
+        "description": "`GET /api/v1/me/deletion`: what deleting the caller's account does, shown before they confirm. Deleted: the\nperson's sign-ins, devices, keys, computers, Cloud workspaces with their files, backups and exports, and the\npersonal account with any team nobody else belongs to. Kept: invoices, payments and the ledger, which the law\nrequires, and the audit trail.",
         "required": [
           "confirmation",
           "mfaRequired",
-          "sessions",
+          "workspaces",
           "subscriptionCancelled",
           "purchasedCredits",
           "teams",
@@ -12507,12 +11980,6 @@
             "$ref": "#/components/schemas/Amount",
             "description": "Purchased credits, forfeited with the account."
           },
-          "sessions": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Cloud sessions destroyed with their files.",
-            "minimum": 0
-          },
           "subscriptionCancelled": {
             "type": "boolean",
             "description": "Whether a paid plan is cancelled at once."
@@ -12522,6 +11989,12 @@
             "items": {
               "$ref": "#/components/schemas/AccountDeletionTeamDto"
             }
+          },
+          "workspaces": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Cloud workspaces destroyed with their files.",
+            "minimum": 0
           }
         }
       },
@@ -12674,7 +12147,7 @@
             "type": "object",
             "default": {},
             "additionalProperties": {
-              "$ref": "#/components/schemas/SessionAgent"
+              "$ref": "#/components/schemas/WorkspaceAgent"
             },
             "propertyNames": {
               "type": "string"
@@ -12764,7 +12237,7 @@
             "type": "object",
             "default": {},
             "additionalProperties": {
-              "$ref": "#/components/schemas/SessionSkill"
+              "$ref": "#/components/schemas/WorkspaceSkill"
             },
             "propertyNames": {
               "type": "string"
@@ -12779,111 +12252,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "AgentSessionCreatedResponse": {
-        "type": "object",
-        "required": [
-          "session",
-          "operation"
-        ],
-        "properties": {
-          "operation": {
-            "$ref": "#/components/schemas/OperationDto"
-          },
-          "session": {
-            "$ref": "#/components/schemas/AgentSessionDto"
-          }
-        }
-      },
-      "AgentSessionDto": {
-        "type": "object",
-        "required": [
-          "id",
-          "accountId",
-          "configuration",
-          "version",
-          "environmentNames",
-          "title",
-          "archived",
-          "createdAt",
-          "updatedAt",
-          "workspace"
-        ],
-        "properties": {
-          "accountId": {
-            "$ref": "#/components/schemas/AccountId"
-          },
-          "agentSnapshot": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/CloudAgentDto"
-              }
-            ]
-          },
-          "archived": {
-            "type": "boolean",
-            "description": "Always `false`: sessions are no longer archived, and deleting one is how its storage is freed. Kept so app\nbuilds made before the change still decode a session; new clients ignore it.",
-            "deprecated": true
-          },
-          "cloudAgentId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "configuration": {
-            "$ref": "#/components/schemas/AgentConfiguration"
-          },
-          "createdAt": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "environmentNames": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "launch": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/SessionLaunchDto",
-                "description": "How Cloud is delivering the session's first message; absent on sessions created without one."
-              }
-            ]
-          },
-          "sshPublicKey": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "title": {
-            "type": "string"
-          },
-          "updatedAt": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "version": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "workspace": {
-            "$ref": "#/components/schemas/WorkspaceDto"
-          }
-        }
       },
       "AiOutputReason": {
         "type": "string",
@@ -13019,24 +12387,24 @@
             ],
             "format": "date-time"
           },
-          "sessionId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
           "source": {
             "$ref": "#/components/schemas/AttentionSource"
           },
           "threadId": {
             "type": "string"
+          },
+          "workspaceId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },
       "AiOutputReportRequest": {
         "type": "object",
-        "description": "`POST /api/v1/reports/ai-output`: one reply of an agent, why it is reported, and where it is. The place takes the\nshape of a Live Activity's target: a computer's chat (`source` `host`, with `hostId` or the shared chat's\n`remoteSessionId`, and the runtime's `projectId`), or a Cloud session's (`source` `session`, `sessionId`).\nUnknown fields are ignored, so newer apps may send more.",
+        "description": "`POST /api/v1/reports/ai-output`: one reply of an agent, why it is reported, and where it is. The place takes the\nshape of a Live Activity's target: a computer's chat (`source` `host`, with `hostId` or the shared chat's\n`remoteSessionId`, and the runtime's `projectId`), or a Cloud workspace's (`source` `workspace`, `workspaceId`).\nUnknown fields are ignored, so newer apps may send more.",
         "required": [
           "reason",
           "source",
@@ -13103,19 +12471,19 @@
             ],
             "format": "uuid"
           },
-          "sessionId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
           "source": {
             "$ref": "#/components/schemas/AttentionSource"
           },
           "threadId": {
             "type": "string",
             "description": "The chat (runtime thread id), 1–200 characters."
+          },
+          "workspaceId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -13461,7 +12829,7 @@
           },
           "connected": {
             "type": "boolean",
-            "description": "The computer is online or the session is running."
+            "description": "The computer is online or the workspace is running."
           },
           "custom": {
             "type": "boolean",
@@ -13534,20 +12902,6 @@
             "type": "boolean",
             "description": "The finished turn was started by a schedule."
           },
-          "sessionId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Cloud session items: the session."
-          },
-          "sessionTitle": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "source": {
             "$ref": "#/components/schemas/AttentionSource"
           },
@@ -13562,6 +12916,20 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "workspaceId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Cloud workspace items: the workspace."
+          },
+          "workspaceTitle": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -13577,10 +12945,10 @@
       },
       "AttentionSource": {
         "type": "string",
-        "description": "Where an item was observed: a connected computer (`remote_hosts`) or a Cloud session (`agent_sessions`).",
+        "description": "Where an item was observed: a connected computer (`remote_hosts`) or a Cloud workspace (`workspaces`).",
         "enum": [
           "host",
-          "session"
+          "workspace"
         ]
       },
       "AuthKind": {
@@ -14186,7 +13554,7 @@
         "required": [
           "id",
           "accountId",
-          "sessionId",
+          "workspaceId",
           "chatId",
           "name",
           "prompt",
@@ -14252,10 +13620,6 @@
           "prompt": {
             "type": "string"
           },
-          "sessionId": {
-            "type": "string",
-            "format": "uuid"
-          },
           "timezone": {
             "type": "string"
           },
@@ -14266,6 +13630,10 @@
           "version": {
             "type": "integer",
             "format": "int64"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -14310,7 +13678,7 @@
           "id",
           "scheduleId",
           "accountId",
-          "sessionId",
+          "workspaceId",
           "chatId",
           "scheduledAt",
           "status",
@@ -14348,10 +13716,6 @@
             "type": "string",
             "format": "date-time"
           },
-          "sessionId": {
-            "type": "string",
-            "format": "uuid"
-          },
           "status": {
             "type": "string"
           },
@@ -14365,6 +13729,10 @@
           "updatedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -14606,67 +13974,6 @@
           }
         }
       },
-      "CreateAgentSessionRequest": {
-        "type": "object",
-        "properties": {
-          "accountId": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/AccountId"
-              }
-            ]
-          },
-          "cloudAgentId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "configuration": {
-            "description": "Supplied top-level fields override the template/defaults. Maps replace as a whole."
-          },
-          "environment": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          },
-          "initialPrompt": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/InitialPromptRequest",
-                "description": "A first message Cloud sends once the session is ready, into a new chat, so it reaches the agent even when the\nperson closes the tab or the app first. Requires the session to start (`start` not `false`). Check for the\n`session_initial_prompt` capability first: an older Cloud refuses the field."
-              }
-            ]
-          },
-          "start": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "title": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "additionalProperties": false
-      },
       "CreateBudgetRequest": {
         "type": "object",
         "required": [
@@ -14749,7 +14056,7 @@
       "CreateCloudScheduleRequest": {
         "type": "object",
         "required": [
-          "sessionId",
+          "workspaceId",
           "chatId",
           "name",
           "prompt"
@@ -14788,16 +14095,17 @@
           "prompt": {
             "type": "string"
           },
-          "sessionId": {
-            "type": "string",
-            "format": "uuid"
-          },
           "timezone": {
             "type": [
               "string",
               "null"
             ],
             "description": "IANA time zone (`Europe/Paris`) for `cron` and for display. Defaults to UTC."
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The workspace whose chat runs the prompt."
           }
         },
         "additionalProperties": false
@@ -14961,10 +14269,7 @@
       },
       "CreateWorkspaceRequest": {
         "type": "object",
-        "required": [
-          "name",
-          "template"
-        ],
+        "description": "`POST /api/v1/workspaces`. Every field is optional: a blank workspace from the defaults, or one that starts from\na Cloud agent template (`cloudAgentId`), with `configuration` overriding the fields it supplies.",
         "properties": {
           "accountId": {
             "oneOf": [
@@ -14976,16 +14281,56 @@
               }
             ]
           },
+          "cloudAgentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "configuration": {
+            "description": "Supplied top-level fields override the template/defaults. Maps replace as a whole."
+          },
           "diskGb": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "default 5"
+            "description": "Deprecated: use `configuration.diskGb`.",
+            "deprecated": true
+          },
+          "environment": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "description": "Write-only environment variables."
+          },
+          "initialPrompt": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/InitialPromptRequest",
+                "description": "A first message Cloud sends once the workspace is ready, into a new chat, so it reaches the agent even when\nthe person closes the tab or the app first. Requires the workspace to start (`start` not `false`). Check for\nthe `workspace_initial_prompt` capability first: an older Cloud refuses the field."
+              }
+            ]
           },
           "name": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Deprecated (the workspace API before templates): used as the title.",
+            "deprecated": true
           },
           "projectId": {
             "oneOf": [
@@ -14995,14 +14340,16 @@
               {
                 "$ref": "#/components/schemas/ProjectId"
               }
-            ]
+            ],
+            "deprecated": true
           },
           "region": {
             "type": [
               "string",
               "null"
             ],
-            "description": "default from config"
+            "description": "Deprecated: use `configuration.region`.",
+            "deprecated": true
           },
           "resourceClass": {
             "oneOf": [
@@ -15010,29 +14357,48 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/ResourceClass",
-                "description": "default shared-2cpu-4gb"
+                "$ref": "#/components/schemas/ResourceClass"
               }
-            ]
+            ],
+            "description": "Deprecated: use `configuration.resourceClass`.",
+            "deprecated": true
           },
           "start": {
             "type": [
               "boolean",
               "null"
             ],
-            "description": "default true: provision then start"
+            "description": "Default true: provision, then start. `false` prepares it stopped."
           },
           "startupCommand": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Deprecated: use `configuration.startupCommand`.",
+            "deprecated": true
           },
           "template": {
-            "$ref": "#/components/schemas/WorkspaceTemplate",
-            "description": "`{\"kind\":\"empty\"}` | `{\"kind\":\"git\",\"url\":\"https://…\",\"ref\":\"main\"}`"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceTemplate"
+              }
+            ],
+            "description": "Deprecated: use `configuration.repository`.",
+            "deprecated": true
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Defaults to the template's name, else \"New workspace\"."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreatedAccountApiKeyResponse": {
         "type": "object",
@@ -16035,7 +15401,7 @@
       },
       "InitialPromptRequest": {
         "type": "object",
-        "description": "The first message of a new session (`initialPrompt`). Attachments are not carried: send those from the chat.",
+        "description": "The first message of a new workspace (`initialPrompt`). Attachments are not carried: send those from the chat.",
         "required": [
           "text"
         ],
@@ -16063,7 +15429,7 @@
               "string",
               "null"
             ],
-            "description": "Reasoning effort for this message (`low`, `high`, …); omitted, the session's own applies."
+            "description": "Reasoning effort for this message (`low`, `high`, …); omitted, the workspace's own applies."
           },
           "text": {
             "type": "string",
@@ -17407,7 +16773,7 @@
           },
           {
             "type": "object",
-            "description": "Delivers each new Cloud session's first message (`initialPrompt`) once its runtime is ready, then follows that\nturn until it ends.",
+            "description": "Delivers each new Cloud workspace's first message (`initialPrompt`) once its runtime is ready, then follows that\nturn until it ends.",
             "required": [
               "payload",
               "kind"
@@ -17416,18 +16782,18 @@
               "kind": {
                 "type": "string",
                 "enum": [
-                  "session_launch_sweep"
+                  "workspace_launch_sweep"
                 ]
               },
               "payload": {
                 "type": "object",
-                "description": "Delivers each new Cloud session's first message (`initialPrompt`) once its runtime is ready, then follows that\nturn until it ends."
+                "description": "Delivers each new Cloud workspace's first message (`initialPrompt`) once its runtime is ready, then follows that\nturn until it ends."
               }
             }
           },
           {
             "type": "object",
-            "description": "Reads what each running Cloud session waits on (pending permissions and questions) and which of its root\nchats finished, straight from the runtime; never feeds an idle-stop decision.",
+            "description": "Reads what each running Cloud workspace waits on (pending permissions and questions) and which of its root\nchats finished, straight from the runtime; never feeds an idle-stop decision.",
             "required": [
               "payload",
               "kind"
@@ -17436,12 +16802,12 @@
               "kind": {
                 "type": "string",
                 "enum": [
-                  "session_attention_sweep"
+                  "workspace_attention_sweep"
                 ]
               },
               "payload": {
                 "type": "object",
-                "description": "Reads what each running Cloud session waits on (pending permissions and questions) and which of its root\nchats finished, straight from the runtime; never feeds an idle-stop decision."
+                "description": "Reads what each running Cloud workspace waits on (pending permissions and questions) and which of its root\nchats finished, straight from the runtime; never feeds an idle-stop decision."
               }
             }
           },
@@ -17629,7 +16995,7 @@
           },
           {
             "type": "object",
-            "description": "What a deleted account still has outside the database, and what it still holds in it: it cancels the\naccount's Stripe subscription at once, waits for its Cloud sessions to be destroyed, then deletes their backups\nand exports and the account's profile archives from object storage and erases its sessions' records, Cloud\nagents, schedules, projects, routers and marketplace listings, keeping only nameless rows the ledger names\n(queued by `cloud_store::account_deletion::execute`).",
+            "description": "What a deleted account still has outside the database, and what it still holds in it: it cancels the\naccount's Stripe subscription at once, waits for its Cloud workspaces to be destroyed, then deletes their backups\nand exports and the account's profile archives from object storage and erases its workspaces' records, Cloud\nagents, schedules, projects, routers and marketplace listings, keeping only nameless rows the ledger names\n(queued by `cloud_store::account_deletion::execute`).",
             "required": [
               "payload",
               "kind"
@@ -17643,7 +17009,7 @@
               },
               "payload": {
                 "type": "object",
-                "description": "What a deleted account still has outside the database, and what it still holds in it: it cancels the\naccount's Stripe subscription at once, waits for its Cloud sessions to be destroyed, then deletes their backups\nand exports and the account's profile archives from object storage and erases its sessions' records, Cloud\nagents, schedules, projects, routers and marketplace listings, keeping only nameless rows the ledger names\n(queued by `cloud_store::account_deletion::execute`).",
+                "description": "What a deleted account still has outside the database, and what it still holds in it: it cancels the\naccount's Stripe subscription at once, waits for its Cloud workspaces to be destroyed, then deletes their backups\nand exports and the account's profile archives from object storage and erases its workspaces' records, Cloud\nagents, schedules, projects, routers and marketplace listings, keeping only nameless rows the ledger names\n(queued by `cloud_store::account_deletion::execute`).",
                 "required": [
                   "account_id"
                 ],
@@ -17835,7 +17201,7 @@
       },
       "LiveActivityTargetDto": {
         "type": "object",
-        "description": "The chat a Live Activity follows: `source: host` with `hostId` (and `projectId`), or `remoteSessionId` for a\nshared chat; `source: session` with `sessionId`.",
+        "description": "The chat a Live Activity follows: `source: host` with `hostId` (and `projectId`), or `remoteSessionId` for a\nshared chat; `source: workspace` with `workspaceId`.",
         "required": [
           "source"
         ],
@@ -17860,15 +17226,15 @@
             ],
             "format": "uuid"
           },
-          "sessionId": {
+          "source": {
+            "$ref": "#/components/schemas/AttentionSource"
+          },
+          "workspaceId": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid"
-          },
-          "source": {
-            "$ref": "#/components/schemas/AttentionSource"
           }
         }
       },
@@ -18293,7 +17659,7 @@
               "string",
               "null"
             ],
-            "description": "The model Cloud sessions start on, when it is configured and active in this pricebook (`provider/model`)."
+            "description": "The model Cloud workspaces start on, when it is configured and active in this pricebook (`provider/model`)."
           },
           "models": {
             "type": "array",
@@ -18550,114 +17916,6 @@
           }
         }
       },
-      "Page_AgentSessionDto": {
-        "type": "object",
-        "description": "`{items, nextCursor}`.",
-        "required": [
-          "items"
-        ],
-        "properties": {
-          "items": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "required": [
-                "id",
-                "accountId",
-                "configuration",
-                "version",
-                "environmentNames",
-                "title",
-                "archived",
-                "createdAt",
-                "updatedAt",
-                "workspace"
-              ],
-              "properties": {
-                "accountId": {
-                  "$ref": "#/components/schemas/AccountId"
-                },
-                "agentSnapshot": {
-                  "oneOf": [
-                    {
-                      "type": "null"
-                    },
-                    {
-                      "$ref": "#/components/schemas/CloudAgentDto"
-                    }
-                  ]
-                },
-                "archived": {
-                  "type": "boolean",
-                  "description": "Always `false`: sessions are no longer archived, and deleting one is how its storage is freed. Kept so app\nbuilds made before the change still decode a session; new clients ignore it.",
-                  "deprecated": true
-                },
-                "cloudAgentId": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "format": "uuid"
-                },
-                "configuration": {
-                  "$ref": "#/components/schemas/AgentConfiguration"
-                },
-                "createdAt": {
-                  "type": "string",
-                  "format": "date-time"
-                },
-                "environmentNames": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                "id": {
-                  "type": "string",
-                  "format": "uuid"
-                },
-                "launch": {
-                  "oneOf": [
-                    {
-                      "type": "null"
-                    },
-                    {
-                      "$ref": "#/components/schemas/SessionLaunchDto",
-                      "description": "How Cloud is delivering the session's first message; absent on sessions created without one."
-                    }
-                  ]
-                },
-                "sshPublicKey": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "title": {
-                  "type": "string"
-                },
-                "updatedAt": {
-                  "type": "string",
-                  "format": "date-time"
-                },
-                "version": {
-                  "type": "integer",
-                  "format": "int64"
-                },
-                "workspace": {
-                  "$ref": "#/components/schemas/WorkspaceDto"
-                }
-              }
-            }
-          },
-          "nextCursor": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      },
       "Page_AttentionItemDto": {
         "type": "object",
         "description": "`{items, nextCursor}`.",
@@ -18708,7 +17966,7 @@
                 },
                 "connected": {
                   "type": "boolean",
-                  "description": "The computer is online or the session is running."
+                  "description": "The computer is online or the workspace is running."
                 },
                 "custom": {
                   "type": "boolean",
@@ -18781,20 +18039,6 @@
                   "type": "boolean",
                   "description": "The finished turn was started by a schedule."
                 },
-                "sessionId": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "format": "uuid",
-                  "description": "Cloud session items: the session."
-                },
-                "sessionTitle": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
                 "source": {
                   "$ref": "#/components/schemas/AttentionSource"
                 },
@@ -18809,6 +18053,20 @@
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "workspaceId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "Cloud workspace items: the workspace."
+                },
+                "workspaceTitle": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               }
             }
@@ -18916,7 +18174,7 @@
               "required": [
                 "id",
                 "accountId",
-                "sessionId",
+                "workspaceId",
                 "chatId",
                 "name",
                 "prompt",
@@ -18982,10 +18240,6 @@
                 "prompt": {
                   "type": "string"
                 },
-                "sessionId": {
-                  "type": "string",
-                  "format": "uuid"
-                },
                 "timezone": {
                   "type": "string"
                 },
@@ -18996,6 +18250,10 @@
                 "version": {
                   "type": "integer",
                   "format": "int64"
+                },
+                "workspaceId": {
+                  "type": "string",
+                  "format": "uuid"
                 }
               }
             }
@@ -19023,7 +18281,7 @@
                 "id",
                 "scheduleId",
                 "accountId",
-                "sessionId",
+                "workspaceId",
                 "chatId",
                 "scheduledAt",
                 "status",
@@ -19061,10 +18319,6 @@
                   "type": "string",
                   "format": "date-time"
                 },
-                "sessionId": {
-                  "type": "string",
-                  "format": "uuid"
-                },
                 "status": {
                   "type": "string"
                 },
@@ -19078,6 +18332,10 @@
                 "updatedAt": {
                   "type": "string",
                   "format": "date-time"
+                },
+                "workspaceId": {
+                  "type": "string",
+                  "format": "uuid"
                 }
               }
             }
@@ -19639,7 +18897,11 @@
               "required": [
                 "id",
                 "accountId",
+                "title",
                 "name",
+                "configuration",
+                "version",
+                "environmentNames",
                 "region",
                 "resourceClass",
                 "diskGb",
@@ -19654,6 +18916,28 @@
                 "accountId": {
                   "$ref": "#/components/schemas/AccountId"
                 },
+                "agentSnapshot": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CloudAgentDto",
+                      "description": "That template as it was when the workspace was created (immutable provenance)."
+                    }
+                  ]
+                },
+                "cloudAgentId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "The Cloud agent template the workspace started from, if any."
+                },
+                "configuration": {
+                  "$ref": "#/components/schemas/AgentConfiguration"
+                },
                 "createdAt": {
                   "type": "string",
                   "format": "date-time"
@@ -19664,6 +18948,12 @@
                 "diskGb": {
                   "type": "integer",
                   "format": "int64"
+                },
+                "environmentNames": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
                 },
                 "failureReason": {
                   "type": [
@@ -19706,8 +18996,21 @@
                   ],
                   "format": "date-time"
                 },
+                "launch": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WorkspaceLaunchDto",
+                      "description": "How Cloud is delivering the workspace's first message; absent on workspaces created without one."
+                    }
+                  ]
+                },
                 "name": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "The machine's slug. Kept for clients made before titles; show `title` instead.",
+                  "deprecated": true
                 },
                 "observedState": {
                   "$ref": "#/components/schemas/WorkspaceState"
@@ -19742,7 +19045,13 @@
                 },
                 "runtimeUpdateAvailable": {
                   "type": "boolean",
-                  "description": "The runtime image is older than the one new sessions get; the next start boots the current one."
+                  "description": "The runtime image is older than the one new workspaces get; the next start boots the current one."
+                },
+                "sshPublicKey": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "startedAt": {
                   "type": [
@@ -19758,9 +19067,18 @@
                   ],
                   "format": "date-time"
                 },
+                "title": {
+                  "type": "string",
+                  "description": "What people call the workspace (1–200 characters)."
+                },
                 "updatedAt": {
                   "type": "string",
                   "format": "date-time"
+                },
+                "version": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Settings revision; send it back with a settings change."
                 }
               }
             }
@@ -21486,8 +20804,9 @@
           }
         }
       },
-      "SaveSessionAgentRequest": {
+      "SaveWorkspaceAgentRequest": {
         "type": "object",
+        "description": "`POST /api/v1/workspaces/{id}/save-agent`: a new Cloud agent template from the workspace's configuration.",
         "required": [
           "name",
           "version"
@@ -21552,125 +20871,8 @@
           }
         }
       },
-      "SessionAgent": {
-        "type": "object",
-        "required": [
-          "prompt"
-        ],
-        "properties": {
-          "description": {
-            "type": "string"
-          },
-          "hidden": {
-            "type": "boolean"
-          },
-          "mode": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "model": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "permission": {},
-          "prompt": {
-            "type": "string"
-          },
-          "steps": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "minimum": 0
-          },
-          "tools": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "boolean"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          }
-        },
-        "additionalProperties": false
-      },
       "SessionId": {
         "type": "string"
-      },
-      "SessionLaunchDto": {
-        "type": "object",
-        "description": "The delivery of a session's first message (`initialPrompt`). Every change is a `session` entity event.",
-        "required": [
-          "chatId",
-          "status",
-          "createdAt",
-          "updatedAt"
-        ],
-        "properties": {
-          "chatId": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The runtime chat the message goes to, chosen when the session is created: open it straight away. It answers\n404 until the launch delivers the message."
-          },
-          "createdAt": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "error": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Why the launch failed, was cancelled or interrupted, in words for people."
-          },
-          "prompt": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The message while it has not reached the chat (`pending`, or `failed`/`cancelled` before delivery), to show\nas the pending first message or to send by hand."
-          },
-          "status": {
-            "$ref": "#/components/schemas/LaunchStatus"
-          },
-          "turnId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "The first turn, once the runtime accepted the message."
-          },
-          "updatedAt": {
-            "type": "string",
-            "format": "date-time"
-          }
-        }
-      },
-      "SessionSkill": {
-        "type": "object",
-        "required": [
-          "files"
-        ],
-        "properties": {
-          "files": {
-            "type": "object",
-            "description": "UTF-8 files relative to this skill directory; must include SKILL.md.",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          }
-        },
-        "additionalProperties": false
       },
       "SessionSummaryDto": {
         "type": "object",
@@ -22329,39 +21531,6 @@
           }
         }
       },
-      "UpdateAgentSessionRequest": {
-        "type": "object",
-        "properties": {
-          "configuration": {},
-          "environment": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          },
-          "title": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "version": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Required for configuration/environment updates. Settings apply at the next start."
-          }
-        },
-        "additionalProperties": false
-      },
       "UpdateAutoTopup": {
         "type": "object",
         "required": [
@@ -22419,7 +21588,7 @@
           "version": {
             "type": "integer",
             "format": "int64",
-            "description": "Required optimistic revision; existing sessions always retain their captured version."
+            "description": "Required optimistic revision; existing workspaces always retain their captured version."
           }
         },
         "additionalProperties": false
@@ -22569,7 +21738,21 @@
       },
       "UpdateWorkspaceRequest": {
         "type": "object",
+        "description": "`PATCH /api/v1/workspaces/{id}`: rename, change settings (with `version`; they apply at the next start, so the\nworkspace must be stopped), or the idle timeout and keep-alive.",
         "properties": {
+          "configuration": {},
+          "environment": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "idleTimeoutSecs": {
             "type": [
               "integer",
@@ -22590,9 +21773,26 @@
             "type": [
               "string",
               "null"
+            ],
+            "description": "Deprecated alias of `title`.",
+            "deprecated": true
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
             ]
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Required for configuration/environment updates."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "UploadArtifactResponse": {
         "type": "object",
@@ -23716,12 +22916,64 @@
           }
         }
       },
+      "WorkspaceAgent": {
+        "type": "object",
+        "required": [
+          "prompt"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "hidden": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "permission": {},
+          "prompt": {
+            "type": "string"
+          },
+          "steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "tools": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "WorkspaceDto": {
         "type": "object",
         "required": [
           "id",
           "accountId",
+          "title",
           "name",
+          "configuration",
+          "version",
+          "environmentNames",
           "region",
           "resourceClass",
           "diskGb",
@@ -23736,6 +22988,28 @@
           "accountId": {
             "$ref": "#/components/schemas/AccountId"
           },
+          "agentSnapshot": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CloudAgentDto",
+                "description": "That template as it was when the workspace was created (immutable provenance)."
+              }
+            ]
+          },
+          "cloudAgentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The Cloud agent template the workspace started from, if any."
+          },
+          "configuration": {
+            "$ref": "#/components/schemas/AgentConfiguration"
+          },
           "createdAt": {
             "type": "string",
             "format": "date-time"
@@ -23746,6 +23020,12 @@
           "diskGb": {
             "type": "integer",
             "format": "int64"
+          },
+          "environmentNames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "failureReason": {
             "type": [
@@ -23788,8 +23068,21 @@
             ],
             "format": "date-time"
           },
+          "launch": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceLaunchDto",
+                "description": "How Cloud is delivering the workspace's first message; absent on workspaces created without one."
+              }
+            ]
+          },
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "The machine's slug. Kept for clients made before titles; show `title` instead.",
+            "deprecated": true
           },
           "observedState": {
             "$ref": "#/components/schemas/WorkspaceState"
@@ -23824,7 +23117,13 @@
           },
           "runtimeUpdateAvailable": {
             "type": "boolean",
-            "description": "The runtime image is older than the one new sessions get; the next start boots the current one."
+            "description": "The runtime image is older than the one new workspaces get; the next start boots the current one."
+          },
+          "sshPublicKey": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "startedAt": {
             "type": [
@@ -23840,14 +23139,73 @@
             ],
             "format": "date-time"
           },
+          "title": {
+            "type": "string",
+            "description": "What people call the workspace (1–200 characters)."
+          },
           "updatedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Settings revision; send it back with a settings change."
           }
         }
       },
       "WorkspaceId": {
         "type": "string"
+      },
+      "WorkspaceLaunchDto": {
+        "type": "object",
+        "description": "The delivery of a workspace's first message (`initialPrompt`). Every change is a `workspace` entity event.",
+        "required": [
+          "chatId",
+          "status",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "chatId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The runtime chat the message goes to, chosen when the workspace is created: open it straight away. It\nanswers 404 until the launch delivers the message."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the launch failed, was cancelled or interrupted, in words for people."
+          },
+          "prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The message while it has not reached the chat (`pending`, or `failed`/`cancelled` before delivery), to show\nas the pending first message or to send by hand."
+          },
+          "status": {
+            "$ref": "#/components/schemas/LaunchStatus"
+          },
+          "turnId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The first turn, once the runtime accepted the message."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
       },
       "WorkspaceOperationResponse": {
         "type": "object",
@@ -23916,6 +23274,25 @@
           }
         }
       },
+      "WorkspaceSkill": {
+        "type": "object",
+        "required": [
+          "files"
+        ],
+        "properties": {
+          "files": {
+            "type": "object",
+            "description": "UTF-8 files relative to this skill directory; must include SKILL.md.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "WorkspaceState": {
         "type": "string",
         "enum": [
@@ -23981,7 +23358,7 @@
     },
     {
       "name": "attention",
-      "description": "Pending requests and finished chats on computers and Cloud sessions"
+      "description": "Pending requests and finished chats on computers and Cloud workspaces"
     },
     {
       "name": "push",
@@ -23989,11 +23366,11 @@
     },
     {
       "name": "cloud-schedules",
-      "description": "Durable Cloud prompts targeting session chats"
+      "description": "Durable Cloud prompts targeting workspace chats"
     },
     {
       "name": "cloud-agents",
-      "description": "Reusable agent templates and isolated Fly sessions"
+      "description": "Reusable agent templates for Cloud workspaces"
     },
     {
       "name": "identity",

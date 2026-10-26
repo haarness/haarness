@@ -20,13 +20,13 @@
     }
   },
   {
-    "name": "cloud_sessions",
+    "name": "cloud_workspaces",
     "method": "POST",
-    "path": "/v1/cloud/sessions",
+    "path": "/v1/cloud/workspaces",
     "pathParams": [],
     "response": {},
     "body": {
-      "$ref": "#/components/schemas/CloudSessionInput"
+      "$ref": "#/components/schemas/CloudWorkspaceInput"
     }
   },
   {

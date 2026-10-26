@@ -1680,116 +1680,6 @@
     }
   },
   {
-    "name": "list_agent_sessions",
-    "method": "GET",
-    "path": "/api/v1/sessions",
-    "pathParams": [],
-    "response": {
-      "$ref": "#/components/schemas/Page_AgentSessionDto"
-    },
-    "query": {
-      "$ref": "#/components/schemas/ListAgentSessionsQuery"
-    }
-  },
-  {
-    "name": "create_agent_session",
-    "method": "POST",
-    "path": "/api/v1/sessions",
-    "pathParams": [],
-    "response": {
-      "$ref": "#/components/schemas/AgentSessionCreatedResponse"
-    },
-    "contentType": "application/json",
-    "body": {
-      "$ref": "#/components/schemas/CreateAgentSessionRequest"
-    }
-  },
-  {
-    "name": "get_agent_session",
-    "method": "GET",
-    "path": "/api/v1/sessions/{id}",
-    "pathParams": [
-      "id"
-    ],
-    "response": {
-      "$ref": "#/components/schemas/AgentSessionDto"
-    }
-  },
-  {
-    "name": "delete_agent_session",
-    "method": "DELETE",
-    "path": "/api/v1/sessions/{id}",
-    "pathParams": [
-      "id"
-    ],
-    "response": {
-      "$ref": "#/components/schemas/WorkspaceOperationResponse"
-    }
-  },
-  {
-    "name": "update_agent_session",
-    "method": "PATCH",
-    "path": "/api/v1/sessions/{id}",
-    "pathParams": [
-      "id"
-    ],
-    "response": {
-      "$ref": "#/components/schemas/AgentSessionDto"
-    },
-    "contentType": "application/json",
-    "body": {
-      "$ref": "#/components/schemas/UpdateAgentSessionRequest"
-    }
-  },
-  {
-    "name": "attach_agent_session",
-    "method": "POST",
-    "path": "/api/v1/sessions/{id}/attach",
-    "pathParams": [
-      "id"
-    ],
-    "response": {
-      "$ref": "#/components/schemas/AttachResponse"
-    }
-  },
-  {
-    "name": "save_session_agent",
-    "method": "POST",
-    "path": "/api/v1/sessions/{id}/save-agent",
-    "pathParams": [
-      "id"
-    ],
-    "response": {
-      "$ref": "#/components/schemas/CloudAgentDto"
-    },
-    "contentType": "application/json",
-    "body": {
-      "$ref": "#/components/schemas/SaveSessionAgentRequest"
-    }
-  },
-  {
-    "name": "start_agent_session",
-    "method": "POST",
-    "path": "/api/v1/sessions/{id}/start",
-    "pathParams": [
-      "id"
-    ],
-    "response": {
-      "$ref": "#/components/schemas/WorkspaceOperationResponse"
-    }
-  },
-  {
-    "name": "stop_agent_session",
-    "method": "POST",
-    "path": "/api/v1/sessions/{id}/stop",
-    "pathParams": [
-      "id"
-    ],
-    "response": {
-      "$ref": "#/components/schemas/WorkspaceOperationResponse"
-    }
-  },
-  {
     "name": "usage_summary",
     "method": "GET",
     "path": "/api/v1/telemetry/usage",
@@ -1949,6 +1839,21 @@
     "contentType": "application/json",
     "body": {
       "$ref": "#/components/schemas/RestoreRequest"
+    }
+  },
+  {
+    "name": "save_workspace_agent",
+    "method": "POST",
+    "path": "/api/v1/workspaces/{id}/save-agent",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/CloudAgentDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/SaveWorkspaceAgentRequest"
     }
   },
   {

@@ -4,7 +4,7 @@
 | --- | --- | --- |
 | `manage_resource` | `manageResource` | `POST /v1/manage/{resource}` |
 | `cloud_agents` | `cloudAgents` | `POST /v1/cloud/agents` |
-| `cloud_sessions` | `cloudSessions` | `POST /v1/cloud/sessions` |
+| `cloud_workspaces` | `cloudWorkspaces` | `POST /v1/cloud/workspaces` |
 | `cloud_chats` | `cloudChats` | `POST /v1/cloud/chats` |
 | `cloud_schedules` | `cloudSchedules` | `POST /v1/cloud/schedules` |
 | `info` | `info` | `GET /v1/info` |

@@ -39,26 +39,26 @@ async def scenario(asynchronous):
     cloud = (AsyncHaarnessCloud if asynchronous else HaarnessCloud)(
         BASE, token=tokens["access_token"]
     )
-    session = None
+    workspace = None
     try:
-        session = await call(
-            cloud.create_session,
+        workspace = await call(
+            cloud.new_workspace,
             {
-                "title": "SDK " + label + " shared session",
+                "title": "SDK " + label + " shared workspace",
                 "configuration": {"model": "router/fixture/echo", "diskGb": 1},
                 "start": True,
             },
         )
         await poll(
-            lambda: call(session.get),
-            lambda s: s["workspace"]["observedState"] == "running",
+            lambda: call(workspace.get),
+            lambda s: s["observedState"] == "running",
         )
-        a = await call(session.chats.create, {"title": "first chat"})
-        b = await call(session.chats.create, {"title": "second chat"})
-        assert len(await call(session.chats.list)) == 2
+        a = await call(workspace.chats.create, {"title": "first chat"})
+        b = await call(workspace.chats.create, {"title": "second chat"})
+        assert len(await call(workspace.chats.list)) == 2
         await call(b.rename, "renamed second chat")
         assert (await call(b.get))["title"] == "renamed second chat"
-        runtime = await call(session.connect)
+        runtime = await call(workspace.connect)
         await call(runtime.mutate_file, {"action": "mkdir", "path": "sdk-files"})
         payload = "shared file 雪\nSDK content " + label
         await call(
@@ -114,13 +114,13 @@ async def scenario(asynchronous):
         else:
             raise AssertionError("Cross-chat turn must be rejected")
         assert not await call(b.messages)
-        sid = session.id
+        sid = workspace.id
         cid = a.id
         key = {"headers": {"Idempotency-Key": uuid4().hex}}
         schedule = await call(
             cloud.create_cloud_schedule,
             {
-                "sessionId": sid,
+                "workspaceId": sid,
                 "chatId": cid,
                 "name": "SDK timed run",
                 "prompt": "scheduled hello",
@@ -130,7 +130,7 @@ async def scenario(asynchronous):
             options=key,
         )
         schedule_id = schedule["id"]
-        assert (await call(cloud.list_cloud_schedules, {"sessionId": sid}))["items"][0][
+        assert (await call(cloud.list_cloud_schedules, {"workspaceId": sid}))["items"][0][
             "id"
         ] == schedule_id
         await poll(
@@ -166,13 +166,13 @@ async def scenario(asynchronous):
                 == "completed"
             ),
         )
-        await call(session.stop)
+        await call(workspace.stop)
         await poll(
-            lambda: call(session.get),
-            lambda s: s["workspace"]["observedState"] == "stopped",
+            lambda: call(workspace.get),
+            lambda s: s["observedState"] == "stopped",
         )
         # Server-side scheduler wakes compute while the SDK has no runtime connection.
-        await call(session.close)
+        await call(workspace.close)
         fresh = await call(cloud.get_cloud_schedule, schedule_id)
         await call(
             cloud.update_cloud_schedule,
@@ -187,8 +187,8 @@ async def scenario(asynchronous):
             lambda: call(cloud.cloud_schedule_runs, schedule_id),
             lambda p: len(p["items"]) == 3 and p["items"][0]["status"] == "completed",
         )
-        runtime = await call(session.connect)
-        assert len(await call(session.chats.list)) == 2
+        runtime = await call(workspace.connect)
+        assert len(await call(workspace.chats.list)) == 2
         assert (await call(runtime.read_file, {"path": "sdk-files/renamed.txt"}))[
             "content"
         ] == payload
@@ -229,20 +229,20 @@ async def scenario(asynchronous):
         )
         await call(b.archive)
         print(
-            f"{label}: sessions, two chats, binary/text uploads, conflict/rename/delete, 7 schedule endpoints, timed run, stop/wake/persistence, archive safety PASS",
+            f"{label}: workspaces, two chats, binary/text uploads, conflict/rename/delete, 7 schedule endpoints, timed run, stop/wake/persistence, archive safety PASS",
             flush=True,
         )
     finally:
-        if session:
+        if workspace:
             try:
-                deletion = await call(session.delete)
+                deletion = await call(workspace.delete)
                 final = await poll(
                     lambda: call(cloud.get_operation, deletion["operation"]["id"]),
                     lambda op: op["status"] in ("succeeded", "failed", "cancelled"),
                 )
                 assert final["status"] == "succeeded", final
             finally:
-                await call(session.close)
+                await call(workspace.close)
         await call(cloud.close)
 
 

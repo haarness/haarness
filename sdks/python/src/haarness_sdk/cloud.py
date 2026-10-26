@@ -1,4 +1,4 @@
-"""Cloud account API and explicit machine/session and chat handles."""
+"""Cloud account API and explicit workspace and chat handles."""
 
 from __future__ import annotations
 import asyncio
@@ -74,67 +74,69 @@ class HaarnessCloud(CloudApi):
                 return {**cloud._headers(), **options["headers"]}
         return RemoteRuntime(self.base_url + path, token="", timeout=self._timeout)
 
-    def session(self, session_id: str) -> CloudSession:
-        self.segment(session_id)
-        return CloudSession(self, session_id)
+    def workspace(self, workspace_id: str) -> CloudWorkspace:
+        """An existing Cloud workspace: its machine, files and chats."""
+        self.segment(workspace_id)
+        return CloudWorkspace(self, workspace_id)
 
-    def create_session(
+    def new_workspace(
         self,
-        body: C.CreateAgentSessionRequest,
+        body: C.CreateWorkspaceRequest | None = None,
         *,
         options: RequestOptions | None = None,
-    ) -> CloudSession:
-        created = self.create_agent_session(body, options=options)
-        session = self.session(created["session"]["id"])
-        session.created = created
-        return session
+    ) -> CloudWorkspace:
+        """Create a workspace and return its handle; `create_workspace` answers the raw `{workspace, operation}`."""
+        created = self.create_workspace(body or {}, options=options)
+        workspace = self.workspace(created["workspace"]["id"])
+        workspace.created = created
+        return workspace
 
 
-class CloudSession:
+class CloudWorkspace:
     """One machine and shared filesystem; connect never starts compute."""
 
-    def __init__(self, cloud: HaarnessCloud, session_id: str):
-        self.cloud, self.id = cloud, session_id
+    def __init__(self, cloud: HaarnessCloud, workspace_id: str):
+        self.cloud, self.id = cloud, workspace_id
         self.chats = CloudChats(self)
-        # What `create_session` answered, with the first message's launch (`created["session"]["launch"]["chatId"]`).
-        self.created: C.AgentSessionCreatedResponse | None = None
+        # What `new_workspace` answered, with the first message's launch (`created["workspace"]["launch"]["chatId"]`).
+        self.created: C.WorkspaceOperationResponse | None = None
         self._ticket: C.AttachResponse | None = None
-        self._runtime: SessionRuntime | None = None
+        self._runtime: WorkspaceRuntime | None = None
         self._lock = threading.Lock()
         self._runtime_lock = threading.Lock()
 
-    def get(self, *, options: RequestOptions | None = None) -> C.AgentSessionDto:
-        return self.cloud.get_agent_session(self.id, options=options)
+    def get(self, *, options: RequestOptions | None = None) -> C.WorkspaceDto:
+        return self.cloud.get_workspace(self.id, options=options)
 
     def start(
         self, *, options: RequestOptions | None = None
     ) -> C.WorkspaceOperationResponse:
-        return self.cloud.start_agent_session(self.id, options=options)
+        return self.cloud.start_workspace(self.id, options=options)
 
     def stop(
         self, *, options: RequestOptions | None = None
     ) -> C.WorkspaceOperationResponse:
-        return self.cloud.stop_agent_session(self.id, options=options)
+        return self.cloud.stop_workspace(self.id, options=options)
 
     def delete(
         self, *, options: RequestOptions | None = None
     ) -> C.WorkspaceOperationResponse:
-        return self.cloud.delete_agent_session(self.id, options=options)
+        return self.cloud.delete_workspace(self.id, options=options)
 
     def credentials(self) -> C.AttachResponse:
         with self._lock:
             if not current(self._ticket):
-                ticket = self.cloud.attach_agent_session(self.id)
+                ticket = self.cloud.attach_workspace(self.id)
                 gateway(ticket["gatewayUrl"])
                 self._ticket = ticket
             assert self._ticket is not None
             return self._ticket
 
-    def connect(self) -> SessionRuntime:
+    def connect(self) -> WorkspaceRuntime:
         with self._runtime_lock:
             if self._runtime is None:
                 ticket = self.credentials()
-                self._runtime = SessionRuntime(self, ticket)
+                self._runtime = WorkspaceRuntime(self, ticket)
             return self._runtime
 
     def close(self) -> None:
@@ -145,17 +147,17 @@ class CloudSession:
             self._ticket = None
 
 
-class SessionRuntime(Haarness):
-    def __init__(self, session: CloudSession, ticket):
+class WorkspaceRuntime(Haarness):
+    def __init__(self, workspace: CloudWorkspace, ticket):
         super().__init__(
             gateway(ticket["gatewayUrl"]),
             token=ticket["ticket"],
-            timeout=session.cloud._timeout,
+            timeout=workspace.cloud._timeout,
         )
-        self.session = session
+        self.cloud_workspace = workspace
 
     def refresh(self):
-        ticket = self.session.credentials()
+        ticket = self.cloud_workspace.credentials()
         self.base_url = gateway(ticket["gatewayUrl"])
         self._authentication = {"Authorization": "Bearer " + ticket["ticket"]}
 
@@ -173,7 +175,7 @@ class SessionRuntime(Haarness):
                 )
                 if attempt or not (error.status == 401 or stale):
                     raise
-                self.session._ticket = None
+                self.cloud_workspace._ticket = None
 
     def _prepare_events(self) -> None:
         self.refresh()
@@ -184,7 +186,7 @@ class SessionRuntime(Haarness):
             and error.code == "remote_project"
             and "workspace restarted" in str(error)
         ):
-            self.session._ticket = None
+            self.cloud_workspace._ticket = None
             return True
         return False
 
@@ -194,8 +196,8 @@ class SessionRuntime(Haarness):
 
 
 class CloudChats:
-    def __init__(self, session: CloudSession):
-        self.session = session
+    def __init__(self, workspace: CloudWorkspace):
+        self.workspace = workspace
 
     def list(
         self,
@@ -203,7 +205,7 @@ class CloudChats:
         *,
         options: RequestOptions | None = None,
     ) -> list[T.Thread]:
-        runtime = self.session.connect()
+        runtime = self.workspace.connect()
         return [
             t
             for t in runtime.list_threads(query, options=options)
@@ -216,7 +218,7 @@ class CloudChats:
         *,
         options: RequestOptions | None = None,
     ) -> CloudChat:
-        runtime = self.session.connect()
+        runtime = self.workspace.connect()
         info = runtime.info(options=options)
         thread = runtime.create_thread(
             {
@@ -231,37 +233,37 @@ class CloudChats:
 
     def get(self, chat_id: str) -> CloudChat:
         Haarness.segment(chat_id)
-        return CloudChat(self.session, chat_id)
+        return CloudChat(self.workspace, chat_id)
 
 
 class CloudChat:
     """Chat ID equals runtime thread ID. History is separate; files are shared."""
 
-    def __init__(self, session: CloudSession, chat_id: str):
-        self.session, self.id = session, chat_id
+    def __init__(self, workspace: CloudWorkspace, chat_id: str):
+        self.workspace, self.id = workspace, chat_id
 
     @property
-    def session_id(self) -> str:
-        return self.session.id
+    def workspace_id(self) -> str:
+        return self.workspace.id
 
     def get(self, *, options: RequestOptions | None = None) -> T.Thread:
-        runtime = self.session.connect()
+        runtime = self.workspace.connect()
         return runtime.get_thread(self.id, options=options)
 
     def rename(self, title: str, *, options: RequestOptions | None = None) -> T.Thread:
-        runtime = self.session.connect()
+        runtime = self.workspace.connect()
         return runtime.update_thread(self.id, {"title": title}, options=options)
 
     def archive(
         self, archived: bool = True, *, options: RequestOptions | None = None
     ) -> T.Thread:
-        runtime = self.session.connect()
+        runtime = self.workspace.connect()
         return runtime.update_thread(self.id, {"archived": archived}, options=options)
 
     def messages(
         self, after: int | None = None, *, options: RequestOptions | None = None
     ) -> list[T.Item]:
-        runtime = self.session.connect()
+        runtime = self.workspace.connect()
         return runtime.list_items(
             self.id, {} if after is None else {"after": after}, options=options
         )
@@ -273,17 +275,17 @@ class CloudChat:
         *,
         options: RequestOptions | None = None,
     ) -> ChatResult:
-        runtime = self.session.connect()
+        runtime = self.workspace.connect()
         return runtime.chat(self.id, text, body, options=options)
 
     def send(
         self, body: T.StartTurnRequest, *, options: RequestOptions | None = None
     ) -> T.Turn:
-        runtime = self.session.connect()
+        runtime = self.workspace.connect()
         return runtime.start_turn(self.id, body, options=options)
 
-    def _turn(self, turn_id: str, options: RequestOptions | None) -> SessionRuntime:
-        runtime = self.session.connect()
+    def _turn(self, turn_id: str, options: RequestOptions | None) -> WorkspaceRuntime:
+        runtime = self.workspace.connect()
         turn = runtime.get_turn(turn_id, options=options)
         if turn["threadId"] != self.id:
             raise ValueError("Turn belongs to another chat")
@@ -309,7 +311,7 @@ class CloudChat:
         if turn_id:
             runtime = self._turn(turn_id, options)
             return runtime.interrupt_turn(turn_id, options=options)
-        runtime = self.session.connect()
+        runtime = self.workspace.connect()
         return runtime.interrupt_thread_tree(self.id, options=options)
 
 
@@ -340,67 +342,69 @@ class AsyncHaarnessCloud(AsyncCloudApi):
                 return {**cloud._headers(), **options["headers"]}
         return RemoteRuntime(self.base_url + path, token="", timeout=self._timeout)
 
-    def session(self, session_id: str) -> AsyncCloudSession:
-        self.segment(session_id)
-        return AsyncCloudSession(self, session_id)
+    def workspace(self, workspace_id: str) -> AsyncCloudWorkspace:
+        """An existing Cloud workspace: its machine, files and chats."""
+        self.segment(workspace_id)
+        return AsyncCloudWorkspace(self, workspace_id)
 
-    async def create_session(
+    async def new_workspace(
         self,
-        body: C.CreateAgentSessionRequest,
+        body: C.CreateWorkspaceRequest | None = None,
         *,
         options: RequestOptions | None = None,
-    ) -> AsyncCloudSession:
-        created = await self.create_agent_session(body, options=options)
-        session = self.session(created["session"]["id"])
-        session.created = created
-        return session
+    ) -> AsyncCloudWorkspace:
+        """Create a workspace and return its handle; `create_workspace` answers the raw `{workspace, operation}`."""
+        created = await self.create_workspace(body or {}, options=options)
+        workspace = self.workspace(created["workspace"]["id"])
+        workspace.created = created
+        return workspace
 
 
-class AsyncCloudSession:
+class AsyncCloudWorkspace:
     """One machine and shared filesystem; connect never starts compute."""
 
-    def __init__(self, cloud: AsyncHaarnessCloud, session_id: str):
-        self.cloud, self.id = cloud, session_id
+    def __init__(self, cloud: AsyncHaarnessCloud, workspace_id: str):
+        self.cloud, self.id = cloud, workspace_id
         self.chats = AsyncCloudChats(self)
-        # What `create_session` answered, with the first message's launch (`created["session"]["launch"]["chatId"]`).
-        self.created: C.AgentSessionCreatedResponse | None = None
+        # What `new_workspace` answered, with the first message's launch (`created["workspace"]["launch"]["chatId"]`).
+        self.created: C.WorkspaceOperationResponse | None = None
         self._ticket: C.AttachResponse | None = None
-        self._runtime: AsyncSessionRuntime | None = None
+        self._runtime: AsyncWorkspaceRuntime | None = None
         self._lock = asyncio.Lock()
         self._runtime_lock = asyncio.Lock()
 
-    async def get(self, *, options: RequestOptions | None = None) -> C.AgentSessionDto:
-        return await self.cloud.get_agent_session(self.id, options=options)
+    async def get(self, *, options: RequestOptions | None = None) -> C.WorkspaceDto:
+        return await self.cloud.get_workspace(self.id, options=options)
 
     async def start(
         self, *, options: RequestOptions | None = None
     ) -> C.WorkspaceOperationResponse:
-        return await self.cloud.start_agent_session(self.id, options=options)
+        return await self.cloud.start_workspace(self.id, options=options)
 
     async def stop(
         self, *, options: RequestOptions | None = None
     ) -> C.WorkspaceOperationResponse:
-        return await self.cloud.stop_agent_session(self.id, options=options)
+        return await self.cloud.stop_workspace(self.id, options=options)
 
     async def delete(
         self, *, options: RequestOptions | None = None
     ) -> C.WorkspaceOperationResponse:
-        return await self.cloud.delete_agent_session(self.id, options=options)
+        return await self.cloud.delete_workspace(self.id, options=options)
 
     async def credentials(self) -> C.AttachResponse:
         async with self._lock:
             if not current(self._ticket):
-                ticket = await self.cloud.attach_agent_session(self.id)
+                ticket = await self.cloud.attach_workspace(self.id)
                 gateway(ticket["gatewayUrl"])
                 self._ticket = ticket
             assert self._ticket is not None
             return self._ticket
 
-    async def connect(self) -> AsyncSessionRuntime:
+    async def connect(self) -> AsyncWorkspaceRuntime:
         async with self._runtime_lock:
             if self._runtime is None:
                 ticket = await self.credentials()
-                self._runtime = AsyncSessionRuntime(self, ticket)
+                self._runtime = AsyncWorkspaceRuntime(self, ticket)
             return self._runtime
 
     async def close(self) -> None:
@@ -411,17 +415,17 @@ class AsyncCloudSession:
             self._ticket = None
 
 
-class AsyncSessionRuntime(AsyncHaarness):
-    def __init__(self, session: AsyncCloudSession, ticket):
+class AsyncWorkspaceRuntime(AsyncHaarness):
+    def __init__(self, workspace: AsyncCloudWorkspace, ticket):
         super().__init__(
             gateway(ticket["gatewayUrl"]),
             token=ticket["ticket"],
-            timeout=session.cloud._timeout,
+            timeout=workspace.cloud._timeout,
         )
-        self.session = session
+        self.cloud_workspace = workspace
 
     async def refresh(self):
-        ticket = await self.session.credentials()
+        ticket = await self.cloud_workspace.credentials()
         self.base_url = gateway(ticket["gatewayUrl"])
         self._authentication = {"Authorization": "Bearer " + ticket["ticket"]}
 
@@ -439,7 +443,7 @@ class AsyncSessionRuntime(AsyncHaarness):
                 )
                 if attempt or not (error.status == 401 or stale):
                     raise
-                self.session._ticket = None
+                self.cloud_workspace._ticket = None
 
     async def _prepare_events(self) -> None:
         await self.refresh()
@@ -450,7 +454,7 @@ class AsyncSessionRuntime(AsyncHaarness):
             and error.code == "remote_project"
             and "workspace restarted" in str(error)
         ):
-            self.session._ticket = None
+            self.cloud_workspace._ticket = None
             return True
         return False
 
@@ -460,8 +464,8 @@ class AsyncSessionRuntime(AsyncHaarness):
 
 
 class AsyncCloudChats:
-    def __init__(self, session: AsyncCloudSession):
-        self.session = session
+    def __init__(self, workspace: AsyncCloudWorkspace):
+        self.workspace = workspace
 
     async def list(
         self,
@@ -469,7 +473,7 @@ class AsyncCloudChats:
         *,
         options: RequestOptions | None = None,
     ) -> list[T.Thread]:
-        runtime = await self.session.connect()
+        runtime = await self.workspace.connect()
         return [
             t
             for t in (await runtime.list_threads(query, options=options))
@@ -482,7 +486,7 @@ class AsyncCloudChats:
         *,
         options: RequestOptions | None = None,
     ) -> AsyncCloudChat:
-        runtime = await self.session.connect()
+        runtime = await self.workspace.connect()
         info = await runtime.info(options=options)
         thread = await runtime.create_thread(
             {
@@ -497,33 +501,33 @@ class AsyncCloudChats:
 
     def get(self, chat_id: str) -> AsyncCloudChat:
         AsyncHaarness.segment(chat_id)
-        return AsyncCloudChat(self.session, chat_id)
+        return AsyncCloudChat(self.workspace, chat_id)
 
 
 class AsyncCloudChat:
     """Chat ID equals runtime thread ID. History is separate; files are shared."""
 
-    def __init__(self, session: AsyncCloudSession, chat_id: str):
-        self.session, self.id = session, chat_id
+    def __init__(self, workspace: AsyncCloudWorkspace, chat_id: str):
+        self.workspace, self.id = workspace, chat_id
 
     @property
-    def session_id(self) -> str:
-        return self.session.id
+    def workspace_id(self) -> str:
+        return self.workspace.id
 
     async def get(self, *, options: RequestOptions | None = None) -> T.Thread:
-        runtime = await self.session.connect()
+        runtime = await self.workspace.connect()
         return await runtime.get_thread(self.id, options=options)
 
     async def rename(
         self, title: str, *, options: RequestOptions | None = None
     ) -> T.Thread:
-        runtime = await self.session.connect()
+        runtime = await self.workspace.connect()
         return await runtime.update_thread(self.id, {"title": title}, options=options)
 
     async def archive(
         self, archived: bool = True, *, options: RequestOptions | None = None
     ) -> T.Thread:
-        runtime = await self.session.connect()
+        runtime = await self.workspace.connect()
         return await runtime.update_thread(
             self.id, {"archived": archived}, options=options
         )
@@ -531,7 +535,7 @@ class AsyncCloudChat:
     async def messages(
         self, after: int | None = None, *, options: RequestOptions | None = None
     ) -> list[T.Item]:
-        runtime = await self.session.connect()
+        runtime = await self.workspace.connect()
         return await runtime.list_items(
             self.id, {} if after is None else {"after": after}, options=options
         )
@@ -543,19 +547,19 @@ class AsyncCloudChat:
         *,
         options: RequestOptions | None = None,
     ) -> ChatResult:
-        runtime = await self.session.connect()
+        runtime = await self.workspace.connect()
         return await runtime.chat(self.id, text, body, options=options)
 
     async def send(
         self, body: T.StartTurnRequest, *, options: RequestOptions | None = None
     ) -> T.Turn:
-        runtime = await self.session.connect()
+        runtime = await self.workspace.connect()
         return await runtime.start_turn(self.id, body, options=options)
 
     async def _turn(
         self, turn_id: str, options: RequestOptions | None
-    ) -> AsyncSessionRuntime:
-        runtime = await self.session.connect()
+    ) -> AsyncWorkspaceRuntime:
+        runtime = await self.workspace.connect()
         turn = await runtime.get_turn(turn_id, options=options)
         if turn["threadId"] != self.id:
             raise ValueError("Turn belongs to another chat")
@@ -581,5 +585,5 @@ class AsyncCloudChat:
         if turn_id:
             runtime = await self._turn(turn_id, options)
             return await runtime.interrupt_turn(turn_id, options=options)
-        runtime = await self.session.connect()
+        runtime = await self.workspace.connect()
         return await runtime.interrupt_thread_tree(self.id, options=options)
