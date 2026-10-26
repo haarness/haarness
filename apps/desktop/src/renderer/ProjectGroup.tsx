@@ -930,22 +930,23 @@ export function SessionList(props: {
       </Show>
       <For each={failures()}>
         {(location) => {
-          // A stopped Cloud session is not broken; it needs starting.
+          // A stopped Cloud workspace is not broken; it needs starting.
+          // (Another computer's saved location also names `cloudWorkspace`.)
           const stopped = () =>
-            !!location.cloudSession &&
+            !!location.cloudWorkspace &&
+            !location.remoteHost &&
             /not running|stopped/i.test(app.indexes()[location.id]?.error ?? "");
           const [starting, setStarting] = createSignal(false);
           async function start() {
             setStarting(true);
             try {
-              await window.haarness.account({ action: "session-start", id: location.cloudSession });
+              await window.haarness.account({ action: "workspace-start", id: location.cloudWorkspace });
               const deadline = Date.now() + 180_000;
               while (Date.now() < deadline) {
-                const sessions = await window.haarness.account({ action: "sessions" });
-                const state = sessions.items?.find((item: { id: string }) => item.id === location.cloudSession)
-                  ?.workspace?.observedState;
+                const workspace = await window.haarness.account({ action: "workspace", id: location.cloudWorkspace });
+                const state = workspace?.observedState;
                 if (state === "running") break;
-                if (state === "failed") throw new Error(t("This Cloud session failed to start."));
+                if (state === "failed") throw new Error(t("This Cloud workspace failed to start."));
                 await new Promise((resolve) => setTimeout(resolve, 1500));
               }
               await app.activateProject(location.id);
@@ -962,8 +963,8 @@ export function SessionList(props: {
               <span>
                 {stopped()
                   ? starting()
-                    ? t("Starting this Cloud session…")
-                    : t("This Cloud session is stopped.")
+                    ? t("Starting this Cloud workspace…")
+                    : t("This Cloud workspace is stopped.")
                   : location.chatHome
                     ? t("Couldn’t open these chats.")
                     : props.project &&

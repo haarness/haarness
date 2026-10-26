@@ -12,8 +12,8 @@ export type ScreenshotListing =
       items: { name: string; modified: number; thumbnail: string }[];
     };
 export interface ProjectLocation {
+  /** A Haarness Cloud workspace's ID. */
   cloudWorkspace?: string;
-  cloudSession?: string;
   cloudAccount?: string;
   cloudApiUrl?: string;
   remoteWorkspace?: string;
@@ -264,7 +264,7 @@ export interface SavedServer {
   id: string;
   label: string;
   url?: string;
-  /** Haarness Cloud sessions of one account, derived from saved locations. */
+  /** Haarness Cloud workspaces of one account, derived from saved locations. */
   cloud?: boolean;
   /** Another of your computers, opened through Haarness Cloud: its host id. */
   host?: string;
@@ -391,7 +391,6 @@ export interface Bridge {
   chatHomeRunning(): Promise<boolean>;
   connect(input: {
     cloudWorkspace?: string;
-    cloudSession?: string;
     /** Another of your computers (its Cloud host id), with `remoteWorkspace`
      * from its catalog or `workspace`, a folder to open there. */
     remoteHost?: string;

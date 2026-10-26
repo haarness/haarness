@@ -123,7 +123,7 @@ test("remote control shares a chat through Haarness Cloud and stops sharing it",
     HAARNESS_CLOUD_CONFIG_DIR: account!,
   });
   const published = () =>
-    JSON.parse(execFileSync(binary, ["--workspace", project, "remote", "sessions"], { env, encoding: "utf8", timeout: 30000 })).items as { id: string; connected: boolean }[];
+    JSON.parse(execFileSync(binary, ["--workspace", project, "remote", "chats"], { env, encoding: "utf8", timeout: 30000 })).items as { id: string; connected: boolean }[];
   try {
     await chat(page, "hello from desktop");
     await command(page, "/rc");

@@ -7,6 +7,12 @@ import { useApp } from "./state";
 import { Icon } from "./ui";
 import "./project-home.css";
 
+/** A Cloud workspace's project; another computer's saves `cloudWorkspace` too. */
+const cloudWorkspace = (project: Parameters<typeof primaryLocation>[0]) => {
+  const location = primaryLocation(project);
+  return !!location.cloudWorkspace && !location.remoteHost;
+};
+
 /** How many of another computer's projects show before "Show more". */
 const HOST_PROJECTS = 8;
 
@@ -103,7 +109,7 @@ export function ProjectHome() {
               <>
                 <h1>
                   {app.currentServer().cloud
-                    ? t("Open a Cloud session")
+                    ? t("Open a Cloud workspace")
                     : host()
                       ? t("Choose a project on {computer}", { computer: computer() })
                       : projects().length
@@ -112,7 +118,7 @@ export function ProjectHome() {
                 </h1>
                 <p>
                   {app.currentServer().cloud
-                    ? t("Start or open a session from your Haarness account.")
+                    ? t("Start or open a workspace from your Haarness account.")
                     : host()
                       ? t("Prompts, tools and terminals run on {computer}.", { computer: computer() })
                       : app.currentServer().url
@@ -144,7 +150,7 @@ export function ProjectHome() {
           >
             <Icon name={app.currentServer().cloud ? "cloud" : "folder"} size="md" />
             {app.currentServer().cloud
-              ? t("Cloud sessions")
+              ? t("Cloud workspaces")
               : state.projectFailure
                 ? app.homeFailed()
                   ? t("Open project")
@@ -165,7 +171,7 @@ export function ProjectHome() {
                         <li>
                           <button
                             class="project-home-row"
-                            title={primaryLocation(project).cloudSession ? undefined : project.root}
+                            title={cloudWorkspace(project) ? undefined : project.root}
                             onClick={() =>
                               app.run(() =>
                                 app.connect({
@@ -175,14 +181,14 @@ export function ProjectHome() {
                             }
                           >
                             <Icon
-                              name={primaryLocation(project).cloudSession ? "cloud" : "folder"}
+                              name={cloudWorkspace(project) ? "cloud" : "folder"}
                               size="md"
                             />
                             <span>
                               <strong>{project.label}</strong>
                               <small>
-                                {primaryLocation(project).cloudSession
-                                  ? t("Cloud session")
+                                {cloudWorkspace(project)
+                                  ? t("Cloud workspace")
                                   : project.root}
                               </small>
                             </span>

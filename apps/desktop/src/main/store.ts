@@ -17,7 +17,7 @@ import {
   type Recent,
   type SavedServer,
 } from "../shared";
-import { migrateProjectlessLocations } from "../projects";
+import { migrateCloudSessions, migrateProjectlessLocations } from "../projects";
 import { migrateServers } from "../servers";
 import { themeIds } from "../themes";
 import { globalShortcutError } from "../global-shortcut";
@@ -59,7 +59,7 @@ export async function load() {
         "Desktop preferences could not be read. Preserve desktop.json and repair it before continuing.",
       );
   }
-  const recent = migrateProjectlessLocations(state.recent);
+  const recent = migrateCloudSessions(migrateProjectlessLocations(state.recent));
   const servers = migrateServers(recent, state.servers);
   const shortcuts = migrateTabKeys(
     saved,

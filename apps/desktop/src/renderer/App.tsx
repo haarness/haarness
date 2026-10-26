@@ -1211,7 +1211,7 @@ export function App() {
               <Show
                 when={state.connection?.remoteHost}
                 fallback={
-                  <span class="badge">{app.currentServer().cloud ? t("Cloud session") : t("Remote")}</span>
+                  <span class="badge">{app.currentServer().cloud ? t("Cloud workspace") : t("Remote")}</span>
                 }
               >
                 {/* Where prompts, tools and terminals run, on every screen. */}
@@ -1298,7 +1298,7 @@ export function App() {
                       label: t(server.label),
                       detail:
                         server.url ??
-                        t(server.cloud ? "Cloud sessions" : "Local projects"),
+                        t(server.cloud ? "Cloud workspaces" : "Local projects"),
                       icon: (server.id === state.activeServer
                         ? "check"
                         : serverIcon(server)) as IconName,

@@ -1348,7 +1348,7 @@ function createApp(saved?: Preferences) {
       set("remoteProjectRequest", { server, newChat });
       return false;
     }
-    // Cloud sessions are started and opened from the account dialog.
+    // Cloud workspaces are started and opened from the account dialog.
     if (server.cloud) {
       window.dispatchEvent(new CustomEvent("haarness:account"));
       return false;

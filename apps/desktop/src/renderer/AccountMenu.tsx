@@ -23,17 +23,17 @@ type Account = {
   selectedAccountId?: string;
   selectedRouterId?: string;
 };
-type CloudSession = {
+type CloudWorkspace = {
   id: string;
   title: string;
   agentSnapshot?: { name: string };
-  workspace: { observedState: string };
+  observedState: string;
 };
 type CloudRouter = { id: string; name: string; isDefault: boolean; credentialMode: string };
 type CloudAgent = { id: string; name: string };
 
 // English keys; t() runs where they render.
-const sessionStates: Record<string, string> = {
+const workspaceStates: Record<string, string> = {
   created: "Preparing…",
   pending: "Preparing…",
   starting: "Starting…",
@@ -76,7 +76,7 @@ export function AccountMenu(props: {
   const [loginUrl, setLoginUrl] = createSignal("");
   const [code, setCode] = createSignal("");
   const [copied, setCopied] = createSignal(false);
-  const [workspaces, setWorkspaces] = createSignal<CloudSession[]>([]);
+  const [workspaces, setWorkspaces] = createSignal<CloudWorkspace[]>([]);
   const [name, setName] = createSignal("");
   const [routers, setRouters] = createSignal<CloudRouter[]>([]);
   const [agents, setAgents] = createSignal<CloudAgent[]>([]);
@@ -113,7 +113,7 @@ export function AccountMenu(props: {
     } else setRouters([]);
     if (result.loggedIn && open() && (result.authKind !== "api_key" || result.scopes?.includes("workspaces:read"))) {
       const [spaces, templates] = await Promise.allSettled([
-        window.haarness.account({ action: "sessions" }),
+        window.haarness.account({ action: "workspaces" }),
         window.haarness.account({ action: "agents" }),
       ]);
       if (!alive) return;
@@ -294,7 +294,7 @@ export function AccountMenu(props: {
               <p class="muted">
                 {account().loggedIn
                   ? account().user?.email
-                  : t("One account for Cloud models, sessions and billing.")}
+                  : t("One account for Cloud models, workspaces and billing.")}
               </p>
             </div>
             <Button icon="close" label={t("Close dialog")} onClick={close} />
@@ -320,7 +320,7 @@ export function AccountMenu(props: {
                           </li>
                           <li>
                             <Icon name="cloud" size="md" />
-                            <span>{t("Run Cloud sessions that keep working when your computer sleeps.")}</span>
+                            <span>{t("Run Cloud workspaces that keep working when your computer sleeps.")}</span>
                           </li>
                           <li>
                             <Icon name="billing" size="md" />
@@ -373,7 +373,7 @@ export function AccountMenu(props: {
                 <div class="account-row">
                   <div>
                     <strong>{t("Account")}</strong>
-                    <p class="muted">{t("Billing, sessions and members belong to the selected account.")}</p>
+                    <p class="muted">{t("Billing, workspaces and members belong to the selected account.")}</p>
                   </div>
                   <Select
                     aria-label={t("Account")}
@@ -507,17 +507,17 @@ export function AccountMenu(props: {
                   </div>
                 </section>
               </Show>
-              <Show when={permits("workspaces:read")} fallback={<p class="account-note">{t("This API key does not include Cloud session access.")}</p>}>
+              <Show when={permits("workspaces:read")} fallback={<p class="account-note">{t("This API key does not include Cloud workspace access.")}</p>}>
               <section class="account-section">
                 <div class="account-heading">
-                  <h3>{t("Cloud sessions")}</h3>
+                  <h3>{t("Cloud workspaces")}</h3>
                   <Show when={!creating()}>
                     <button
                       disabled={busy() || !permits("workspaces:write")}
                       onClick={() => setCreating(true)}
                     >
                       <Icon name="plus" size="sm" />
-                      {t("New session")}
+                      {t("New workspace")}
                     </button>
                   </Show>
                 </div>
@@ -528,7 +528,7 @@ export function AccountMenu(props: {
                       event.preventDefault();
                       void act(async () => {
                         await window.haarness.account({
-                          action: "create-session",
+                          action: "create-workspace",
                           name: name(),
                           id: agentId() || undefined,
                           configuration: { ...(configuration().trim() ? JSON.parse(configuration()) : {}), ...(instructions().trim() ? { instructions: instructions() } : {}) },
@@ -545,8 +545,8 @@ export function AccountMenu(props: {
                     <label class="field">
                       <span>{t("Title")}</span>
                       <input
-                        aria-label={t("Session title")}
-                        placeholder={t("What will this session work on?")}
+                        aria-label={t("Workspace title")}
+                        placeholder={t("What will this workspace work on?")}
                         required
                         value={name()}
                         onInput={(event) => setName(event.currentTarget.value)}
@@ -567,7 +567,7 @@ export function AccountMenu(props: {
                     <label class="field">
                       <span>{t("Instructions")} <em>{t("Optional")}</em></span>
                       <textarea
-                        aria-label={t("Session instructions")}
+                        aria-label={t("Workspace instructions")}
                         rows={3}
                         value={instructions()}
                         onInput={e => setInstructions(e.currentTarget.value)}
@@ -577,10 +577,10 @@ export function AccountMenu(props: {
                     <details class="account-advanced">
                       <summary>
                         <Icon name="chevron" size="xs" />
-                        {t("Advanced session configuration")}
+                        {t("Advanced workspace configuration")}
                       </summary>
-                      <p class="muted">{t("Optional JSON settings for model, reasoningEffort, mcp, agents, skills and permissions. Supplied fields override the template. Manage secrets in Cloud session settings.")}</p>
-                      <textarea aria-label={t("Session configuration JSON")} rows={6} value={configuration()} onInput={e => setConfiguration(e.currentTarget.value)} placeholder={'{"mcp":{},"agents":{},"skills":{}}'} />
+                      <p class="muted">{t("Optional JSON settings for model, reasoningEffort, mcp, agents, skills and permissions. Supplied fields override the template. Manage secrets in Cloud workspace settings.")}</p>
+                      <textarea aria-label={t("Workspace configuration JSON")} rows={6} value={configuration()} onInput={e => setConfiguration(e.currentTarget.value)} placeholder={'{"mcp":{},"agents":{},"skills":{}}'} />
                     </details>
                     <p class="account-hint">
                       {t("Starts an independent Cloud machine with its own files. It runs on your plan's compute hours and disk.")}
@@ -594,7 +594,7 @@ export function AccountMenu(props: {
                         {t("Cancel")}
                       </button>
                       <button class="primary" disabled={busy()}>
-                        {t("Start session")}
+                        {t("Start workspace")}
                       </button>
                     </div>
                   </form>
@@ -604,33 +604,33 @@ export function AccountMenu(props: {
                   fallback={
                     <Show when={!creating()}>
                       <p class="account-empty">
-                        {t("No Cloud sessions yet. A session runs Haarness on a Cloud machine with its own files, and keeps working while you are away.")}
+                        {t("No Cloud workspaces yet. A workspace runs Haarness on a Cloud machine with its own files, and keeps working while you are away.")}
                       </p>
                     </Show>
                   }
                 >
-                  <ul class="account-sessions">
+                  <ul class="account-workspaces">
                     <For each={workspaces()}>
                       {(w) => (
-                        <li class="account-workspace" data-state={w.workspace.observedState}>
-                          <span class="account-session-dot" aria-hidden="true" />
-                          <div class="account-session-text">
+                        <li class="account-workspace" data-state={w.observedState}>
+                          <span class="account-workspace-dot" aria-hidden="true" />
+                          <div class="account-workspace-text">
                             <strong>{w.title}</strong>
                             <Shimmer
-                              class="account-session-state"
-                              active={/…$/.test(sessionStates[w.workspace.observedState] ?? "")}
+                              class="account-workspace-state"
+                              active={/…$/.test(workspaceStates[w.observedState] ?? "")}
                             >
-                              {t(sessionStates[w.workspace.observedState] ?? w.workspace.observedState)}
+                              {t(workspaceStates[w.observedState] ?? w.observedState)}
                               <Show when={w.agentSnapshot?.name}>{" · " + w.agentSnapshot!.name}</Show>
                             </Shimmer>
                           </div>
-                          <div class="account-session-actions">
-                            <Show when={w.workspace.observedState === "running"}>
+                          <div class="account-workspace-actions">
+                            <Show when={w.observedState === "running"}>
                               <button
                                 disabled={busy() || !permits("workspaces:write")}
                                 onClick={() =>
                                   void act(async () => {
-                                    await window.haarness.account({ action: "session-stop", id: w.id });
+                                    await window.haarness.account({ action: "workspace-stop", id: w.id });
                                     await refresh();
                                   })
                                 }
@@ -642,7 +642,7 @@ export function AccountMenu(props: {
                                 disabled={busy() || !permits("workspaces:agent")}
                                 onClick={() =>
                                   void act(async () => {
-                                    const connected = await app.connect({ cloudSession: w.id });
+                                    const connected = await app.connect({ cloudWorkspace: w.id });
                                     if (connected) close();
                                   })
                                 }
@@ -650,12 +650,12 @@ export function AccountMenu(props: {
                                 {t("Open")}
                               </button>
                             </Show>
-                            <Show when={w.workspace.observedState === "stopped"}>
+                            <Show when={w.observedState === "stopped"}>
                               <button
                                 disabled={busy() || !permits("workspaces:write")}
                                 onClick={() =>
                                   void act(async () => {
-                                    await window.haarness.account({ action: "session-start", id: w.id });
+                                    await window.haarness.account({ action: "workspace-start", id: w.id });
                                     await refresh();
                                   })
                                 }
@@ -666,8 +666,8 @@ export function AccountMenu(props: {
                             </Show>
                             <Button
                               icon="settings"
-                              label={t("Cloud session settings")}
-                              onClick={() => void web("session-settings", w.id)}
+                              label={t("Cloud workspace settings")}
+                              onClick={() => void web("workspace-settings", w.id)}
                             />
                           </div>
                         </li>

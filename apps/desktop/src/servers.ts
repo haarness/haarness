@@ -18,7 +18,7 @@ export function serverKey(location: {
   // Each of your other computers is a place of its own, whichever Cloud
   // address relays it.
   if (location.remoteHost) return "host:" + location.remoteHost;
-  // Every Cloud session of one account is one place to switch to. Sessions are
+  // Every Cloud workspace of one account is one place to switch to. Workspaces are
   // reached through the Cloud gateway's URL, but that origin is not a server
   // the user added and must not become one.
   if (location.cloudAccount)
@@ -27,7 +27,7 @@ export function serverKey(location: {
   return location.id;
 }
 
-/** The Haarness Cloud entries implied by opened Cloud sessions, one per account. */
+/** The Haarness Cloud entries implied by opened Cloud workspaces, one per account. */
 export function cloudServers(recent: Recent[]): SavedServer[] {
   const servers = new Map<string, SavedServer>();
   for (const location of recent)
@@ -47,7 +47,7 @@ export function serverAfterRemoval(servers: SavedServer[], active: string) {
 
 export function migrateServers(recent: Recent[], saved: SavedServer[] = []) {
   // Earlier versions saved a Cloud gateway as a remote server the first time a
-  // Cloud session opened. Drop those unless a real remote project uses them.
+  // Cloud workspace opened. Drop those unless a real remote project uses them.
   const gateways = new Set(
     recent
       .filter((location) => location.cloudAccount && location.url)

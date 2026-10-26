@@ -212,39 +212,39 @@
 .account-workspace + .account-workspace {
   border-block-start: 1px solid var(--hairline);
 }
-.account-session-dot {
+.account-workspace-dot {
   flex: none;
   width: 7px;
   height: 7px;
   border-radius: var(--r-pill);
   background: var(--faint);
 }
-.account-workspace[data-state="running"] .account-session-dot {
+.account-workspace[data-state="running"] .account-workspace-dot {
   background: var(--green);
   box-shadow: 0 0 0 3px var(--green-soft);
 }
-.account-workspace[data-state="failed"] .account-session-dot {
+.account-workspace[data-state="failed"] .account-workspace-dot {
   background: var(--danger);
 }
-.account-session-text {
+.account-workspace-text {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.account-session-text strong {
+.account-workspace-text strong {
   font-size: var(--ui-lg);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.account-session-state {
+.account-workspace-state {
   font-size: var(--ui-sm);
   color: var(--muted);
 }
-.account-session-actions {
+.account-workspace-actions {
   flex: none;
   display: flex;
   align-items: center;

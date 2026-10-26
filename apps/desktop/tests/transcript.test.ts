@@ -586,7 +586,7 @@ const haarnessTools = [
   "update_goal", "propose_goal_criteria", "load_tool", "schedule", "workflow", "marketplace_manage",
   "capability_manage", "skill_manage", "plugin_manage", "mcp_manage", "mcp_resource_list", "mcp_resource_read",
   "agent_manage", "command_manage",
-  "cloud_agent_manage", "cloud_agent_session", "cloud_chat", "cloud_schedule", "memory_list", "memory_search",
+  "cloud_agent_manage", "cloud_workspace", "cloud_agent_session", "cloud_chat", "cloud_schedule", "memory_list", "memory_search",
   "memory_read", "memory_save", "memory_delete", "task_abort", "agent_switch", "session_manage",
   "session_rename", "session_message", "session_wait", "StructuredOutput",
 ];
@@ -616,7 +616,7 @@ test("each of Haarness's own tools reads as what it does, never as its id or ano
   assert.equal(describeTool("schedule", { action: "list" }).target, "");
   const uuid = "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
   assert.equal(describeTool("workflow", { action: "status", runID: uuid }).target, "");
-  assert.equal(describeTool("cloud_chat", { action: "rename", sessionId: uuid, chatId: uuid, title: "Release" }).target, "Release");
+  assert.equal(describeTool("cloud_chat", { action: "rename", workspaceId: uuid, chatId: uuid, title: "Release" }).target, "Release");
   assert.equal(describeTool("task_abort", { task_id: uuid }).target, "");
   assert.equal(describeTool("session_wait", { id: uuid }).target, "");
   assert.equal(describeTool("session_message", { id: uuid, message: "Ship it" }).target, "");

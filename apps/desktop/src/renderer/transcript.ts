@@ -104,6 +104,8 @@ const namedTools: Record<string, { icon: IconName } & Verbs> = {
   agent_manage: { icon: "agents", ...verbs("Managed agents", "Managing agents", "Tried to manage agents") },
   command_manage: { icon: "compose", ...verbs("Managed commands", "Managing commands", "Tried to manage commands") },
   cloud_agent_manage: { icon: "cloud", ...verbs("Used Haarness Cloud", "Using Haarness Cloud", "Tried to use Haarness Cloud") },
+  cloud_workspace: { icon: "cloud", ...verbs("Used Haarness Cloud", "Using Haarness Cloud", "Tried to use Haarness Cloud") },
+  // `cloud_workspace`'s name in chats from before Cloud sessions became workspaces.
   cloud_agent_session: { icon: "cloud", ...verbs("Used Haarness Cloud", "Using Haarness Cloud", "Tried to use Haarness Cloud") },
   cloud_chat: { icon: "cloud", ...verbs("Used Haarness Cloud", "Using Haarness Cloud", "Tried to use Haarness Cloud") },
   cloud_schedule: { icon: "cloud", ...verbs("Used Haarness Cloud", "Using Haarness Cloud", "Tried to use Haarness Cloud") },
