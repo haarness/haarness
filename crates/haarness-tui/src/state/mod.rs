@@ -792,6 +792,9 @@ pub struct App {
     /// The provider catalog did not come in time for the first frame: it
     /// says "Loading models…", not that nothing is connected.
     pub(crate) models_loading: bool,
+    /// A newer Haarness the release service offers; the home screen says so
+    /// (see `updates.rs`).
+    pub(crate) update_available: Option<String>,
     /// Where a provider catalog read off the event loop goes (see
     /// `App::catalog_arrived`); without it, the read waits in place.
     pub(crate) catalog_tx:
@@ -1169,6 +1172,7 @@ impl App {
             language: crate::locale::Language::default(),
             connection_lost: None,
             models_loading: false,
+            update_available: None,
             catalog_tx: None,
             lost_toast_at: None,
             following_stopped: false,

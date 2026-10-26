@@ -29,6 +29,7 @@ mod statusline;
 mod terminal;
 mod theme;
 mod theme_embedded;
+mod updates;
 mod view;
 mod width;
 
@@ -659,6 +660,15 @@ async fn run_with_client(
     // Provider catalogs read off the loop (the server may wait up to 10 s
     // for a list), applied when they come.
     let (catalog_tx, mut catalog_rx) = tokio::sync::mpsc::channel(4);
+    // A newer Haarness: what the last check knew at once, then a check off
+    // the loop (see updates.rs).
+    app.update_available = updates::known();
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        if let Some(version) = updates::check().await {
+            let _ = update_tx.send(version).await;
+        }
+    });
     app.catalog_tx = Some(catalog_tx.clone());
     // MCP resources for the `@` list, read off the loop when it first opens,
     // and messages that mention some, sent off the loop while they are read.
@@ -693,7 +703,9 @@ async fn run_with_client(
                     event_task.abort();
                     client.disconnect_all_ptys();
                     client = connection.client;
+                    let update_available = app.update_available.take();
                     app = connection.app;
+                    app.update_available = update_available;
                     if let Some(watch) = &billing {
                         app.billing = watch.updates.borrow().clone();
                     }
@@ -1070,6 +1082,7 @@ async fn run_with_client(
                 }
             },
             Some(message) = side_rx.recv() => app.side_message(message),
+            Some(version) = update_rx.recv() => app.update_available = Some(version),
             Some(update) = resources_rx.recv() => app.resources_arrived(update),
             Some(sent) = sends_rx.recv() => app.mentions_sent(sent, Some(&client)).await,
             Some(listed) = catalog_rx.recv() => {

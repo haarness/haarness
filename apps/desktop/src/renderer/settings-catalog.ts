@@ -101,7 +101,8 @@ export const settingsControls = [
   ["extensions", "Enable extensions", "javascript hooks scripts"],
   ["profiles", "Save a profile", "export snapshot configuration"],
   ["profiles", "Profile catalog", "manage catalog registry"],
-  ["about", "Updates", "check update download version"],
+  ["about", "Updates", "check update download version restart install upgrade new"],
+  ["about", "Download updates automatically", "auto update background download install restart"],
   ["about", "Reopen project", "refresh conversations files reconnect"],
 ] as const;
 /** Rows Settings shows on macOS only, so search offers them only there. */

@@ -158,6 +158,10 @@ struct Cli {
         conflicts_with = "thread"
     )]
     continue_last: bool,
+    /// Install the newest Haarness release in place, as `haarness upgrade`
+    /// does (the terminal UI's home screen says when one is out).
+    #[arg(long)]
+    update: bool,
 }
 /// The modes `--approvals` takes, in the order every app lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1461,6 +1465,17 @@ async fn cli_main() -> Result<()> {
         }
         Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
     };
+    if cli.update {
+        if cli.command.is_some() {
+            cli_command()
+                .error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "--update installs the newest Haarness and does nothing else; run it on its own",
+                )
+                .exit();
+        }
+        return upgrade::run(upgrade::UpgradeArgs::latest());
+    }
     if let Some(Command::Serve(ServeArgs {
         start_log: Some(path),
         start_id: Some(id),

@@ -195,6 +195,7 @@ export async function preferences(input: Partial<Preferences>) {
         enabled: z.boolean(),
         keys: z.string().max(100),
       }),
+      autoUpdate: z.boolean(),
     })
     .parse({ ...state.preferences, ...input });
   if (

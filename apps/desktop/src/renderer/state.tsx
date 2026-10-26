@@ -83,6 +83,7 @@ import {
   type TabOpen,
 } from "./chat-tabs";
 import { themeColors } from "../themes";
+import type { UpdateState } from "../updates";
 import {
   cleanProjectMeta,
   groupProjects,
@@ -139,6 +140,8 @@ interface State extends Live {
   preferences: Preferences;
   version: string;
   platform: string;
+  /** What Desktop knows about a newer version (see updates.ts). */
+  update: UpdateState;
   selected: string;
   tabs: string[];
   /** The tab a plain click opened, which the next one replaces ("" when
@@ -235,6 +238,7 @@ function createApp(saved?: Preferences) {
     preferences: { ...defaults, ...saved },
     version: "",
     platform: "",
+    update: { method: "off", status: "idle", checking: false },
     selected: "",
     tabs: [],
     preview: "",
@@ -2471,6 +2475,7 @@ function createApp(saved?: Preferences) {
     applyRecent(value.recent);
     set("version", value.version);
     set("platform", value.platform);
+    if (value.update) set("update", reconcile(value.update));
     set("chatHomeAt", value.chatHome);
     void followHomeAtLaunch();
     const savedProject = await window.haarness.storage("active-project");
@@ -2511,6 +2516,10 @@ function createApp(saved?: Preferences) {
     }
     if (event.kind === "projects") {
       applyRecent(event.data as Recent[]);
+      return;
+    }
+    if (event.kind === "update") {
+      set("update", reconcile(event.data as UpdateState));
       return;
     }
     if (event.kind === "menu") {

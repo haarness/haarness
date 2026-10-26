@@ -761,6 +761,62 @@ html[data-order-dragging] * {
   flex: none;
   gap: var(--s0);
 }
+/* A newer Haarness waiting for the person: a quiet row in the accent colour,
+   with a hairline of progress along its foot while a download it asked for
+   runs. It never shows for a download running by itself. */
+.update-row {
+  position: relative;
+  overflow: hidden;
+  color: var(--accent);
+}
+.nav-row.update-row svg {
+  color: var(--accent);
+}
+.update-row.ready {
+  background: var(--accent-soft);
+}
+.update-row.ready:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.update-row.failed,
+.nav-row.update-row.failed svg {
+  color: var(--danger);
+}
+.update-row:disabled {
+  opacity: 1;
+  cursor: default;
+}
+.update-row > span:not(.update-progress) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.update-progress {
+  position: absolute;
+  inset-inline-start: var(--s2);
+  inset-inline-end: var(--s2);
+  bottom: 3px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent-soft);
+}
+.update-progress::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: var(--progress, 0%);
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width var(--slow) var(--ease);
+}
+@media (prefers-reduced-motion: reduce) {
+  .update-progress::after {
+    transition: none;
+  }
+}
 
 /* --------------------------------------------------------------- workbench */
 .resize-handle {
