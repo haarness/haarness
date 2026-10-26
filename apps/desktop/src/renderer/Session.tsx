@@ -92,7 +92,7 @@ import {
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import type * as T from "@haarness/sdk";
 import { useApp } from "./state";
-import { Button, Icon, stringify, time, type IconName } from "./ui";
+import { Button, Icon, ago, stringify, type IconName } from "./ui";
 import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
 import { watchOpenImages } from "./ImageViewer";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
@@ -3179,8 +3179,8 @@ function projectHeading(template: string, name: () => string) {
     </>
   );
 }
-/** A message's time as it shows (short), with the full date and time on
- * hover and for assistive technology. */
+/** A message's time as how long ago it was ("5 minutes ago"), with the full
+ * date and time on hover and for assistive technology. */
 function Timestamp(props: { value: string }) {
   const date = () => new Date(props.value);
   const valid = () => !Number.isNaN(date().getTime());
@@ -3190,7 +3190,7 @@ function Timestamp(props: { value: string }) {
       dateTime={valid() ? date().toISOString() : undefined}
       title={valid() ? date().toLocaleString(language(), { dateStyle: "full", timeStyle: "short" }) : undefined}
     >
-      {time(props.value)}
+      {valid() ? ago(props.value) : ""}
     </time>
   );
 }

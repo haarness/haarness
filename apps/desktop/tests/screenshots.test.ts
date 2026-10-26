@@ -16,7 +16,8 @@ import {
   parseDefaultsLocation,
   screenshotFolder,
 } from "../src/screenshots";
-import { relativeTime, toggleSelection } from "../src/renderer/screenshot-picker";
+import { relativeTime } from "../src/renderer/relative-time";
+import { toggleSelection } from "../src/renderer/screenshot-picker";
 
 test("macOS's Save to setting names the folder, quoted or with ~", () => {
   assert.equal(parseDefaultsLocation('"/Users/me/My Shots"\n', "/Users/me"), "/Users/me/My Shots");
