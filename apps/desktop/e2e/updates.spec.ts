@@ -298,7 +298,6 @@ test("Restart to update with unsaved file edits asks first; keeping them calls t
   await writeFile(join(project, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
   await writeFile(join(project, "notes.txt"), "Original notes");
   await launch();
-  const asked: string[] = [];
   await app!.evaluate(({ dialog }, { directory }) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
     const record = globalThis as { unloadAnswer?: number; unloadAsked?: string[] };
