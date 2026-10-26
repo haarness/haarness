@@ -8928,12 +8928,16 @@ test("assistant hover icons copy Markdown and fork through exactly that reply", 
     .toBe(true);
   await user.screenshot({ path: "test-results/user-message-copy-only.png" });
   await expect(reply.locator(".message-label")).toHaveCount(0);
-  await expect(reply.locator(".message-footer .message-time")).toBeVisible();
+  // The reply's time says how long ago it was, and shows with its actions.
+  const replyTime = reply.locator(".message-footer .message-time");
+  await expect(replyTime).toHaveText(/^(now|\d+ minutes? ago)$/);
   const toolbar = reply.locator(".message-tools");
   await page.getByRole("textbox", { name: "Message", exact: true }).hover();
   await expect(toolbar).toHaveCSS("opacity", "0");
+  await expect(replyTime).toHaveCSS("opacity", "0");
   await reply.hover();
   await expect(toolbar).toHaveCSS("opacity", "1");
+  await expect(replyTime).toHaveCSS("opacity", "1");
   await expect(toolbar.getByRole("button")).toHaveCount(2);
   await expect(
     toolbar

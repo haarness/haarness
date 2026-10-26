@@ -20,8 +20,17 @@
   color: var(--muted);
   margin: var(--s3) 0 var(--s6);
 }
-.project-home-open {
-  margin: var(--s2) auto 0;
+.project-home-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+.project-home-actions button {
+  min-height: var(--control-lg);
+  padding: 0 var(--s4);
 }
 .project-home-error {
   overflow-wrap: anywhere;

@@ -166,16 +166,6 @@
   margin-top: 0;
   min-height: var(--icon-button);
 }
-/* The user's own words carry no persistent metadata; it appears with the
-   actions, on hover or focus, so a re-read of the thread stays clean. */
-.message.user .message-time {
-  opacity: 0;
-  transition: opacity var(--fast) var(--ease);
-}
-.message.user:hover .message-time,
-.message.user:focus-within .message-time {
-  opacity: 1;
-}
 
 /* -- what Haarness answered ------------------------------------------------ */
 .message.assistant {
@@ -263,11 +253,19 @@
   min-height: var(--icon-button);
   color: var(--muted);
 }
+/* No message carries persistent metadata: its time appears with the actions,
+   on hover or focus, so a re-read of the thread stays clean. */
 .message-time {
   font-size: var(--ui-xs);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
+  opacity: 0;
+  transition: opacity var(--fast) var(--ease);
+}
+.message:hover .message-time,
+.message:focus-within .message-time {
+  opacity: 1;
 }
 .message-tools {
   display: flex;
@@ -282,6 +280,9 @@
   pointer-events: auto;
 }
 @media (hover: none) {
+  .message-time {
+    opacity: 1;
+  }
   .message-tools {
     opacity: 1;
     pointer-events: auto;
