@@ -68,7 +68,9 @@ enum RemoteCommand {
     /// List machines connected to the selected Cloud account.
     Hosts,
     /// List explicitly published chats.
-    Sessions,
+    // `sessions` is the command's name from before shared chats were called chats.
+    #[command(alias = "sessions")]
+    Chats,
     /// Revoke Cloud access without deleting any local files or conversations.
     Revoke {
         /// Connector id, as `remote status` shows it.
@@ -255,7 +257,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             );
             return Ok(());
         }
-        RemoteCommand::Sessions => {
+        RemoteCommand::Chats => {
             println!(
                 "{}",
                 super::account::list_all(
@@ -1328,7 +1330,7 @@ fn identities_in(dir: &Path) -> Result<Vec<(std::path::PathBuf, Value)>> {
 /// The other computers Desktop can open: the account's hosts that share the
 /// whole computer, without this one (any host whose connector identity lives
 /// in `config_dir`) and without chat-only connectors, which Cloud lists under
-/// Sessions instead.
+/// Shared chats instead.
 pub(crate) async fn computers(
     client: &haarness_account::Client,
     config_dir: &Path,
@@ -1792,6 +1794,8 @@ mod tests {
             vec!["enable"],
             vec!["status"],
             vec!["hosts"],
+            vec!["chats"],
+            // The former name of `chats` still works.
             vec!["sessions"],
             vec!["run", "--chat", "00000000-0000-0000-0000-000000000001"],
             vec!["disable", "00000000-0000-0000-0000-000000000001"],

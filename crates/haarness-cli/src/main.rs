@@ -16398,7 +16398,7 @@ request_timeout = 0
             explicit: false,
             repository_scope: None,
             permission_id: "p".into(),
-            operation: "cloud:session_create".into(),
+            operation: "cloud:workspace_create".into(),
             detail: serde_json::Value::Null,
             script: None,
             permission: "cloud".into(),

@@ -24,7 +24,7 @@ pub struct AccountArgs {
     /// Print JSON.
     #[arg(long)]
     pub json: bool,
-    /// Switch the account used for Cloud models and sessions.
+    /// Switch the account used for Cloud models and workspaces.
     #[arg(long)]
     pub select: Option<String>,
     /// List the account’s Cloud routers.
@@ -57,12 +57,9 @@ pub enum CloudCommand {
         #[command(subcommand)]
         command: AgentCommand,
     },
-    /// Start, list and attach to cloud sessions, blank or from a cloud agent.
-    Session {
-        #[command(subcommand)]
-        command: SessionCommand,
-    },
-    /// Compatibility commands for existing Cloud workspaces.
+    /// Create, list, open and manage cloud workspaces, blank or from a cloud agent.
+    // `session` is the command's name from before Cloud sessions became workspaces.
+    #[command(alias = "session")]
     Workspace {
         #[command(subcommand)]
         command: WorkspaceCommand,
@@ -104,37 +101,55 @@ pub enum AgentCommand {
     },
 }
 #[derive(Subcommand)]
-pub enum SessionCommand {
-    /// List your cloud sessions.
+pub enum WorkspaceCommand {
+    /// List your cloud workspaces.
     List {
         /// Print JSON.
         #[arg(long)]
         json: bool,
-        /// Only sessions started from this cloud agent (its id).
+        /// Only workspaces started from this cloud agent (its id).
         #[arg(long)]
         agent: Option<String>,
     },
-    /// Start a cloud session: a blank one, or one from a cloud agent.
+    /// Create a cloud workspace: a blank one, or one from a cloud agent.
     Create {
+        /// The workspace's title (the same as `--title`).
+        #[arg(value_name = "TITLE", conflicts_with = "title")]
+        name: Option<String>,
         /// Start from this cloud agent (its id).
         #[arg(long)]
         agent: Option<String>,
-        /// The session's title.
+        /// The workspace's title.
         #[arg(long)]
         title: Option<String>,
+        /// Git repository to clone into it.
+        #[arg(long)]
+        repo: Option<String>,
         /// JSON creation body with configuration and optional encrypted environment values.
         #[arg(long)]
         file: Option<std::path::PathBuf>,
-        /// Create the session without starting it.
+        /// Create the workspace without starting it.
         #[arg(long)]
         stopped: bool,
         /// Print JSON.
         #[arg(long)]
         json: bool,
     },
+    /// Show one cloud workspace as JSON.
+    Show {
+        /// Cloud workspace id.
+        id: String,
+    },
+    /// Rename a cloud workspace.
+    Rename {
+        /// Cloud workspace id.
+        id: String,
+        /// The new title.
+        title: String,
+    },
     /// Save configuration/environment while stopped. File must include the current version.
     Update {
-        /// Cloud session id.
+        /// Cloud workspace id.
         id: String,
         /// JSON file with the current version and the new settings.
         #[arg(long)]
@@ -142,65 +157,30 @@ pub enum SessionCommand {
     },
     /// Capture saved settings in an inert template with a fresh deploy key.
     SaveAgent {
-        /// Cloud session id.
+        /// Cloud workspace id.
         id: String,
         /// The new cloud agent's name.
         #[arg(long)]
         name: String,
-        /// The session's current `version`; a session changed since is refused.
+        /// The workspace's current `version`; a workspace changed since is refused.
         #[arg(long)]
         version: i64,
-        /// Copy the session's environment values into the agent as well.
+        /// Copy the workspace's environment values into the agent as well.
         #[arg(long)]
         include_environment: bool,
-    },
-    /// Show one cloud session as JSON.
-    Show {
-        /// Cloud session id.
-        id: String,
-    },
-    /// Start a stopped session.
-    Start {
-        /// Cloud session id.
-        id: String,
-    },
-    /// Stop a running session.
-    Stop {
-        /// Cloud session id.
-        id: String,
-    },
-    /// Open a session in the terminal UI.
-    Attach {
-        /// Cloud session id.
-        id: String,
-    },
-}
-#[derive(Subcommand)]
-pub enum WorkspaceCommand {
-    /// List existing Cloud workspaces.
-    List {
-        /// Print JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Create a Cloud workspace. New work belongs in `cloud session create`.
-    Create {
-        /// Workspace name.
-        name: String,
-        /// Git repository to clone into it.
-        #[arg(long)]
-        repo: Option<String>,
-        /// Print JSON.
-        #[arg(long)]
-        json: bool,
     },
     /// Start a stopped workspace.
     Start {
         /// Cloud workspace id.
         id: String,
     },
-    /// Stop a running workspace.
+    /// Stop a running workspace. Its files are kept.
     Stop {
+        /// Cloud workspace id.
+        id: String,
+    },
+    /// Delete a workspace with its files and chats, for good.
+    Delete {
         /// Cloud workspace id.
         id: String,
     },
@@ -412,43 +392,38 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
             client.select_account(id(&input)?).await?;
             client.status().await?
         }
-        "workspaces" => {
-            client
-                .request(Method::GET, &format!("api/v1/workspaces{query}"), None)
-                .await?
-        }
-        "agents" | "sessions" => {
+        "agents" | "workspaces" => {
             let resource = if action == "agents" {
                 "cloud-agents"
             } else {
-                "sessions"
+                "workspaces"
             };
             list_all(client, &format!("api/v1/{resource}{query}")).await?
         }
-        "create-session" => {
+        "create-workspace" => {
             client
                 .request(
                     Method::POST,
-                    "api/v1/sessions",
+                    "api/v1/workspaces",
                     Some(json!({"accountId":client.config.selected_account(),"cloudAgentId":if input["id"].is_null() { None } else { Some(id(&input)?) },"title":input["name"],"configuration":input["configuration"]})),
                 )
                 .await?
         }
-        "session" => {
+        "workspace" => {
             client
                 .request(
                     Method::GET,
-                    &format!("api/v1/sessions/{}", id(&input)?),
+                    &format!("api/v1/workspaces/{}", id(&input)?),
                     None,
                 )
                 .await?
         }
-        "session-attach" | "session-start" | "session-stop" => {
-            let action = action.strip_prefix("session-").unwrap_or(action);
+        "workspace-attach" | "workspace-start" | "workspace-stop" => {
+            let action = action.strip_prefix("workspace-").unwrap_or(action);
             client
                 .request(
                     Method::POST,
-                    &format!("api/v1/sessions/{}/{action}", id(&input)?),
+                    &format!("api/v1/workspaces/{}/{action}", id(&input)?),
                     Some(json!({})),
                 )
                 .await?
@@ -463,38 +438,17 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
                 .request(Method::GET, &format!("api/v1/billing/usage{query}"), None)
                 .await?
         }
-        "create" => {
-            let name = input["name"]
-                .as_str()
-                .filter(|n| !n.trim().is_empty())
-                .context("Enter a workspace name")?;
-            let template = match input["repo"].as_str().filter(|s| !s.is_empty()) {
-                Some(url) => json!({"kind":"git","url":url}),
-                None => json!({"kind":"empty"}),
-            };
-            client.request(Method::POST,"api/v1/workspaces",Some(json!({"name":name,"accountId":client.config.selected_account(),"template":template}))).await?
-        }
-        "attach" | "start" | "stop" => {
-            client
-                .request(
-                    Method::POST,
-                    &format!("api/v1/workspaces/{}/{action}", id(&input)?),
-                    Some(json!({})),
-                )
-                .await?
-        }
         "web" => {
             let page = match input["page"].as_str() {
                 Some("billing" | "topup") => "app/billing",
                 Some("usage") => "app/billing/usage",
                 Some("agents") => "app/agents",
-                Some("sessions") => "app/sessions",
-
+                Some("workspaces") => "app/workspaces",
                 _ => "app",
             };
             {
                 let base = client.config.web_origin()?;
-                let mut url = base.join(&if input["page"] == "session-settings" { format!("app/sessions/{}/settings", id(&input)?) } else {page.to_owned()})?;
+                let mut url = base.join(&if input["page"] == "workspace-settings" { format!("app/workspaces/{}/settings", id(&input)?) } else {page.to_owned()})?;
                 if matches!(input["page"].as_str(), Some("billing" | "topup" | "usage")) {
                     if let Some(account) = client.config.selected_account() {
                         url.query_pairs_mut().append_pair("accountId", &account);
@@ -557,169 +511,153 @@ pub async fn cloud(args: &CloudArgs) -> Result<()> {
                     &value,
                     "name",
                     false,
-                    "No cloud agents yet. Save one from a session with `haarness cloud session save-agent`, or create one with `haarness cloud agent create --file agent.json`.",
+                    "No cloud agents yet. Save one from a workspace with `haarness cloud workspace save-agent`, or create one with `haarness cloud agent create --file agent.json`.",
                 );
             } else {
                 println!("{value}");
             }
         }
-        CloudCommand::Session { command } => match command {
-            SessionCommand::List {
-                json: as_json,
-                agent,
-            } => {
-                let mut path = format!(
-                    "api/v1/sessions?accountId={}",
-                    client.config.selected_account().unwrap_or_default()
-                );
-                if let Some(agent) = agent {
-                    write!(path, "&cloudAgentId={}", id(&json!({"id":agent}))?)?;
-                }
-                // Omitting accountId selects the signed-in personal account.
-                if client.config.selected_account().is_none() {
-                    path = path.replace("?accountId=", "?");
-                }
-                let value = list_all(&client, &path).await?;
-                if *as_json {
-                    println!("{value}");
-                } else {
-                    print_list(
-                        &value,
-                        "title",
-                        true,
-                        &no_sessions_hint(client.config.web_origin().ok()),
-                    );
-                }
-            }
-            SessionCommand::Create {
-                agent,
-                title,
-                file,
-                stopped,
-                json: as_json,
-            } => {
-                let mut body: Value = if let Some(file) = file {
-                    serde_json::from_slice(&std::fs::read(file)?)?
-                } else {
-                    json!({})
-                };
-                if !body.is_object() {
-                    bail!("Session file must contain a JSON object");
-                }
-                if let Some(agent) = agent {
-                    body["cloudAgentId"] = json!(id(&json!({"id":agent}))?);
-                }
-                if let Some(title) = title {
-                    body["title"] = json!(title);
-                }
-                if *stopped {
-                    body["start"] = json!(false);
-                }
-                if body.get("accountId").is_none() {
-                    body["accountId"] = json!(client.config.selected_account());
-                }
-                let value = client
-                    .request(Method::POST, "api/v1/sessions", Some(body))
-                    .await?;
-                if *as_json {
-                    println!("{value}");
-                } else {
-                    println!(
-                        "Session {} created. Use `haarness cloud session list`, then `haarness cloud session attach <id>`.",
-                        value["session"]["id"].as_str().unwrap_or("")
-                    );
-                }
-            }
-            SessionCommand::Update { id: session, file } => {
-                let body: Value = serde_json::from_slice(&std::fs::read(file)?)?;
-                println!(
-                    "{}",
-                    client
-                        .request(
-                            Method::PATCH,
-                            &format!("api/v1/sessions/{}", id(&json!({"id":session}))?),
-                            Some(body)
-                        )
-                        .await?
-                );
-            }
-            SessionCommand::SaveAgent {
-                id: session,
-                name,
-                version,
-                include_environment,
-            } => {
-                println!("{}", client.request(Method::POST, &format!("api/v1/sessions/{}/save-agent", id(&json!({"id":session}))?), Some(json!({"name":name,"version":version,"includeEnvironment":include_environment}))).await?);
-            }
-            SessionCommand::Show { id } => println!(
-                "{}",
-                rpc(&client, json!({"action":"session","id":id})).await?
-            ),
-            SessionCommand::Start { id } | SessionCommand::Stop { id } => {
-                let action = if matches!(command, SessionCommand::Start { .. }) {
-                    "session-start"
-                } else {
-                    "session-stop"
-                };
-                rpc(&client, json!({"action":action,"id":id})).await?;
-                println!("Session operation requested.");
-            }
-            SessionCommand::Attach { id } => attach(client, id, "session-attach").await?,
-        },
-        CloudCommand::Workspace { command } => match command {
-            WorkspaceCommand::List { json: as_json } => {
-                let v = rpc(&client, json!({"action":"workspaces"})).await?;
-                if *as_json {
-                    println!("{v}")
-                } else if let Some(items) = v["items"].as_array() {
-                    if items.is_empty() {
-                        println!(
-                            "No Cloud workspaces. New work runs in sessions: start one with `haarness cloud session create`."
-                        );
-                    }
-                    for w in items {
-                        println!(
-                            "{}  {}  {}",
-                            w["id"].as_str().unwrap_or(""),
-                            w["name"].as_str().unwrap_or(""),
-                            w["observedState"].as_str().unwrap_or("")
-                        );
-                    }
-                }
-            }
-            WorkspaceCommand::Create {
-                name,
-                repo,
-                json: as_json,
-            } => {
-                let v = rpc(&client, json!({"action":"create","name":name,"repo":repo})).await?;
-                if *as_json {
-                    println!("{v}")
-                } else {
-                    println!(
-                        "Creating Cloud workspace {name}. Use `haarness cloud workspace list` to see when it is ready."
-                    );
-                }
-            }
-            WorkspaceCommand::Start { id } | WorkspaceCommand::Stop { id } => {
-                let action = if matches!(command, WorkspaceCommand::Start { .. }) {
-                    "start"
-                } else {
-                    "stop"
-                };
-                rpc(&client, json!({"action":action,"id":id})).await?;
-                println!("Workspace {action} requested.");
-            }
-            WorkspaceCommand::Attach { id } => {
-                attach(client, id, "attach").await?;
-            }
-        },
+        CloudCommand::Workspace { command } => workspace(&client, command).await?,
     }
     Ok(())
 }
 
-async fn attach(client: Client, id: &str, action: &'static str) -> Result<()> {
+async fn workspace(client: &Client, command: &WorkspaceCommand) -> Result<()> {
+    let path = |workspace: &str| -> Result<String> {
+        Ok(format!(
+            "api/v1/workspaces/{}",
+            id(&json!({"id":workspace}))?
+        ))
+    };
+    match command {
+        WorkspaceCommand::List {
+            json: as_json,
+            agent,
+        } => {
+            let mut path = format!(
+                "api/v1/workspaces?accountId={}",
+                client.config.selected_account().unwrap_or_default()
+            );
+            if let Some(agent) = agent {
+                write!(path, "&cloudAgentId={}", id(&json!({"id":agent}))?)?;
+            }
+            // Omitting accountId selects the signed-in personal account.
+            if client.config.selected_account().is_none() {
+                path = path.replace("?accountId=", "?");
+            }
+            let value = list_all(client, &path).await?;
+            if *as_json {
+                println!("{value}");
+            } else {
+                print_list(
+                    &value,
+                    "title",
+                    true,
+                    &no_workspaces_hint(client.config.web_origin().ok()),
+                );
+            }
+        }
+        WorkspaceCommand::Create {
+            name,
+            agent,
+            title,
+            repo,
+            file,
+            stopped,
+            json: as_json,
+        } => {
+            let mut body: Value = if let Some(file) = file {
+                serde_json::from_slice(&std::fs::read(file)?)?
+            } else {
+                json!({})
+            };
+            if !body.is_object() {
+                bail!("Workspace file must contain a JSON object");
+            }
+            if let Some(agent) = agent {
+                body["cloudAgentId"] = json!(id(&json!({"id":agent}))?);
+            }
+            if let Some(title) = title.as_ref().or(name.as_ref()) {
+                body["title"] = json!(title);
+            }
+            if let Some(url) = repo.as_deref().filter(|url| !url.is_empty()) {
+                if !body["configuration"].is_object() {
+                    body["configuration"] = json!({});
+                }
+                body["configuration"]["repository"] = json!({"kind":"git","url":url});
+            }
+            if *stopped {
+                body["start"] = json!(false);
+            }
+            if body.get("accountId").is_none() {
+                body["accountId"] = json!(client.config.selected_account());
+            }
+            let value = client
+                .request(Method::POST, "api/v1/workspaces", Some(body))
+                .await?;
+            if *as_json {
+                println!("{value}");
+            } else {
+                println!(
+                    "Workspace {} created. Use `haarness cloud workspace list`, then `haarness cloud workspace attach <id>`.",
+                    value["workspace"]["id"].as_str().unwrap_or("")
+                );
+            }
+        }
+        WorkspaceCommand::Show { id } => println!(
+            "{}",
+            rpc(client, json!({"action":"workspace","id":id})).await?
+        ),
+        WorkspaceCommand::Rename { id, title } => {
+            println!(
+                "{}",
+                client
+                    .request(Method::PATCH, &path(id)?, Some(json!({"title":title})))
+                    .await?
+            );
+        }
+        WorkspaceCommand::Update { id, file } => {
+            let body: Value = serde_json::from_slice(&std::fs::read(file)?)?;
+            println!(
+                "{}",
+                client
+                    .request(Method::PATCH, &path(id)?, Some(body))
+                    .await?
+            );
+        }
+        WorkspaceCommand::SaveAgent {
+            id,
+            name,
+            version,
+            include_environment,
+        } => {
+            println!("{}", client.request(Method::POST, &format!("{}/save-agent", path(id)?), Some(json!({"name":name,"version":version,"includeEnvironment":include_environment}))).await?);
+        }
+        WorkspaceCommand::Start { id } | WorkspaceCommand::Stop { id } => {
+            let action = if matches!(command, WorkspaceCommand::Start { .. }) {
+                "start"
+            } else {
+                "stop"
+            };
+            rpc(
+                client,
+                json!({"action":format!("workspace-{action}"),"id":id}),
+            )
+            .await?;
+            println!("Workspace {action} requested.");
+        }
+        WorkspaceCommand::Delete { id } => {
+            client.request(Method::DELETE, &path(id)?, None).await?;
+            println!("Workspace delete requested.");
+        }
+        WorkspaceCommand::Attach { id } => attach(client.clone(), id).await?,
+    }
+    Ok(())
+}
+
+async fn attach(client: Client, id: &str) -> Result<()> {
     super::require_terminal()?;
+    let action = "workspace-attach";
     let value = rpc(&client, json!({"action":action,"id":id})).await?;
     let url = value["gatewayUrl"]
         .as_str()
@@ -756,34 +694,30 @@ async fn attach(client: Client, id: &str, action: &'static str) -> Result<()> {
                 .clone(),
         )
     });
-    let result = if action == "session-attach" {
-        haarness_tui::resume_attached_with_resolver(url, token, resolver).await
-    } else {
-        haarness_tui::run_attached_with_resolver(url, token, resolver).await
-    };
+    let result = haarness_tui::resume_attached_with_resolver(url, token, resolver).await;
     renew.abort();
     result?;
     Ok(())
 }
 
-/// Blank sessions need no agent, and Home starts one from a prompt.
-fn no_sessions_hint(web_origin: Option<reqwest::Url>) -> String {
+/// Blank workspaces need no agent, and Home starts one from a prompt.
+fn no_workspaces_hint(web_origin: Option<reqwest::Url>) -> String {
     let home = web_origin
         .and_then(|origin| origin.join("app").ok())
         .map(|home| format!(", or from Home at {home}"))
         .unwrap_or_default();
-    format!("No cloud sessions yet. Start one with `haarness cloud session create`{home}.")
+    format!("No cloud workspaces yet. Create one with `haarness cloud workspace create`{home}.")
 }
 
-fn print_list(value: &Value, label: &str, session: bool, empty: &str) {
+fn print_list(value: &Value, label: &str, workspace: bool, empty: &str) {
     if let Some(items) = value["items"].as_array() {
         for item in items {
             println!(
                 "{}  {}  {}",
                 item["id"].as_str().unwrap_or(""),
                 item[label].as_str().unwrap_or(""),
-                if session {
-                    item["workspace"]["observedState"].as_str().unwrap_or("")
+                if workspace {
+                    item["observedState"].as_str().unwrap_or("")
                 } else {
                     "template"
                 }
@@ -805,7 +739,7 @@ mod tests {
         use axum::{Json, Router, extract::Query, routing::get};
         let cursor = uuid::Uuid::now_v7().to_string();
         let app = Router::new().route(
-            "/api/v1/sessions",
+            "/api/v1/workspaces",
             get(
                 move |Query(q): Query<std::collections::HashMap<String, String>>| {
                     let cursor = cursor.clone();
@@ -842,7 +776,7 @@ mod tests {
         .unwrap();
         let result = list_all(
             &Client::new(config).unwrap(),
-            "api/v1/sessions?accountId=account&cloudAgentId=agent",
+            "api/v1/workspaces?accountId=account&cloudAgentId=agent",
         )
         .await;
         server.abort();
@@ -918,11 +852,11 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn cloud_commands_keep_templates_sessions_and_legacy_workspaces_distinct() {
+    fn cloud_workspace_commands_and_the_former_session_name() {
         let args = crate::Cli::try_parse_from([
             "haarness",
             "cloud",
-            "session",
+            "workspace",
             "create",
             "--agent",
             "template-id",
@@ -934,20 +868,43 @@ mod tests {
         assert!(matches!(
             args.command,
             Some(crate::Command::Cloud(CloudArgs {
-                command: CloudCommand::Session {
-                    command: SessionCommand::Create { json: true, .. }
+                command: CloudCommand::Workspace {
+                    command: WorkspaceCommand::Create { json: true, .. }
                 }
             }))
         ));
-        assert!(crate::Cli::try_parse_from(["haarness", "cloud", "session", "create"]).is_ok());
+        assert!(crate::Cli::try_parse_from(["haarness", "cloud", "workspace", "create"]).is_ok());
+        // The former workspace commands' title and repository still parse.
+        assert!(matches!(
+            crate::Cli::try_parse_from([
+                "haarness",
+                "cloud",
+                "workspace",
+                "create",
+                "Parser fix",
+                "--repo",
+                "https://example.test/repo.git"
+            ])
+            .unwrap()
+            .command,
+            Some(crate::Command::Cloud(CloudArgs {
+                command: CloudCommand::Workspace {
+                    command: WorkspaceCommand::Create {
+                        name: Some(_),
+                        repo: Some(_),
+                        ..
+                    }
+                }
+            }))
+        ));
         assert!(
             crate::Cli::try_parse_from([
                 "haarness",
                 "cloud",
-                "session",
+                "workspace",
                 "create",
                 "--file",
-                "session.json",
+                "workspace.json",
                 "--stopped"
             ])
             .is_ok()
@@ -956,14 +913,24 @@ mod tests {
             crate::Cli::try_parse_from([
                 "haarness",
                 "cloud",
-                "session",
+                "workspace",
                 "update",
-                "session-id",
+                "workspace-id",
                 "--file",
                 "settings.json"
             ])
             .is_ok()
         );
+        for command in [
+            &["rename", "workspace-id", "New title"][..],
+            &["delete", "workspace-id"],
+            &["show", "workspace-id"],
+            &["attach", "workspace-id"],
+            &["list", "--agent", "template-id"],
+        ] {
+            let args = [&["haarness", "cloud", "workspace"][..], command].concat();
+            assert!(crate::Cli::try_parse_from(args).is_ok(), "{command:?}");
+        }
         assert!(
             crate::Cli::try_parse_from([
                 "haarness",
@@ -975,15 +942,33 @@ mod tests {
             ])
             .is_ok()
         );
-        assert!(crate::Cli::try_parse_from(["haarness", "cloud", "workspace", "list"]).is_ok());
+        // Scripts written before the rename keep working, and help no longer
+        // offers the old name.
+        assert!(matches!(
+            crate::Cli::try_parse_from(["haarness", "cloud", "session", "list"])
+                .unwrap()
+                .command,
+            Some(crate::Command::Cloud(CloudArgs {
+                command: CloudCommand::Workspace {
+                    command: WorkspaceCommand::List { .. }
+                }
+            }))
+        ));
+        let help = <crate::Cli as clap::CommandFactory>::command()
+            .find_subcommand_mut("cloud")
+            .unwrap()
+            .render_help()
+            .to_string();
+        assert!(help.contains("workspace"));
+        assert!(!help.to_lowercase().contains("session"), "{help}");
     }
     #[test]
-    fn an_empty_session_list_points_at_starting_one() {
+    fn an_empty_workspace_list_points_at_creating_one() {
         assert_eq!(
-            no_sessions_hint(Some("https://cloud.example.test/".parse().unwrap())),
-            "No cloud sessions yet. Start one with `haarness cloud session create`, or from Home at https://cloud.example.test/app."
+            no_workspaces_hint(Some("https://cloud.example.test/".parse().unwrap())),
+            "No cloud workspaces yet. Create one with `haarness cloud workspace create`, or from Home at https://cloud.example.test/app."
         );
-        assert!(!no_sessions_hint(None).contains("agent"));
+        assert!(!no_workspaces_hint(None).contains("agent"));
     }
     #[test]
     fn identifiers_cannot_change_the_cloud_api_path() {

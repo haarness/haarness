@@ -213,7 +213,7 @@ pub async fn service(
 }
 
 pub async fn catalog(path: &str, query: &[(&str, String)]) -> Result<Value> {
-    // A Cloud session can read only its owning account's catalog. The server
+    // A Cloud workspace can read only its owning account's catalog. The server
     // verifies the current generation token; it grants no billing or write API access.
     if let (Ok(base), Ok(workspace), Ok(token)) = (
         std::env::var("HAARNESS_CLOUD_MARKETPLACE_URL"),
