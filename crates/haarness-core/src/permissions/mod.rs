@@ -924,7 +924,9 @@ fn canonical_tool_permission(tool: &str) -> &str {
 /// resource tools `opencode_list_mcp_resources` and
 /// `opencode_read_mcp_resource`, with the same patterns, and Haarness reads
 /// OpenCode's configuration files: a rule under those names governs
-/// `mcp_resource_list` and `mcp_resource_read`.
+/// `mcp_resource_list` and `mcp_resource_read`. `cloud_workspace` was called
+/// `cloud_agent_session` while Cloud workspaces were called sessions, and a
+/// rule saved under that name still governs it.
 fn normalize_operation_alias(value: &str) -> std::borrow::Cow<'_, str> {
     for (alias, canonical) in [
         ("todo:", "todowrite:"),
@@ -934,6 +936,7 @@ fn normalize_operation_alias(value: &str) -> std::borrow::Cow<'_, str> {
         ("multiedit:", "edit:"),
         ("opencode_list_mcp_resources:", "mcp_resource_list:"),
         ("opencode_read_mcp_resource:", "mcp_resource_read:"),
+        ("cloud_agent_session:", "cloud_workspace:"),
     ] {
         if let Some(suffix) = value.strip_prefix(alias) {
             return std::borrow::Cow::Owned(format!("{canonical}{suffix}"));
@@ -1228,15 +1231,15 @@ pub fn plan_ceiling() -> Vec<PermissionRule> {
         rule("cloud_chat:get:*", PermissionDecision::Allow),
         rule("cloud_chat:messages:*", PermissionDecision::Allow),
         rule("cloud_chat:wait:*", PermissionDecision::Allow),
-        rule("cloud_agent_session:*", PermissionDecision::Deny),
-        rule("cloud_agent_session:list:*", PermissionDecision::Allow),
-        rule("cloud_agent_session:get:*", PermissionDecision::Allow),
+        rule("cloud_workspace:*", PermissionDecision::Deny),
+        rule("cloud_workspace:list:*", PermissionDecision::Allow),
+        rule("cloud_workspace:get:*", PermissionDecision::Allow),
         rule(
-            "cloud_agent_session:ssh_public_key:*",
+            "cloud_workspace:ssh_public_key:*",
             PermissionDecision::Allow,
         ),
-        rule("cloud_agent_session:messages:*", PermissionDecision::Allow),
-        rule("cloud_agent_session:wait:*", PermissionDecision::Allow),
+        rule("cloud_workspace:messages:*", PermissionDecision::Allow),
+        rule("cloud_workspace:wait:*", PermissionDecision::Allow),
     ]
 }
 
@@ -1448,11 +1451,11 @@ mod tests {
     #[test]
     fn cloud_plan_reads_cannot_escalate_to_remote_execution() {
         let mut engine = PermissionEngine::plan_defaults();
-        engine.approve_always("cloud_agent_session:*");
+        engine.approve_always("cloud_workspace:*");
         engine.add_rule(rule("cloud_agent_manage:*", PermissionDecision::Allow));
         for action in ["list", "get", "messages", "wait"] {
             assert_eq!(
-                engine.evaluate(&format!("cloud_agent_session:{action}:session-id")),
+                engine.evaluate(&format!("cloud_workspace:{action}:workspace-id")),
                 PermissionDecision::Allow
             );
         }
@@ -1460,7 +1463,7 @@ mod tests {
             "create", "start", "ask", "stop", "abort", "rename", "delete",
         ] {
             assert_eq!(
-                engine.evaluate(&format!("cloud_agent_session:{action}:session-id")),
+                engine.evaluate(&format!("cloud_workspace:{action}:workspace-id")),
                 PermissionDecision::Deny
             );
         }
@@ -1503,9 +1506,18 @@ mod tests {
             }
         }
         let mut build = PermissionEngine::build_defaults();
-        build.add_rule(rule("cloud_agent_session:*", PermissionDecision::Deny));
+        build.add_rule(rule("cloud_workspace:*", PermissionDecision::Deny));
         assert_eq!(
-            build.evaluate("cloud_agent_session:ask:session-id"),
+            build.evaluate("cloud_workspace:ask:workspace-id"),
+            PermissionDecision::Deny
+        );
+        // A rule saved under the tool's former name still governs it.
+        let legacy = PermissionEngine::new(vec![
+            rule("*", PermissionDecision::Allow),
+            rule("cloud_agent_session:delete:*", PermissionDecision::Deny),
+        ]);
+        assert_eq!(
+            legacy.evaluate("cloud_workspace:delete:workspace-id"),
             PermissionDecision::Deny
         );
     }

@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 const ACCOUNT: &str = "00000000-0000-4000-8000-000000000001";
 const AGENT: &str = "00000000-0000-4000-8000-000000000002";
-const SESSION: &str = "00000000-0000-4000-8000-000000000003";
+const WORKSPACE: &str = "00000000-0000-4000-8000-000000000003";
 const THREAD: &str = "00000000-0000-4000-8000-000000000004";
 const TURN: &str = "00000000-0000-4000-8000-000000000005";
 const OTHER: &str = "00000000-0000-4000-8000-000000000006";
@@ -25,7 +25,7 @@ struct Data {
     base: String,
     requests: Vec<(String, String, Value)>,
     attachments: u32,
-    session_reads: u32,
+    workspace_reads: u32,
     created: bool,
     chats: Vec<Value>,
     schedule: Option<Value>,
@@ -149,7 +149,7 @@ async fn handler(State(state): State<Shared>, req: Request) -> Response {
             row.clone()
         }
         ("POST", p) if p == format!("/api/v1/schedules/{AGENT}/run") => {
-            json!({"id":TURN,"sessionId":SESSION,"chatId":THREAD,"status":"pending"})
+            json!({"id":TURN,"workspaceId":WORKSPACE,"chatId":THREAD,"status":"pending"})
         }
         ("GET", p) if p == format!("/api/v1/schedules/{AGENT}/runs") => {
             json!({"items":[{"id":TURN,"chatId":THREAD}],"nextCursor":null})
@@ -158,43 +158,43 @@ async fn handler(State(state): State<Shared>, req: Request) -> Response {
             d.schedule = None;
             Value::Null
         }
-        ("POST", "/api/v1/sessions") => {
+        ("POST", "/api/v1/workspaces") => {
             d.created = true;
-            json!({"session":{"id":SESSION,"workspace":{"observedState":"pending"}}})
+            json!({"workspace":{"id":WORKSPACE,"observedState":"pending"}})
         }
-        ("GET", p) if p == format!("/api/v1/sessions/{SESSION}") => {
-            d.session_reads += 1;
+        ("GET", p) if p == format!("/api/v1/workspaces/{WORKSPACE}") => {
+            d.workspace_reads += 1;
             let starting = if d.control_events.is_some() {
                 d.hold_startup
             } else {
-                d.session_reads <= 2
+                d.workspace_reads <= 2
             };
             let observed = if (d.created || d.started) && starting || d.stopped {
                 "stopped"
             } else {
                 "running"
             };
-            json!({"id":SESSION,"accountId":if d.foreign_account {OTHER}else{ACCOUNT},"agentSnapshot":agent(&d),"configuration":agent(&d)["configuration"],"version":3,"sshPublicKey":"ssh-ed25519 session-public","workspace":{"observedState":observed,"desiredState":if d.stopped {"stopped"} else {"running"}}})
+            json!({"id":WORKSPACE,"accountId":if d.foreign_account {OTHER}else{ACCOUNT},"agentSnapshot":agent(&d),"configuration":agent(&d)["configuration"],"version":3,"sshPublicKey":"ssh-ed25519 workspace-public","observedState":observed,"desiredState":if d.stopped {"stopped"} else {"running"}})
         }
-        ("POST", p) if p == format!("/api/v1/sessions/{SESSION}/attach") => {
+        ("POST", p) if p == format!("/api/v1/workspaces/{WORKSPACE}/attach") => {
             d.attachments += 1;
             json!({"gatewayUrl":if d.invalid_gateway {"http://untrusted.example/runtime/".into()} else {format!("{}/runtime/",d.base)},"ticket":format!("ticket-{}",d.attachments),"expiresAt":Utc::now()+Duration::hours(1)})
         }
-        ("POST", p) if p == format!("/api/v1/sessions/{SESSION}/start") => {
+        ("POST", p) if p == format!("/api/v1/workspaces/{WORKSPACE}/start") => {
             d.started = true;
             d.stopped = false;
-            d.session_reads = 0;
+            d.workspace_reads = 0;
             json!({"operation":{"id":"start"}})
         }
-        ("POST", p) if p == format!("/api/v1/sessions/{SESSION}/stop") => {
+        ("POST", p) if p == format!("/api/v1/workspaces/{WORKSPACE}/stop") => {
             d.stopped = true;
             json!({"operation":{"id":"stop"}})
         }
-        ("DELETE", p) if p == format!("/api/v1/sessions/{SESSION}") => {
+        ("DELETE", p) if p == format!("/api/v1/workspaces/{WORKSPACE}") => {
             json!({"operation":{"id":"delete"}})
         }
-        ("PATCH", p) if p == format!("/api/v1/sessions/{SESSION}") => body,
-        ("POST", p) if p == format!("/api/v1/sessions/{SESSION}/save-agent") => body,
+        ("PATCH", p) if p == format!("/api/v1/workspaces/{WORKSPACE}") => body,
+        ("POST", p) if p == format!("/api/v1/workspaces/{WORKSPACE}/save-agent") => body,
         ("GET", "/runtime/v1/threads") => json!(d.chats),
         ("GET", "/runtime/v1/info") => {
             json!({"defaultAgent":"cloud-agent","defaultProvider":"haarness","defaultModel":"openai/gpt-5-nano"})
@@ -494,12 +494,12 @@ async fn asynchronous_ask_waits_for_boot_submits_once_and_renews_ticket() {
     let cloud = f.cloud(CancellationToken::new()).await;
     assert!(
         cloud
-            .session(json!({"action":"ask","cloudAgentId":AGENT,"message":"  "}))
+            .workspace(json!({"action":"ask","cloudAgentId":AGENT,"message":"  "}))
             .await
             .is_err()
     );
-    assert_eq!(f.count("POST", "/api/v1/sessions"), 0);
-    let result=cloud.session(json!({"action":"ask","cloudAgentId":AGENT,"message":"hello","wait":false,"timeoutSeconds":10})).await.unwrap();
+    assert_eq!(f.count("POST", "/api/v1/workspaces"), 0);
+    let result=cloud.workspace(json!({"action":"ask","cloudAgentId":AGENT,"message":"hello","wait":false,"timeoutSeconds":10})).await.unwrap();
     assert_eq!(result["messageSubmitted"], true);
     assert_eq!(result["turnId"], TURN);
     assert_eq!(result["status"], "running");
@@ -527,11 +527,11 @@ async fn asynchronous_ask_waits_for_boot_submits_once_and_renews_ticket() {
         assert_eq!(ask.2["tools"]["question"], false);
     }
     let done = cloud
-        .session(json!({"action":"wait","sessionId":SESSION,"threadId":THREAD,"turnId":TURN}))
+        .workspace(json!({"action":"wait","workspaceId":WORKSPACE,"threadId":THREAD,"turnId":TURN}))
         .await
         .unwrap();
     assert_eq!(done["status"], "completed");
-    assert_eq!(f.count("POST", "/api/v1/sessions"), 1);
+    assert_eq!(f.count("POST", "/api/v1/workspaces"), 1);
     assert_eq!(
         f.count("POST", &format!("/runtime/v1/threads/{THREAD}/turns")),
         1
@@ -547,22 +547,22 @@ async fn stopped_reads_never_start_compute_and_explicit_start_waits() {
     let cloud = f.cloud(CancellationToken::new()).await;
     for action in ["messages", "wait"] {
         let result = cloud
-            .session(json!({"action":action,"sessionId":SESSION}))
+            .workspace(json!({"action":action,"workspaceId":WORKSPACE}))
             .await
             .unwrap();
         assert_eq!(result["status"], "stopped");
     }
     assert_eq!(f.data.lock().unwrap().attachments, 0);
     assert_eq!(
-        f.count("POST", &format!("/api/v1/sessions/{SESSION}/start")),
+        f.count("POST", &format!("/api/v1/workspaces/{WORKSPACE}/start")),
         0
     );
     let result = cloud
-        .session(json!({"action":"start","sessionId":SESSION,"timeoutSeconds":10}))
+        .workspace(json!({"action":"start","workspaceId":WORKSPACE,"timeoutSeconds":10}))
         .await
         .unwrap();
     assert_eq!(result["status"], "running");
-    assert!(f.data.lock().unwrap().session_reads >= 3);
+    assert!(f.data.lock().unwrap().workspace_reads >= 3);
 }
 
 #[tokio::test]
@@ -575,7 +575,9 @@ async fn permissions_are_not_autoapproved_and_wrong_turn_cannot_be_aborted() {
     }
     let cloud = f.cloud(CancellationToken::new()).await;
     let result = cloud
-        .session(json!({"action":"ask","sessionId":SESSION,"threadId":THREAD,"message":"deploy"}))
+        .workspace(
+            json!({"action":"ask","workspaceId":WORKSPACE,"threadId":THREAD,"message":"deploy"}),
+        )
         .await
         .unwrap();
     assert_eq!(result["status"], "needs_attention");
@@ -591,7 +593,9 @@ async fn permissions_are_not_autoapproved_and_wrong_turn_cannot_be_aborted() {
     f.data.lock().unwrap().wrong_turn = true;
     assert!(
         cloud
-            .session(json!({"action":"abort","sessionId":SESSION,"threadId":THREAD,"turnId":TURN}))
+            .workspace(
+                json!({"action":"abort","workspaceId":WORKSPACE,"threadId":THREAD,"turnId":TURN})
+            )
             .await
             .unwrap_err()
             .to_string()
@@ -608,20 +612,20 @@ async fn timeout_and_history_cursors_continue_without_resubmitting() {
     let f = Fixture::new(true).await;
     f.data.lock().unwrap().running_turn = true;
     let cloud = f.cloud(CancellationToken::new()).await;
-    let result=cloud.session(json!({"action":"ask","sessionId":SESSION,"threadId":THREAD,"message":"hello","timeoutSeconds":1})).await.unwrap();
+    let result=cloud.workspace(json!({"action":"ask","workspaceId":WORKSPACE,"threadId":THREAD,"message":"hello","timeoutSeconds":1})).await.unwrap();
     assert_eq!(result["status"], "running");
     assert_eq!(result["turnId"], TURN);
     let first = cloud
-        .session(
-            json!({"action":"messages","sessionId":SESSION,"threadId":THREAD,"after":0,"limit":2}),
+        .workspace(
+            json!({"action":"messages","workspaceId":WORKSPACE,"threadId":THREAD,"after":0,"limit":2}),
         )
         .await
         .unwrap();
     assert_eq!(first["messages"]["nextAfter"], 2);
     assert_eq!(first["messages"]["hasMore"], true);
     let next = cloud
-        .session(
-            json!({"action":"messages","sessionId":SESSION,"threadId":THREAD,"after":2,"limit":2}),
+        .workspace(
+            json!({"action":"messages","workspaceId":WORKSPACE,"threadId":THREAD,"after":2,"limit":2}),
         )
         .await
         .unwrap();
@@ -633,7 +637,7 @@ async fn timeout_and_history_cursors_continue_without_resubmitting() {
 }
 
 #[tokio::test]
-async fn cancellation_interrupts_only_its_own_turn_and_preserves_session() {
+async fn cancellation_interrupts_only_its_own_turn_and_preserves_workspace() {
     let f = Fixture::new(true).await;
     f.data.lock().unwrap().running_turn = true;
     let cancel = CancellationToken::new();
@@ -656,8 +660,8 @@ async fn cancellation_interrupts_only_its_own_turn_and_preserves_session() {
     });
     assert!(
         cloud
-            .session(
-                json!({"action":"ask","sessionId":SESSION,"threadId":THREAD,"message":"hello"})
+            .workspace(
+                json!({"action":"ask","workspaceId":WORKSPACE,"threadId":THREAD,"message":"hello"})
             )
             .await
             .unwrap_err()
@@ -669,33 +673,39 @@ async fn cancellation_interrupts_only_its_own_turn_and_preserves_session() {
         f.count("POST", &format!("/runtime/v1/turns/{TURN}/interrupt")),
         1
     );
-    assert_eq!(f.count("DELETE", &format!("/api/v1/sessions/{SESSION}")), 0);
     assert_eq!(
-        f.count("POST", &format!("/api/v1/sessions/{SESSION}/stop")),
+        f.count("DELETE", &format!("/api/v1/workspaces/{WORKSPACE}")),
+        0
+    );
+    assert_eq!(
+        f.count("POST", &format!("/api/v1/workspaces/{WORKSPACE}/stop")),
         0
     );
 }
 
 #[tokio::test]
-async fn lifecycle_mutations_use_session_routes_and_sessions_have_no_archive() {
+async fn lifecycle_mutations_use_workspace_routes_and_workspaces_have_no_archive() {
     let f = Fixture::new(true).await;
     let cloud = f.cloud(CancellationToken::new()).await;
-    // Cloud sessions are kept until they are deleted; there is nothing to archive.
+    // Cloud workspaces are kept until they are deleted; there is nothing to archive.
     assert!(
         cloud
-            .session(json!({"action":"archive","sessionId":SESSION}))
+            .workspace(json!({"action":"archive","workspaceId":WORKSPACE}))
             .await
             .is_err()
     );
-    assert_eq!(f.count("PATCH", &format!("/api/v1/sessions/{SESSION}")), 0);
+    assert_eq!(
+        f.count("PATCH", &format!("/api/v1/workspaces/{WORKSPACE}")),
+        0
+    );
     let renamed = cloud
-        .session(json!({"action":"rename","sessionId":SESSION,"title":"Renamed"}))
+        .workspace(json!({"action":"rename","workspaceId":WORKSPACE,"title":"Renamed"}))
         .await
         .unwrap();
     assert_eq!(renamed["title"], "Renamed");
     for action in ["stop", "delete"] {
         let result = cloud
-            .session(json!({"action":action,"sessionId":SESSION}))
+            .workspace(json!({"action":action,"workspaceId":WORKSPACE}))
             .await
             .unwrap();
         assert_eq!(result["status"], "accepted");
@@ -705,8 +715,11 @@ async fn lifecycle_mutations_use_session_routes_and_sessions_have_no_archive() {
         .agent(json!({"action":"delete","id":AGENT}))
         .await
         .unwrap();
-    assert_eq!(deleted["existingSessionsPreserved"], true);
-    assert_eq!(f.count("DELETE", &format!("/api/v1/sessions/{SESSION}")), 1);
+    assert_eq!(deleted["existingWorkspacesPreserved"], true);
+    assert_eq!(
+        f.count("DELETE", &format!("/api/v1/workspaces/{WORKSPACE}")),
+        1
+    );
     assert_eq!(
         f.count("DELETE", &format!("/api/v1/cloud-agents/{AGENT}")),
         1
@@ -720,7 +733,7 @@ async fn attachment_cannot_redirect_bearers_to_insecure_hosts() {
     let cloud = f.cloud(CancellationToken::new()).await;
     assert!(
         cloud
-            .session(json!({"action":"messages","sessionId":SESSION}))
+            .workspace(json!({"action":"messages","workspaceId":WORKSPACE}))
             .await
             .unwrap_err()
             .to_string()
@@ -737,7 +750,7 @@ async fn attachment_cannot_redirect_bearers_to_insecure_hosts() {
 }
 
 #[tokio::test]
-async fn independent_sessions_inline_configuration_revision_and_save_template() {
+async fn independent_workspaces_inline_configuration_revision_and_save_template() {
     let fixture = Fixture::new(true).await;
     let cloud = Cloud::new(
         Client::new(fixture.config.clone()).unwrap(),
@@ -747,7 +760,7 @@ async fn independent_sessions_inline_configuration_revision_and_save_template() 
     .unwrap();
     let configuration = json!({"instructions":"Independent","mcp":{"docs":{"command":"echo","args":["ok"]}},"agents":{"reviewer":{"prompt":"Review"}},"skills":{"review":{"files":{"SKILL.md":"Review"}}},"permissions":{"bash":"ask"}});
     cloud
-        .session(json!({"action":"create","start":false,"configuration":configuration}))
+        .workspace(json!({"action":"create","start":false,"configuration":configuration}))
         .await
         .unwrap();
     {
@@ -755,7 +768,7 @@ async fn independent_sessions_inline_configuration_revision_and_save_template() 
         let request = data
             .requests
             .iter()
-            .find(|(m, p, _)| m == "POST" && p.starts_with("/api/v1/sessions?"))
+            .find(|(m, p, _)| m == "POST" && p.starts_with("/api/v1/workspaces?"))
             .unwrap();
         assert!(request.2["cloudAgentId"].is_null());
         assert_eq!(request.2["configuration"], configuration);
@@ -769,29 +782,33 @@ async fn independent_sessions_inline_configuration_revision_and_save_template() 
         );
     }
     let updated = cloud
-        .session(
-            json!({"action":"update","sessionId":SESSION,"version":3,"configuration":{"mcp":{}}}),
+        .workspace(
+            json!({"action":"update","workspaceId":WORKSPACE,"version":3,"configuration":{"mcp":{}}}),
         )
         .await
         .unwrap();
     assert_eq!(updated, json!({"version":3,"configuration":{"mcp":{}}}));
     assert!(
         cloud
-            .session(json!({"action":"update","sessionId":SESSION,"version":1,"configuration":{}}))
+            .workspace(
+                json!({"action":"update","workspaceId":WORKSPACE,"version":1,"configuration":{}})
+            )
             .await
             .is_err()
     );
     let saved = cloud
-        .session(json!({"action":"save_agent","sessionId":SESSION,"version":3,"name":"Reusable"}))
+        .workspace(
+            json!({"action":"save_agent","workspaceId":WORKSPACE,"version":3,"name":"Reusable"}),
+        )
         .await
         .unwrap();
     assert_eq!(saved["name"], "Reusable");
     assert!(saved.get("includeEnvironment").is_none());
     let key = cloud
-        .session(json!({"action":"ssh_public_key","sessionId":SESSION}))
+        .workspace(json!({"action":"ssh_public_key","workspaceId":WORKSPACE}))
         .await
         .unwrap();
-    assert_eq!(key["sshPublicKey"], "ssh-ed25519 session-public");
+    assert_eq!(key["sshPublicKey"], "ssh-ed25519 workspace-public");
 }
 
 async fn until(mut predicate: impl FnMut() -> bool) {
@@ -808,35 +825,35 @@ fn turn_event(kind: &str) -> Value {
 }
 
 #[tokio::test]
-async fn startup_uses_websocket_and_ignores_other_sessions_without_polling() {
+async fn startup_uses_websocket_and_ignores_other_workspaces_without_polling() {
     let f = Fixture::new(true).await;
     f.enable_events();
     f.data.lock().unwrap().hold_startup = true;
     let cloud = f.cloud(CancellationToken::new()).await;
     let task = tokio::spawn(async move {
         cloud
-            .session(json!({"action":"start","sessionId":SESSION,"timeoutSeconds":10}))
+            .workspace(json!({"action":"start","workspaceId":WORKSPACE,"timeoutSeconds":10}))
             .await
     });
     until(|| {
         let connected = f.data.lock().unwrap().control_connections == 1;
-        connected && f.count("GET", &format!("/api/v1/sessions/{SESSION}")) >= 2
+        connected && f.count("GET", &format!("/api/v1/workspaces/{WORKSPACE}")) >= 2
     })
     .await;
-    let reads = f.count("GET", &format!("/api/v1/sessions/{SESSION}"));
+    let reads = f.count("GET", &format!("/api/v1/workspaces/{WORKSPACE}"));
     {
         let d = f.data.lock().unwrap();
         d.control_events
             .as_ref()
             .unwrap()
             .send(
-                json!({"type":"entity.changed","accountId":ACCOUNT,"entity":"session","id":OTHER}),
+                json!({"type":"entity.changed","accountId":ACCOUNT,"entity":"workspace","id":OTHER}),
             )
             .unwrap();
     }
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
     assert_eq!(
-        f.count("GET", &format!("/api/v1/sessions/{SESSION}")),
+        f.count("GET", &format!("/api/v1/workspaces/{WORKSPACE}")),
         reads,
         "healthy stream must not poll"
     );
@@ -844,7 +861,7 @@ async fn startup_uses_websocket_and_ignores_other_sessions_without_polling() {
     {
         let mut d = f.data.lock().unwrap();
         d.hold_startup = false;
-        d.control_events.as_ref().unwrap().send(json!({"type":"entity.changed","accountId":ACCOUNT,"entity":"session","id":SESSION})).unwrap();
+        d.control_events.as_ref().unwrap().send(json!({"type":"entity.changed","accountId":ACCOUNT,"entity":"workspace","id":WORKSPACE})).unwrap();
     }
     let result = tokio::time::timeout(std::time::Duration::from_millis(700), task)
         .await
@@ -864,8 +881,8 @@ async fn runtime_completion_is_push_driven_and_tokens_do_not_trigger_reads() {
     let cloud = f.cloud(CancellationToken::new()).await;
     let task = tokio::spawn(async move {
         cloud
-            .session(
-                json!({"action":"ask","sessionId":SESSION,"threadId":THREAD,"message":"hello"}),
+            .workspace(
+                json!({"action":"ask","workspaceId":WORKSPACE,"threadId":THREAD,"message":"hello"}),
             )
             .await
     });
@@ -928,7 +945,9 @@ async fn child_permission_event_wakes_wait_without_autoapproval() {
     let cloud = f.cloud(CancellationToken::new()).await;
     let task = tokio::spawn(async move {
         cloud
-            .session(json!({"action":"wait","sessionId":SESSION,"threadId":THREAD,"turnId":TURN}))
+            .workspace(
+                json!({"action":"wait","workspaceId":WORKSPACE,"threadId":THREAD,"turnId":TURN}),
+            )
             .await
     });
     until(|| f.count("GET", "/runtime/v1/permissions") == 1).await;
@@ -966,7 +985,9 @@ async fn runtime_reconnects_reattaches_and_resyncs_a_gap_without_resubmission() 
     let cloud = f.cloud(CancellationToken::new()).await;
     let task = tokio::spawn(async move {
         cloud
-            .session(json!({"action":"ask","sessionId":SESSION,"threadId":THREAD,"message":"once"}))
+            .workspace(
+                json!({"action":"ask","workspaceId":WORKSPACE,"threadId":THREAD,"message":"once"}),
+            )
             .await
     });
     until(|| f.count("GET", "/runtime/v1/permissions") == 1).await;
@@ -1009,7 +1030,9 @@ async fn unsupported_stream_falls_back_and_dropped_wait_closes_subscription() {
     let cloud = f.cloud(CancellationToken::new()).await;
     let task = tokio::spawn(async move {
         cloud
-            .session(json!({"action":"wait","sessionId":SESSION,"threadId":THREAD,"turnId":TURN}))
+            .workspace(
+                json!({"action":"wait","workspaceId":WORKSPACE,"threadId":THREAD,"turnId":TURN}),
+            )
             .await
     });
     until(|| f.count("GET", "/runtime/v1/permissions") == 1).await;
@@ -1028,7 +1051,9 @@ async fn unsupported_stream_falls_back_and_dropped_wait_closes_subscription() {
     let cloud = f.cloud(CancellationToken::new()).await;
     let task = tokio::spawn(async move {
         cloud
-            .session(json!({"action":"wait","sessionId":SESSION,"threadId":THREAD,"turnId":TURN}))
+            .workspace(
+                json!({"action":"wait","workspaceId":WORKSPACE,"threadId":THREAD,"turnId":TURN}),
+            )
             .await
     });
     until(|| f.data.lock().unwrap().live_connections == 1).await;
@@ -1047,7 +1072,7 @@ async fn streaming_timeout_and_cancellation_preserve_continuation_and_ownership(
     f.enable_events();
     f.data.lock().unwrap().running_turn = true;
     let cloud = f.cloud(CancellationToken::new()).await;
-    let result = tokio::time::timeout(std::time::Duration::from_secs(2), cloud.session(json!({"action":"ask","sessionId":SESSION,"threadId":THREAD,"message":"slow","timeoutSeconds":1}))).await.unwrap().unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), cloud.workspace(json!({"action":"ask","workspaceId":WORKSPACE,"threadId":THREAD,"message":"slow","timeoutSeconds":1}))).await.unwrap().unwrap();
     assert_eq!(result["status"], "running");
     assert_eq!(result["turnId"], TURN);
     until(|| f.data.lock().unwrap().live_connections == 0).await;
@@ -1055,7 +1080,7 @@ async fn streaming_timeout_and_cancellation_preserve_continuation_and_ownership(
         let cancel = CancellationToken::new();
         let cloud = f.cloud(cancel.clone()).await;
         let task = tokio::spawn(async move {
-            cloud.session(json!({"action":if asking {"ask"} else {"wait"},"sessionId":SESSION,"threadId":THREAD,"turnId":TURN,"message":"cancel"})).await
+            cloud.workspace(json!({"action":if asking {"ask"} else {"wait"},"workspaceId":WORKSPACE,"threadId":THREAD,"turnId":TURN,"message":"cancel"})).await
         });
         until(|| f.data.lock().unwrap().live_connections == 1).await;
         cancel.cancel();
@@ -1072,10 +1097,13 @@ async fn streaming_timeout_and_cancellation_preserve_continuation_and_ownership(
         );
     }
     assert_eq!(
-        f.count("POST", &format!("/api/v1/sessions/{SESSION}/stop")),
+        f.count("POST", &format!("/api/v1/workspaces/{WORKSPACE}/stop")),
         0
     );
-    assert_eq!(f.count("DELETE", &format!("/api/v1/sessions/{SESSION}")), 0);
+    assert_eq!(
+        f.count("DELETE", &format!("/api/v1/workspaces/{WORKSPACE}")),
+        0
+    );
 }
 
 #[tokio::test]
@@ -1090,7 +1118,7 @@ async fn control_socket_refreshes_rejected_oauth_and_resyncs_after_reconnect() {
     let cloud = f.cloud(CancellationToken::new()).await;
     let task = tokio::spawn(async move {
         cloud
-            .session(json!({"action":"start","sessionId":SESSION,"timeoutSeconds":10}))
+            .workspace(json!({"action":"start","workspaceId":WORKSPACE,"timeoutSeconds":10}))
             .await
     });
     until(|| f.data.lock().unwrap().control_connections == 1).await;
@@ -1130,7 +1158,7 @@ async fn runtime_generation_changes_reattach_reads_but_never_replay_asks() {
     f.data.lock().unwrap().stale_generation = true;
     let cloud = f.cloud(CancellationToken::new()).await;
     let result = cloud
-        .session(json!({"action":"messages","sessionId":SESSION,"threadId":THREAD}))
+        .workspace(json!({"action":"messages","workspaceId":WORKSPACE,"threadId":THREAD}))
         .await
         .unwrap();
     assert_eq!(result["messages"]["items"].as_array().unwrap().len(), 5);
@@ -1140,7 +1168,9 @@ async fn runtime_generation_changes_reattach_reads_but_never_replay_asks() {
     let cloud = f.cloud(CancellationToken::new()).await;
     assert!(
         cloud
-            .session(json!({"action":"ask","sessionId":SESSION,"threadId":THREAD,"message":"once"}))
+            .workspace(
+                json!({"action":"ask","workspaceId":WORKSPACE,"threadId":THREAD,"message":"once"})
+            )
             .await
             .unwrap_err()
             .to_string()
@@ -1166,13 +1196,13 @@ async fn ask_launches_freestyle_or_a_listed_template_with_inline_overrides() {
                 .unwrap();
             arguments["cloudAgentId"] = listed["items"][0]["id"].clone();
         }
-        let result = cloud.session(arguments).await.unwrap();
+        let result = cloud.workspace(arguments).await.unwrap();
         assert_eq!(result["messageSubmitted"], true);
         let d = f.data.lock().unwrap();
         let created = &d
             .requests
             .iter()
-            .find(|(m, p, _)| m == "POST" && p == "/api/v1/sessions?")
+            .find(|(m, p, _)| m == "POST" && p == "/api/v1/workspaces?")
             .unwrap()
             .2;
         assert_eq!(created["configuration"]["instructions"], "Inline override");
@@ -1191,7 +1221,7 @@ async fn ask_launches_freestyle_or_a_listed_template_with_inline_overrides() {
 }
 
 #[tokio::test]
-async fn cancelled_startup_returns_the_retained_session_id_and_closes_socket() {
+async fn cancelled_startup_returns_the_retained_workspace_id_and_closes_socket() {
     let f = Fixture::new(true).await;
     f.enable_events();
     f.data.lock().unwrap().hold_startup = true;
@@ -1199,7 +1229,7 @@ async fn cancelled_startup_returns_the_retained_session_id_and_closes_socket() {
     let cloud = f.cloud(cancel.clone()).await;
     let task = tokio::spawn(async move {
         cloud
-            .session(json!({"action":"create","configuration":{"model":"openai/gpt-5-mini"}}))
+            .workspace(json!({"action":"create","configuration":{"model":"openai/gpt-5-mini"}}))
             .await
     });
     until(|| f.data.lock().unwrap().control_connections == 1).await;
@@ -1211,46 +1241,49 @@ async fn cancelled_startup_returns_the_retained_session_id_and_closes_socket() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("cancelled") && error.contains(SESSION),
+        error.contains("cancelled") && error.contains(WORKSPACE),
         "{error}"
     );
     until(|| f.data.lock().unwrap().live_connections == 0).await;
-    assert_eq!(f.count("POST", "/api/v1/sessions"), 1);
+    assert_eq!(f.count("POST", "/api/v1/workspaces"), 1);
     assert_eq!(
-        f.count("POST", &format!("/api/v1/sessions/{SESSION}/stop")),
+        f.count("POST", &format!("/api/v1/workspaces/{WORKSPACE}/stop")),
         0
     );
-    assert_eq!(f.count("DELETE", &format!("/api/v1/sessions/{SESSION}")), 0);
+    assert_eq!(
+        f.count("DELETE", &format!("/api/v1/workspaces/{WORKSPACE}")),
+        0
+    );
 }
 
 #[tokio::test]
-async fn chats_share_one_session_but_require_explicit_conversation_targets() {
+async fn chats_share_one_workspace_but_require_explicit_conversation_targets() {
     let fixture = Fixture::new(true).await;
     let cloud = fixture.cloud(CancellationToken::new()).await;
     let first = cloud
-        .chat(json!({"action":"create","sessionId":SESSION,"title":"Implement"}))
+        .chat(json!({"action":"create","workspaceId":WORKSPACE,"title":"Implement"}))
         .await
         .unwrap();
     let second = cloud
-        .chat(json!({"action":"create","sessionId":SESSION,"title":"Review"}))
+        .chat(json!({"action":"create","workspaceId":WORKSPACE,"title":"Review"}))
         .await
         .unwrap();
     assert_ne!(first["chatId"], second["chatId"]);
-    assert_eq!(first["sessionId"], second["sessionId"]);
+    assert_eq!(first["workspaceId"], second["workspaceId"]);
     let list = cloud
-        .chat(json!({"action":"list","sessionId":SESSION,"limit":1}))
+        .chat(json!({"action":"list","workspaceId":WORKSPACE,"limit":1}))
         .await
         .unwrap();
     assert_eq!(list["chats"].as_array().unwrap().len(), 1);
     assert_eq!(list["nextCursor"], THREAD);
     let next = cloud
-        .chat(json!({"action":"list","sessionId":SESSION,"cursor":THREAD}))
+        .chat(json!({"action":"list","workspaceId":WORKSPACE,"cursor":THREAD}))
         .await
         .unwrap();
     assert_eq!(next["chats"][0]["id"], OTHER);
     assert!(
         cloud
-            .session(json!({"action":"ask","sessionId":SESSION,"message":"ambiguous"}))
+            .workspace(json!({"action":"ask","workspaceId":WORKSPACE,"message":"ambiguous"}))
             .await
             .unwrap_err()
             .to_string()
@@ -1258,25 +1291,27 @@ async fn chats_share_one_session_but_require_explicit_conversation_targets() {
     );
     assert!(
         cloud
-            .chat(json!({"action":"ask","sessionId":SESSION,"message":"ambiguous"}))
+            .chat(json!({"action":"ask","workspaceId":WORKSPACE,"message":"ambiguous"}))
             .await
             .unwrap_err()
             .to_string()
             .contains("chatId")
     );
-    let result = cloud.chat(json!({"action":"ask","sessionId":SESSION,"chatId":THREAD,"message":"explicit","wait":false})).await.unwrap();
+    let result = cloud.chat(json!({"action":"ask","workspaceId":WORKSPACE,"chatId":THREAD,"message":"explicit","wait":false})).await.unwrap();
     assert_eq!(result["chatId"], THREAD);
     cloud
-        .chat(json!({"action":"rename","sessionId":SESSION,"chatId":OTHER,"title":"Review only"}))
+        .chat(
+            json!({"action":"rename","workspaceId":WORKSPACE,"chatId":OTHER,"title":"Review only"}),
+        )
         .await
         .unwrap();
     cloud
-        .chat(json!({"action":"archive","sessionId":SESSION,"chatId":OTHER}))
+        .chat(json!({"action":"archive","workspaceId":WORKSPACE,"chatId":OTHER}))
         .await
         .unwrap();
     assert_eq!(
         cloud
-            .chat(json!({"action":"list","sessionId":SESSION}))
+            .chat(json!({"action":"list","workspaceId":WORKSPACE}))
             .await
             .unwrap()["chats"]
             .as_array()
@@ -1286,7 +1321,7 @@ async fn chats_share_one_session_but_require_explicit_conversation_targets() {
     );
     assert_eq!(
         cloud
-            .chat(json!({"action":"list","sessionId":SESSION,"archived":true}))
+            .chat(json!({"action":"list","workspaceId":WORKSPACE,"archived":true}))
             .await
             .unwrap()["chats"]
             .as_array()
@@ -1299,7 +1334,7 @@ async fn chats_share_one_session_but_require_explicit_conversation_targets() {
     assert!(
         !d.requests
             .iter()
-            .any(|(method, path, _)| method == "POST" && path.starts_with("/api/v1/sessions?"))
+            .any(|(method, path, _)| method == "POST" && path.starts_with("/api/v1/workspaces?"))
     );
 }
 
@@ -1311,17 +1346,17 @@ async fn chat_reads_and_creation_do_not_start_stopped_compute_or_cross_accounts(
     for action in ["list", "create"] {
         assert!(
             cloud
-                .chat(json!({"action":action,"sessionId":SESSION}))
+                .chat(json!({"action":action,"workspaceId":WORKSPACE}))
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("Start the Cloud session")
+                .contains("Start the Cloud workspace")
         );
     }
     fixture.data.lock().unwrap().foreign_account = true;
     assert!(
         cloud
-            .chat(json!({"action":"list","sessionId":SESSION}))
+            .chat(json!({"action":"list","workspaceId":WORKSPACE}))
             .await
             .is_err()
     );
@@ -1332,11 +1367,11 @@ async fn chat_reads_and_creation_do_not_start_stopped_compute_or_cross_accounts(
 async fn cloud_schedule_adapter_is_explicit_scoped_versioned_and_never_installs_local_timers() {
     let fixture = Fixture::new(true).await;
     let cloud = fixture.cloud(CancellationToken::new()).await;
-    let created=cloud.schedule(json!({"action":"create","sessionId":SESSION,"chatId":THREAD,"name":"Hourly review","prompt":"Review changes","everySeconds":3600})).await.unwrap();
+    let created=cloud.schedule(json!({"action":"create","workspaceId":WORKSPACE,"chatId":THREAD,"name":"Hourly review","prompt":"Review changes","everySeconds":3600})).await.unwrap();
     assert_eq!(created["chatId"], THREAD);
     assert_eq!(
         cloud
-            .schedule(json!({"action":"list","sessionId":SESSION}))
+            .schedule(json!({"action":"list","workspaceId":WORKSPACE}))
             .await
             .unwrap()["items"][0]["id"],
         AGENT

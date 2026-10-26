@@ -21,7 +21,7 @@ use haarness_language::{FormatterStatus, LanguageService, LanguageStatus};
 use haarness_protocol::{
     AgentProfile, ApiDoc, ApiError, BTW_STREAM_CAPABILITY, BackgroundTaskInfo, BtwEvent,
     BtwRequest, BtwResponse, CloudAgentInput, CloudChatInput, CloudScheduleInput,
-    CloudSessionInput, CommandExecutionResponse, CompactRequest, CreateThreadRequest,
+    CloudWorkspaceInput, CommandExecutionResponse, CompactRequest, CreateThreadRequest,
     EventEnvelope, ExecuteCommandRequest, FileDiff, ForkThreadRequest, GoalActionRequest,
     GoalActionResponse, LazyToolSettingsUpdate, McpConfigureRequest, McpServerInfo, PTY_CAPABILITY,
     PendingPermissionInfo, PendingQuestionInfo, PermissionReply, PluginActionRequest, PluginInfo,
@@ -175,7 +175,7 @@ pub async fn serve_with_access(
     let protected = Router::new()
         .route("/manage/{resource}", post(manage_resource))
         .route("/cloud/agents", post(cloud_agents))
-        .route("/cloud/sessions", post(cloud_sessions))
+        .route("/cloud/workspaces", post(cloud_workspaces))
         .route("/cloud/chats", post(cloud_chats))
         .route("/cloud/schedules", post(cloud_schedules))
         .merge(crate::profiles::routes())
@@ -2373,7 +2373,7 @@ fn usage_totals(items: &[haarness_protocol::Item]) -> Value {
     paths(
         manage_resource,
         cloud_agents,
-        cloud_sessions,
+        cloud_workspaces,
         cloud_chats,
         cloud_schedules
     ),
@@ -2417,15 +2417,15 @@ async fn cloud_agents(
     )
     .await
 }
-/// Account-authenticated Cloud sessions, using this host's signed-in account.
-#[utoipa::path(post, path = "/v1/cloud/sessions", request_body = CloudSessionInput, responses((status = 200, body = Value), (status = 401, description = "Authentication required")))]
-async fn cloud_sessions(
+/// Account-authenticated Cloud workspaces, using this host's signed-in account.
+#[utoipa::path(post, path = "/v1/cloud/workspaces", request_body = CloudWorkspaceInput, responses((status = 200, body = Value), (status = 401, description = "Authentication required")))]
+async fn cloud_workspaces(
     State(state): State<ServerState>,
-    Json(input): Json<CloudSessionInput>,
+    Json(input): Json<CloudWorkspaceInput>,
 ) -> ApiResult<Json<Value>> {
     manage_resource(
         State(state),
-        Path("cloud_agent_session".into()),
+        Path("cloud_workspace".into()),
         Json(serde_json::to_value(input).expect("Cloud input serializes")),
     )
     .await

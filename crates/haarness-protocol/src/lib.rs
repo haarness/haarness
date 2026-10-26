@@ -694,8 +694,8 @@ pub struct ForkThreadRequest {
 /// Auto's review of their request stricter.
 pub const SESSION_MESSAGE_PREFIX: &str = "Message from session #";
 
-/// How a message a Haarness agent sends to a Cloud session's chat
-/// (`cloud_agent_session` or `cloud_chat` ask) starts, for the same reason.
+/// How a message a Haarness agent sends to a Cloud workspace's chat
+/// (`cloud_workspace` or `cloud_chat` ask) starts, for the same reason.
 pub const AGENT_MESSAGE_PREFIX: &str = "Message from another Haarness agent:\n";
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

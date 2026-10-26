@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn router_spellings_of_claude_versions_find_the_native_entry() {
-        // Cloud sessions name models the OpenRouter way: dots, not dashes.
+        // Cloud workspaces name models the OpenRouter way: dots, not dashes.
         let dotted = lookup("anthropic", "claude-opus-5.5").unwrap();
         assert_eq!(dotted.prefix, "claude-opus-5-5");
         let info = haarness_protocol::ModelInfo {

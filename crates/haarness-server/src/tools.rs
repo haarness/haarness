@@ -192,9 +192,9 @@ impl NativeToolRegistry {
     /// constructors used by embedders.
     #[must_use]
     pub fn with_management(mut self, management: Arc<dyn ManagementRegistry>) -> Self {
-        for session in [false, true] {
+        for workspace in [false, true] {
             let tool: Arc<dyn Tool> = Arc::new(crate::cloud_tools::CloudTool::new(
-                session,
+                workspace,
                 management.clone(),
             ));
             self.tools.insert(tool.definition().name.clone(), tool);
@@ -1544,7 +1544,7 @@ impl Tool for ScheduleTool {
             name: "schedule".into(),
             description: [
                 "Manage durable local Haarness schedules backed by launchd on macOS, systemd --user on Linux, or Windows Task Scheduler.",
-                "For work on a Cloud session that must run while this device is off, use cloud_schedule instead. Local schedules execute on this device and do not select a Cloud session or chat.",
+                "For work in a Cloud workspace that must run while this device is off, use cloud_schedule instead. Local schedules execute on this device and do not select a Cloud workspace or chat.",
                 "Use this when the user asks to create, update, list, inspect history, run, enable, disable, or delete a scheduled task.",
                 "Schedules are for a future one-shot run or recurrence. Do not use this merely to start background work now; use task with background=true only when that task's independent-sidecar rules are satisfied.",
                 "Actions are create, list, update, delete, enable, disable, run, and history.",
@@ -5291,7 +5291,7 @@ mod tests {
             .with_management(Arc::new(StubManagement));
         for (name, read, mutation) in [
             ("cloud_agent_manage", "models", "create"),
-            ("cloud_agent_session", "messages", "ask"),
+            ("cloud_workspace", "messages", "ask"),
         ] {
             let tool = registry.get(name).expect("Cloud tool registered");
             assert!(tool.parallel_safe(&json!({"action":read})));

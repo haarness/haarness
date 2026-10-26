@@ -15,7 +15,7 @@ use std::sync::Arc;
 // archiving a chat, an empty chat). The plan agent's read-only ceiling still denies
 // every one that is not a read.
 const MANAGE_QUIET: &[&str] = &["list", "get", "models", "ssh_public_key"];
-const SESSION_QUIET: &[&str] = &[
+const WORKSPACE_QUIET: &[&str] = &[
     "list",
     "get",
     "ssh_public_key",
@@ -42,16 +42,19 @@ fn cloud_constraint(quiet: &[&str], arguments: &Value) -> Option<PermissionDecis
 }
 
 pub(crate) struct CloudTool {
-    session: bool,
+    workspace: bool,
     registry: Arc<dyn ManagementRegistry>,
 }
 impl CloudTool {
-    pub(crate) fn new(session: bool, registry: Arc<dyn ManagementRegistry>) -> Self {
-        Self { session, registry }
+    pub(crate) fn new(workspace: bool, registry: Arc<dyn ManagementRegistry>) -> Self {
+        Self {
+            workspace,
+            registry,
+        }
     }
     fn name(&self) -> &'static str {
-        if self.session {
-            "cloud_agent_session"
+        if self.workspace {
+            "cloud_workspace"
         } else {
             "cloud_agent_manage"
         }
@@ -61,20 +64,20 @@ impl CloudTool {
 impl Tool for CloudTool {
     fn definition(&self) -> ToolDefinition {
         let id = json!({"type":"string","format":"uuid"});
-        let (description, mut properties) = if self.session {
+        let (description, mut properties) = if self.workspace {
             (
-                "Launch and manage Haarness Cloud sessions on Fly.io using the user's signed-in Haarness account. Requires haarness login, Desktop Sign in to Haarness, or HAARNESS_API_KEY with the needed Cloud permissions; never ask for tokens. Each session owns its configuration, persistent files and conversations. Cloud agents are OPTIONAL reusable templates. create and ask can launch with inline configuration and no cloudAgentId; when supplied, cloudAgentId supplies defaults overridden by configuration. For freestyle work, prefer ask with message, title, and optional configuration, omitting sessionId and cloudAgentId. ask creates, starts, and messages the new session in one call. create only prepares/starts a session; it does not send a message. Use title to name sessions; name is only for save_agent. Remote sessions already have native bash/read/write tools: use permissions.bash for shell policy, never add an MCP shell server just to run commands. To reuse a template, first list/get it with cloud_agent_manage and pass its returned id as cloudAgentId. When the user wants an answer or work performed, use ask with cloudAgentId and message, just as for freestyle work. A create result with messageSubmitted=false has not performed the requested work; follow it with ask using the returned sessionId and await the answer. Use start=false with create to prepare a stopped session and ssh_public_key to get its deploy key. update requires sessionId, version from get, and configuration; omitted fields are preserved, supplied maps replace ({} clears), null resets optional values. Stop and wait until stopped before update, then start to apply. save_agent copies the last saved settings into a reusable template, requires name and version, and does not copy environment secrets; it creates no compute. MCP supports command/args/environment or url/headers, with ${VARIABLE} encrypted environment references. skills maps names to {files: a map containing SKILL.md and optional supporting files}; agents maps names to {prompt,description,mode,model,tools,permission}. Use Cloud UI/API for secrets. ask sends a message to sessionId, or creates a new session when sessionId is omitted. Existing stopped sessions require explicit start; reads never start compute. Use cloud_chat to list/create/manage separate chats sharing this session filesystem. threadId is a chat ID. Omit it only if there is at most one root conversation; multiple chats require an explicit ID. wait waits for turnId or the active turn; messages reads history; abort interrupts only the specified turn/conversation. create/start/ask wait by default, bounded by timeoutSeconds; waits follow live state/completion/approval events and recover with snapshots after disconnection; wait=false returns after acceptance (ask still waits for startup so its message can be submitted). If startup times out with messageSubmitted=false, retry ask with that sessionId once running. A running result at timeout means work continues: use wait with the returned IDs, never resubmit. needs_attention requires the user to open the returned URL for normal permission approval. No remote permissions are auto-approved. Cancelling a synchronous ask best-effort interrupts its submitted turn but preserves the session. stop releases compute and preserves disk; delete permanently removes the session and disk. Archive only hides it and does not stop billing. Only create, send, change, stop or delete when requested by the user. Do not replace local task/session tools with cloud work without user intent.",
+                "Launch and manage Haarness Cloud workspaces on Fly.io using the user's signed-in Haarness account. Requires haarness login, Desktop Sign in to Haarness, or HAARNESS_API_KEY with the needed Cloud permissions; never ask for tokens. Each workspace owns its configuration, persistent files and conversations. Cloud agents are OPTIONAL reusable templates. create and ask can launch with inline configuration and no cloudAgentId; when supplied, cloudAgentId supplies defaults overridden by configuration. For freestyle work, prefer ask with message, title, and optional configuration, omitting workspaceId and cloudAgentId. ask creates, starts, and messages the new workspace in one call. create only prepares/starts a workspace; it does not send a message. Use title to name workspaces; name is only for save_agent. Remote workspaces already have native bash/read/write tools: use permissions.bash for shell policy, never add an MCP shell server just to run commands. To reuse a template, first list/get it with cloud_agent_manage and pass its returned id as cloudAgentId. When the user wants an answer or work performed, use ask with cloudAgentId and message, just as for freestyle work. A create result with messageSubmitted=false has not performed the requested work; follow it with ask using the returned workspaceId and await the answer. Use start=false with create to prepare a stopped workspace and ssh_public_key to get its deploy key. update requires workspaceId, version from get, and configuration; omitted fields are preserved, supplied maps replace ({} clears), null resets optional values. Stop and wait until stopped before update, then start to apply. save_agent copies the last saved settings into a reusable template, requires name and version, and does not copy environment secrets; it creates no compute. MCP supports command/args/environment or url/headers, with ${VARIABLE} encrypted environment references. skills maps names to {files: a map containing SKILL.md and optional supporting files}; agents maps names to {prompt,description,mode,model,tools,permission}. Use Cloud UI/API for secrets. ask sends a message to workspaceId, or creates a new workspace when workspaceId is omitted. Existing stopped workspaces require explicit start; reads never start compute. Use cloud_chat to list/create/manage separate chats sharing this workspace filesystem. threadId is a chat ID. Omit it only if there is at most one root conversation; multiple chats require an explicit ID. wait waits for turnId or the active turn; messages reads history; abort interrupts only the specified turn/conversation. create/start/ask wait by default, bounded by timeoutSeconds; waits follow live state/completion/approval events and recover with snapshots after disconnection; wait=false returns after acceptance (ask still waits for startup so its message can be submitted). If startup times out with messageSubmitted=false, retry ask with that workspaceId once running. A running result at timeout means work continues: use wait with the returned IDs, never resubmit. needs_attention requires the user to open the returned URL for normal permission approval. No remote permissions are auto-approved. Cancelling a synchronous ask best-effort interrupts its submitted turn but preserves the workspace. stop releases compute and preserves disk; delete permanently removes the workspace and disk. Only create, send, change, stop or delete when requested by the user. Do not replace local task or session_* tools with cloud work without user intent.",
                 json!({
                     "action":{"type":"string","enum":["list","get","create","start","stop","rename","update","save_agent","ssh_public_key","delete","ask","messages","wait","abort"]},
-                    "sessionId":id,"cloudAgentId":{"type":"string","format":"uuid","description":"Optional reusable template ID from cloud_agent_manage list/get. Omit for a freestyle session with inline configuration."},"threadId":id,"turnId":id,
+                    "workspaceId":id,"cloudAgentId":{"type":"string","format":"uuid","description":"Optional reusable template ID from cloud_agent_manage list/get. Omit for a freestyle workspace with inline configuration."},"threadId":id,"turnId":id,
                     "configuration":configuration_schema(),
                     "version":{"type":"integer","minimum":1},
-                    "name":{"type":"string","minLength":1,"maxLength":128,"description":"save_agent only: name of the new reusable template. To name a session, use title."},
+                    "name":{"type":"string","minLength":1,"maxLength":128,"description":"save_agent only: name of the new reusable template. To name a workspace, use title."},
                     "description":{"type":"string","maxLength":4096},
-                    "start":{"type":"boolean","description":"create only: false prepares a stopped session for SSH setup."},
-                    "title":{"type":"string","minLength":1,"maxLength":200,"description":"Session name for create/ask, or the new title for rename. Use this field to name a session."},
+                    "start":{"type":"boolean","description":"create only: false prepares a stopped workspace for SSH setup."},
+                    "title":{"type":"string","minLength":1,"maxLength":200,"description":"Workspace name for create/ask, or the new title for rename. Use this field to name a workspace."},
                     "message":{"type":"string","minLength":1,"maxLength":32768},
-                    "reasoningEffort":{"type":"string","description":"Supported reasoning level for ask; omit to preserve session defaults."},
+                    "reasoningEffort":{"type":"string","description":"Supported reasoning level for ask; omit to preserve workspace defaults."},
                     "wait":{"type":"boolean"},
                     "timeoutSeconds":{"type":"integer","minimum":1,"maximum":600},
                     "after":{"type":"integer","minimum":0,"description":"Read messages after this sequence. Continue with returned nextAfter."}
@@ -82,7 +85,7 @@ impl Tool for CloudTool {
             )
         } else {
             (
-                "Manage reusable Haarness Cloud agent templates using the user's signed-in Haarness account. Requires haarness login, Desktop Sign in to Haarness, or HAARNESS_API_KEY with the needed Cloud permissions; a model-provider login alone is insufficient. list/get inspect templates, ssh_public_key returns only the public deploy key, models discovers priced available Cloud model IDs/capabilities. Never invent model IDs or reasoning levels: use models first, or omit defaults. create requires name; update requires id and the version returned by get, and merges supplied configuration fields while preserving omitted settings/environment. Saving a template starts no machine; cloud_agent_session launches it. Template edits/deletion do not change existing sessions. Only mutate templates when requested. Private keys and write-only environment values are managed in the Cloud UI/API, never requested or returned here. repository accepts empty or git with URL/ref; SSH repositories require trusted knownHosts and the public deploy key installed at the Git host. startupCommand runs on every boot and must be idempotent. Session compute/disk billing and plan limits apply. Use local agent_manage for local agent personas.",
+                "Manage reusable Haarness Cloud agent templates using the user's signed-in Haarness account. Requires haarness login, Desktop Sign in to Haarness, or HAARNESS_API_KEY with the needed Cloud permissions; a model-provider login alone is insufficient. list/get inspect templates, ssh_public_key returns only the public deploy key, models discovers priced available Cloud model IDs/capabilities. Never invent model IDs or reasoning levels: use models first, or omit defaults. create requires name; update requires id and the version returned by get, and merges supplied configuration fields while preserving omitted settings/environment. Saving a template starts no machine; cloud_workspace launches it. Template edits/deletion do not change existing workspaces. Only mutate templates when requested. Private keys and write-only environment values are managed in the Cloud UI/API, never requested or returned here. repository accepts empty or git with URL/ref; SSH repositories require trusted knownHosts and the public deploy key installed at the Git host. startupCommand runs on every boot and must be idempotent. Workspace compute/disk billing and plan limits apply. Use local agent_manage for local agent personas.",
                 json!({
                     "action":{"type":"string","enum":["list","get","create","update","delete","ssh_public_key","models"]},
                     "id":id,
@@ -114,8 +117,8 @@ impl Tool for CloudTool {
     }
     fn permission_constraint(&self, args: &Value, _operation: &str) -> Option<PermissionDecision> {
         cloud_constraint(
-            if self.session {
-                SESSION_QUIET
+            if self.workspace {
+                WORKSPACE_QUIET
             } else {
                 MANAGE_QUIET
             },
@@ -154,10 +157,10 @@ impl Tool for CloudChatTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "cloud_chat".into(),
-            description: "Manage chats inside a running Haarness Cloud session. sessionId identifies the machine/shared filesystem; chatId identifies one root conversation (runtime threadId); turnId identifies one response. All chats share files, compute and session configuration, but have separate histories. list discovers chat IDs; create adds a fresh empty chat without allocating or starting compute. get reads chat metadata; rename changes only the chat title; archive hides/restores only that chat and does not stop compute. ask/messages/wait/abort require explicit chatId. ask sends one message; wait observes work without resubmission; abort interrupts only the targeted chat/turn. Use cloud_agent_session for session lifecycle and freestyle or template launches; cloud_agent_manage for templates. Stopped sessions require explicit start. Waits use live events; timeout means work continues. Permissions require normal user approval. Only create, send, rename, archive or interrupt when requested.".into(),
-            input_schema: json!({"type":"object","additionalProperties":false,"required":["action","sessionId"],"properties":{
+            description: "Manage chats inside a running Haarness Cloud workspace. workspaceId identifies the machine/shared filesystem; chatId identifies one root conversation (runtime threadId); turnId identifies one response. All chats share files, compute and workspace configuration, but have separate histories. list discovers chat IDs; create adds a fresh empty chat without allocating or starting compute. get reads chat metadata; rename changes only the chat title; archive hides/restores only that chat and does not stop compute. ask/messages/wait/abort require explicit chatId. ask sends one message; wait observes work without resubmission; abort interrupts only the targeted chat/turn. Use cloud_workspace for workspace lifecycle and freestyle or template launches; cloud_agent_manage for templates. Stopped workspaces require explicit start. Waits use live events; timeout means work continues. Permissions require normal user approval. Only create, send, rename, archive or interrupt when requested.".into(),
+            input_schema: json!({"type":"object","additionalProperties":false,"required":["action","workspaceId"],"properties":{
                 "action":{"type":"string","enum":["list","get","create","rename","archive","ask","messages","wait","abort"]},
-                "sessionId":{"type":"string","format":"uuid","description":"Cloud machine/workspace session ID, not a chat ID."},
+                "workspaceId":{"type":"string","format":"uuid","description":"Cloud workspace ID (the machine and its shared files), not a chat ID."},
                 "chatId":{"type":"string","format":"uuid","description":"Chat ID from list/create. Required except for list/create. Same value as runtime threadId."},
                 "turnId":{"type":"string","format":"uuid"},
                 "title":{"type":"string","minLength":1,"maxLength":200},
@@ -191,10 +194,10 @@ impl Tool for CloudScheduleTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
   name:"cloud_schedule".into(),
-  description:"Schedule prompts on the Haarness Cloud worker, independent of this computer. DIFFERENT from schedule, which installs local device timers. Always use cloud_schedule when the user requests Cloud scheduling. A Cloud schedule targets an existing sessionId (machine) and chatId (conversation); first use cloud_agent_session and cloud_chat to launch/list/create them if needed. It can wake a stopped session, and normal session compute/storage and router usage charges apply. create requires name, prompt, sessionId, chatId, and at (RFC3339 with explicit timezone offset) and/or everySeconds (60..31536000). at is the first run; everySeconds repeats. Missed ticks coalesce; runs do not overlap. list/get/history inspect schedules and durable run outcomes, including chatId/turnId. update/pause/resume require version from get. run triggers one immediate run; delete cancels future and unsubmitted runs, not an already-running turn. Use cloud_chat abort to interrupt that turn. Session deletion cancels its schedules; archiving a chat prevents future scheduled submissions. Permission approvals are never automatic. Only schedule, run or change future work when the user requests it.".into(),
+  description:"Schedule prompts on the Haarness Cloud worker, independent of this computer. DIFFERENT from schedule, which installs local device timers. Always use cloud_schedule when the user requests Cloud scheduling. A Cloud schedule targets an existing workspaceId (machine) and chatId (conversation); first use cloud_workspace and cloud_chat to launch/list/create them if needed. It can wake a stopped workspace, and normal workspace compute/storage and router usage charges apply. create requires name, prompt, workspaceId, chatId, and at (RFC3339 with explicit timezone offset) and/or everySeconds (60..31536000). at is the first run; everySeconds repeats. Missed ticks coalesce; runs do not overlap. list/get/history inspect schedules and durable run outcomes, including chatId/turnId. update/pause/resume require version from get. run triggers one immediate run; delete cancels future and unsubmitted runs, not an already-running turn. Use cloud_chat abort to interrupt that turn. Workspace deletion cancels its schedules; archiving a chat prevents future scheduled submissions. Permission approvals are never automatic. Only schedule, run or change future work when the user requests it.".into(),
   input_schema:json!({"type":"object","additionalProperties":false,"required":["action"],"properties":{
    "action":{"type":"string","enum":["list","get","create","update","pause","resume","run","history","delete"]},
-   "id":{"type":"string","format":"uuid"},"sessionId":{"type":"string","format":"uuid"},"chatId":{"type":"string","format":"uuid"},
+   "id":{"type":"string","format":"uuid"},"workspaceId":{"type":"string","format":"uuid"},"chatId":{"type":"string","format":"uuid"},
    "name":{"type":"string","minLength":1,"maxLength":200},"prompt":{"type":"string","minLength":1,"maxLength":32768},
    "at":{"type":"string","format":"date-time"},"everySeconds":{"type":"integer","minimum":60,"maximum":31_536_000},
    "version":{"type":"integer","minimum":1},"enabled":{"type":"boolean"},"cursor":{"type":"string","format":"uuid"},"limit":{"type":"integer","minimum":1,"maximum":100}
@@ -236,7 +239,7 @@ mod tests {
 
     const CLOUD_TOOLS: [&str; 4] = [
         "cloud_agent_manage",
-        "cloud_agent_session",
+        "cloud_workspace",
         "cloud_chat",
         "cloud_schedule",
     ];
@@ -489,16 +492,18 @@ mod tests {
             tools: None,
             command: None,
         };
-        let session = "00000000-0000-4000-8000-000000000001";
+        let workspace = "00000000-0000-4000-8000-000000000001";
         let arguments = |tool: &str, action: &str| match tool {
-            "cloud_agent_manage" => json!({"action": action, "id": session}),
-            "cloud_chat" => json!({"action": action, "sessionId": session, "chatId": session}),
-            _ => json!({"action": action, "sessionId": session}),
+            "cloud_agent_manage" => json!({"action": action, "id": workspace}),
+            "cloud_chat" => {
+                json!({"action": action, "workspaceId": workspace, "chatId": workspace})
+            }
+            _ => json!({"action": action, "workspaceId": workspace}),
         };
 
         // Reads run without a prompt.
         for (tool, action) in [
-            ("cloud_agent_session", "list"),
+            ("cloud_workspace", "list"),
             ("cloud_chat", "messages"),
             ("cloud_schedule", "history"),
             ("cloud_agent_manage", "models"),
@@ -513,7 +518,7 @@ mod tests {
         assert_eq!(
             recorder.calls(),
             [
-                "cloud_agent_session:list",
+                "cloud_workspace:list",
                 "cloud_chat:messages",
                 "cloud_schedule:history",
                 "cloud_agent_manage:models"
@@ -523,21 +528,9 @@ mod tests {
         // Mutations prompt without an Always option. Answering Always counts
         // once, so the same action prompts again; a rejection never runs it.
         for (tool, action, reply) in [
-            (
-                "cloud_agent_session",
-                "create",
-                PermissionReplyDecision::Always,
-            ),
-            (
-                "cloud_agent_session",
-                "create",
-                PermissionReplyDecision::Reject,
-            ),
-            (
-                "cloud_agent_session",
-                "delete",
-                PermissionReplyDecision::Once,
-            ),
+            ("cloud_workspace", "create", PermissionReplyDecision::Always),
+            ("cloud_workspace", "create", PermissionReplyDecision::Reject),
+            ("cloud_workspace", "delete", PermissionReplyDecision::Once),
             ("cloud_chat", "ask", PermissionReplyDecision::Once),
             ("cloud_schedule", "run", PermissionReplyDecision::Once),
             (

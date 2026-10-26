@@ -16,8 +16,8 @@ mod events;
 use haarness_protocol::{
     CloudAgentAction as AgentAction, CloudAgentInput as AgentInput, CloudChatAction as ChatAction,
     CloudChatInput as ChatInput, CloudScheduleAction as ScheduleAction,
-    CloudScheduleInput as ScheduleInput, CloudSessionAction as SessionAction,
-    CloudSessionInput as SessionInput,
+    CloudScheduleInput as ScheduleInput, CloudWorkspaceAction as WorkspaceAction,
+    CloudWorkspaceInput as WorkspaceInput,
 };
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -111,7 +111,7 @@ impl Cloud {
 
     async fn api(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
         tokio::select! {
-            () = self.cancel.cancelled() => Err(invalid("Cloud operation cancelled; accepted Cloud work is retained. List sessions to inspect it.")),
+            () = self.cancel.cancelled() => Err(invalid("Cloud operation cancelled; accepted Cloud work is retained. List workspaces to inspect it.")),
             result = self.client.request(method, path, body) => result,
         }
     }
@@ -242,7 +242,7 @@ impl Cloud {
                     AgentAction::Delete => {
                         self.api(Method::DELETE, &format!("api/v1/cloud-agents/{id}"), None)
                             .await?;
-                        Ok(json!({"id":id,"deleted":true,"existingSessionsPreserved":true}))
+                        Ok(json!({"id":id,"deleted":true,"existingWorkspacesPreserved":true}))
                     }
                     AgentAction::Update => {
                         let version = required(input.version, "version (from get)")?;
@@ -275,19 +275,19 @@ impl Cloud {
         let count = limit(input.limit)?;
         if matches!(input.action, ScheduleAction::List) {
             let extra = input
-                .session_id
-                .map(|id| format!("&sessionId={id}"))
+                .workspace_id
+                .map(|id| format!("&workspaceId={id}"))
                 .unwrap_or_default();
             return self.page("schedules", input.cursor, count, &extra).await;
         }
         if matches!(input.action, ScheduleAction::Create) {
-            let session = required(input.session_id, "sessionId")?;
-            self.owned("sessions", session).await?;
+            let workspace = required(input.workspace_id, "workspaceId")?;
+            self.owned("workspaces", workspace).await?;
             let name = required(input.name, "name")?;
             nonempty(&name, 200, "name")?;
             let prompt = required(input.prompt, "prompt")?;
             nonempty(&prompt, 32768, "prompt")?;
-            return self.api(Method::POST,"api/v1/schedules",Some(json!({"sessionId":session,"chatId":required(input.chat_id,"chatId")?,"name":name,"prompt":prompt,"at":input.at,"everySeconds":input.every_seconds}))).await;
+            return self.api(Method::POST,"api/v1/schedules",Some(json!({"workspaceId":workspace,"chatId":required(input.chat_id,"chatId")?,"name":name,"prompt":prompt,"at":input.at,"everySeconds":input.every_seconds}))).await;
         }
         let id = required(input.id, "id")?;
         let row = self.owned("schedules", id).await?;
@@ -319,18 +319,18 @@ impl Cloud {
         }
     }
 
-    /// Explicit chat management scoped to one session; never provisions compute.
+    /// Explicit chat management scoped to one workspace; never provisions compute.
     pub async fn chat(&self, arguments: Value) -> Result<Value> {
         let input: ChatInput = serde_json::from_value(arguments)?;
         let count = limit(input.limit)? as usize;
         if let Some(title) = &input.title {
             nonempty(title, 200, "title")?;
         }
-        let id = input.session_id;
+        let id = input.workspace_id;
         let requires_chat = !matches!(input.action, ChatAction::List | ChatAction::Create);
         if requires_chat && input.chat_id.is_none() {
             return Err(invalid(
-                "chatId is required; list chats first or create a new chat in this session",
+                "chatId is required; list chats first or create a new chat in this workspace",
             ));
         }
         if !requires_chat && (input.chat_id.is_some() || input.turn_id.is_some()) {
@@ -348,14 +348,14 @@ impl Cloud {
                 "message",
             )?;
         }
-        let session = self.owned("sessions", id).await?;
-        if session["workspace"]["observedState"] != "running" {
+        let workspace = self.owned("workspaces", id).await?;
+        if workspace["observedState"] != "running" {
             return Err(invalid(
-                "Start the Cloud session before using its chats; no message was submitted",
+                "Start the Cloud workspace before using its chats; no message was submitted",
             ));
         }
         let mut remote = Remote::new(self, id).await?;
-        let url = self.url(id, "sessions")?;
+        let url = self.url(id, "workspaces")?;
         if matches!(input.action, ChatAction::List) {
             let rows = remote
                 .request(
@@ -386,14 +386,14 @@ impl Cloud {
                 Value::Null
             };
             rows.truncate(count);
-            return Ok(json!({"sessionId":id,"chats":rows,"nextCursor":next,"url":url}));
+            return Ok(json!({"workspaceId":id,"chats":rows,"nextCursor":next,"url":url}));
         }
         if matches!(input.action, ChatAction::Create) {
             let info = remote.request(Method::GET, "v1/info", None).await?;
             let chat = remote.request(Method::POST, "v1/threads", Some(json!({"title":input.title,
                 "agent":info["defaultAgent"],"provider":info["defaultProvider"],"model":info["defaultModel"]}))).await?;
             return Ok(
-                json!({"sessionId":id,"chatId":chat["id"],"threadId":chat["id"],"chat":chat,"url":format!("{url}?thread={}",chat["id"].as_str().unwrap_or_default())}),
+                json!({"workspaceId":id,"chatId":chat["id"],"threadId":chat["id"],"chat":chat,"url":format!("{url}?thread={}",chat["id"].as_str().unwrap_or_default())}),
             );
         }
         let chat_id = required(input.chat_id, "chatId")?;
@@ -415,29 +415,29 @@ impl Cloud {
                     chat = remote.request(Method::PATCH, &path, Some(body)).await?;
                 }
                 Ok(
-                    json!({"sessionId":id,"chatId":chat_id,"threadId":chat_id,"chat":chat,"url":format!("{url}?thread={chat_id}")}),
+                    json!({"workspaceId":id,"chatId":chat_id,"threadId":chat_id,"chat":chat,"url":format!("{url}?thread={chat_id}")}),
                 )
             }
             _ => {
                 let mut args = serde_json::to_value(input)?;
                 let fields = args.as_object_mut().unwrap();
                 fields.remove("chatId");
-                // Archiving belongs to chats; sessions have no archived state.
+                // Archiving belongs to chats; workspaces have no archived state.
                 fields.remove("archived");
                 args["threadId"] = json!(chat_id);
-                let mut result = self.session(args).await?;
+                let mut result = self.workspace(args).await?;
                 result["chatId"] = json!(chat_id);
                 Ok(result)
             }
         }
     }
 
-    pub async fn session(&self, arguments: Value) -> Result<Value> {
-        let input: SessionInput = serde_json::from_value(arguments)?;
+    pub async fn workspace(&self, arguments: Value) -> Result<Value> {
+        let input: WorkspaceInput = serde_json::from_value(arguments)?;
         validate_configuration(input.configuration.as_ref())?;
-        if matches!(input.action, SessionAction::Ask) && input.start == Some(false) {
+        if matches!(input.action, WorkspaceAction::Ask) && input.start == Some(false) {
             return Err(invalid(
-                "ask requires a running session; use create with start=false to prepare one",
+                "ask requires a running workspace; use create with start=false to prepare one",
             ));
         }
         let count = limit(input.limit)?;
@@ -446,16 +446,16 @@ impl Cloud {
             return Err(invalid("timeoutSeconds must be between 1 and 600"));
         }
         let deadline = Instant::now() + Duration::from_secs(seconds);
-        if matches!(input.action, SessionAction::List) {
-            // Sessions have no archived state: every one is listed until it is deleted.
+        if matches!(input.action, WorkspaceAction::List) {
+            // Workspaces have no archived state: every one is listed until it is deleted.
             let extra = input
                 .cloud_agent_id
                 .map(|agent| format!("&cloudAgentId={agent}"))
                 .unwrap_or_default();
-            return self.page("sessions", input.cursor, count, &extra).await;
+            return self.page("workspaces", input.cursor, count, &extra).await;
         }
         // Validate before provisioning: malformed asks must not allocate a machine.
-        if matches!(input.action, SessionAction::Ask) {
+        if matches!(input.action, WorkspaceAction::Ask) {
             nonempty(
                 required(input.message.as_deref(), "message")?,
                 32768,
@@ -465,12 +465,13 @@ impl Cloud {
         if let Some(title) = &input.title {
             nonempty(title, 200, "title")?;
         }
-        let creating = matches!(input.action, SessionAction::Create)
-            || matches!(input.action, SessionAction::Ask) && input.session_id.is_none();
-        let mut session = if creating {
-            if input.session_id.is_some() || input.thread_id.is_some() || input.turn_id.is_some() {
+        let creating = matches!(input.action, WorkspaceAction::Create)
+            || matches!(input.action, WorkspaceAction::Ask) && input.workspace_id.is_none();
+        let mut workspace = if creating {
+            if input.workspace_id.is_some() || input.thread_id.is_some() || input.turn_id.is_some()
+            {
                 return Err(invalid(
-                    "A new session cannot use an existing sessionId, threadId or turnId",
+                    "A new workspace cannot use an existing workspaceId, threadId or turnId",
                 ));
             }
             if let Some(agent) = input.cloud_agent_id {
@@ -478,37 +479,38 @@ impl Cloud {
             }
             self.api(
                 Method::POST,
-                "api/v1/sessions",
+                "api/v1/workspaces",
                 Some(json!({"accountId":self.account,"cloudAgentId":input.cloud_agent_id,"title":input.title,"configuration":input.configuration,"start":input.start})),
             )
-            .await?["session"]
+            .await?["workspace"]
                 .clone()
         } else {
-            self.owned("sessions", required(input.session_id, "sessionId")?)
+            self.owned("workspaces", required(input.workspace_id, "workspaceId")?)
                 .await?
         };
-        let id: Uuid = serde_json::from_value(session["id"].clone())?;
-        let path = format!("api/v1/sessions/{id}");
-        let url = self.url(id, "sessions")?;
+        // The canonical id, even when the caller named the workspace by a former session id.
+        let id: Uuid = serde_json::from_value(workspace["id"].clone())?;
+        let path = format!("api/v1/workspaces/{id}");
+        let url = self.url(id, "workspaces")?;
         match input.action {
-            SessionAction::Get => return Ok(json!({"session":session,"url":url})),
-            SessionAction::SshPublicKey => {
-                return Ok(json!({"sessionId":id,"sshPublicKey":session["sshPublicKey"]}));
+            WorkspaceAction::Get => return Ok(json!({"workspace":workspace,"url":url})),
+            WorkspaceAction::SshPublicKey => {
+                return Ok(json!({"workspaceId":id,"sshPublicKey":workspace["sshPublicKey"]}));
             }
-            SessionAction::Update => {
+            WorkspaceAction::Update => {
                 let version = required(input.version, "version")?;
-                if session["version"].as_i64() != Some(version) {
-                    return Err(invalid("Session changed; get it again before saving"));
+                if workspace["version"].as_i64() != Some(version) {
+                    return Err(invalid("Workspace changed; get it again before saving"));
                 }
                 return self.api(Method::PATCH, &path, Some(json!({"version":version,"configuration":required(input.configuration,"configuration")?}))).await;
             }
-            SessionAction::SaveAgent => {
+            WorkspaceAction::SaveAgent => {
                 let name = required(input.name, "name")?;
                 nonempty(&name, 128, "name")?;
                 return self.api(Method::POST, &format!("{path}/save-agent"), Some(json!({"name":name,"description":input.description.unwrap_or_default(),"version":required(input.version,"version")?}))).await;
             }
-            SessionAction::Stop | SessionAction::Delete => {
-                let deleting = matches!(input.action, SessionAction::Delete);
+            WorkspaceAction::Stop | WorkspaceAction::Delete => {
+                let deleting = matches!(input.action, WorkspaceAction::Delete);
                 let result = self
                     .api(
                         if deleting {
@@ -521,43 +523,40 @@ impl Cloud {
                     )
                     .await?;
                 return Ok(
-                    json!({"sessionId":id,"url":url,"operation":result["operation"],"status":"accepted"}),
+                    json!({"workspaceId":id,"url":url,"operation":result["operation"],"status":"accepted"}),
                 );
             }
-            SessionAction::Rename => {
+            WorkspaceAction::Rename => {
                 let body = json!({"title":required(input.title,"title")?});
                 return self.api(Method::PATCH, &path, Some(body)).await;
             }
-            SessionAction::Start => {
+            WorkspaceAction::Start => {
                 self.api(Method::POST, &format!("{path}/start"), Some(json!({})))
                     .await?;
             }
             _ => {}
         }
-        if creating || matches!(input.action, SessionAction::Start) {
+        if creating || matches!(input.action, WorkspaceAction::Start) {
             // An asynchronous ask still needs a ready runtime to submit its message.
             // wait=false skips waiting for the response, never silently drops the prompt.
             if input.start != Some(false)
-                && (matches!(input.action, SessionAction::Ask) || input.wait.unwrap_or(true))
+                && (matches!(input.action, WorkspaceAction::Ask) || input.wait.unwrap_or(true))
             {
-                let workspace = session["workspace"]["id"]
-                    .as_str()
-                    .and_then(|id| id.parse().ok());
-                session = self.ready(id, workspace, deadline).await?;
+                workspace = self.ready(id, deadline).await?;
             } else {
-                session = self.owned("sessions", id).await?;
+                workspace = self.owned("workspaces", id).await?;
             }
-            if !matches!(input.action, SessionAction::Ask)
-                || session["workspace"]["observedState"] != "running"
+            if !matches!(input.action, WorkspaceAction::Ask)
+                || workspace["observedState"] != "running"
             {
                 return Ok(
-                    json!({"session":session,"sessionId":id,"url":url,"status":session["workspace"]["observedState"],"messageSubmitted":false,"message":"No chat message was submitted. Once running, ask using this sessionId; do not create a duplicate session."}),
+                    json!({"workspace":workspace,"workspaceId":id,"url":url,"status":workspace["observedState"],"messageSubmitted":false,"message":"No chat message was submitted. Once running, ask using this workspaceId; do not create a duplicate workspace."}),
                 );
             }
         }
-        if session["workspace"]["observedState"] != "running" {
+        if workspace["observedState"] != "running" {
             return Ok(
-                json!({"sessionId":id,"url":url,"status":session["workspace"]["observedState"],"message":"Start the session before chatting or reading its runtime. No message was submitted."}),
+                json!({"workspaceId":id,"url":url,"status":workspace["observedState"],"message":"Start the workspace before chatting or reading its runtime. No message was submitted."}),
             );
         }
         let mut remote = Remote::new(self, id).await?;
@@ -576,30 +575,30 @@ impl Cloud {
                 .collect();
             if roots.len() > 1 {
                 return Err(invalid(
-                    "Multiple chats in this session; list them with cloud_chat and supply chatId (or threadId for this legacy tool)",
+                    "Multiple chats in this workspace; list them with cloud_chat and supply chatId (or threadId for this legacy tool)",
                 ));
             }
             let candidate = roots.first();
             if let Some(thread) = candidate {
                 serde_json::from_value(thread["id"].clone())?
-            } else if matches!(input.action, SessionAction::Ask) {
+            } else if matches!(input.action, WorkspaceAction::Ask) {
                 let info = remote.request(Method::GET, "v1/info", None).await?;
                 let agent = info["defaultAgent"]
                     .as_str()
-                    .or_else(|| (!session["agentSnapshot"].is_null()).then_some("cloud-agent"));
+                    .or_else(|| (!workspace["agentSnapshot"].is_null()).then_some("cloud-agent"));
                 let row=remote.request(Method::POST,"v1/threads",Some(json!({"title":input.title,"agent":agent,"provider":info["defaultProvider"],"model":info["defaultModel"]}))).await?;
                 serde_json::from_value(row["id"].clone())?
             } else {
-                return Ok(json!({"sessionId":id,"url":url,"status":"idle","items":[]}));
+                return Ok(json!({"workspaceId":id,"url":url,"status":"idle","items":[]}));
             }
         };
         let thread_path = format!("v1/threads/{thread}");
         match input.action {
-            SessionAction::Messages => {
+            WorkspaceAction::Messages => {
                 let items = remote.items(thread, input.after, count).await?;
-                Ok(json!({"sessionId":id,"threadId":thread,"url":url,"messages":items}))
+                Ok(json!({"workspaceId":id,"threadId":thread,"url":url,"messages":items}))
             }
-            SessionAction::Abort => {
+            WorkspaceAction::Abort => {
                 // Never allow a turn ID from a different conversation to be interrupted.
                 let result = if let Some(turn) = input.turn_id {
                     remote.turn(thread, turn).await?;
@@ -620,15 +619,16 @@ impl Cloud {
                         .await?
                 };
                 Ok(
-                    json!({"sessionId":id,"threadId":thread,"url":url,"status":"interrupt_requested","result":result}),
+                    json!({"workspaceId":id,"threadId":thread,"url":url,"status":"interrupt_requested","result":result}),
                 )
             }
-            SessionAction::Ask | SessionAction::Wait => {
-                let asking = matches!(input.action, SessionAction::Ask);
+            WorkspaceAction::Ask | WorkspaceAction::Wait => {
+                let asking = matches!(input.action, WorkspaceAction::Ask);
                 let turn = if asking {
                     // No nested control-plane access or interactive questions in remote delegated work.
+                    // `cloud_agent_session` is the tool's name in runtimes started before the rename.
                     let effort = input.reasoning_effort.as_ref().map_or_else(
-                        || session.get("configuration").unwrap_or(&session["agentSnapshot"]["configuration"])["reasoningEffort"].clone(),
+                        || workspace.get("configuration").unwrap_or(&workspace["agentSnapshot"]["configuration"])["reasoningEffort"].clone(),
                         |e| json!(e),
                     );
                     // The agent's words, marked as an agent's: Auto's reviewer there never
@@ -636,7 +636,7 @@ impl Cloud {
                     let text = input.message.as_deref().map(|message| {
                         format!("{}{message}", haarness_protocol::AGENT_MESSAGE_PREFIX)
                     });
-                    remote.request(Method::POST,&format!("{thread_path}/turns"),Some(json!({"requestId":Uuid::now_v7(),"text":text,"reasoningEffort":effort,"tools":{"question":false,"cloud_agent_manage":false,"cloud_agent_session":false,"cloud_chat":false,"cloud_schedule":false}}))).await?
+                    remote.request(Method::POST,&format!("{thread_path}/turns"),Some(json!({"requestId":Uuid::now_v7(),"text":text,"reasoningEffort":effort,"tools":{"question":false,"cloud_agent_manage":false,"cloud_workspace":false,"cloud_agent_session":false,"cloud_chat":false,"cloud_schedule":false}}))).await?
                 } else if let Some(turn) = input.turn_id {
                     remote.turn(thread, turn).await?
                 } else {
@@ -646,7 +646,7 @@ impl Cloud {
                 };
                 if turn.is_null() {
                     return Ok(
-                        json!({"sessionId":id,"threadId":thread,"url":url,"status":"idle","messages":remote.items(thread,input.after,count).await?}),
+                        json!({"workspaceId":id,"threadId":thread,"url":url,"status":"idle","messages":remote.items(thread,input.after,count).await?}),
                     );
                 }
                 let turn_id: Uuid = serde_json::from_value(turn["id"].clone())?;
@@ -657,32 +657,32 @@ impl Cloud {
                 };
                 // These cursors are sufficient to continue a timed-out or asynchronous call without resubmission.
                 Ok(
-                    json!({"sessionId":id,"threadId":thread,"turnId":turn_id,"url":format!("{url}?thread={thread}"),"status":result["status"],"messageSubmitted":asking,"turn":result,"messages":remote.items(thread,input.after,count).await?}),
+                    json!({"workspaceId":id,"threadId":thread,"turnId":turn_id,"url":format!("{url}?thread={thread}"),"status":result["status"],"messageSubmitted":asking,"turn":result,"messages":remote.items(thread,input.after,count).await?}),
                 )
             }
-            _ => Err(invalid("Unsupported session action")),
+            _ => Err(invalid("Unsupported workspace action")),
         }
     }
 
-    async fn ready(&self, id: Uuid, workspace: Option<Uuid>, deadline: Instant) -> Result<Value> {
-        let mut updates = events::Updates::control(self.clone(), id, workspace, deadline).await;
+    async fn ready(&self, id: Uuid, deadline: Instant) -> Result<Value> {
+        let mut updates = events::Updates::control(self.clone(), id, deadline).await;
         loop {
-            let session = match self.owned("sessions", id).await {
+            let workspace = match self.owned("workspaces", id).await {
                 Err(_) if self.cancel.is_cancelled() => {
                     return Err(invalid(format!(
-                        "Cloud wait cancelled. Session {id} is retained; inspect or stop it explicitly."
+                        "Cloud wait cancelled. Workspace {id} is retained; inspect or stop it explicitly."
                     )));
                 }
                 result => result?,
             };
             if matches!(
-                session["workspace"]["observedState"].as_str(),
+                workspace["observedState"].as_str(),
                 Some("running" | "failed" | "deleted")
-            ) || (session["workspace"]["observedState"] == "stopped"
-                && session["workspace"]["desiredState"] != "running")
+            ) || (workspace["observedState"] == "stopped"
+                && workspace["desiredState"] != "running")
                 || Instant::now() >= deadline
             {
-                return Ok(session);
+                return Ok(workspace);
             }
             updates.wait(deadline, &self.cancel).await;
         }
@@ -715,7 +715,7 @@ impl<'a> Remote<'a> {
             cloud
                 .api(
                     Method::POST,
-                    &format!("api/v1/sessions/{id}/attach"),
+                    &format!("api/v1/workspaces/{id}/attach"),
                     Some(json!({})),
                 )
                 .await?,
@@ -730,7 +730,7 @@ impl<'a> Remote<'a> {
         for attempt in 0..2 {
             let url = safe_url(&self.attachment.gateway_url)?
                 .join(path)
-                .map_err(|_| invalid("Invalid session path"))?;
+                .map_err(|_| invalid("Invalid workspace path"))?;
             let mut request = self
                 .cloud
                 .client
@@ -825,10 +825,10 @@ impl<'a> Remote<'a> {
             if self.cloud.cancel.is_cancelled() {
                 if abort_on_cancel {
                     // Best effort only for the turn submitted by this call. Cancellation must not
-                    // stop another user's turn or destroy the persistent session.
+                    // stop another user's turn or destroy the persistent workspace.
                     let url = safe_url(&self.attachment.gateway_url)?
                         .join(&format!("v1/turns/{turn}/interrupt"))
-                        .map_err(|_| invalid("Invalid session path"))?;
+                        .map_err(|_| invalid("Invalid workspace path"))?;
                     let _ = self
                         .cloud
                         .client
@@ -841,7 +841,7 @@ impl<'a> Remote<'a> {
                         .await;
                 }
                 return Err(invalid(format!(
-                    "Cloud wait cancelled. Session {} and thread {thread} are retained.",
+                    "Cloud wait cancelled. Workspace {} and thread {thread} are retained.",
                     self.id
                 )));
             }
