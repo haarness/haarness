@@ -188,6 +188,23 @@ export async function rememberConnected<T extends { id: string }>(input: {
   return true;
 }
 
+/**
+ * Waits for `work` at most `ms` and never fails with it: for what only adds to
+ * an opening (the project a folder belongs to, for the sidebar), which must
+ * neither hold the opening up nor turn it into a failure. Work still running
+ * carries on, and what it brings arrives later its own way.
+ */
+export async function waitBriefly(work: Promise<unknown>, ms: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    work.catch(() => {}),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]);
+  clearTimeout(timer);
+}
+
 // Runtime project IDs are authoritative. Paths identify their concrete
 // endpoints, never the relationship between a chat and its project.
 export function mergeProjectCatalog(

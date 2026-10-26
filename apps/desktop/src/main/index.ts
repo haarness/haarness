@@ -67,6 +67,7 @@ import {
   mergeProjectCatalog,
   projectKey,
   rememberConnected,
+  waitBriefly,
 } from "../projects";
 import {
   connectLocal,
@@ -457,6 +458,8 @@ function saveHostServer(host: string, label?: string) {
   } else data().servers.push({ id, label: label || say("Remote"), host });
 }
 let projectCatalog: Promise<Recent[]> | undefined;
+/** How long an opening waits for the project catalog (see `waitBriefly`). */
+const CATALOG_WAIT_MS = 2000;
 async function refreshProjects(): Promise<Recent[]> {
   if (projectCatalog) return projectCatalog;
   projectCatalog = (async () => {
@@ -1136,9 +1139,18 @@ function installHandlers() {
         after: view.remote || home
           ? undefined
           : async () => {
-              await refreshProjects();
-              if (!data().recent.find((item) => item.id === view.id)?.project)
-                await refreshProjects();
+              // The catalog only names the folder's project and checkout for
+              // the sidebar. The opening waits a moment for it, then goes on
+              // without it rather than failing: a late catalog still reaches
+              // the windows as a "projects" event.
+              await waitBriefly(
+                (async () => {
+                  await refreshProjects();
+                  if (!data().recent.find((item) => item.id === view.id)?.project)
+                    await refreshProjects();
+                })(),
+                CATALOG_WAIT_MS,
+              );
               const annotated = data().recent.find(
                 (item) => item.id === view.id,
               );

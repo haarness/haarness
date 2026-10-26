@@ -17,6 +17,7 @@ import {
   saveConnected,
   sessionKey,
   sidebarGroups,
+  waitBriefly,
 } from "../src/projects";
 import {
   readProjectCache,
@@ -114,6 +115,22 @@ test("a project removed while its folder is looked up after it connected, or whi
     false,
   );
   assert.equal(saved, false);
+});
+
+test("an opening waits only briefly for its project catalog and never fails with it", async () => {
+  // Answered in time: waited for.
+  let done = false;
+  await waitBriefly(
+    new Promise<void>((resolve) => setTimeout(() => ((done = true), resolve()), 5)),
+    1000,
+  );
+  assert.equal(done, true);
+  // A catalog that fails is no failure of the opening.
+  await waitBriefly(Promise.reject(new Error("took too long")), 1000);
+  // One that hangs is left to finish later.
+  const started = Date.now();
+  await waitBriefly(new Promise(() => {}), 20);
+  assert.ok(Date.now() - started < 500);
 });
 
 test("registered identity groups a worktree outside the project and discovers the primary folder without conflating remote hosts", () => {

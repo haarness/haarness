@@ -122,6 +122,8 @@ export async function invoke(
       errors = "";
     let exceeded = false,
       timedOut = false;
+    const action =
+      args[0] === "desktop" ? (input as { action?: string })?.action : undefined;
     const timer = setTimeout(
       () => {
         timedOut = true;
@@ -130,10 +132,7 @@ export async function invoke(
       },
       args[0] === "auth"
         ? 600000
-        : args[0] === "desktop" &&
-            ["connect", "projects"].includes(
-              (input as { action?: string })?.action ?? "",
-            )
+        : action === "connect" || action === "projects"
           ? 30000
           : 180000,
     );
@@ -169,7 +168,9 @@ export async function invoke(
         reject(
           new Error(
             timedOut
-              ? "Opening this project took too long. Please retry."
+              ? action === "connect"
+                ? "Opening this project took too long. Please retry."
+                : "Haarness took too long to answer. Please retry."
               : exceeded
                 ? "Command output exceeded its limit"
                 : errors.trim() || "Command was cancelled or failed",
