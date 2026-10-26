@@ -40,6 +40,11 @@ export const providerBrands = {
   upstage: "upstage",
   digitalocean: "digitalocean",
   wandb: "wandb",
+  // Maker ids as Cloud's router (OpenRouter) spells them.
+  "x-ai": "xai",
+  mistralai: "mistral",
+  "z-ai": "zai",
+  "meta-llama": "meta",
 } as const;
 
 export function providerBrand(id?: string | null): string | undefined {
