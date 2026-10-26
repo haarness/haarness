@@ -2796,7 +2796,7 @@ impl AgentRuntime {
 
     /// Create a chat. With a client-chosen id that already names a chat, that
     /// chat is returned as it is, without events or hooks: a retried create
-    /// (Cloud delivering a session's first prompt) cannot make a second one.
+    /// (Cloud delivering a workspace's first prompt) cannot make a second one.
     pub async fn create_thread(&self, mut request: CreateThreadRequest) -> CoreResult<Thread> {
         let chosen = request.id;
         if let Some(id) = chosen {
@@ -14304,10 +14304,10 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
     }
     if matches!(
         name,
-        "cloud_agent_manage" | "cloud_agent_session" | "cloud_chat" | "cloud_schedule"
+        "cloud_agent_manage" | "cloud_workspace" | "cloud_chat" | "cloud_schedule"
     ) {
         let action = arguments["action"].as_str().unwrap_or("unknown");
-        let target = arguments["sessionId"]
+        let target = arguments["workspaceId"]
             .as_str()
             .or_else(|| arguments["id"].as_str())
             .or_else(|| arguments["cloudAgentId"].as_str())
@@ -17682,9 +17682,9 @@ mod tests {
     fn cloud_permissions_are_scoped_to_action_and_target() {
         for (name, args, target) in [
             (
-                "cloud_agent_session",
-                json!({"action":"ask","sessionId":"session-id"}),
-                "session-id",
+                "cloud_workspace",
+                json!({"action":"ask","workspaceId":"workspace-id"}),
+                "workspace-id",
             ),
             (
                 "cloud_agent_manage",
@@ -17692,7 +17692,7 @@ mod tests {
                 "agent-id",
             ),
             (
-                "cloud_agent_session",
+                "cloud_workspace",
                 json!({"action":"create","cloudAgentId":"agent-id"}),
                 "agent-id",
             ),

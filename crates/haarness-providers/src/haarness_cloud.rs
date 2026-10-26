@@ -149,7 +149,7 @@ fn readable(error: CoreError) -> CoreError {
     readable_with(error, " (in the terminal: /billing)")
 }
 
-/// [`readable`] for a Cloud session's own `router` provider, whose chat is
+/// [`readable`] for a Cloud workspace's own `router` provider, whose chat is
 /// read in a browser or on a phone as often as in a terminal.
 pub(crate) fn readable_router(error: CoreError) -> CoreError {
     readable_with(error, "")
@@ -519,7 +519,7 @@ mod tests {
         let other = CoreError::Provider("HTTP 500: boom".into());
         assert!(matches!(readable(other), CoreError::Provider(m) if m == "HTTP 500: boom"));
 
-        // A Cloud session's chat is read in a browser too: no terminal hint, and limits explained.
+        // A Cloud workspace's chat is read in a browser too: no terminal hint, and limits explained.
         let budget = CoreError::Provider(
             "HTTP 402: [budget_exceeded] the per_request_max budget cannot fund this request \
              (up to 2600000000 nanos)"

@@ -73,7 +73,7 @@ pub fn reminder(
 pub use haarness_protocol::{AGENT_MESSAGE_PREFIX, SESSION_MESSAGE_PREFIX};
 
 /// Whether `text` is a message another agent sent (another chat's, or a
-/// Haarness agent's to a Cloud session), not the person's.
+/// Haarness agent's to a Cloud workspace), not the person's.
 #[must_use]
 pub fn is_session_message(text: &str) -> bool {
     let text = text.trim_start();

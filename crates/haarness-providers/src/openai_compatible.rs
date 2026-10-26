@@ -1472,7 +1472,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let request_id = crate::request_id(response.headers());
         let provider_id = self.id.clone();
         let mut events = json_stream(response, cancel, limits);
-        // A Cloud session's own router (the Haarness Cloud provider translates its errors itself).
+        // A Cloud workspace's own router (the Haarness Cloud provider translates its errors itself).
         if self.server_output_limit && self.id != "haarness" {
             events = Box::pin(futures::StreamExt::map(events, |event| {
                 event.map_err(crate::haarness_cloud::readable_router)
@@ -2055,7 +2055,7 @@ mod tests {
 
     #[test]
     fn cloud_catalog_prices_override_builtin_estimates() {
-        // The Haarness Cloud provider and a Cloud session's own router read the same price list.
+        // The Haarness Cloud provider and a Cloud workspace's own router read the same price list.
         for provider in ["haarness", "router"] {
             let model = discovered_model_info(provider, &serde_json::json!({
                 "id":"openai/gpt-4.1-nano",

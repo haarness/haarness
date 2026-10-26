@@ -282,7 +282,7 @@ pub async fn run_attached_with_resolver(
     .map(|_| ())
 }
 
-/// Resume a Cloud session's most recent conversation, creating one only for a new session.
+/// Resume a Cloud workspace's most recent conversation, creating one only for a new workspace.
 pub async fn resume_attached_with_resolver(
     server: &str,
     token: &str,

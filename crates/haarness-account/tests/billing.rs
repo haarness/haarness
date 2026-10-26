@@ -173,7 +173,7 @@ async fn websocket_balances_reconnect_switch_logout_and_stale_errors() {
         .unwrap();
     f.data
         .events
-        .send(json!({"type":"entity.changed","entity":"session","accountId":A}))
+        .send(json!({"type":"entity.changed","entity":"workspace","accountId":A}))
         .unwrap();
     tokio::time::sleep(Wait::from_millis(250)).await;
     assert_eq!(before, f.data.requests.load(Ordering::SeqCst));

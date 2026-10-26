@@ -30,7 +30,7 @@ pub struct CloudAgentInput {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum CloudSessionAction {
+pub enum CloudWorkspaceAction {
     List,
     Get,
     Create,
@@ -49,9 +49,9 @@ pub enum CloudSessionAction {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CloudSessionInput {
-    pub action: CloudSessionAction,
-    pub session_id: Option<Uuid>,
+pub struct CloudWorkspaceInput {
+    pub action: CloudWorkspaceAction,
+    pub workspace_id: Option<Uuid>,
     pub configuration: Option<Value>,
     pub version: Option<i64>,
     pub name: Option<String>,
@@ -70,8 +70,8 @@ pub struct CloudSessionInput {
     pub after: Option<u64>,
 }
 
-/// A chat is a root runtime thread inside a Cloud session. It shares files and compute,
-/// but owns its conversation history. Chat operations never create or start a session.
+/// A chat is a root runtime thread inside a Cloud workspace. It shares files and compute,
+/// but owns its conversation history. Chat operations never create or start a workspace.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CloudChatAction {
@@ -90,7 +90,7 @@ pub enum CloudChatAction {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CloudChatInput {
     pub action: CloudChatAction,
-    pub session_id: Uuid,
+    pub workspace_id: Uuid,
     /// Explicit chat ID, also called threadId by the runtime. Required except list/create.
     pub chat_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
@@ -124,7 +124,7 @@ pub enum CloudScheduleAction {
 pub struct CloudScheduleInput {
     pub action: CloudScheduleAction,
     pub id: Option<Uuid>,
-    pub session_id: Option<Uuid>,
+    pub workspace_id: Option<Uuid>,
     pub chat_id: Option<Uuid>,
     pub name: Option<String>,
     pub prompt: Option<String>,

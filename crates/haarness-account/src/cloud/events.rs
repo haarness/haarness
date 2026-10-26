@@ -60,12 +60,7 @@ impl Updates {
         }
     }
 
-    pub(super) async fn control(
-        cloud: Cloud,
-        session: Uuid,
-        workspace: Option<Uuid>,
-        deadline: Instant,
-    ) -> Self {
+    pub(super) async fn control(cloud: Cloud, workspace: Uuid, deadline: Instant) -> Self {
         let cancel = cloud.cancel.clone();
         Self::start(&cancel, deadline, |sender| {
             Box::pin(async move {
@@ -73,8 +68,7 @@ impl Updates {
                 let mut rejected = None;
                 loop {
                     let connected =
-                        control_connection(&cloud, session, workspace, &sender, &mut rejected)
-                            .await;
+                        control_connection(&cloud, workspace, &sender, &mut rejected).await;
                     sender.send_replace(false);
                     backoff(&mut retry, connected).await;
                 }
@@ -85,7 +79,7 @@ impl Updates {
 
     pub(super) async fn runtime(
         cloud: Cloud,
-        session: Uuid,
+        workspace: Uuid,
         attachment: Attachment,
         thread: Uuid,
         turn: Uuid,
@@ -111,7 +105,7 @@ impl Updates {
                         Ok(value)
                     } else {
                         // A reconnect obtains a fresh ticket and runtime generation.
-                        Remote::attach(&cloud, session).await
+                        Remote::attach(&cloud, workspace).await
                     };
                     let connected = match attachment {
                         Ok(attachment) => {
@@ -142,8 +136,7 @@ async fn backoff(retry: &mut u32, connected: bool) {
 
 async fn control_connection(
     cloud: &Cloud,
-    session: Uuid,
-    workspace: Option<Uuid>,
+    workspace: Uuid,
     sender: &watch::Sender<bool>,
     rejected: &mut Option<String>,
 ) -> bool {
@@ -189,10 +182,10 @@ async fn control_connection(
                     return ready;
                 };
                 if event["type"] == "ready" {
-                    tracing::debug!(transport = "websocket", %session, "Cloud event stream connected");
+                    tracing::debug!(transport = "websocket", %workspace, "Cloud event stream connected");
                     ready = true;
                 }
-                if ready && control_change(&event, cloud.account, session, workspace) {
+                if ready && control_change(&event, cloud.account, workspace) {
                     sender.send_replace(true);
                 }
             }
@@ -214,18 +207,15 @@ async fn control_connection(
     }
 }
 
-fn control_change(event: &Value, account: Uuid, session: Uuid, workspace: Option<Uuid>) -> bool {
+fn control_change(event: &Value, account: Uuid, workspace: Uuid) -> bool {
     match event["type"].as_str() {
         Some("ready" | "resync_required") => true,
         Some("entity.changed")
             if event["accountId"].as_str() == Some(account.to_string().as_str()) =>
         {
-            let id = event["id"].as_str().and_then(|id| id.parse::<Uuid>().ok());
-            match event["entity"].as_str() {
-                Some("session") => id == Some(session),
-                Some("workspace") => workspace.is_none() || id == workspace,
-                _ => false,
-            }
+            // Cloud's deprecated `session` duplicate of each event is for older clients.
+            event["entity"] == "workspace"
+                && event["id"].as_str().and_then(|id| id.parse::<Uuid>().ok()) == Some(workspace)
         }
         _ => false,
     }
@@ -359,14 +349,20 @@ mod tests {
     #[test]
     fn only_scoped_state_changes_wake_waiters() {
         let account = Uuid::now_v7();
-        let session = Uuid::now_v7();
         let workspace = Uuid::now_v7();
         let thread = Uuid::now_v7();
         let turn = Uuid::now_v7();
         let mut event = json!({"type":"entity.changed","accountId":account,"entity":"workspace","id":workspace});
-        assert!(control_change(&event, account, session, Some(workspace)));
+        assert!(control_change(&event, account, workspace));
+        event["id"] = json!(Uuid::now_v7());
+        assert!(!control_change(&event, account, workspace));
+        event["id"] = json!(workspace);
+        // The deprecated duplicate for older clients wakes nothing on its own.
+        event["entity"] = json!("session");
+        assert!(!control_change(&event, account, workspace));
+        event["entity"] = json!("workspace");
         event["accountId"] = json!(Uuid::now_v7());
-        assert!(!control_change(&event, account, session, Some(workspace)));
+        assert!(!control_change(&event, account, workspace));
         let mut event =
             json!({"type":"permission.requested","threadId":Uuid::now_v7(),"rootThreadId":thread});
         assert!(runtime_change(&event, thread, turn));

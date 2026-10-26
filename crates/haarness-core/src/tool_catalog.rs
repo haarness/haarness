@@ -89,7 +89,7 @@ fn classify(name: &str) -> Classification {
         ("goals", "Goals", true)
     } else if matches!(
         name,
-        "cloud_agent_manage" | "cloud_agent_session" | "cloud_chat" | "cloud_schedule"
+        "cloud_agent_manage" | "cloud_workspace" | "cloud_chat" | "cloud_schedule"
     ) {
         ("cloud", "Cloud agents", false)
     } else if name.starts_with("session_") {
@@ -402,7 +402,7 @@ pub fn load_tool_result(ids: &[String], catalog: &ToolCatalogResponse) -> Value 
 mod tests {
     #[test]
     fn cloud_tools_are_deferred_in_the_cloud_group() {
-        for name in ["cloud_agent_manage", "cloud_agent_session"] {
+        for name in ["cloud_agent_manage", "cloud_workspace"] {
             let kind = super::classify(name);
             assert_eq!(kind.group, "cloud");
             assert!(!kind.essential);
