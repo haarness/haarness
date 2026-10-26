@@ -83,7 +83,7 @@ class PublicationTest(unittest.TestCase):
         }]}
         (self.root / 'index.json').write_text(json.dumps(index))
         self.args = argparse.Namespace(index=[str(self.root / 'index.json')], url=operator,
-            channel='preview', allow_dirty=False, allow_unsigned=False, notes_url=None,
+            channel='preview', allow_dirty=False, allow_unsigned=False, allow_unsigned_windows=False, notes_url=None,
             receipt=str(self.root / 'receipt.json'))
         env = patch.dict(os.environ, HAARNESS_RELEASE_TOKEN='test-operator-secret')
         env.start()
