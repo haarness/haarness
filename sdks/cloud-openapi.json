@@ -4013,7 +4013,7 @@
         "tags": [
           "identity"
         ],
-        "summary": "The caller's sign-in methods (Google and Apple identities, the email credential), which providers this Cloud can\nconnect, and whether removing one asks for a two-factor code (ADR-0016).",
+        "summary": "The caller's sign-in methods (Google and Apple identities, the email credential, passkeys), which providers this\nCloud can connect, whether it can hold passkeys, and whether removing one asks for a two-factor code (ADR-0016,\nADR-0017).",
         "description": "Auth: `cookie|bearer` with the `account` scope (not API keys).",
         "operationId": "sign_in_methods",
         "responses": {
@@ -4112,12 +4112,156 @@
         }
       }
     },
+    "/api/v1/me/sign-in-methods/passkeys": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Keep the passkey the browser just created. It is named after the password manager that holds it, the account's\naddress is emailed a notice, and the answer is the account's sign-in methods.",
+        "description": "Auth: `cookie+csrf` (browser sessions only).",
+        "operationId": "add_passkey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddPasskeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Added; the sign-in methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInMethodsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a passkey answer, or for an unknown or expired challenge",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a browser session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The passkey already belongs to an account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The passkey did not verify",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/sign-in-methods/passkeys/options": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Start adding a passkey to the signed-in account: the options for `navigator.credentials.create()`, valid 10\nminutes. With two-factor authentication on, a current code is required first, since the passkey will sign in\nwithout one.",
+        "description": "Auth: `cookie+csrf` (browser sessions only).",
+        "operationId": "passkey_registration_options",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasskeyOptionsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The creation options",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyCreationOptionsDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a browser session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "This Cloud cannot hold passkeys, or the account has the most it may keep (`details.reason = too_many`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The two-factor code is missing or wrong",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many wrong codes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/me/sign-in-methods/{id}/remove": {
       "post": {
         "tags": [
           "identity"
         ],
-        "summary": "Remove a Google or Apple identity from the caller's account while another way to sign in remains. Removing Apple\nalso revokes Haarness's Apple token. Answers the remaining methods.",
+        "summary": "Remove a Google or Apple identity or a passkey from the caller's account. Google, Apple or email must remain, since\npasskeys alone cannot recover an account. Removing Apple also revokes Haarness's Apple token. Answers the remaining\nmethods.",
         "description": "Auth: `cookie+csrf` (browser sessions only), plus a current two-factor code when `mfaRequired`.",
         "operationId": "remove_sign_in_method",
         "parameters": [
@@ -6286,7 +6430,17 @@
             "description": "Native runtime response or event stream"
           },
           "409": {
-            "description": "Conflict",
+            "description": "`conflict`: the computer is offline or its connection changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`bad_gateway`: the computer is connected but could not complete the request",
             "content": {
               "application/json": {
                 "schema": {
@@ -6607,7 +6761,17 @@
             }
           },
           "409": {
-            "description": "Conflict",
+            "description": "`conflict`: the computer is offline or its connection changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`bad_gateway`: the computer is connected but could not complete the request",
             "content": {
               "application/json": {
                 "schema": {
@@ -7930,7 +8094,7 @@
         "tags": [
           "cloud-agents"
         ],
-        "summary": "List independent sessions, optionally including archived sessions.",
+        "summary": "List the account's sessions, newest first. Every session is listed until it is deleted.",
         "operationId": "list_agent_sessions",
         "parameters": [
           {
@@ -7940,14 +8104,6 @@
             "schema": {
               "type": "string",
               "format": "uuid"
-            }
-          },
-          {
-            "name": "archived",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean"
             }
           },
           {
@@ -10707,7 +10863,131 @@
         "operationId": "auth_options",
         "responses": {
           "200": {
-            "description": "googleEnabled, appleEnabled and emailEnabled"
+            "description": "googleEnabled, appleEnabled, emailEnabled and passkeyEnabled"
+          }
+        }
+      }
+    },
+    "/auth/passkey/finish": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Finish a sign-in with a passkey: verifies the browser's answer and creates the session (`hc_session` + `hc_csrf`).\nA passkey is a second factor on its own, so two-factor authentication asks for no code here. A Google or Apple\nsign-in waiting in this browser for this account joins it, as at every sign-in (ADR-0016).",
+        "description": "Auth: public, from the Haarness sign-in page (exact `Origin`).",
+        "operationId": "passkey_sign_in",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasskeySignInRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in; continue to `redirectTo`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a passkey answer, or for an unknown or expired challenge",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No account has this passkey (`details.reason = unknown_passkey`), or it did not verify",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not from the sign-in page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many sign-in requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/passkey/options": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Start a sign-in with a passkey (ADR-0017): a fresh challenge for `navigator.credentials.get()`, valid 10 minutes.\nNo address is asked for: the browser lists this site's passkeys, and the sign-in page also offers them in the\nemail field's autofill.",
+        "description": "Auth: public, from the Haarness sign-in page (exact `Origin`).",
+        "operationId": "passkey_sign_in_options",
+        "responses": {
+          "200": {
+            "description": "The request options",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyRequestOptionsDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not from the sign-in page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "This Cloud's web origin cannot hold passkeys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many sign-in requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         }
       }
@@ -12375,6 +12655,18 @@
           }
         }
       },
+      "AddPasskeyRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/me/sign-in-methods/passkeys`.",
+        "required": [
+          "credential"
+        ],
+        "properties": {
+          "credential": {
+            "$ref": "#/components/schemas/PasskeyRegistrationDto"
+          }
+        }
+      },
       "AgentConfiguration": {
         "type": "object",
         "properties": {
@@ -12532,7 +12824,9 @@
             ]
           },
           "archived": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Always `false`: sessions are no longer archived, and deleting one is how its storage is freed. Kept so app\nbuilds made before the change still decode a session; new clients ignore it.",
+            "deprecated": true
           },
           "cloudAgentId": {
             "type": [
@@ -13062,7 +13356,8 @@
         "description": "The chat's approvals, set before the message is sent (`PUT /v1/threads/{id}/approval-mode`).",
         "enum": [
           "auto",
-          "review"
+          "review",
+          "yolo"
         ]
       },
       "ArtifactId": {
@@ -15345,6 +15640,7 @@
           "not_implemented",
           "provider_unavailable",
           "storage_unavailable",
+          "bad_gateway",
           "remote_project"
         ]
       },
@@ -15751,7 +16047,7 @@
               },
               {
                 "$ref": "#/components/schemas/ApprovalMode",
-                "description": "Set on the chat before the message is sent; omitted, the chat asks for every request (Review)."
+                "description": "Set on the chat before the message is sent: `auto`, `review`, or `yolo` (every request approved without\nasking; a runtime without it starts the chat in Auto). Omitted, the chat starts in the runtime's default\nmode, which is Auto."
               }
             ]
           },
@@ -17791,7 +18087,8 @@
           "google",
           "password",
           "email",
-          "apple"
+          "apple",
+          "passkey"
         ]
       },
       "MfaRecoveryCodesResponse": {
@@ -18291,7 +18588,9 @@
                   ]
                 },
                 "archived": {
-                  "type": "boolean"
+                  "type": "boolean",
+                  "description": "Always `false`: sessions are no longer archived, and deleting one is how its storage is freed. Kept so app\nbuilds made before the change still decode a session; new clients ignore it.",
+                  "deprecated": true
                 },
                 "cloudAgentId": {
                   "type": [
@@ -19474,6 +19773,322 @@
           }
         }
       },
+      "PasskeyAlgorithmDto": {
+        "type": "object",
+        "required": [
+          "type",
+          "alg"
+        ],
+        "properties": {
+          "alg": {
+            "type": "integer",
+            "format": "int64",
+            "description": "A COSE algorithm: -7 (ES256), -8 (`EdDSA`) or -257 (RS256)."
+          },
+          "type": {
+            "type": "string",
+            "description": "Always `public-key`."
+          }
+        }
+      },
+      "PasskeyAssertionDto": {
+        "type": "object",
+        "description": "`AuthenticatorAssertionResponse`, as `toJSON()` gives it.",
+        "required": [
+          "clientDataJSON",
+          "authenticatorData",
+          "signature"
+        ],
+        "properties": {
+          "authenticatorData": {
+            "type": "string"
+          },
+          "clientDataJSON": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          },
+          "userHandle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PasskeyAttestationDto": {
+        "type": "object",
+        "description": "`AuthenticatorAttestationResponse`, as `toJSON()` gives it.",
+        "required": [
+          "clientDataJSON",
+          "attestationObject"
+        ],
+        "properties": {
+          "attestationObject": {
+            "type": "string"
+          },
+          "clientDataJSON": {
+            "type": "string"
+          },
+          "transports": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`getTransports()`, kept so later sign-ins can hint them."
+          }
+        }
+      },
+      "PasskeyAuthenticatorSelectionDto": {
+        "type": "object",
+        "required": [
+          "residentKey",
+          "requireResidentKey",
+          "userVerification"
+        ],
+        "properties": {
+          "requireResidentKey": {
+            "type": "boolean"
+          },
+          "residentKey": {
+            "type": "string",
+            "description": "Always `required`: the passkey carries the account, so signing in needs no address."
+          },
+          "userVerification": {
+            "type": "string",
+            "description": "Always `required`."
+          }
+        }
+      },
+      "PasskeyCreationOptionsDto": {
+        "type": "object",
+        "description": "`POST /api/v1/me/sign-in-methods/passkeys/options`: what `navigator.credentials.create()` needs.",
+        "required": [
+          "challenge",
+          "rp",
+          "user",
+          "pubKeyCredParams",
+          "timeout",
+          "authenticatorSelection",
+          "attestation"
+        ],
+        "properties": {
+          "attestation": {
+            "type": "string",
+            "description": "Always `none`."
+          },
+          "authenticatorSelection": {
+            "$ref": "#/components/schemas/PasskeyAuthenticatorSelectionDto"
+          },
+          "challenge": {
+            "type": "string"
+          },
+          "excludeCredentials": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PasskeyDescriptorDto"
+            },
+            "description": "The account's passkeys: the browser says one is already on this device instead of making another."
+          },
+          "pubKeyCredParams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PasskeyAlgorithmDto"
+            }
+          },
+          "rp": {
+            "$ref": "#/components/schemas/PasskeyRpDto"
+          },
+          "timeout": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Milliseconds.",
+            "minimum": 0
+          },
+          "user": {
+            "$ref": "#/components/schemas/PasskeyUserDto"
+          }
+        }
+      },
+      "PasskeyCredentialDto": {
+        "type": "object",
+        "description": "A sign-in with a passkey: `PublicKeyCredential.toJSON()` after `navigator.credentials.get()`.",
+        "required": [
+          "id",
+          "type",
+          "response"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "rawId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response": {
+            "$ref": "#/components/schemas/PasskeyAssertionDto"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "PasskeyDescriptorDto": {
+        "type": "object",
+        "description": "A credential the browser may use or must not create again.",
+        "required": [
+          "type",
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The credential id."
+          },
+          "transports": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "type": {
+            "type": "string",
+            "description": "Always `public-key`."
+          }
+        }
+      },
+      "PasskeyOptionsRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/me/sign-in-methods/passkeys/options`.",
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required when the account uses two-factor authentication: an authenticator or recovery code, since a passkey\nsigns in without one."
+          }
+        }
+      },
+      "PasskeyRegistrationDto": {
+        "type": "object",
+        "description": "A new passkey: `PublicKeyCredential.toJSON()` after `navigator.credentials.create()`.",
+        "required": [
+          "id",
+          "type",
+          "response"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "rawId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response": {
+            "$ref": "#/components/schemas/PasskeyAttestationDto"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "PasskeyRequestOptionsDto": {
+        "type": "object",
+        "description": "`POST /auth/passkey/options`: what `navigator.credentials.get()` needs to sign in with any of this site's passkeys\n(the browser lists them; nothing is typed first).",
+        "required": [
+          "challenge",
+          "rpId",
+          "timeout",
+          "userVerification"
+        ],
+        "properties": {
+          "allowCredentials": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PasskeyDescriptorDto"
+            }
+          },
+          "challenge": {
+            "type": "string"
+          },
+          "rpId": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Milliseconds.",
+            "minimum": 0
+          },
+          "userVerification": {
+            "type": "string",
+            "description": "Always `required`: the person unlocks the passkey with their face, fingerprint or screen lock."
+          }
+        }
+      },
+      "PasskeyRpDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "PasskeySignInRequest": {
+        "type": "object",
+        "description": "`POST /auth/passkey/finish`.",
+        "required": [
+          "credential"
+        ],
+        "properties": {
+          "credential": {
+            "$ref": "#/components/schemas/PasskeyCredentialDto"
+          },
+          "returnTo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where to continue, as for every sign-in: a web page or `/oauth/authorize?request=…`."
+          }
+        }
+      },
+      "PasskeyUserDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "displayName"
+        ],
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "description": "The account's opaque user handle (its id's 16 bytes); never an address."
+          },
+          "name": {
+            "type": "string",
+            "description": "The account's address, which the password manager lists the passkey under."
+          }
+        }
+      },
       "PaymentDto": {
         "type": "object",
         "required": [
@@ -19545,7 +20160,7 @@
             "items": {
               "$ref": "#/components/schemas/SignInProvider"
             },
-            "description": "How the existing account signs in."
+            "description": "How the existing account signs in (`passkey` when it has one)."
           },
           "provider": {
             "$ref": "#/components/schemas/SignInProvider",
@@ -21138,6 +21753,13 @@
             ],
             "format": "date-time"
           },
+          "credentialId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A passkey's credential id (base64url), so the page can tell the password manager which ones still sign in."
+          },
           "email": {
             "type": [
               "string",
@@ -21150,7 +21772,7 @@
           },
           "id": {
             "type": "string",
-            "description": "The identity's id, or `email` for the email credential."
+            "description": "The identity's or passkey's id, or `email` for the email credential."
           },
           "lastUsedAt": {
             "type": [
@@ -21159,12 +21781,23 @@
             ],
             "format": "date-time"
           },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A passkey's name: where it is kept (`iCloud Keychain`, `Google Password Manager`, `1Password`…), or `Passkey`."
+          },
           "privateEmail": {
             "type": "boolean",
             "description": "An Apple private relay address (\"Hide My Email\")."
           },
           "provider": {
             "$ref": "#/components/schemas/SignInProvider"
+          },
+          "synced": {
+            "type": "boolean",
+            "description": "A passkey that syncs to the person's other devices through its password manager."
           }
         }
       },
@@ -21191,11 +21824,15 @@
             "items": {
               "$ref": "#/components/schemas/SignInMethodDto"
             },
-            "description": "Google and Apple identities (oldest first), then the email credential."
+            "description": "Google and Apple identities (oldest first), the email credential, then passkeys (oldest first)."
           },
           "mfaRequired": {
             "type": "boolean",
             "description": "Removing a method asks for a current two-factor code."
+          },
+          "passkeysEnabled": {
+            "type": "boolean",
+            "description": "This Cloud's web origin can hold passkeys (a domain over https, or `localhost`)."
           }
         }
       },
@@ -21205,7 +21842,8 @@
         "enum": [
           "google",
           "apple",
-          "email"
+          "email",
+          "passkey"
         ]
       },
       "SignInResponse": {
@@ -21694,12 +22332,6 @@
       "UpdateAgentSessionRequest": {
         "type": "object",
         "properties": {
-          "archived": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
           "configuration": {},
           "environment": {
             "type": [

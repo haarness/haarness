@@ -376,3 +376,61 @@ def test_remote_project_auth_refresh_and_close(asynchronous, monkeypatch):
         cloud.close()
         with pytest.raises(Exception,match="closed"):project._headers()
         host.close();project.close();shared.close()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_a_session_runtime_keeps_the_cloud_clients_timeout(asynchronous):
+    ticket = {
+        "gatewayUrl": "http://localhost/runtime",
+        "ticket": "runtime",
+        "expiresAt": "2099-01-01T00:00:00Z",
+    }
+
+    async def run():
+        async with AsyncHaarnessCloud("http://localhost", token="account", timeout=77) as cloud:
+
+            async def attach(id):
+                return ticket
+
+            cloud.attach_agent_session = attach
+            session = cloud.session("session")
+            try:
+                assert (await session.connect())._timeout == 77
+            finally:
+                await session.close()
+
+    if asynchronous:
+        asyncio.run(run())
+    else:
+        with HaarnessCloud("http://localhost", token="account", timeout=77) as cloud:
+            cloud.attach_agent_session = lambda id: ticket
+            session = cloud.session("session")
+            try:
+                assert session.connect()._timeout == 77
+            finally:
+                session.close()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_the_cloud_address_defaults_like_the_cli_and_create_session_keeps_the_launch(monkeypatch, asynchronous):
+    kind = AsyncHaarnessCloud if asynchronous else HaarnessCloud
+    monkeypatch.delenv("HAARNESS_CLOUD_API_URL", raising=False)
+    assert kind(token="account").base_url == "https://haarness.ai"
+    monkeypatch.setenv("HAARNESS_CLOUD_API_URL", "http://127.0.0.1:18080")
+    assert kind(token="account").base_url == "http://127.0.0.1:18080"
+    assert kind("https://staging.haarness.ai", token="account").base_url == "https://staging.haarness.ai"
+
+    created = {"operation": {"id": "op"}, "session": {"id": "session", "launch": {"chatId": "chat-1"}}}
+    cloud = kind("http://localhost", token="account")
+    if asynchronous:
+
+        async def create(body, options=None):
+            return created
+
+        cloud.create_agent_session = create
+        session = asyncio.run(cloud.create_session({"title": "Launch", "initialPrompt": {"text": "hello"}}))
+    else:
+        cloud.create_agent_session = lambda body, options=None: created
+        session = cloud.create_session({"title": "Launch", "initialPrompt": {"text": "hello"}})
+    assert session.id == "session"
+    assert session.created["session"]["launch"]["chatId"] == "chat-1"

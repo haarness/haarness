@@ -77,8 +77,9 @@ already runs, a front for it at its own address, never a replacement), and load 
 
 The repository's `sdks/OPERATIONS.md` lists every method; `sdks/README.md`
 describes generation and `scripts/test-sdks.sh` runs the real-server E2E gate.
-execute_command handles server commands; CLI-only authentication/install/native
-scheduler administration and TUI-only commands are not HTTP endpoints.
+execute_command handles server commands; native schedules, hooks, providers and the
+other settings go through `manage_resource`. CLI-only authentication and install, and
+TUI-only commands, are not HTTP endpoints.
 
 ## Optional server authentication
 
@@ -97,12 +98,18 @@ existing `token` option remains compatible.
 
 ## Cloud
 
-`HaarnessCloud` connects to the Cloud account API using an account token
-(`HAARNESS_CLOUD_TOKEN`), or a scoped API key (`HAARNESS_API_KEY`), separately from runtime tokens.
-Python also exports `AsyncHaarnessCloud`. Select `session(sessionId)`, then
-`session.chats` for root chat handles with independent history and shared files.
-Connect the session to access the complete native API. Cloud account updates
-use authenticated WebSockets; chat/turn updates use runtime SSE.
+`HaarnessCloud` connects to the Cloud account API with a scoped API key
+(`HAARNESS_API_KEY`, which wins) or an account token (`HAARNESS_CLOUD_TOKEN`),
+separately from runtime tokens. With no `base_url` it uses `HAARNESS_CLOUD_API_URL`,
+else `https://haarness.ai`, as the CLI does. `AsyncHaarnessCloud` is the async form.
+Select `session(session_id)`, or `create_session({"title": …, "initialPrompt": …})`,
+whose handle keeps the response in `created`; then `session.chats` for root chat
+handles with independent history and shared files. Connect the session to access
+the complete native API with the client's timeout. Sessions sleep (`stop`) and wake
+(`start`) and have no archive. Cloud account updates use authenticated WebSockets;
+chat/turn updates use runtime SSE. A failed `LocalServer.start` reports the reason
+the server printed, and `chat()` keeps its five-minute wait whatever other options
+you pass.
 
 Cloud schedule CRUD, pause/resume, run-now and history are generated methods.
 Schedules target a session and chat and run on the Cloud worker with the laptop
