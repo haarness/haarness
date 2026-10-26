@@ -19,6 +19,22 @@ class ChatResult(TypedDict):
     text: str
 
 
+NEW_FILE_REVISION = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+"""The ``revision`` to write a file that does not exist yet: the SHA-256 of empty content. A write fails with
+``409`` if a file appeared there meanwhile."""
+
+
+def _waiting(options: RequestOptions | None) -> RequestOptions:
+    """The request options for waiting on a turn: five minutes and a little more, unless the caller set a timeout."""
+    return {"timeout": 305.0, **(options or {})}
+
+
+def _server_wait(options: RequestOptions) -> int:
+    """How long the server holds the wait: at most its five minutes, and five seconds less than the client's
+    timeout, so the answer arrives before the client gives up."""
+    return max(1, min(300000, int(options.get("timeout", 305.0) * 1000) - 5000))
+
+
 def result(turn: Turn, items: list[Item]) -> ChatResult:
     selected = [item for item in items if item.get("turnId") == turn["id"]]
     return {
@@ -61,8 +77,9 @@ class Haarness(Api):
         request.update(body or {})
         request["text"] = text
         turn = self.start_turn(id, request, options=options)
+        waiting = _waiting(options)
         turn = self.wait_turn(
-            turn["id"], {"timeout_ms": 300000}, options=options or {"timeout": 305}
+            turn["id"], {"timeout_ms": _server_wait(waiting)}, options=waiting
         )
         return result(turn, self.list_items(id, options=options))
 
@@ -118,8 +135,9 @@ class AsyncHaarness(AsyncApi):
         request.update(body or {})
         request["text"] = text
         turn = await self.start_turn(id, request, options=options)
+        waiting = _waiting(options)
         turn = await self.wait_turn(
-            turn["id"], {"timeout_ms": 300000}, options=options or {"timeout": 305}
+            turn["id"], {"timeout_ms": _server_wait(waiting)}, options=waiting
         )
         return result(turn, await self.list_items(id, options=options))
 

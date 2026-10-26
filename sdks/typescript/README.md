@@ -31,7 +31,7 @@ try {
 ```
 
 Every method has generated input/output types. Arguments are path values, then
-body (if any), query (if any), and transport options `{signal, timeoutMs}`.
+body (if any), query (if any), and transport options `{signal, timeoutMs, headers}`.
 Default timeout is 30 seconds; `chat()` defaults to about five minutes. Requests
 are never automatically retried. Reuse a requestId for an intentional idempotent
 turn retry. ApiError exposes status/code/retryable/body; network and decoding
@@ -92,12 +92,16 @@ The existing `token` option remains supported.
 
 ## Cloud
 
-`HaarnessCloud` connects to the Cloud account API using an account token
-(`HAARNESS_CLOUD_TOKEN`), or a scoped API key (`HAARNESS_API_KEY`), separately from runtime tokens.
-Python also exports `AsyncHaarnessCloud`. Select `session(sessionId)`, then
-`session.chats` for root chat handles with independent history and shared files.
-Connect the session to access the complete native API. Cloud account updates
-use authenticated WebSockets; chat/turn updates use runtime SSE.
+`HaarnessCloud` connects to the Cloud account API with a scoped API key
+(`HAARNESS_API_KEY`, which wins) or an account token (`HAARNESS_CLOUD_TOKEN`),
+separately from runtime tokens. With no `baseUrl` it uses `HAARNESS_CLOUD_API_URL`,
+else `https://haarness.ai`, as the CLI does. Select `session(sessionId)`, or
+`createSession({title, initialPrompt})`, whose handle keeps the response in `created`;
+then `session.chats` for root chat handles with independent history and shared files.
+Connect the session to access the complete native API; it uses the client's own
+`fetch` and `timeoutMs`. Sessions sleep (`stop`) and wake (`start`) and have no
+archive. Cloud account updates use authenticated WebSockets; chat/turn updates use
+runtime SSE. A failed `LocalServer.start` reports the reason the server printed.
 
 Cloud schedule CRUD, pause/resume, run-now and history are generated methods.
 Schedules target a session and chat and run on the Cloud worker with the laptop

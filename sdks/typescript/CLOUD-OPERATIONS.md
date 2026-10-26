@@ -71,6 +71,8 @@
 | `account_deletion` | `accountDeletion` | `POST /api/v1/me/deletion` |
 | `sign_in_methods` | `signInMethods` | `GET /api/v1/me/sign-in-methods` |
 | `connect_sign_in_method` | `connectSignInMethod` | `POST /api/v1/me/sign-in-methods/connect` |
+| `add_passkey` | `addPasskey` | `POST /api/v1/me/sign-in-methods/passkeys` |
+| `passkey_registration_options` | `passkeyRegistrationOptions` | `POST /api/v1/me/sign-in-methods/passkeys/options` |
 | `remove_sign_in_method` | `removeSignInMethod` | `POST /api/v1/me/sign-in-methods/{id}/remove` |
 | `mfa_status` | `mfaStatus` | `GET /api/v1/mfa` |
 | `mfa_disable` | `mfaDisable` | `POST /api/v1/mfa/disable` |
@@ -184,6 +186,8 @@
 | `mfa_cancel` | `mfaCancel` | `POST /auth/mfa/cancel` |
 | `mfa_verify` | `mfaVerify` | `POST /auth/mfa/verify` |
 | `auth_options` | `authOptions` | `GET /auth/options` |
+| `passkey_sign_in` | `passkeySignIn` | `POST /auth/passkey/finish` |
+| `passkey_sign_in_options` | `passkeySignInOptions` | `POST /auth/passkey/options` |
 | `device_page` | `devicePage` | `GET /device` |
 | `healthz` | `healthz` | `GET /healthz` |
 | `release_install_ps1` | `releaseInstallPs1` | `GET /install.ps1` |

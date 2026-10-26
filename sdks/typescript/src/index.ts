@@ -12,6 +12,10 @@ export * from "./capabilities.js";
 export * from "./transport.js";
 export * from "./pty.js";
 export * from "./server.js";
+/** The `revision` to write a file that does not exist yet: the SHA-256 of empty content. A write fails with
+ * `409` if a file appeared there meanwhile. */
+export const NEW_FILE_REVISION =
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 export interface ChatResult {
   turn: Turn;
   items: Item[];
@@ -37,7 +41,7 @@ export class Haarness extends Api {
     const headers = () => this.headers();
     return new class extends Haarness {
       protected override headers() { return headers(); }
-    }({baseUrl:this.url(`/v1/host/workspaces/${this.segment(id)}`), fetch:this.fetcher});
+    }({baseUrl:this.url(`/v1/host/workspaces/${this.segment(id)}`), fetch:this.fetcher, timeoutMs:this.timeoutMs});
   }
 
   /** Start and wait for one turn; approvals must be handled by a concurrent observer. */
@@ -52,10 +56,12 @@ export class Haarness extends Api {
       { ...body, requestId: body.requestId ?? randomUUID(), text },
       options,
     );
+    // The server holds the wait at most five minutes, ending five seconds before this client gives up.
+    const waiting = { timeoutMs: 305_000, ...options };
     const result = await this.waitTurn(
       turn.id,
-      { timeout_ms: Math.min(options.timeoutMs ?? 300_000, 300_000) },
-      { timeoutMs: 305_000, ...options },
+      { timeout_ms: Math.max(1, Math.min(300_000, waiting.timeoutMs - 5_000)) },
+      waiting,
     );
     const items = (await this.listItems(id, {}, options)).filter(
       (item) => item.turnId === turn.id,

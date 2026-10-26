@@ -1,6 +1,6 @@
 """Haarness SDK: explicit server connections and owned local server helpers."""
 
-from .client import Haarness, AsyncHaarness, ChatResult, attachments
+from .client import Haarness, AsyncHaarness, ChatResult, NEW_FILE_REVISION, attachments
 from .server import LocalServer, AsyncLocalServer
 from .transport import ApiError, TransportError, RequestOptions, ServerEvent
 from .pty import PtyConnection, AsyncPtyConnection, PtyControl
@@ -11,6 +11,7 @@ __all__ = [
     "AsyncHaarness",
     "ChatResult",
     "attachments",
+    "NEW_FILE_REVISION",
     "LocalServer",
     "AsyncLocalServer",
     "ApiError",

@@ -4,6 +4,7 @@ import { CloudApi } from "./cloud-api.js";
 import { Haarness } from "./index.js";
 import { type RequestOptions } from "./transport.js";
 import type {
+  AgentSessionCreatedResponse,
   AttachResponse,
   CreateAgentSessionRequest,
 } from "./cloud-types.js";
@@ -41,6 +42,10 @@ export class HaarnessCloud extends CloudApi {
       protected override headers() { return headers(); }
     }({baseUrl: this.baseUrl + path, token: "", fetch: this.fetcher, timeoutMs: this.timeoutMs});
   }
+  /** The fetch function and timeout this client was made with, which its session runtimes use too. */
+  runtimeOptions(): { fetch: typeof globalThis.fetch; timeoutMs: number } {
+    return { fetch: this.fetcher, timeoutMs: this.timeoutMs };
+  }
   session(sessionId: string): CloudSession {
     this.segment(sessionId);
     return new CloudSession(this, sessionId);
@@ -50,7 +55,9 @@ export class HaarnessCloud extends CloudApi {
     options?: RequestOptions,
   ): Promise<CloudSession> {
     const result = await this.createAgentSession(body, options);
-    return this.session(result.session.id);
+    const session = this.session(result.session.id);
+    session.created = result;
+    return session;
   }
 }
 
@@ -76,6 +83,8 @@ export function validateGateway(value: string): string {
 /** One machine/filesystem, with many independent chat histories. close() only detaches. */
 export class CloudSession {
   readonly chats: CloudChats;
+  /** What `createSession` answered, with the first message's launch (`created.session.launch?.chatId`). */
+  created?: AgentSessionCreatedResponse;
   private runtime?: Promise<Haarness>;
   private ticket?: AttachResponse;
   private renewing?: Promise<AttachResponse>;
@@ -116,6 +125,7 @@ export class CloudSession {
   async connect(): Promise<Haarness> {
     this.runtime ??= this.credentials()
       .then((ticket) => {
+        const { fetch: fetcher0, timeoutMs } = this.cloud.runtimeOptions();
         const initial = validateGateway(ticket.gatewayUrl);
         const fetcher: typeof fetch = async (input, init) => {
           const original = new URL(
@@ -130,7 +140,7 @@ export class CloudSession {
             const current = await this.credentials();
             const headers = new Headers(init?.headers);
             headers.set("Authorization", `Bearer ${current.ticket}`);
-            const response = await fetch(
+            const response = await fetcher0(
               validateGateway(current.gatewayUrl) + suffix,
               { ...init, headers },
             );
@@ -159,6 +169,7 @@ export class CloudSession {
         return new Haarness({
           baseUrl: initial,
           fetch: fetcher,
+          timeoutMs,
           resolveAuth: async () => ({
             type: "bearer",
             token: (await this.credentials()).ticket,
