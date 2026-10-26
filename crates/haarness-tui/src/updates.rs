@@ -19,6 +19,16 @@ fn current() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// The release channel this build follows: preview for a prerelease
+/// (`0.2.0-preview.1`), stable otherwise.
+pub fn channel() -> &'static str {
+    if current().contains('-') {
+        "preview"
+    } else {
+        "stable"
+    }
+}
+
 /// Whether this copy checks at all.
 pub fn enabled() -> bool {
     if std::env::var("HAARNESS_NO_UPDATE_CHECK")
@@ -100,42 +110,25 @@ pub async fn check() -> Option<String> {
     newer(&latest, current()).then_some(latest)
 }
 
-/// The newest CLI release with a file for this computer: from stable, and
-/// for a prerelease build from preview too.
+/// The newest CLI release with a file for this computer, from the channel
+/// `haarness --update` installs from: stable, or preview for a prerelease
+/// build, so the line never offers what the command would not install.
 async fn latest_release() -> Option<String> {
     let base = release_url()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .ok()?;
-    let channels: &[&str] = if current().contains('-') {
-        &["preview", "stable"]
-    } else {
-        &["stable"]
-    };
-    let mut best: Option<String> = None;
-    for channel in channels {
-        let Ok(response) = client
-            .get(format!("{base}/api/v1/releases/{channel}/cli"))
-            .header("accept", "application/json")
-            .send()
-            .await
-        else {
-            continue;
-        };
-        if !response.status().is_success() {
-            continue;
-        }
-        let Ok(body) = response.json::<serde_json::Value>().await else {
-            continue;
-        };
-        if let Some(version) = release_for_this_computer(&body)
-            && best.as_deref().is_none_or(|known| newer(&version, known))
-        {
-            best = Some(version);
-        }
+    let response = client
+        .get(format!("{base}/api/v1/releases/{}/cli", channel()))
+        .header("accept", "application/json")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
     }
-    best
+    release_for_this_computer(&response.json::<serde_json::Value>().await.ok()?)
 }
 
 /// The CLI version of a release manifest, when it has a binary for this

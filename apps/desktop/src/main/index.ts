@@ -6,7 +6,7 @@ import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
 import { exportLogs, logLevel } from "./logs";
 import { createUpdater, type Updater } from "./updater";
-import { detectInstall, freeSpace, launchInstall, macTeam, openInstaller, stageAppImage, stageMacApp } from "./update-install";
+import { detectInstall, freeSpace, launchInstall, macTeam, openInstaller, removeLeftovers, stageAppImage, stageMacApp } from "./update-install";
 import type { UpdateState } from "../updates";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
 import { createSideChatStorage } from "./side-chat-storage";
@@ -252,6 +252,9 @@ let pendingLink: string | undefined =
 /** Desktop updates (see updater.ts); undefined until the app is ready. */
 let updater: Updater | undefined;
 const updatesOff: UpdateState = { method: "off", status: "idle", checking: false };
+/** Settles once the updater exists, so a window's first look at updates is
+ * what they are rather than "off" for a moment. */
+let updaterMade: Promise<unknown> = Promise.resolve();
 const send = (win: BrowserWindow, event: DesktopEvent) => {
   if (!win.isDestroyed()) win.webContents.send("haarness:event", event);
 };
@@ -748,7 +751,10 @@ function installHandlers() {
       id: "local:" + workspace,
       workspace,
     })),
-    update: updater?.state() ?? updatesOff,
+    // Made by then in practice; a slow signature read never holds the window up.
+    update: await Promise.race([updaterMade, new Promise((resolve) => setTimeout(resolve, 1500))]).then(
+      () => updater?.state() ?? updatesOff,
+    ),
   }));
   handle("chatHomeRunning", async () =>
     daemonRunning(await chatHomePath(), { home: homedir() }),
@@ -2205,6 +2211,8 @@ async function startUpdates() {
   const os = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
   // The new app must come from the team that signed this one.
   const team = install.method === "restart" && install.kind === "zip" ? await macTeam(install.target) : undefined;
+  // What an install stopped halfway left beside the app.
+  if (install.method === "restart" && install.kind !== "exe") void removeLeftovers(install.target);
   updater = createUpdater({
     version: app.getVersion(),
     os,
@@ -2232,16 +2240,41 @@ async function startUpdates() {
         relaunch,
         result,
         env: process.env,
+        argv: process.argv,
         // An end-to-end test notes the reopening instead of starting its stand-in app.
         reopen: test && process.env.HAARNESS_UPDATE_REOPEN_LOG ? ["/usr/bin/touch", process.env.HAARNESS_UPDATE_REOPEN_LOG] : undefined,
       });
     },
     openInstaller: (file) => openInstaller(file, app.getPath("downloads"), (path) => shell.openPath(path)),
     move: () => app.moveToApplicationsFolder(),
-    quit: () => app.quit(),
+    quit: () => void quitToInstall(),
     freeSpace,
   });
-  await updater.start();
+}
+/**
+ * Restart to update: each window closes first, so one with unsaved file
+ * edits asks about them while nothing else has shut down yet; keeping them
+ * calls the restart off and leaves every window and connection as it was.
+ */
+async function quitToInstall() {
+  for (const win of [...windows]) {
+    if (win.isDestroyed()) continue;
+    const closed = await new Promise<boolean>((resolve) => {
+      win.once("closed", () => resolve(true));
+      // A window that neither closes nor asks in time is taken to have stayed.
+      setTimeout(() => resolve(win.isDestroyed()), 30_000).unref();
+      // Runs after the handler that asks, which allows the unload or not.
+      win.webContents.once("will-prevent-unload", (event) => {
+        if (!event.defaultPrevented) setImmediate(() => resolve(win.isDestroyed()));
+      });
+      win.close();
+    });
+    if (!closed) {
+      updater?.quitCancelled();
+      return;
+    }
+  }
+  app.quit();
 }
 if (!process.env.HAARNESS_DESKTOP_TEST && !app.requestSingleInstanceLock())
   app.quit();
@@ -2278,6 +2311,8 @@ else {
       }
       await load();
       if (quitting) return;
+      // Made before the first window asks for it; checking starts later.
+      updaterMade = startUpdates().catch((error) => console.warn("Haarness update: could not start: " + String(error)));
       installHandlers();
       startBillingWatch(state => broadcast({ kind: "menu", data: { action: "account-billing", state } }));
       menu();
@@ -2286,8 +2321,10 @@ else {
       createWindow();
       void refreshProjects().catch(() => {});
       setupChromeOnLaunch();
-      void startUpdates().catch((error) => console.warn("Haarness update: could not start: " + String(error)));
+      void updaterMade.then(() => updater?.start());
       if (app.isPackaged) app.setAsDefaultProtocolClient("haarness");
+      // A plain quit during a logout or shutdown installs nothing.
+      powerMonitor.on("shutdown", () => updater?.systemShutdown());
       powerMonitor.on("resume", () => {
         broadcast({ kind: "connection", data: "resume" });
         wakeFromSleep();

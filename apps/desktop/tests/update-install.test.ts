@@ -4,7 +4,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HELPER, detectInstall, openInstaller, stageMacApp } from "../src/main/update-install";
+import { HELPER, detectInstall, openInstaller, removeLeftovers, stageMacApp } from "../src/main/update-install";
 
 const temporary = () => mkdtemp(join(tmpdir(), "haarness-update-install-"));
 /** A process id that has already exited. */
@@ -178,9 +178,29 @@ test("a macOS update is unpacked and checked before anything uses it", { skip: p
     stageMacApp({ file: zip(await app("9.9.6"), "adhoc.zip"), version: "9.9.6", folder, team: "J63GND4Q8A" }),
     (error: { code?: string }) => error.code === "signature",
   );
+  // A running app whose own signature cannot be read accepts nothing.
+  await assert.rejects(
+    stageMacApp({ file: zip(await app("9.9.5"), "unreadable.zip"), version: "9.9.5", folder, team: null }),
+    (error: { code?: string }) => error.code === "signature",
+  );
   // Not an archive at all.
   const junk = join(root, "junk.zip");
   await writeFile(junk, "not a zip");
   await assert.rejects(stageMacApp({ file: junk, version: "9.9.9", folder }), (error: { code?: string }) => error.code === "write");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("what a stopped install left beside the app goes once it is old; a running install's is kept", async () => {
+  const root = await temporary();
+  const target = join(root, "Haarness.app");
+  await mkdir(target);
+  for (const name of [".Haarness.app.previous.123", ".Haarness.app.incoming.456", ".Haarness.app.previous.789", ".Other.app.previous.1", "Haarness.app.previous.2"])
+    await mkdir(join(root, name));
+  const old = Date.now() - 11 * 60_000;
+  const { utimes } = await import("node:fs/promises");
+  for (const name of [".Haarness.app.previous.123", ".Haarness.app.incoming.456", ".Other.app.previous.1", "Haarness.app.previous.2"])
+    await utimes(join(root, name), old / 1000, old / 1000);
+  await removeLeftovers(target);
+  assert.deepEqual((await readdir(root)).sort(), [".Haarness.app.previous.789", ".Other.app.previous.1", "Haarness.app", "Haarness.app.previous.2"]);
   await rm(root, { recursive: true, force: true });
 });

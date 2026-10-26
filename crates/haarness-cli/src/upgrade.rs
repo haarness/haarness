@@ -17,11 +17,16 @@ pub struct UpgradeArgs {
     release_url: String,
 }
 impl UpgradeArgs {
-    /// The newest stable release, from `HAARNESS_RELEASE_URL` or haarness.ai:
-    /// what `haarness --update` installs.
+    /// The newest release of this build's channel (preview for a prerelease
+    /// build, stable otherwise), from `HAARNESS_RELEASE_URL` or haarness.ai:
+    /// what `haarness --update` installs, and what the TUI's home screen offers.
     pub fn latest() -> Self {
         Self {
-            channel: "stable".into(),
+            channel: if env!("CARGO_PKG_VERSION").contains('-') {
+                "preview".into()
+            } else {
+                "stable".into()
+            },
             version: "latest".into(),
             release_url: std::env::var("HAARNESS_RELEASE_URL")
                 .ok()

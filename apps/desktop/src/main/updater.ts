@@ -1,7 +1,7 @@
 import { createHash, type Hash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import {
   channelsFor,
   compareVersions,
@@ -147,6 +147,18 @@ async function hashFile(file: string, hash: Hash) {
   for await (const chunk of createReadStream(file)) hash.update(chunk as Buffer);
 }
 
+/** Writes `value` as JSON so a read never finds it half written. */
+async function writeJson(file: string, value: unknown) {
+  await writeFile(file + ".tmp", JSON.stringify(value));
+  await rename(file + ".tmp", file);
+}
+/** Why a download stopped without failing: a newer release, a withdrawn
+ * one, the automatic download turned off. It is not reported. */
+class Stopped extends Error {}
+
+/** The wait before trying again after `count` failures in a row. */
+const retryAfter = (count: number) => RETRY_AFTER_MS[count - 1] ?? CHECK_EVERY_MS;
+
 /**
  * Desktop's updater: checks the release service on a schedule, downloads the
  * newer version in the background (resuming an interrupted download, from the
@@ -167,10 +179,15 @@ export function createUpdater(options: UpdaterOptions) {
   let found: Found | undefined;
   let staged: Staged | undefined;
   let checking: Promise<void> | undefined;
-  let downloading: { version: string; promise: Promise<void> } | undefined;
+  let downloading: { version: string; promise: Promise<void>; stop: AbortController; asked: boolean } | undefined;
   let timer: Timer | undefined;
-  let failures = 0;
+  let checkFailures = 0;
+  let downloadFailures = 0;
+  /** A file that was damaged or not signed as it must be: not fetched
+   * again by itself until the release changes it, only when asked. */
+  let refused: { version: string; sha256: string } | undefined;
   let relaunch = false;
+  let shuttingDown = false;
   let exited = false;
   let disposed = false;
 
@@ -182,6 +199,11 @@ export function createUpdater(options: UpdaterOptions) {
   };
   const kind = install.method === "off" ? undefined : install.kind;
   const restartable = install.method === "restart";
+  /** Quitting to install: nothing changes what the window shows until it
+   * is gone, or the quit is called off. */
+  const installing = () => state.status === "installing";
+  const isRefused = (target: Found) =>
+    refused?.version === target.release.version && refused.sha256 === target.artifact.sha256;
 
   function schedule(ms: number) {
     if (disposed || install.method === "off") return;
@@ -192,27 +214,25 @@ export function createUpdater(options: UpdaterOptions) {
     }, ms);
     (timer as { unref?: () => void }).unref?.();
   }
-  function failed(error: unknown, step: string) {
-    const reason = updateError(error);
-    options.log(`Haarness update: ${step} failed (${reason.code}): ${reason.detail ?? ""}`);
-    failures++;
-    schedule(RETRY_AFTER_MS[Math.min(failures, RETRY_AFTER_MS.length) - 1] ?? CHECK_EVERY_MS);
-    return reason;
-  }
 
-  async function forget(version?: string) {
-    if (!staged || (version && staged.version !== version)) return;
+  async function forget() {
+    if (!staged) return;
     const old = staged;
     staged = undefined;
     await rm(ready, { force: true }).catch(() => {});
     await removeStaged(old.path);
   }
-  /** Only what this updater made goes: inside its folder, or the hidden
-   * AppImage it staged beside the one it replaces. */
+  /** Whether `path` is something this updater made: inside its folder, or
+   * the hidden AppImage it staged beside the one it replaces. */
+  function ours(path: string) {
+    const inside = relative(options.dir, resolve(path));
+    return (
+      (!!inside && !inside.startsWith("..") && !isAbsolute(inside)) ||
+      /^\.[^/\\]+\.haarness-update$/.test(basename(path))
+    );
+  }
   async function removeStaged(path: string) {
-    const inside = path.startsWith(options.dir + "/") || path.startsWith(options.dir + "\\");
-    const beside = /[/\\]\.[^/\\]+\.haarness-update$/.test(path);
-    if (inside || beside) await rm(path, { recursive: true, force: true }).catch(() => {});
+    if (ours(path)) await rm(path, { recursive: true, force: true }).catch(() => {});
   }
 
   /** What an earlier run left: a finished or failed install, a staged
@@ -220,13 +240,13 @@ export function createUpdater(options: UpdaterOptions) {
   async function init() {
     await mkdir(options.dir, { recursive: true });
     const outcome = await readJson(result);
+    await rm(result, { force: true }).catch(() => {});
     if (outcome) {
-      await rm(result, { force: true }).catch(() => {});
       const version = String(outcome.version ?? "");
       if (outcome.ok === true) options.log(`Haarness update: installed ${version}`);
       else if (validVersion(version) && compareVersions(version, options.version) > 0) {
         options.log(`Haarness update: installing ${version} failed: ${String(outcome.reason ?? "")}`);
-        set({ error: { code: "install", detail: String(outcome.reason ?? "") } });
+        state = { ...state, error: { code: "install", detail: String(outcome.reason ?? "") } };
       }
     }
     const saved = await readJson(ready);
@@ -234,6 +254,7 @@ export function createUpdater(options: UpdaterOptions) {
       saved &&
       validVersion(saved.version) &&
       typeof saved.path === "string" &&
+      ours(saved.path) &&
       compareVersions(saved.version, options.version) > 0 &&
       restartable &&
       (await exists(saved.path))
@@ -243,7 +264,7 @@ export function createUpdater(options: UpdaterOptions) {
         path: saved.path,
         ...(typeof saved.notesUrl === "string" ? { notesUrl: saved.notesUrl } : {}),
       };
-      set({ status: "ready", version: staged.version, notesUrl: staged.notesUrl });
+      state = { ...state, status: "ready", version: staged.version, ...(staged.notesUrl ? { notesUrl: staged.notesUrl } : {}) };
     } else if (saved) {
       await rm(ready, { force: true }).catch(() => {});
       if (typeof saved.path === "string") await removeStaged(saved.path);
@@ -272,7 +293,7 @@ export function createUpdater(options: UpdaterOptions) {
       }
       if (!release || !kind) continue;
       const artifact = pickArtifact(release, { os: options.os, arch: options.arch, kind });
-      if (!artifact || !allowed(artifact.url, releaseUrl) && !allowed(service(artifact), releaseUrl)) continue;
+      if (!artifact || (!allowed(artifact.url, releaseUrl) && !allowed(service(artifact), releaseUrl))) continue;
       if (!best || compareVersions(release.version, best.release.version) > 0) best = { release, artifact };
     }
     return best;
@@ -288,22 +309,30 @@ export function createUpdater(options: UpdaterOptions) {
       set({ checking: true });
       try {
         const next = await latest();
-        failures = 0;
+        checkFailures = 0;
         found = next && compareVersions(next.release.version, options.version) > 0 ? next : undefined;
-        // A staged version the service no longer offers was withdrawn.
-        if (staged && next && compareVersions(next.release.version, staged.version) < 0) {
-          options.log(`Haarness update: ${staged.version} was withdrawn; ${next.release.version} is current`);
+        // A staged version the service no longer offers (it offers an older
+        // one, or none for this computer) was withdrawn.
+        if (staged && (!next || compareVersions(next.release.version, staged.version) < 0)) {
+          options.log(`Haarness update: ${staged.version} was withdrawn; ${next?.release.version ?? "nothing"} is offered`);
           await forget();
         }
+        // So is one still downloading that the service no longer names.
+        if (downloading && downloading.version !== found?.release.version)
+          downloading.stop.abort(new Stopped(`${downloading.version} is no longer offered`));
+        // New bytes, or another version, may be tried again by themselves.
+        if (refused && !(found && isRefused(found))) refused = undefined;
         const clear = state.error?.code === "install" ? {} : { error: undefined };
-        if (!found) {
+        if (installing()) {
+          // Quitting to install what is staged: nothing else to say.
+        } else if (!found) {
           if (!staged)
             set({ status: "idle", version: undefined, percent: undefined, notesUrl: undefined, asked: undefined, ...clear });
           else set(clear);
         } else if (staged && staged.version === found.release.version) {
           set({ status: "ready", version: staged.version, notesUrl: staged.notesUrl, ...clear });
         } else if (downloading?.version === found.release.version) {
-          set(clear);
+          // Downloading it already; a refusal or failure keeps its reason.
         } else if (!staged) {
           set({
             status: "available",
@@ -311,16 +340,20 @@ export function createUpdater(options: UpdaterOptions) {
             notesUrl: found.release.notesUrl,
             percent: undefined,
             asked: undefined,
-            ...clear,
+            ...(isRefused(found) ? {} : clear),
           });
         } else set(clear);
         set({ checking: false, checkedAt: now() });
         schedule(CHECK_EVERY_MS);
         // Newer than anything here: fetch it now, while the person works.
-        if (found && restartable && options.automatic() && staged?.version !== found.release.version)
+        if (found && restartable && options.automatic() && staged?.version !== found.release.version && !installing())
           void download(false);
       } catch (error) {
-        set({ checking: false, error: failed(error, "checking") });
+        checkFailures++;
+        const reason = updateError(error);
+        options.log(`Haarness update: checking failed (${reason.code}): ${reason.detail ?? ""}`);
+        schedule(retryAfter(checkFailures));
+        set({ checking: false, ...(state.error?.code === "install" ? {} : { error: reason }) });
       } finally {
         checking = undefined;
       }
@@ -329,8 +362,13 @@ export function createUpdater(options: UpdaterOptions) {
   }
 
   /** Downloads `artifact` into `folder`, resuming a partial file; returns the
-   * verified file. */
-  async function fetchVerified(artifact: ReleaseArtifact, folder: string, progress: (fraction: number) => void) {
+   * verified file. `stop` ends it at once, with no further tries. */
+  async function fetchVerified(
+    artifact: ReleaseArtifact,
+    folder: string,
+    progress: (fraction: number) => void,
+    stop: AbortSignal,
+  ) {
     const file = join(folder, artifact.file);
     const part = file + ".part";
     const meta = part + ".json";
@@ -345,12 +383,14 @@ export function createUpdater(options: UpdaterOptions) {
     let last: unknown = new UpdateError("service", "The release names no address Haarness may download from.");
     for (const source of sources) {
       for (let attempt = 1; attempt <= TRIES; attempt++) {
+        if (stop.aborted) throw stop.reason;
         try {
-          await fetchInto(source, part, meta, artifact, progress);
+          await fetchInto(source, part, meta, artifact, progress, stop);
           await rename(part, file);
           await rm(meta, { force: true });
           return file;
         } catch (error) {
+          if (stop.aborted) throw stop.reason;
           last = error;
           const reason = updateError(error);
           options.log(`Haarness update: download from ${new URL(source).host} failed (${reason.code}): ${reason.detail ?? ""}`);
@@ -374,6 +414,7 @@ export function createUpdater(options: UpdaterOptions) {
     meta: string,
     artifact: ReleaseArtifact,
     progress: (fraction: number) => void,
+    stop: AbortSignal,
   ) {
     let have = await stat(part).then(
       (info) => info.size,
@@ -389,6 +430,8 @@ export function createUpdater(options: UpdaterOptions) {
       have = 0;
     }
     const stall = new AbortController();
+    const stopped = () => stall.abort(stop.reason);
+    stop.addEventListener("abort", stopped, { once: true });
     let idle: Timer | undefined;
     const watch = () => {
       if (idle) cancel(idle);
@@ -421,10 +464,19 @@ export function createUpdater(options: UpdaterOptions) {
       let received = have;
       try {
         const reader = response.body.getReader();
-        // A stalled body ends here even when the fetch does not end it itself.
+        // A stalled or stopped body ends here even when the fetch does not end it itself.
         stall.signal.addEventListener("abort", () => void reader.cancel(stall.signal.reason).catch(() => {}), { once: true });
+        if (stall.signal.aborted) throw stall.signal.reason;
         for (;;) {
-          const { done, value } = await reader.read();
+          let chunk: ReadableStreamReadResult<Uint8Array>;
+          try {
+            chunk = await reader.read();
+          } catch (error) {
+            // The connection broke mid-download: a network failure, resumed next try.
+            if (stall.signal.aborted) throw stall.signal.reason;
+            throw new UpdateError("offline", error instanceof Error ? error.message : String(error));
+          }
+          const { done, value } = chunk;
           if (done) break;
           watch();
           received += value.byteLength;
@@ -436,37 +488,59 @@ export function createUpdater(options: UpdaterOptions) {
       } finally {
         await handle.close();
       }
+      if (stall.signal.aborted) throw stall.signal.reason;
       if (received !== artifact.size) throw new UpdateError("offline", "The download ended early.");
       if (hash.digest("hex") !== artifact.sha256) throw new UpdateError("damaged", "The download's SHA-256 does not match the release.");
     } catch (error) {
       // An abort carries the reason it was given.
-      if (stall.signal.aborted && stall.signal.reason instanceof UpdateError) throw stall.signal.reason;
+      if (stall.signal.aborted && (stall.signal.reason instanceof UpdateError || stall.signal.reason instanceof Stopped))
+        throw stall.signal.reason;
       throw error;
     } finally {
       if (idle) cancel(idle);
+      stop.removeEventListener("abort", stopped);
     }
   }
 
   /**
    * Downloads, verifies and stages the newer version. `asked`: the person
-   * asked (Download, Update to …), so the sidebar shows the progress.
+   * asked (Download, Update to …), so the sidebar shows the progress, and a
+   * file refused before is tried again.
    */
   function download(asked: boolean): Promise<void> {
-    if (!found || install.method === "off" || install.method === "move") return Promise.resolve();
+    if (!found || install.method === "off" || install.method === "move" || disposed) return Promise.resolve();
     const target = found;
     const version = target.release.version;
     if (staged?.version === version) return Promise.resolve();
+    if (asked) refused = undefined;
+    else if (isRefused(target)) return Promise.resolve();
     if (downloading?.version === version) {
+      if (asked) downloading.asked = true;
       if (asked && !state.asked && state.version === version) set({ asked: true });
       return downloading.promise;
     }
+    // One download at a time: one for another version stops first.
+    const previous = downloading;
+    previous?.stop.abort(new Stopped(`${version} supersedes ${previous.version}`));
+    const stop = new AbortController();
     // With an older version staged, the newer one downloads behind it: the
     // window keeps offering the restart it has until this one is ready.
     const quiet = !!staged;
-    const promise = (async () => {
-      const folder = join(options.dir, version);
-      if (!quiet)
+    // Assigned apart from its declaration: its own `finally` reads it.
+    let promise!: Promise<void>;
+    const announce = () => {
+      if (!quiet && !installing())
         set({ status: "downloading", version, percent: 0, notesUrl: target.release.notesUrl, asked: asked || undefined, error: undefined });
+    };
+    // Said at once, so a click shows its download straight away.
+    if (!previous) announce();
+    promise = (async () => {
+      if (previous) {
+        await previous.promise.catch(() => {});
+        if (stop.signal.aborted) return;
+        announce();
+      }
+      const folder = join(options.dir, version);
       try {
         await mkdir(folder, { recursive: true });
         // The download, and on macOS the app it unpacks to, with room to spare.
@@ -475,40 +549,65 @@ export function createUpdater(options: UpdaterOptions) {
         if (free !== undefined && free < needed)
           throw new UpdateError("space", `The update needs ${Math.ceil(needed / 1e6)} MB free; ${Math.floor(free / 1e6)} MB are.`);
         let shown = -1;
-        const file = await fetchVerified(target.artifact, folder, (fraction) => {
-          const percent = Math.min(100, Math.floor(fraction * 100));
-          if (percent !== shown && state.version === version && state.status === "downloading") {
-            shown = percent;
-            set({ percent });
-          }
-        });
-        if (disposed) return;
+        const file = await fetchVerified(
+          target.artifact,
+          folder,
+          (fraction) => {
+            const percent = Math.min(100, Math.floor(fraction * 100));
+            if (percent !== shown && state.version === version && state.status === "downloading") {
+              shown = percent;
+              set({ percent });
+            }
+          },
+          stop.signal,
+        );
+        // Withdrawn, or passed by a newer one, while it downloaded.
+        const offered = () => !stop.signal.aborted && !disposed && found?.release.version === version;
+        if (!offered()) throw stop.signal.reason ?? new Stopped(`${version} is no longer offered`);
         if (install.method === "installer") {
           staged = { version, path: file, notesUrl: target.release.notesUrl };
+          downloadFailures = 0;
           set({ status: "ready", percent: undefined });
           return;
         }
-        if (!quiet) set({ status: "verifying", percent: undefined });
+        if (!quiet && !installing()) set({ status: "verifying", percent: undefined });
         const path = await options.stage({ file, version, folder, artifact: target.artifact });
+        if (!offered()) {
+          await removeStaged(path);
+          throw stop.signal.reason ?? new Stopped(`${version} is no longer offered`);
+        }
         const older = staged;
         staged = { version, path, notesUrl: target.release.notesUrl };
-        await writeFile(ready, JSON.stringify(staged));
+        await writeJson(ready, staged);
         if (older && older.path !== path) await removeStaged(older.path);
-        failures = 0;
+        downloadFailures = 0;
         options.log(`Haarness update: ${version} is ready`);
-        if (state.status !== "installing")
+        if (!installing())
           set({ status: "ready", version, notesUrl: target.release.notesUrl, percent: undefined, error: undefined });
       } catch (error) {
-        const reason = failed(error, "downloading");
-        // The newer version is still there to try again; a staged older one stays ready.
-        if (staged && staged.version !== version)
-          set({ status: "ready", version: staged.version, notesUrl: staged.notesUrl, percent: undefined, error: reason });
-        else set({ status: "available", version, percent: undefined, error: reason });
+        if (error instanceof Stopped || stop.signal.aborted) {
+          options.log(`Haarness update: stopped downloading ${version}: ${error instanceof Error ? error.message : String(error)}`);
+          // A version no longer offered leaves nothing behind.
+          if (found?.release.version !== version) await rm(folder, { recursive: true, force: true }).catch(() => {});
+          return;
+        }
+        const reason = updateError(error);
+        options.log(`Haarness update: downloading ${version} failed (${reason.code}): ${reason.detail ?? ""}`);
+        if (reason.code === "damaged" || reason.code === "signature")
+          refused = { version, sha256: target.artifact.sha256 };
+        else {
+          // Tried again sooner, then every half hour: never in a tight loop.
+          downloadFailures++;
+          schedule(retryAfter(downloadFailures));
+        }
+        // Behind a staged version, a failure stays in the log: the restart
+        // the window offers still works.
+        if (!quiet && !installing()) set({ status: "available", version, percent: undefined, error: reason });
       } finally {
-        downloading = undefined;
+        if (downloading?.promise === promise) downloading = undefined;
       }
     })();
-    downloading = { version, promise };
+    downloading = { version, promise, stop, asked };
     return promise;
   }
 
@@ -520,6 +619,8 @@ export function createUpdater(options: UpdaterOptions) {
       } catch (error) {
         options.log(`Haarness update: could not read earlier updates: ${String(error)}`);
       }
+      // The window shows what an earlier run left at once, not at the first check.
+      options.emit({ ...state });
       schedule(FIRST_CHECK_MS);
     },
     check,
@@ -533,9 +634,13 @@ export function createUpdater(options: UpdaterOptions) {
     },
     /** A window kept its unsaved edits, so Haarness did not quit after all. */
     quitCancelled() {
-      if (state.status !== "installing") return;
       relaunch = false;
-      set({ status: "ready" });
+      if (installing()) set(staged ? { status: "ready", version: staged.version } : { status: "idle" });
+    },
+    /** The system is shutting down or logging out: a plain quit then installs
+     * nothing, as being stopped halfway could leave no app at all. */
+    systemShutdown() {
+      shuttingDown = true;
     },
     /** Moves the app to Applications (it relaunches from there). */
     move() {
@@ -565,8 +670,9 @@ export function createUpdater(options: UpdaterOptions) {
       exited = true;
       disposed = true;
       if (timer) cancel(timer);
+      downloading?.stop.abort(new Stopped("Haarness is quitting"));
       if (!restartable || !staged) return;
-      if (!relaunch && install.kind === "exe") return;
+      if (!relaunch && (install.kind === "exe" || shuttingDown)) return;
       try {
         options.launch({ staged: staged.path, version: staged.version, relaunch, result });
         options.log(`Haarness update: installing ${staged.version}${relaunch ? " and reopening" : ""}`);
@@ -578,11 +684,20 @@ export function createUpdater(options: UpdaterOptions) {
      * failed, happens soon instead of on its timer. */
     wake() {
       const last = state.checkedAt ?? 0;
-      if (failures || now() - last >= CHECK_EVERY_MS) schedule(5_000);
+      if (checkFailures || downloadFailures || now() - last >= CHECK_EVERY_MS) schedule(5_000);
     },
-    /** The automatic download setting changed. */
+    /** The automatic download setting changed: on, a waiting version
+     * downloads; off, one downloading by itself stops. */
     automaticChanged() {
-      if (options.automatic() && found && restartable && state.status === "available") void download(false);
+      if (options.automatic()) {
+        if (found && restartable && state.status === "available") void download(false);
+        return;
+      }
+      if (downloading && !downloading.asked) {
+        const version = downloading.version;
+        downloading.stop.abort(new Stopped("automatic downloads were turned off"));
+        if (!staged && !installing()) set({ status: "available", version, percent: undefined });
+      }
     },
   };
 }

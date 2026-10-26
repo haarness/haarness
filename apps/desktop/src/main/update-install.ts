@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, chmod, copyFile, mkdir, readdir, rename, rm, statfs } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdir, readdir, rename, rm, statfs } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve, win32 } from "node:path";
 import { UpdateError, type Install } from "./updater";
 
@@ -59,24 +59,30 @@ export async function detectInstall(input: {
   return { method: "off" };
 }
 
-/** The Apple team that signed an app, or undefined for an ad hoc or unsigned one. */
-export async function macTeam(bundle: string): Promise<string | undefined> {
+/** The Apple team that signed an app: undefined for an ad hoc signature
+ * (a local build), null when its signature cannot be read at all. */
+export async function macTeam(bundle: string): Promise<string | undefined | null> {
   try {
     const { stderr } = await run("/usr/bin/codesign", ["-dv", "--verbose=2", bundle]);
     const team = /^TeamIdentifier=(.+)$/m.exec(stderr)?.[1]?.trim();
-    return team && team !== "not set" ? team : undefined;
+    if (!team || team === "not set") return undefined;
+    return /^[A-Z0-9]{10}$/.test(team) ? team : null;
   } catch {
-    return undefined;
+    return null;
   }
 }
 
 /**
  * Unpacks a verified macOS ZIP and checks the app in it before anything uses
  * it: it is the version the release names, its signature verifies, and when
- * the running app is a team's, it is that same team's. Returns the staged
- * app; the ZIP goes once unpacked.
+ * the running app is a team's, it is signed through Apple's certificate chain
+ * by that same team (the one check that does not rest on the release
+ * service). A running app whose signature cannot be read accepts nothing.
+ * Returns the staged app; the ZIP goes once unpacked.
  */
-export async function stageMacApp(input: { file: string; version: string; folder: string; team?: string }) {
+export async function stageMacApp(input: { file: string; version: string; folder: string; team?: string | null }) {
+  if (input.team === null)
+    throw new UpdateError("signature", "This app's own signature could not be read, so no update can be checked against it.");
   const unpacked = join(input.folder, "unpacked");
   await rm(unpacked, { recursive: true, force: true });
   await mkdir(unpacked, { recursive: true });
@@ -98,14 +104,17 @@ export async function stageMacApp(input: { file: string; version: string; folder
     throw new UpdateError("damaged", `The update's archive holds version ${version || "unknown"}, not ${input.version}.`);
   // Not downloaded by a browser, so not quarantined; a copy that is would ask on first launch.
   await run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", app]).catch(() => {});
+  const requirement = input.team
+    ? ["-R", `=anchor apple generic and certificate leaf[subject.OU] = "${input.team}"`]
+    : [];
   try {
-    await run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app]);
+    await run("/usr/bin/codesign", ["--verify", "--deep", "--strict", ...requirement, app]);
   } catch (error) {
-    throw new UpdateError("signature", `The new app's signature does not verify: ${(error as { stderr?: string }).stderr || String(error)}`);
-  }
-  if (input.team) {
-    const team = await macTeam(app);
-    if (team !== input.team) throw new UpdateError("signature", `The new app is signed by ${team ?? "no team"}, not ${input.team}.`);
+    const detail = (error as { stderr?: string }).stderr || String(error);
+    throw new UpdateError(
+      "signature",
+      input.team ? `The new app is not signed by Apple-certified team ${input.team}: ${detail}` : `The new app's signature does not verify: ${detail}`,
+    );
   }
   const staged = join(input.folder, "Haarness.app");
   await rm(staged, { recursive: true, force: true });
@@ -131,7 +140,8 @@ export async function stageAppImage(input: { file: string; target: string }) {
  * then opens it again when asked. Run detached as
  * `sh -c HELPER sh <pid> <target> <staged> <result> <version> <relaunch> <command…>`.
  * The running copy is moved aside, never deleted, until the new one is in
- * place: any failed step puts both back and opens the old one. It ignores
+ * place (an AppImage, a file, is replaced by one rename): any failed step
+ * puts both back and opens the old one. It ignores
  * the hangup and termination a logout sends, which could otherwise stop it
  * between its two renames. It writes what happened to <result> for the next
  * launch to read.
@@ -155,7 +165,18 @@ incoming="$parent/.$name.incoming.$$"
 backup="$parent/.$name.previous.$$"
 ok=false
 reason=''
-if ! mv "$staged" "$incoming" 2>/dev/null; then
+if [ ! -d "$target" ]; then
+  # A file (the AppImage): one rename replaces it, and the copy still running keeps its own.
+  if ! mv "$staged" "$incoming" 2>/dev/null; then
+    rm -f "$incoming"
+    reason='could not copy the new version beside the old one'
+  elif ! mv -f "$incoming" "$target" 2>/dev/null; then
+    mv "$incoming" "$staged" 2>/dev/null || rm -f "$incoming"
+    reason='could not put the new version in place'
+  else
+    ok=true
+  fi
+elif ! mv "$staged" "$incoming" 2>/dev/null; then
   rm -rf "$incoming"
   reason='could not copy the new version beside the old one'
 elif ! mv "$target" "$backup" 2>/dev/null; then
@@ -188,10 +209,14 @@ export function launchInstall(input: {
   env: NodeJS.ProcessEnv;
   /** What opens Haarness again; a test records it instead. */
   reopen?: string[];
+  /** The running app's own arguments; the reopened Linux app gets its flags (`--no-sandbox`). */
+  argv?: string[];
 }) {
   if (input.platform === "win32") {
-    // An update: the setup skips its folder page and keeps the installed one.
-    spawn(input.staged, ["--updated"], { detached: true, stdio: "ignore" }).unref();
+    // As electron-updater runs it: an update into the installed folder,
+    // without the wizard, opening Haarness when done. The setup waits for
+    // what is left of Haarness to exit.
+    spawn(input.staged, ["--updated", "/S", "--force-run"], { detached: true, stdio: "ignore" }).unref();
     return;
   }
   const env = { ...input.env };
@@ -206,7 +231,7 @@ export function launchInstall(input: {
   } else {
     // The old AppImage's runtime set these for itself; the new one sets its own.
     for (const key of ["APPDIR", "APPIMAGE", "ARGV0", "OWD"]) delete env[key];
-    command = [input.target];
+    command = [input.target, ...(input.argv ?? []).slice(1).filter((argument) => /^--[a-z]/.test(argument))];
   }
   spawn(
     "/bin/sh",
@@ -241,4 +266,22 @@ export async function openInstaller(file: string, downloads: string, openPath: (
 export async function freeSpace(path: string) {
   const info = await statfs(path);
   return Number(info.bavail) * Number(info.bsize);
+}
+
+/**
+ * What an install that was stopped halfway (a logout, a crash) left beside
+ * the app: the old copy moved aside, a new one not yet in place. Each is
+ * removed once it is ten minutes old, so an install still running is left
+ * alone.
+ */
+export async function removeLeftovers(target: string, now = Date.now()) {
+  const name = basename(target).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^\\.${name}\\.(previous|incoming)\\.\\d+$`);
+  const folder = dirname(target);
+  for (const entry of await readdir(folder).catch(() => [] as string[])) {
+    if (!pattern.test(entry)) continue;
+    const path = join(folder, entry);
+    const info = await lstat(path).catch(() => undefined);
+    if (info && now - info.mtimeMs > 10 * 60_000) await rm(path, { recursive: true, force: true }).catch(() => {});
+  }
 }
