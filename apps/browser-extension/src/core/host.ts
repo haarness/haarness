@@ -66,6 +66,13 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const REFUSAL_NOTE_MS = 120_000;
 /** How long a reload's hand-over stays valid for the instance that starts next. */
 const HANDOFF_MS = 60_000;
+/**
+ * How long a command that failed as Chrome closed a tab holds its answer.
+ * Quitting Chrome closes the tabs first: the command fails at once, and the
+ * native port closes a moment later. Held, the answer never leaves, and the
+ * bridge answers with the recovery advice that fits a quit.
+ */
+const TAB_LOST_HOLD_MS = 1_000;
 
 /** This browser session's state, kept in storage.local across the extension's own reload. */
 interface Handoff {
@@ -109,6 +116,8 @@ export function createHost(options: HostOptions) {
   const publishing = new Set<string>();
 
   const control = { paused: false, stopped: false, focusedAt: 0 };
+  /** When Chrome or the user last closed a tab (not Haarness): see TAB_LOST_HOLD_MS. */
+  let tabLostAt = -Infinity;
   /**
    * In the window the user is using, the agent may bring its tab forward only
    * over a tab it opened itself and brought forward itself, in a window the
@@ -379,7 +388,9 @@ export function createHost(options: HostOptions) {
     const key = threadKey(workspace, message.thread);
     clearTimeout(idle.get(key));
     idle.delete(key);
+    const started = platform.now();
     const outcome = await queues.run(key, message.id, (signal) => run(serverId, entry, message, signal));
+    if (outcome.type === "failure" && tabLostAt >= started) await new Promise((resolve) => setTimeout(resolve, TAB_LOST_HOLD_MS));
     if (message.command.inspect !== true) sendState(serverId, entry);
     bridge.send({ type: "to-server", server: serverId, message: { type: "result", id: message.id, outcome: encode(message.command, outcome) } });
     // One idle timer per chat, armed by the last of its commands to finish.
@@ -699,6 +710,7 @@ export function createHost(options: HostOptions) {
     },
     tabRemoved(tabId) {
       agentOpened.delete(tabId);
+      if (!closing.has(tabId)) tabLostAt = platform.now();
       void after(() => {
         if (closing.delete(tabId)) return;
         const owner = registry.owner(tabId);

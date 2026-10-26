@@ -4,6 +4,9 @@
  * the newest connection is the live one, as with a real bridge restart.
  */
 import { createServer, type Server, type Socket } from "node:net";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { workspaceVersion } from "../../manifest.config";
 
 export interface Received {
   connection: number;
@@ -15,6 +18,8 @@ export const WORKSPACE = "/work/acme";
 export const THREAD = "0192a5f0-7c1e-7d3a-9b1e-4f2a9c3d5e61";
 export const OTHER_THREAD = "0192a5f0-7c1e-7d3a-9b1e-4f2a9c3d5e62";
 export const UPLOADS = "/tmp/haarness-e2e-uploads";
+/** The release under test: the built extension reports it, and a bridge and servers of the same release say it. */
+export const VERSION = workspaceVersion(resolve(dirname(fileURLToPath(import.meta.url)), "../../../../Cargo.toml"));
 
 export class FakeBridge {
   readonly received: Received[] = [];
@@ -79,13 +84,13 @@ export class FakeBridge {
     this.send({
       type: "bridge",
       protocol: 1,
-      version: "0.1.1-preview.1",
+      version: VERSION,
       uploadsRoot: UPLOADS,
       extension: options.extension ?? null,
     });
     this.send({
       type: "servers",
-      servers: [{ id: SERVER, workspace: WORKSPACE, name: "acme", version: "0.1.1-preview.1", state: "connected" }],
+      servers: [{ id: SERVER, workspace: WORKSPACE, name: "acme", version: VERSION, state: "connected" }],
     });
   }
 
