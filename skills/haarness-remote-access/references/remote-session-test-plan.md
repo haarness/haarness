@@ -22,7 +22,7 @@ With an isolated workspace/data/config environment, run the selected CLI:
 # Inspect from another terminal with the same isolated configuration:
 "$haarness_bin" remote status
 "$haarness_bin" remote hosts
-"$haarness_bin" remote sessions
+"$haarness_bin" remote chats
 ```
 
 Use `remote enable --name NAME` instead of `run` for background lifecycle testing. Do not launch duplicate connectors for one identity. `status` proves local process liveness; Cloud `connected` proves its relay lease. Read a project and complete a turn to prove the runtime works.
@@ -37,7 +37,7 @@ In Chrome **Remote hosts**, verify live appearance/status, rename, hidden-folder
 | --- | --- | --- |
 | Native host project | `cloud.remote_host(host_id).workspace(project_id)` | `cloud.remoteHost(hostId).workspace(projectId)` |
 | Published native chat tree | `cloud.remote_session(publication_id)` | `cloud.remoteSession(publicationId)` |
-| Rented Cloud session | `cloud.session(cloud_session_id)` | `cloud.session(cloudSessionId)` |
+| Rented Cloud workspace | `cloud.workspace(workspace_id)` | `cloud.workspace(workspaceId)` |
 
 Keep host, project, publication and thread IDs distinct. Runtime chat methods still require native thread IDs; a publication's `threadId` identifies its root. Use the native connector for `/connect`; generated JSON HTTP methods do not implement its WebSocket protocol.
 
@@ -108,7 +108,7 @@ Run Cloud `cargo test -p cloud-api --test remote` with a real test database conf
 
 Close owned SDK streams/clients and PTYs, stop the fixture TUI/tmux session, unpublish test chats and revoke owned hosts. Exercise `remote disable HOST_ID`, then `remote forget HOST_ID` for a stopped identity; forget revokes before removing its local identity. A later explicit enable creates a fresh host ID. Verify old IDs remain inaccessible and original local files/history remain.
 
-Stop only the fixture daemon after connector/terminal cleanup. Keep its directory until owned processes stop and evidence is saved. Do not use rented-session worker cleanup, delete user projects, kill all Haarness processes or remove another host's registration. If a manual demo remains running at the user's request, report its URL, lifecycle and how to stop it, without secrets.
+Stop only the fixture daemon after connector/terminal cleanup. Keep its directory until owned processes stop and evidence is saved. Do not use rented-workspace worker cleanup, delete user projects, kill all Haarness processes or remove another host's registration. If a manual demo remains running at the user's request, report its URL, lifecycle and how to stop it, without secrets.
 
 Report source SHAs/binary, fixture/provider mode, executed checks and counts, Chrome/tmux observed effects, stress/recovery results, cleanup IDs/status and limitations. Automated echo, real-provider turns, browser picker, SDKs and production deployment are separate verdicts.
 

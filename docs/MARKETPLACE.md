@@ -37,8 +37,8 @@ haarness marketplace request '{"action":"installed"}' # the machine-readable for
 
 **Catalog.** Reads go to the Cloud API (`api/v1/marketplace/resources`, `…/collections`,
 `…/resources/{id}`, `…/versions`, `…/install-manifest`). Signed in, the request carries the account,
-so account-private resources are listed; signed out, only public ones. Inside a Cloud session the
-runtime reads its owning account's catalog through `HAARNESS_CLOUD_MARKETPLACE_URL` with the session's
+so account-private resources are listed; signed out, only public ones. Inside a Cloud workspace the
+runtime reads its owning account's catalog through `HAARNESS_CLOUD_MARKETPLACE_URL` with the workspace's
 token.
 
 **Install.** `crates/haarness-cli/src/marketplace.rs` fetches the install manifest, downloads the

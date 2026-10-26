@@ -1,14 +1,14 @@
 # Sign in to Haarness
 
-How the CLI, TUI and Desktop sign in to a Haarness account and use it: Cloud models and routers, billing, Cloud agents and sessions and the model tools that drive them, where account credentials live, and how development builds sign in to a local Cloud stack. For developers working on the account client and anyone scripting Cloud from the CLI.
+How the CLI, TUI and Desktop sign in to a Haarness account and use it: Cloud models and routers, billing, Cloud agents and workspaces and the model tools that drive them, where account credentials live, and how development builds sign in to a local Cloud stack. For developers working on the account client and anyone scripting Cloud from the CLI.
 
-> **User guides:** [Sign in and secure your account](https://haarness.ai/docs/cloud/sign-in), [Credits and plans](https://haarness.ai/docs/cloud/credits-and-plans), [Cloud sessions](https://haarness.ai/docs/cloud/workspaces), [Reuse a setup with Cloud agents](https://haarness.ai/docs/cloud/agents).
+> **User guides:** [Sign in and secure your account](https://haarness.ai/docs/cloud/sign-in), [Credits and plans](https://haarness.ai/docs/cloud/credits-and-plans), [Cloud workspaces](https://haarness.ai/docs/cloud/workspaces), [Reuse a setup with Cloud agents](https://haarness.ai/docs/cloud/agents).
 
 Run `haarness login`, finish sign-in in your browser, then choose a model under **Haarness Cloud**. For an SSH or headless terminal, use `haarness login --device` and approve the displayed code from another device; `--no-browser` prints the sign-in link instead of opening a browser, and `--json` prints the link and the result as JSON lines for a program driving the sign-in. `haarness cloud login` and `haarness auth login haarness` are aliases for the same account flow (`--method headless` on the latter means `--device`). In the TUI, `/connect haarness` (or **Haarness Cloud** in the first-run picker) runs the same sign-in without leaving the terminal and lands in the Cloud model picker; **Manage providers → Haarness Cloud → Sign out of Haarness** signs out again.
 
 `/billing` (alias `/credits`) in the TUI shows the plan and balances with the next step as a row to choose: **Add credits**, **Choose a plan** (or **Change plan**) and **Usage** open the matching Cloud page in your browser; `/billing open`, `/billing topup` and `/billing usage` open those pages directly. Purchased credits are only spent once overage is on; when they are waiting on it, `/billing` says so and offers **Turn on overage**, and a refused request explains the same instead of reporting a raw `402`. From a shell, `haarness account --billing` prints the selected account's plan, credit balances and billing links (`--json` for the structured summary).
 
-Desktop has **Sign in to Haarness** in its sidebar and **Use Haarness Cloud** in Connect provider. The account dialog shows available credits and Cloud sessions, with links to billing and usage. Existing provider keys and self-hosted router connections continue to work independently.
+Desktop has **Sign in to Haarness** in its sidebar and **Use Haarness Cloud** in Connect provider. The account dialog shows available credits and Cloud workspaces, with links to billing and usage. Existing provider keys and self-hosted router connections continue to work independently.
 
 Signing in to OpenAI with ChatGPT connects the **OpenAI** provider. Choosing
 **Haarness Cloud** uses the signed-in Haarness account and Cloud's upstream API
@@ -34,20 +34,20 @@ can still prevent a listed model from serving a request.
 
 Each sign-in is named after the app and the computer in Cloud's **Settings → Devices**: `Haarness CLI on Studio`, or `Haarness Desktop on Studio` when Desktop signs in (it runs `haarness login` with `HAARNESS_LOGIN_APP=desktop`). The computer name is the one Remote control shows: macOS's computer name, else the host name.
 
-`haarness account` shows the signed-in user and selected account (`--json` for the full status); `haarness account --select <account-id>` switches it. `haarness logout` removes local credentials and revokes the login. Sign-out does not stop running Cloud sessions; stop them separately to stop compute usage. If Cloud is unreachable during sign-out, credentials are removed locally and the command explains how to revoke the session online.
+`haarness account` shows the signed-in user and selected account (`--json` for the full status); `haarness account --select <account-id>` switches it. `haarness logout` removes local credentials and revokes the login. Sign-out does not stop running Cloud workspaces; stop them separately to stop compute usage. If Cloud is unreachable during sign-out, credentials are removed locally and the command explains how to revoke the session online.
 
 ## Cloud routers
 
 Haarness Cloud model requests go through one of the account's Cloud routers: the account's default, unless you choose another. `/router` (alias `/routers`) in the TUI lists them with the one in use marked and opens sign-in first when you are signed out; `haarness account --routers` prints them as JSON, and `haarness account --router <router-id>` chooses one. Desktop's account dialog shows a **Model router** choice when the account has more than one, grouped into routers that spend **Cloud credits** and routers that use **your provider keys** (no Cloud credits). The choice is saved on this computer, in `routers.json` in the account folder, separately for each Cloud service, account and API key, so switching accounts never carries it over. A self-hosted router you run is a provider connection instead; see [Connect Haarness Router](ROUTER.md).
 
-## Cloud agents and sessions
+## Cloud agents and workspaces
 
 A cloud agent is a reusable template containing instructions, model/reasoning defaults,
 repository, SSH deploy key, pinned hosts, environment, startup command and runtime size.
-Each session starts an independent Fly runtime with its own persistent files and conversations.
-Editing a template affects future sessions; existing sessions retain their captured version.
-Templates have no compute charge. Running sessions use your plan's concurrency and compute allowance;
-stopped sessions retain billable storage.
+Each workspace is an independent Fly runtime with its own persistent files and chats.
+Editing a template affects future workspaces; existing workspaces retain their captured version.
+Templates have no compute charge. Running workspaces use your plan's concurrency and compute allowance;
+stopped workspaces retain billable storage.
 
 Create a template in the Cloud website's **Cloud agents** page, or pass its JSON definition
 to `haarness cloud agent create --file agent.json`. Environment values are write-only;
@@ -56,29 +56,24 @@ the returned public deploy key can be added to your repository.
 ```sh
 haarness cloud agent list
 haarness cloud agent show AGENT_ID
-haarness cloud session create --agent AGENT_ID --title "Investigate issue" --json
-haarness cloud session list
-haarness cloud session attach SESSION_ID
-haarness cloud session stop SESSION_ID
-haarness cloud session start SESSION_ID
+haarness cloud workspace create --agent AGENT_ID --title "Investigate issue" --json
+haarness cloud workspace create "My repo" --repo https://github.com/owner/repo.git
+haarness cloud workspace list
+haarness cloud workspace attach WORKSPACE_ID
+haarness cloud workspace stop WORKSPACE_ID
+haarness cloud workspace start WORKSPACE_ID
+haarness cloud workspace rename WORKSPACE_ID "New title"
+haarness cloud workspace delete WORKSPACE_ID
 ```
 
 Create/start/stop return once accepted. Wait for `running` before attaching. Attach resumes the
-most recent conversation. Desktop offers **Haarness account → Cloud sessions → New session**
+most recent conversation. Desktop offers **Haarness account → Cloud workspaces → New workspace**
 with a template picker; **Manage agent templates** opens the browser editor. New conversations
 honor the runtime's default agent and model in both TUI and Desktop.
 
-Existing workspaces appear as sessions with their files, conversations and old URLs intact.
-The previous CLI commands remain available for compatibility:
-
-```
-haarness cloud workspace list
-haarness cloud workspace create my-workspace
-haarness cloud workspace create my-repo --repo https://github.com/owner/repo.git
-haarness cloud workspace start <id>
-haarness cloud workspace attach <id>
-haarness cloud workspace stop <id>
-```
+Workspaces created before templates existed, and those made as Cloud sessions before the
+rename, keep their files, chats and old URLs; Cloud accepts either id. `haarness cloud session …`
+still works as a hidden alias of `haarness cloud workspace …`.
 
 ### Ask your assistant to use Cloud
 
@@ -86,24 +81,27 @@ After `haarness login`, the same tools are available to models in CLI, TUI and D
 
 - `cloud_agent_manage`: find, inspect, create, update and delete templates, discover Cloud models,
   and retrieve a template's public SSH deploy key.
-- `cloud_agent_session`: launch independent sessions, chat and read results, wait for a turn,
-  interrupt, rename, archive, stop, resume or delete a session.
-- `cloud_chat`: list, create, rename and archive the separate chats inside one running session
+- `cloud_workspace`: launch independent workspaces, chat and read results, wait for a turn,
+  interrupt, rename, stop, resume or delete a workspace.
+- `cloud_chat`: list, create, rename and archive the separate chats inside one running workspace
   (they share its files and compute), and ask, read, wait on or interrupt one of them.
-- `cloud_schedule`: run a prompt in a session's chat on Cloud's own timetable, independent of
-  this computer (unlike the local `schedule` tool); it can wake a stopped session.
+- `cloud_schedule`: run a prompt in a workspace's chat on Cloud's own timetable, independent of
+  this computer (unlike the local `schedule` tool); it can wake a stopped workspace.
 
-For example, ask: "Find my Repository helper cloud agent. Launch a session from it, ask it
-to inspect the repository, and bring back the result." Follow up with "Ask that cloud session
-to run the tests" or "Stop that cloud session and keep its files." The assistant returns a
-session link you can open in Cloud to continue the same conversation and inspect files.
+For example, ask: "Find my Repository helper cloud agent. Launch a workspace from it, ask it
+to inspect the repository, and bring back the result." Follow up with "Ask that cloud workspace
+to run the tests" or "Stop that cloud workspace and keep its files." The assistant returns a
+workspace link you can open in Cloud to continue the same conversation and inspect files.
+
+Permission rules written for the tool's old name, `cloud_agent_session`, still apply to
+`cloud_workspace`.
 
 You can also use a normal CLI run (with any connected tool-capable model):
 
 ```sh
 haarness login
 haarness run --provider haarness --model openai/gpt-5-mini \
-  "List my cloud agents and sessions. Do not start anything."
+  "List my cloud agents and workspaces. Do not start anything."
 ```
 
 `--model haarness-cloud/openai/gpt-5-mini` is the equivalent fully qualified form.
@@ -115,27 +113,27 @@ tokens, issuer URLs, or credential paths from the model. Use the Cloud editor/AP
 write-only environment secrets.
 
 Actions that start billable compute, submit remote work, or replace or delete Cloud resources ask
-for approval each time: `cloud_agent_session` create/start/ask/update/save_agent/delete,
+for approval each time: `cloud_workspace` create/start/ask/update/save_agent/delete,
 `cloud_chat` ask, `cloud_agent_manage` create/update/delete and `cloud_schedule`
 create/update/resume/run/delete. The permissive default profile, an allow rule, `--yolo`, Auto
 approvals and a `PermissionRequest`/`PreToolUse` hook cannot skip that prompt, and it offers no
-**Always** choice. A deny rule such as `cloud_agent_session:delete:*` still refuses the action
+**Always** choice. A deny rule such as `cloud_workspace:delete:*` still refuses the action
 without prompting.
 
 Reads (`list`, `get`, `messages`, `wait`, `history`, `models`, `ssh_public_key`) and actions that
-spend nothing or reduce spending (stopping a session, interrupting a turn, pausing a schedule,
+spend nothing or reduce spending (stopping a workspace, interrupting a turn, pausing a schedule,
 renaming, archiving, creating an empty chat) follow ordinary permission rules. The plan agent can
-inspect templates, sessions and history but cannot launch or mutate them, even with an allow
+inspect templates, workspaces and history but cannot launch or mutate them, even with an allow
 override.
 
 The tools are discoverable under **Cloud agents** in the tool catalog and can be loaded with
 `load_tool` when lazy loading is enabled. Reads never start a stopped runtime. `ask` without
-`sessionId` creates an independent session. Omit `cloudAgentId` for freestyle work with inline
+`workspaceId` creates an independent workspace. Omit `cloudAgentId` for freestyle work with inline
 `configuration`, or list templates with `cloud_agent_manage` and pass a returned ID to inherit
-its defaults. Inline configuration overrides those defaults. Follow-ups use the returned session/thread IDs.
+its defaults. Inline configuration overrides those defaults. Follow-ups use the returned workspace/thread IDs.
 `wait=false` submits the message after startup and returns without waiting for the reply.
 Waits default to 120 seconds (maximum 600). A startup timeout reports `messageSubmitted:false`;
-retry `ask` with that session ID once it is running. A running turn at timeout continues remotely:
+retry `ask` with that workspace ID once it is running. A running turn at timeout continues remotely:
 use `wait` with its IDs instead of submitting another message. History supports `after`/`nextAfter`
 cursors and `limit` (1–100); without `after`, it returns the latest page.
 
@@ -145,13 +143,13 @@ and coalesce events while a snapshot is in flight. Healthy connections reconcile
 a minute; unsupported/disconnected streams retain the one-second HTTP fallback. Events never
 replay a submitted message. Cancelling or dropping a wait closes its event subscription.
 
-Remote permission prompts remain user approvals in the session's Cloud chat. The tool returns
+Remote permission prompts remain user approvals in the workspace's Cloud chat. The tool returns
 `needs_attention` and its URL instead of approving them. A message the model sends to a Cloud
 chat starts with `Message from another Haarness agent:`, so the remote chat (and Auto's reviewer
 there, when it is in Auto) never reads it as the person's words. Cancelling a synchronous ask attempts
-to interrupt only the turn it submitted; the session and files remain. Cancelling an observation
-does not interrupt someone else's work. Archive hides a session without stopping it; stop releases
-compute while retaining storage, and delete removes the session and its disk.
+to interrupt only the turn it submitted; the workspace and files remain. Cancelling an observation
+does not interrupt someone else's work. Stop releases compute while retaining storage, and delete
+removes the workspace and its disk.
 
 Create/start/stop return once the operation is accepted. Use `list` to check its state. Desktop provides the same actions in the account dialog. Saved Cloud projects contain account/workspace identifiers; attach tickets are acquired again when opened and renewed while connected. Workspace access through a revoked native login is rejected within the gateway's existing ticket-cache window (10 seconds by default). Existing open connections follow the gateway's stream policy.
 
@@ -159,7 +157,7 @@ Create/start/stop return once the operation is accepted. Use `list` to check its
 
 CLI and Desktop use the same account client: PKCE with a loopback callback, or device authorization, rotating refresh tokens, a single retry after a rejected access token, and an OS file lock across processes. Cloud spends a refresh token when it answers and ends the whole sign-in when a spent one comes back, so a renewal runs on its own task: a Stop or timeout returns at once, and the renewal still saves the new pair for the next request. A renewal gives up after 30 seconds without an answer, freeing the next request, and a Haarness process that exits (a stopped server, a finished command) first waits up to 5 seconds for a renewal still running. A process killed outright cannot wait, and MCP servers' own OAuth renewals (made inside the MCP client while it connects) are not covered by this. Credentials are written atomically with owner-only permissions. Account refresh tokens are never passed to a workspace, renderer, project configuration or model provider upstream.
 
-Release builds sign in to `https://haarness.ai`. **Development builds** (`cargo build`, the `target/debug/haarness` that Desktop's `npm run dev` and the TUI use) sign in to the local Cloud stack at `http://127.0.0.1:18080`, the address `haarness-cloud/scripts/dev-up.sh` starts, so trying a change never touches production accounts or billing. Desktop needs nothing extra: its account dialog, billing and Cloud sessions all go through that binary.
+Release builds sign in to `https://haarness.ai`. **Development builds** (`cargo build`, the `target/debug/haarness` that Desktop's `npm run dev` and the TUI use) sign in to the local Cloud stack at `http://127.0.0.1:18080`, the address `haarness-cloud/scripts/dev-up.sh` starts, so trying a change never touches production accounts or billing. Desktop needs nothing extra: its account dialog, billing and Cloud workspaces all go through that binary.
 
 | To | Do |
 | --- | --- |
@@ -170,28 +168,28 @@ Production credentials live in `~/.config/haarness-cloud` (or `$XDG_CONFIG_HOME/
 
 Only HTTPS and loopback HTTP are accepted for account/router traffic; token-bearing requests do not follow redirects.
 
-The API exchanges an authenticated native session for a five-minute router credential. The router checks the login family, current membership, billing status and model restrictions. When the router refuses a cached credential before it expires (401), the client fetches a new one and sends the request once more. Automatic refresh does not create a user-visible developer API key. Explicit developer keys retain their own lifecycle.
+The API exchanges an authenticated native sign-in for a five-minute router credential. The router checks the login family, current membership, billing status and model restrictions. When the router refuses a cached credential before it expires (401), the client fetches a new one and sends the request once more. Automatic refresh does not create a user-visible developer API key. Explicit developer keys retain their own lifecycle.
 
 Deploy the Cloud migration and API/router changes before distributing the native client. No production configuration or deployment is performed by the local test suite.
 
-## Independently configured Cloud sessions
+## Independently configured Cloud workspaces
 
-Templates are optional. `haarness cloud session create --title "My work"` starts a blank session;
-`--file session.json` accepts a creation body with `configuration` (instructions, model/reasoning,
+Templates are optional. `haarness cloud workspace create --title "My work"` starts a blank workspace;
+`--file workspace.json` accepts a creation body with `configuration` (instructions, model/reasoning,
 MCP, agents, skills, permissions, repository/setup/resources) and optional write-only `environment`.
 Add `--agent ID` to inherit a template and override supplied fields, or `--stopped` to prepare SSH access.
 
-Stop and wait for a session to be stopped, then use `cloud session update ID --file settings.json`
-with its current `version` and changed `configuration`. `cloud session save-agent ID --version N
+Stop and wait for a workspace to be stopped, then use `cloud workspace update ID --file settings.json`
+with its current `version` and changed `configuration`. `cloud workspace save-agent ID --version N
 --name "Template"` saves its last saved settings as an inert template with a fresh SSH key; environment
 is copied only with `--include-environment`. Restart applies the saved settings while retaining files/chat.
 
-The `cloud_agent_session` model tool supports inline `configuration` without `cloudAgentId`, plus
+The `cloud_workspace` model tool supports inline `configuration` without `cloudAgentId`, plus
 `update`, `save_agent` and `ssh_public_key`. It never reads or sets environment secret values.
-Desktop offers blank/template creation, instructions and advanced JSON settings; its session Settings
+Desktop offers blank/template creation, instructions and advanced JSON settings; its **Workspace settings**
 button opens the shared Cloud editor. CLI/TUI/Desktop continue to share the account login.
-`haarness cloud session list --agent ID` lists only the sessions started from one template, and
-`haarness cloud session show ID` prints one session as JSON, including the `version` that
+`haarness cloud workspace list --agent ID` lists only the workspaces started from one template, and
+`haarness cloud workspace show ID` prints one workspace as JSON, including the `version` that
 `update` and `save-agent` need.
 
 ## Verification
@@ -205,4 +203,4 @@ HAARNESS_CLOUD_TOOLS_LIVE=1 HAARNESS_CLOUD_API_URL=… HAARNESS_CLOUD_CONFIG_DIR
 
 `test-billing-tmux.py` makes one small paid model call through the Cloud router and checks the
 debit in the TUI's billing view; `test-cloud-tools-live.py` drives the Cloud model tools through a
-disposable server and tmux TUI, creating and deleting only its own sessions and template.
+disposable server and tmux TUI, creating and deleting only its own workspaces and template.

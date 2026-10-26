@@ -316,7 +316,7 @@ Neither is supported yet. The seams for them are in place:
 
 ## Limits in this version
 
-- Servers on this computer only: a project that Desktop or `haarness attach` reaches on another machine cannot use Chrome; Desktop says "Chrome works with projects on this computer." and the TUI "Chrome works with projects on the computer where Chrome runs". A chat shared with `/remote-control` (`/rc`, a published chat under Remote control › Sessions) still runs here and can use Chrome, but requests scoped to it cannot list hosts or answer Chrome approvals. A whole computer connected with `haarness remote enable` (Remote control › Hosts) relays unscoped requests, like a local client, so it can.
+- Servers on this computer only: a project that Desktop or `haarness attach` reaches on another machine cannot use Chrome; Desktop says "Chrome works with projects on this computer." and the TUI "Chrome works with projects on the computer where Chrome runs". A chat shared with `/remote-control` (`/rc`, a published chat under Remote control › Chats) still runs here and can use Chrome, but requests scoped to it cannot list hosts or answer Chrome approvals. A whole computer connected with `haarness remote enable` (Remote control › Hosts) relays unscoped requests, like a local client, so it can.
 - Open-access servers (`haarness serve` with no token or password, or `--anonymous`) refuse the extension host; the welcome page lists such a project as "This project's Haarness server does not accept Chrome. Restart it without --anonymous."
 - Flatpak and Snap browsers cannot see host manifests and are reported as unsupported.
 - Incognito windows are excluded (`incognito: "not_allowed"`).
