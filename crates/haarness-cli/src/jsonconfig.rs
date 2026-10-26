@@ -2800,7 +2800,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_session_defaults_are_portable_and_project_overrides_still_win() {
+    fn cloud_workspace_defaults_are_portable_and_project_overrides_still_win() {
         let root =
             std::env::temp_dir().join(format!("haarness-cloud-config-{}", uuid::Uuid::now_v7()));
         let config = root.join("config");
