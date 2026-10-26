@@ -95,6 +95,22 @@ async function launchChromium(options: {
   // Like Load unpacked on chrome://extensions. Chrome disables a command-line
   // extension that reloads itself; this one reloads like a real install.
   if (unpacked) {
+    // Developer mode is now a protected setting (signed in Secure
+    // Preferences), so Chromium can ignore the Preferences written above, and
+    // without it disables an unpacked extension on its next load (a reload).
+    // Switch it on where the user does.
+    const extensions = await context.newPage();
+    await extensions.goto("chrome://extensions/");
+    await extensions.evaluate(
+      () =>
+        new Promise<void>((done) =>
+          (chrome as unknown as { developerPrivate: { updateProfileConfiguration(update: object, callback: () => void): void } }).developerPrivate.updateProfileConfiguration(
+            { inDeveloperMode: true },
+            done,
+          ),
+        ),
+    );
+    await extensions.close();
     const browser = await context.browser()!.newBrowserCDPSession();
     await browser.send("Extensions.loadUnpacked" as never, { path: extension } as never);
     await browser.detach();

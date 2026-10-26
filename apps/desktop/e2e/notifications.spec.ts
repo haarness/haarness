@@ -123,9 +123,10 @@ test.beforeAll(async () => {
     const directory = join(temporary, name);
     directories.push(directory);
     await mkdir(join(directory, ".haarness"), { recursive: true });
+    // Review, so an approval waits for a person rather than the Auto reviewer.
     await writeFile(
       join(directory, ".haarness/config.toml"),
-      '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\ntask="allow"\n[providers.notification-failure]\nprotocol="anthropic-messages"\nbase_url="http://127.0.0.1:1/v1"\nmodels=["fixture"]\napi_key_env="HAARNESS_NOTIFICATION_MISSING_KEY"\n',
+      '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\ntask="allow"\n[providers.notification-failure]\nprotocol="anthropic-messages"\nbase_url="http://127.0.0.1:1/v1"\nmodels=["fixture"]\napi_key_env="HAARNESS_NOTIFICATION_MISSING_KEY"\n',
     );
     await writeFile(join(directory, "fixture.txt"), name + "\n");
     for (const args of [

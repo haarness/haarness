@@ -841,6 +841,34 @@ test("the shared page driver plugs in through createPage and runs inside the sit
   assert.equal(surface?.supports("heap.snapshot"), false);
 });
 
+test("a command that fails as its tab closes answers a moment later, so a quitting Chrome's disconnect answers instead", async () => {
+  let fail: (() => void) | undefined;
+  const createPage: CreatePage = (pageSurface, _cdp, options) => ({
+    ready: Promise.resolve(),
+    state: () => ({ id: options.id, url: pageSurface.url(), title: "", loading: false, canGoBack: false, canGoForward: false, generation: 0 }),
+    sources: () => [],
+    async inspect() {
+      return { resources: [], key: "k" };
+    },
+    execute: () => new Promise((_, reject) => (fail = () => reject(new Error("Detached while handling command.")))),
+    navigationStarted() {},
+    personActed() {},
+    dispose() {},
+  });
+  const h = await boot({ createPage });
+  h.start();
+  h.attach();
+  const { tab, live } = await h.open("https://a.example/");
+  const from = h.sent.length;
+  const waiting = h.command({ action: { type: "wait", tabID: tab.id, condition: "text", text: "Never" }, policy: ask, target: { resources: ["https://a.example"], key: "k" } });
+  while (!fail) await new Promise((resolve) => setTimeout(resolve, 2));
+  h.fake.removeTab(live.id);
+  fail();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(h.sent.slice(from).some((message) => message.message?.type === "result"), false);
+  assert.equal((await waiting).outcome.type, "failure");
+});
+
 test("an older copy on disk (Haarness was downgraded) reloads once but is not offered as an update", async () => {
   const h = await boot();
   h.fake.port.deliver({ type: "bridge", protocol: 1, version: "0.1.0", uploadsRoot: "/tmp", extension: { path: "/x", version: "0.1.0" } });
