@@ -7,9 +7,12 @@ import {
 } from "./transport.js";
 import type { CloudEntityEvent } from "./cloud-types.js";
 export type { RequestOptions } from "./transport.js";
-export interface CloudOptions extends ClientOptions {
+export interface CloudOptions extends Omit<ClientOptions, "baseUrl"> {
+  /** Default: `HAARNESS_CLOUD_API_URL`, else Haarness Cloud (`https://haarness.ai`), as the CLI does. */
+  baseUrl?: string;
   accountId?: string;
 }
+export const DEFAULT_CLOUD_URL = "https://haarness.ai";
 export interface CloudEventOptions
   extends Omit<EventOptions, "after" | "idleTimeoutMs"> {
   accountId?: string;
@@ -17,9 +20,10 @@ export interface CloudEventOptions
 /** Cloud credentials never fall back to the unrelated local server token. */
 export class Transport extends HttpTransport {
   private readonly accountId?: string;
-  constructor(options: CloudOptions) {
+  constructor(options: CloudOptions = {}) {
     super({
       ...options,
+      baseUrl: options.baseUrl ?? process.env.HAARNESS_CLOUD_API_URL ?? DEFAULT_CLOUD_URL,
       token: options.token ?? process.env.HAARNESS_API_KEY ?? process.env.HAARNESS_CLOUD_TOKEN ?? "",
     });
     this.accountId = options.accountId;

@@ -278,6 +278,14 @@ export class CloudApi extends Transport {
   connectSignInMethod(body: T.ConnectSignInMethodRequest, options: RequestOptions = {}): Promise<T.ConnectSignInMethodResponse> {
     return this.request("POST", `/api/v1/me/sign-in-methods/connect`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
+  /** POST /api/v1/me/sign-in-methods/passkeys */
+  addPasskey(body: T.AddPasskeyRequest, options: RequestOptions = {}): Promise<T.SignInMethodsDto> {
+    return this.request("POST", `/api/v1/me/sign-in-methods/passkeys`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/me/sign-in-methods/passkeys/options */
+  passkeyRegistrationOptions(body: T.PasskeyOptionsRequest, options: RequestOptions = {}): Promise<T.PasskeyCreationOptionsDto> {
+    return this.request("POST", `/api/v1/me/sign-in-methods/passkeys/options`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
   /** POST /api/v1/me/sign-in-methods/{id}/remove */
   removeSignInMethod(id: string, body: T.RemoveSignInMethodRequest, options: RequestOptions = {}): Promise<T.SignInMethodsDto> {
     return this.request("POST", `/api/v1/me/sign-in-methods/${this.segment(id)}/remove`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
@@ -717,6 +725,14 @@ export class CloudApi extends Transport {
   /** GET /auth/options */
   authOptions(options: RequestOptions = {}): Promise<T.JsonValue> {
     return this.request("GET", `/auth/options`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /auth/passkey/finish */
+  passkeySignIn(body: T.PasskeySignInRequest, options: RequestOptions = {}): Promise<T.SignInResponse> {
+    return this.request("POST", `/auth/passkey/finish`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /auth/passkey/options */
+  passkeySignInOptions(options: RequestOptions = {}): Promise<T.PasskeyRequestOptionsDto> {
+    return this.request("POST", `/auth/passkey/options`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /device */
   devicePage(query: T.DevicePageQuery = {}, options: RequestOptions = {}): Promise<string> {

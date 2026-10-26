@@ -3,6 +3,7 @@
 from __future__ import annotations
 import asyncio
 import os
+import collections
 import queue
 import re
 import secrets
@@ -47,10 +48,26 @@ class LocalServer:
             env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
         )
         ready: queue.Queue[str | None] = queue.Queue()
+        # What the server last said on stderr, kept (and the pipe drained) for as long as it runs: a failed
+        # start reports why, such as another server already running in that folder.
+        said: collections.deque[str] = collections.deque(maxlen=20)
+
+        def drain():
+            assert process.stderr
+            for line in process.stderr:
+                if line.strip():
+                    said.append(line.strip())
+
+        errors = threading.Thread(target=drain, daemon=True)
+        errors.start()
+
+        def failure(what: str) -> RuntimeError:
+            errors.join(timeout=1)
+            return RuntimeError(f"{what}: {said[-1]}" if said else what)
 
         def read():
             assert process.stdout
@@ -64,9 +81,12 @@ class LocalServer:
         reader.start()
         client = None
         try:
-            url = ready.get(timeout=startup_timeout)
+            try:
+                url = ready.get(timeout=startup_timeout)
+            except queue.Empty:
+                raise failure("Haarness startup timed out") from None
             if not url:
-                raise RuntimeError("Haarness failed to start")
+                raise failure("Haarness failed to start")
             client = Haarness(url, token=token)
             info = client.info()
             if info["name"] != "haarness" or info["schemaVersion"] != "1":
@@ -89,6 +109,8 @@ class LocalServer:
                 process.wait(timeout=5)
         if process.stdout:
             process.stdout.close()
+        if process.stderr:
+            process.stderr.close()
 
     def close(self) -> None:
         if self._closed:

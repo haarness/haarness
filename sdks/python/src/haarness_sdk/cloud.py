@@ -85,7 +85,9 @@ class HaarnessCloud(CloudApi):
         options: RequestOptions | None = None,
     ) -> CloudSession:
         created = self.create_agent_session(body, options=options)
-        return self.session(created["session"]["id"])
+        session = self.session(created["session"]["id"])
+        session.created = created
+        return session
 
 
 class CloudSession:
@@ -94,6 +96,8 @@ class CloudSession:
     def __init__(self, cloud: HaarnessCloud, session_id: str):
         self.cloud, self.id = cloud, session_id
         self.chats = CloudChats(self)
+        # What `create_session` answered, with the first message's launch (`created["session"]["launch"]["chatId"]`).
+        self.created: C.AgentSessionCreatedResponse | None = None
         self._ticket: C.AttachResponse | None = None
         self._runtime: SessionRuntime | None = None
         self._lock = threading.Lock()
@@ -143,7 +147,11 @@ class CloudSession:
 
 class SessionRuntime(Haarness):
     def __init__(self, session: CloudSession, ticket):
-        super().__init__(gateway(ticket["gatewayUrl"]), token=ticket["ticket"])
+        super().__init__(
+            gateway(ticket["gatewayUrl"]),
+            token=ticket["ticket"],
+            timeout=session.cloud._timeout,
+        )
         self.session = session
 
     def refresh(self):
@@ -292,7 +300,7 @@ class CloudChat:
         return runtime.wait_turn(
             turn_id,
             {"timeout_ms": timeout_ms},
-            options=options or {"timeout": timeout_ms / 1000 + 5},
+            options={"timeout": timeout_ms / 1000 + 5, **(options or {})},
         )
 
     def abort(
@@ -343,7 +351,9 @@ class AsyncHaarnessCloud(AsyncCloudApi):
         options: RequestOptions | None = None,
     ) -> AsyncCloudSession:
         created = await self.create_agent_session(body, options=options)
-        return self.session(created["session"]["id"])
+        session = self.session(created["session"]["id"])
+        session.created = created
+        return session
 
 
 class AsyncCloudSession:
@@ -352,6 +362,8 @@ class AsyncCloudSession:
     def __init__(self, cloud: AsyncHaarnessCloud, session_id: str):
         self.cloud, self.id = cloud, session_id
         self.chats = AsyncCloudChats(self)
+        # What `create_session` answered, with the first message's launch (`created["session"]["launch"]["chatId"]`).
+        self.created: C.AgentSessionCreatedResponse | None = None
         self._ticket: C.AttachResponse | None = None
         self._runtime: AsyncSessionRuntime | None = None
         self._lock = asyncio.Lock()
@@ -401,7 +413,11 @@ class AsyncCloudSession:
 
 class AsyncSessionRuntime(AsyncHaarness):
     def __init__(self, session: AsyncCloudSession, ticket):
-        super().__init__(gateway(ticket["gatewayUrl"]), token=ticket["ticket"])
+        super().__init__(
+            gateway(ticket["gatewayUrl"]),
+            token=ticket["ticket"],
+            timeout=session.cloud._timeout,
+        )
         self.session = session
 
     async def refresh(self):
@@ -556,7 +572,7 @@ class AsyncCloudChat:
         return await runtime.wait_turn(
             turn_id,
             {"timeout_ms": timeout_ms},
-            options=options or {"timeout": timeout_ms / 1000 + 5},
+            options={"timeout": timeout_ms / 1000 + 5, **(options or {})},
         )
 
     async def abort(

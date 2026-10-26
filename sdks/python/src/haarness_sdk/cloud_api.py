@@ -275,6 +275,14 @@ class CloudApi(Transport):
         """POST /api/v1/me/sign-in-methods/connect."""
         return cast("T.ConnectSignInMethodResponse", self.request('POST', f'/api/v1/me/sign-in-methods/connect', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
+    def add_passkey(self, body: T.AddPasskeyRequest, *, options: RequestOptions | None = None) -> T.SignInMethodsDto:
+        """POST /api/v1/me/sign-in-methods/passkeys."""
+        return cast("T.SignInMethodsDto", self.request('POST', f'/api/v1/me/sign-in-methods/passkeys', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def passkey_registration_options(self, body: T.PasskeyOptionsRequest, *, options: RequestOptions | None = None) -> T.PasskeyCreationOptionsDto:
+        """POST /api/v1/me/sign-in-methods/passkeys/options."""
+        return cast("T.PasskeyCreationOptionsDto", self.request('POST', f'/api/v1/me/sign-in-methods/passkeys/options', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     def remove_sign_in_method(self, id: str, body: T.RemoveSignInMethodRequest, *, options: RequestOptions | None = None) -> T.SignInMethodsDto:
         """POST /api/v1/me/sign-in-methods/{id}/remove."""
         return cast("T.SignInMethodsDto", self.request('POST', f'/api/v1/me/sign-in-methods/{self.segment(id)}/remove', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
@@ -715,6 +723,14 @@ class CloudApi(Transport):
         """GET /auth/options."""
         return cast("T.JsonValue", self.request('GET', f'/auth/options', binary_body=False, binary_response=False, options=options))
 
+    def passkey_sign_in(self, body: T.PasskeySignInRequest, *, options: RequestOptions | None = None) -> T.SignInResponse:
+        """POST /auth/passkey/finish."""
+        return cast("T.SignInResponse", self.request('POST', f'/auth/passkey/finish', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def passkey_sign_in_options(self, *, options: RequestOptions | None = None) -> T.PasskeyRequestOptionsDto:
+        """POST /auth/passkey/options."""
+        return cast("T.PasskeyRequestOptionsDto", self.request('POST', f'/auth/passkey/options', binary_body=False, binary_response=False, options=options))
+
     def device_page(self, query: T.DevicePageQuery | None = None, *, options: RequestOptions | None = None) -> str:
         """GET /device."""
         return cast("str", self.request('GET', f'/device', query=query, text_response=True, binary_body=False, binary_response=False, options=options))
@@ -1095,6 +1111,14 @@ class AsyncCloudApi(AsyncTransport):
     async def connect_sign_in_method(self, body: T.ConnectSignInMethodRequest, *, options: RequestOptions | None = None) -> T.ConnectSignInMethodResponse:
         """POST /api/v1/me/sign-in-methods/connect."""
         return cast("T.ConnectSignInMethodResponse", await self.request('POST', f'/api/v1/me/sign-in-methods/connect', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def add_passkey(self, body: T.AddPasskeyRequest, *, options: RequestOptions | None = None) -> T.SignInMethodsDto:
+        """POST /api/v1/me/sign-in-methods/passkeys."""
+        return cast("T.SignInMethodsDto", await self.request('POST', f'/api/v1/me/sign-in-methods/passkeys', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def passkey_registration_options(self, body: T.PasskeyOptionsRequest, *, options: RequestOptions | None = None) -> T.PasskeyCreationOptionsDto:
+        """POST /api/v1/me/sign-in-methods/passkeys/options."""
+        return cast("T.PasskeyCreationOptionsDto", await self.request('POST', f'/api/v1/me/sign-in-methods/passkeys/options', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     async def remove_sign_in_method(self, id: str, body: T.RemoveSignInMethodRequest, *, options: RequestOptions | None = None) -> T.SignInMethodsDto:
         """POST /api/v1/me/sign-in-methods/{id}/remove."""
@@ -1535,6 +1559,14 @@ class AsyncCloudApi(AsyncTransport):
     async def auth_options(self, *, options: RequestOptions | None = None) -> T.JsonValue:
         """GET /auth/options."""
         return cast("T.JsonValue", await self.request('GET', f'/auth/options', binary_body=False, binary_response=False, options=options))
+
+    async def passkey_sign_in(self, body: T.PasskeySignInRequest, *, options: RequestOptions | None = None) -> T.SignInResponse:
+        """POST /auth/passkey/finish."""
+        return cast("T.SignInResponse", await self.request('POST', f'/auth/passkey/finish', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def passkey_sign_in_options(self, *, options: RequestOptions | None = None) -> T.PasskeyRequestOptionsDto:
+        """POST /auth/passkey/options."""
+        return cast("T.PasskeyRequestOptionsDto", await self.request('POST', f'/auth/passkey/options', binary_body=False, binary_response=False, options=options))
 
     async def device_page(self, query: T.DevicePageQuery | None = None, *, options: RequestOptions | None = None) -> str:
         """GET /device."""

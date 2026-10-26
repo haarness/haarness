@@ -315,3 +315,46 @@ def test_streamed_side_questions(endpoint):
             assert events[-1] == {"type": "done", "answer": "An answer", "inputTokens": 7, "outputTokens": 3}
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_chat_waits_five_minutes_whatever_else_is_passed_and_ends_before_the_client(asynchronous):
+    """Headers alone keep the long wait; a shorter client timeout makes the server's wait end first."""
+    seen = []
+    done = {"id": "turn-1", "status": "completed"}
+    if asynchronous:
+        client = AsyncHaarness("http://127.0.0.1:9", token="x")
+
+        async def start(id, body, options=None):
+            return {"id": "turn-1"}
+
+        async def wait(turn_id, query, options=None):
+            seen.append((query, options))
+            return done
+
+        async def items(id, options=None):
+            return []
+
+        client.start_turn, client.wait_turn, client.list_items = start, wait, items
+
+        async def run():
+            await client.chat("thread", "hi", options={"headers": {"x-trace": "1"}})
+            await client.chat("thread", "hi", options={"timeout": 60})
+
+        asyncio.run(run())
+    else:
+        client = Haarness("http://127.0.0.1:9", token="x")
+        client.start_turn = lambda id, body, options=None: {"id": "turn-1"}
+
+        def wait(turn_id, query, options=None):
+            seen.append((query, options))
+            return done
+
+        client.wait_turn = wait
+        client.list_items = lambda id, options=None: []
+        client.chat("thread", "hi", options={"headers": {"x-trace": "1"}})
+        client.chat("thread", "hi", options={"timeout": 60})
+    assert seen == [
+        ({"timeout_ms": 300000}, {"timeout": 305.0, "headers": {"x-trace": "1"}}),
+        ({"timeout_ms": 55000}, {"timeout": 60}),
+    ]

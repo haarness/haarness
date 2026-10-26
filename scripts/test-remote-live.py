@@ -35,7 +35,8 @@ BIN = str(
 )
 ROOT = REPO / "target" / ("remote-e2e-" + uuid.uuid4().hex[:8])
 ROOT.mkdir(parents=True)
-CONFIG = '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\nwrite="ask"\n[lsp]\nenabled=false\n[lazy_tools]\nmode="off"\n'
+# Chats start in Auto, which runs tools without asking; the test answers permission requests, so it reviews them.
+CONFIG = '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\nwrite="ask"\n[lsp]\nenabled=false\n[lazy_tools]\nmode="off"\n'
 
 
 def project_folder(name):
@@ -1112,7 +1113,9 @@ try:
         selected["id"],
         {"projectId": pid, "threadId": b["id"], "title": "Must remain inaccessible"},
     )
-    deny(lambda: cloud.remote_session(forged["id"]).list_threads(), 409)
+    # The connector refuses a chat it does not share; Cloud reports a computer's refusal as 502 bad_gateway
+    # ("Your computer could not complete this request"), not as an offline host.
+    deny(lambda: cloud.remote_session(forged["id"]).list_threads(), 502)
     proof("session-only connector rejects host access and forged sibling publication")
     # A chat-only connector reports its shared tree only, each row linked to
     # the publication, even beside a forged publication of the sibling.

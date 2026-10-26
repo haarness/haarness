@@ -59,7 +59,7 @@ These publish a disposable preview, verify binary/text downloads, withdraw it an
 restore the prior publication in `finally`. Never point this mutation test at production.
 See [release testing](../haarness-release/SKILL.md) for real packages and quarantine.
 
-The native scenario now exercises 119 non-account operations in each of TypeScript,
+The native scenario now exercises 128 non-account operations in each of TypeScript,
 Python sync and Python async, including actual browser-host WebSockets, TCP tunnels,
 draft adoption, lease rejection and shared HTML. Four native account adapters still
 need the authenticated Cloud tool suite. New route modules and unmatched Cloud route
