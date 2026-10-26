@@ -495,3 +495,181 @@ test("errors read as the window's reasons", () => {
   assert.equal(updateError(Object.assign(new Error("t"), { name: "TimeoutError" })).code, "offline");
   assert.equal(updateError(new Error("odd")).code, "unknown");
 });
+
+/** A body that sends its first bytes, then waits for `release` before the rest. */
+function held(file: Buffer) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let sent = 0;
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (sent === 0) {
+        sent = 1;
+        controller.enqueue(new Uint8Array(file.subarray(0, 1000)));
+        return;
+      }
+      await gate;
+      controller.enqueue(new Uint8Array(file.subarray(1000)));
+      controller.close();
+    },
+  });
+  return { response: new Response(body, { status: 200, headers: { etag: '"h"' } }), release };
+}
+
+test("failed downloads back off to the half hour; a damaged file is not fetched again until the release changes", async () => {
+  const broken = () => new Response(stream([bytes.subarray(0, 10)], new Error("reset")), { status: 200 });
+  const f = await fixture({ edge: broken, service: broken });
+  await f.updater.check();
+  await f.settle();
+  assert.equal(f.updater.state().error?.code, "offline");
+  const delays = [f.timers.at(-1)?.ms];
+  for (let round = 0; round < 4; round++) {
+    await f.updater.check();
+    await f.settle();
+    delays.push(f.timers.at(-1)?.ms);
+  }
+  // Each round's checks succeed; the download's own failures set the pace.
+  assert.deepEqual(delays, [...RETRY_AFTER_MS, CHECK_EVERY_MS, CHECK_EVERY_MS]);
+  await f.cleanup();
+
+  const damaged = Buffer.from(bytes);
+  damaged[7] ^= 1;
+  const bad = () => new Response(stream([damaged]), { status: 200 });
+  const g = await fixture({ edge: bad, service: bad });
+  await g.updater.check();
+  await g.settle();
+  assert.equal(g.updater.state().error?.code, "damaged");
+  const fetched = () => g.requests.filter((request) => !request.url.endsWith("/desktop")).length;
+  const before = fetched();
+  for (let round = 0; round < 3; round++) {
+    await g.updater.check();
+    await g.settle();
+  }
+  assert.equal(fetched(), before, "a refused file is not downloaded again by itself");
+  assert.equal(g.updater.state().error?.code, "damaged");
+  assert.equal(g.timers.at(-1)?.ms, CHECK_EVERY_MS);
+  // The person asks: it is tried again.
+  await g.updater.download(true);
+  assert.ok(fetched() > before);
+  await g.cleanup();
+});
+
+test("a release withdrawn while it downloads is neither staged nor installed", async () => {
+  const hold = held(bytes);
+  const served: Served = { edge: () => hold.response };
+  const f = await fixture(served);
+  await f.updater.check();
+  assert.equal(f.updater.state().status, "downloading");
+  // Withdrawn: the channel offers this version again.
+  served.version = "0.1.5";
+  await f.updater.check();
+  hold.release();
+  await f.settle();
+  assert.equal(f.updater.state().status, "idle");
+  assert.equal(f.staged.length, 0);
+  assert.equal(await stat(join(f.dir, "ready.json")).catch(() => null), null);
+  assert.equal(await stat(join(f.dir, "9.9.9")).catch(() => null), null);
+  f.updater.atExit();
+  assert.deepEqual(f.launched, []);
+  await f.cleanup();
+});
+
+test("a staged version is dropped when the channel no longer offers anything for this computer", async () => {
+  const first = await fixture({});
+  await first.updater.check();
+  await first.settle();
+  const second = await fixture({ status: 404 }, { dir: first.dir });
+  await second.updater.start();
+  assert.equal(second.updater.state().status, "ready");
+  await second.updater.check();
+  assert.equal(second.updater.state().status, "idle");
+  second.updater.atExit();
+  assert.deepEqual(second.launched, []);
+  await first.cleanup();
+});
+
+test("a newer release while one downloads stops that one; only the newest is staged", async () => {
+  const hold = held(bytes);
+  const served: Served = { edge: () => hold.response };
+  const f = await fixture(served);
+  await f.updater.check();
+  assert.equal(f.updater.state().version, "9.9.9");
+  served.version = "9.9.10";
+  served.edge = undefined;
+  await f.updater.check();
+  hold.release();
+  await f.settle();
+  assert.equal(f.updater.state().status, "ready");
+  assert.equal(f.updater.state().version, "9.9.10");
+  assert.deepEqual(f.staged.map((path) => path.includes("9.9.10")), [true]);
+  assert.equal(await stat(join(f.dir, "9.9.9")).catch(() => null), null);
+  await f.cleanup();
+});
+
+test("turning automatic downloads off stops one running by itself", async () => {
+  const hold = held(bytes);
+  const f = await fixture({ edge: () => hold.response });
+  await f.updater.check();
+  assert.equal(f.updater.state().status, "downloading");
+  f.setAutomatic(false);
+  f.updater.automaticChanged();
+  assert.equal(f.updater.state().status, "available");
+  hold.release();
+  await f.settle();
+  assert.equal(f.updater.state().status, "available");
+  assert.equal(f.staged.length, 0);
+  await f.cleanup();
+});
+
+test("a cancelled restart never leaves the reopening or the Windows setup armed", async () => {
+  const install: Install = { method: "restart", kind: "exe", target: "C:\\Haarness" };
+  const value = manifest("9.9.9");
+  value.manifest.products.desktop.artifacts[0] = { ...value.manifest.products.desktop.artifacts[0], os: "windows", arch: "x64", kind: "exe" };
+  const f = await fixture({ body: value }, { install, os: "windows", arch: "x64", stage: async ({ file }) => file });
+  await f.updater.check();
+  await f.settle();
+  f.updater.restart();
+  // A check ends while the window asks about unsaved edits.
+  await f.updater.check();
+  assert.equal(f.updater.state().status, "installing");
+  f.updater.quitCancelled();
+  assert.equal(f.updater.state().status, "ready");
+  // The person quits later: the setup does not run unasked.
+  f.updater.atExit();
+  assert.deepEqual(f.launched, []);
+  await f.cleanup();
+});
+
+test("a plain quit while the system shuts down installs nothing; the update waits for the next launch", async () => {
+  const f = await fixture({});
+  await f.updater.check();
+  await f.settle();
+  f.updater.systemShutdown();
+  f.updater.atExit();
+  assert.deepEqual(f.launched, []);
+  assert.ok(await stat(join(f.dir, "ready.json")));
+  await f.cleanup();
+});
+
+test("starting says what an earlier run left at once, and trusts no staged path outside its folder", async () => {
+  const first = await fixture({});
+  await first.updater.check();
+  await first.settle();
+  const second = await fixture({}, { dir: first.dir });
+  await second.updater.start();
+  assert.equal(second.states.at(-1)?.status, "ready");
+  // A ready.json pointing elsewhere is dropped, and what it names is left alone.
+  const outside = await mkdtemp(join(tmpdir(), "haarness-outside-"));
+  await writeFile(join(first.dir, "ready.json"), JSON.stringify({ version: "9.9.9", path: join(first.dir, "..", outside.split("/").pop()!) }));
+  const third = await fixture({}, { dir: first.dir });
+  await third.updater.start();
+  assert.equal(third.updater.state().status, "idle");
+  assert.ok(await stat(outside));
+  await rm(outside, { recursive: true, force: true });
+  // A corrupt install result goes too.
+  await writeFile(join(first.dir, "install-result.json"), "{not json");
+  const fourth = await fixture({}, { dir: first.dir });
+  await fourth.updater.start();
+  assert.equal(await stat(join(first.dir, "install-result.json")).catch(() => null), null);
+  await first.cleanup();
+});

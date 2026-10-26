@@ -287,3 +287,70 @@ test("a download damaged from every source is not installed; the sidebar offers 
   expect(await installed()).toBe("0.1.5");
   await quit();
 });
+
+test("Restart to update with unsaved file edits asks first; keeping them calls the restart off and nothing shuts down", async () => {
+  test.setTimeout(300_000);
+  await reinstallOld();
+  await rm(join(temporary, "reopened"), { force: true });
+  behaviour.mode = "ok";
+  const project = join(temporary, "project");
+  await mkdir(join(project, ".haarness"), { recursive: true });
+  await writeFile(join(project, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
+  await writeFile(join(project, "notes.txt"), "Original notes");
+  await launch();
+  const asked: string[] = [];
+  await app!.evaluate(({ dialog }, { directory }) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
+    const record = globalThis as { unloadAnswer?: number; unloadAsked?: string[] };
+    record.unloadAnswer = 0;
+    record.unloadAsked = [];
+    dialog.showMessageBoxSync = ((...args: unknown[]) => {
+      const options = args.find((value) => value && typeof value === "object" && "buttons" in (value as object)) as { message?: string };
+      record.unloadAsked!.push(String(options?.message));
+      return record.unloadAnswer!;
+    }) as typeof dialog.showMessageBoxSync;
+  }, { directory: project });
+  // Electron asks about the unload itself (stubbed above); Playwright must not answer it too.
+  page.on("dialog", () => {});
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90_000 });
+  // An unsaved edit in the Files panel.
+  const button = (name: string) => page.getByRole("button", { name, exact: true });
+  if (await button("Show side panel").isVisible()) await button("Show side panel").click();
+  if (await button("Show Files panel").isVisible()) await button("Show Files panel").click();
+  else if (!(await page.locator(".explorer").isVisible())) {
+    await button("Open panel").click();
+    await button("Open Files").click();
+  }
+  await page.locator(".file-entry").filter({ hasText: "notes.txt" }).click();
+  await page.locator(".cm-content").fill("Unsaved notes");
+  // The update is ready.
+  const updates = await about();
+  await updates.getByRole("button", { name: "Check for updates" }).click();
+  await expect(updates.getByRole("button", { name: "Restart to update" })).toBeVisible({ timeout: 60_000 });
+  await closeSettings();
+  // Keep editing: the restart is called off, the window and its project stay.
+  await updateRow().click();
+  await expect.poll(() => app!.evaluate(() => (globalThis as { unloadAsked?: string[] }).unloadAsked)).toEqual(["There are unsaved file edits."]);
+  await expect(updateRow()).toHaveText("Restart to update");
+  await expect(page.locator(".cm-content")).toHaveText("Unsaved notes");
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  expect(await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(1);
+  expect(await installed()).toBe("0.1.5");
+  // The project still answers: its connection was not closed.
+  await page.locator(".cm-content").press("ControlOrMeta+s");
+  await expect.poll(() => readFile(join(project, "notes.txt"), "utf8")).toBe("Unsaved notes");
+  // Saved now: Restart goes through without asking again.
+  const process = app!.process();
+  const exited = new Promise((resolve) => process.once("exit", resolve));
+  // The window closes under the click.
+  await updateRow().click({ noWaitAfter: true }).catch(() => {});
+  await exited;
+  expect(await app!.evaluate(() => 0).catch(() => "gone")).toBe("gone");
+  app = undefined;
+  try {
+    execFileSync(binary, ["--workspace", project, "serve", "--stop"], { env, stdio: "ignore", timeout: 30_000 });
+  } catch {}
+  stopChatHome(binary, env);
+  await expect.poll(installed, { timeout: 30_000 }).toBe(NEW);
+});

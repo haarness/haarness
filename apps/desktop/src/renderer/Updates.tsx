@@ -68,8 +68,14 @@ export function UpdateRow() {
         return true;
       case "available":
         // Downloading by itself, it shows once ready; it shows now when it
-        // waits for the person, or failed.
-        return value.method !== "restart" || !app.state.preferences.autoUpdate || !!value.error || !!value.asked;
+        // waits for the person, or failed in a way they may act on. A blip
+        // of the network mends itself and says so in About only.
+        return (
+          value.method !== "restart" ||
+          !app.state.preferences.autoUpdate ||
+          !!value.asked ||
+          (!!value.error && !passing(value))
+        );
       case "downloading":
       case "verifying":
         return !!value.asked;
