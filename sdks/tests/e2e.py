@@ -321,6 +321,8 @@ def scenario(mode):
                 c("wait_turn", qturn["id"], {"timeout_ms": 10000})["status"]
                 == "completed"
             )
+            # A completed turn can still hold the chat for a moment while it settles.
+            runner.until("active_turn", tid, predicate=lambda value: value is None)
             permission = c(
                 "start_turn",
                 tid,

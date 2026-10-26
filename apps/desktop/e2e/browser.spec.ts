@@ -131,9 +131,10 @@ test.beforeAll(async () => {
     const dir = join(temporary, name);
     directories.push(dir);
     await mkdir(join(dir, ".haarness"), { recursive: true });
+    // Review, so site approvals wait for a person rather than the Auto reviewer.
     await writeFile(
       join(dir, ".haarness/config.toml"),
-      '[defaults]\nprovider="echo"\nmodel="echo-1"\n',
+      '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n',
     );
     await writeFile(join(dir, "upload.txt"), "Server upload 日本");
     for (const args of [

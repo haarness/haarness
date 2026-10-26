@@ -681,10 +681,12 @@ async fn lifecycle_mutations_use_session_routes_and_sessions_have_no_archive() {
     let f = Fixture::new(true).await;
     let cloud = f.cloud(CancellationToken::new()).await;
     // Cloud sessions are kept until they are deleted; there is nothing to archive.
-    assert!(cloud
-        .session(json!({"action":"archive","sessionId":SESSION}))
-        .await
-        .is_err());
+    assert!(
+        cloud
+            .session(json!({"action":"archive","sessionId":SESSION}))
+            .await
+            .is_err()
+    );
     assert_eq!(f.count("PATCH", &format!("/api/v1/sessions/{SESSION}")), 0);
     let renamed = cloud
         .session(json!({"action":"rename","sessionId":SESSION,"title":"Renamed"}))

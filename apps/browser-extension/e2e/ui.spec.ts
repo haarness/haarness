@@ -4,14 +4,14 @@
  */
 import type { Page } from "@playwright/test";
 import { join } from "node:path";
-import { askPolicy, SERVER, THREAD, WORKSPACE, type FakeBridge } from "./fixtures/bridge";
+import { askPolicy, SERVER, THREAD, VERSION, WORKSPACE, type FakeBridge } from "./fixtures/bridge";
 import { expect, test, type Site } from "./fixtures/extension";
 
 const SECOND = "0192a5f0-7c1e-7d3a-9b1e-4f2a9c3d5e63";
 
 async function busy(bridge: FakeBridge, site: Site) {
   await bridge.wait((message) => message.type === "hello");
-  bridge.start({ extension: { path: "/Users/you/Library/Application Support/haarness/browser/chrome/Haarness for Chrome", version: "0.1.1-preview.1" } });
+  bridge.start({ extension: { path: "/Users/you/Library/Application Support/haarness/browser/chrome/Haarness for Chrome", version: VERSION } });
   bridge.attach();
   for (const path of ["/", "/pricing"]) {
     const url = site.origin + path;
@@ -157,7 +157,7 @@ test("popup and welcome errors show in the chosen language, and follow a change 
   // A project the bridge cannot reach says why, in the same language.
   bridge.send({
     type: "servers",
-    servers: [{ id: SERVER, workspace: WORKSPACE, name: "acme", version: "0.1.1-preview.1", state: "error", error: "restart this project's Haarness server" }],
+    servers: [{ id: SERVER, workspace: WORKSPACE, name: "acme", version: VERSION, state: "error", error: "restart this project's Haarness server" }],
   });
   const welcome = await openExtensionPage("welcome.html", { width: 1200, height: 900 });
   await expect(welcome.locator(".project-error")).toHaveText("このプロジェクトの Haarness サーバーを再起動してください。");
