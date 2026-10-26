@@ -717,7 +717,7 @@
         "type": "object"
       },
       "CloudChatAction": {
-        "description": "A chat is a root runtime thread inside a Cloud session. It shares files and compute,\nbut owns its conversation history. Chat operations never create or start a session.",
+        "description": "A chat is a root runtime thread inside a Cloud workspace. It shares files and compute,\nbut owns its conversation history. Chat operations never create or start a workspace.",
         "enum": [
           "list",
           "get",
@@ -786,10 +786,6 @@
               "null"
             ]
           },
-          "sessionId": {
-            "format": "uuid",
-            "type": "string"
-          },
           "timeoutSeconds": {
             "format": "int64",
             "minimum": 0,
@@ -816,11 +812,15 @@
               "boolean",
               "null"
             ]
+          },
+          "workspaceId": {
+            "format": "uuid",
+            "type": "string"
           }
         },
         "required": [
           "action",
-          "sessionId"
+          "workspaceId"
         ],
         "type": "object"
       },
@@ -907,17 +907,17 @@
               "null"
             ]
           },
-          "sessionId": {
-            "format": "uuid",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "version": {
             "format": "int64",
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "workspaceId": {
+            "format": "uuid",
+            "type": [
+              "string",
               "null"
             ]
           }
@@ -927,7 +927,7 @@
         ],
         "type": "object"
       },
-      "CloudSessionAction": {
+      "CloudWorkspaceAction": {
         "enum": [
           "list",
           "get",
@@ -946,11 +946,11 @@
         ],
         "type": "string"
       },
-      "CloudSessionInput": {
+      "CloudWorkspaceInput": {
         "additionalProperties": false,
         "properties": {
           "action": {
-            "$ref": "#/components/schemas/CloudSessionAction"
+            "$ref": "#/components/schemas/CloudWorkspaceAction"
           },
           "after": {
             "format": "int64",
@@ -1007,13 +1007,6 @@
               "null"
             ]
           },
-          "sessionId": {
-            "format": "uuid",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "start": {
             "type": [
               "boolean",
@@ -1058,6 +1051,13 @@
           "wait": {
             "type": [
               "boolean",
+              "null"
+            ]
+          },
+          "workspaceId": {
+            "format": "uuid",
+            "type": [
+              "string",
               "null"
             ]
           }
@@ -7877,15 +7877,15 @@
         ]
       }
     },
-    "/v1/cloud/sessions": {
+    "/v1/cloud/workspaces": {
       "post": {
-        "operationId": "cloud_sessions",
+        "operationId": "cloud_workspaces",
         "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CloudSessionInput"
+                "$ref": "#/components/schemas/CloudWorkspaceInput"
               }
             }
           },

@@ -231,9 +231,9 @@ def test_runtime_stream_renews_once_and_preserves_cursor(asynchronous, failure):
             async def async_attach(id):
                 return attach(id)
 
-            cloud.attach_agent_session = async_attach
-            session = cloud.session("session")
-            runtime = await session.connect()
+            cloud.attach_workspace = async_attach
+            workspace = cloud.workspace("workspace")
+            runtime = await workspace.connect()
             await runtime._http.aclose()
             runtime._http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
             stream = runtime.events(
@@ -248,13 +248,13 @@ def test_runtime_stream_renews_once_and_preserves_cursor(asynchronous, failure):
                 )
             finally:
                 await stream.aclose()
-                await session.close()
+                await workspace.close()
 
     def run_sync():
         with HaarnessCloud("http://localhost", token="account-secret") as cloud:
-            cloud.attach_agent_session = attach
-            session = cloud.session("session")
-            runtime = session.connect()
+            cloud.attach_workspace = attach
+            workspace = cloud.workspace("workspace")
+            runtime = workspace.connect()
             runtime._http.close()
             runtime._http = httpx.Client(transport=httpx.MockTransport(respond))
             stream = runtime.events(
@@ -269,7 +269,7 @@ def test_runtime_stream_renews_once_and_preserves_cursor(asynchronous, failure):
                 )
             finally:
                 stream.close()
-                session.close()
+                workspace.close()
 
     if failure == "denied":
         with pytest.raises(ApiError):
@@ -304,13 +304,13 @@ def test_concurrent_chat_connections_share_one_runtime_client(asynchronous):
                 await asyncio.sleep(0.02)
                 return ticket
 
-            cloud.attach_agent_session = attach
-            session = cloud.session("session")
+            cloud.attach_workspace = attach
+            workspace = cloud.workspace("workspace")
             try:
-                clients = await asyncio.gather(*(session.connect() for _ in range(8)))
+                clients = await asyncio.gather(*(workspace.connect() for _ in range(8)))
                 assert all(client is clients[0] for client in clients)
             finally:
-                await session.close()
+                await workspace.close()
 
     if asynchronous:
         asyncio.run(run())
@@ -322,15 +322,15 @@ def test_concurrent_chat_connections_share_one_runtime_client(asynchronous):
                 time.sleep(0.02)
                 return ticket
 
-            cloud.attach_agent_session = attach
-            session = cloud.session("session")
+            cloud.attach_workspace = attach
+            workspace = cloud.workspace("workspace")
             try:
                 with ThreadPoolExecutor(8) as pool:
-                    clients = list(pool.map(lambda _: session.connect(), range(8)))
+                    clients = list(pool.map(lambda _: workspace.connect(), range(8)))
                 assert all(client is clients[0] for client in clients)
             finally:
-                session.close()
-    assert calls == ["session"]
+                workspace.close()
+    assert calls == ["workspace"]
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_unified_key_env_precedence_and_explicit_override(monkeypatch, asynchronous):
@@ -379,7 +379,7 @@ def test_remote_project_auth_refresh_and_close(asynchronous, monkeypatch):
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_a_session_runtime_keeps_the_cloud_clients_timeout(asynchronous):
+def test_a_workspace_runtime_keeps_the_cloud_clients_timeout(asynchronous):
     ticket = {
         "gatewayUrl": "http://localhost/runtime",
         "ticket": "runtime",
@@ -392,27 +392,27 @@ def test_a_session_runtime_keeps_the_cloud_clients_timeout(asynchronous):
             async def attach(id):
                 return ticket
 
-            cloud.attach_agent_session = attach
-            session = cloud.session("session")
+            cloud.attach_workspace = attach
+            workspace = cloud.workspace("workspace")
             try:
-                assert (await session.connect())._timeout == 77
+                assert (await workspace.connect())._timeout == 77
             finally:
-                await session.close()
+                await workspace.close()
 
     if asynchronous:
         asyncio.run(run())
     else:
         with HaarnessCloud("http://localhost", token="account", timeout=77) as cloud:
-            cloud.attach_agent_session = lambda id: ticket
-            session = cloud.session("session")
+            cloud.attach_workspace = lambda id: ticket
+            workspace = cloud.workspace("workspace")
             try:
-                assert session.connect()._timeout == 77
+                assert workspace.connect()._timeout == 77
             finally:
-                session.close()
+                workspace.close()
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_the_cloud_address_defaults_like_the_cli_and_create_session_keeps_the_launch(monkeypatch, asynchronous):
+def test_the_cloud_address_defaults_like_the_cli_and_new_workspace_keeps_the_launch(monkeypatch, asynchronous):
     kind = AsyncHaarnessCloud if asynchronous else HaarnessCloud
     monkeypatch.delenv("HAARNESS_CLOUD_API_URL", raising=False)
     assert kind(token="account").base_url == "https://haarness.ai"
@@ -420,17 +420,17 @@ def test_the_cloud_address_defaults_like_the_cli_and_create_session_keeps_the_la
     assert kind(token="account").base_url == "http://127.0.0.1:18080"
     assert kind("https://staging.haarness.ai", token="account").base_url == "https://staging.haarness.ai"
 
-    created = {"operation": {"id": "op"}, "session": {"id": "session", "launch": {"chatId": "chat-1"}}}
+    created = {"operation": {"id": "op"}, "workspace": {"id": "workspace", "launch": {"chatId": "chat-1"}}}
     cloud = kind("http://localhost", token="account")
     if asynchronous:
 
         async def create(body, options=None):
             return created
 
-        cloud.create_agent_session = create
-        session = asyncio.run(cloud.create_session({"title": "Launch", "initialPrompt": {"text": "hello"}}))
+        cloud.create_workspace = create
+        workspace = asyncio.run(cloud.new_workspace({"title": "Launch", "initialPrompt": {"text": "hello"}}))
     else:
-        cloud.create_agent_session = lambda body, options=None: created
-        session = cloud.create_session({"title": "Launch", "initialPrompt": {"text": "hello"}})
-    assert session.id == "session"
-    assert session.created["session"]["launch"]["chatId"] == "chat-1"
+        cloud.create_workspace = lambda body, options=None: created
+        workspace = cloud.new_workspace({"title": "Launch", "initialPrompt": {"text": "hello"}})
+    assert workspace.id == "workspace"
+    assert workspace.created["workspace"]["launch"]["chatId"] == "chat-1"

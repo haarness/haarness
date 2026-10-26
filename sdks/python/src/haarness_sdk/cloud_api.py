@@ -535,42 +535,6 @@ class CloudApi(Transport):
         """GET /api/v1/schedules/{id}/runs."""
         return cast("T.Page_CloudScheduleRunDto", self.request('GET', f'/api/v1/schedules/{self.segment(id)}/runs', query=query, binary_body=False, binary_response=False, options=options))
 
-    def list_agent_sessions(self, query: T.ListAgentSessionsQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_AgentSessionDto:
-        """GET /api/v1/sessions."""
-        return cast("T.Page_AgentSessionDto", self.request('GET', f'/api/v1/sessions', query=query, binary_body=False, binary_response=False, options=options))
-
-    def create_agent_session(self, body: T.CreateAgentSessionRequest, *, options: RequestOptions | None = None) -> T.AgentSessionCreatedResponse:
-        """POST /api/v1/sessions."""
-        return cast("T.AgentSessionCreatedResponse", self.request('POST', f'/api/v1/sessions', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
-
-    def get_agent_session(self, id: str, *, options: RequestOptions | None = None) -> T.AgentSessionDto:
-        """GET /api/v1/sessions/{id}."""
-        return cast("T.AgentSessionDto", self.request('GET', f'/api/v1/sessions/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
-
-    def delete_agent_session(self, id: str, *, options: RequestOptions | None = None) -> T.WorkspaceOperationResponse:
-        """DELETE /api/v1/sessions/{id}."""
-        return cast("T.WorkspaceOperationResponse", self.request('DELETE', f'/api/v1/sessions/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
-
-    def update_agent_session(self, id: str, body: T.UpdateAgentSessionRequest, *, options: RequestOptions | None = None) -> T.AgentSessionDto:
-        """PATCH /api/v1/sessions/{id}."""
-        return cast("T.AgentSessionDto", self.request('PATCH', f'/api/v1/sessions/{self.segment(id)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
-
-    def attach_agent_session(self, id: str, *, options: RequestOptions | None = None) -> T.AttachResponse:
-        """POST /api/v1/sessions/{id}/attach."""
-        return cast("T.AttachResponse", self.request('POST', f'/api/v1/sessions/{self.segment(id)}/attach', binary_body=False, binary_response=False, options=options))
-
-    def save_session_agent(self, id: str, body: T.SaveSessionAgentRequest, *, options: RequestOptions | None = None) -> T.CloudAgentDto:
-        """POST /api/v1/sessions/{id}/save-agent."""
-        return cast("T.CloudAgentDto", self.request('POST', f'/api/v1/sessions/{self.segment(id)}/save-agent', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
-
-    def start_agent_session(self, id: str, *, options: RequestOptions | None = None) -> T.WorkspaceOperationResponse:
-        """POST /api/v1/sessions/{id}/start."""
-        return cast("T.WorkspaceOperationResponse", self.request('POST', f'/api/v1/sessions/{self.segment(id)}/start', binary_body=False, binary_response=False, options=options))
-
-    def stop_agent_session(self, id: str, *, options: RequestOptions | None = None) -> T.WorkspaceOperationResponse:
-        """POST /api/v1/sessions/{id}/stop."""
-        return cast("T.WorkspaceOperationResponse", self.request('POST', f'/api/v1/sessions/{self.segment(id)}/stop', binary_body=False, binary_response=False, options=options))
-
     def usage_summary(self, query: T.UsageSummaryQuery | None = None, *, options: RequestOptions | None = None) -> T.UsageSummaryResponse:
         """GET /api/v1/telemetry/usage."""
         return cast("T.UsageSummaryResponse", self.request('GET', f'/api/v1/telemetry/usage', query=query, binary_body=False, binary_response=False, options=options))
@@ -622,6 +586,10 @@ class CloudApi(Transport):
     def restore_workspace(self, id: str, body: T.RestoreRequest, *, options: RequestOptions | None = None) -> T.WorkspaceOperationResponse:
         """POST /api/v1/workspaces/{id}/restore."""
         return cast("T.WorkspaceOperationResponse", self.request('POST', f'/api/v1/workspaces/{self.segment(id)}/restore', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def save_workspace_agent(self, id: str, body: T.SaveWorkspaceAgentRequest, *, options: RequestOptions | None = None) -> T.CloudAgentDto:
+        """POST /api/v1/workspaces/{id}/save-agent."""
+        return cast("T.CloudAgentDto", self.request('POST', f'/api/v1/workspaces/{self.segment(id)}/save-agent', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     def list_snapshots(self, id: str, *, options: RequestOptions | None = None) -> T.Items_SnapshotDto:
         """GET /api/v1/workspaces/{id}/snapshots."""
@@ -1372,42 +1340,6 @@ class AsyncCloudApi(AsyncTransport):
         """GET /api/v1/schedules/{id}/runs."""
         return cast("T.Page_CloudScheduleRunDto", await self.request('GET', f'/api/v1/schedules/{self.segment(id)}/runs', query=query, binary_body=False, binary_response=False, options=options))
 
-    async def list_agent_sessions(self, query: T.ListAgentSessionsQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_AgentSessionDto:
-        """GET /api/v1/sessions."""
-        return cast("T.Page_AgentSessionDto", await self.request('GET', f'/api/v1/sessions', query=query, binary_body=False, binary_response=False, options=options))
-
-    async def create_agent_session(self, body: T.CreateAgentSessionRequest, *, options: RequestOptions | None = None) -> T.AgentSessionCreatedResponse:
-        """POST /api/v1/sessions."""
-        return cast("T.AgentSessionCreatedResponse", await self.request('POST', f'/api/v1/sessions', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
-
-    async def get_agent_session(self, id: str, *, options: RequestOptions | None = None) -> T.AgentSessionDto:
-        """GET /api/v1/sessions/{id}."""
-        return cast("T.AgentSessionDto", await self.request('GET', f'/api/v1/sessions/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
-
-    async def delete_agent_session(self, id: str, *, options: RequestOptions | None = None) -> T.WorkspaceOperationResponse:
-        """DELETE /api/v1/sessions/{id}."""
-        return cast("T.WorkspaceOperationResponse", await self.request('DELETE', f'/api/v1/sessions/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
-
-    async def update_agent_session(self, id: str, body: T.UpdateAgentSessionRequest, *, options: RequestOptions | None = None) -> T.AgentSessionDto:
-        """PATCH /api/v1/sessions/{id}."""
-        return cast("T.AgentSessionDto", await self.request('PATCH', f'/api/v1/sessions/{self.segment(id)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
-
-    async def attach_agent_session(self, id: str, *, options: RequestOptions | None = None) -> T.AttachResponse:
-        """POST /api/v1/sessions/{id}/attach."""
-        return cast("T.AttachResponse", await self.request('POST', f'/api/v1/sessions/{self.segment(id)}/attach', binary_body=False, binary_response=False, options=options))
-
-    async def save_session_agent(self, id: str, body: T.SaveSessionAgentRequest, *, options: RequestOptions | None = None) -> T.CloudAgentDto:
-        """POST /api/v1/sessions/{id}/save-agent."""
-        return cast("T.CloudAgentDto", await self.request('POST', f'/api/v1/sessions/{self.segment(id)}/save-agent', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
-
-    async def start_agent_session(self, id: str, *, options: RequestOptions | None = None) -> T.WorkspaceOperationResponse:
-        """POST /api/v1/sessions/{id}/start."""
-        return cast("T.WorkspaceOperationResponse", await self.request('POST', f'/api/v1/sessions/{self.segment(id)}/start', binary_body=False, binary_response=False, options=options))
-
-    async def stop_agent_session(self, id: str, *, options: RequestOptions | None = None) -> T.WorkspaceOperationResponse:
-        """POST /api/v1/sessions/{id}/stop."""
-        return cast("T.WorkspaceOperationResponse", await self.request('POST', f'/api/v1/sessions/{self.segment(id)}/stop', binary_body=False, binary_response=False, options=options))
-
     async def usage_summary(self, query: T.UsageSummaryQuery | None = None, *, options: RequestOptions | None = None) -> T.UsageSummaryResponse:
         """GET /api/v1/telemetry/usage."""
         return cast("T.UsageSummaryResponse", await self.request('GET', f'/api/v1/telemetry/usage', query=query, binary_body=False, binary_response=False, options=options))
@@ -1459,6 +1391,10 @@ class AsyncCloudApi(AsyncTransport):
     async def restore_workspace(self, id: str, body: T.RestoreRequest, *, options: RequestOptions | None = None) -> T.WorkspaceOperationResponse:
         """POST /api/v1/workspaces/{id}/restore."""
         return cast("T.WorkspaceOperationResponse", await self.request('POST', f'/api/v1/workspaces/{self.segment(id)}/restore', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def save_workspace_agent(self, id: str, body: T.SaveWorkspaceAgentRequest, *, options: RequestOptions | None = None) -> T.CloudAgentDto:
+        """POST /api/v1/workspaces/{id}/save-agent."""
+        return cast("T.CloudAgentDto", await self.request('POST', f'/api/v1/workspaces/{self.segment(id)}/save-agent', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     async def list_snapshots(self, id: str, *, options: RequestOptions | None = None) -> T.Items_SnapshotDto:
         """GET /api/v1/workspaces/{id}/snapshots."""

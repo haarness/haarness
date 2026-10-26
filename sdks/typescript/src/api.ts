@@ -10,9 +10,9 @@ export class Api extends Transport {
   cloudAgents(body: T.CloudAgentInput, options: RequestOptions = {}): Promise<T.JsonValue> {
     return this.request("POST", `/v1/cloud/agents`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
-  /** POST /v1/cloud/sessions */
-  cloudSessions(body: T.CloudSessionInput, options: RequestOptions = {}): Promise<T.JsonValue> {
-    return this.request("POST", `/v1/cloud/sessions`, { body, binaryBody: false, binaryResponse: false, ...options });
+  /** POST /v1/cloud/workspaces */
+  cloudWorkspaces(body: T.CloudWorkspaceInput, options: RequestOptions = {}): Promise<T.JsonValue> {
+    return this.request("POST", `/v1/cloud/workspaces`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /v1/cloud/chats */
   cloudChats(body: T.CloudChatInput, options: RequestOptions = {}): Promise<T.JsonValue> {

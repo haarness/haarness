@@ -538,42 +538,6 @@ export class CloudApi extends Transport {
   cloudScheduleRuns(id: string, query: T.CloudScheduleRunsQuery = {}, options: RequestOptions = {}): Promise<T.Page_CloudScheduleRunDto> {
     return this.request("GET", `/api/v1/schedules/${this.segment(id)}/runs`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
-  /** GET /api/v1/sessions */
-  listAgentSessions(query: T.ListAgentSessionsQuery = {}, options: RequestOptions = {}): Promise<T.Page_AgentSessionDto> {
-    return this.request("GET", `/api/v1/sessions`, { query, binaryBody: false, binaryResponse: false, ...options });
-  }
-  /** POST /api/v1/sessions */
-  createAgentSession(body: T.CreateAgentSessionRequest, options: RequestOptions = {}): Promise<T.AgentSessionCreatedResponse> {
-    return this.request("POST", `/api/v1/sessions`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
-  }
-  /** GET /api/v1/sessions/{id} */
-  getAgentSession(id: string, options: RequestOptions = {}): Promise<T.AgentSessionDto> {
-    return this.request("GET", `/api/v1/sessions/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
-  }
-  /** DELETE /api/v1/sessions/{id} */
-  deleteAgentSession(id: string, options: RequestOptions = {}): Promise<T.WorkspaceOperationResponse> {
-    return this.request("DELETE", `/api/v1/sessions/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
-  }
-  /** PATCH /api/v1/sessions/{id} */
-  updateAgentSession(id: string, body: T.UpdateAgentSessionRequest, options: RequestOptions = {}): Promise<T.AgentSessionDto> {
-    return this.request("PATCH", `/api/v1/sessions/${this.segment(id)}`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
-  }
-  /** POST /api/v1/sessions/{id}/attach */
-  attachAgentSession(id: string, options: RequestOptions = {}): Promise<T.AttachResponse> {
-    return this.request("POST", `/api/v1/sessions/${this.segment(id)}/attach`, { binaryBody: false, binaryResponse: false, ...options });
-  }
-  /** POST /api/v1/sessions/{id}/save-agent */
-  saveSessionAgent(id: string, body: T.SaveSessionAgentRequest, options: RequestOptions = {}): Promise<T.CloudAgentDto> {
-    return this.request("POST", `/api/v1/sessions/${this.segment(id)}/save-agent`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
-  }
-  /** POST /api/v1/sessions/{id}/start */
-  startAgentSession(id: string, options: RequestOptions = {}): Promise<T.WorkspaceOperationResponse> {
-    return this.request("POST", `/api/v1/sessions/${this.segment(id)}/start`, { binaryBody: false, binaryResponse: false, ...options });
-  }
-  /** POST /api/v1/sessions/{id}/stop */
-  stopAgentSession(id: string, options: RequestOptions = {}): Promise<T.WorkspaceOperationResponse> {
-    return this.request("POST", `/api/v1/sessions/${this.segment(id)}/stop`, { binaryBody: false, binaryResponse: false, ...options });
-  }
   /** GET /api/v1/telemetry/usage */
   usageSummary(query: T.UsageSummaryQuery = {}, options: RequestOptions = {}): Promise<T.UsageSummaryResponse> {
     return this.request("GET", `/api/v1/telemetry/usage`, { query, binaryBody: false, binaryResponse: false, ...options });
@@ -625,6 +589,10 @@ export class CloudApi extends Transport {
   /** POST /api/v1/workspaces/{id}/restore */
   restoreWorkspace(id: string, body: T.RestoreRequest, options: RequestOptions = {}): Promise<T.WorkspaceOperationResponse> {
     return this.request("POST", `/api/v1/workspaces/${this.segment(id)}/restore`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/workspaces/{id}/save-agent */
+  saveWorkspaceAgent(id: string, body: T.SaveWorkspaceAgentRequest, options: RequestOptions = {}): Promise<T.CloudAgentDto> {
+    return this.request("POST", `/api/v1/workspaces/${this.segment(id)}/save-agent`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/workspaces/{id}/snapshots */
   listSnapshots(id: string, options: RequestOptions = {}): Promise<T.Items_SnapshotDto> {

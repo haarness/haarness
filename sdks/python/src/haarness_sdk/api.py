@@ -11,9 +11,9 @@ class Api(Transport):
         """POST /v1/cloud/agents."""
         return cast("T.JsonValue", self.request('POST', f'/v1/cloud/agents', body=body, binary_body=False, binary_response=False, options=options))
 
-    def cloud_sessions(self, body: T.CloudSessionInput, *, options: RequestOptions | None = None) -> T.JsonValue:
-        """POST /v1/cloud/sessions."""
-        return cast("T.JsonValue", self.request('POST', f'/v1/cloud/sessions', body=body, binary_body=False, binary_response=False, options=options))
+    def cloud_workspaces(self, body: T.CloudWorkspaceInput, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/cloud/workspaces."""
+        return cast("T.JsonValue", self.request('POST', f'/v1/cloud/workspaces', body=body, binary_body=False, binary_response=False, options=options))
 
     def cloud_chats(self, body: T.CloudChatInput, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/cloud/chats."""
@@ -516,9 +516,9 @@ class AsyncApi(AsyncTransport):
         """POST /v1/cloud/agents."""
         return cast("T.JsonValue", await self.request('POST', f'/v1/cloud/agents', body=body, binary_body=False, binary_response=False, options=options))
 
-    async def cloud_sessions(self, body: T.CloudSessionInput, *, options: RequestOptions | None = None) -> T.JsonValue:
-        """POST /v1/cloud/sessions."""
-        return cast("T.JsonValue", await self.request('POST', f'/v1/cloud/sessions', body=body, binary_body=False, binary_response=False, options=options))
+    async def cloud_workspaces(self, body: T.CloudWorkspaceInput, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/cloud/workspaces."""
+        return cast("T.JsonValue", await self.request('POST', f'/v1/cloud/workspaces', body=body, binary_body=False, binary_response=False, options=options))
 
     async def cloud_chats(self, body: T.CloudChatInput, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/cloud/chats."""

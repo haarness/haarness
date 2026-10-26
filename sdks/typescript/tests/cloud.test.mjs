@@ -167,7 +167,7 @@ test("runtime attachment has one bearer and renews on a flat generation error", 
     restarted = false;
   const auth = [];
   const server = createServer((req, res) => {
-    if (req.url === "/api/v1/sessions/session/attach") {
+    if (req.url === "/api/v1/workspaces/workspace/attach") {
       assert.equal(req.headers.authorization, "Bearer account-fixture");
       tickets++;
       res.setHeader("Content-Type", "application/json");
@@ -204,9 +204,9 @@ test("runtime attachment has one bearer and renews on a flat generation error", 
     baseUrl: `http://127.0.0.1:${server.address().port}`,
     token: "account-fixture",
   });
-  const session = client.session("session");
+  const workspace = client.workspace("workspace");
   try {
-    const runtime = await session.connect();
+    const runtime = await workspace.connect();
     await runtime.info();
     restarted = true;
     await runtime.info();
@@ -217,7 +217,7 @@ test("runtime attachment has one bearer and renews on a flat generation error", 
     ]);
     assert.equal(tickets, 2);
   } finally {
-    await session.close();
+    await workspace.close();
     client.close();
     await new Promise((resolve) => server.close(resolve));
   }
@@ -253,32 +253,32 @@ test("remote host and project adapters resolve current Cloud auth and never repl
   client.close();await assert.rejects(project.info());assert.equal(seen.length,4);host.close();project.close();shared.close();
 });
 
-test("a session's runtime and a host workspace use the client's own fetch and timeout", async () => {
+test("a workspace's runtime and a host workspace use the client's own fetch and timeout", async () => {
   const seen = [];
   const reply = (body) => new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
   const fetcher = async (input) => {
     const url = String(input instanceof Request ? input.url : input);
     seen.push(new URL(url).pathname);
-    if (url.endsWith("/api/v1/sessions/session/attach"))
+    if (url.endsWith("/api/v1/workspaces/workspace/attach"))
       return reply({ gatewayUrl: "http://127.0.0.1:9/runtime", ticket: "ticket", expiresAt: new Date(Date.now() + 3600000).toISOString() });
     if (url.endsWith("/runtime/v1/info")) return reply({ name: "haarness" });
     return new Response("{}", { status: 404 });
   };
   const cloud = new HaarnessCloud({ baseUrl: "http://127.0.0.1:9", token: "account", fetch: fetcher, timeoutMs: 1234 });
-  const session = cloud.session("session");
+  const workspace = cloud.workspace("workspace");
   try {
-    const runtime = await session.connect();
+    const runtime = await workspace.connect();
     assert.equal(runtime.timeoutMs, 1234);
     assert.deepEqual(await runtime.info(), { name: "haarness" });
-    assert.deepEqual(seen, ["/api/v1/sessions/session/attach", "/runtime/v1/info"], "no request bypasses the given fetch");
+    assert.deepEqual(seen, ["/api/v1/workspaces/workspace/attach", "/runtime/v1/info"], "no request bypasses the given fetch");
     const host = cloud.remoteHost("host");
     assert.equal(host.workspace("project").timeoutMs, 1234);
   } finally {
-    await session.close();
+    await workspace.close();
   }
 });
 
-test("the Cloud address defaults like the CLI's, and createSession keeps where the first message goes", async () => {
+test("the Cloud address defaults like the CLI's, and newWorkspace keeps where the first message goes", async () => {
   const saved = process.env.HAARNESS_CLOUD_API_URL;
   try {
     delete process.env.HAARNESS_CLOUD_API_URL;
@@ -290,13 +290,13 @@ test("the Cloud address defaults like the CLI's, and createSession keeps where t
     if (saved === undefined) delete process.env.HAARNESS_CLOUD_API_URL;
     else process.env.HAARNESS_CLOUD_API_URL = saved;
   }
-  const created = { operation: { id: "op" }, session: { id: "session", launch: { chatId: "chat-1", status: "pending" } } };
+  const created = { operation: { id: "op" }, workspace: { id: "workspace", launch: { chatId: "chat-1", status: "pending" } } };
   const cloud = new HaarnessCloud({
     baseUrl: "http://127.0.0.1:9",
     token: "account",
     fetch: async () => new Response(JSON.stringify(created), { headers: { "Content-Type": "application/json" } }),
   });
-  const session = await cloud.createSession({ title: "Launch", initialPrompt: { text: "hello" } });
-  assert.equal(session.id, "session");
-  assert.equal(session.created.session.launch.chatId, "chat-1");
+  const workspace = await cloud.newWorkspace({ title: "Launch", initialPrompt: { text: "hello" } });
+  assert.equal(workspace.id, "workspace");
+  assert.equal(workspace.created.workspace.launch.chatId, "chat-1");
 });

@@ -102,19 +102,19 @@ existing `token` option remains compatible.
 (`HAARNESS_API_KEY`, which wins) or an account token (`HAARNESS_CLOUD_TOKEN`),
 separately from runtime tokens. With no `base_url` it uses `HAARNESS_CLOUD_API_URL`,
 else `https://haarness.ai`, as the CLI does. `AsyncHaarnessCloud` is the async form.
-Select `session(session_id)`, or `create_session({"title": …, "initialPrompt": …})`,
-whose handle keeps the response in `created`; then `session.chats` for root chat
-handles with independent history and shared files. Connect the session to access
-the complete native API with the client's timeout. Sessions sleep (`stop`) and wake
+Select `workspace(workspace_id)`, or `new_workspace({"title": …, "initialPrompt": …})`,
+whose handle keeps the response in `created`; then `workspace.chats` for root chat
+handles with independent history and shared files. Connect the workspace to access
+the complete native API with the client's timeout. Workspaces sleep (`stop`) and wake
 (`start`) and have no archive. Cloud account updates use authenticated WebSockets;
 chat/turn updates use runtime SSE. A failed `LocalServer.start` reports the reason
 the server printed, and `chat()` keeps its five-minute wait whatever other options
 you pass.
 
 Cloud schedule CRUD, pause/resume, run-now and history are generated methods.
-Schedules target a session and chat and run on the Cloud worker with the laptop
+Schedules target a workspace and chat and run on the Cloud worker with the laptop
 off. They differ from the device-local `schedule` tool. Closing a client only
-detaches; explicitly stop or delete sessions to release compute. The repository's
+detaches; explicitly stop or delete workspaces to release compute. The repository's
 `sdks/README.md` contains complete examples, authentication and lifecycle details,
 and `CLOUD-OPERATIONS.md` inventories every Cloud method.
 
@@ -127,5 +127,5 @@ manage other keys: creation, update, rotation and revocation require an owner/ad
 The generated API includes key list/create/update/rotate/revoke and self-context methods.
 Grant `models:read` for discovery, `models:invoke` for inference, and appropriate `workspaces`,
 `schedules`, `marketplace` or `billing:read` permissions for Cloud calls. An attach capability
-authorizes full runtime chats, files, terminal and settings in sessions in the key's account.
+authorizes full runtime chats, files, terminal and settings in workspaces in the key's account.
 Expired or revoked keys fail; SDKs never implicitly replace them with OAuth credentials.
