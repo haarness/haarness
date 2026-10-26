@@ -85,23 +85,23 @@ test("multiple remote folders share a saved server without sharing project or co
   );
 });
 
-test("Cloud sessions of one account form one Haarness Cloud server, never a saved gateway", () => {
-  const session = (id: string, account = "acct-1"): Recent => ({
+test("Cloud workspaces of one account form one Haarness Cloud server, never a saved gateway", () => {
+  const workspace = (id: string, account = "acct-1"): Recent => ({
     ...local,
-    id: `cloud-session:https://api.example/:${account}:${id}`,
-    label: "Session " + id,
+    id: `cloud:https://api.example/:${account}:${id}`,
+    label: "Workspace " + id,
     remote: true,
     url: `https://gateway.example/ws/${id}`,
-    cloudSession: id,
+    cloudWorkspace: id,
     cloudAccount: account,
     cloudApiUrl: "https://api.example/",
   });
-  const recent = [local, remote, session("a"), session("b"), session("c", "acct-2")];
-  const key = serverKey(session("a"));
+  const recent = [local, remote, workspace("a"), workspace("b"), workspace("c", "acct-2")];
+  const key = serverKey(workspace("a"));
   assert.equal(key, "cloud:https://api.example/:acct-1");
-  assert.equal(serverKey(session("b")), key);
+  assert.equal(serverKey(workspace("b")), key);
   assert.deepEqual(
-    serverProjects(recent, key).map((item) => item.cloudSession),
+    serverProjects(recent, key).map((item) => item.cloudWorkspace),
     ["a", "b"],
   );
   assert.deepEqual(cloudServers(recent), [
@@ -109,7 +109,7 @@ test("Cloud sessions of one account form one Haarness Cloud server, never a save
     { id: "cloud:https://api.example/:acct-2", label: "Haarness Cloud", cloud: true },
   ]);
   // A gateway saved by an earlier version disappears; real servers stay.
-  const stale = { id: "remote:https://gateway.example", label: "Session a", url: "https://gateway.example" };
+  const stale = { id: "remote:https://gateway.example", label: "Workspace a", url: "https://gateway.example" };
   assert.deepEqual(migrateServers(recent, [stale]), [
     { id: remote.id, label: "Build server", url: "https://one.example" },
   ]);
@@ -125,7 +125,7 @@ test("a window leaving a removed project stays on its server while it is listed,
   );
 });
 
-test("each of your other computers is a server of its own, apart from Cloud sessions and saved servers", () => {
+test("each of your other computers is a server of its own, apart from Cloud workspaces and saved servers", () => {
   const project = (host: string, workspace: string): Recent => ({
     ...local,
     id: `host:${host}/workspaces/${workspace}`,

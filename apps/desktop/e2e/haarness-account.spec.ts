@@ -83,7 +83,7 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
       dialog.getByRole("button", { name: "Sign out", exact: true }),
     ).toBeVisible();
     await expect(
-      dialog.getByText("Cloud sessions", { exact: true }),
+      dialog.getByText("Cloud workspaces", { exact: true }),
     ).toBeVisible();
     await expect(dialog.getByRole("alert")).toHaveCount(0);
     const connection = await page.evaluate(
@@ -315,7 +315,7 @@ test("unified API key connects Desktop with its actual capabilities", async () =
     await expect(dialog.getByText(/Connected with HAARNESS_API_KEY/)).toBeVisible();
     await expect(dialog.getByRole("button",{name:"Sign out",exact:true})).toHaveCount(0);
     const canRead=status.scopes.includes("workspaces:read"),canBill=status.scopes.includes("billing:read");
-    await expect(dialog.getByRole("heading",{name:"Cloud sessions",exact:true})).toHaveCount(canRead?1:0);
+    await expect(dialog.getByRole("heading",{name:"Cloud workspaces",exact:true})).toHaveCount(canRead?1:0);
     if(canBill)await expect(dialog.getByTestId("included-credits")).toBeVisible();
     else await expect(dialog.getByText("This API key does not include billing access.",{exact:true})).toBeVisible();
     await expect(dialog.getByRole("alert")).toHaveCount(0);

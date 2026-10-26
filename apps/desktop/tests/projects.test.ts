@@ -6,6 +6,7 @@ import {
   cleanProjectMeta,
   groupProjects,
   mergeProjectCatalog,
+  migrateCloudSessions,
   migrateProjectPresentation,
   migrateProjectlessLocations,
   primaryLocation,
@@ -270,6 +271,25 @@ test("legacy chats become ordinary projects without changing identity or trust",
   assert.equal(groups[0].label, "app");
   assert.equal(groups[0].locations[0].id, chats.id);
   assert.equal(migrateProjectlessLocations(migrated), migrated);
+});
+
+test("projects saved as Cloud sessions keep their ID and open by their workspace", () => {
+  const saved = {
+    ...recent("/workspace"),
+    id: "cloud-session:https://api.example/:account:session-id",
+    remote: true,
+    cloudSession: "session-id",
+    cloudWorkspace: "workspace-id",
+  };
+  const [migrated] = migrateCloudSessions([saved]);
+  assert.equal("cloudSession" in migrated, false);
+  assert.equal(migrated.id, saved.id);
+  assert.equal(migrated.cloudWorkspace, "workspace-id");
+  // One saved before it knew its workspace opens by the old ID, which Cloud still accepts.
+  const [older] = migrateCloudSessions([{ ...saved, cloudWorkspace: undefined }]);
+  assert.equal(older.cloudWorkspace, "session-id");
+  const current = [recent("/code/app")];
+  assert.equal(migrateCloudSessions(current), current);
 });
 
 test("the chat home is never a project, and the catalog leaves it as it is", () => {

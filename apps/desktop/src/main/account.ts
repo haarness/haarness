@@ -142,20 +142,19 @@ export async function accountLogin(
 /** Only main holds tickets. Saved projects contain identifiers, never credentials. */
 export async function connectCloud(
   workspace: string,
-  expected?: { cloudAccount?: string; cloudApiUrl?: string },
-  session = false,
+  expected?: { id?: string; cloudAccount?: string; cloudApiUrl?: string },
 ): Promise<Connection> {
   const status = await accountRequest({ action: "status" });
   if (!status.loggedIn)
-    throw new Error("Sign in to Haarness to open this session.");
+    throw new Error("Sign in to Haarness to open this workspace.");
   if (
     expected?.cloudAccount &&
     (expected.cloudAccount !== status.selectedAccountId ||
       expected.cloudApiUrl !== status.apiUrl)
   )
-    throw new Error("Switch to this session’s Haarness account to open it.");
-  const metadata = session ? await accountRequest({ action: "session", id: workspace }) : undefined;
-  const attachAction = session ? "session-attach" : "attach";
+    throw new Error("Switch to this workspace’s Haarness account to open it.");
+  const metadata = await accountRequest({ action: "workspace", id: workspace });
+  const attachAction = "workspace-attach";
   let ticket = await accountRequest({ action: attachAction, id: workspace });
   let pending: Promise<void> | undefined;
   const resolveAuth = async (): Promise<ServerAuth> => {
@@ -179,8 +178,11 @@ export async function connectCloud(
       ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
     )
   )
-    throw new Error("Cloud sessions require HTTPS.");
-  const id = `${session ? "cloud-session" : "cloud"}:${status.apiUrl}:${status.selectedAccountId}:${workspace}`;
+    throw new Error("Cloud workspaces require HTTPS.");
+  // A saved workspace keeps the ID it was saved under (projects opened as
+  // Cloud sessions before the rename say `cloud-session:`), so its chats'
+  // drafts and layout stay with it.
+  const id = expected?.id ?? `cloud:${status.apiUrl}:${status.selectedAccountId}:${metadata.id ?? workspace}`;
   const client = new Haarness({
     baseUrl: url.href,
     resolveAuth,
@@ -188,16 +190,15 @@ export async function connectCloud(
   });
   const info = await client.info();
   // A captured template supplies the default during rolling upgrades of older runtimes.
-  if (metadata?.agentSnapshot && !info.defaultAgent) info.defaultAgent = "cloud-agent";
+  if (metadata.agentSnapshot && !info.defaultAgent) info.defaultAgent = "cloud-agent";
   const view: Connection = {
     id,
-    label: metadata?.title ?? "Cloud session",
+    label: metadata.title ?? "Cloud workspace",
     workspace: String(info.workspace),
     remote: true,
     trust: false,
     url: url.href,
-    cloudWorkspace: metadata?.workspace.id ?? workspace,
-    ...(session ? { cloudSession: workspace } : {}),
+    cloudWorkspace: metadata.id ?? workspace,
     cloudAccount: status.selectedAccountId,
     cloudApiUrl: status.apiUrl,
     info,
@@ -208,7 +209,7 @@ export async function connectCloud(
   return view;
 }
 
-/** After a sign-out or an account switch: Cloud sessions and your other
+/** After a sign-out or an account switch: Cloud workspaces and your other
  * computers were reached with the account that just changed. Returns the
  * connections closed. */
 export function closeCloudConnections() {

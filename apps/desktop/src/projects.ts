@@ -20,6 +20,22 @@ export function migrateProjectlessLocations(
   return recent.map(({ projectless: _legacy, ...location }) => location);
 }
 
+/**
+ * Cloud workspaces were Cloud sessions, saved with the session's ID as
+ * `cloudSession` and their workspace's ID as `cloudWorkspace`. The workspace
+ * ID is the one ID now, and Cloud still answers to the old one.
+ */
+export function migrateCloudSessions(
+  recent: (Recent & { cloudSession?: string })[],
+): Recent[] {
+  if (!recent.some((item) => "cloudSession" in item)) return recent;
+  return recent.map(({ cloudSession, ...location }) =>
+    cloudSession && !location.cloudWorkspace
+      ? { ...location, cloudWorkspace: cloudSession }
+      : location,
+  );
+}
+
 export const projectKey = (location: ProjectLocation & { id: string }) =>
   location.project?.id ?? location.id;
 /** The saved locations that are projects: all but the chat home, whose

@@ -801,7 +801,7 @@ function Servers() {
             description={
               item.url ??
               (item.cloud
-                ? "Cloud sessions in your Haarness account"
+                ? "Cloud workspaces in your Haarness account"
                 : "Local projects on this computer")
             }
           >

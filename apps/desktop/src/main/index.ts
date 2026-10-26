@@ -431,7 +431,7 @@ function quietOtherComputers() {
     }
   }
 }
-/** After a sign-out or an account switch: Cloud sessions and your other
+/** After a sign-out or an account switch: Cloud workspaces and your other
  * computers were reached with the account that changed. Returns the projects
  * that closed. */
 function closeCloud() {
@@ -821,7 +821,7 @@ function installHandlers() {
     return data().values[key] ?? null;
   });
   handle("account", async (win, raw: unknown) => {
-    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "routers", "select-router", "workspaces", "create", "start", "stop", "agents", "sessions", "create-session", "session-start", "session-stop", "billing", "billing-state", "usage", "web", "remote-hosts"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "sessions", "session-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
+    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "routers", "select-router", "agents", "workspaces", "workspace", "create-workspace", "workspace-start", "workspace-stop", "billing", "billing-state", "usage", "web", "remote-hosts"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "workspaces", "workspace-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
     if (input.action === "billing-state") return billingState();
     if (input.action === "cancel") { cancelAccountLogin(); return null; }
     const closed: string[] = [];
@@ -850,7 +850,6 @@ function installHandlers() {
       .object({
         workspace: z.string().optional(),
         cloudWorkspace: z.string().uuid().optional(),
-        cloudSession: z.string().uuid().optional(),
         remoteHost: z.string().uuid().optional(),
         remoteWorkspace: z.string().min(1).max(200).optional(),
         url: z.string().optional(),
@@ -880,7 +879,6 @@ function installHandlers() {
         /^[\\/]{2}/.test(input.workspace) ||
         input.url ||
         input.recent ||
-        input.cloudSession ||
         input.cloudWorkspace ||
         input.remoteHost)
     )
@@ -890,10 +888,14 @@ function installHandlers() {
       : undefined;
     if (input.recent && !recent) throw new Error("Saved project was not found");
     const remoteHost = input.remoteHost ?? recent?.remoteHost;
-    const cloudSession = input.cloudSession ?? recent?.cloudSession;
     const cloudWorkspace = input.cloudWorkspace ?? recent?.cloudWorkspace;
-    if (!remoteHost && (cloudSession || cloudWorkspace)) {
-      const view = await connectCloud((cloudSession ?? cloudWorkspace)!, recent, !!cloudSession);
+    if (!remoteHost && cloudWorkspace) {
+      // Opened from the account dialog, a workspace already in the sidebar
+      // is the same project, not a second one.
+      const saved =
+        recent ??
+        data().recent.find((item) => !item.remoteHost && item.cloudWorkspace === cloudWorkspace);
+      const view = await connectCloud(cloudWorkspace, saved);
       // Removed from the sidebar while it connected: it stays removed.
       const kept = await rememberConnected({
         recent: () => data().recent,

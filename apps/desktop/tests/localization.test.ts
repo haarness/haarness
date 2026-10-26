@@ -201,12 +201,12 @@ test("keys translated through a variable are in the catalog", () => {
     "No commands yet", "Save a prompt you use often, then run it with /name.",
     "Skills are instructions and files an agent loads when a task calls for them.",
     "No skills yet", "Teach Haarness a workflow once, and it will use it whenever it fits.",
-    // Cloud session and subscription states in the account dialog.
+    // Cloud workspace and subscription states in the account dialog.
     "Preparing…", "Starting…", "Running", "Stopping…", "Stopped", "Failed", "Deleting…",
     "Active", "Trial", "Payment due", "Canceled", "Incomplete", "Paused",
     // Server switcher labels and Servers settings descriptions.
-    "Haarness Cloud", "Cloud sessions", "Local projects",
-    "Cloud sessions in your Haarness account", "Local projects on this computer",
+    "Haarness Cloud", "Cloud workspaces", "Local projects",
+    "Cloud workspaces in your Haarness account", "Local projects on this computer",
     // The palette's count picks its singular or plural key.
     "{count} result",
     // Settings → Tools names the catalog's tool groups (`classify` in

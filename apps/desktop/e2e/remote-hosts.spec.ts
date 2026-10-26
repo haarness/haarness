@@ -26,7 +26,7 @@ const away = "6a0c1b2e-0000-4000-8000-000000000002";
 const self = "6a0c1b2e-0000-4000-8000-000000000003";
 const shared = "6a0c1b2e-0000-4000-8000-000000000004";
 const otherAccount = "00000000-0000-4000-8000-00000000c002";
-const session = "6a0c1b2e-0000-4000-8000-0000000000c5";
+const cloudWorkspace = "6a0c1b2e-0000-4000-8000-0000000000c5";
 
 async function shoot(page: Page, name: string, theme?: "light" | "dark") {
   if (!shots) return;
@@ -65,12 +65,12 @@ async function fakeCloud(gateway: { url: string; token: string }) {
         ],
         defaultAccountId: account,
       });
-    // A Cloud session: its ticket and its gateway, which wants the ticket.
-    if (url.pathname === `/api/v1/sessions/${session}`)
-      return json(response, 200, { id: session, title: "Fake session", workspace: { id: session } });
-    if (url.pathname === `/api/v1/sessions/${session}/attach`)
-      return json(response, 200, { ticket: "ticket-1", gatewayUrl: `http://${request.headers.host}/gateway/${session}`, expiresAt: new Date(Date.now() + 600_000).toISOString() });
-    const gatewayPath = url.pathname.startsWith(`/gateway/${session}/`) ? url.pathname.slice(`/gateway/${session}`.length) : undefined;
+    // A Cloud workspace: its ticket and its gateway, which wants the ticket.
+    if (url.pathname === `/api/v1/workspaces/${cloudWorkspace}`)
+      return json(response, 200, { id: cloudWorkspace, title: "Fake workspace", observedState: "running" });
+    if (url.pathname === `/api/v1/workspaces/${cloudWorkspace}/attach`)
+      return json(response, 200, { ticket: "ticket-1", gatewayUrl: `http://${request.headers.host}/gateway/${cloudWorkspace}`, expiresAt: new Date(Date.now() + 600_000).toISOString() });
+    const gatewayPath = url.pathname.startsWith(`/gateway/${cloudWorkspace}/`) ? url.pathname.slice(`/gateway/${cloudWorkspace}`.length) : undefined;
     if (gatewayPath && request.headers.authorization !== "Bearer ticket-1")
       return json(response, 401, { error: { code: "unauthorized", message: "Missing ticket" } });
     if (url.pathname === "/api/v1/remote-hosts") {
@@ -596,19 +596,19 @@ test("the switcher holds a row while it reads your computers, and one the accoun
   }
 });
 
-test("a Cloud session's event stream and file reads carry its ticket", async () => {
+test("a Cloud workspace's event stream and file reads carry its ticket", async () => {
   const { folders, env, cloud, stop } = await fixture();
   let app: ElectronApplication | undefined;
   try {
     let page: Page;
     ({ app, page } = await launch(env, folders.local));
-    const view = await page.evaluate((id) => window.haarness.connect({ cloudSession: id }), session);
-    expect(view?.cloudSession).toBe(session);
+    const view = await page.evaluate((id) => window.haarness.connect({ cloudWorkspace: id }), cloudWorkspace);
+    expect(view?.cloudWorkspace).toBe(cloudWorkspace);
     const key = await page.evaluate((id) => window.haarness.subscribe(id, 0), view!.id);
     await page.evaluate((id) => window.haarness.files(id, "list", { path: "" }), view!.id);
-    await expect.poll(() => cloud.seen.filter((item) => item.path === `/gateway/${session}/v1/events`).map((item) => item.authorization)).toContain("Bearer ticket-1");
-    expect(cloud.seen.filter((item) => item.path.startsWith(`/gateway/${session}/`)).every((item) => item.authorization === "Bearer ticket-1")).toBe(true);
-    expect(cloud.seen.some((item) => item.path === `/gateway/${session}/v1/files/list`)).toBe(true);
+    await expect.poll(() => cloud.seen.filter((item) => item.path === `/gateway/${cloudWorkspace}/v1/events`).map((item) => item.authorization)).toContain("Bearer ticket-1");
+    expect(cloud.seen.filter((item) => item.path.startsWith(`/gateway/${cloudWorkspace}/`)).every((item) => item.authorization === "Bearer ticket-1")).toBe(true);
+    expect(cloud.seen.some((item) => item.path === `/gateway/${cloudWorkspace}/v1/files/list`)).toBe(true);
     await page.evaluate((id) => window.haarness.unsubscribe(id), key);
   } finally {
     if (app) await close(app);
