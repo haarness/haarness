@@ -31,6 +31,7 @@ import ChevronDown from "lucide-solid/icons/chevron-down";
 import ChevronUp from "lucide-solid/icons/chevron-up";
 import ChevronRight from "lucide-solid/icons/chevron-right";
 import ChartColumn from "lucide-solid/icons/chart-column";
+import CircleArrowUp from "lucide-solid/icons/circle-arrow-up";
 import CreditCard from "lucide-solid/icons/credit-card";
 import Crosshair from "lucide-solid/icons/crosshair";
 import Laptop from "lucide-solid/icons/laptop";
@@ -162,6 +163,8 @@ const catalog = {
   filter: Filter,
   trash: Trash,
   download: Download,
+  /** A newer Haarness to install. */
+  update: CircleArrowUp,
   refresh: RefreshCw,
   copy: Copy,
   attach: Paperclip,

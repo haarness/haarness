@@ -135,49 +135,6 @@
   color: var(--accent);
   background: var(--accent-soft);
 }
-/* An update's release notes in its confirmation: the same quiet well as
-   the list above, scrolling on its own so the buttons stay in place. */
-.release-notes {
-  margin: var(--s3) 0 0;
-}
-.release-notes > small {
-  display: block;
-  margin-bottom: var(--s1);
-  color: var(--muted);
-  font-size: var(--ui-sm);
-}
-.release-notes-body {
-  max-height: min(320px, 40vh);
-  overflow: auto;
-  padding: var(--s1) var(--s3);
-  background: var(--surface);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-md);
-  font-size: var(--ui-lg);
-  line-height: var(--lh-ui);
-}
-.release-notes-body:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-}
-.release-notes-body :is(h1, h2, h3, h4) {
-  font-size: var(--ui-lg);
-  font-weight: 600;
-  margin: var(--s3) 0 var(--s1);
-}
-.release-notes-body > :first-child :is(h1, h2, h3, h4):first-child,
-.release-notes-body :is(h1, h2, h3, h4):first-child {
-  margin-top: var(--s1);
-}
-.release-notes-body :is(ul, ol) {
-  padding-inline-start: var(--s5);
-}
-.release-notes-body :is(p, ul, ol) {
-  margin-block: var(--s1);
-}
-.release-notes-body li {
-  margin-block: 2px;
-}
 .field {
   display: flex;
   flex-direction: column;
@@ -1289,6 +1246,31 @@ dialog .notifications {
 .about-mark {
   font-size: 40px;
   margin-top: var(--s6);
+}
+/* About's update status: one line of what the updater knows, its progress
+   while a download runs, and a failure in the failure colour. */
+.update-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.update-status progress {
+  width: min(100%, 320px);
+  height: 4px;
+  margin-block: var(--s1);
+  accent-color: var(--accent);
+}
+.setting-row p.update-problem {
+  color: var(--danger);
+}
+.update-status small {
+  font-size: var(--ui-sm);
+}
+.update-status a {
+  font-size: var(--ui);
+  margin-top: 2px;
 }
 
 @media (max-width: 1100px) {

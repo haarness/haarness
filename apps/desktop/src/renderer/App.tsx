@@ -1,5 +1,6 @@
 import { BrowserPanel } from "./BrowserPanel";
 import { AccountMenu } from "./AccountMenu";
+import { UpdateRow } from "./Updates";
 import { Notifications } from "./Notifications";
 import { t } from "./i18n";
 import { ServerConnect, openServerConnection } from "./ServerConnect";
@@ -1428,6 +1429,7 @@ export function App() {
           </div>
           <SelectionBar />
           <footer class="sidebar-footer">
+            <UpdateRow />
             <AccountMenu />
             <button
               class="nav-row"

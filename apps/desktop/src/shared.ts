@@ -75,6 +75,9 @@ export interface Preferences {
   /** Shows and hides Haarness from any app; off by default. */
   globalShortcut: GlobalShortcut;
   language: string;
+  /** Downloads a newer version in the background, ready to install on
+   * restart; on by default. Off, Haarness still checks and says so. */
+  autoUpdate: boolean;
 }
 export type ThinkingDisplay = "compact" | "show" | "hide";
 /**
@@ -150,6 +153,7 @@ export const defaults: Preferences = {
   },
   globalShortcut: defaultGlobalShortcut,
   language: "en",
+  autoUpdate: true,
 };
 /**
  * Tab and Shift+Tab used to switch agents from anywhere in the window, so
@@ -384,7 +388,7 @@ export interface Bridge {
     /** Where the chat home (see `ProjectLocation.chatHome`) is, made or
      * not, and the location ID it is saved under. */
     chatHome: { id: string; workspace: string };
-    updateConfigured: boolean;
+    update: import("./updates").UpdateState;
   }>;
   /** Whether the chat home's daemon runs now, from its own record: nothing
    * is started for the answer. */
@@ -498,7 +502,7 @@ export interface Bridge {
     id: string,
     input?: unknown,
   ): Promise<unknown>;
-  update(action: "check" | "download" | "install"): Promise<unknown>;
+  update(action: import("./updates").UpdateAction): Promise<import("./updates").UpdateState>;
   onEvent(callback: (event: DesktopEvent) => void): () => void;
 }
 declare global {

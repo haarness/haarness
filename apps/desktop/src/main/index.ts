@@ -5,7 +5,9 @@ import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-d
 import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
 import { exportLogs, logLevel } from "./logs";
-import { releaseNotesText } from "../release-notes";
+import { createUpdater, type Updater } from "./updater";
+import { detectInstall, freeSpace, launchInstall, macTeam, openInstaller, stageAppImage, stageMacApp } from "./update-install";
+import type { UpdateState } from "../updates";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
 import { createSideChatStorage } from "./side-chat-storage";
 import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-folder";
@@ -147,7 +149,11 @@ app.on("will-quit", (event) => {
         new Promise((resolve) => setTimeout(resolve, 2000)),
       ]),
     )
-    .then(() => app.exit());
+    .then(() => {
+      // The staged update installs once this process is gone.
+      updater?.atExit();
+      app.exit();
+    });
 });
 app.on("quit", () => {
   quitting = true;
@@ -242,9 +248,9 @@ let pendingLink: string | undefined =
   process.platform === "darwin"
     ? undefined
     : process.argv.find((arg) => arg.startsWith("haarness://"));
-let updateReady = false,
-  updateAvailable = false,
-  updateListeners = false;
+/** Desktop updates (see updater.ts); undefined until the app is ready. */
+let updater: Updater | undefined;
+const updatesOff: UpdateState = { method: "off", status: "idle", checking: false };
 const send = (win: BrowserWindow, event: DesktopEvent) => {
   if (!win.isDestroyed()) win.webContents.send("haarness:event", event);
 };
@@ -739,7 +745,7 @@ function installHandlers() {
       id: "local:" + workspace,
       workspace,
     })),
-    updateConfigured: !!process.env.HAARNESS_UPDATE_URL,
+    update: updater?.state() ?? updatesOff,
   }));
   handle("chatHomeRunning", async () =>
     daemonRunning(await chatHomePath(), { home: homedir() }),
@@ -766,6 +772,7 @@ function installHandlers() {
     menu();
     repaintWindows();
     broadcast({ kind: "menu", data: { action: "preferences", value } });
+    updater?.automaticChanged();
     return value;
   });
   // While Settings records a new global shortcut, the current one must not
@@ -1749,64 +1756,15 @@ function installHandlers() {
       throw new Error("Path escapes workspace");
     shell.showItemInFolder(target);
   });
-  handle("update", async (_, action: string) => {
-    if (!process.env.HAARNESS_UPDATE_URL)
-      throw new Error(
-        "This build has no configured update feed. Install a newer signed release manually.",
-      );
-    // End-to-end tests stand in for the feed with `haarnessUpdater`.
-    const fake = (globalThis as { haarnessUpdater?: typeof import("electron-updater").autoUpdater }).haarnessUpdater;
-    const { autoUpdater } =
-      process.env.HAARNESS_DESKTOP_TEST === "1" && !app.isPackaged && fake
-        ? { autoUpdater: fake }
-        : await import("electron-updater");
-    if (action === "install") {
-      if (!updateReady)
-        throw new Error("Download the update before installing.");
-      autoUpdater.quitAndInstall();
-      return;
-    }
-    if (!updateListeners) {
-      updateListeners = true;
-      autoUpdater.on("download-progress", (value) =>
-        broadcast({
-          kind: "update",
-          data: { status: "downloading", percent: value.percent },
-        }),
-      );
-      autoUpdater.on("update-downloaded", (value) => {
-        updateReady = true;
-        broadcast({
-          kind: "update",
-          data: { status: "ready", version: value.version, notes: releaseNotesText(value.releaseNotes) },
-        });
-      });
-      autoUpdater.on("error", (error) =>
-        broadcast({
-          kind: "update",
-          data: { status: "error", message: error.message },
-        }),
-      );
-    }
-    if (action === "download") {
-      if (!updateAvailable)
-        throw new Error("Check for an available update first.");
-      await autoUpdater.downloadUpdate();
-      return { status: "ready" };
-    }
-    if (action !== "check") throw new Error("Unknown update operation");
-    const url = new URL(process.env.HAARNESS_UPDATE_URL);
-    if (url.protocol !== "https:")
-      throw new Error("Update feeds require HTTPS");
-    autoUpdater.setFeedURL({ provider: "generic", url: url.href });
-    autoUpdater.autoDownload = false;
-    const result = await autoUpdater.checkForUpdates();
-    updateAvailable = result?.isUpdateAvailable ?? false;
-    return {
-      available: updateAvailable,
-      info: result?.updateInfo,
-      notes: releaseNotesText(result?.updateInfo.releaseNotes),
-    };
+  handle("update", async (_, action: unknown) => {
+    if (!updater) return updatesOff;
+    if (action === "check") await updater.check();
+    else if (action === "download") void updater.download(true);
+    else if (action === "restart") updater.restart();
+    else if (action === "move") updater.move();
+    else if (action === "open-installer") await updater.openInstaller();
+    else throw new Error("Unknown update operation");
+    return updater.state();
   });
 }
 /**
@@ -1921,7 +1879,11 @@ function createWindow() {
       detail: say("Save your files before closing, or discard the edits."),
     });
     if (choice === 1) event.preventDefault();
-    else quitting = false;
+    else {
+      quitting = false;
+      // A restart to update waits for the edits too.
+      updater?.quitCancelled();
+    }
   });
   win.webContents.on(
     "did-start-navigation",
@@ -2040,6 +2002,7 @@ function menu() {
               label: t("Haarness"),
               submenu: [
                 { label: t("About"), role: "about" as const },
+                { label: t("Check for updates") + "…", click: () => checkForUpdates() },
                 {
                   label: t("Settings") + "…",
                   accelerator: data().preferences.shortcuts.settings.replace(
@@ -2175,11 +2138,98 @@ function menu() {
         submenu: [
           { label: t("Keyboard shortcuts"), click: () => action("shortcuts") },
           { label: t("Export logs") + "…", click: (_item, win) => action("export-logs", win) },
+          ...(process.platform === "darwin"
+            ? []
+            : [{ label: t("Check for updates") + "…", click: () => checkForUpdates() }]),
           { label: t("About Haarness"), click: () => action("about") },
         ],
       },
     ]),
   );
+}
+/** The menu's Check for updates: Settings → About shows the check and what it found. */
+function checkForUpdates() {
+  void updater?.check();
+  const open = BrowserWindow.getFocusedWindow() ?? [...windows].at(-1);
+  if (!open) {
+    // A new window hears the menu once its page has loaded.
+    const win = createWindow();
+    win?.webContents.once("did-finish-load", () => send(win, { kind: "menu", data: "about" }));
+    return;
+  }
+  if (open.isMinimized()) open.restore();
+  open.show();
+  open.focus();
+  send(open, { kind: "menu", data: "about" });
+}
+/**
+ * Starts Desktop's updater (see updater.ts) against the Haarness release
+ * service, `HAARNESS_RELEASE_URL` when set (HTTPS, or loopback HTTP for
+ * tests), as `install.sh` reads it. A development build stays off, except in
+ * an end-to-end test that names the installed app it stands in for.
+ */
+async function startUpdates() {
+  const test = process.env.HAARNESS_DESKTOP_TEST === "1" && !app.isPackaged;
+  const install = await detectInstall({
+    platform: process.platform,
+    execPath: process.execPath,
+    packaged: app.isPackaged,
+    env: process.env,
+    testTarget: test ? process.env.HAARNESS_UPDATE_TARGET : undefined,
+  });
+  let releaseUrl = "https://haarness.ai";
+  const configured = process.env.HAARNESS_RELEASE_URL?.trim();
+  if (configured)
+    try {
+      const url = new URL(configured);
+      if (
+        !url.username &&
+        !url.password &&
+        (url.protocol === "https:" || (url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)))
+      )
+        releaseUrl = url.origin + url.pathname.replace(/\/+$/, "");
+    } catch {}
+  const arch = process.arch === "arm64" || app.runningUnderARM64Translation ? "arm64" : process.arch === "x64" ? "x64" : undefined;
+  const os = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
+  // The new app must come from the team that signed this one.
+  const team = install.method === "restart" && install.kind === "zip" ? await macTeam(install.target) : undefined;
+  updater = createUpdater({
+    version: app.getVersion(),
+    os,
+    arch: arch ?? "x64",
+    install: arch ? install : { method: "off" },
+    releaseUrl,
+    dir: join(app.getPath("userData"), "updates"),
+    fetch: (url, init) => net.fetch(url, init),
+    automatic: () => data().preferences.autoUpdate,
+    emit: (state) => broadcast({ kind: "update", data: state }),
+    log: (message) => console.info(message),
+    stage: ({ file, version, folder }) =>
+      install.method === "restart" && install.kind === "zip"
+        ? stageMacApp({ file, version, folder, team })
+        : install.method === "restart" && install.kind === "AppImage"
+          ? stageAppImage({ file, target: install.target })
+          : Promise.resolve(file),
+    launch: ({ staged, version, relaunch, result }) => {
+      if (install.method !== "restart") return;
+      launchInstall({
+        platform: process.platform,
+        target: install.target,
+        staged,
+        version,
+        relaunch,
+        result,
+        env: process.env,
+        // An end-to-end test notes the reopening instead of starting its stand-in app.
+        reopen: test && process.env.HAARNESS_UPDATE_REOPEN_LOG ? ["/usr/bin/touch", process.env.HAARNESS_UPDATE_REOPEN_LOG] : undefined,
+      });
+    },
+    openInstaller: (file) => openInstaller(file, app.getPath("downloads"), (path) => shell.openPath(path)),
+    move: () => app.moveToApplicationsFolder(),
+    quit: () => app.quit(),
+    freeSpace,
+  });
+  await updater.start();
 }
 if (!process.env.HAARNESS_DESKTOP_TEST && !app.requestSingleInstanceLock())
   app.quit();
@@ -2224,12 +2274,20 @@ else {
       createWindow();
       void refreshProjects().catch(() => {});
       setupChromeOnLaunch();
+      void startUpdates().catch((error) => console.warn("Haarness update: could not start: " + String(error)));
       if (app.isPackaged) app.setAsDefaultProtocolClient("haarness");
       powerMonitor.on("resume", () => {
         broadcast({ kind: "connection", data: "resume" });
         wakeFromSleep();
+        updater?.wake();
       });
-      onlineAgain(() => net.isOnline(), wakeConnections);
+      onlineAgain(
+        () => net.isOnline(),
+        () => {
+          wakeConnections();
+          updater?.wake();
+        },
+      );
       setInterval(checkTerminals, TERMINAL_PING_EVERY_MS).unref();
       nativeTheme.on("updated", () => {
         repaintWindows();

@@ -91,6 +91,9 @@ pub fn masthead(app: &App, width: usize, identity_in_panel: bool) -> Vec<Line> {
             }
             lines.push(Line::new(spans));
         }
+        if let Some(version) = &app.update_available {
+            lines.push(update_line(app, width, version));
+        }
         if width >= 56 {
             lines.push(Line::empty());
             lines.push(legend(app, width));
@@ -172,6 +175,29 @@ fn legend(app: &App, width: usize) -> Line {
         spans.push(Span::new(key, theme.accent).with_attributes(attr::BOLD));
         spans.push(Span::new(format!(" {label}"), theme.muted));
         used += key.width() + label.width() + 1;
+    }
+    Line::new(spans)
+}
+
+/// A newer Haarness, and the command that installs it, where the eye lands
+/// before a first prompt. There is no slash command for it: updating
+/// replaces the program this screen runs in.
+fn update_line(app: &App, width: usize, version: &str) -> Line {
+    const COMMAND: &str = "haarness --update";
+    let theme = &app.theme;
+    let sentence = app
+        .language
+        .format("Haarness {version} is available.", &[("version", version)]);
+    let mut spans = vec![
+        Span::new(" ".repeat(INSET), theme.muted),
+        Span::new("↑ ", theme.accent).with_attributes(attr::BOLD),
+    ];
+    let room = width.saturating_sub(INSET + 2);
+    spans.push(Span::new(single_line(&sentence, room), theme.muted));
+    // The command, where it fits whole; the sentence alone otherwise.
+    if sentence.width() + "  ·  ".width() + COMMAND.width() <= room {
+        spans.push(Span::new("  ·  ", theme.muted));
+        spans.push(Span::new(COMMAND, theme.accent).with_attributes(attr::BOLD));
     }
     Line::new(spans)
 }

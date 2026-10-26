@@ -333,17 +333,24 @@ account (Objects, Certificate profiles) with that validation, then run a release
 Signed is not yet trusted: SmartScreen builds reputation per signing identity from downloads, so a
 new identity may still warn for days to weeks; submit a new release's installer at
 <https://www.microsoft.com/wdsi/filesubmission> (software developer) to speed that up, and keep one
-identity (renewing it does not carry reputation). An electron-updater feed must keep
-`publisherName` equal to the certificate's CN (the config sets it from `WIN_SIGN_PUBLISHER`).
+identity (renewing it does not carry reputation).
 Docker Desktop mangles a same-path `-v <path>:<path>:ro` mount (the target gains a trailing `o`);
 the script uses `--mount …,readonly`.
 
-**Open launch item: Desktop has no update feed.** Installed Desktop apps check for updates only
-when `HAARNESS_UPDATE_URL` is set in their environment at runtime
-(`apps/desktop/src/main/index.ts`, the `update` handler); nothing sets it, no release publishes
-an electron-updater feed (`latest*.yml`), and macOS auto-update would also need the signed ZIP.
-Until a feed exists and the packaged app knows its URL, every Desktop upgrade is a manual
-download: say so in the final proof and on the download page, and do not claim auto-update.
+**Desktop and the TUI update from what this publishes.** Installed Desktop apps read
+`/api/v1/releases/<channel>/desktop` every half hour and install the file for their platform
+themselves ([Desktop updates](../../docs/DESKTOP.md#updates)): the macOS **ZIP** (unpacked, its
+`CFBundleShortVersionString` must be the release's version and its signature must verify and be
+the same team's as the running app's, so publish only Developer ID builds signed by
+`J63GND4Q8A`), the AppImage, and the Windows setup `.exe`; the .deb and a copy that may not write
+itself get the installer. The TUI's home screen reads `/api/v1/releases/<channel>/cli` and offers
+`haarness --update` when a binary for its platform is newer. So a release missing a platform's
+file is simply not offered there, a published file that does not match its index is refused, and
+withdrawing a release makes copies that staged it drop it. After publishing, prove an update: a
+copy of the previous Desktop shows **Restart to update** within a check (Settings → About →
+Check for updates is immediate), restarting opens the new version, and `haarness --version`
+after `haarness --update` names it. Desktop builds before 0.1.6 have no updater: their users
+install once by hand.
 
 ## 5. Deploy the Cloud
 

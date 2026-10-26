@@ -3,8 +3,8 @@ import { createSettingsSearch } from "./settings-search";
 import { physicalKey, searchEntries, shortcutField, shortcutFromField, shortcutLabel } from "./search";
 import { BaseTag, CurrentTag, PathText, SettingRow as Row } from "./SettingRow";
 import { DiagnosticsSetting } from "./Diagnostics";
-import { Markdown } from "./Markdown";
 import { UsageStatisticsSetting } from "./UsageStatistics";
+import { UpdateSettings } from "./Updates";
 import { BrowserSettings } from "./BrowserSettings";
 import { Notifications } from "./Notifications";
 import { formatNumber, splitAround, t, languages } from "./i18n";
@@ -2288,122 +2288,14 @@ function Profiles(props: { cli: Cli }) {
     </>
   );
 }
-/**
- * A link in release notes opens in the system browser when it is a web
- * address; anything else (a relative link, a file, an app link) does nothing:
- * the notes come from the update feed, not from a project.
- */
-function openReleaseLink(href: string) {
-  let url: URL;
-  try {
-    url = new URL(href);
-  } catch {
-    return;
-  }
-  if (url.protocol === "https:" || url.protocol === "http:")
-    void window.haarness.openExternal(url.href).catch(() => {});
-}
-/** An update's release notes, rendered and sanitized, in a scroll area of their own. */
-function ReleaseNotes(props: { version?: string; notes: string }) {
-  return (
-    <section class="release-notes" aria-label={t("Release notes")}>
-      <small>
-        {props.version ? t("What’s new in {version}", { version: props.version }) : t("What’s new")}
-      </small>
-      <div class="release-notes-body" tabindex="0">
-        <Markdown text={props.notes} document onLink={openReleaseLink} />
-      </div>
-    </section>
-  );
-}
 function About() {
   const app = useApp();
-  const [update, setUpdate] = createSignal<{
-    status?: string;
-    percent?: number;
-    version?: string;
-    message?: string;
-    /** The feed's release notes for the update, as Markdown; "" without any. */
-    notes?: string;
-  }>({});
-  const off = window.haarness.onEvent((event) => {
-    if (event.kind !== "update") return;
-    const next = event.data as ReturnType<typeof update>;
-    // Progress events carry no version or notes; the ones the check found stay.
-    setUpdate((current) => ({
-      ...next,
-      version: next.version ?? current.version,
-      notes: next.notes || current.notes,
-    }));
-  });
-  onCleanup(off);
   return (
     <>
       <Wordmark class="about-mark" />
       <p>Haarness {app.state.version}</p>
       <p class="muted">{t("A place for your projects and chats.")}</p>
-      <Row title="Updates">
-        <button
-          onClick={() =>
-            app.run(async () => {
-              const result = (await window.haarness.update("check")) as {
-                available: boolean;
-                info?: { version: string };
-                notes?: string;
-              };
-              setUpdate({
-                status: result.available ? "available" : "current",
-                version: result.info?.version,
-                notes: result.notes,
-              });
-            })
-          }
-        >
-          {t("Check for updates")}
-        </button>
-        <Show when={update().status === "available"}>
-          <button
-            onClick={() => app.run(() => window.haarness.update("download"))}
-          >
-            {t("Download {version}", { version: update().version ?? "" })}
-          </button>
-        </Show>
-        <Show when={update().status === "ready"}>
-          <button
-            class="primary"
-            onClick={() =>
-              app.run(async () => {
-                const { version, notes } = update();
-                if (
-                  await confirm(
-                    t("Install update?"),
-                    t("Haarness will restart. Save your file edits before continuing."),
-                    {
-                      submit: t("Restart & install"),
-                      // What the update brings, when the feed says.
-                      content: notes
-                        ? () => <ReleaseNotes version={version} notes={notes} />
-                        : undefined,
-                    },
-                  )
-                )
-                  await window.haarness.update("install");
-              })
-            }
-          >
-            {t("Restart & install")}
-          </button>
-        </Show>
-        <Show when={update().status === "downloading"}>
-          <span>{t("Downloading {percent}%", { percent: Math.round(update().percent ?? 0) })}</span>
-        </Show>
-        <Show when={update().status === "current"}>
-          <span>{t("You are up to date.")}</span>
-        </Show>
-        <Show when={update().message}>
-          <span class="danger">{update().message}</span>
-        </Show>
-      </Row>
+      <UpdateSettings />
       <Show when={app.state.connection && !app.state.connection.remote}>
         <Row
           title="Reopen project"

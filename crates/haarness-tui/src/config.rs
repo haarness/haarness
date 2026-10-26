@@ -425,6 +425,10 @@ pub struct TuiState {
     pub viewport_offset: Option<usize>,
     pub thread_views: std::collections::BTreeMap<String, ThreadViewState>,
     pub diff: DiffViewState,
+    /// When the release service last answered (Unix seconds), and the newest
+    /// version it named; see `updates.rs`.
+    pub update_checked_at: Option<i64>,
+    pub latest_release: Option<String>,
 }
 
 /// Review-viewer layout choices. They are a reading preference, not session
