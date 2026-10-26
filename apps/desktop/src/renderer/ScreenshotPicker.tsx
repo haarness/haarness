@@ -1,7 +1,8 @@
 import { t, language } from "./i18n";
 import { For, Match, Show, Switch, createSignal, onMount } from "solid-js";
 import { Button, Icon, dismissOnBackdrop } from "./ui";
-import { relativeTime, toggleSelection } from "./screenshot-picker";
+import { relativeTime } from "./relative-time";
+import { toggleSelection } from "./screenshot-picker";
 import type { Attachment } from "../attachments";
 import type { ScreenshotListing } from "../shared";
 

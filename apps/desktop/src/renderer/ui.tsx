@@ -3,6 +3,7 @@ import { Select } from "./Select";
 import { For, Show, createSignal, onMount, type JSX } from "solid-js";
 import { Icon, type IconName, type IconSize } from "./icons";
 import { errorText } from "./error-text";
+import { relativeTime } from "./relative-time";
 export { Icon, type IconName } from "./icons";
 /**
  * The one icon-only control. It owns the hit area (`--icon-button`), the
@@ -354,14 +355,19 @@ export const Empty = (props: {
 export function stringify(value: unknown) {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
-/** "5:51 PM" today; "Oct 2, 5:51 PM" for anything older, so a long
- * conversation never shows two identical-looking times from different days. */
-export function time(value: string) {
-  const date = new Date(value);
-  const today = date.toDateString() === new Date().toDateString();
-  return date.toLocaleString(language(), {
-    ...(today ? {} : { month: "short", day: "numeric" }),
-    hour: "numeric",
-    minute: "2-digit",
-  });
+/** The time now, to the half minute: one clock for every relative time on
+ * screen, started by the first one read. */
+const [clock, setClock] = createSignal(Date.now());
+let ticking = false;
+function now() {
+  if (!ticking) {
+    ticking = true;
+    setInterval(() => setClock(Date.now()), 30_000);
+  }
+  return clock();
+}
+/** "now", "5 minutes ago", "yesterday", "3 weeks ago": how long ago `value`
+ * was, kept current as time passes. */
+export function ago(value: string) {
+  return relativeTime(new Date(value).getTime(), now(), language());
 }
