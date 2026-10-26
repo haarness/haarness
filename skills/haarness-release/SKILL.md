@@ -25,7 +25,7 @@ description: Build, verify, publish and present Haarness CLI and Electron Deskto
   `haarness-cloud/assets/install.{sh,ps1}`, which the Cloud serves. Keep them identical.
 - A release is the Cloud too: the web app, the API that serves the download page and the
   release manifests, the worker, router and gateway, and the Fly workspace image that runs the
-  CLI in Cloud sessions. Deploy the Cloud that matches the release (section 5) before the
+  CLI in Cloud workspaces. Deploy the Cloud that matches the release (section 5) before the
   binaries are published through it, and report its tags in the final proof like a platform.
 - Do not limit testing to this recipe. Chase undocumented paths and failures, fix causes, add
   regression checks, and say which proof is local, which is CI and which is public.
@@ -350,7 +350,7 @@ download: say so in the final proof and on the download page, and do not claim a
 Everything the release is served by comes from `haarness-cloud` (web app, `cloud-api`,
 `cloud-worker`, `cloud-gateway`, `cloud-router`) and from this repository's runtime in the Fly
 workspace image. Deploy both from the pushed commits before publishing the binaries, so the
-download page, the served installers (`assets/install.{sh,ps1}`) and Cloud sessions carry the
+download page, the served installers (`assets/install.{sh,ps1}`) and Cloud workspaces carry the
 release. The operator's runbook is `~/work/haarness/haarness-deploy` (`docs/operations.md`);
 `kubectl` runs on node1d only (`environments/prod/hosts`).
 
@@ -361,7 +361,7 @@ cd ~/work/haarness/haarness-deploy
 scripts/build-local.sh cloud     VERSION=<YYYYMMDD>-<cloud sha7>     # api(+web), worker, gateway, router
 CORE_REF=v<x.y.z> scripts/build-local.sh workspace VERSION=<YYYYMMDD>-<core sha7>   # when the runtime changed
 
-# Staging first; then check https://staging.haarness.ai (download page, sign-in, a Cloud session).
+# Staging first; then check https://staging.haarness.ai (download page, sign-in, a Cloud workspace).
 #   environments/staging/version.yml: version (cloud) and workspace_version (workspace image)
 ansible-playbook -i environments/staging/hosts playbooks/deploy.yml
 # Then prod with environments/prod/version.yml.
@@ -379,7 +379,7 @@ workload and waits for the rollouts; `-e restart=true` rolls pods whose tags did
   `job dead-lettered` or repeated `job failed` lines.
 - `curl -fsS https://<host>/healthz` and `/readyz`; `/download` shows the six platforms;
   `/install.sh` matches `install.sh` here byte for byte.
-- A Cloud session starts and answers (the workspace image), when it was rebuilt.
+- A Cloud workspace starts and answers (the workspace image), when it was rebuilt.
 
 Roll back by deploying the previous tags from `version.yml`'s history; migrations are forward-only,
 so a rollback across a migration needs the migration's own down path first (`docs/MIGRATIONS.md`

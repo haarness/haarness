@@ -1,6 +1,6 @@
 ---
 name: haarness-remote-access
-description: Test Haarness Cloud remote hosts and published remote sessions (native chat trees) through the CLI connector, Chrome, tmux TUI and Python/TypeScript SDKs. Use for remote access, sharing, relay, reconnect, scope, stress and cleanup changes; distinguish these from rented Cloud sessions.
+description: Test Haarness Cloud remote hosts and published remote sessions (native chat trees) through the CLI connector, Chrome, tmux TUI and Python/TypeScript SDKs. Use for remote access, sharing, relay, reconnect, scope, stress and cleanup changes; distinguish these from rented Cloud workspaces.
 ---
 
 # Remote access verification
@@ -11,7 +11,7 @@ Read the [native build skill](../../.skills/haarness-build-run/SKILL.md) and `do
 
 | Concept | Meaning and test boundary |
 | --- | --- |
-| Rented Cloud session | Cloud-managed machine; use the [sessions skill](../haarness-cloud-sessions-chats-schedules/SKILL.md) for its compute lifecycle |
+| Rented Cloud workspace | Cloud-managed machine; use the [workspaces skill](../haarness-cloud-workspaces-chats-schedules/SKILL.md) for its compute lifecycle |
 | Remote host ID | User-owned computer registration and outbound WebSocket connector; advertises native projects |
 | Native project ID | Read from the host's project catalog; selects a workspace/filesystem containing multiple chats |
 | Native thread/chat ID | Conversation history inside that project; used by the TUI and native runtime APIs |
@@ -69,11 +69,11 @@ Check exit status, individual checks and cleanup. The echo provider is determini
 - Open the link in a browser signed in to the same account, send from there, and confirm the turn appears in the TUI; the band shows `remote`.
 - `/rc stop` must leave no connector, no `remote-*` identity files and no host/publication in Cloud; the old link returns 404. Stopping from the Cloud page must clear the TUI badge within a minute and clean up the connector the same way. Sharing again gives a new link.
 - Desktop: `npx playwright test e2e/remote-control.spec.ts` (signed-out case always; the live case with `HAARNESS_REMOTE_CONTROL_API`, `_WEB` and a signed-in `_ACCOUNT` config dir). It saves `qr.png`/`dialog.png`; decode the QR too.
-- Check Cloud's Remote control page (Sessions and Hosts tabs) and the shared chat at 375 px wide: chat-only connectors appear only under Sessions, never as computer cards under Hosts.
+- Check Cloud's Remote control page (Chats and Hosts tabs) and the shared chat at 375 px wide: chat-only connectors appear only under Chats, never as computer cards under Hosts.
 
 ## Your computers in Desktop
 
-Desktop lists the account's hosts (Settings → Servers and the server switcher, **Your computers**) and opens them through `/api/v1/remote-hosts/{id}/runtime`. Unit coverage: `cargo test -p haarness-cli --bin haarness desktop_lists_other_computers desktop_relay_sign_in`, `npm --prefix apps/desktop test` (`tests/remote-hosts.test.ts`, `tests/servers.test.ts`). `npx playwright test e2e/remote-hosts.spec.ts` plays Cloud itself in front of a real `haarness serve` gateway (no Cloud needed): listing, opening, stream cuts across sign-in renewals and a project server restart, sign-out and account switch, revoked computers, and a Cloud session's ticket on its event stream. Against a local Cloud with the fixture identity provider, `HAARNESS_REMOTE_E2E=1 HAARNESS_CLOUD_API_URL=http://127.0.0.1:19080 scripts/test-remote-hosts-live.py [state]` signs a fixture user in with the device flow, shares three computers (one away, one being Desktop's own), runs the spec's live case (chat, terminal and folder browser through the relay) and revokes everything; `HAARNESS_REMOTE_HOSTS_LONG=1` also waits past the ten minutes a relayed sign-in lives.
+Desktop lists the account's hosts (Settings → Servers and the server switcher, **Your computers**) and opens them through `/api/v1/remote-hosts/{id}/runtime`. Unit coverage: `cargo test -p haarness-cli --bin haarness desktop_lists_other_computers desktop_relay_sign_in`, `npm --prefix apps/desktop test` (`tests/remote-hosts.test.ts`, `tests/servers.test.ts`). `npx playwright test e2e/remote-hosts.spec.ts` plays Cloud itself in front of a real `haarness serve` gateway (no Cloud needed): listing, opening, stream cuts across sign-in renewals and a project server restart, sign-out and account switch, revoked computers, and a Cloud workspace's ticket on its event stream. Against a local Cloud with the fixture identity provider, `HAARNESS_REMOTE_E2E=1 HAARNESS_CLOUD_API_URL=http://127.0.0.1:19080 scripts/test-remote-hosts-live.py [state]` signs a fixture user in with the device flow, shares three computers (one away, one being Desktop's own), runs the spec's live case (chat, terminal and folder browser through the relay) and revokes everything; `HAARNESS_REMOTE_HOSTS_LONG=1` also waits past the ten minutes a relayed sign-in lives.
 
 ## Complete the user journey
 
@@ -81,7 +81,7 @@ Follow the [test plan](references/remote-session-test-plan.md) for full-host and
 
 Use `remote run --chat THREAD_ID` to publish. The global `--session` flag is an alias for native thread selection, not publication. Background `remote enable` does not install boot/login startup integration.
 
-Stop sharing/revoke/disable only owned fixtures and close their streams, PTYs and tmux sessions. Project close, unpublish and host revocation must retain native files/history; never apply rented-session deletion to remote hosts. Report exact revisions, automated/Chrome/tmux/provider evidence separately, cleanup status and any untested boundary. Leave a demo running only when needed for user testing.
+Stop sharing/revoke/disable only owned fixtures and close their streams, PTYs and tmux sessions. Project close, unpublish and host revocation must retain native files/history; never apply rented-workspace deletion to remote hosts. Report exact revisions, automated/Chrome/tmux/provider evidence separately, cleanup status and any untested boundary. Leave a demo running only when needed for user testing.
 
 ## Explore beyond this guide
 

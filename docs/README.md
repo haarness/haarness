@@ -15,7 +15,7 @@ New to the code? Read the [README](../README.md) quick start and the [reference]
 - [Haarness Desktop](DESKTOP.md): first run, where things live, how each surface behaves, and Desktop development and packaging.
 - [Desktop notifications](DESKTOP-NOTIFICATIONS.md): notifications that open the chat that finished or needs an answer.
 - [Extensions](EXTENSIONS.md): TypeScript and JavaScript extensions that add tools and hooks, trust and installation.
-- [Sign in to Haarness](HAARNESS-ACCOUNT.md): the Haarness account in the CLI, TUI and Desktop, Cloud models, agents and sessions, billing commands, development sign-in.
+- [Sign in to Haarness](HAARNESS-ACCOUNT.md): the Haarness account in the CLI, TUI and Desktop, Cloud models, agents and workspaces, billing commands, development sign-in.
 - [Steer and Queue](INPUT-QUEUE.md): correcting work in progress versus queuing the next task, in both apps and the API.
 - [Cross-project analytics](INSIGHTS.md): `haarness stats` and `haarness insights`, and how they count.
 - [Reviewing large changesets](LARGE-DIFF-REVIEW.md): how Desktop and the API page through very large diffs.
@@ -56,7 +56,7 @@ New to the code? Read the [README](../README.md) quick start and the [reference]
 - [Brand assets](../brand/README.md): the logo, wordmark and app icons, and how they are generated.
 - Skills for development work: [build and run](../.skills/haarness-build-run/SKILL.md),
   [releases](../skills/haarness-release/SKILL.md), and the testing skills in [`skills/`](../skills/)
-  (Cloud sessions and schedules, remote access, the marketplace, SDKs, billing, storage, sign-in, email).
+  (Cloud workspaces and schedules, remote access, the marketplace, SDKs, billing, storage, sign-in, email).
 
 ## Records
 
