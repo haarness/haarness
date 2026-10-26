@@ -10,12 +10,14 @@ import { stopChatHome } from "./fixtures/chat-home";
 // plain words, a server's interactive apps turn off from its page's options or its row in Settings (and back
 // on with Undo) unless the server comes from a plugin, and a secret-looking value is kept in the keychain with
 // a click, never replacing another entry and taken out again when the server cannot be added. The keychain is
-// a test file (HAARNESS_TEST_KEYCHAIN_FILE, which only debug builds read), so the system's is never touched.
+// a test file (HAARNESS_TEST_KEYCHAIN_FILE, which only debug builds read), so the system's is never touched:
+// with a release build (CI's), the tests that store a secret are skipped.
 test.describe.configure({ mode: "serial" });
 
 let app: ElectronApplication, page: Page, client: Haarness;
 let temporary: string, workspace: string, binary: string, env: Record<string, string>, keychain: string;
 let thread = "";
+let testKeychain = false;
 const errors: string[] = [];
 const fixtures = resolve("../../crates/haarness-mcp/tests/fixtures");
 const shots = process.env.HAARNESS_SCREENSHOTS;
@@ -67,6 +69,13 @@ test.beforeAll(async () => {
   };
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.ELECTRON_RENDERER_URL;
+  testKeychain =
+    JSON.parse(
+      execFileSync(binary, ["telemetry", "preview"], {
+        env: { ...env, HAARNESS_DATA_DIR: join(temporary, "build-probe") },
+        encoding: "utf8",
+      }),
+    ).client.build === "debug";
   app = await electron.launch({ args: ["."], env, timeout: 60000 });
   page = await app.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
@@ -238,6 +247,7 @@ test("a plugin's server shows its apps state but neither its switch nor its page
 });
 
 test("a server that cannot be added takes the secrets it stored out again", async () => {
+  test.skip(!testKeychain, "only a debug build keeps secrets in the test keychain file");
   await writeFile(keychain, JSON.stringify({ kept: "unrelated" }));
   await openMcpSettings();
   await settings().getByRole("button", { name: "Add MCP server", exact: true }).click();
@@ -260,6 +270,7 @@ test("a server that cannot be added takes the secrets it stored out again", asyn
 });
 
 test("a secret-looking value is kept in the keychain and the settings name it", async () => {
+  test.skip(!testKeychain, "only a debug build keeps secrets in the test keychain file");
   // Another server's entry by the same name stays as it is.
   await writeFile(keychain, JSON.stringify({ "keyed-GITHUB_TOKEN": "another-server" }));
   const secret = 'ghp_desk"top\\e2e-secret';

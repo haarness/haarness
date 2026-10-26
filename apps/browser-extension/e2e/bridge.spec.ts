@@ -2,7 +2,7 @@
  * The extension against a fake bridge in a real Chromium: native messaging,
  * reconnects, the per-chat tab inventory and the user's controls.
  */
-import { askPolicy, inner, isToServer, OTHER_THREAD, SERVER, THREAD, WORKSPACE } from "./fixtures/bridge";
+import { askPolicy, inner, isToServer, OTHER_THREAD, SERVER, THREAD, VERSION, WORKSPACE } from "./fixtures/bridge";
 import { expect, snapshot, test } from "./fixtures/extension";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -13,7 +13,7 @@ test("says hello over native messaging and reconnects when the bridge exits", as
     type: "hello",
     protocol: 1,
     browser: { kind: "chrome", label: null },
-    extension: { version: "0.1.1-preview.1" },
+    extension: { version: VERSION },
     paused: false,
     stopped: false,
   });
@@ -144,11 +144,13 @@ test("a tab dragged into a chat's group is shared, but browser pages are refused
   await worker.evaluate(([id, groupId]) => chrome.tabs.group({ tabIds: id, groupId }), [shared, group.id] as const);
   await bridge.wait((message) => isToServer(message, "state") && inner(message).state.tabs.length === 2);
 
-  const welcome = await context.newPage();
-  await welcome.goto("chrome-extension://accdjhmcgljbadpeanajllmcembhkomn/welcome.html");
+  // The user's own browser page. (Not context.newPage(): Chromium names the
+  // active tab, here a chat's, as the opener of that blank tab, so the
+  // extension rightly adopts it as a page the agent's tab opened.)
   const restricted = await worker.evaluate(() =>
-    chrome.tabs.query({ url: "chrome-extension://accdjhmcgljbadpeanajllmcembhkomn/welcome.html" }).then((tabs) => tabs.at(-1)!.id!),
+    chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") }).then((tab) => tab.id!),
   );
+  await expect.poll(() => worker.evaluate((id) => chrome.tabs.get(id).then((found) => found.status), restricted)).toBe("complete");
   await worker.evaluate(([id, groupId]) => chrome.tabs.group({ tabIds: id, groupId }), [restricted, group.id] as const);
   await expect.poll(() => worker.evaluate((id) => chrome.tabs.get(id).then((found) => found.groupId), restricted)).toBe(-1);
   await expect.poll(async () => (await snapshot(worker)).chats[0]?.refused).toBe("restricted");
