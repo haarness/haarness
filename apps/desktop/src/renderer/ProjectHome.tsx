@@ -138,27 +138,33 @@ export function ProjectHome() {
                 <p class="project-home-error" role="alert">
                   {failure().message}
                 </p>
-                <button onClick={() => app.run(app.retryOpening)}>
-                  {t("Retry")}
-                </button>
               </>
             )}
           </Show>
-          <button
-            class="primary project-home-open"
-            onClick={() => app.run(() => app.openProject())}
-          >
-            <Icon name={app.currentServer().cloud ? "cloud" : "folder"} size="md" />
-            {app.currentServer().cloud
-              ? t("Cloud workspaces")
-              : state.projectFailure
-                ? app.homeFailed()
-                  ? t("Open project")
-                  : t("Choose another project")
-                : (host() ? hostProjects()?.items.length : projects().length)
-                  ? t("Open another project")
-                  : t("Open project")}
-          </button>
+          {/* After a failure, trying again is the way forward; choosing
+              another project sits beside it, on the same line and height. */}
+          <div class="project-home-actions">
+            <Show when={state.projectFailure}>
+              <button class="primary" onClick={() => app.run(app.retryOpening)}>
+                {t("Retry")}
+              </button>
+            </Show>
+            <button
+              class={state.projectFailure ? "project-home-open" : "primary project-home-open"}
+              onClick={() => app.run(() => app.openProject())}
+            >
+              <Icon name={app.currentServer().cloud ? "cloud" : "folder"} size="md" />
+              {app.currentServer().cloud
+                ? t("Cloud workspaces")
+                : state.projectFailure
+                  ? app.homeFailed()
+                    ? t("Open project")
+                    : t("Choose another project")
+                  : (host() ? hostProjects()?.items.length : projects().length)
+                    ? t("Open another project")
+                    : t("Open project")}
+            </button>
+          </div>
           <Show
             when={host()}
             fallback={
