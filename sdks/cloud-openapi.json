@@ -3941,7 +3941,7 @@
         "tags": [
           "identity"
         ],
-        "summary": "Delete the caller's account, at once and for good. Every sign-in ends (a browser's cookies are cleared), the\nCloud workspaces and their files are destroyed, a paid plan is cancelled and the personal account closes with any\nteam nobody else belongs to; the person leaves their other teams. Invoices, payments and the ledger are kept.",
+        "summary": "Delete the caller's account, at once and for good. Every sign-in ends (a browser's cookies are cleared), the\nCloud sessions and their files are destroyed, a paid plan is cancelled and the personal account closes with any\nteam nobody else belongs to; the person leaves their other teams. Invoices, payments and the ledger are kept.",
         "description": "Auth: `cookie+csrf|bearer` with the `account` scope (not API keys), plus the typed confirmation and, when the\naccount uses two-factor authentication, a current code.",
         "operationId": "account_deletion",
         "requestBody": {
@@ -8494,7 +8494,7 @@
           "workspaces"
         ],
         "summary": "One workspace: its settings, runtime status and the delivery of its first message (`launch`).",
-        "description": "Auth: `cookie|bearer`. A workspace of another tenant is a `404`, never a `403`. Every `{id}` also accepts the\nid the workspace had before the rename.",
+        "description": "Auth: `cookie|bearer`. A workspace of another tenant is a `404`, never a `403`. Every `{id}` also accepts the\nid the workspace had as a Cloud session before the rename.",
         "operationId": "get_workspace",
         "parameters": [
           {
@@ -8545,7 +8545,7 @@
         "tags": [
           "workspaces"
         ],
-        "summary": "Delete a workspace and its persistent disk.",
+        "summary": "Delete a workspace.",
         "description": "Auth: `cookie+csrf|bearer`, bearer scope `workspaces`. Asynchronous: the row moves to `Deleting` and the\nreturned operation finishes the teardown.",
         "operationId": "delete_workspace",
         "parameters": [
@@ -12404,7 +12404,7 @@
       },
       "AiOutputReportRequest": {
         "type": "object",
-        "description": "`POST /api/v1/reports/ai-output`: one reply of an agent, why it is reported, and where it is. The place takes the\nshape of a Live Activity's target: a computer's chat (`source` `host`, with `hostId` or the shared chat's\n`remoteSessionId`, and the runtime's `projectId`), or a Cloud workspace's (`source` `workspace`, `workspaceId`).\nUnknown fields are ignored, so newer apps may send more.",
+        "description": "`POST /api/v1/reports/ai-output`: one reply of an agent, why it is reported, and where it is. The place takes the\nshape of a Live Activity's target: a computer's chat (`source` `host`, with `hostId` or the shared chat's\n`remoteSessionId`, and the runtime's `projectId`), or a Cloud workspace's (`source` `workspace`, `workspaceId`; `session` and `sessionId` from\napp builds made before the rename are read too).\nUnknown fields are ignored, so newer apps may send more.",
         "required": [
           "reason",
           "source",
@@ -12945,7 +12945,7 @@
       },
       "AttentionSource": {
         "type": "string",
-        "description": "Where an item was observed: a connected computer (`remote_hosts`) or a Cloud workspace (`workspaces`).",
+        "description": "Where an item was observed: a connected computer (`remote_hosts`) or a Cloud workspace (`workspaces`).\n`session` is read as `workspace` for app builds made before the rename.",
         "enum": [
           "host",
           "workspace"
@@ -14105,7 +14105,7 @@
           "workspaceId": {
             "type": "string",
             "format": "uuid",
-            "description": "The workspace whose chat runs the prompt."
+            "description": "The workspace whose chat runs the prompt (`sessionId` is read too, from clients made before the rename)."
           }
         },
         "additionalProperties": false
@@ -14305,13 +14305,13 @@
               "object",
               "null"
             ],
+            "description": "Write-only environment variables.",
             "additionalProperties": {
               "type": "string"
             },
             "propertyNames": {
               "type": "string"
-            },
-            "description": "Write-only environment variables."
+            }
           },
           "initialPrompt": {
             "oneOf": [
@@ -14340,8 +14340,7 @@
               {
                 "$ref": "#/components/schemas/ProjectId"
               }
-            ],
-            "deprecated": true
+            ]
           },
           "region": {
             "type": [
@@ -14357,11 +14356,10 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/ResourceClass"
+                "$ref": "#/components/schemas/ResourceClass",
+                "description": "Deprecated: use `configuration.resourceClass`."
               }
-            ],
-            "description": "Deprecated: use `configuration.resourceClass`.",
-            "deprecated": true
+            ]
           },
           "start": {
             "type": [
@@ -14384,11 +14382,10 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/WorkspaceTemplate"
+                "$ref": "#/components/schemas/WorkspaceTemplate",
+                "description": "Deprecated: use `configuration.repository`."
               }
-            ],
-            "description": "Deprecated: use `configuration.repository`.",
-            "deprecated": true
+            ]
           },
           "title": {
             "type": [
@@ -17201,7 +17198,7 @@
       },
       "LiveActivityTargetDto": {
         "type": "object",
-        "description": "The chat a Live Activity follows: `source: host` with `hostId` (and `projectId`), or `remoteSessionId` for a\nshared chat; `source: workspace` with `workspaceId`.",
+        "description": "The chat a Live Activity follows: `source: host` with `hostId` (and `projectId`), or `remoteSessionId` for a\nshared chat; `source: workspace` with `workspaceId` (`session`/`sessionId` from app builds made before the\nrename are read too).",
         "required": [
           "source"
         ],
