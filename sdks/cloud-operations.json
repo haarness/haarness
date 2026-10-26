@@ -842,6 +842,32 @@
     }
   },
   {
+    "name": "add_passkey",
+    "method": "POST",
+    "path": "/api/v1/me/sign-in-methods/passkeys",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/SignInMethodsDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/AddPasskeyRequest"
+    }
+  },
+  {
+    "name": "passkey_registration_options",
+    "method": "POST",
+    "path": "/api/v1/me/sign-in-methods/passkeys/options",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/PasskeyCreationOptionsDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/PasskeyOptionsRequest"
+    }
+  },
+  {
     "name": "remove_sign_in_method",
     "method": "POST",
     "path": "/api/v1/me/sign-in-methods/{id}/remove",
@@ -2200,6 +2226,28 @@
     "path": "/auth/options",
     "pathParams": [],
     "response": {}
+  },
+  {
+    "name": "passkey_sign_in",
+    "method": "POST",
+    "path": "/auth/passkey/finish",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/SignInResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/PasskeySignInRequest"
+    }
+  },
+  {
+    "name": "passkey_sign_in_options",
+    "method": "POST",
+    "path": "/auth/passkey/options",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/PasskeyRequestOptionsDto"
+    }
   },
   {
     "name": "device_page",

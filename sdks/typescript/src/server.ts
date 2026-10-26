@@ -39,13 +39,23 @@ export class LocalServer {
         ...(options.dataDir ? { HAARNESS_DATA_DIR: options.dataDir } : {}),
         HAARNESS_SERVER_TOKEN: token,
       },
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
     });
+    // What the server last said on stderr, kept (and the pipe drained) for as long as it runs: a failed start
+    // reports why, such as another server already running in that folder.
+    let said = "";
+    child.stderr!.on("data", (chunk: Buffer) => {
+      said = (said + chunk.toString()).slice(-4096);
+    });
+    const failure = (what: string) => {
+      const reason = said.trim().split("\n").filter((line) => line.trim()).at(-1)?.trim();
+      return new Error(reason ? `${what}: ${reason}` : what);
+    };
     try {
       const url = await new Promise<string>((resolve, reject) => {
         let text = "";
         const timer = setTimeout(
-          () => finish(new Error("Haarness startup timed out")),
+          () => finish(failure("Haarness startup timed out")),
           options.startupTimeoutMs ?? 30_000,
         );
         const data = (chunk: Buffer) => {
@@ -55,17 +65,19 @@ export class LocalServer {
           );
           if (match) finish(undefined, match[1]);
         };
-        const failed = () => finish(new Error("Haarness failed to start"));
+        const failed = (error?: Error) =>
+          finish(error instanceof Error ? error : failure("Haarness failed to start"));
         function finish(error?: Error, url?: string) {
           clearTimeout(timer);
           child.stdout?.off("data", data);
           child.off("error", failed);
-          child.off("exit", failed);
+          child.off("close", failed);
           error ? reject(error) : resolve(url!);
         }
         child.stdout!.on("data", data);
         child.once("error", failed);
-        child.once("exit", failed);
+        // `close` comes after the output is read, so the reason is in `said`.
+        child.once("close", () => failed());
       });
       child.stdout?.resume();
       const client = new Haarness({ baseUrl: url, token });

@@ -106,10 +106,20 @@ transport options are keyword-only. JSON `null` and omitted fields remain
 separate, including settings-reset requests.
 
 `chat()` starts and waits for a turn, then returns `{turn, items, text}` for that
-turn only. Inspect `turn.status` for completion/failure/interruption. A pending
-permission or question must be answered by another observer while chat waits;
-SDKs never automatically approve prompts. `autoApprove` is an explicit server
-request field for authorized noninteractive work.
+turn only. Inspect `turn.status` for completion/failure/interruption. It waits up
+to five minutes, and the server's wait ends five seconds before the client's
+timeout when you pass a shorter one; a turn still running then raises `409`
+while it keeps going. A pending permission or question must be answered by
+another observer while chat waits; SDKs never automatically approve prompts.
+How much a chat asks is its approval mode: new chats start in the server's
+`info().defaultApprovalMode` (Auto by default), and `setApprovalMode(id,
+{mode: "review" | "auto" | "yolo" | "inherit"})` changes it for every client.
+`autoApprove` is a per-turn request field for authorized noninteractive work; a
+published chat refuses it.
+
+Write a new file with `revision: NEW_FILE_REVISION` (the SHA-256 of empty
+content, exported by both SDKs) and an existing one with the `revision` you
+read, so a concurrent change fails with `409` instead of being overwritten.
 
 ## Streaming, approvals and cancellation
 
@@ -204,9 +214,11 @@ See [side questions](../docs/SIDE-QUESTIONS.md#api).
 
 Names in these examples must exist in your `commands()`/`workflows()` catalog.
 Command results are tagged as `turn`, `workflow_run` or `text`. Server-executable
-commands are distinct from TUI-only commands such as `/exit`. CLI-only
-installation/authentication/native-scheduler administration has no server API;
-the SDK does not invent endpoints or silently shell out for those commands.
+commands are distinct from TUI-only commands such as `/exit`. Native schedules,
+hooks, providers, MCP servers, memory and profiles are administered through
+`manageResource(resource, input)` (`manage_resource`), the same management API
+the apps' settings use. CLI-only installation and authentication have no server
+API; the SDK does not invent endpoints or silently shell out for those commands.
 
 All other resources have direct typed methods listed in [OPERATIONS.md](OPERATIONS.md).
 Examples: `updateTool("read", {enabled: null})`, `setGoal(id, {action: "pause"})`,
@@ -365,21 +377,28 @@ with HaarnessCloud(api_url, token=account_access_token) as cloud:
 
 Python async uses `AsyncHaarnessCloud`, `async with`, and awaits the same
 operations. `session.chats.list()` returns root chats, with native pagination
-options; `get(chatId)` selects one explicitly. Handles provide metadata,
-rename, archive/restore, messages, ask, send, wait and abort. Wait/abort reject
+options; `get(chatId)` selects one explicitly. Chat handles provide metadata,
+rename, archive/restore (of the chat; Cloud sessions themselves have no archive),
+messages, ask, send, wait and abort. Wait/abort reject
 a turn belonging to a different chat. The connected runtime exposes the entire
 native API, including files, Git, PTYs, permissions and SSE.
 
 Create a freestyle session with `createSession`/`create_session` and
-`{title, configuration, start}`. To use a template, list/get Cloud agents and
-include its `cloudAgentId`. Account credentials authenticate only the account
+`{title, configuration, start, environment, initialPrompt}`. `initialPrompt`
+(`text`, `chatTitle`, `reasoningEffort`, `approvalMode`) is delivered to a new
+chat once the session is up, even after your script exits; the returned handle
+keeps the create response in `created` (Python `created`), and
+`created.session.launch.chatId` is that chat, which `get()` reports on as
+`launch.status`. To use a template, list/get Cloud agents and include its
+`cloudAgentId`. `HaarnessCloud()` with no address uses `HAARNESS_CLOUD_API_URL`,
+else `https://haarness.ai`, as the CLI does. Account credentials authenticate only the account
 API; runtime requests use short-lived attach tickets. Tickets renew before
 expiry and once after an authentication failure or a stale generation read.
 An event stream encountering a new runtime generation returns `resync_required`;
 reload snapshots before subscribing again.
 
-Supply a scoped API key through `HAARNESS_API_KEY`, or an OAuth account access
-token explicitly or through `HAARNESS_CLOUD_TOKEN`.
+Supply a scoped API key through `HAARNESS_API_KEY` (which wins), or an OAuth
+account access token explicitly or through `HAARNESS_CLOUD_TOKEN`.
 `HAARNESS_SERVER_TOKEN` authenticates the local runtime. Cloud API keys can authorize both Cloud operations and inference, depending on their capabilities. OAuth code/PKCE,
 refresh and device endpoints are generated methods; SDK construction does not
 log in, store secrets, or refresh an OAuth grant automatically. For long-lived
@@ -479,13 +498,15 @@ Python methods are `create_cloud_schedule`, `list_cloud_schedules`,
 `cloud_schedule_runs`, and `delete_cloud_schedule`. Transport headers use
 `options={"headers": {"Idempotency-Key": ...}}`. Pause/resume is an update with
 `enabled`; supply the latest version from get. Use an RFC3339 `at` with a UTC
-offset for a one-shot run or an initial repeating date. Repeat intervals are
-60–31,536,000 seconds. Updating the cadence/target requires a new schedule;
-name, prompt, enabled and next date can be updated in place.
+offset for a one-shot run or an initial repeating date. Repeat with
+`everySeconds` (60–31,536,000) or a five-field `cron` read in `timezone` (IANA,
+default UTC); `previewCloudSchedule` (`preview_cloud_schedule`) shows the next
+run times first. Name, prompt, enabled, next date and the cadence (`timing`) can
+be updated in place; the target chat cannot.
 
 The worker checks due work every five seconds. It coalesces missed repeats,
 prevents overlapping runs per schedule and reuses a stable runtime request ID
-on retries. It can wake an existing stopped session under normal plan and
+on retries. It can wake an existing sleeping session under normal plan and
 concurrency limits, with a ten-minute startup deadline. Normal permission
 prompts become `needs_attention`; schedules never auto-approve them. Archived
 or missing target chats pause future execution when detected. Archiving does
@@ -493,8 +514,9 @@ not interrupt an already accepted turn. Pausing/deleting a schedule prevents
 future ticks; deleting cancels pending work but does not abort an accepted turn.
 Use chat abort explicitly for that. Session deletion cancels schedules and
 removes its machine, disk and all chats. Terminal schedule history is retained
-for 30 days. Stopping retains chats/files and disk charges; archiving only hides
-an item. Closing an SDK handle never stops billable compute.
+for 30 days. Putting a session to sleep (`stop`) retains chats/files and disk
+charges; sessions have no archive, and deleting is how their disk is freed.
+Closing an SDK handle never stops billable compute.
 
 For upload, use the connected runtime's `writeFile`/`write_file` with `path`,
 `content`, `encoding` (`utf8` or `base64`) and the current `revision`. New files

@@ -40,6 +40,14 @@ def response_value(
     return decode(response, binary)
 
 
+DEFAULT_CLOUD_URL = "https://haarness.ai"
+
+
+def cloud_url(base_url: str | None) -> str:
+    """The Cloud to talk to: the one given, else ``HAARNESS_CLOUD_API_URL``, else Haarness Cloud, as the CLI does."""
+    return base_url or os.getenv("HAARNESS_CLOUD_API_URL") or DEFAULT_CLOUD_URL
+
+
 class CloudBase:
     _token_resolver: Callable[[], str] | None
     _account_id: str | None
@@ -73,7 +81,7 @@ class CloudBase:
 class Transport(RuntimeTransport, CloudBase):
     def __init__(
         self,
-        base_url: str,
+        base_url: str | None = None,
         *,
         token: str | None = None,
         account_id: str | None = None,
@@ -81,7 +89,7 @@ class Transport(RuntimeTransport, CloudBase):
         timeout: float = 30,
     ):
         super().__init__(
-            base_url,
+            cloud_url(base_url),
             token=token if token is not None else os.getenv("HAARNESS_API_KEY", os.getenv("HAARNESS_CLOUD_TOKEN", "")),
             timeout=timeout,
         )
@@ -184,7 +192,7 @@ class Transport(RuntimeTransport, CloudBase):
 class AsyncTransport(AsyncRuntimeTransport, CloudBase):
     def __init__(
         self,
-        base_url: str,
+        base_url: str | None = None,
         *,
         token: str | None = None,
         account_id: str | None = None,
@@ -192,7 +200,7 @@ class AsyncTransport(AsyncRuntimeTransport, CloudBase):
         timeout: float = 30,
     ):
         super().__init__(
-            base_url,
+            cloud_url(base_url),
             token=token if token is not None else os.getenv("HAARNESS_API_KEY", os.getenv("HAARNESS_CLOUD_TOKEN", "")),
             timeout=timeout,
         )
