@@ -4,7 +4,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HELPER, detectInstall, openInstaller, removeLeftovers, stageMacApp } from "../src/main/update-install";
+import { HELPER, WINDOWS_HELPER, detectInstall, openInstaller, removeLeftovers, stageMacApp, windowsInstallCommand } from "../src/main/update-install";
 
 const temporary = () => mkdtemp(join(tmpdir(), "haarness-update-install-"));
 /** A process id that has already exited. */
@@ -203,4 +203,29 @@ test("what a stopped install left beside the app goes once it is old; a running 
   await removeLeftovers(target);
   assert.deepEqual((await readdir(root)).sort(), [".Haarness.app.previous.789", ".Other.app.previous.1", "Haarness.app", "Haarness.app.previous.2"]);
   await rm(root, { recursive: true, force: true });
+});
+
+test("Windows runs its install helper through Windows PowerShell, with every input in the environment", () => {
+  const command = windowsInstallCommand({
+    staged: "C:\\Users\\a b\\AppData\\Roaming\\Haarness\\updates\\9.9.9\\Haarness-9.9.9-win-x64.exe",
+    version: "9.9.9",
+    result: "C:\\Users\\a b\\AppData\\Roaming\\Haarness\\updates\\install-result.json",
+    env: { SystemRoot: "D:\\Windows", PATH: "x" },
+    pid: 4242,
+    windows: { bin: "C:\\Programs\\Haarness\\resources\\bin", records: "C:\\Users\\a b\\.cache\\haarness\\workspaces", app: "C:\\Programs\\Haarness\\Haarness.exe" },
+  });
+  assert.equal(command.file, "D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  const encoded = command.args.at(-1)!;
+  assert.deepEqual(command.args.slice(0, -1), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-EncodedCommand"]);
+  assert.equal(Buffer.from(encoded, "base64").toString("utf16le"), WINDOWS_HELPER);
+  // Windows caps a command line at 32,767 characters.
+  assert.ok(command.args.join(" ").length < 20_000);
+  assert.equal(command.env.HAARNESS_UPDATE_PID, "4242");
+  assert.equal(command.env.HAARNESS_UPDATE_VERSION, "9.9.9");
+  assert.equal(command.env.HAARNESS_UPDATE_BIN, "C:\\Programs\\Haarness\\resources\\bin");
+  assert.equal(command.env.PATH, "x");
+  // The helper names the flags electron-updater uses and the graceful stop it asks for first.
+  assert.match(WINDOWS_HELPER, /'--updated', '\/S', '--force-run'/);
+  assert.match(WINDOWS_HELPER, /\/v1\/shutdown/);
+  assert.match(WINDOWS_HELPER, /StartsWith\(\$bin \+ '\\'/);
 });

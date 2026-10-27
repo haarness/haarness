@@ -100,7 +100,7 @@ import { createUiSession } from "./ui-session";
 import { createNotifications } from "./notifications";
 import { chatHomeFolder, chatHomePath, isChatHome } from "./chat-home";
 import { quietClosedSocketReads } from "./closed-socket-read";
-import { daemonRunning } from "./daemon-record";
+import { cliCacheFolder, daemonRunning } from "./daemon-record";
 
 // A connection that went away never interrupts with Electron's error dialog
 // (see closed-socket-read.ts); any other uncaught error still shows it.
@@ -2241,6 +2241,15 @@ async function startUpdates() {
         result,
         env: process.env,
         argv: process.argv,
+        // Windows: Desktop's own servers stop on their own terms before the setup replaces them.
+        windows:
+          process.platform === "win32"
+            ? {
+                bin: join(process.resourcesPath, "bin"),
+                records: join(cliCacheFolder(process.env, homedir()) ?? join(homedir(), ".cache", "haarness"), "workspaces"),
+                app: process.execPath,
+              }
+            : undefined,
         // An end-to-end test notes the reopening instead of starting its stand-in app.
         reopen: test && process.env.HAARNESS_UPDATE_REOPEN_LOG ? ["/usr/bin/touch", process.env.HAARNESS_UPDATE_REOPEN_LOG] : undefined,
       });

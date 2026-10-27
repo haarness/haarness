@@ -673,3 +673,26 @@ test("starting says what an earlier run left at once, and trusts no staged path 
   assert.equal(await stat(join(first.dir, "install-result.json")).catch(() => null), null);
   await first.cleanup();
 });
+
+test("a rename Windows holds for a moment (an antivirus scan) is tried again; other failures are not", async () => {
+  const { renameSoon } = await import("../src/main/updater");
+  const dir = await mkdtemp(join(tmpdir(), "haarness-rename-"));
+  await writeFile(join(dir, "a"), "x");
+  // A real rename after waits: the waits are what a held file gets.
+  const waits: number[] = [];
+  await renameSoon(join(dir, "a"), join(dir, "b"), async (ms) => void waits.push(ms));
+  assert.deepEqual(waits, []);
+  assert.equal(await readFile(join(dir, "b"), "utf8"), "x");
+  await assert.rejects(renameSoon(join(dir, "missing"), join(dir, "c"), async () => {}), { code: "ENOENT" });
+  // Held the whole time: tried ten times, waiting a little longer each time, then the error.
+  if (process.getuid?.() !== 0) {
+    const { chmod } = await import("node:fs/promises");
+    await mkdir(join(dir, "locked"));
+    await chmod(join(dir, "locked"), 0o555);
+    const held: number[] = [];
+    await assert.rejects(renameSoon(join(dir, "b"), join(dir, "locked", "b"), async (ms) => void held.push(ms)), { code: "EACCES" });
+    assert.deepEqual(held, [100, 200, 300, 400, 500, 600, 700, 800, 900]);
+    await chmod(join(dir, "locked"), 0o755);
+  }
+  await rm(dir, { recursive: true, force: true });
+});

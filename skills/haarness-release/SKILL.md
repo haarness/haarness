@@ -349,8 +349,13 @@ file is simply not offered there, a published file that does not match its index
 withdrawing a release makes copies that staged it drop it. After publishing, prove an update: a
 copy of the previous Desktop shows **Restart to update** within a check (Settings → About →
 Check for updates is immediate), restarting opens the new version, and `haarness --version`
-after `haarness --update` names it. Desktop builds before 0.1.6 have no updater: their users
-install once by hand.
+after `haarness --update` names it. On Linux, `scripts/test-linux-update.sh` does it in a Docker
+desktop session (the release's AppImage, installed by `install.sh`, takes the previous release's
+AppImage offered as newer, replaces itself in place and reopens). On Windows, nothing here runs
+the setup itself: `scripts/test-windows-update-helper.py` (under PowerShell 7, e.g. in a container)
+proves the helper that stops Desktop's servers, runs the setup with `--updated /S --force-run` and
+reports; prove the setup on a Windows machine when one is at hand. Desktop builds before 0.1.6
+have no updater: their users install once by hand.
 
 ## 5. Deploy the Cloud
 
