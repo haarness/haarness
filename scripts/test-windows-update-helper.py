@@ -7,8 +7,11 @@ leaves, and a setup that notes how it was run. Checked: the helper waits for Haa
 stop (with its token, at the address its record names), waits for it, then runs the setup with
 `--updated /S --force-run`, and reports success; a setup that fails is reported and Haarness opens again.
 
-Needs `pwsh` (PowerShell 7, on any OS) or HAARNESS_POWERSHELL. Without one, in the release's PowerShell image:
-  docker run --rm --init -v "$PWD":/src -w /src haarness-release-pwsh:latest python3 scripts/test-windows-update-helper.py
+Needs `pwsh` (PowerShell 7, on any OS) or HAARNESS_POWERSHELL, of the machine's own architecture: an emulated one
+(Docker running an amd64 image on Apple silicon) reports the emulator as every process's program. Without one:
+  docker build -q --target pwsh -t haarness-linux-update-test:pwsh scripts/linux-update
+  docker run --rm --init -u root -v "$PWD":/src -w /src haarness-linux-update-test:pwsh \
+    python3 scripts/test-windows-update-helper.py
 Stand-ins are started apart from this process (and `--init` reaps them in a container), as a process that has
 exited must be gone: here, as on Windows, not a zombie the helper would still see.
 """

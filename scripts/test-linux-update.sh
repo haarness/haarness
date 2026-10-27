@@ -31,7 +31,7 @@ if len(versions) < 2:
 json.dump(versions[1], open(out + "/payload.json", "w"))
 print("current", versions[0]["version"], "- the update offered is", versions[1]["version"] + "'"'"'s file")
 ' "$arch" "$out"
-docker build -q -t haarness-linux-update-test:24.04 "$here/linux-update" >/dev/null
+docker build -q --target desktop -t haarness-linux-update-test:24.04 "$here/linux-update" >/dev/null
 docker run --rm --init --shm-size=1g \
   -e HAARNESS_RELEASE_SERVICE="$service" \
   -v "$root/apps/desktop/node_modules:/work/node_modules:ro" \
