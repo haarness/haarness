@@ -765,7 +765,7 @@ export function App() {
       );
     const actions: SearchEntry[] = [
       {key:"browser",group:"Project panels",name:t("Open browser"),keywords:"web website Chromium tabs",icon:"web",hint:hint("browser", "Mod+Shift+B"),disabled:!connected||!browserHere(),action:()=>openDock("browser")},
-      {key:"pick",group:"Project panels",name:t("Select part of the page"),keywords:"inspect select element page point browser chip",icon:"pick",hint:hint("pick"),disabled:!connected||!browserHere(),action:pickElement},
+      {key:"pick",group:"Project panels",name:t("Select part of the page"),keywords:"pick an element inspect select element page point browser chip",icon:"pick",hint:hint("pick"),disabled:!connected||!browserHere(),action:pickElement},
       {key:"conversation:side-chat",group:"Project panels",name:t("Open side chat"),keywords:"btw side question aside ask thread",icon:"side-chat",hint:hint("sideChat", "Mod+Shift+J"),disabled:!connected||!state.selected,action:()=>openSide()},
       {key:"side-chat-new",group:"Project panels",name:t("New side chat"),keywords:"btw side question aside ask thread another",icon:"side-chat",disabled:!connected||!state.selected,action:()=>openSide(true)},
       {key:"memory",group:"Chat actions",name:t("Manage memory"),keywords:"project memory index",icon:"layers",disabled:!connected,action:()=>set("memoryOpen",true)},

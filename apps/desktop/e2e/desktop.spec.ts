@@ -5770,7 +5770,7 @@ test("slash commands that answer with text show the answer above the composer", 
   const note = page.locator(".command-note");
   await send("/goal status");
   await expect(note).toContainText("/goal status");
-  await expect(note.getByRole("status")).toContainText("No active goal");
+  await expect(note.getByRole("status")).toContainText("There is no goal yet");
   await send("/workflow");
   await expect(note).toContainText("/workflow");
   await expect(note.getByRole("status")).toContainText("Workflows (");
