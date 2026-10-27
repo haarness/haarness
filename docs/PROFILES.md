@@ -90,17 +90,17 @@ Running servers use normal idle-time configuration reload. Project configuration
 `--disable-project-config` or `HAARNESS_DISABLE_PROJECT_CONFIG=1`. Restore archives you trust:
 configuration can define tools, hooks, and workflows.
 
-## Profiles and a base folder
+## Profiles and a system folder
 
 A profile is a snapshot: restoring it copies files into the person's own global
 and project configuration, which they then own and change. A
-[base folder](CONFIGURATION-SCOPES.md#base-folder) (`HAARNESS_BASE_CONFIG_DIR`)
+[system folder](CONFIGURATION-SCOPES.md#system-folder) (`HAARNESS_SYSTEM_CONFIG_DIR`)
 is a live, read-only layer below that configuration, shared by everyone whose
 Haarness starts with the variable and updated where it lives (a `git pull`, a
-device management push). Saving a profile never includes the base folder,
+device management push). Saving a profile never includes the system folder,
 restoring one never writes into it, and whatever a profile restores overrides
-the base folder's settings and definitions of the same name. Ship team defaults
-that should stay current as a base folder; hand someone a setup to make their
+the system folder's settings and definitions of the same name. Ship team defaults
+that should stay current as a system folder; hand someone a setup to make their
 own as a profile.
 
 ## Cloud storage and discovery
@@ -116,14 +116,14 @@ haarness --data-dir /path/to/catalog-data --workspace /path/to/catalog-workspace
 # In another terminal, use the same bearer token.
 export HAARNESS_PROFILE_URL=http://127.0.0.1:4096
 export HAARNESS_PROFILE_TOKEN="$HAARNESS_SERVER_TOKEN"
-haarness profile cloud-push ./engineering.profile.zip
-haarness profile cloud-list --query engineering --limit 20
-haarness profile cloud-get PROFILE_ID
-haarness profile cloud-download PROFILE_ID --output ./downloaded.profile.zip
-haarness profile cloud-restore PROFILE_ID --dry-run
-haarness profile cloud-restore PROFILE_ID
-haarness profile cloud-delete PROFILE_ID
-haarness profile save engineering --cloud
+haarness profile push ./engineering.profile.zip
+haarness profile search --query engineering --limit 20
+haarness profile info PROFILE_ID
+haarness profile download PROFILE_ID --output ./downloaded.profile.zip
+haarness profile pull PROFILE_ID --dry-run
+haarness profile pull PROFILE_ID
+haarness profile delete PROFILE_ID
+haarness profile save engineering --push
 ```
 
 `--url` and `--token` override environment settings. URLs accept a server root

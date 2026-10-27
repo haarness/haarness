@@ -5,12 +5,12 @@ import { splitPath } from "./settings-lists";
 /** Roughly three lines at the description's measure; past that a row would
  * push its own control out of sight, so the text clamps until asked. */
 const CLAMP_OVER = 220;
-/** The quiet tag on an item that comes from the base configuration folder
- * (`HAARNESS_BASE_CONFIG_DIR`), which Haarness lists but never changes: an
+/** The quiet tag on an item that comes from the system configuration folder
+ * (`HAARNESS_SYSTEM_CONFIG_DIR`), which Haarness lists but never changes: an
  * edit saves the person's own version, so such an item has no Remove. */
-export function BaseTag() {
+export function SystemTag() {
   return (
-    <span class="badge setting-tag" title={t("From the base folder")}>
+    <span class="badge setting-tag" title={t("From the system folder")}>
       {t("Base")}
     </span>
   );
@@ -91,7 +91,7 @@ export function SettingRow(props: {
   title: string;
   target?: string;
   description?: string;
-  /** A tag beside the title, such as {@link BaseTag}. */
+  /** A tag beside the title, such as {@link SystemTag}. */
   tag?: JSX.Element;
   /** Content under the title that is not a sentence, such as a path. */
   detail?: JSX.Element;

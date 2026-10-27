@@ -96,7 +96,7 @@ For ambiguous mutations use native request IDs where supported and read authorit
 
 ## 6. Authorization, routing and bounded load
 
-Run Cloud `cargo test -p cloud-api --test remote` with a real test database configured. Its three cases cover registry scopes/ownership/revocation, real multiplexed relay across two API replicas with live key revocation, and pagination/replacement lease fencing. Confirm cases executed instead of skipping.
+Run Cloud `cargo test -p cloud-api --test remote` with a real test datasystem configured. Its three cases cover registry scopes/ownership/revocation, real multiplexed relay across two API replicas with live key revocation, and pagination/replacement lease fencing. Confirm cases executed instead of skipping.
 
 - `remote:read`: account discovery/entity events only. `remote:connect`: owned registration/connector/publication. `remote:control`: runtime, rename/revoke/unpublish. Role checks are independent: viewer discovery, builder-or-higher control; only the registering user connects/publishes.
 - Use different consumer/publisher credentials. Revoking a consumer closes its streams without dropping another publisher; revoking publisher access disconnects that host. Check fresh requests and existing streams, including expiry/permission changes when auth is affected. Access revalidation runs every 5 s.

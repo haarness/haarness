@@ -294,18 +294,18 @@ pub fn project_directories(workspace: &Path) -> Vec<PathBuf> {
     vec![workspace.to_path_buf()]
 }
 
-/// The base configuration folder this process reads
-/// (`HAARNESS_BASE_CONFIG_DIR`, absolute, see
-/// [`haarness_protocol::base_config_dir`]). This crate's own tests never read
-/// one from the machine they run on: a test that needs a base folder passes
-/// it ([`BaseFolder::at`], `jsonconfig::load_layers_with_base`).
+/// The system configuration folder this process reads
+/// (`HAARNESS_SYSTEM_CONFIG_DIR`, absolute, see
+/// [`haarness_protocol::system_config_dir`]). This crate's own tests never read
+/// one from the machine they run on: a test that needs a system folder passes
+/// it ([`SystemFolder::at`], `jsonconfig::load_layers_with_system`).
 #[cfg(not(test))]
-pub fn base_config_dir() -> Option<PathBuf> {
-    haarness_protocol::base_config_dir()
+pub fn system_config_dir() -> Option<PathBuf> {
+    haarness_protocol::system_config_dir()
 }
 
 #[cfg(test)]
-pub fn base_config_dir() -> Option<PathBuf> {
+pub fn system_config_dir() -> Option<PathBuf> {
     None
 }
 
@@ -333,24 +333,24 @@ pub fn real_path_within(path: &Path, roots: &[PathBuf]) -> bool {
             .is_ok_and(|real| roots.iter().any(|root| real.starts_with(root)))
 }
 
-/// The base configuration folder (`HAARNESS_BASE_CONFIG_DIR`) as one
+/// The system configuration folder (`HAARNESS_SYSTEM_CONFIG_DIR`) as one
 /// workspace reads it: the lowest configuration layer, below the global
 /// folder, which a team or device management ships. Haarness only reads it,
 /// and never through a link that leads into the project, where a cloned
-/// repository puts what it likes. A base folder the person points into the
+/// repository puts what it likes. A system folder the person points into the
 /// project stays theirs, so everything in it is read.
 #[derive(Clone, Debug)]
-pub struct BaseFolder {
+pub struct SystemFolder {
     root: PathBuf,
     /// The project's real roots, unless the folder itself is inside them.
     project: Vec<PathBuf>,
 }
 
-impl BaseFolder {
-    /// The folder `HAARNESS_BASE_CONFIG_DIR` names, for `workspace`; `None`
+impl SystemFolder {
+    /// The folder `HAARNESS_SYSTEM_CONFIG_DIR` names, for `workspace`; `None`
     /// when the variable is unset or blank.
     pub fn for_workspace(workspace: &Path) -> Option<Self> {
-        base_config_dir().map(|root| Self::at(root, workspace))
+        system_config_dir().map(|root| Self::at(root, workspace))
     }
 
     pub fn at(root: PathBuf, workspace: &Path) -> Self {
@@ -377,7 +377,7 @@ impl BaseFolder {
         if excluded {
             tracing::warn!(
                 path = %path.display(),
-                "config: base folder entry not read: a link leads it into the project"
+                "config: system folder entry not read: a link leads it into the project"
             );
         }
         excluded
@@ -406,7 +406,7 @@ impl BaseFolder {
     /// The files under the folder's `name`, at any depth, leaving out each one
     /// a link leads into the project.
     pub fn files(&self, name: &str) -> Vec<PathBuf> {
-        fn walk(base: &BaseFolder, path: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        fn walk(base: &SystemFolder, path: &Path, depth: usize, out: &mut Vec<PathBuf>) {
             if depth > 16 {
                 return;
             }

@@ -323,13 +323,13 @@ mod history_tests {
     }
 }
 
-/// The base configuration folder (`HAARNESS_BASE_CONFIG_DIR`) this TUI
+/// The system configuration folder (`HAARNESS_SYSTEM_CONFIG_DIR`) this TUI
 /// started with; never the machine's own in this crate's tests.
-pub(crate) fn base_config_dir() -> Option<PathBuf> {
+pub(crate) fn system_config_dir() -> Option<PathBuf> {
     if cfg!(test) {
         None
     } else {
-        haarness_protocol::base_config_dir()
+        haarness_protocol::system_config_dir()
     }
 }
 
@@ -342,9 +342,9 @@ pub struct UnreadTheme {
 }
 
 /// Themes discovered from `<config>/themes/*.toml`, then from the base
-/// configuration folder's `themes` (`HAARNESS_BASE_CONFIG_DIR`), appended
+/// configuration folder's `themes` (`HAARNESS_SYSTEM_CONFIG_DIR`), appended
 /// after the built-ins; the first theme of a name wins, so a global theme
-/// replaces the base folder's. Unparseable files are skipped and returned,
+/// replaces the system folder's. Unparseable files are skipped and returned,
 /// never printed: the TUI may be drawing on the terminal.
 pub fn load_theme_entries() -> (Vec<crate::theme::ThemeEntry>, Vec<UnreadTheme>) {
     let mut entries = crate::theme::builtin_entries();
@@ -353,7 +353,7 @@ pub fn load_theme_entries() -> (Vec<crate::theme::ThemeEntry>, Vec<UnreadTheme>)
     let mut unread = Vec::new();
     let directories = config_dir()
         .into_iter()
-        .chain(base_config_dir())
+        .chain(system_config_dir())
         .map(|directory| directory.join("themes"));
     for directory in directories {
         add_theme_entries(&mut entries, &mut names, &mut unread, &directory);

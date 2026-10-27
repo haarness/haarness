@@ -88,9 +88,9 @@ pub fn all_enabled_roots(
     if !config.join(".layout-v1").exists() && !data.join(".layout-v1").exists() {
         roots.extend(local_plugin_roots(&data.join("plugins/local")));
     }
-    // The base folder's local plugins, which only its own maintainers change,
+    // The system folder's local plugins, which only its own maintainers change,
     // each left out when a link leads it into the project.
-    roots.extend(base_plugin_roots(workspace));
+    roots.extend(system_plugin_roots(workspace));
     roots.extend(local_plugin_roots(&config.join("plugins/local")));
     if trust_project {
         for directory in crate::layout::project_directories(workspace) {
@@ -102,15 +102,15 @@ pub fn all_enabled_roots(
     roots
 }
 
-/// The base folder's enabled local plugins, without one a link leads into
-/// the project: its hooks and MCP servers would run as the base folder's.
-fn base_plugin_roots(workspace: &Path) -> Vec<PathBuf> {
-    crate::layout::BaseFolder::for_workspace(workspace)
-        .map(|base| base_plugin_roots_in(&base))
+/// The system folder's enabled local plugins, without one a link leads into
+/// the project: its hooks and MCP servers would run as the system folder's.
+fn system_plugin_roots(workspace: &Path) -> Vec<PathBuf> {
+    crate::layout::SystemFolder::for_workspace(workspace)
+        .map(|base| system_plugin_roots_in(&base))
         .unwrap_or_default()
 }
 
-pub(crate) fn base_plugin_roots_in(base: &crate::layout::BaseFolder) -> Vec<PathBuf> {
+pub(crate) fn system_plugin_roots_in(base: &crate::layout::SystemFolder) -> Vec<PathBuf> {
     base.entry("plugins/local")
         .map(|local| local_plugin_roots(&local))
         .unwrap_or_default()
@@ -152,9 +152,9 @@ fn local_plugin_infos(root: &Path, scope: &str) -> Vec<PluginInfo> {
             marketplace: None,
             path: path.display().to_string(),
             enabled: !path.join(".haarness-disabled").exists(),
-            // Haarness never writes into the base folder: its plugins are
+            // Haarness never writes into the system folder: its plugins are
             // switched off or removed there.
-            managed: scope != "base",
+            managed: scope != "system",
             description: manifest
                 .get("description")
                 .and_then(serde_json::Value::as_str)
@@ -264,11 +264,11 @@ pub fn plugin_infos(
             description: plugin.description,
         })
         .collect();
-    if let Some(base) = crate::layout::BaseFolder::for_workspace(workspace)
+    if let Some(base) = crate::layout::SystemFolder::for_workspace(workspace)
         && let Some(local) = base.entry("plugins/local")
     {
         result.extend(
-            local_plugin_infos(&local, "base")
+            local_plugin_infos(&local, "system")
                 .into_iter()
                 .filter(|info| !base.excluded(Path::new(&info.path))),
         );

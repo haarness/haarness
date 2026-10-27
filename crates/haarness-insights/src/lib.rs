@@ -33,7 +33,7 @@ impl Options {
             bail!("limit must be between 1 and 1000000");
         }
         if self.current_project && self.project.is_some() {
-            bail!("choose project or current-project, not both");
+            bail!("choose --project or --here, not both");
         }
         Ok(())
     }

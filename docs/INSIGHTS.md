@@ -13,17 +13,17 @@ start servers, register projects, migrate databases, load credentials or call pr
 ```sh
 haarness stats
 haarness stats --days 7 --json
-haarness stats --current-project
+haarness stats --here
 haarness stats --project PROJECT_ID
 haarness insights --days 30 --limit 200
-haarness insights --current-project --open
+haarness insights --here --open
 haarness insights --output-dir ./reports --json
 ```
 
 With no filters, all recorded history is included. `--days N` selects turns started
 within a rolling UTC window, including all recorded events of those turns.
 `--limit N` selects the most recently active matching sessions across projects.
-`--project` accepts an ID, unique name or root path; `--current-project` includes
+`--project` accepts an ID, unique name or root path; `--here` includes
 the project's other registered workspaces. The hidden global `--data-dir` (or
 `HAARNESS_DATA_DIR`) selects an isolated installation.
 
@@ -36,7 +36,7 @@ opens the browser; `--no-open` and `--no-llm` explicitly describe the defaults.
 In the TUI, `/stats` shows a summary panel. `/insights` also saves HTML on the
 **client's machine**, as `haarness-insights-<id>.html` (owner-only on Unix) in the system
 temporary folder, and copies its path; with `--open` it also opens the report,
-except over SSH. Both accept `--days N`, `--limit N`, `--current-project` and
+except over SSH. Both accept `--days N`, `--limit N`, `--here` and
 `--project ID`. Attached clients analyze the server's history. Desktop has no
 analytics view.
 

@@ -9,11 +9,11 @@ pub struct Filters {
     #[arg(long)]
     days: Option<u32>,
     /// Registered project ID, unique name, or root path.
-    #[arg(long, conflicts_with = "current_project")]
+    #[arg(long, conflicts_with = "here")]
     project: Option<String>,
-    /// Include all workspaces belonging to the current project.
+    /// Only this project: every workspace of the project you are in.
     #[arg(long)]
-    current_project: bool,
+    here: bool,
     /// Include at most this many recent matching chats (default: no limit).
     #[arg(long)]
     limit: Option<usize>,
@@ -23,7 +23,7 @@ impl Filters {
         Options {
             days: self.days,
             project: self.project.clone(),
-            current_project: self.current_project,
+            current_project: self.here,
             limit: self.limit,
         }
     }

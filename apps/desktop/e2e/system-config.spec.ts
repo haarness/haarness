@@ -18,8 +18,8 @@ async function snapshot(folder: string): Promise<Record<string, string>> {
   return files;
 }
 
-test("items of the base config folder carry a quiet Base tag and no Remove", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "haarness-base-config-")));
+test("items of the system config folder carry a quiet Base tag and no Remove", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "haarness-system-config-")));
   const home = join(root, "home");
   const workspace = join(root, "project");
   const team = join(root, "team");
@@ -33,7 +33,7 @@ test("items of the base config folder carry a quiet Base tag and no Remove", asy
     HAARNESS_BIN: binary,
     HAARNESS_TEST_PROVIDER: "1",
     HAARNESS_DESKTOP_TEST: "1",
-    HAARNESS_BASE_CONFIG_DIR: team,
+    HAARNESS_SYSTEM_CONFIG_DIR: team,
   };
   delete env.ELECTRON_RUN_AS_NODE;
   let app: Awaited<ReturnType<typeof electron.launch>> | undefined;
@@ -97,7 +97,7 @@ test("items of the base config folder carry a quiet Base tag and no Remove", asy
       await section(name);
       const row = settings.locator(`[data-setting="${kind}:${item}"]`);
       await expect(tag(row)).toHaveText("Base");
-      await expect(tag(row)).toHaveAttribute("title", "From the base folder");
+      await expect(tag(row)).toHaveAttribute("title", "From the system folder");
       await expect(row.locator("p")).toHaveText(description);
       await expect(row.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
       await expect(row.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);

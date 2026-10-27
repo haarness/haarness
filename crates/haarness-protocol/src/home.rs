@@ -57,37 +57,37 @@ pub fn test_folder() -> PathBuf {
         .join(std::process::id().to_string())
 }
 
-/// The variable that names the base configuration folder.
-pub const BASE_CONFIG_DIR_ENV: &str = "HAARNESS_BASE_CONFIG_DIR";
+/// The variable that names the system configuration folder.
+pub const SYSTEM_CONFIG_DIR_ENV: &str = "HAARNESS_SYSTEM_CONFIG_DIR";
 
-/// The base configuration folder, `HAARNESS_BASE_CONFIG_DIR`: a read-only
+/// The system configuration folder, `HAARNESS_SYSTEM_CONFIG_DIR`: a read-only
 /// layer that a team or device management ships below the user's global
 /// configuration. `None` when the variable is unset or blank, so Haarness
 /// loads exactly as before, and when it is not an absolute path: an
 /// administrator's folder, it must mean the same folder for every process,
-/// whatever folder each starts in ([`base_config_dir_problem`] says why it is
+/// whatever folder each starts in ([`system_config_dir_problem`] says why it is
 /// ignored).
 #[must_use]
-pub fn base_config_dir() -> Option<PathBuf> {
-    base_config_dir_from(std::env::var_os(BASE_CONFIG_DIR_ENV))
+pub fn system_config_dir() -> Option<PathBuf> {
+    system_config_dir_from(std::env::var_os(SYSTEM_CONFIG_DIR_ENV))
 }
 
-/// [`base_config_dir`] for a value of the variable, without a trailing
+/// [`system_config_dir`] for a value of the variable, without a trailing
 /// separator or `.` parts.
 #[must_use]
-pub fn base_config_dir_from(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+pub fn system_config_dir_from(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
     let path = written(value?);
     (path.is_absolute()).then(|| path.components().collect())
 }
 
-/// Why a set `HAARNESS_BASE_CONFIG_DIR` is ignored, in one line: it is not an
+/// Why a set `HAARNESS_SYSTEM_CONFIG_DIR` is ignored, in one line: it is not an
 /// absolute path. `None` when it is unset, blank or absolute.
 #[must_use]
-pub fn base_config_dir_problem() -> Option<String> {
-    let path = written(std::env::var_os(BASE_CONFIG_DIR_ENV)?);
+pub fn system_config_dir_problem() -> Option<String> {
+    let path = written(std::env::var_os(SYSTEM_CONFIG_DIR_ENV)?);
     (!path.as_os_str().is_empty() && !path.is_absolute()).then(|| {
         format!(
-            "{BASE_CONFIG_DIR_ENV} must be an absolute path; ignoring \"{}\"",
+            "{SYSTEM_CONFIG_DIR_ENV} must be an absolute path; ignoring \"{}\"",
             path.display()
         )
     })
@@ -127,19 +127,19 @@ mod tests {
     }
 
     #[test]
-    fn base_config_dir_is_unset_for_blank_and_relative_values() {
-        assert_eq!(base_config_dir_from(None), None);
-        assert_eq!(base_config_dir_from(Some("".into())), None);
-        assert_eq!(base_config_dir_from(Some("  ".into())), None);
-        assert_eq!(base_config_dir_from(Some("team".into())), None);
-        assert_eq!(base_config_dir_from(Some("./team".into())), None);
+    fn system_config_dir_is_unset_for_blank_and_relative_values() {
+        assert_eq!(system_config_dir_from(None), None);
+        assert_eq!(system_config_dir_from(Some("".into())), None);
+        assert_eq!(system_config_dir_from(Some("  ".into())), None);
+        assert_eq!(system_config_dir_from(Some("team".into())), None);
+        assert_eq!(system_config_dir_from(Some("./team".into())), None);
         let absolute = std::env::temp_dir().join("team-base");
         assert_eq!(
-            base_config_dir_from(Some(format!(" {}/ ", absolute.display()).into())),
+            system_config_dir_from(Some(format!(" {}/ ", absolute.display()).into())),
             Some(absolute.components().collect())
         );
         assert_eq!(
-            base_config_dir_from(Some(format!("{}/./", absolute.display()).into())),
+            system_config_dir_from(Some(format!("{}/./", absolute.display()).into())),
             Some(absolute.components().collect())
         );
     }

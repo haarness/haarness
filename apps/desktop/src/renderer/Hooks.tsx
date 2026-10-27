@@ -17,7 +17,7 @@ import {
 } from "./hook-matcher";
 import { confirm, Empty } from "./ui";
 import { cancelled } from "./error-text";
-import { BaseTag } from "./SettingRow";
+import { SystemTag } from "./SettingRow";
 import "./management.css";
 
 interface Hook {
@@ -213,7 +213,7 @@ export function Hooks() {
                   </code>
                   <small class="muted management-source">
                     <Show
-                      when={hook.source.scope === "base"}
+                      when={hook.source.scope === "system"}
                       fallback={
                         hook.source.scope === "local"
                           ? t("This project")
@@ -222,7 +222,7 @@ export function Hooks() {
                             : t("Plugin (read-only)")
                       }
                     >
-                      <BaseTag />
+                      <SystemTag />
                     </Show>{" "}
                     · {hook.source.path}
                   </small>

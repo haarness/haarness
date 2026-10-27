@@ -2988,7 +2988,7 @@ mod tests {
                     haarness_server::auth::ServerAccess::Private.fingerprint("fixture"),
                 ),
                 trace_endpoint: None,
-                base_config_dir: None,
+                system_config_dir: None,
             };
             crate::write_private_json(&folder.join("runtime.json"), &record).unwrap();
         }

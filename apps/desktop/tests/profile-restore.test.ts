@@ -46,8 +46,8 @@ test("the confirmed restore replaces files only when the preview listed some", (
     "profile", "restore", "/p/work.profile.zip", "--force", "--json",
   ]);
   assert.deepEqual(
-    restoreArgs(["cloud-restore", "id", "--url", "https://h.example"], restorePlan({ ...preview, overwrite: [] })),
-    ["profile", "cloud-restore", "id", "--url", "https://h.example", "--json"],
+    restoreArgs(["pull", "id", "--url", "https://h.example"], restorePlan({ ...preview, overwrite: [] })),
+    ["profile", "pull", "id", "--url", "https://h.example", "--json"],
   );
 });
 

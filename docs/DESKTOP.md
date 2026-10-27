@@ -387,8 +387,8 @@ retain their permission rules. These editors also work on a connected remote
 server; changes are saved on that server.
 
 Definitions, MCP servers, hooks and plugins from a
-[base folder](CONFIGURATION-SCOPES.md#base-folder) (`HAARNESS_BASE_CONFIG_DIR`)
-carry a small **Base** tag ("From the base folder") and have no Remove: Edit
+[system folder](CONFIGURATION-SCOPES.md#system-folder) (`HAARNESS_SYSTEM_CONFIG_DIR`)
+carry a small **Base** tag ("From the system folder") and have no Remove: Edit
 saves your own version as for a built-in, an MCP server's Enable, Disable and
 Edit save a copy in your configuration, and base hooks open read-only.
 

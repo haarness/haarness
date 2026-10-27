@@ -536,7 +536,7 @@ inherit their ancestors' mode, while ordinary forks, other projects and worktree
 retain their own settings. “Allow once + Auto” from a child view affects that
 child and its descendants without enabling the parent or siblings. It enables
 only after a successful reply and an unchanged view/mode. TUI supports Ctrl+Y,
-the permission-mode command, and the same one-time approval action with a
+the approvals command, and the same one-time approval action with a
 launch-local mode. Auto never stores Always rules; explicit denies, agent
 ceilings and manual questions remain enforced. See AUTO-APPROVALS.md for the
 scope and reconnect behavior.
