@@ -1648,7 +1648,13 @@ fn openai_compatible_media_message(
     supports_images: bool,
     model: &str,
 ) -> CoreResult<Value> {
-    let mut blocks = vec![json!({"type":"text","text":content})];
+    // A photo sent on its own has no text. Claude refuses a blank text block,
+    // including through a router that passes the request on to Anthropic, so
+    // blank text is left out (as the native adapters do).
+    let mut blocks = Vec::new();
+    if !content.trim().is_empty() {
+        blocks.push(json!({"type":"text","text":content}));
+    }
     for item in crate::media::load_all(attachments)? {
         if item.is_image() {
             if !supports_images {
@@ -2234,6 +2240,35 @@ mod tests {
         assert_eq!(details[0]["format"], "anthropic-claude-v1");
         assert_eq!(details[1]["text"], "distinct");
         assert_eq!(details[1]["id"], "block-b");
+    }
+
+    #[test]
+    fn a_photo_sent_without_text_has_no_blank_text_block() {
+        // Claude refuses a blank text block, and a router passes this
+        // message on to Anthropic as it is.
+        for content in ["", " \n"] {
+            let message = openai_compatible_media_message(
+                "user",
+                content,
+                &["data:image/png;name=photo-1.png;base64,iVBORw0KGgo=".into()],
+                true,
+                "anthropic/claude-sonnet-5.5",
+            )
+            .unwrap();
+            let blocks = message["content"].as_array().unwrap();
+            assert_eq!(blocks.len(), 1, "{content:?}: {blocks:?}");
+            assert_eq!(blocks[0]["type"], "image_url");
+        }
+        let message = openai_compatible_media_message(
+            "user",
+            "What is this?",
+            &["data:image/png;base64,iVBORw0KGgo=".into()],
+            true,
+            "anthropic/claude-sonnet-5.5",
+        )
+        .unwrap();
+        assert_eq!(message["content"][0]["text"], "What is this?");
+        assert_eq!(message["content"][1]["type"], "image_url");
     }
 
     #[test]
