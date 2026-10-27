@@ -1525,7 +1525,7 @@ impl ManagementService {
             if row["scope"] == "system" {
                 view.entries.push(entry(
                     text(row, "name"),
-                    format!("{} · base", text(row, "runtimeStatus")),
+                    format!("{} · system", text(row, "runtimeStatus")),
                     row_request("inspect", row),
                 ));
             } else if row["readOnly"] == true {
