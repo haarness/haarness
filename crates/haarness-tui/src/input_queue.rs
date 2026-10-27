@@ -79,7 +79,7 @@ impl App {
             title: if self.active_turn.is_some() {
                 "Queued messages · after current work".into()
             } else {
-                "Queued messages · paused — send when ready".into()
+                "Queued messages · on hold".into()
             },
             kind: OptionsKind::InputQueue,
             entries: self
@@ -133,7 +133,7 @@ impl App {
             (
                 "edit",
                 "Edit",
-                "load it into the prompt; Enter saves it in place",
+                "load it into the prompt; Enter saves your changes",
             ),
             ("remove", "Remove", "discard it; the agent never sees it"),
         ];

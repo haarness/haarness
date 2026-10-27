@@ -878,32 +878,16 @@ const HELP: &[(&str, &str, &str)] = &[
         "Next / previous file",
         "Go to the next or previous file with changes",
     ),
-    (
-        "↵",
-        "Open item",
-        "Open a file, or open and close a folder",
-    ),
+    ("↵", "Open item", "Open a file, or open and close a folder"),
     (
         "→ / ←",
         "Expand / collapse",
         "Open the folder, or step out to its parent",
     ),
-    (
-        "a",
-        "Expand all folders",
-        "Unfold the whole file tree",
-    ),
+    ("a", "Expand all folders", "Unfold the whole file tree"),
     ("t", "Toggle file tree", "Show or hide the sidebar"),
-    (
-        "o",
-        "Toggle patches",
-        "One file's patch, or all of them",
-    ),
-    (
-        "v",
-        "Toggle view",
-        "Side by side, or one column",
-    ),
+    ("o", "Toggle patches", "One file's patch, or all of them"),
+    ("v", "Toggle view", "Side by side, or one column"),
     (
         "x",
         "Cycle context",

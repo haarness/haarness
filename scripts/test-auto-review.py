@@ -169,10 +169,10 @@ try:
     finished()
     assert not (workspace / 'blocked.txt').exists()
     # The row; the echo provider's reply below it quotes the text the model got.
-    until(lambda: '⊘ bash printf blocked > blocked.txt  Stopped by Auto's reviewer: Test verdict: deny.' in capture(),
+    until(lambda: "⊘ bash printf blocked > blocked.txt  Stopped by Auto's reviewer: Test verdict: deny." in capture(),
           'the row did not say why it was blocked')
     save('blocked-row')
-    check('a block refuses the call and its row reads Stopped by Auto's reviewer with the reason')
+    check("a block refuses the call and its row reads Stopped by Auto's reviewer with the reason")
 
     start(thread, 'printf slow > slow.txt', 'slow')
     until(lambda: 'reviewing…' in capture(), 'a slow review did not say so', seconds=5)

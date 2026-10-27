@@ -61,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix='haarness-input-tmux-') as directory:
         until(lambda:'Steer now' in pane(),'clicking a queued row did not open its actions')
         keys('Down','Enter')
         until(lambda:'Esc or click cancels and restores your draft' in pane(),'edit did not load into the prompt')
-        assert 'Editing — Enter saves it in place' in pane(), pane()
+        assert 'Editing · Enter saves your changes' in pane(), pane()
         evidence.append('EDITING\n'+pane())
         text(' edited');keys('Enter')
         until(lambda:queue()['items'][0]['text']=='deferred one edited','edit did not persist')
@@ -92,7 +92,7 @@ with tempfile.TemporaryDirectory(prefix='haarness-input-tmux-') as directory:
         try:answered=until(steer_answered,'')
         except AssertionError:answered=False
         until(lambda:not api('/turns/active'),'stop did not finish')
-        until(lambda:'Queue on hold · send when you're ready' in pane(),'remaining queue was not parked')
+        until(lambda:"Queue on hold · send when you're ready" in pane(),'remaining queue was not parked')
         assert len(queue()['items'])==1
         evidence.append('STOPPED\n'+pane())
         # Resume the parked message through the terminal controls.

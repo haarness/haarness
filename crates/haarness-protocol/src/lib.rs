@@ -21,8 +21,8 @@ pub use btw::*;
 pub use cloud::*;
 pub use goal::*;
 pub use home::{
-    SYSTEM_CONFIG_DIR_ENV, system_config_dir, system_config_dir_from, system_config_dir_problem, home_dir,
-    test_binary, test_binary_path, test_folder,
+    SYSTEM_CONFIG_DIR_ENV, home_dir, system_config_dir, system_config_dir_from,
+    system_config_dir_problem, test_binary, test_binary_path, test_folder,
 };
 pub use input::*;
 pub use management::*;

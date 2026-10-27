@@ -100,7 +100,9 @@ pub async fn check() -> Option<String> {
         .update_checked_at
         .is_some_and(|at| (0..CHECK_EVERY_SECS).contains(&(now - at)))
     {
-        return state.latest_release.filter(|latest| newer(latest, current()));
+        return state
+            .latest_release
+            .filter(|latest| newer(latest, current()));
     }
     let latest = latest_release().await?;
     crate::config::save_state(|state| {
@@ -247,11 +249,17 @@ mod tests {
                 }
             }
         });
-        assert_eq!(release_for(&body, "macos", "arm64").as_deref(), Some("0.1.6"));
+        assert_eq!(
+            release_for(&body, "macos", "arm64").as_deref(),
+            Some("0.1.6")
+        );
         assert_eq!(release_for(&body, "linux", "x64").as_deref(), Some("0.1.6"));
         assert_eq!(release_for(&body, "windows", "x64"), None);
         assert_eq!(release_for(&body, "linux", "arm64"), None);
-        assert_eq!(release_for(&serde_json::json!({ "error": "no" }), "macos", "arm64"), None);
+        assert_eq!(
+            release_for(&serde_json::json!({ "error": "no" }), "macos", "arm64"),
+            None
+        );
         let odd = serde_json::json!({ "manifest": { "products": { "cli": {
             "version": "latest", "artifacts": [{ "os": "macos", "arch": "arm64", "kind": "binary" }]
         } } } });

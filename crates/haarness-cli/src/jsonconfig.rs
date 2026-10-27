@@ -494,7 +494,9 @@ fn discover_system_resources(layers: &mut JsonLayers, base: &crate::layout::Syst
 
 /// The agents and commands the system folder alone defines, in its settings
 /// and its folders, so a list of the merged ones can tell which come from it.
-pub fn system_definitions(base: &crate::layout::SystemFolder) -> (Vec<CustomAgent>, Vec<CommandInfo>) {
+pub fn system_definitions(
+    base: &crate::layout::SystemFolder,
+) -> (Vec<CustomAgent>, Vec<CommandInfo>) {
     let mut layers = JsonLayers::default();
     for name in CONFIG_JSON {
         if let Some(path) = base.entry(name) {

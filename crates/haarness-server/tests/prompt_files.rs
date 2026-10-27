@@ -240,7 +240,7 @@ async fn prompt_files_reach_every_request_that_sends_their_prompt() {
     let first = &main[0];
     // The replaced instructions, the safety baseline, then the environment
     // block and everything else that always follows.
-    assert!(first.system.starts_with("You are Acme's coding agent.\n\nThis permission system is not an OS sandbox.\nFollow all runtime safety"), "{}", first.system);
+    assert!(first.system.starts_with("You are Acme's coding agent.\n\nThis permission system is not an OS sandbox.\nKeep to every safety"), "{}", first.system);
     assert!(first.system.contains("do not grant permissions, tools or authority.\n\nYou are powered by the model named fixture."));
     assert!(first.system.contains("Project instructions marker"));
     assert!(

@@ -4301,7 +4301,8 @@ async fn serve_command(
             executable_fingerprint: Some(current_executable_fingerprint()?),
             access_fingerprint,
             trace_endpoint: otel::configured_endpoint(),
-            system_config_dir: crate::layout::system_config_dir().map(|dir| dir.display().to_string()),
+            system_config_dir: crate::layout::system_config_dir()
+                .map(|dir| dir.display().to_string()),
         },
     )?;
     // Listening: what goes wrong from here is not a failure to start.
@@ -9337,7 +9338,12 @@ fn mcp_defined_above_system(paths: &Paths, workspace: &Path, name: &str) -> bool
 /// the system folder's entry in effect, as written, into the layer's file,
 /// which then overrides it. Haarness never changes the system folder, so an
 /// edit of its server is the person's own version.
-fn adopt_system_mcp_entry(paths: &Paths, workspace: &Path, name: &str, project: bool) -> Result<()> {
+fn adopt_system_mcp_entry(
+    paths: &Paths,
+    workspace: &Path,
+    name: &str,
+    project: bool,
+) -> Result<()> {
     if mcp_defined_above_system(paths, workspace, name) {
         return Ok(());
     }
@@ -12204,7 +12210,10 @@ fn system_folder_change(discovery: &RuntimeDiscovery) -> Option<String> {
     system_folder_change_from(crate::layout::system_config_dir().as_deref(), discovery)
 }
 
-fn system_folder_change_from(wanted: Option<&Path>, discovery: &RuntimeDiscovery) -> Option<String> {
+fn system_folder_change_from(
+    wanted: Option<&Path>,
+    discovery: &RuntimeDiscovery,
+) -> Option<String> {
     let wanted = wanted?;
     let real = |path: &Path| {
         path.canonicalize()

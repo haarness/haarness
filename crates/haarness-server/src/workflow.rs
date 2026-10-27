@@ -385,14 +385,18 @@ impl WorkflowRuntimeAdapter {
         let (authority_thread_id, thread_id, input) = {
             let mut state = self.continuations.lock().await;
             if state.closed.contains(&token) {
-                return Err(HostError::new("this workflow agent has finished and cannot be continued"));
+                return Err(HostError::new(
+                    "this workflow agent has finished and cannot be continued",
+                ));
             }
             let continuation = state
                 .open
                 .get_mut(&token)
                 .ok_or_else(|| HostError::new("this workflow agent can no longer be continued"))?;
             if continuation.closed {
-                return Err(HostError::new("this workflow agent has finished and cannot be continued"));
+                return Err(HostError::new(
+                    "this workflow agent has finished and cannot be continued",
+                ));
             }
             if continuation.active {
                 return Err(HostError::new(
@@ -2737,7 +2741,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(followup.to_string().contains("closed"), "{followup}");
+        assert!(
+            followup.to_string().contains("cannot be continued"),
+            "{followup}"
+        );
 
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
