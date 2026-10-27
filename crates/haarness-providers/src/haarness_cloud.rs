@@ -161,12 +161,20 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
     };
     let advice = if message.contains("[insufficient_credits]") {
         if message.contains("overage opt-in false") {
-            // Purchased credits only pay once overage is on, so "out of
-            // credits" would be wrong for someone who just bought some.
-            format!(
-                "Your included Haarness Cloud credits are used up. Turn on overage in Billing \
-                 to spend purchased credits, or add credits or choose a plan{terminal}."
-            )
+            // Purchased credits only pay once overage is on, and buying
+            // more does not turn it on. With overage off the router names
+            // the purchased balance as what is available.
+            if purchased_available(&message) {
+                format!(
+                    "Your included Haarness Cloud credits can't cover this request. Turn on \
+                     overage in Billing so your purchased credits pay{terminal}."
+                )
+            } else {
+                format!(
+                    "Your included Haarness Cloud credits can't cover this request. Add credits \
+                     and turn on overage in Billing, or choose a plan{terminal}."
+                )
+            }
         } else if message.contains("frozen") {
             format!(
                 "Your purchased Haarness Cloud credits are on hold. Open Billing in Haarness \
@@ -174,8 +182,8 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
             )
         } else {
             format!(
-                "You're out of Haarness Cloud credits. Add credits or choose a plan under \
-                 Billing{terminal}."
+                "Your Haarness Cloud credits can't cover this request. Add credits or choose a \
+                 plan under Billing{terminal}."
             )
         }
     } else if message.contains("[upstream_404]") {
@@ -206,9 +214,17 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
     } else if message.contains("[budget_exceeded]") {
         // The limit is checked against the request's worst case: a long
         // context and a large answer limit can exceed it on their own.
-        "This request could cost more than a spending limit allows. Compact or shorten the \
-         conversation, or raise the limit on the API key in Haarness Cloud."
-            .to_owned()
+        // Account and project budgets live in Billing, not on a key.
+        let limit =
+            if message.contains("the account budget") || message.contains("the project budget") {
+                "raise the budget under Billing in Haarness Cloud"
+            } else {
+                "raise the limit on the API key in Haarness Cloud"
+            };
+        format!(
+            "This request could cost more than a spending limit allows. Compact or shorten the \
+             conversation, or {limit}."
+        )
     } else if message.contains("[exposure_cap]") {
         "Too many requests are still settling on this Haarness Cloud account. Wait a moment, \
          then try again."
@@ -223,6 +239,19 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
     };
     CoreError::Provider(advice)
 }
+/// Whether a refused request's `available` names credits: with overage off
+/// the router reports the purchased balance there.
+fn purchased_available(message: &str) -> bool {
+    message
+        .split_once("available ")
+        .map(|(_, rest)| {
+            rest.bytes()
+                .take_while(u8::is_ascii_digit)
+                .collect::<Vec<_>>()
+        })
+        .is_some_and(|digits| digits.iter().any(|digit| *digit != b'0'))
+}
+
 #[async_trait]
 impl ModelProvider for HaarnessCloudProvider {
     fn id(&self) -> &str {
@@ -503,18 +532,30 @@ mod tests {
             panic!("still a provider error");
         };
         assert!(
-            message.starts_with("Your included Haarness Cloud credits are used up."),
+            message.starts_with("Your included Haarness Cloud credits can't cover this request."),
             "{message}"
         );
-        assert!(message.contains("Turn on overage"), "{message}");
+        assert!(
+            message.contains("Add credits and turn on overage"),
+            "{message}"
+        );
         assert!(!message.contains("Nanos"), "{message}");
+        // Purchased credits are there and only wait for overage.
+        let waiting = CoreError::Provider(
+            "HTTP 402: [insufficient_credits] insufficient credits: unit Nanos requested 104592000, \
+             available 5000000000, overage opt-in false"
+                .into(),
+        );
+        assert!(
+            matches!(readable(waiting), CoreError::Provider(m) if m.contains("Turn on overage in Billing so your purchased credits pay") && !m.contains("Add credits"))
+        );
         let spent = CoreError::Provider(
             "HTTP 402: [insufficient_credits] insufficient credits: unit Nanos requested 1, \
              available 0, overage opt-in true"
                 .into(),
         );
         assert!(
-            matches!(readable(spent), CoreError::Provider(m) if m.starts_with("You're out of Haarness Cloud credits."))
+            matches!(readable(spent), CoreError::Provider(m) if m.starts_with("Your Haarness Cloud credits can't cover this request."))
         );
         let other = CoreError::Provider("HTTP 500: boom".into());
         assert!(matches!(readable(other), CoreError::Provider(m) if m == "HTTP 500: boom"));
@@ -544,7 +585,17 @@ mod tests {
             panic!("still a provider error");
         };
         assert!(
-            message.ends_with("or add credits or choose a plan."),
+            message.ends_with("turn on overage in Billing, or choose a plan."),
+            "{message}"
+        );
+        let CoreError::Provider(message) = readable_router(CoreError::Provider(
+            "HTTP 402: [budget_exceeded] the account budget cannot fund this request (up to 9 nanos)"
+                .into(),
+        )) else {
+            panic!("still a provider error");
+        };
+        assert!(
+            message.ends_with("raise the budget under Billing in Haarness Cloud."),
             "{message}"
         );
 
