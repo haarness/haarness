@@ -1,5 +1,7 @@
 import { createEffect, createSignal, onCleanup, on } from "solid-js";
 import type { VoiceEvent } from "../shared";
+import { errorLine } from "./i18n";
+import { cancelled } from "./error-text";
 
 export function insertDictation(
   base: string,
@@ -76,7 +78,7 @@ export function createDictation(options: {
       if (!run) return;
       setStatus("finishing");
       await window.haarness.voice("stop", run.id).catch((error) => {
-        setError(String(error));
+        if (!cancelled(error)) setError(errorLine(error));
         cancel();
       });
       return;
@@ -99,7 +101,7 @@ export function createDictation(options: {
       await window.haarness.voice("start", current.id, navigator.language);
     } catch (error) {
       if (run !== current) return;
-      setError(error instanceof Error ? error.message : String(error));
+      if (!cancelled(error)) setError(errorLine(error));
       cancel();
     }
   }

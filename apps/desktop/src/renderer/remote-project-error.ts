@@ -1,3 +1,5 @@
+import { errorText, errorTextLine } from "./error-text";
+
 /** Keep server diagnostics out of the form, but preserve the useful next step. */
 export function remoteProjectError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -35,5 +37,8 @@ export function remoteProjectError(error: unknown): string {
     return "This folder is no longer available. Choose another folder or check the path.";
   if (/cancelled/i.test(message))
     return "Opening was cancelled. Try again when you’re ready.";
+  // A server or computer that is not answering, as everywhere else.
+  const text = errorText(error);
+  if (text.known && text.message) return errorTextLine(text);
   return "Couldn’t open this project. Make sure the server is running, then try again.";
 }

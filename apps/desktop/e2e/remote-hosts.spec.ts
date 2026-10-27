@@ -372,7 +372,7 @@ test("your other computers open from the server switcher through Haarness Cloud,
     await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
     await page.getByRole("button", { name: "Switch server", exact: true }).click();
     await menu.getByRole("menuitem", { name: "Studio", exact: true }).click();
-    await expect(home.getByRole("alert")).toHaveText("This computer is offline. Try again when it is awake and connected.");
+    await expect(home.getByRole("alert")).toHaveText("Your computer isn't reachable. Open Haarness on it, then try again.");
     await shoot(page, "computer-offline");
     cloud.state.offline = false;
     await home.getByRole("button", { name: "Retry", exact: true }).click();

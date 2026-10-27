@@ -1,4 +1,4 @@
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import { ManagementPanel } from "./ManagementPanel";
 import { For, Show, createSignal, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
@@ -7,6 +7,7 @@ import { FormDialog } from "./FormDialog";
 import { Select } from "./Select";
 import { useApp } from "./state";
 import { confirm } from "./ui";
+import { cancelled } from "./error-text";
 import "./management.css";
 interface Memory {
   name: string;
@@ -52,7 +53,7 @@ export function MemoryDialog(props: { close: () => void }) {
     try {
       await operation();
     } catch (error) {
-      setError(error instanceof Error ? error.message : String(error));
+      if (!cancelled(error)) setError(errorLine(error));
     } finally {
       setBusy(false);
     }
@@ -363,9 +364,7 @@ function MemoryEditor(props: {
                   close();
                 } catch (error) {
                   setDeleting(false);
-                  setError(
-                    error instanceof Error ? error.message : String(error),
-                  );
+                  if (!cancelled(error)) setError(errorLine(error));
                 }
               }}
             >

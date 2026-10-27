@@ -1,6 +1,7 @@
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import { For, Show, createEffect, createSignal, onCleanup, untrack } from "solid-js";
 import { useApp } from "./state";
+import { cancelled } from "./error-text";
 
 type Delivery = "steer" | "queue";
 
@@ -74,7 +75,7 @@ export function InputSettings() {
       setGlobalDelivery((global ?? result).data.scopeDelivery ?? "steer");
       setError("");
     } catch (cause) {
-      if (current === generation) setError(cause instanceof Error ? cause.message : String(cause));
+      if (current === generation && !cancelled(cause)) setError(errorLine(cause));
     } finally {
       if (current === generation) setBusy(false);
     }

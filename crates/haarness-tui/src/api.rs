@@ -356,7 +356,7 @@ impl ApiClient {
         Ok(checked_response(
             self.request(reqwest::Method::GET, &format!("/v1/insights?{query}"))
                 .timeout(Duration::from_secs(120))
-                .send()
+                .sent()
                 .await?,
         )
         .await?
@@ -519,7 +519,7 @@ impl ApiClient {
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         Ok(
-            checked_response(self.request(reqwest::Method::GET, path).send().await?)
+            checked_response(self.request(reqwest::Method::GET, path).sent().await?)
                 .await?
                 .json()
                 .await?,
@@ -557,7 +557,7 @@ impl ApiClient {
         Ok(checked_response(
             self.request(reqwest::Method::POST, "/v1/host/open")
                 .json(&serde_json::json!({"path":path}))
-                .send()
+                .sent()
                 .await?,
         )
         .await?
@@ -582,7 +582,7 @@ impl ApiClient {
         Ok(checked_response(
             self.request(reqwest::Method::GET, &path)
                 .timeout(Duration::from_secs(5))
-                .send()
+                .sent()
                 .await?,
         )
         .await?
@@ -618,7 +618,7 @@ impl ApiClient {
         Ok(checked_response(
             self.request(reqwest::Method::POST, &format!("/v1/manage/{resource}"))
                 .json(input)
-                .send()
+                .sent()
                 .await?,
         )
         .await?
@@ -648,7 +648,7 @@ impl ApiClient {
         Ok(checked_response(
             self.request(reqwest::Method::POST, "/v1/workspaces/resolve-ref")
                 .json(request)
-                .send()
+                .sent()
                 .await?,
         )
         .await?
@@ -663,7 +663,7 @@ impl ApiClient {
             self.request(reqwest::Method::POST, "/v1/workspaces")
                 .timeout(WORKSPACE_MUTATION_TIMEOUT)
                 .json(request)
-                .send()
+                .sent()
                 .await?,
         )
         .await?
@@ -679,7 +679,7 @@ impl ApiClient {
                 reqwest::Method::POST,
                 &format!("/v1/workspaces/{}/open", encode_url_component(reference)),
             )
-            .send()
+            .sent()
             .await?,
         )
         .await?
@@ -698,7 +698,7 @@ impl ApiClient {
             )
             .timeout(WORKSPACE_MUTATION_TIMEOUT)
             .json(request)
-            .send()
+            .sent()
             .await?,
         )
         .await?
@@ -717,7 +717,7 @@ impl ApiClient {
             )
             .timeout(WORKSPACE_MUTATION_TIMEOUT)
             .json(request)
-            .send()
+            .sent()
             .await?,
         )
         .await?
@@ -736,7 +736,7 @@ impl ApiClient {
             )
             .timeout(WORKSPACE_MUTATION_TIMEOUT)
             .json(request)
-            .send()
+            .sent()
             .await?,
         )
         .await?
@@ -767,7 +767,7 @@ impl ApiClient {
         Ok(checked_response(
             self.request(reqwest::Method::POST, "/v1/session-archives/import")
                 .json(&SessionArchiveImportRequest { archive })
-                .send()
+                .sent()
                 .await?,
         )
         .await?
@@ -780,7 +780,7 @@ impl ApiClient {
     pub async fn refresh_providers(&self) -> Result<Vec<haarness_protocol::ProviderInfo>> {
         let response = self
             .request(reqwest::Method::POST, "/v1/providers/refresh")
-            .send()
+            .sent()
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return self.providers().await;
@@ -816,7 +816,7 @@ impl ApiClient {
         Ok(self
             .request(reqwest::Method::POST, "/v1/workflows/run")
             .json(&request)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -849,7 +849,7 @@ impl ApiClient {
                 reqwest::Method::POST,
                 &format!("/v1/workflows/runs/{id}/{action}"),
             )
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -876,7 +876,7 @@ impl ApiClient {
     }
     pub async fn delete_workflow(&self, id: haarness_protocol::WorkflowId) -> Result<()> {
         self.request(reqwest::Method::DELETE, &format!("/v1/workflows/runs/{id}"))
-            .send()
+            .sent()
             .await?
             .checked()
             .await?;
@@ -900,7 +900,7 @@ impl ApiClient {
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/goal"))
             .json(action)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -920,7 +920,7 @@ impl ApiClient {
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/loop"))
             .json(&body)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -961,7 +961,7 @@ impl ApiClient {
                 reqwest::Method::POST,
                 &format!("/v1/threads/{id}/background{query}"),
             )
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -975,7 +975,7 @@ impl ApiClient {
         Ok(self
             .request(reqwest::Method::POST, "/v1/threads")
             .json(&request)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -990,7 +990,7 @@ impl ApiClient {
         Ok(self
             .request(reqwest::Method::PATCH, &format!("/v1/threads/{id}"))
             .json(&request)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1009,7 +1009,7 @@ impl ApiClient {
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/fork"))
             .json(&request)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1024,7 +1024,7 @@ impl ApiClient {
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/compact"))
             .json(&request)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1056,7 +1056,7 @@ impl ApiClient {
                 &format!("/v1/mcp/{}", encode_url_component(name)),
             )
             .json(request)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1069,7 +1069,7 @@ impl ApiClient {
                 reqwest::Method::POST,
                 &format!("/v1/mcp/{}/reconnect", encode_url_component(name)),
             )
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1082,7 +1082,7 @@ impl ApiClient {
                 reqwest::Method::POST,
                 &format!("/v1/mcp/{}/disconnect", encode_url_component(name)),
             )
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1114,7 +1114,7 @@ impl ApiClient {
                 &format!("/v1/tools/{}", encode_url_component(name)),
             )
             .json(&ToolSettingsUpdate { enabled })
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1128,7 +1128,7 @@ impl ApiClient {
         Ok(self
             .request(reqwest::Method::POST, "/v1/tools/lazy")
             .json(&LazyToolSettingsUpdate { mode })
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1151,7 +1151,7 @@ impl ApiClient {
                 ),
             )
             .json(arguments)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1176,7 +1176,7 @@ impl ApiClient {
                 &format!("/v1/mcp/{}/resources/read", encode_url_component(name)),
             )
             .json(&serde_json::json!({"uri": uri}))
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1203,7 +1203,7 @@ impl ApiClient {
                 ),
             )
             .json(arguments)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1226,7 +1226,7 @@ impl ApiClient {
                 reqwest::Method::GET,
                 &format!("/v1/files/search?q={encoded}&limit={limit}"),
             )
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1248,7 +1248,7 @@ impl ApiClient {
         if let Some(sequence) = sequence {
             request = request.json(&serde_json::json!({ "sequence": sequence }));
         }
-        Ok(checked_response(request.send().await?)
+        Ok(checked_response(request.sent().await?)
             .await?
             .json()
             .await?)
@@ -1256,7 +1256,7 @@ impl ApiClient {
     pub async fn unrevert(&self, id: haarness_protocol::ThreadId) -> Result<Thread> {
         Ok(checked_response(
             self.request(reqwest::Method::POST, &format!("/v1/threads/{id}/unrevert"))
-                .send()
+                .sent()
                 .await?,
         )
         .await?
@@ -1310,7 +1310,7 @@ impl ApiClient {
     pub async fn run_shell(&self, id: haarness_protocol::ThreadId, command: &str) -> Result<()> {
         self.request(reqwest::Method::POST, &format!("/v1/threads/{id}/shell"))
             .json(&serde_json::json!({ "command": command }))
-            .send()
+            .sent()
             .await?
             .checked()
             .await?;
@@ -1326,7 +1326,7 @@ impl ApiClient {
         Ok(checked_response(
             self.request(reqwest::Method::POST, "/v1/ptys")
                 .json(request)
-                .send()
+                .sent()
                 .await?,
         )
         .await?
@@ -1337,7 +1337,7 @@ impl ApiClient {
         Ok(checked_response(
             self.request(reqwest::Method::PATCH, &format!("/v1/ptys/{id}"))
                 .json(request)
-                .send()
+                .sent()
                 .await?,
         )
         .await?
@@ -1347,7 +1347,7 @@ impl ApiClient {
     pub async fn delete_pty(&self, id: PtyId) -> Result<()> {
         checked_response(
             self.request(reqwest::Method::DELETE, &format!("/v1/ptys/{id}"))
-                .send()
+                .sent()
                 .await?,
         )
         .await?;
@@ -1445,7 +1445,7 @@ impl ApiClient {
                     request_id: haarness_protocol::RequestId::new(),
                     history,
                 })
-                .send()
+                .sent()
                 .await?,
         )
         .await?
@@ -1473,7 +1473,7 @@ impl ApiClient {
                     request_id: haarness_protocol::RequestId::new(),
                     history,
                 })
-                .send()
+                .sent()
                 .await?,
         )
         .await?;
@@ -1523,7 +1523,7 @@ impl ApiClient {
         Ok(self
             .request(reqwest::Method::POST, "/v1/plugins")
             .json(&request)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1544,7 +1544,7 @@ impl ApiClient {
             Ok(self
                 .request(reqwest::Method::POST, &format!("/v1/threads/{id}/turns"))
                 .json(&request)
-                .send()
+                .sent()
                 .await?
                 .checked()
                 .await?
@@ -1563,7 +1563,7 @@ impl ApiClient {
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/commands"))
             .json(&request)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1573,7 +1573,7 @@ impl ApiClient {
     pub async fn interrupt(&self, id: TurnId) -> Result<Turn> {
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/turns/{id}/interrupt"))
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1595,7 +1595,7 @@ impl ApiClient {
             format!("/v1/threads/{id}/interrupt")
         };
         self.request(reqwest::Method::POST, &path)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?;
@@ -1603,7 +1603,7 @@ impl ApiClient {
     }
     pub async fn shutdown_server(&self) -> Result<()> {
         self.request(reqwest::Method::POST, "/v1/shutdown")
-            .send()
+            .sent()
             .await?
             .checked()
             .await?;
@@ -1649,7 +1649,7 @@ impl ApiClient {
                 &format!("/v1/threads/{id}/input/queue"),
             )
             .json(&action)
-            .send()
+            .sent()
             .await?
             // The queue tells a 409 (it moved on) apart by reqwest's status.
             .error_for_status()?
@@ -1665,7 +1665,7 @@ impl ApiClient {
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/input"))
             .json(&request)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?
@@ -1689,7 +1689,7 @@ impl ApiClient {
                 &format!("/v1/threads/{id}/approval-mode"),
             )
             .json(request)
-            .send()
+            .sent()
             .await?
             // The caller tells a 409 (changed elsewhere) apart by reqwest's status.
             .error_for_status()?
@@ -1699,7 +1699,7 @@ impl ApiClient {
     pub async fn reply_permission(&self, id: &str, reply: PermissionReply) -> Result<()> {
         self.request(reqwest::Method::POST, &format!("/v1/permissions/{id}"))
             .json(&reply)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?;
@@ -1708,7 +1708,7 @@ impl ApiClient {
     pub async fn reply_question(&self, id: &str, reply: QuestionReply) -> Result<()> {
         self.request(reqwest::Method::POST, &format!("/v1/questions/{id}"))
             .json(&reply)
-            .send()
+            .sent()
             .await?
             .checked()
             .await?;
@@ -2153,9 +2153,10 @@ pub fn refusal_status(error: &anyhow::Error) -> Option<reqwest::StatusCode> {
 }
 
 /// Preserve the server's structured error instead of reducing every failure
-/// to reqwest's generic "HTTP status client error". A body without one (an
-/// older server, a proxy) names the status and path; query strings and
-/// authorization headers are deliberately excluded.
+/// to reqwest's generic "HTTP status client error". A body without a sentence
+/// (an older gateway, a proxy: nothing, a reason phrase, an HTML page) reads
+/// as its status in plain words; the status, path and body go to the log.
+/// Query strings and authorization headers are deliberately excluded.
 async fn checked_response(response: reqwest::Response) -> Result<reqwest::Response> {
     let status = response.status();
     if status.is_success() {
@@ -2166,27 +2167,200 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
         .text()
         .await
         .context("read Haarness API error response")?;
-    let refusal = match serde_json::from_str::<haarness_protocol::ApiError>(&body) {
-        Ok(error) => ApiRefusal {
-            status,
-            code: Some(error.code),
-            message: error.message,
-        },
-        Err(_) => {
-            let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
-            let detail = if compact.is_empty() {
-                "no error details".into()
-            } else {
-                compact.chars().take(512).collect::<String>()
-            };
-            ApiRefusal {
-                status,
-                code: None,
-                message: format!("Haarness server answered HTTP {status} for {path}: {detail}"),
-            }
-        }
+    // `{"code", "message"}`, or the same inside `"error"`, as gateways write it.
+    let value = serde_json::from_str::<serde_json::Value>(&body).ok();
+    let record = value.as_ref().map(|value| {
+        value
+            .get("error")
+            .filter(|error| error.is_object())
+            .unwrap_or(value)
+    });
+    let field = |name: &str| {
+        record
+            .and_then(|record| record.get(name))
+            .and_then(serde_json::Value::as_str)
     };
-    Err(refusal.into())
+    let code = field("code").map(str::to_owned);
+    let said = field("message").or_else(|| field("error"));
+    let relayed = path.contains("/remote-hosts/") || path.contains("/remote-sessions/");
+    let message = match refusal_words(status, code.as_deref(), said, relayed) {
+        Some(words) => {
+            let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            let detail = compact.chars().take(512).collect::<String>();
+            tracing::warn!(%status, path, ?code, detail, "the server refused a request without saying why");
+            words.to_owned()
+        }
+        None => said.unwrap_or_default().to_owned(),
+    };
+    Err(ApiRefusal {
+        status,
+        code,
+        message,
+    }
+    .into())
+}
+
+/// Failures in plain words: the same words Desktop and the phones use.
+pub(crate) const COMPUTER_UNANSWERED: &str = "Your computer couldn't answer. Check that Haarness is open and up to date on it, then try again.";
+pub(crate) const COMPUTER_UNREACHABLE: &str =
+    "Your computer isn't reachable. Open Haarness on it, then try again.";
+pub(crate) const NOT_ANSWERING: &str = "Haarness isn't answering. Try again in a moment.";
+const SERVER_FAILED: &str = "Something went wrong on our side. Try again in a moment.";
+const TOO_SLOW: &str = "This took too long. Try again in a moment.";
+const TOO_MANY: &str = "Too many requests. Wait a moment, then try again.";
+const NO_ACCESS: &str = "You don't have access to this.";
+const GONE: &str = "This is no longer available. It may have been removed.";
+const TOO_LARGE: &str = "This is too large to send.";
+const NOT_THROUGH: &str = "That didn't go through. Try again.";
+pub(crate) const CANNOT_CONNECT: &str =
+    "Can't connect. Check your internet connection and try again.";
+pub(crate) const TIMED_OUT: &str = "This took too long. Check your connection, then try again.";
+
+/// The plain words for a refusal, or `None` when the server's own sentence
+/// says it. `relayed`: Cloud relayed the request to another of your
+/// computers, so a gateway status is that computer's.
+fn refusal_words(
+    status: reqwest::StatusCode,
+    code: Option<&str>,
+    said: Option<&str>,
+    relayed: bool,
+) -> Option<&'static str> {
+    if matches!(code, Some("bad_gateway" | "project_server_unavailable")) {
+        return Some(COMPUTER_UNANSWERED);
+    }
+    let offline = said.is_some_and(|said| {
+        said.to_ascii_lowercase()
+            .contains("offline or its connection changed")
+    });
+    if code == Some("remote_offline") || (status == reqwest::StatusCode::CONFLICT && offline) {
+        return Some(COMPUTER_UNREACHABLE);
+    }
+    if said.is_some_and(|said| !says_only_its_status(said)) {
+        return None;
+    }
+    Some(match status.as_u16() {
+        502..=504 if relayed => COMPUTER_UNANSWERED,
+        502..=504 => NOT_ANSWERING,
+        500..=599 => SERVER_FAILED,
+        408 => TOO_SLOW,
+        429 => TOO_MANY,
+        403 => NO_ACCESS,
+        404 | 410 => GONE,
+        413 => TOO_LARGE,
+        _ => NOT_THROUGH,
+    })
+}
+
+/// A message that says no more than a status: nothing, "HTTP 502", a reason
+/// phrase ("Bad Gateway", "502 Bad Gateway", in any case), or an HTML page.
+fn says_only_its_status(said: &str) -> bool {
+    const REASONS: [&str; 18] = [
+        "bad request",
+        "unauthorized",
+        "forbidden",
+        "not found",
+        "method not allowed",
+        "request timeout",
+        "conflict",
+        "gone",
+        "payload too large",
+        "content too large",
+        "unprocessable entity",
+        "unprocessable content",
+        "too many requests",
+        "internal server error",
+        "not implemented",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+    ];
+    let said = said.trim();
+    if said.starts_with('<') {
+        return true;
+    }
+    let words = said
+        .trim_end_matches(['.', '!'])
+        .to_ascii_lowercase()
+        .replace("time-out", "timeout")
+        .replace("time out", "timeout")
+        .replace('-', " ");
+    let words = words
+        .strip_prefix("http")
+        .map_or(words.as_str(), |rest| {
+            rest.trim_start_matches(|c: char| c == '/' || c == '.' || c.is_ascii_digit())
+        })
+        .trim_start()
+        .trim_start_matches(|c: char| c.is_ascii_digit())
+        .trim();
+    words.is_empty() || REASONS.contains(&words)
+}
+
+/// A request that got no answer at all: refused, reset, timed out, or no
+/// route. reqwest's own text names the daemon's address and the request's
+/// path and says nothing a person can act on, so this says what to do, and
+/// what reqwest said goes to the log.
+#[derive(Debug)]
+pub struct Unanswered {
+    message: &'static str,
+}
+
+impl std::fmt::Display for Unanswered {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl std::error::Error for Unanswered {}
+
+/// Whether `error` is a request that got no answer (see [`Unanswered`]).
+#[must_use]
+pub fn unanswered(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<Unanswered>().is_some()
+}
+
+fn unanswered_error(error: reqwest::Error) -> anyhow::Error {
+    // A request this client could not build is a bug, not a lost connection.
+    if error.is_builder() {
+        return error.into();
+    }
+    let mut detail = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        detail.push_str(": ");
+        detail.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    tracing::warn!(detail, "a request to the server got no answer");
+    // A server on this computer that does not answer is Haarness's, not the
+    // internet's.
+    let local = error
+        .url()
+        .and_then(reqwest::Url::host)
+        .is_some_and(|host| match host {
+            url::Host::Domain(name) => name == "localhost",
+            url::Host::Ipv4(address) => address.is_loopback(),
+            url::Host::Ipv6(address) => address.is_loopback(),
+        });
+    let message = if error.is_timeout() {
+        TIMED_OUT
+    } else if local {
+        NOT_ANSWERING
+    } else {
+        CANNOT_CONNECT
+    };
+    Unanswered { message }.into()
+}
+
+/// `send`, with a request that got no answer in plain words: see
+/// [`Unanswered`].
+trait SendPlain {
+    async fn sent(self) -> Result<reqwest::Response>;
+}
+
+impl SendPlain for reqwest::RequestBuilder {
+    async fn sent(self) -> Result<reqwest::Response> {
+        self.send().await.map_err(unanswered_error)
+    }
 }
 
 /// The server prefixes each message with its error category ("tool error:
@@ -2562,6 +2736,20 @@ mod tests {
                     r#"{"code":"missing_route","message":"workspace history API is unavailable","retryable":false}"#,
                 ),
                 ("502 Bad Gateway", "upstream\n  went away"),
+                (
+                    "502 Bad Gateway",
+                    r#"{"error":{"code":"project_server_unavailable","message":"This project's Haarness server is not reachable","retryable":true}}"#,
+                ),
+                (
+                    "503 Service Unavailable",
+                    r#"{"error":"Service Unavailable"}"#,
+                ),
+                ("413 Payload Too Large", "<html><body>413</body></html>"),
+                ("502 Bad Gateway", ""),
+                (
+                    "409 Conflict",
+                    r#"{"error":{"code":"conflict","message":"Remote host is offline or its connection changed. Reconnect and check the current state before retrying.","retryable":false}}"#,
+                ),
             ] {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
@@ -2597,16 +2785,140 @@ mod tests {
             Some("missing_route")
         );
 
-        // A body without the structured error names the status and path,
-        // never the daemon's address or token.
-        let error = client.agents().await.unwrap_err().to_string();
+        // A body without a sentence reads as its status in plain words, never
+        // the status line, the path, the daemon's address or token; the
+        // status stays for callers that branch on it.
+        let error = client.agents().await.unwrap_err();
+        assert_eq!(error.to_string(), super::NOT_ANSWERING);
         assert_eq!(
-            error,
-            "Haarness server answered HTTP 502 Bad Gateway for /v1/agents: upstream went away"
+            super::refusal_status(&error),
+            Some(reqwest::StatusCode::BAD_GATEWAY)
+        );
+        let error = error.to_string();
+        assert!(!error.contains("test-token") && !error.contains(&address.to_string()));
+        // A computer's gateway that could not reach its project's server.
+        let error = client.agents().await.unwrap_err();
+        assert_eq!(error.to_string(), super::COMPUTER_UNANSWERED);
+        assert_eq!(
+            super::refusal_code(&error),
+            Some("project_server_unavailable")
+        );
+        // A reason phrase or a proxy's page is no sentence either.
+        assert_eq!(
+            client.agents().await.unwrap_err().to_string(),
+            super::NOT_ANSWERING
+        );
+        assert_eq!(
+            client.agents().await.unwrap_err().to_string(),
+            "This is too large to send."
+        );
+        // Through Cloud's relay, a bare gateway status is the other
+        // computer's, and Cloud's offline answer says it is not reachable.
+        let relayed = ApiClient::new(
+            &format!("http://{address}/api/v1/remote-hosts/h1/runtime"),
+            "test-token",
+        )
+        .unwrap();
+        assert_eq!(
+            relayed.agents().await.unwrap_err().to_string(),
+            super::COMPUTER_UNANSWERED
+        );
+        assert_eq!(
+            relayed.agents().await.unwrap_err().to_string(),
+            super::COMPUTER_UNREACHABLE
         );
         let requests = server.await.unwrap();
         assert!(requests[0].starts_with("GET /v1/vcs/diff?mode=working "));
-        assert!(!error.contains("test-token") && !error.contains(&address.to_string()));
+        assert!(requests[5].starts_with("GET /api/v1/remote-hosts/h1/runtime/v1/agents "));
+    }
+
+    /// A request that got no answer says what to do: the daemon's address
+    /// and reqwest's transport text go to the log.
+    #[tokio::test]
+    async fn a_request_without_an_answer_reads_as_plain_words() {
+        let error = ApiClient::new("http://127.0.0.1:1", "test-token")
+            .unwrap()
+            .agents()
+            .await
+            .unwrap_err();
+        assert!(super::unanswered(&error));
+        // A server on this computer is Haarness's; one elsewhere needs the
+        // connection checked.
+        assert_eq!(format!("{error:#}"), super::NOT_ANSWERING);
+        let error = ApiClient::new("http://unreachable.invalid", "test-token")
+            .unwrap()
+            .agents()
+            .await
+            .unwrap_err();
+        assert_eq!(format!("{error:#}"), super::CANNOT_CONNECT);
+    }
+
+    #[test]
+    fn a_status_line_is_no_sentence() {
+        for said in [
+            "",
+            "HTTP 502",
+            "Bad Gateway",
+            "502 Bad Gateway",
+            "bad gateway",
+            "HTTP/1.1 504 Gateway Time-out",
+            "<html><body><h1>502 Bad Gateway</h1></body></html>",
+            "Service Unavailable.",
+        ] {
+            assert!(super::says_only_its_status(said), "{said:?}");
+        }
+        for said in [
+            "upstream went away",
+            "Unknown agent: nope",
+            "conflict: the chat changed",
+            "Not found: command /nope",
+        ] {
+            assert!(!super::says_only_its_status(said), "{said:?}");
+        }
+        let words = |status: u16, code: Option<&str>, said: Option<&str>, relayed: bool| {
+            super::refusal_words(
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                code,
+                said,
+                relayed,
+            )
+        };
+        assert_eq!(
+            words(
+                502,
+                Some("bad_gateway"),
+                Some("Your computer could not complete this request."),
+                true
+            ),
+            Some(super::COMPUTER_UNANSWERED)
+        );
+        assert_eq!(
+            words(409, Some("remote_offline"), None, true),
+            Some(super::COMPUTER_UNREACHABLE)
+        );
+        assert_eq!(words(504, None, None, false), Some(super::NOT_ANSWERING));
+        assert_eq!(
+            words(500, None, Some("Internal Server Error"), false),
+            Some(super::SERVER_FAILED)
+        );
+        assert_eq!(words(408, None, None, false), Some(super::TOO_SLOW));
+        assert_eq!(words(429, None, None, false), Some(super::TOO_MANY));
+        assert_eq!(
+            words(403, None, Some("Forbidden"), false),
+            Some(super::NO_ACCESS)
+        );
+        assert_eq!(words(410, None, None, false), Some(super::GONE));
+        assert_eq!(words(400, None, None, false), Some(super::NOT_THROUGH));
+        // The server's own sentence is the server's, whatever its status.
+        assert_eq!(
+            words(
+                502,
+                Some("provider_error"),
+                Some("The model is overloaded"),
+                false
+            ),
+            None
+        );
     }
 
     #[tokio::test]

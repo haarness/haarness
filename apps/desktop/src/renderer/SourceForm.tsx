@@ -1,4 +1,5 @@
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
+import { cancelled } from "./error-text";
 import { Show, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import { FormDialog } from "./FormDialog";
@@ -25,7 +26,7 @@ export function SourceForm(props: {
       const path = await window.haarness.pick(type);
       if (path) setForm("local", path);
     } catch (error) {
-      setPickerError(error instanceof Error ? error.message : String(error));
+      if (!cancelled(error)) setPickerError(errorLine(error));
     }
   }
   const extension = props.kind === "extension";

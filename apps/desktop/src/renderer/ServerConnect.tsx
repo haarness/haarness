@@ -2,6 +2,7 @@ import { t } from "./i18n";
 import { createSignal, onMount, Show } from "solid-js";
 import { useApp } from "./state";
 import { Button, dismissOnBackdrop } from "./ui";
+import { cancelled } from "./error-text";
 import "./server-connect.css";
 
 const [opened, setOpened] = createSignal(false);
@@ -70,6 +71,7 @@ function ConnectionForm() {
       } else
         setError(t("The connection was cancelled. Try again when you’re ready."));
     } catch (failure) {
+      if (cancelled(failure)) return;
       const message =
         failure instanceof Error ? failure.message : String(failure);
       setError(

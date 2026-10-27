@@ -1,7 +1,8 @@
 import { t } from "./i18n";
 import { Show } from "solid-js";
 import { useApp } from "./state";
-import { Button, Icon } from "./ui";
+import { Button, ErrorWords, Icon } from "./ui";
+import { errorText } from "./error-text";
 
 /** Render in the active surface so native modality cannot hide operation errors. */
 export function Notifications() {
@@ -15,10 +16,12 @@ export function Notifications() {
             {t(state.notice)}
           </div>
         </Show>
-        <Show when={state.error}>
+        <Show when={errorText(state.error).message}>
           <div class="error-banner" role="alert">
             <Icon name="alert" size="sm" />
-            <span>{state.error}</span>
+            <span title={errorText(state.error).detail}>
+              <ErrorWords error={state.error} />
+            </span>
             <Button
               icon="close"
               label={t("Dismiss error")}

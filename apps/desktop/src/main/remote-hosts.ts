@@ -1,5 +1,6 @@
 import { ApiError, Haarness, type ServerAuth, type WorkspaceListResponse } from "@haarness/sdk";
 import type { Connection } from "../shared";
+import { failureMessage } from "../renderer/error-text";
 
 /** What the account bridge hands main: the current Cloud sign-in and the
  * Cloud it belongs to. It never reaches the renderer or saved projects. */
@@ -134,18 +135,20 @@ export const hostServerId = (host: string) => "host:" + host;
 export const hostLocationId = (host: string, workspace: string) =>
   `host:${host}/workspaces/${encodeURIComponent(workspace)}`;
 
-/** Plain words for what Cloud says when a computer cannot be reached. */
+/** Plain words for what Cloud says when a computer cannot be reached. An
+ * offline computer, or one that could not answer, reads as `errorText` says
+ * it everywhere, for the window to translate. */
 export function hostError(error: unknown, say: (key: string) => string): Error {
   if (error instanceof ApiError) {
     if (error.status === 401) return new Error(say("Sign in to Haarness to open your other computers."));
     if (error.status === 403 || error.status === 404)
       return new Error(say("This computer is not shared with your Haarness account anymore. Share it again with haarness remote enable on that computer."));
-    if (error.status === 409 && /offline|connection changed/i.test(error.message))
-      return new Error(say("This computer is offline. Try again when it is awake and connected."));
   }
   if (error instanceof Error && /Sign in to Haarness|not signed in|NotLoggedIn/i.test(error.message))
     return new Error(say("Sign in to Haarness to open your other computers."));
-  return error instanceof Error ? error : new Error(String(error));
+  const message = failureMessage(error, { relay: true });
+  if (error instanceof Error && message === error.message) return error;
+  return new Error(message, { cause: error });
 }
 
 /** A computer's host gateway (its project list, folders, opening a folder),

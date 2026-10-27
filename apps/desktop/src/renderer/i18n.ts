@@ -1,5 +1,6 @@
 import { createSignal, type JSX } from "solid-js";
 import { displayLanguage, translate } from "../localization";
+import { errorText, errorTextLine } from "./error-text";
 export { languages, parseLanguage } from "../localization";
 const [language, setLanguage] = createSignal("en");
 export { language };
@@ -16,6 +17,13 @@ export const formatDateTime = (value: number | string | Date) => new Date(value)
 export function t(key: string, values: Record<string, string | number> = {}): string {
   return translate(language(), key).replace(/\{(\w+)\}/g, (match, name) =>
     Object.hasOwn(values, name) ? String(values[name]) : match);
+}
+/** A failure on one line in the reader's language, for a surface without
+ * room for a title; empty for a cancellation, which shows nothing. */
+export function errorLine(error: unknown) {
+  const text = errorText(error);
+  const said = errorTextLine(text);
+  return text.known ? t(said) : said;
 }
 
 /**

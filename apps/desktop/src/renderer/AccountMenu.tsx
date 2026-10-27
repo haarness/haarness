@@ -1,9 +1,10 @@
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { useApp } from "./state";
 import { Button, dismissOnBackdrop, Icon } from "./ui";
+import { cancelled as requestCancelled } from "./error-text";
 import { Select } from "./Select";
 import { Shimmer } from "./Shimmer";
-import { language, t } from "./i18n";
+import { language, t, errorLine } from "./i18n";
 import { setAccountKnown, setSignedIn } from "./computers";
 import "./account.css";
 import {
@@ -108,7 +109,7 @@ export function AccountMenu(props: {
         setRouters(catalog.items ?? []);
       } catch (cause) {
         if (!alive) return;
-        setRouters([]); setError(String(cause));
+        setRouters([]); if (!requestCancelled(cause)) setError(errorLine(cause));
       }
     } else setRouters([]);
     if (result.loggedIn && open() && (result.authKind !== "api_key" || result.scopes?.includes("workspaces:read"))) {
@@ -119,7 +120,7 @@ export function AccountMenu(props: {
       if (!alive) return;
       if (spaces.status === "fulfilled")
         setWorkspaces(spaces.value.items ?? []);
-      else setError(String(spaces.reason));
+      else if (!requestCancelled(spaces.reason)) setError(errorLine(spaces.reason));
       if (templates.status === "fulfilled")
         setAgents(templates.value.items ?? []);
 
@@ -134,7 +135,7 @@ export function AccountMenu(props: {
     try {
       await fn();
     } catch (e) {
-      if (alive) setError(e instanceof Error ? e.message : String(e));
+      if (alive && !requestCancelled(e)) setError(errorLine(e));
     } finally {
       if (alive) setBusy(false);
     }

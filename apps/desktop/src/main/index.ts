@@ -27,10 +27,11 @@ import { terminalAnswers } from "./terminal-answers";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
 import { matchesShortcut, shortcutLabel } from "../renderer/search";
+import { cancelled, errorText, failureDetail, failureMessage } from "../renderer/error-text";
 /** Native dialogs speak the language chosen in Settings, like the menus do. */
 const say = (key: string) => translate(data().preferences.language, key);
 import { ApiError, authorizationHeaders, type ServerAuth } from "@haarness/sdk";
-import { browseRemote, openRemote, remoteLocationId } from "./remote-projects";
+import { browseRemote, openRemote, remoteLocationId, responseFailure } from "./remote-projects";
 import { connectHost, createRelay, hostBrowse, hostCatalog, hostServerId } from "./remote-hosts";
 import { withThreadKinds } from "../thread-kinds";
 import {
@@ -539,7 +540,13 @@ function handle(
       bounded(args);
       return { ok: true, value: await fn(win, ...(args as never[])) };
     } catch (error) {
-      let message = error instanceof Error ? error.message : String(error);
+      // A project's calls name its connection first; one of another
+      // computer's went through Cloud's relay.
+      const id = name === "api" ? (args[0] as { connection?: unknown } | undefined)?.connection : args[0];
+      const relayed = typeof id === "string" && !!connections.get(id)?.view.remoteHost;
+      let message = failureMessage(error, { relay: relayed });
+      // The window gets plain words; what they stand in for is logged here.
+      let detail = !cancelled(error) && errorText(message).known ? failureDetail(error) : "";
       for (const { auth } of connections.values()) {
         const secret =
           auth.type === "bearer"
@@ -547,10 +554,16 @@ function handle(
             : auth.type === "basic"
               ? auth.password
               : "";
-        if (secret) message = message.replaceAll(secret, "[redacted]");
+        if (secret) {
+          message = message.replaceAll(secret, "[redacted]");
+          detail = detail.replaceAll(secret, "[redacted]");
+        }
       }
-      for (const secret of relay.secrets())
+      for (const secret of relay.secrets()) {
         message = message.replaceAll(secret, "[redacted]");
+        detail = detail.replaceAll(secret, "[redacted]");
+      }
+      if (detail) console.warn(`Haarness: ${name} failed: ${detail}`);
       return { ok: false, error: message.slice(0, 8000) };
     }
   });
@@ -1290,7 +1303,7 @@ function installHandlers() {
         redirect: "error",
       });
       if (test) (globalThis as { haarnessReadLog?: string[] }).haarnessReadLog?.push(String(input.path));
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw await responseFailure(response);
       return response.json();
     },
   );

@@ -420,7 +420,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
           live = false;
           waiting.add(position, bytes);
         })
-        .catch((error) => app.set("error", String(error)));
+        .catch(app.showError);
     };
     const input = terminal.onData((data) => {
       const answer = !typing();

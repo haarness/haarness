@@ -1,10 +1,11 @@
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import type { WorkspaceInfo } from "@haarness/sdk";
 import { primaryLocation } from "../projects";
 import { Mark } from "./brand";
 import { useApp } from "./state";
 import { Icon } from "./ui";
+import { cancelled, errorText } from "./error-text";
 import "./project-home.css";
 
 /** A Cloud workspace's project; another computer's saves `cloudWorkspace` too. */
@@ -57,6 +58,11 @@ export function ProjectHome() {
       setCatalog({ server, status: "ready", items, error: "" });
     } catch (error) {
       if (app.currentServer().id !== server) return;
+      // A cancelled read shows nothing; the next look reads again.
+      if (cancelled(error)) {
+        setCatalog(undefined);
+        return;
+      }
       setCatalog({
         server,
         status: "error",
@@ -135,8 +141,8 @@ export function ProjectHome() {
                     ? t("Couldn’t open This computer")
                     : t("Couldn’t open project")}
                 </h1>
-                <p class="project-home-error" role="alert">
-                  {failure().message}
+                <p class="project-home-error" role="alert" title={errorText(failure().message).detail}>
+                  {errorLine(failure().message)}
                 </p>
               </>
             )}
@@ -217,8 +223,8 @@ export function ProjectHome() {
               {/* A project that could not open already says why above. */}
               <Show when={hostProjects()?.status === "error" && !state.projectFailure}>
                 <div class="project-home-status">
-                  <p class="project-home-error" role="alert">
-                    {hostProjects()!.error}
+                  <p class="project-home-error" role="alert" title={errorText(hostProjects()!.error).detail}>
+                    {errorLine(hostProjects()!.error)}
                   </p>
                   <button onClick={() => void loadCatalog(app.currentServer().id)}>
                     {t("Try again")}

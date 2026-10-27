@@ -4,6 +4,7 @@ import type { Computer } from "../shared";
 import { sortComputers } from "../servers";
 import { language, t } from "./i18n";
 import { relativeAge } from "./relative-age";
+import { cancelled } from "./error-text";
 
 type Status = "idle" | "loading" | "ready" | "signed-out" | "error";
 const [computers, setComputers] = createStore<{
@@ -63,6 +64,8 @@ export function loadComputers() {
     })
     .catch((error: unknown) => {
       if (asked !== generation) return;
+      // A cancelled read leaves the list as it was.
+      if (cancelled(error)) return void setComputers({ status: computers.items.length ? "ready" : "idle" });
       const message = error instanceof Error ? error.message : String(error);
       // A list already shown stays; the next look reads it again.
       setComputers(computers.items.length ? { status: "ready", error: "" } : { status: "error", error: message });

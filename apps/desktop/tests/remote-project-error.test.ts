@@ -77,4 +77,10 @@ test("remote project failures give relevant next steps without exposing server d
   );
   assert.match(unknown, /server is running/);
   assert.doesNotMatch(unknown, /private|SECRET|Check the path/);
+  // A computer or server that is not answering says so, as everywhere.
+  assert.equal(
+    remoteProjectError(new Error("Your computer isn't reachable. Open Haarness on it, then try again.")),
+    "Your computer isn't reachable. Open Haarness on it, then try again.",
+  );
+  assert.equal(remoteProjectError(new Error("HTTP 503")), "Haarness isn't answering. Try again in a moment.");
 });

@@ -1,4 +1,4 @@
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import { browserAddress } from "../browser-settings";
 import {
   createEffect,
@@ -12,6 +12,7 @@ import {
   untrack,
 } from "solid-js";
 import { Icon } from "./ui";
+import { cancelled } from "./error-text";
 import { useApp } from "./state";
 import type { BrowserState } from "../shared";
 import { setNativeArea } from "./native-area";
@@ -113,9 +114,9 @@ export function BrowserPanel(props: {
       setError("");
       updateLayout();
     } catch (reason) {
-      if (version !== epoch) return;
+      if (version !== epoch || cancelled(reason)) return;
       setConnected(false);
-      setError(String(reason));
+      setError(errorLine(reason));
       retry = setTimeout(() => void attach(connection, thread, version), 5000);
     }
   }
@@ -291,7 +292,7 @@ export function BrowserPanel(props: {
       // The button lights only when the page is really picking.
       setPicking(!!started && belongs(connection, thread));
     } catch (reason) {
-      if (round === pickRound && belongs(connection, thread)) setError(String(reason));
+      if (round === pickRound && belongs(connection, thread) && !cancelled(reason)) setError(errorLine(reason));
     } finally {
       if (round === pickRound) setStarting(false);
     }
@@ -364,7 +365,7 @@ export function BrowserPanel(props: {
       setError("");
       await window.haarness.browserCommand(connection, thread, action);
     } catch (reason) {
-      if (belongs(connection, thread)) setError(String(reason));
+      if (belongs(connection, thread) && !cancelled(reason)) setError(errorLine(reason));
     }
   }
   onMount(() => {
