@@ -2927,5 +2927,11 @@
   "This copy of Haarness can’t replace itself, so updates come as an installer.": "لا يمكن لهذه النسخة من Haarness استبدال نفسها، لذا تصل التحديثات كمثبّت.",
   "Last checked {time}": "آخر تحقق: {time}",
   "Download updates automatically": "تنزيل التحديثات تلقائيًا",
-  "New versions download in the background and install when Haarness restarts.": "تُنزَّل الإصدارات الجديدة في الخلفية وتُثبَّت عند إعادة تشغيل Haarness."
+  "New versions download in the background and install when Haarness restarts.": "تُنزَّل الإصدارات الجديدة في الخلفية وتُثبَّت عند إعادة تشغيل Haarness.",
+  "Less than a day left at this pace": "يتبقى أقل من يوم بهذا المعدل",
+  "About 1 day left at this pace": "يتبقى نحو يوم واحد بهذا المعدل",
+  "Ends {date}": "ينتهي في {date}",
+  "On hold": "معلّق",
+  "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "الاستخدام الإضافي متوقف، لذا لا يُنفق الرصيد المشترى. فعّله من الفوترة.",
+  "Your free trial didn't start: that card was already used for a trial.": "لم تبدأ تجربتك المجانية: سبق استخدام هذه البطاقة لتجربة."
 }

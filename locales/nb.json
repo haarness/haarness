@@ -2927,5 +2927,11 @@
   "This copy of Haarness can’t replace itself, so updates come as an installer.": "Denne kopien av Haarness kan ikke erstatte seg selv, så oppdateringer kommer som et installasjonsprogram.",
   "Last checked {time}": "Sist sjekket {time}",
   "Download updates automatically": "Last ned oppdateringer automatisk",
-  "New versions download in the background and install when Haarness restarts.": "Nye versjoner lastes ned i bakgrunnen og installeres når Haarness starter på nytt."
+  "New versions download in the background and install when Haarness restarts.": "Nye versjoner lastes ned i bakgrunnen og installeres når Haarness starter på nytt.",
+  "Less than a day left at this pace": "Under én dag igjen i dette tempoet",
+  "About 1 day left at this pace": "Omtrent 1 dag igjen i dette tempoet",
+  "Ends {date}": "Slutter {date}",
+  "On hold": "Holdt tilbake",
+  "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Overforbruk er av, så kjøpte kreditter brukes ikke. Slå det på under Fakturering.",
+  "Your free trial didn't start: that card was already used for a trial.": "Gratis prøveperiode startet ikke: kortet er allerede brukt til en prøveperiode."
 }

@@ -26,8 +26,12 @@ pub struct Summary {
     pub plan: String,
     pub subscription_status: Option<String>,
     pub account_status: String,
+    /// Included AI credits left, counting what requests in flight hold: each holds its worst case and settles
+    /// to far less, so the balance does not dip for the length of a reply.
     pub included_credits: String,
+    /// Purchased credits left, counted as [`Summary::included_credits`] is.
     pub purchased_credits: String,
+    /// Credits requests in flight hold; part of the balances above.
     pub held_credits: String,
     pub cloud_units: String,
     pub cloud_units_held: String,
@@ -49,6 +53,12 @@ pub struct Summary {
     /// The account can still start the one-time trial.
     #[serde(default)]
     pub trial_available: bool,
+    /// A trial checkout saved a card that had already been used for a trial, so no trial started.
+    #[serde(default)]
+    pub trial_refused: bool,
+    /// Purchased credits are on hold (a payment dispute) and pay for nothing until it is resolved.
+    #[serde(default)]
+    pub purchased_frozen: bool,
     #[serde(default)]
     pub auto_topup: bool,
     /// Why the last automatic top-up failed (they are then off).
@@ -57,7 +67,8 @@ pub struct Summary {
     /// Whole days the credits that can pay last at the last seven days' pace; absent without recent spend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days_left: Option<u64>,
-    /// A plan is current but no AI credit can pay: nothing included is left and purchased credits cannot pay.
+    /// The account has a plan or purchased credits, yet no AI credit can pay: nothing included is left and
+    /// purchased credits cannot pay (none, overage off, or on hold).
     #[serde(default)]
     pub out_of_credits: bool,
 }
@@ -71,6 +82,51 @@ fn nanos(value: &Value, key: &str) -> u128 {
         .as_str()
         .and_then(|text| text.parse().ok())
         .unwrap_or(0)
+}
+
+/// Credits as the wallet writes them, from exact nanos.
+fn credit_text(nanos: u128) -> String {
+    format!("{}.{:06}", nanos / 1_000_000, nanos % 1_000_000)
+}
+
+/// AI balances in nanos: each counts what requests in flight hold, as [`Summary::included_credits`] says.
+#[derive(Debug, Default, PartialEq)]
+struct Balances {
+    included: u128,
+    purchased: u128,
+    purchased_frozen: bool,
+}
+
+/// [`Balances`] from the wallet's buckets (`available` + `reserved` of every current bucket of a kind), or from
+/// its totals, which leave holds out, when it lists none.
+fn balances(wallet: &Value) -> Balances {
+    let Some(buckets) = wallet["buckets"].as_array().filter(|b| !b.is_empty()) else {
+        return Balances {
+            included: nanos(wallet, "includedAi"),
+            purchased: nanos(wallet, "purchased"),
+            purchased_frozen: false,
+        };
+    };
+    let amount = |bucket: &Value, key: &str| -> u128 {
+        bucket[key]
+            .as_str()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(0)
+    };
+    let mut out = Balances::default();
+    for bucket in buckets {
+        let total = amount(bucket, "available") + amount(bucket, "reserved");
+        let frozen = bucket["frozen"].as_bool().unwrap_or(false);
+        match bucket["kind"].as_str() {
+            Some("included_ai") if !frozen => out.included += total,
+            Some("purchased") => {
+                out.purchased += total;
+                out.purchased_frozen |= frozen && total > 0;
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Days the credits that can pay last at the pace of `spent_7_days` nanos a week.
@@ -164,8 +220,13 @@ impl State {
                     display_credits(&s.included_credits)
                 ),
                 format!(
-                    "Purchased        {} credits available",
-                    display_credits(&s.purchased_credits)
+                    "Purchased        {} credits {}",
+                    display_credits(&s.purchased_credits),
+                    if s.purchased_frozen {
+                        "on hold"
+                    } else {
+                        "available"
+                    }
                 ),
                 format!(
                     "Reserved         {} credits in use",
@@ -193,13 +254,26 @@ impl State {
                 }
             ));
             if s.out_of_credits {
-                lines
-                    .push("Out of credits   add credits or turn overage on to keep working".into());
+                lines.push(
+                    if s.overage_opt_in {
+                        "Out of credits   add credits to keep working"
+                    } else if display_credits(&s.purchased_credits) != "0" && !s.purchased_frozen {
+                        "Out of credits   turn overage on so purchased credits pay"
+                    } else {
+                        "Out of credits   add credits and turn overage on to keep working"
+                    }
+                    .into(),
+                );
             } else if let Some(days) = s.days_left {
                 lines.push(format!("Forecast         {}", forecast(days)));
             }
             if let Some(at) = &s.resets_at {
-                lines.push(format!("Allowance reset  {at}"));
+                // A trial's allowance, or one on a plan set to end, stops there instead of refilling.
+                if s.trial || s.cancel_at_period_end {
+                    lines.push(format!("Allowance ends   {at}"));
+                } else {
+                    lines.push(format!("Allowance reset  {at}"));
+                }
             }
             if let Some(at) = &s.period_ends_at {
                 lines.push(format!(
@@ -210,6 +284,11 @@ impl State {
                         "Plan renews    "
                     }
                 ));
+            }
+            if s.trial_refused {
+                lines.push(
+                    "Free trial       not started · that card was already used for a trial".into(),
+                );
             }
             if s.trial_available {
                 lines.push(format!(
@@ -279,8 +358,9 @@ impl Client {
         let text = |v: &Value, key: &str| v[key].as_str().map(str::to_owned);
         let plan_code = text(&subscription, "planCode").or_else(|| text(&entitlements, "planCode"));
         let overage = wallet["overageOptIn"].as_bool().unwrap_or(false);
-        let included = nanos(&wallet, "includedAi");
-        let purchased = nanos(&wallet, "purchased");
+        let balance = balances(&wallet);
+        // Frozen purchased credits pay for nothing, overage or not.
+        let purchased_pays = overage && !balance.purchased_frozen;
         let seats = subscription["seats"]
             .as_i64()
             .or_else(|| entitlements["seats"].as_i64())
@@ -292,6 +372,9 @@ impl Client {
                 .map(str::to_owned)
                 .ok_or_else(|| Error::Other("Cloud returned an invalid credit balance".into()))
         };
+        // The totals stay required: a wallet without them is not one this client understands.
+        credits("includedAi")?;
+        credits("purchased")?;
         let base = self.config.web_origin()?;
         let web = |path: &str| -> Result<String> {
             let mut url = base.join(path).map_err(|e| Error::Config(e.to_string()))?;
@@ -310,14 +393,14 @@ impl Client {
                     .unwrap_or(account)
                     .into(),
                 trial: plan_code.as_deref() == Some(TRIAL_PLAN) && subscription.is_null(),
-                out_of_credits: plan_code.is_some()
-                    && included + if overage { purchased } else { 0 } == 0,
+                out_of_credits: (plan_code.is_some() || balance.purchased > 0)
+                    && balance.included + if purchased_pays { balance.purchased } else { 0 } == 0,
                 plan: plan_code.unwrap_or_else(|| "No plan".into()),
                 subscription_status: text(&subscription, "status"),
                 account_status: text(&wallet, "status")
                     .ok_or_else(|| Error::Other("Missing billing status".into()))?,
-                included_credits: credits("includedAi")?,
-                purchased_credits: credits("purchased")?,
+                included_credits: credit_text(balance.included),
+                purchased_credits: credit_text(balance.purchased),
                 held_credits: credits("heldReserve")?,
                 cloud_units: units(&wallet, "cloudUnitSecondsAvailable")?,
                 cloud_units_held: units(&wallet, "cloudUnitSecondsReserved")?,
@@ -330,12 +413,14 @@ impl Client {
                 seats,
                 billing_interval: text(&subscription, "billingInterval"),
                 trial_available: wallet["trialAvailable"].as_bool().unwrap_or(false),
+                trial_refused: wallet["trialRefused"].as_bool().unwrap_or(false),
+                purchased_frozen: balance.purchased_frozen,
                 auto_topup: wallet["autoTopup"]["enabled"].as_bool().unwrap_or(false),
                 auto_topup_failure: text(&wallet["autoTopup"], "failure"),
                 days_left: days_left(
-                    included,
-                    purchased,
-                    overage,
+                    balance.included,
+                    balance.purchased,
+                    purchased_pays,
                     nanos(&wallet, "aiSpendLast7Days"),
                 ),
             }),
@@ -399,20 +484,27 @@ pub fn watch(client: Client) -> Watcher {
 
 async fn snapshots(client: Client, sender: watch::Sender<State>) {
     let (hints, mut receiver) = watch::channel(false);
-    let mut socket = None;
+    // The events stream follows the account the balances are for: signing in as someone else without
+    // signing out first keeps the selection, so only the snapshot shows the account changed.
+    let mut socket: Option<(String, Task)> = None;
     loop {
         receiver.borrow_and_update();
         match client.billing_summary().await {
             Ok(state) => {
                 if let Some(summary) = &state.summary
-                    && socket.is_none()
+                    && socket
+                        .as_ref()
+                        .is_none_or(|(account, _)| *account != summary.account_id)
                 {
                     let client = client.clone();
                     let hints = hints.clone();
                     let account = summary.account_id.clone();
-                    socket = Some(Task(tokio::spawn(async move {
-                        events(client, account, hints).await;
-                    })));
+                    socket = Some((
+                        account.clone(),
+                        Task(tokio::spawn(async move {
+                            events(client, account, hints).await;
+                        })),
+                    ));
                 }
                 sender.send_if_modified(|old| {
                     if *old == state {
@@ -541,7 +633,36 @@ async fn connection(
 
 #[cfg(test)]
 mod tests {
-    use super::forecast;
+    use super::{Balances, balances, forecast};
+    use serde_json::json;
+
+    #[test]
+    fn balances_count_what_replies_in_flight_hold() {
+        // 904 credits, 404 of them held by a reply; the wallet's totals leave the hold out.
+        let wallet = json!({
+            "includedAi": {"credits": "500.000000", "nanos": "500000000"},
+            "purchased": {"credits": "2.000000", "nanos": "2000000"},
+            "buckets": [
+                {"kind": "included_ai", "available": "500000000", "reserved": "404000000", "frozen": false},
+                {"kind": "included_cloud", "available": "7200", "reserved": "0", "frozen": false},
+                {"kind": "purchased", "available": "2000000", "reserved": "1000000", "frozen": true},
+            ],
+        });
+        assert_eq!(
+            balances(&wallet),
+            Balances {
+                included: 904_000_000,
+                purchased: 3_000_000,
+                purchased_frozen: true,
+            }
+        );
+        // Without buckets the totals are all there is.
+        let wallet = json!({
+            "includedAi": {"credits": "500.000000", "nanos": "500000000"},
+            "purchased": {"credits": "0", "nanos": "0"},
+        });
+        assert_eq!(balances(&wallet).included, 500_000_000);
+    }
 
     #[test]
     fn the_forecast_counts_whole_days() {

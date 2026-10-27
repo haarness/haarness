@@ -2927,5 +2927,11 @@
   "This copy of Haarness can’t replace itself, so updates come as an installer.": "此 Haarness 副本無法自行取代，因此更新會以安裝程式的形式提供。",
   "Last checked {time}": "上次檢查：{time}",
   "Download updates automatically": "自動下載更新",
-  "New versions download in the background and install when Haarness restarts.": "新版本會在背景下載，並在 Haarness 重新啟動時安裝。"
+  "New versions download in the background and install when Haarness restarts.": "新版本會在背景下載，並在 Haarness 重新啟動時安裝。",
+  "Less than a day left at this pace": "依此速度剩不到一天",
+  "About 1 day left at this pace": "依此速度約剩 1 天",
+  "Ends {date}": "{date} 結束",
+  "On hold": "已凍結",
+  "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "超額使用已關閉，因此不會花費已購額度。請在帳單中開啟。",
+  "Your free trial didn't start: that card was already used for a trial.": "免費試用未開始：這張卡已用於試用。"
 }

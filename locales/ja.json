@@ -2927,5 +2927,11 @@
   "This copy of Haarness can’t replace itself, so updates come as an installer.": "この Haarness は自身を置き換えられないため、アップデートはインストーラで提供されます。",
   "Last checked {time}": "最終確認: {time}",
   "Download updates automatically": "アップデートを自動でダウンロード",
-  "New versions download in the background and install when Haarness restarts.": "新しいバージョンはバックグラウンドでダウンロードされ、Haarness の再起動時にインストールされます。"
+  "New versions download in the background and install when Haarness restarts.": "新しいバージョンはバックグラウンドでダウンロードされ、Haarness の再起動時にインストールされます。",
+  "Less than a day left at this pace": "このペースでは残り 1 日未満",
+  "About 1 day left at this pace": "このペースでは残り約 1 日",
+  "Ends {date}": "{date} に終了",
+  "On hold": "保留中",
+  "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "超過利用がオフのため、購入済みクレジットは使われません。請求でオンにしてください。",
+  "Your free trial didn't start: that card was already used for a trial.": "無料トライアルは開始されませんでした。このカードはすでにトライアルで使われています。"
 }

@@ -217,7 +217,7 @@ async fn websocket_balances_reconnect_switch_logout_and_stale_errors() {
         s.summary.as_ref().is_some_and(|s| s.account_id == B)
     })
     .await;
-    assert_eq!(state.summary.unwrap().included_credits, "100");
+    assert_eq!(state.summary.unwrap().included_credits, "100.000000");
     assert!(state.error.is_none());
     credentials::delete(&f.client.config.path()).unwrap();
     let state = until(&mut watcher.updates, |s| !s.logged_in).await;
