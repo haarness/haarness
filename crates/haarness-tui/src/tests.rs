@@ -20412,7 +20412,9 @@ async fn a_sign_in_that_cannot_start_says_why_and_offers_another_try() {
     let crate::connect::LoginState::Failed(reason) = &login.state else {
         panic!("{:?}", login.state);
     };
-    assert!(reason.contains("127.0.0.1:1"), "{reason}");
+    // The reason in plain words: the server is not answering, never the
+    // daemon's address or reqwest's transport text.
+    assert_eq!(reason, crate::api::NOT_ANSWERING);
     assert_eq!(login.method, "device");
     let rendered = app
         .lines((100, 30))

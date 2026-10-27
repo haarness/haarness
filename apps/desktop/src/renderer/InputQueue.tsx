@@ -1,8 +1,9 @@
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import type { EventEnvelope, InputQueue as Queue, InputQueueAction, PendingInput } from "@haarness/sdk";
 import { useApp } from "./state";
 import { Button, Icon } from "./ui";
+import { cancelled } from "./error-text";
 import { attachmentName, type Attachment } from "./media";
 import { carriedResource, sentParts, type PromptContext } from "./prompt-context";
 import { pasteLabel } from "./PromptContext";
@@ -47,7 +48,7 @@ export function createInputQueue(composer: {
     setQueue({ revision: 0, items: [] }); setError(""); setBusy(false);
     const epoch = generation, key = composer.owner();
     void refresh().catch((reason) => {
-      if (epoch === generation) setError(String(reason));
+      if (epoch === generation && !cancelled(reason)) setError(errorLine(reason));
     });
     if (edits()[key]) return;
     void window.haarness.storage(stashKey(key)).then((saved) => {
@@ -79,8 +80,8 @@ export function createInputQueue(composer: {
       const value = await app.api<Queue>("changeInputQueue", app.state.selected, action);
       if (origin === owner() && epoch === generation) accept(value);
     } catch (reason) {
-      if (origin === owner() && epoch === generation) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+      if (origin === owner() && epoch === generation && !cancelled(reason)) {
+        setError(errorLine(reason));
         await refresh().catch(() => {});
       }
       throw reason;

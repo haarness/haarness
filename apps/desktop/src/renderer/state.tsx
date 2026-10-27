@@ -7,7 +7,8 @@ import {
 } from "./reconnect-wait";
 import { shareOrder, type RemoteAction, type RemoteShare } from "./remote-control";
 import { createAttachmentDrafts } from "./attachment-drafts";
-import { applyLanguage, t } from "./i18n";
+import { applyLanguage, t, errorLine } from "./i18n";
+import { cancelled } from "./error-text";
 import {
   alreadySettled,
   autoApproval,
@@ -345,12 +346,17 @@ function createApp(saved?: Preferences) {
     clearTimeout(noticeTimer);
     noticeTimer = setTimeout(() => set("notice", ""), 5000);
   }
+  /** Shows a failure in the error banner, which says it in plain words
+   * (`errorText`); a cancelled request leaves the banner as it was. */
+  function showError(error: unknown) {
+    if (!cancelled(error)) set("error", error instanceof Error ? error.message : String(error));
+  }
   async function run<V>(operation: () => Promise<V>): Promise<V | undefined> {
     set("error", "");
     try {
       return await operation();
     } catch (error) {
-      set("error", error instanceof Error ? error.message : String(error));
+      showError(error);
       return undefined;
     }
   }
@@ -363,9 +369,10 @@ function createApp(saved?: Preferences) {
     id: string,
     error: unknown,
   ) {
+    if (cancelled(error)) return;
     set("permissionErrors", connection, {
       ...state.permissionErrors[connection],
-      [id]: error instanceof Error ? error.message : String(error),
+      [id]: errorLine(error),
     });
   }
   function retainPermissionErrors(
@@ -563,7 +570,7 @@ function createApp(saved?: Preferences) {
       recordPermissionError(
         connection,
         request.permissionId,
-        `Auto approval failed. Review the request manually. ${error instanceof Error ? error.message : String(error)}`,
+        `Auto approval failed. Review the request manually. ${errorLine(error)}`,
       );
     },
   });
@@ -834,7 +841,7 @@ function createApp(saved?: Preferences) {
       const operation = hydration;
       void attempt.catch((error) => {
         if (stopped || operation !== hydration) return;
-        set("error", String(error));
+        showError(error);
         reconnect();
       });
     }, delay);
@@ -1720,7 +1727,9 @@ function createApp(saved?: Preferences) {
   const loadAttachmentDraft = (key: string) => attachmentDrafts.load(key);
   function setAttachmentDraft(key: string, value: Attachment[] | ((items: Attachment[]) => Attachment[])) {
     const pending = attachmentDrafts.update(key, value);
-    void pending.catch((error) => set("error", "Could not save attachment draft: " + String(error)));
+    void pending.catch((error) => {
+      if (!cancelled(error)) set("error", "Could not save attachment draft: " + errorLine(error));
+    });
     return pending;
   }
   const addAttachments = (key: string, values: Attachment[]) =>
@@ -1992,7 +2001,7 @@ function createApp(saved?: Preferences) {
       const loading: Promise<void> = (catalogLoad = catalogs(false, view.info)
         .then(catalogsIn)
         .catch((error) => {
-          if (valid()) set("error", String(error));
+          if (valid()) showError(error);
         })
         .finally(() => {
           if (catalogLoad === loading) set("catalogLoading", false);
@@ -2063,10 +2072,12 @@ function createApp(saved?: Preferences) {
         await clearWorkspace(state.activeServer);
         if (request !== connectAttempt) return false;
         if (inlineError) throw error;
-        set("projectFailure", {
-          input,
-          message: error instanceof Error ? error.message : String(error),
-        });
+        // A cancelled opening leaves the project home as it is.
+        if (!cancelled(error))
+          set("projectFailure", {
+            input,
+            message: error instanceof Error ? error.message : String(error),
+          });
         return false;
       }
       if (state.connection?.id !== input.recent) set(previous);
@@ -2195,7 +2206,7 @@ function createApp(saved?: Preferences) {
           ),
         );
       } catch (error) {
-        set("error", String(error));
+        showError(error);
       }
     } else if (sharedApprovals(connection))
       await loadApprovalMode(connection, thread.id);
@@ -2212,7 +2223,7 @@ function createApp(saved?: Preferences) {
       if (selection === currentSelection) {
         if (inheritBrowser) {
           try { await window.haarness.browserAdopt(connection, thread.id); }
-          catch (error) { set("error", "Your browser remains on the new-chat screen: " + String(error)); }
+          catch (error) { if (!cancelled(error)) set("error", "Your browser remains on the new-chat screen: " + errorLine(error)); }
         }
         if (generation === current && selection === currentSelection)
           await choose(thread.id, panel, {
@@ -2614,7 +2625,7 @@ function createApp(saved?: Preferences) {
     // A reloaded configuration can change models, agents, commands and the
     // server's capabilities (Auto's reviewer turned on or off).
     if (item.type === "assets.updated" || item.type === "configuration.reloaded")
-      void catalogs().catch((error) => set("error", String(error)));
+      void catalogs().catch(showError);
     if (
       ["thread.reverted", "thread.unreverted", "thread.compacted"].includes(
         item.type,
@@ -2643,7 +2654,7 @@ function createApp(saved?: Preferences) {
             state.connection?.id === connection &&
             state.selected === selected
           )
-            set("error", String(error));
+            showError(error);
         })
         .finally(() => journals.delete(journal));
     }
@@ -2687,6 +2698,7 @@ function createApp(saved?: Preferences) {
     api,
     native,
     run,
+    showError,
     notify,
     connect,
     projectConnection,

@@ -1,5 +1,5 @@
 import type { ReviewDraft } from "../review-drafts";
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import { Select } from "./Select";
 import {
   For,
@@ -17,6 +17,7 @@ import type { FileDiff } from "@haarness/sdk";
 import { diffWordsWithSpace } from "diff";
 import { useApp } from "./state";
 import { Button, Icon, Empty } from "./ui";
+import { cancelled } from "./error-text";
 import { ReviewRows } from "./ReviewRows";
 import { InlineComment } from "./InlineComment";
 import { ReviewCache } from "./review-cache";
@@ -136,8 +137,8 @@ export function Review(props: { compact?: boolean } = {}) {
       }
       if (scroll()) scroll()!.scrollTop = 0;
     } catch (error) {
-      if (id !== generation) return;
-      setProblem(error instanceof Error ? error.message : String(error));
+      if (id !== generation || cancelled(error)) return;
+      setProblem(errorLine(error));
     } finally {
       if (id === generation) setLoading(false);
     }

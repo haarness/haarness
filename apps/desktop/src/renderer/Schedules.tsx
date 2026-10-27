@@ -1,4 +1,4 @@
-import { t, language } from "./i18n";
+import { t, language, errorLine } from "./i18n";
 import { ProviderIcon } from "./ProviderIcon";
 import { ModelPicker } from "./ModelPicker";
 import { conversationAgents } from "./agent-selection";
@@ -15,6 +15,7 @@ import { createStore } from "solid-js/store";
 import { Select } from "./Select";
 import { useApp } from "./state";
 import { Button, confirm, dismissOnBackdrop, Empty, Icon } from "./ui";
+import { cancelled } from "./error-text";
 import { parseModel, selectModel } from "./model-selection";
 import {
   describeSchedule,
@@ -250,7 +251,8 @@ function ScheduleForm(props: {
       await props.save(args);
       close();
     } catch (error) {
-      setError(t(error instanceof Error ? error.message : String(error)));
+      // Its own checks throw English keys; a server's failure reads as everywhere.
+      if (!cancelled(error)) setError(t(errorLine(error)));
     } finally {
       setSaving(false);
     }

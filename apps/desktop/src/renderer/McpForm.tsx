@@ -1,8 +1,9 @@
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import { For, Show, createSignal, onMount } from "solid-js";
 import { createStore } from "solid-js/store";
 import { Select } from "./Select";
 import { Button, Icon, dismissOnBackdrop } from "./ui";
+import { cancelled } from "./error-text";
 import { keychainInput, newMcpDraft, renameKeychainReference, secretLooking, type McpPair } from "./mcp-form";
 
 /** What this computer calls the store a secret is kept in. */
@@ -57,7 +58,8 @@ export function McpForm(props: {
     } catch (error) {
       if (stored.length) await props.removeSecrets(stored).catch(() => undefined);
       setSaving(false);
-      setError(error instanceof Error ? error.message : String(error));
+      if (cancelled(error)) return;
+      setError(errorLine(error));
       failure?.focus();
     }
   }

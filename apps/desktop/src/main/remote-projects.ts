@@ -1,4 +1,4 @@
-import { authorizationHeaders, type ServerAuth } from "@haarness/sdk";
+import { ApiError, authorizationHeaders, type ServerAuth } from "@haarness/sdk";
 import type { DirectoryListing } from "../shared";
 import type { WorkspaceInfo } from "@haarness/sdk";
 
@@ -37,15 +37,30 @@ async function hostRequest<T>(
     throw new Error(
       "This server does not support remote project browsing yet. Update Haarness on the server; its current project remains available.",
     );
-  if (!response.ok) {
-    const text = await response.text();
-    let message = text;
-    try {
-      message = JSON.parse(text).error?.message ?? text;
-    } catch {}
-    throw new Error(message || `Remote server returned ${response.status}`);
-  }
+  if (!response.ok) throw await responseFailure(response);
   return response.json() as Promise<T>;
+}
+
+/** A refused request as the SDK reports one, for a request Desktop sends
+ * itself: the server's code and message, or only the status when the body
+ * is not Haarness's (a proxy's text or page, nothing at all). */
+export async function responseFailure(response: Response): Promise<ApiError> {
+  const text = await response.text().catch(() => "");
+  let body: unknown = text;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    /* A proxy answers in plain text or HTML. */
+  }
+  const outer = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const record = outer.error && typeof outer.error === "object" ? (outer.error as Record<string, unknown>) : outer;
+  return new ApiError(
+    response.status,
+    String(record.code ?? "http_error"),
+    String(record.message ?? record.error ?? `HTTP ${response.status}`),
+    record.retryable === true,
+    body,
+  );
 }
 export const browseRemote = (
   url: string,

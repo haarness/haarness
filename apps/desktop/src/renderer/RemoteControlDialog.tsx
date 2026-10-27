@@ -1,4 +1,4 @@
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import {
   Match,
   Show,
@@ -8,6 +8,7 @@ import {
   onMount,
 } from "solid-js";
 import { Button, Icon, dismissOnBackdrop } from "./ui";
+import { cancelled } from "./error-text";
 import { useApp } from "./state";
 import { sessionKey } from "../projects";
 import {
@@ -63,8 +64,8 @@ export function RemoteControlDialog(props: {
       if (action === "stop" && !value.error)
         app.notify(t("Stopped sharing. This chat stays on this computer."));
     } catch (cause) {
-      if (!alive || action === "view") return;
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (!alive || action === "view" || cancelled(cause)) return;
+      setError(errorLine(cause));
     } finally {
       if (alive) setBusy("");
     }

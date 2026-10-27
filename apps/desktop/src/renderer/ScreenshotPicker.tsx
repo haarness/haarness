@@ -1,6 +1,7 @@
-import { t, language } from "./i18n";
+import { t, language, errorLine } from "./i18n";
 import { For, Match, Show, Switch, createSignal, onMount } from "solid-js";
 import { Button, Icon, dismissOnBackdrop } from "./ui";
+import { cancelled } from "./error-text";
 import { relativeTime } from "./relative-time";
 import { toggleSelection } from "./screenshot-picker";
 import type { Attachment } from "../attachments";
@@ -49,7 +50,7 @@ export function ScreenshotPicker(props: {
       setNeedsFolder("needsFolder" in value);
       setListing("listing" in value ? value : undefined);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (!cancelled(cause)) setError(errorLine(cause));
     } finally {
       setLoading(false);
       queueMicrotask(() =>
@@ -65,7 +66,7 @@ export function ScreenshotPicker(props: {
     try {
       close(await window.haarness.screenshotAttach(value.listing, selected()));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (!cancelled(cause)) setError(errorLine(cause));
     } finally {
       setAdding(false);
     }

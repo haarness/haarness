@@ -2,7 +2,7 @@ import { language, t } from "./i18n";
 import { Select } from "./Select";
 import { For, Show, createSignal, onMount, type JSX } from "solid-js";
 import { Icon, type IconName, type IconSize } from "./icons";
-import { errorText } from "./error-text";
+import { cancelled, errorText } from "./error-text";
 import { relativeTime } from "./relative-time";
 export { Icon, type IconName } from "./icons";
 /**
@@ -211,7 +211,7 @@ export function Forms() {
                   setBusy(false);
                   finish(input);
                 } catch (error) {
-                  setError(error instanceof Error ? error.message : String(error));
+                  if (!cancelled(error)) setError(error instanceof Error ? error.message : String(error));
                   setBusy(false);
                   // Disabling the form while it saved dropped focus; give it
                   // back so the field can be corrected straight away.
@@ -317,7 +317,8 @@ export function Forms() {
 }
 /**
  * A failure in words: a title when one helps, then what happened. Copy that
- * stands in for the server's own text keeps that text as the tooltip.
+ * stands in for the server's own text keeps that text as the tooltip. A
+ * cancellation shows nothing.
  */
 export function ErrorNotice(props: {
   error: unknown;
@@ -326,18 +327,30 @@ export function ErrorNotice(props: {
   focusable?: boolean;
 }) {
   const text = () => errorText(props.error);
+  return (
+    <Show when={text().message}>
+      <p
+        ref={props.ref}
+        class={props.class ?? "form-error"}
+        role="alert"
+        tabindex={props.focusable ? -1 : undefined}
+        title={text().detail}
+      >
+        <ErrorWords error={props.error} />
+      </p>
+    </Show>
+  );
+}
+/** A failure's title, when one helps, over what happened, in the reader's
+ * language: what an `ErrorNotice` or the error banner says. */
+export function ErrorWords(props: { error: unknown }) {
+  const text = () => errorText(props.error);
   const say = (value: string) => (text().known ? t(value) : value);
   return (
-    <p
-      ref={props.ref}
-      class={props.class ?? "form-error"}
-      role="alert"
-      tabindex={props.focusable ? -1 : undefined}
-      title={text().detail}
-    >
+    <>
       <Show when={text().title}>{(title) => <strong>{say(title())}</strong>}</Show>
       {say(text().message)}
-    </p>
+    </>
   );
 }
 export const Empty = (props: {

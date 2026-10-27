@@ -1,5 +1,5 @@
 import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import { useApp } from "./state";
 import { confirm } from "./ui";
 import { chatTitle } from "./chat-title";
@@ -21,7 +21,7 @@ function reason(error: unknown) {
   const text = errorText(error);
   if (/local changes/i.test(text.message)) return t("uncommitted changes");
   if (/active server/i.test(text.message)) return t("still running");
-  return text.known ? t(text.message) : text.message;
+  return errorLine(error);
 }
 
 /**
