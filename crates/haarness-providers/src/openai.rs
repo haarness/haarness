@@ -576,7 +576,11 @@ impl ModelProvider for OpenAiProvider {
                     attachments,
                 } => {
                     let media = crate::media::load_all(&attachments)?;
-                    let mut blocks = vec![json!({"type":"input_text","text":content})];
+                    // A photo sent on its own has no text to go with it.
+                    let mut blocks = Vec::new();
+                    if !content.trim().is_empty() {
+                        blocks.push(json!({"type":"input_text","text":content}));
+                    }
                     for item in media {
                         if item.is_image() {
                             blocks.push(json!({"type":"input_image","image_url":item.data_url()}));
@@ -1821,6 +1825,12 @@ mod tests {
                     content: "inspect this".into(),
                     attachments: vec!["data:image/png;base64,iVBORw0KGgo=".into()],
                 },
+                // A photo sent on its own.
+                ProviderMessage::Media {
+                    role: "user".into(),
+                    content: String::new(),
+                    attachments: vec!["data:image/png;base64,iVBORw0KGgo=".into()],
+                },
             ],
             tools: vec![ToolDefinition {
                 name: "list".into(),
@@ -1888,6 +1898,9 @@ mod tests {
             requests[0]["input"][3]["content"][1]["image_url"],
             "data:image/png;base64,iVBORw0KGgo="
         );
+        let photo = requests[0]["input"][4]["content"].as_array().unwrap();
+        assert_eq!(photo.len(), 1, "no blank text beside a photo: {photo:?}");
+        assert_eq!(photo[0]["type"], "input_image");
     }
 
     #[tokio::test]
