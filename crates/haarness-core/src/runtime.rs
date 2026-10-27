@@ -710,7 +710,12 @@ fn stop_failure_categories(error: &CoreError) -> (&'static str, &'static str) {
         .any(|marker| lower.contains(marker))
     {
         "authentication_failed"
-    } else if is_provider_usage_limit(error) {
+    } else if is_provider_usage_limit(error)
+        // Haarness Cloud's refusals for credits and budgets arrive as advice,
+        // without the 402 they came with: they are quotas all the same.
+        || lower.contains("haarness cloud credits")
+        || lower.contains("cost more than a spending limit allows")
+    {
         "rate_limit"
     } else if status == Some(529) || lower.contains("overloaded") || lower.contains("high demand") {
         "overloaded"
@@ -15436,6 +15441,14 @@ mod tests {
             ("openai api_key is not configured", "authentication_failed"),
             ("HTTP 429 Too Many Requests: rate limit", "rate_limit"),
             ("[insufficient_quota] You exceeded your quota", "rate_limit"),
+            (
+                "Your included Haarness Cloud credits can't cover this request.",
+                "rate_limit",
+            ),
+            (
+                "This request could cost more than a spending limit allows.",
+                "rate_limit",
+            ),
             ("HTTP 529: Overloaded", "overloaded"),
             ("This model is experiencing high demand", "overloaded"),
             ("HTTP 502 Bad Gateway", "server_error"),
