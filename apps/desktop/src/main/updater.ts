@@ -147,10 +147,26 @@ async function hashFile(file: string, hash: Hash) {
   for await (const chunk of createReadStream(file)) hash.update(chunk as Buffer);
 }
 
+/**
+ * Renames `from` to `to`, trying again for a few seconds while Windows holds
+ * the file: an antivirus scan locks a program just written, and a rename then
+ * fails with EPERM, EACCES or EBUSY for a moment.
+ */
+export async function renameSoon(from: string, to: string, wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await rename(from, to);
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (attempt >= 10 || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY")) throw error;
+      await wait(Math.min(1000, 100 * attempt));
+    }
+  }
+}
 /** Writes `value` as JSON so a read never finds it half written. */
 async function writeJson(file: string, value: unknown) {
   await writeFile(file + ".tmp", JSON.stringify(value));
-  await rename(file + ".tmp", file);
+  await renameSoon(file + ".tmp", file);
 }
 /** Why a download stopped without failing: a newer release, a withdrawn
  * one, the automatic download turned off. It is not reported. */
@@ -386,7 +402,7 @@ export function createUpdater(options: UpdaterOptions) {
         if (stop.aborted) throw stop.reason;
         try {
           await fetchInto(source, part, meta, artifact, progress, stop);
-          await rename(part, file);
+          await renameSoon(part, file);
           await rm(meta, { force: true });
           return file;
         } catch (error) {
