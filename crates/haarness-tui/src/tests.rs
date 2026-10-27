@@ -9096,7 +9096,12 @@ fn cloud_billing_balances_and_panel_fit_narrow_terminals() {
             "cancelAtPeriodEnd":false,"overageOptIn":false,"billingUrl":"https://haarness.ai/app/billing","usageUrl":"https://haarness.ai/app/billing/usage"
         }
     })).unwrap();
-    assert!(frame_text(&app, (160, 46)).contains("100.12 included · 500 purchased"));
+    // Balances stay in the panel; the status band never shows them.
+    let band = frame_text(&app, (160, 46));
+    assert!(
+        !band.contains("included") && !band.contains("/billing"),
+        "{band}"
+    );
     for width in [160, 100, 80] {
         app.open_billing();
         let lines = app.lines((width, 46));
@@ -9119,7 +9124,7 @@ fn cloud_billing_balances_and_panel_fit_narrow_terminals() {
     app.close_overlay();
     app.billing.error = Some("Offline".into());
     app.overlay = crate::state::Overlay::None;
-    assert!(frame_text(&app, (160, 46)).contains("Cloud credits unavailable"));
+    assert!(!frame_text(&app, (160, 46)).contains("Cloud credits"));
 }
 
 #[test]
