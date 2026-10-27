@@ -51,8 +51,8 @@ EVIDENCE = Path(os.environ.get('HAARNESS_E2E_EVIDENCE', REPO / 'target/prompt-st
 EVIDENCE.mkdir(parents=True, exist_ok=True)
 MODEL = 'claude-sonnet-4-6'
 REQUESTS = []
-BASE_FOLDER = '--system-folder' in sys.argv[1:]
-if BASE_FOLDER:
+SYSTEM_FOLDER = '--system-folder' in sys.argv[1:]
+if SYSTEM_FOLDER:
     EVIDENCE = EVIDENCE / 'system-folder'
     EVIDENCE.mkdir(parents=True, exist_ok=True)
 
@@ -156,7 +156,7 @@ env = {**ISOLATED, 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home), '
 args = [str(BINARY), '--workspace', str(workspace), '--trust-project']
 connection = None
 team = root / 'team'
-if BASE_FOLDER:
+if SYSTEM_FOLDER:
     (team / 'prompts').mkdir(parents=True, exist_ok=True)
     (team / 'prompts/system.md').write_text('BASE_PROMPT_MARKER: follow the team checklist.\n')
     (team / 'prompts/compaction.md').write_text('---\nmode: prepend\n---\nBASE_SUMMARY_MARKER\n')
@@ -267,7 +267,7 @@ try:
     assert len(stamps) == 2 and stamps[0] != stamps[1], stamps
     assert all(text.startswith('<system-reminder>\nContext from hooks:\nHOOK_STAMP ') for text in stamps), stamps
     assert 'HOOK_STAMP' not in json.dumps(first['system']), 'hook context reached the system prompt'
-    if BASE_FOLDER:
+    if SYSTEM_FOLDER:
         added = 'not an OS sandbox.\n\nBASE_PROMPT_MARKER: follow the team checklist.\n\nYou are powered by'
         assert added in system_text(first), system_text(first)[:600]
     else:
@@ -296,7 +296,7 @@ try:
     assert len(summaries) == 1, f'{len(summaries)} compaction requests'
     assert 'Summarize this conversation for continuation' in json.dumps(summaries[0]['messages'][-1]), summaries[0]['messages'][-1]
     assert 'cache_control' not in json.dumps(summaries[0]), 'the compaction summary marked cache breakpoints'
-    if BASE_FOLDER:
+    if SYSTEM_FOLDER:
         assert system_text(summaries[0]).startswith('BASE_SUMMARY_MARKER\n\nYou are Haarness'), summaries[0]['system']
     assert 'cache_control' in json.dumps(first['system']) and 'cache_control' in json.dumps(second['messages']), 'a turn lost its breakpoints'
     offset = len(REQUESTS)
@@ -359,7 +359,7 @@ try:
     assert clean(under_plan['tools']) == clean(under_build['tools']), 'the subagents sent different tool lists'
     assert json.dumps(clean(under_plan['system'])) == json.dumps(clean(under_build['system'])), 'the subagents sent different system prompts'
     assert 'browser_navigate' in plan_tools and 'write' in plan_tools, plan_tools
-    if BASE_FOLDER:
+    if SYSTEM_FOLDER:
         assert 'BASE_PROMPT_MARKER' in system_text(under_plan), 'the subagent lost the base prompt file'
         after = {path: path.read_bytes() for path in team.rglob('*') if path.is_file()}
         assert after == base_before, 'the system folder was written'
