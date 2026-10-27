@@ -1,4 +1,4 @@
-import { t, splitAround } from "./i18n";
+import { t, splitAround, errorLine } from "./i18n";
 import {
   For,
   Match,
@@ -10,6 +10,7 @@ import {
   onMount,
 } from "solid-js";
 import { Button, Icon, dismissOnBackdrop } from "./ui";
+import { cancelled } from "./error-text";
 import { useApp } from "./state";
 import {
   chromeHostName,
@@ -53,7 +54,7 @@ export function ChromeSetupDialog(props: { close: () => void }) {
       const value = await window.haarness.chromeSetup("setup");
       if (alive) setSetup(value);
     } catch (cause) {
-      if (alive) setSetupError(cause instanceof Error ? cause.message : String(cause));
+      if (alive && !cancelled(cause)) setSetupError(errorLine(cause));
     } finally {
       if (alive) setRunning(false);
     }
@@ -134,7 +135,7 @@ export function ChromeSetupDialog(props: { close: () => void }) {
     try {
       await action();
     } catch (cause) {
-      if (alive) setActionError(cause instanceof Error ? cause.message : String(cause));
+      if (alive && !cancelled(cause)) setActionError(errorLine(cause));
     }
   }
   const copy = (text: string) =>

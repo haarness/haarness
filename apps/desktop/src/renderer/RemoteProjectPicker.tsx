@@ -1,7 +1,8 @@
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import { createSignal, onMount, onCleanup, For, Show } from "solid-js";
 import { FormDialog } from "./FormDialog";
 import { Button, Icon } from "./ui";
+import { cancelled, errorText } from "./error-text";
 import { useApp } from "./state";
 import { remoteProjectError } from "./remote-project-error";
 import type { DirectoryListing, SavedServer } from "../shared";
@@ -83,13 +84,17 @@ export function RemoteProjectPicker(props: {
             ) ?? input
           ).focus();
       });
-    } catch {
-      if (attempt === generation)
-        setError(
-          t(
-            "Couldn’t read this folder. Check the path and your access to the server.",
-          ),
-        );
+    } catch (error) {
+      if (attempt !== generation || cancelled(error)) return;
+      // A computer or server that is not answering says so; anything else
+      // is about this folder.
+      setError(
+        errorText(error).known
+          ? errorLine(error)
+          : t(
+              "Couldn’t read this folder. Check the path and your access to the server.",
+            ),
+      );
     } finally {
       if (attempt === generation) setLoading(false);
     }
@@ -157,6 +162,8 @@ export function RemoteProjectPicker(props: {
           )
             throw new Error("Cancelled");
         } catch (error) {
+          // A cancelled opening says nothing; the form stays as it was.
+          if (cancelled(error)) throw error;
           const plain = remoteProjectError(error);
           // Main already says in plain words why another computer cannot
           // be reached (offline, signed out, no longer shared).

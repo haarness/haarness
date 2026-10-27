@@ -1,4 +1,4 @@
-import { language, t } from "./i18n";
+import { language, t, errorLine } from "./i18n";
 import { For, Show, createMemo, createSignal, onMount } from "solid-js";
 import { createStore } from "solid-js/store";
 import type { ToolCatalogResponse } from "@haarness/sdk";
@@ -16,6 +16,7 @@ import {
   type MatcherTarget,
 } from "./hook-matcher";
 import { confirm, Empty } from "./ui";
+import { cancelled } from "./error-text";
 import { BaseTag } from "./SettingRow";
 import "./management.css";
 
@@ -76,7 +77,7 @@ export function Hooks() {
     try {
       setCatalog(await request<Catalog>({ action: "list" }));
     } catch (error) {
-      setError(String(error instanceof Error ? error.message : error));
+      if (!cancelled(error)) setError(errorLine(error));
     } finally {
       setLoading(false);
     }
@@ -89,7 +90,7 @@ export function Hooks() {
       await request(input);
       await load();
     } catch (error) {
-      setError(error instanceof Error ? error.message : String(error));
+      if (!cancelled(error)) setError(errorLine(error));
     } finally {
       setBusy(false);
     }

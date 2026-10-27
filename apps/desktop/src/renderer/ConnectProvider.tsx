@@ -12,6 +12,7 @@ import {
   onMount,
 } from "solid-js";
 import { Button, ErrorNotice, Icon, confirm, dismissOnBackdrop } from "./ui";
+import { cancelled } from "./error-text";
 import { ProviderIcon } from "./ProviderIcon";
 import { ProviderForm } from "./ProviderForm";
 import { RouterConnectionDialog } from "./RouterConnectionDialog";
@@ -176,7 +177,7 @@ export function ConnectProvider(props: {
       setStep({ kind: "login", provider, login, opened });
       startPolling(login.id, provider);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (!cancelled(cause)) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
     }
@@ -234,7 +235,7 @@ export function ConnectProvider(props: {
       if (warning) await keptUnchecked(current.provider, warning);
       else await finish(current.provider);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (!cancelled(cause)) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
     }

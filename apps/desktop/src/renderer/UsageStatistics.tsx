@@ -6,10 +6,11 @@ import {
   on,
   onMount,
 } from "solid-js";
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import { SettingRow as Row } from "./SettingRow";
 import { useApp } from "./state";
 import { Button, dismissOnBackdrop } from "./ui";
+import { cancelled } from "./error-text";
 import "./usage-statistics.css";
 
 /** `manageResource("usage-statistics", …)` on the connected server. */
@@ -121,7 +122,7 @@ function UsagePreview(props: { close: () => void }) {
       setEmpty(!days?.length);
       setReport(JSON.stringify(status.report, null, 2));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (!cancelled(cause)) setError(errorLine(cause));
     }
   });
   return (

@@ -1,4 +1,4 @@
-import { language, t } from "./i18n";
+import { language, t, errorLine } from "./i18n";
 import {
   createEffect,
   createMemo,
@@ -11,6 +11,7 @@ import {
 import type { Turn, UsageResponse } from "@haarness/sdk";
 import { useApp } from "./state";
 import { Button } from "./ui";
+import { cancelled } from "./error-text";
 import { ProviderLabel } from "./ProviderIcon";
 import { modelName } from "../model-names";
 import {
@@ -75,10 +76,8 @@ export function ConversationContext() {
           setLastTurn(turn);
         })
         .catch((reason) => {
-          if (attempt === generation)
-            setError(
-              reason instanceof Error ? reason.message : String(reason),
-            );
+          if (attempt === generation && !cancelled(reason))
+            setError(errorLine(reason));
         })
         .finally(() => {
           if (attempt === generation) setLoading(false);

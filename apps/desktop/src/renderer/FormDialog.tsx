@@ -1,6 +1,7 @@
 import { t } from "./i18n";
 import { Show, createSignal, onMount, type Accessor, type JSX } from "solid-js";
 import { Button, ErrorNotice, dismissOnBackdrop, focusFirstField } from "./ui";
+import { cancelled } from "./error-text";
 
 /** Preserve failed drafts and allow dismissal without waiting for pending writes. */
 export function FormDialog(props: {
@@ -54,6 +55,7 @@ export function FormDialog(props: {
             close();
           } catch (error) {
             setBusy(false);
+            if (cancelled(error)) return;
             setError(error instanceof Error ? error.message : String(error));
             alert?.focus();
           }

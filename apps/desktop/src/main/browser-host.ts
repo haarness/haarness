@@ -18,6 +18,7 @@ import { createBrowserNetwork, type BrowserNetwork } from "./browser/network";
 import { browserFailure } from "@haarness/browser-driver/errors";
 import { destinationOrigin, normalizeURL, policyOrigin } from "@haarness/browser-driver/policy";
 import { connectionAuth, connections } from "./runtime";
+import { responseFailure } from "./remote-projects";
 import { data, persist } from "./store";
 import { translate } from "../localization";
 import type { DesktopEvent, BrowserLayout } from "../shared";
@@ -557,7 +558,7 @@ export function createBrowserHost(
                   signal ?? AbortSignal.timeout(35000),
                 ]),
               });
-              if (!response.ok) throw new Error(await response.text());
+              if (!response.ok) throw await responseFailure(response);
               return response.json();
             },
             (url) => {
@@ -663,7 +664,7 @@ export function createBrowserHost(
           body: JSON.stringify({ thread, lease: e.lease }),
           signal: AbortSignal.any([e.abort.signal, AbortSignal.timeout(15000)]),
         });
-        if (!response.ok) throw new Error(await response.text());
+        if (!response.ok) throw await responseFailure(response);
         clearTimeout(e.save);
         entries.delete(source);
         e.thread = thread;

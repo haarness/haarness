@@ -1,4 +1,4 @@
-import { formatNumber, language, t } from "./i18n";
+import { formatNumber, language, t, errorLine } from "./i18n";
 import {
   createEffect,
   createMemo,
@@ -12,6 +12,7 @@ import {
 } from "solid-js";
 import { useApp } from "./state";
 import { Icon } from "./icons";
+import { cancelled } from "./error-text";
 import type { FileContent } from "../shared";
 import {
   activeMention,
@@ -284,9 +285,9 @@ export function PromptContextControls(props: {
           setCursor(Math.max(at, 0));
         })
         .catch((reason) => {
-          if (version !== generation) return;
+          if (version !== generation || cancelled(reason)) return;
           setFound({ connection: where, names: [] });
-          setError(String(reason));
+          setError(errorLine(reason));
         })
         .finally(() => {
           if (version === generation) setLoading(false);
@@ -340,7 +341,7 @@ export function PromptContextControls(props: {
         });
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      if (!cancelled(reason)) setError(errorLine(reason));
     } finally {
       setBusy(false);
     }

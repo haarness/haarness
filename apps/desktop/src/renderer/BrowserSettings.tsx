@@ -1,4 +1,4 @@
-import { formatDateTime, formatNumber, t } from "./i18n";
+import { formatDateTime, formatNumber, t, errorLine } from "./i18n";
 import {
   For,
   Show,
@@ -12,6 +12,7 @@ import { useApp } from "./state";
 import { Select } from "./Select";
 import { SettingRow as Row } from "./SettingRow";
 import { Icon, confirm } from "./ui";
+import { cancelled } from "./error-text";
 import { ChromeSettingsSection } from "./ChromeSettings";
 import type { ChromeSettings, ChromeSettingsView } from "../chrome";
 import type {
@@ -82,8 +83,8 @@ export function BrowserSettings() {
       setError("");
       if (input.action === "set") setOrigin("");
     } catch (cause) {
-      if (version === generation) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+      if (version === generation && !cancelled(cause)) {
+        setError(errorLine(cause));
         const fresh = await window.haarness
           .api<{ data: BrowserSettingsValue }>(connection, "manageResource", [
             "browser-settings",
@@ -124,8 +125,8 @@ export function BrowserSettings() {
       }
       return true;
     } catch (cause) {
-      if (version === generation) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+      if (version === generation && !cancelled(cause)) {
+        setError(errorLine(cause));
         const fresh = await read().catch(() => undefined);
         if (version === generation && fresh) setValue(fresh.data);
       }
@@ -180,7 +181,7 @@ export function BrowserSettings() {
         setError("");
       }
     } catch (cause) {
-      if (connection === app.state.connection?.id) setError(String(cause));
+      if (connection === app.state.connection?.id && !cancelled(cause)) setError(errorLine(cause));
     } finally {
       setDataBusy(false);
     }

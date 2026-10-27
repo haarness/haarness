@@ -1,11 +1,11 @@
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { createStore, produce, unwrap } from "solid-js/store";
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import { Icon } from "./icons";
 import { Markdown } from "./Markdown";
 import { Shimmer } from "./Shimmer";
 import { useApp } from "./state";
-import { errorText } from "./error-text";
+import { cancelled } from "./error-text";
 import { registerCyclePanel, tabButton } from "./tab-cycle";
 import { shortcutLabel } from "./search";
 import {
@@ -179,7 +179,8 @@ async function ask(key: string, id: string, question: string) {
     if (end?.type === "done") settle(key, id, { answer: end.answer, state: "done" });
     else settle(key, id, { state: "error", error: end?.message ?? t("The answer ended before it finished.") });
   } catch (error) {
-    settle(key, id, { state: "error", error: errorText(error).message });
+    // Cancelled without Stop (the project closed meanwhile): stopped, not failed.
+    settle(key, id, cancelled(error) ? { state: "stopped" } : { state: "error", error: errorLine(error) });
   } finally {
     streams.delete(stream);
     if (running.get(id) === stream) running.delete(id);
