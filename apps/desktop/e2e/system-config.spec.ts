@@ -18,12 +18,12 @@ async function snapshot(folder: string): Promise<Record<string, string>> {
   return files;
 }
 
-test("items of the system config folder carry a quiet Base tag and no Remove", async () => {
+test("items of the system config folder carry a quiet System tag and no Remove", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "haarness-system-config-")));
   const home = join(root, "home");
   const workspace = join(root, "project");
   const team = join(root, "team");
-  const evidence = process.env.HAARNESS_BASE_EVIDENCE ?? join(root, "evidence");
+  const evidence = process.env.HAARNESS_SYSTEM_EVIDENCE ?? join(root, "evidence");
   const env: Record<string, string> = {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
     HOME: home,
@@ -83,7 +83,7 @@ test("items of the system config folder carry a quiet Base tag and no Remove", a
         // Let the colour transition finish, so the picture shows the scheme itself.
         await page.waitForTimeout(400);
         await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)));
-        await page.screenshot({ path: join(evidence, `base-${name}-${scheme}.png`) });
+        await page.screenshot({ path: join(evidence, `system-${name}-${scheme}.png`) });
       }
     }
 
@@ -96,7 +96,7 @@ test("items of the system config folder carry a quiet Base tag and no Remove", a
     ] as const) {
       await section(name);
       const row = settings.locator(`[data-setting="${kind}:${item}"]`);
-      await expect(tag(row)).toHaveText("Base");
+      await expect(tag(row)).toHaveText("System");
       await expect(tag(row)).toHaveAttribute("title", "From the system folder");
       await expect(row.locator("p")).toHaveText(description);
       await expect(row.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
@@ -113,21 +113,21 @@ test("items of the system config folder carry a quiet Base tag and no Remove", a
     // MCP: the tag beside the status, and Manage offers no Remove.
     await section("MCP servers");
     const server = settings.locator(".setting-block").filter({ has: page.locator('[data-setting="mcp:teamfs"]') });
-    await expect(server.locator(".setting-tag")).toHaveText("Base");
+    await expect(server.locator(".setting-tag")).toHaveText("System");
     await expect(server.locator(".badge").last()).toHaveText(/connected|starting|connecting/);
     await shoot("mcp");
     await server.getByRole("button", { name: "Manage teamfs" }).click();
     const menu = page.getByRole("menu");
     await expect(menu.getByRole("menuitem", { name: "Disable" })).toBeVisible();
     await expect(menu.getByRole("menuitem", { name: "Remove" })).toHaveCount(0);
-    await page.screenshot({ path: join(evidence, "base-mcp-manage-menu.png") });
+    await page.screenshot({ path: join(evidence, "system-mcp-manage-menu.png") });
     await page.keyboard.press("Escape");
 
     // Hooks: the tag where the scope is named; viewing only.
     await section("Hooks");
     const source = page.locator(".management-source").filter({ hasText: join(team, "haarness.json") });
     const card = settings.locator("article.management-card").filter({ has: source });
-    await expect(card.locator(".management-source .setting-tag")).toHaveText("Base");
+    await expect(card.locator(".management-source .setting-tag")).toHaveText("System");
     await expect(card.getByRole("switch")).toBeDisabled();
     await expect(card.getByRole("button", { name: "View hook" })).toBeVisible();
     await expect(card.getByRole("button", { name: "Remove hook" })).toHaveCount(0);
@@ -136,7 +136,7 @@ test("items of the system config folder carry a quiet Base tag and no Remove", a
     // Plugins: the tag, and no switch or Remove.
     await section("Plugins");
     const plugin = settings.locator('[data-setting="plugin:team-plugin"]');
-    await expect(tag(plugin)).toHaveText("Base");
+    await expect(tag(plugin)).toHaveText("System");
     await expect(plugin.getByRole("switch")).toHaveCount(0);
     await expect(plugin.getByRole("button", { name: "Remove" })).toHaveCount(0);
     await shoot("plugins");
