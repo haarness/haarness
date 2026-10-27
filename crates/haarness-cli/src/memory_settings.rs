@@ -20,7 +20,7 @@ impl MemorySettings {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (1..=1000).contains(&self.index_limit),
-            "Index limit must be between 1 and 1000"
+            "The index limit is a number from 1 to 1000"
         );
         Ok(())
     }

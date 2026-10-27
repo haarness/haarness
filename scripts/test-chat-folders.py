@@ -241,7 +241,7 @@ try:
     tool(flow, 'workflow', {'action': 'create', 'name': 'nat', 'source': native})
     tool(flow, 'workflow', {'action': 'start', 'name': 'nat'})
     refused = last_result(flow, 'workflow')
-    assert refused['is_error'] and 'project configuration is disabled' in refused['output'], refused
+    assert refused['is_error'] and 'project configuration is turned off' in refused['output'], refused
     passed('a workflow created in a chat\'s folder starts by name from that chat; a native one needs project configuration')
 
     # Schedules: a chat schedules into its own folder and sees no other chat's schedules.

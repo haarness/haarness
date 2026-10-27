@@ -541,7 +541,7 @@ impl Extensions {
                     .or_insert_with(|| json!(self.workspace));
             }
             if let Err(error) = host.hook("config", input).await {
-                tracing::warn!(extension = host.name, %error, "extension config hook failed");
+                tracing::warn!(extension = host.name, %error, "the extension's config hook failed");
             }
         }
     }

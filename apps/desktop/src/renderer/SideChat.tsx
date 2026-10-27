@@ -177,7 +177,7 @@ async function ask(key: string, id: string, question: string) {
   try {
     const end = await window.haarness.btw(connection, chat, history.length ? { question, history } : { question }, stream);
     if (end?.type === "done") settle(key, id, { answer: end.answer, state: "done" });
-    else settle(key, id, { state: "error", error: end?.message ?? t("The answer ended before it finished.") });
+    else settle(key, id, { state: "error", error: end?.message ?? t("The answer was cut off.") });
   } catch (error) {
     // Cancelled without Stop (the project closed meanwhile): stopped, not failed.
     settle(key, id, cancelled(error) ? { state: "stopped" } : { state: "error", error: errorLine(error) });

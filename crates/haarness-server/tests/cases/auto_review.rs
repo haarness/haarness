@@ -219,7 +219,7 @@ async fn auto_approves_what_the_reviewer_allows_and_blocks_what_it_denies() {
         .find(|request| request.output_schema.is_some())
         .cloned()
         .unwrap();
-    assert!(review.system.starts_with("You review one action"));
+    assert!(review.system.starts_with("An AI coding agent is about to take one action"));
     assert_eq!(review.parameters.temperature, Some(0.0));
     assert_eq!(review.parameters.max_output_tokens, Some(2048));
     assert!(review.tools.is_empty());
@@ -327,7 +327,7 @@ async fn a_failed_or_late_review_asks_a_person_and_never_approves() {
             .rationale
             .as_deref()
             .unwrap()
-            .starts_with("It could not decide"),
+            .starts_with("The review failed"),
         "{review:?}"
     );
     // A failed call is tried once more.

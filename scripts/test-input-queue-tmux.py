@@ -92,7 +92,7 @@ with tempfile.TemporaryDirectory(prefix='haarness-input-tmux-') as directory:
         try:answered=until(steer_answered,'')
         except AssertionError:answered=False
         until(lambda:not api('/turns/active'),'stop did not finish')
-        until(lambda:'Queue paused — send when ready' in pane(),'remaining queue was not parked')
+        until(lambda:'Queue on hold · send when you're ready' in pane(),'remaining queue was not parked')
         assert len(queue()['items'])==1
         evidence.append('STOPPED\n'+pane())
         # Resume the parked message through the terminal controls.

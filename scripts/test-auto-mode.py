@@ -155,7 +155,7 @@ try:
     keys('u')
     proof('u.txt','u-proof')
     until(lambda:'auto' in capture(),'Once + Auto did not enable Auto')
-    check('Allow once + Auto asks to confirm, then executes the pending request and enables Auto')
+    check('Allow once, then Auto asks to confirm, then executes the pending request and enables Auto')
     start(thread,text)
     finished()
     assert not api('/v1/permissions')

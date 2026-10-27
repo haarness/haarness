@@ -389,9 +389,9 @@ fn review_reason(
             .text("The action is too long to review whole.")
             .into(),
         ReviewReason::NoModel => language
-            .text("No model was available to review this request.")
+            .text("No reviewer model could look at this request.")
             .into(),
-        ReviewReason::Error { detail } => text("It could not decide ({detail}).", "detail", detail),
+        ReviewReason::Error { detail } => text("The review failed ({detail}).", "detail", detail),
         ReviewReason::Streak { count } => text(
             "It blocked {count} actions in a row, so the rest of this turn is yours to approve.",
             "count",

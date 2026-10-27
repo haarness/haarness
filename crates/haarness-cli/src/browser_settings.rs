@@ -189,7 +189,7 @@ pub(super) fn request(
     };
     ensure!(
         project_config || scope == "global" || action == "get",
-        "Project configuration is disabled for this server. Choose Global scope to change this setting."
+        "Project configuration is turned off for this server. Choose Global scope to change this setting."
     );
     let before = snapshot(project_config, global, workspace, scope)?;
     if action != "get" {

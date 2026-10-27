@@ -278,7 +278,7 @@ test("a click picks the element under the pointer into the message without reach
   await expect(messageBox()).toBeFocused();
   await page.keyboard.type("bigger");
   await expect(messageBox()).toHaveValue("Make this bigger");
-  await expect(messageBox()).toHaveAttribute("placeholder", "Ask about this element…");
+  await expect(messageBox()).toHaveAttribute("placeholder", "Ask about the selected element…");
   // The page heard no press, click or focus, and its button did not run.
   expect(JSON.parse(await evaluate("JSON.stringify({ heard, saved })"))).toEqual({ heard: [], saved: 0 });
   // The outline lingers a moment as taken, then goes.
@@ -338,7 +338,7 @@ test("Esc stops picking without adding anything, and Shift-click picks several",
   await expect(chips()).toHaveCount(3);
   await expect(chips().nth(2)).toContainText("p");
   await expect(pickButton()).toHaveAttribute("aria-pressed", "false");
-  await expect(messageBox()).toHaveAttribute("placeholder", "Ask about these elements…");
+  await expect(messageBox()).toHaveAttribute("placeholder", "Ask about the selected elements…");
   // Picking the same element again leaves one chip.
   await pickButton().click();
   await mouse(await center("#title"), { press: true });
@@ -526,7 +526,7 @@ test("the shortcut's menu item and the command palette start picking, and stop i
   await expect(page.getByRole("region", { name: "Web browser" })).toBeHidden();
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Pick an element");
-  await page.getByRole("option", { name: /Pick an element in the browser/ }).click();
+  await page.getByRole("option", { name: /Select part of the page/ }).click();
   await expect(page.getByRole("region", { name: "Web browser" })).toBeVisible();
   await expect(pickButton()).toHaveAttribute("aria-pressed", "true");
   await page.keyboard.press("Escape");

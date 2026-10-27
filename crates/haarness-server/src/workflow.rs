@@ -28,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 const WORKFLOW_NOTIFICATION_BODY_LIMIT: usize = 8_000;
 const CANCELLED_WORKFLOW_NOTICE: &str =
-    "This workflow run was stopped intentionally. Do not restart or retry it.";
+    "The person stopped this workflow run on purpose. Do not start it again or retry it.";
 
 /// Attachable workflow host used to break the composition cycle between the
 /// runtime, its tool registry, and the workflow coordinator.
@@ -385,18 +385,18 @@ impl WorkflowRuntimeAdapter {
         let (authority_thread_id, thread_id, input) = {
             let mut state = self.continuations.lock().await;
             if state.closed.contains(&token) {
-                return Err(HostError::new("workflow agent continuation is closed"));
+                return Err(HostError::new("this workflow agent has finished and cannot be continued"));
             }
             let continuation = state
                 .open
                 .get_mut(&token)
-                .ok_or_else(|| HostError::new("unknown or expired workflow agent continuation"))?;
+                .ok_or_else(|| HostError::new("this workflow agent can no longer be continued"))?;
             if continuation.closed {
-                return Err(HostError::new("workflow agent continuation is closed"));
+                return Err(HostError::new("this workflow agent has finished and cannot be continued"));
             }
             if continuation.active {
                 return Err(HostError::new(
-                    "workflow agent continuation already has an active follow-up",
+                    "this workflow agent is already handling a follow-up",
                 ));
             }
             let input = AgentInput::parse_followup(raw, &continuation.defaults)?;
@@ -446,7 +446,7 @@ impl WorkflowRuntimeAdapter {
             let continuation = state
                 .open
                 .get_mut(&token)
-                .ok_or_else(|| HostError::new("unknown or expired workflow agent continuation"))?;
+                .ok_or_else(|| HostError::new("this workflow agent can no longer be continued"))?;
             continuation.closed = true;
             if !continuation.active {
                 break continuation.thread_id;
@@ -2093,7 +2093,7 @@ mod tests {
         )
         .await;
         for (request_id, name, expected) in [
-            (1, "secret", "project configuration is disabled"),
+            (1, "secret", "project configuration is turned off"),
             (2, "absent", "skill absent"),
         ] {
             let error = host

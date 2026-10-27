@@ -431,7 +431,7 @@ export function McpAppView(props: {
       <Show when={props.payload.tooLarge}>
         <div class="notice-inline mcp-app-notice" role="status">
           <Icon name="alert" size="sm" />
-          <span>{t("This result is too large to show in the app.")}</span>
+          <span>{t("This result is too big to display here.")}</span>
         </div>
       </Show>
       <Show when={refused() !== undefined}>

@@ -2762,8 +2762,8 @@ export function Session() {
                     ? t("Choose a project to start a chat")
                     : pickedElements()
                       ? pickedElements() > 1
-                        ? t("Ask about these elements…")
-                        : t("Ask about this element…")
+                        ? t("Ask about the selected elements…")
+                        : t("Ask about the selected element…")
                       : currentQuestion()
                         ? // A question waits above: what is typed here is a
                           // message of its own, not the answer.
@@ -3690,7 +3690,7 @@ function Permission(props: {
   const autoOffered = () => app.approvalMode() === "review" && canAutoApprove(props.permission);
   /* Deny, Always and Allow once share one line, even in a narrow chat:
      every way of allowing more than this request waits in the Always menu,
-     Allow once + Auto included. */
+     Allow once, then Auto included. */
   const alwaysChoices = (): MenuAction[] => [
     ...(props.permission.allowAlways !== false
       ? [
@@ -3721,7 +3721,7 @@ function Permission(props: {
     ...(autoOffered()
       ? [
           {
-            label: t("Allow once + Auto"),
+            label: t("Allow once, then Auto"),
             detail: t("Then Auto decides for this chat"),
             icon: "approval-auto" as const,
             divider: props.permission.allowAlways !== false,
@@ -3963,7 +3963,7 @@ function Permission(props: {
       </Show>
       <Show when={!explicit() && !settled()}>
         <footer class="prompt-actions" ref={footer}>
-          {/* With nothing to allow always, Allow once + Auto keeps a button
+          {/* With nothing to allow always, Allow once, then Auto keeps a button
               of its own at the start, apart from the answers: when Auto
               turns on and it goes, nothing else moves, and its focus passes
               to Allow once. */}
@@ -3980,7 +3980,7 @@ function Permission(props: {
               onClick={() => decide("auto")}
               title={t("Allow this request once and enable Auto for this chat and its agents")}
             >
-              {t("Allow once + Auto")}
+              {t("Allow once, then Auto")}
             </button>
           </Show>
           <button

@@ -1501,7 +1501,7 @@ impl ApiClient {
                         }
                         Ok(Some(Err(error))) => anyhow::Error::new(error.without_url())
                             .context("The side question's connection failed"),
-                        Ok(None) => anyhow::anyhow!("The answer ended before it finished."),
+                        Ok(None) => anyhow::anyhow!("The answer was cut off."),
                         Err(_) => anyhow::anyhow!("The side question's connection went quiet."),
                     };
                     return Some((Err(failure), (bytes, buffer, true)));

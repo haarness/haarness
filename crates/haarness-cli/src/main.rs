@@ -2379,7 +2379,7 @@ async fn provider_command(
                 println!("Connect it with `haarness auth set {id}` before use.");
             }
             if project && !trust {
-                println!("Note: project configuration is disabled for this invocation.");
+                println!("Note: project configuration is turned off for this invocation.");
             }
             reload_notice(paths);
             Ok(())
@@ -3660,7 +3660,7 @@ async fn schedule_command(
             if json {
                 println!("{}", serde_json::to_string_pretty(&runs)?);
             } else if runs.is_empty() {
-                println!("No runs recorded yet.");
+                println!("This schedule has not run yet.");
             } else {
                 for run in runs {
                     let mut row = format!(
@@ -3879,7 +3879,7 @@ async fn execute_schedule(
             thread_id: None,
             turn_id: None,
             response: None,
-            error: Some("Skipped because a previous run is still active.".into()),
+            error: Some("Skipped: the previous run was still going.".into()),
         };
         scheduler.record(&schedule, &run)?;
         return Ok(run);
@@ -8812,7 +8812,7 @@ async fn mcp_command(
                 }
             }
             if project && !trust {
-                println!("Note: project configuration is disabled for this invocation.");
+                println!("Note: project configuration is turned off for this invocation.");
             }
         }
         McpCommand::Enable { name, project } => {

@@ -593,7 +593,7 @@ pub(crate) fn validate_plugin_tree(root: &Path) -> Result<()> {
                     )
                 })?;
                 if !resolved.starts_with(&root) {
-                    bail!("plugin symlink escapes its root: {}", path.display());
+                    bail!("a link in the plugin leads outside its folder: {}", path.display());
                 }
             } else if metadata.is_dir() {
                 pending.push(path);
@@ -1190,7 +1190,7 @@ mod tests {
             install(&data, "root-kit@root-market")
                 .unwrap_err()
                 .to_string()
-                .contains("plugin symlink escapes its root")
+                .contains("a link in the plugin leads outside its folder")
         );
         assert!(installed(&data).is_empty());
 

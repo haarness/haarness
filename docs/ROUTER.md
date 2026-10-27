@@ -25,7 +25,7 @@ configuration unchanged.
 
 Use **Advanced** to give the connection a name or limit it to the current
 project (**Available in**: global or project; a project connection is refused
-while project configuration is disabled). You can add multiple named routers. The model picker loads
+while project configuration is turned off). You can add multiple named routers. The model picker loads
 current models automatically, including the router's aliases. The address is
 normalized to its `/v1` API root (`localhost:8080` becomes
 `http://localhost:8080/v1`), keeping any proxy path before it.

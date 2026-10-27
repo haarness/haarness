@@ -90,7 +90,7 @@ The `instructions` key in `haarness.json{,c}` and its legacy filename aliases ap
 }
 ```
 
-Files under the global configuration directory or the supported home resource roots may import from outside the workspace; everything else is bounded like project `AGENTS.md`. Relative entries are ignored when project configuration is disabled.
+Files under the global configuration directory or the supported home resource roots may import from outside the workspace; everything else is bounded like project `AGENTS.md`. Relative entries are ignored when project configuration is turned off.
 
 When a `read` returns a file inside a workspace subdirectory, every `AGENTS.md` between that directory and the workspace root that the system prompt does not already carry is appended to the tool result, once per thread (at most twenty files, 40 KiB each).
 

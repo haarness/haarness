@@ -58,8 +58,8 @@ Queued messages appear in a tray joined to the top of the composer. It is visibl
 | Header | Meaning |
 | --- | --- |
 | Queued, with a count | Work is running; the messages run in order after it. |
-| Queue paused — send when ready | Nothing runs until you resume the queue. |
-| Editing — sending saves it in place | You are editing a queued message in the composer. |
+| Queue on hold · send when you're ready | Nothing runs until you resume the queue. |
+| Editing · send to save your changes | You are editing a queued message in the composer. |
 
 Each message has icon buttons: **Edit**, **Send now** (**Steer now** while work runs, which hands it to the current work at its next step, with an arrow of its own), and **Remove**, after which the keyboard moves to the next message's **Remove**, or to the message box. Hovering a row also reveals **Move up** and **Move down**.
 
@@ -69,7 +69,7 @@ Each message has icon buttons: **Edit**, **Send now** (**Steer now** while work 
 
 **Enter** uses the configured mode; **Alt+Enter** explicitly queues. While work runs, the empty prompt says which: `Enter steers · alt+enter queues`, or `Enter queues until this work is done` in Queue mode. Use `/queue <message>` to defer text, or `/queue` to open the pending list.
 
-Above the prompt, steering the agent has not read yet appears under **Steering · N**. Queued messages appear under **Queued · N**, or **Queue paused — send when ready** when idle. The strip shows the first three messages numbered in order, then a `+N more` line.
+Above the prompt, steering the agent has not read yet appears under **Steering · N**. Queued messages appear under **Queued · N**, or **Queue on hold · send when you're ready** when idle. The strip shows the first three messages numbered in order, then a `+N more` line.
 
 Click a queued row, or pick it from `/queue`, for its actions:
 

@@ -334,12 +334,12 @@ impl Scheduler {
         let trigger = input
             .trigger
             .or_else(|| parsed.as_ref().map(|value| value.trigger.clone()))
-            .context("schedule trigger is required")?;
+            .context("a schedule needs a time to run")?;
         let prompt = input
             .prompt
             .or_else(|| parsed.as_ref().map(|value| value.prompt.clone()))
             .filter(|value| !value.trim().is_empty())
-            .context("schedule prompt is required")?;
+            .context("a schedule needs a prompt")?;
         validate_trigger(&trigger)?;
         validate_model(input.model.as_deref())?;
         let workspace = canonical_directory(&input.workspace)?;
@@ -1294,14 +1294,14 @@ fn interval_parts(rest: &str, require_to: bool) -> Result<(u64, &str, String)> {
         .parse::<u64>()
         .context("schedule interval must start with an integer")?;
     let unit = words.next().context("schedule interval unit is required")?;
-    let suffix = words.next().context("schedule prompt is required")?.trim();
+    let suffix = words.next().context("a schedule needs a prompt")?.trim();
     let prompt = strip_keyword(suffix, "to ")
         .or_else(|| (!require_to).then_some(suffix))
         .context("recurring schedule prompt must follow 'to'")?
         .trim_matches(|character: char| character == ',' || character.is_whitespace())
         .to_owned();
     if prompt.is_empty() {
-        anyhow::bail!("schedule prompt is required");
+        anyhow::bail!("a schedule needs a prompt");
     }
     Ok((amount, unit, prompt))
 }
@@ -1320,10 +1320,10 @@ fn interval_seconds(amount: u64, unit: &str) -> Result<u64> {
 }
 
 fn split_prompt(value: &str) -> Result<(&str, String)> {
-    let split = find_keyword(value, " to ").context("schedule prompt is required after 'to'")?;
+    let split = find_keyword(value, " to ").context("a schedule needs a prompt after 'to'")?;
     let (left, right) = (&value[..split], &value[split + 4..]);
     if right.trim().is_empty() {
-        anyhow::bail!("schedule prompt is required");
+        anyhow::bail!("a schedule needs a prompt");
     }
     Ok((left.trim(), right.trim().to_owned()))
 }
@@ -1366,13 +1366,13 @@ fn parse_clock(value: &str) -> Result<(u32, u32)> {
 fn validate_trigger(trigger: &Trigger) -> Result<()> {
     match trigger {
         Trigger::Interval { seconds } if *seconds < MIN_INTERVAL_SECONDS => {
-            anyhow::bail!("minimum schedule interval is 1 minute (60 seconds)")
+            anyhow::bail!("a schedule can repeat at most once a minute")
         }
         Trigger::Cron { expression } => {
             parse_cron(expression)?;
         }
         Trigger::Once { at } if *at < Utc::now() + chrono::Duration::minutes(1) => {
-            anyhow::bail!("one-shot schedule must be at least 1 minute in the future")
+            anyhow::bail!("a one-time schedule must start at least a minute from now")
         }
         _ => {}
     }

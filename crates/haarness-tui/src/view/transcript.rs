@@ -2076,7 +2076,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         format!("  {}", app.language.text(state))
                     }
                     Some("blocked") => {
-                        let lead = app.language.text("Blocked by Auto review");
+                        let lead = app.language.text("Stopped by Auto's reviewer");
                         let reason = blocked
                             .as_ref()
                             .map(|review| {
@@ -2350,7 +2350,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         let blocked = step.blocked.as_ref().map(|review| {
                             let reason =
                                 crate::view::approval::review_reason_text(review, app.language);
-                            let lead = app.language.text("Blocked by Auto review");
+                            let lead = app.language.text("Stopped by Auto's reviewer");
                             if reason.is_empty() {
                                 format!("  {lead}")
                             } else {

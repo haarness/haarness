@@ -114,7 +114,7 @@ impl ManagementService {
         } else if kind == "extension" {
             ensure!(
                 input["scope"] == "global" || self.trust_project,
-                "Project configuration is disabled"
+                "Project configuration is turned off"
             );
             crate::extensions::manage(&self.paths, &self.workspace, self.trust_project, input)?
         } else {

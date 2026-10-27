@@ -138,7 +138,7 @@ pub enum ReviewReason {
     Timeout { seconds: u64 },
     /// The action is too long to review whole.
     TooLong,
-    /// No model was available to review it.
+    /// No reviewer model could look at it.
     NoModel,
     /// The reviewer's calls failed; `detail` is the last error.
     Error { detail: String },

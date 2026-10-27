@@ -138,7 +138,7 @@ test("Auto attempts each permission once across replay, keeps failures manual, a
   assert.equal(replies.at(-1), "b:ok");
 });
 
-test("Allow once + Auto acknowledges the current prompt before enabling the consumer", () => {
+test("Allow once, then Auto acknowledges the current prompt before enabling the consumer", () => {
   const replies: string[] = [];
   const consume = createAutoApprover({
     enabled: () => true,
@@ -152,7 +152,7 @@ test("Allow once + Auto acknowledges the current prompt before enabling the cons
   assert.deepEqual(replies, ["next"]);
 });
 
-test("Allow once + Auto never enables after a failed reply or after navigation/review changes", async () => {
+test("Allow once, then Auto never enables after a failed reply or after navigation/review changes", async () => {
   let enabled = 0,
     acknowledged = 0,
     current = true;
@@ -302,7 +302,7 @@ test("the reviewer's note reads as one quiet line, and only for a reviewed reque
   );
   assert.equal(
     reviewNote({ status: "failed", reason: { code: "error", detail: "HTTP 500" } }, words),
-    "«Auto review unavailable»: «It could not decide (\u2068HTTP 500\u2069).»",
+    "«Auto review unavailable»: «The review failed (\u2068HTTP 500\u2069).»",
   );
   // The reviewer's own rule is shown as it wrote it.
   assert.equal(

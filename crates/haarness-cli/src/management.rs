@@ -2961,7 +2961,7 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("Project configuration is disabled")
+                    .contains("Project configuration is turned off")
             );
         }
         assert!(!root.join(".haarness").exists());

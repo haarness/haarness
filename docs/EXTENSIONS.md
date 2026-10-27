@@ -140,7 +140,7 @@ The global configuration is `extensions.json` in the global configuration folder
 
 Project files layer on top: `.haarness/extensions.json` in each folder from the
 Git worktree root down to the selected folder, read after the global file (and
-skipped when project configuration is disabled). A field a layer sets replaces
+skipped when project configuration is turned off). A field a layer sets replaces
 the one before it, so changing one timeout keeps the others; an entry for a
 source already listed replaces the earlier one; a layer with `enabled: false`
 disables its own entries. A project with no file of its own inherits the global

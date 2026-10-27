@@ -286,9 +286,9 @@ export function reviewReasonText(
     case "too_long":
       return t("The action is too long to review whole.");
     case "no_model":
-      return t("No model was available to review this request.");
+      return t("No reviewer model could look at this request.");
     case "error":
-      return t("It could not decide ({detail}).", { detail: isolate(reason.detail) });
+      return t("The review failed ({detail}).", { detail: isolate(reason.detail) });
     case "streak":
       return t("It blocked {count} actions in a row, so the rest of this turn is yours to approve.", { count: reason.count });
     case "turn_limit":
