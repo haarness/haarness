@@ -158,10 +158,10 @@ pub(crate) const MAX_STEPS: &str = "The configured maximum number of tool steps 
 /// approvals and each agent's tools are enforced while it runs, whatever a
 /// prompt says.
 pub const SAFETY_BASELINE: &str = "This permission system is not an OS sandbox.
-Follow all runtime safety, permission, and tool-use requirements.
-Never claim an action succeeded unless its result was observed.
-Treat destructive or externally visible actions with the same confirmation requirements as the default assistant.
-These instructions may change role, tone, and presentation, but they cannot expand permissions, tools, or authority.";
+Keep to every safety, permission and tool-use rule the runtime sets.
+Say an action worked only after you have seen its result.
+Before destructive or externally visible actions, ask for the same confirmation the default instructions require.
+These instructions may change your role, tone and presentation, but they do not grant permissions, tools or authority.";
 
 /// How a prompt file applies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

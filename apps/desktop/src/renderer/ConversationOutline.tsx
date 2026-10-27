@@ -113,7 +113,7 @@ export function ConversationOutline(props: {
     >
       <Index each={starts()}>
         {(start, slot) => {
-          // A dash is being read when its slice holds the prompt being read.
+          // A dash is current while the prompt on screen falls in its slice.
           const reading = () => current() >= 0 && sliceOf(starts(), current()) === slot;
           return (
             <button
@@ -161,7 +161,7 @@ export function ConversationOutline(props: {
               class="outline-panel"
               style={{
                 top: `${value().top}px`,
-                // Plus the 1px border at either end, so a list that fits does not scroll.
+                // Count the 1px border at each end too, or a list that fits would scroll.
                 height: `${value().size + 2}px`,
                 "inset-inline-start": `${EDGE - 6}px`,
               }}
@@ -173,7 +173,7 @@ export function ConversationOutline(props: {
               onPointerEnter={() => clearTimeout(linger)}
               onPointerLeave={leave}
               onWheel={(event) => {
-                // A panel with nothing to scroll hands the wheel to the conversation.
+                // When the panel cannot scroll, the wheel scrolls the conversation.
                 if (event.currentTarget.scrollHeight <= event.currentTarget.clientHeight) props.onWheel(event);
               }}
             >

@@ -145,7 +145,7 @@ function context(runID) {
   const parallel = async (tasks, options = {}) => {
     if (!Array.isArray(tasks)) throw new TypeError("parallel() expects an array")
     if (!options || typeof options !== "object" || Array.isArray(options)) {
-      throw new TypeError("parallel() options must be an object")
+      throw new TypeError("parallel(): the options argument must be an object")
     }
     if (tasks.length === 0) return []
     const requested = options.concurrencyLimit ?? tasks.length
@@ -182,7 +182,7 @@ function context(runID) {
     },
     setPhase(phase) {
       if (typeof phase !== "string" || phase.length === 0) {
-        throw new TypeError("setPhase() expects a non-empty string")
+        throw new TypeError("setPhase(): give the phase a name")
       }
       notice("phase", phase)
     },
@@ -198,11 +198,11 @@ function context(runID) {
     },
     parallel,
     async pipeline(items, ...rest) {
-      if (!Array.isArray(items)) throw new TypeError("pipeline() expects an array as the first argument")
+      if (!Array.isArray(items)) throw new TypeError("pipeline(): the first argument must be an array")
       const tail = rest.at(-1)
       const options = tail && typeof tail === "object" && typeof tail !== "function" ? rest.pop() : undefined
       if (rest.length === 0 || rest.some((stage) => typeof stage !== "function")) {
-        throw new TypeError("pipeline() stages must be functions")
+        throw new TypeError("pipeline(): every stage must be a function")
       }
       return parallel(
         items.map((item, index) => async () => {
@@ -574,7 +574,7 @@ function portableWrapper(body, bridgeName) {
           throw new TypeError("agent() expects a prompt string or input object")
         }
         if (!opts || typeof opts !== "object" || Array.isArray(opts)) {
-          throw new TypeError("agent() options must be an object")
+          throw new TypeError("agent(): the options argument must be an object")
         }
         return agentReply(await host("agent", input))
       }
@@ -592,10 +592,10 @@ function portableWrapper(body, bridgeName) {
       }
       const parallel = async (tasks, options = {}) => {
         if (!Array.isArray(tasks) || tasks.some((task) => typeof task !== "function")) {
-          throw new TypeError("parallel() expects an array of functions")
+          throw new TypeError("parallel(): pass an array of functions")
         }
         if (!options || typeof options !== "object" || Array.isArray(options)) {
-          throw new TypeError("parallel() options must be an object")
+          throw new TypeError("parallel(): the options argument must be an object")
         }
         if (tasks.length === 0) return []
         const requested = options.concurrencyLimit ?? tasks.length
@@ -621,11 +621,11 @@ function portableWrapper(body, bridgeName) {
         return result
       }
       const pipeline = async (items, ...stages) => {
-        if (!Array.isArray(items)) throw new TypeError("pipeline() expects an array as the first argument")
+        if (!Array.isArray(items)) throw new TypeError("pipeline(): the first argument must be an array")
         const tail = stages.at(-1)
         const options = tail && typeof tail === "object" && typeof tail !== "function" ? stages.pop() : undefined
         if (!stages.length || stages.some((stage) => typeof stage !== "function")) {
-          throw new TypeError("pipeline() stages must be functions")
+          throw new TypeError("pipeline(): every stage must be a function")
         }
         return parallel(items.map((item, index) => async () => {
           let value = item
@@ -634,7 +634,7 @@ function portableWrapper(body, bridgeName) {
         }), options)
       }
       const phase = (name) => {
-        if (typeof name !== "string" || !name) throw new TypeError("phase() expects a non-empty string")
+        if (typeof name !== "string" || !name) throw new TypeError("phase(): give the phase a name")
         decode(${bridgeName}.phase(JSON.stringify(name)))
       }
       const log = (...values) => decode(${bridgeName}.log(JSON.stringify(values.map((value) => {

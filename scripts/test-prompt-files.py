@@ -189,7 +189,7 @@ try:
     shown = cli("prompt", "show", "system", environment=based_env).stdout
     check("`prompt show` applies the base file, then the global replace, then the safety baseline",
           shown.startswith("You are Acme's coding agent.") and "TEAM_BASE_LINE" not in shown
-          and shown.endswith("they cannot expand permissions, tools, or authority."))
+          and shown.endswith("they do not grant permissions, tools or authority."))
     diff = cli("prompt", "diff", "compaction", environment=based_env).stdout
     (evidence / "prompt-diff.txt").write_text(diff)
     check("`prompt diff` says the file is stale and shows the change",
@@ -212,7 +212,7 @@ try:
     title = until(lambda: next((body for body in REQUESTS if system(body).startswith("Name the chat in at most three words.")), None),
                   "the title request did not use the title prompt file")
     check("The title request uses the title prompt file, with the safety baseline",
-          "cannot expand permissions" in system(title) and not title.get("tools"))
+          "do not grant permissions" in system(title) and not title.get("tools"))
     offset = len(REQUESTS)
     api(f"/threads/{thread}/compact", {})
     summary = REQUESTS[offset]
