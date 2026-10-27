@@ -349,7 +349,11 @@ file is simply not offered there, a published file that does not match its index
 withdrawing a release makes copies that staged it drop it. After publishing, prove an update: a
 copy of the previous Desktop shows **Restart to update** within a check (Settings → About →
 Check for updates is immediate), restarting opens the new version, and `haarness --version`
-after `haarness --update` names it. On Linux, `scripts/test-linux-update.sh` does it in a Docker
+after `haarness --update` names it. On macOS, launch the previous Desktop as a person does,
+through LaunchServices (`open -n … --args --remote-debugging-port=<port>` and drive it over that
+port): a notarized app Gatekeeper has seen is protected by App Management, and an app started
+directly by a test (Playwright's `executablePath`) answers to the test's terminal, which may not
+modify it, so it would rightly offer the installer instead of updating. On Linux, `scripts/test-linux-update.sh` does it in a Docker
 desktop session (the release's AppImage, installed by `install.sh`, takes the previous release's
 AppImage offered as newer, replaces itself in place and reopens). On Windows, nothing here runs
 the setup itself: `scripts/test-windows-update-helper.py` (under PowerShell 7, e.g. in a container)
