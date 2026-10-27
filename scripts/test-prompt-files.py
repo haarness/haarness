@@ -8,7 +8,7 @@ that hold prompt files, the script proves that:
    stale written-from is marked and warned about, files with a bad name or frontmatter are listed as
    ignored with the reason, a project's `.haarness/prompts` is never read and a link from the
    global folder into the project is refused;
-2. a real chat sends the prompts as `prompt show` prints them: the main instructions (base file,
+2. a real chat sends the prompts as `prompt show` prints them: the main instructions (system folder's file,
    then global file, safety baseline), the plan agent's own prompt, the title and the summary
    prompts; two turns send a byte-identical system prompt;
 3. editing a prompt file applies to the next turn without a restart (hot reload), and the daemon
@@ -174,8 +174,8 @@ try:
     listed = cli("prompt", "list", environment=based_env)
     (evidence / "prompt-list.txt").write_text(listed.stdout + "\n--- stderr\n" + listed.stderr)
     rows = [line.split() for line in listed.stdout.splitlines()]
-    check("`prompt list` shows the base file applying before the global one",
-          rows[0][:2] == ["system", "append"] and rows[0][-1] == "(base)"
+    check("`prompt list` shows the system folder's file applying before the global one",
+          rows[0][:2] == ["system", "append"] and rows[0][-1] == "(system)"
           and rows[1][0] == "replace" and rows[1][-1] == "(global)")
     check("`prompt list` marks the stale file and warns on stderr",
           any(row[:2] == ["compaction", "stale"] for row in rows) and "written from an older built-in prompt" in listed.stderr)
@@ -187,7 +187,7 @@ try:
           "PROJECT_PROMPT_LINE" not in cli("prompt", "show", "explore", environment=based_env).stdout
           and ".haarness/prompts" not in listed.stdout + listed.stderr)
     shown = cli("prompt", "show", "system", environment=based_env).stdout
-    check("`prompt show` applies the base file, then the global replace, then the safety baseline",
+    check("`prompt show` applies the system folder's file, then the global replace, then the safety baseline",
           shown.startswith("You are Acme's coding agent.") and "TEAM_BASE_LINE" not in shown
           and shown.endswith("they do not grant permissions, tools or authority."))
     diff = cli("prompt", "diff", "compaction", environment=based_env).stdout
