@@ -1,6 +1,7 @@
-// Drives the installed AppImage through a self-update (scripts/test-linux-update.sh): a stand-in release service on
-// loopback offers "9.9.9", whose file is another release's AppImage on the release domain, with the size and SHA-256
-// the release service published for it.
+// Drives the installed AppImage through a self-update (scripts/test-linux-update.sh). With /work/out/payload.json, a
+// stand-in release service on loopback offers "9.9.9", whose file is another release's AppImage on the release
+// domain with the size and SHA-256 the release service published for it; without it, the app updates from the
+// release service itself to the channel's current version.
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
@@ -14,13 +15,25 @@ const home = process.env.HOME;
 const target = join(home, ".local/bin/Haarness.AppImage");
 const launcher = join(home, ".local/bin/haarness-desktop");
 const out = "/work/out";
-const payload = JSON.parse(readFileSync("/work/out/payload.json", "utf8"));
+const service = process.env.HAARNESS_RELEASE_SERVICE;
+const channel = process.env.CHANNEL || "stable";
+const arch = process.arch === "arm64" ? "arm64" : "x64";
+const standIn = existsSync("/work/out/payload.json");
+let payload;
+if (standIn) payload = JSON.parse(readFileSync("/work/out/payload.json", "utf8"));
+else {
+  const current = await (await fetch(`${service}/api/v1/releases/${channel}/desktop`)).json();
+  const desktop = current.manifest.products.desktop;
+  const item = desktop.artifacts.find((a) => a.os === "linux" && a.arch === arch && a.kind === "AppImage");
+  payload = { ...item, version: desktop.version };
+}
+const offered = standIn ? "9.9.9" : payload.version;
 const log = (...args) => console.log(new Date().toISOString().slice(11, 19), ...args);
 const sha = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const requests = [];
 
-const service = createServer((request, response) => {
+const standInService = createServer((request, response) => {
   requests.push(request.url);
   if (request.url === "/api/v1/releases/stable/desktop") {
     const body = { channel: "stable", manifest: { version: "9.9.9", products: { desktop: { version: "9.9.9", artifacts: [{ ...payload, file: "Haarness-9.9.9-linux-arm64.AppImage" }] } } } };
@@ -29,8 +42,11 @@ const service = createServer((request, response) => {
   }
   response.writeHead(404).end();
 });
-await new Promise((resolve) => service.listen(0, "127.0.0.1", resolve));
-const releaseUrl = `http://127.0.0.1:${service.address().port}`;
+let releaseUrl = service;
+if (standIn) {
+  await new Promise((resolve) => standInService.listen(0, "127.0.0.1", resolve));
+  releaseUrl = `http://127.0.0.1:${standInService.address().port}`;
+}
 const data = join(home, "haarness-test");
 const env = {
   ...process.env,
@@ -74,7 +90,7 @@ for (let i = 0; i < 900; i++) {
   await sleep(1000);
 }
 await page.screenshot({ path: join(out, "linux-about-ready.png") });
-if (!last.includes("Haarness 9.9.9 is ready to install")) throw new Error("not ready: " + last);
+if (!last.includes(`Haarness ${offered} is ready to install`)) throw new Error("not ready: " + last);
 const staged = join(home, ".local/bin/.Haarness.AppImage.haarness-update");
 log("staged beside the app:", existsSync(staged), existsSync(staged) && sha(staged) === payload.digest.sha256 ? "(sha matches the release)" : "");
 await page.keyboard.press("Escape");
@@ -90,6 +106,7 @@ const after = sha(target);
 log("AppImage after:", after.slice(0, 16), after === payload.digest.sha256 ? "= the release's file" : "UNCHANGED");
 const result = join(data, "desktop/updates/install-result.json");
 log("install result:", existsSync(result) ? readFileSync(result, "utf8").trim() : "(already read by the reopened app)");
+log("offered", offered, standIn ? "(stand-in service)" : `(${service}, ${channel})`);
 log("left beside the app:", readdirSync(join(home, ".local/bin")).join(" "));
 // The helper reopens the app; it must still be running after a while (with --no-sandbox, which this container needs).
 let reopened = "";
@@ -111,5 +128,5 @@ await again.app.close();
 writeFileSync(join(out, "linux-requests.txt"), requests.join("\n"));
 const passed = version === payload.version && after === payload.digest.sha256 && !!alive;
 log(passed ? "PASS: replaced in place, reopened with its flags, runs the new file" : "FAIL");
-service.close();
+standInService.close();
 process.exit(passed ? 0 : 1);
