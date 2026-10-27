@@ -21,8 +21,8 @@ jobs:
       # One Python on every runner (Windows images have no python3 command).
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      # Haarness is a commercial product: no internal identifiers may
-      # reach a release. The self-test proves the gate still detects them.
+      # Blocked words must not reach a release. The self-test proves the
+      # gate still detects them.
       - run: sh ./scripts/check-commercial-boundary.sh --self-test
         if: runner.os != 'Windows'
       - run: sh ./scripts/check-commercial-boundary.sh
