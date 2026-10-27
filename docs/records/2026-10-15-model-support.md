@@ -26,7 +26,7 @@ Direct Gemini API requests of a few tokens each (`gemini-4-argon`):
 
 ## Changes
 
-- Haarness: `gemini-4-argon` in the Gemini catalog (1,048,576 / 32,768), display names for its bare, `models/` and `google/` ids, and the reviewed price ($2/$10, cache read $0.10, cache writes at the input price) with the December change in its note. The thinking-level handling for Gemini 4 came with the [October 13–14 port](2026-10-15-reliability-port.md). Live-test candidates and the Desktop Cloud effort case include Argon.
+- Haarness: `gemini-4-argon` in the Gemini catalog (1,048,576 / 32,768), display names for its bare, `models/` and `google/` ids, and the reviewed price ($2/$10, cache read $0.10, cache writes at the input price) with the December change in its note. The thinking-level handling for Gemini 4 came in on October 14. Live-test candidates and the Desktop Cloud effort case include Argon.
 - Haarness Router: Gemini 4 and later offer low, medium and high, so a `minimal` or `none` effort is refused by the router with a clear message instead of a Google 400, and a discovered Gemini 4 model counts as a reasoning model. Argon is in the example configurations.
 - Haarness Cloud: the same reviewed price table, and a test that Argon bills at Google's rates rather than OpenRouter's cache-write price.
 - iOS needs no change: the composer's effort menu comes from the server's model list, and router model ids such as `google/gemini-4-argon` read as "Gemini 4 Argon".

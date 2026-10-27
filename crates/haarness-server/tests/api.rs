@@ -13140,7 +13140,7 @@ async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
 }
 
 /// A test never writes preview versions or saved tool output into the data
-/// folder of the person running it (Upstream PR #1145's rule): a test binary
+/// folder of the person running it: a test binary
 /// gets a data folder of its own under the system temp folder.
 #[test]
 fn tests_never_resolve_the_persons_own_data_folder() {

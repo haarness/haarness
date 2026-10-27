@@ -12,9 +12,9 @@ export interface NativeNotification {
  * How long a "Task finished" banner waits before it goes out. The daemon
  * starts the next queued prompt (or the reply to steering a stop left unread)
  * as a new root turn moments after the previous one finishes, so a banner sent
- * at once would announce the end of work that is still going. Upstream measured
- * those resumptions at 31–192 ms and holds its completion banner for 500 ms;
- * a real completion costs half a second nobody can see.
+ * at once would announce the end of work that is still going. Those
+ * resumptions start 31–192 ms after the previous turn, so half a second covers
+ * them, and a real completion costs half a second nobody can see.
  */
 export const COMPLETION_GRACE_MS = 500;
 

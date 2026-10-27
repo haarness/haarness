@@ -625,8 +625,8 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
     Some(out)
 }
 
-/// A waiting chat's sign: the approval card's ⚠ for an approval, Upstream's
-/// `?` for a question.
+/// A waiting chat's sign: the approval card's ⚠ for an approval, `?` for a
+/// question.
 const fn waiting_sign(waiting: crate::state::Waiting) -> &'static str {
     match waiting {
         crate::state::Waiting::Approval => "⚠",

@@ -1673,8 +1673,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
         .map(|item| item.id)
         .collect();
     // Undone work stays on the server until the next turn confirms it, but
-    // it is no longer the conversation: fold it into one marker, as Upstream
-    // does, instead of drawing it like live turns.
+    // it is no longer the conversation: fold it into one marker instead of
+    // drawing it like live turns.
     let undone_after = app.thread.revert.as_ref().map(|revert| revert.sequence);
     let mut folded = false;
     let ordered = presentation_order(&app.items);
@@ -2496,8 +2496,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     width,
                 );
             }
-            // The user's own stop is not a failure: a quiet marker, as a
-            // stopped reply reads in Upstream.
+            // The user's own stop is not a failure: a quiet marker.
             ItemData::Error { message, .. } if message.trim() == "operation cancelled" => {
                 block.push(line(
                     format!("  · {}", app.language.text("interrupted")),

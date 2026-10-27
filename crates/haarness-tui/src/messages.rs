@@ -13,8 +13,8 @@ pub struct BrowserPosition {
     selected: Option<String>,
 }
 
-/// Where a message key takes the transcript. Upstream's set: by message, by
-/// prompt (the person's own messages), the first message and the last prompt.
+/// Where a message key takes the transcript: by message, by prompt (the
+/// person's own messages), the first message and the last prompt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MessageStep {
     Previous,

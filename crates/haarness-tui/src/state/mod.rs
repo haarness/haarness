@@ -976,7 +976,7 @@ pub struct App {
     /// default; terminals narrower than that never dock it).
     pub sidebar_open: bool,
     /// The right pane opened over the conversation's right edge with ctrl+b
-    /// on a terminal too narrow to dock it, as Upstream does.
+    /// on a terminal too narrow to dock it.
     pub sidebar_overlay: bool,
     /// Width of the last rendered frame, so ctrl+b can tell a docked sidebar
     /// from one that has to open over the conversation.
@@ -2837,8 +2837,7 @@ impl App {
                     || thread.id.to_string().contains(&query)
             })
             .collect();
-        // Chats that wait for a person lead, as Upstream lists them; each
-        // part stays newest first.
+        // Chats that wait for a person lead; each part stays newest first.
         let waiting = self.waiting_chats();
         threads.sort_by(|left, right| {
             waiting
