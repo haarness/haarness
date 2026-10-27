@@ -5320,7 +5320,7 @@
             "type": "object"
           },
           {
-            "description": "No model was available to review it.",
+            "description": "No reviewer model could look at it.",
             "properties": {
               "code": {
                 "enum": [
