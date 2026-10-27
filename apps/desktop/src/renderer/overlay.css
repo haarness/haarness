@@ -738,6 +738,11 @@ dialog .notifications {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* As in a form's error: the title on its own line, above what happened. */
+.error-banner > span > strong {
+  display: block;
+  font-weight: 600;
+}
 
 /* ----------------------------------------------------------------- settings */
 .settings {

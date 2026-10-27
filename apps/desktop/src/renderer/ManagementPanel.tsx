@@ -16,6 +16,7 @@ import { useApp } from "./state";
 import { Select } from "./Select";
 import { ProviderLabel } from "./ProviderIcon";
 import { ErrorNotice } from "./ui";
+import { cancelled } from "./error-text";
 import "./management.css";
 
 /** A sentence reads as text; JSON, commands and paths keep the code face. */
@@ -97,7 +98,7 @@ export function ManagementPanel(props: {
       );
     } catch (cause) {
       if (current === generation)
-        setError(cause instanceof Error ? cause.message : String(cause));
+        if (!cancelled(cause)) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       if (current === generation) {
         setBusy(false);

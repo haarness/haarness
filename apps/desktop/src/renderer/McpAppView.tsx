@@ -1,4 +1,4 @@
-import { t, language } from "./i18n";
+import { t, language, errorLine } from "./i18n";
 import { useApp } from "./state";
 import { Icon } from "./ui";
 import { MenuButton } from "./MenuButton";
@@ -106,7 +106,7 @@ export function McpAppView(props: {
     setFailure("");
     readPage(connection, props.payload.server, props.payload.uri).then(
       (value) => setPage(value),
-      (error: unknown) => setFailure(error instanceof Error ? error.message : String(error)),
+      (error: unknown) => setFailure(errorLine(error)),
     );
   };
   const width = () => Math.round(root?.clientWidth ?? 0);

@@ -185,7 +185,10 @@ async fn check_login(client: &ApiClient, id: &str) -> CheckAnswer {
         Ok(Err(error)) => {
             let gateway = crate::api::refusal_status(&error)
                 .is_some_and(|status| matches!(status.as_u16(), 502..=504));
-            if error.downcast_ref::<reqwest::Error>().is_some() || gateway {
+            if crate::api::unanswered(&error)
+                || error.downcast_ref::<reqwest::Error>().is_some()
+                || gateway
+            {
                 CheckAnswer::Unanswered(format!("{error:#}"))
             } else {
                 CheckAnswer::Refused(format!("{error:#}"))

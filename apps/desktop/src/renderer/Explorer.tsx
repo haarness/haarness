@@ -1,11 +1,12 @@
 import { Preview } from "./preview";
 import { PreviewContent } from "./PreviewContent";
-import { t } from "./i18n";
+import { t, errorLine } from "./i18n";
 import { For, Show, batch, createMemo, createSignal, createEffect, on, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { FileContent, FileEntry } from "../shared";
 import { useApp } from "./state";
 import { Button, Icon, ask, confirm, Empty } from "./ui";
+import { cancelled } from "./error-text";
 import { Editor, type EditorSession } from "./Editor";
 import { contextLabel, fileContext, fileLinesContext } from "./prompt-context";
 import { matchesShortcut, shortcutLabel, shortcutText } from "./search";
@@ -238,7 +239,7 @@ export function Explorer() {
             if (current === searchGeneration) setResults(items);
           })
           .catch((error) => {
-            if (current === searchGeneration) app.set("error", String(error));
+            if (current === searchGeneration) app.showError(error);
           }),
       200,
     );
@@ -1021,7 +1022,7 @@ function Tree(props: {
             : "",
         );
       })
-      .catch((error) => { if (id === generation) setError(String(error)); });
+      .catch((error) => { if (id === generation && !cancelled(error)) setError(errorLine(error)); });
   });
   onCleanup(() => generation++);
   return (

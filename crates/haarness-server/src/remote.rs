@@ -214,37 +214,53 @@ async fn forward(
         return StatusCode::NOT_FOUND.into_response();
     }
     let read = ws.is_err() && matches!(*request.method(), Method::GET | Method::HEAD);
-    let target = if crate::remote_scope::root(request.headers()).is_some() {
-        gateway.host.chat_target(id.clone(), read).await
-    } else if read {
-        gateway.host.read_target(id.clone()).await
-    } else {
-        gateway.host.target(id.clone()).await
-    };
-    let target = match target {
+    let chat = crate::remote_scope::root(request.headers()).is_some();
+    let mut target = match resolve(&gateway, &id, chat, read).await {
         Ok(value) => value,
         Err(error) => return failure(error),
     };
     let prefix = format!("/v1/host/workspaces/{id}/");
-    let raw_path = request.uri().path().strip_prefix(&prefix).unwrap_or(&path);
-    let mut url = format!("{}/{}", target.url.trim_end_matches('/'), raw_path);
-    if let Some(query) = request.uri().query() {
-        url.push('?');
-        url.push_str(query);
-    }
+    let raw_path = request
+        .uri()
+        .path()
+        .strip_prefix(&prefix)
+        .unwrap_or(&path)
+        .to_owned();
+    let query = request.uri().query().map(str::to_owned);
+    let address = |target: &WorkspaceTarget| {
+        let mut url = format!("{}/{}", target.url.trim_end_matches('/'), raw_path);
+        if let Some(query) = &query {
+            url.push('?');
+            url.push_str(query);
+        }
+        url
+    };
+    // A project's server that stopped since the host found it takes no
+    // connection, and nothing has reached it: find (or start) it again,
+    // once, before saying it could not be reached.
+    let mut retried = false;
     if let Ok(ws) = ws {
-        let upstream_url = url.replacen("http", "ws", 1);
-        let mut handshake = match upstream_url.into_client_request() {
-            Ok(value) => value,
-            Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
-        };
-        let Ok(auth) = format!("Bearer {}", target.token).parse() else {
-            return StatusCode::BAD_GATEWAY.into_response();
-        };
-        handshake.headers_mut().insert("authorization", auth);
-        let upstream = match tokio_tungstenite::connect_async(handshake).await {
-            Ok((socket, _)) => socket,
-            Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+        let upstream = loop {
+            let handshake = address(&target)
+                .replacen("http", "ws", 1)
+                .into_client_request()
+                .ok()
+                .zip(format!("Bearer {}", target.token).parse().ok());
+            let Some((mut handshake, auth)) = handshake else {
+                return unreachable("bad upstream address");
+            };
+            handshake.headers_mut().insert("authorization", auth);
+            match tokio_tungstenite::connect_async(handshake).await {
+                Ok((socket, _)) => break socket,
+                Err(_) if !retried => {
+                    retried = true;
+                    target = match resolve(&gateway, &id, chat, read).await {
+                        Ok(value) => value,
+                        Err(error) => return failure(error),
+                    };
+                }
+                Err(error) => return unreachable(&error.to_string()),
+            }
         };
         let shutdown = gateway.shutdown.clone();
         return ws
@@ -252,47 +268,92 @@ async fn forward(
             .into_response();
     }
     let (parts, body) = request.into_parts();
-    let mut upstream = gateway
-        .client
-        .request(parts.method, url)
-        .bearer_auth(target.token);
-    for name in [
-        "content-type",
-        "accept",
-        "last-event-id",
-        "x-haarness-remote-thread",
-    ] {
-        if let Some(value) = parts.headers.get(name) {
-            upstream = upstream.header(name, value);
-        }
-    }
     let body = match to_bytes(body, 64 * 1024 * 1024).await {
         Ok(value) => value,
         Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
-    match upstream.body(body).send().await {
-        Ok(response) => {
-            let mut result = Response::builder().status(response.status());
-            for name in [
-                "content-type",
-                "cache-control",
-                "content-disposition",
-                "x-accel-buffering",
-            ] {
-                if let Some(value) = response.headers().get(name) {
-                    result = result.header(name, value);
-                }
+    let mut url = address(&target);
+    loop {
+        let mut upstream = gateway
+            .client
+            .request(parts.method.clone(), &url)
+            .bearer_auth(&target.token);
+        for name in [
+            "content-type",
+            "accept",
+            "last-event-id",
+            "x-haarness-remote-thread",
+        ] {
+            if let Some(value) = parts.headers.get(name) {
+                upstream = upstream.header(name, value);
             }
-            result
-                .body(Body::from_stream(
-                    response
-                        .bytes_stream()
-                        .take_until(gateway.shutdown.cancelled_owned()),
-                ))
-                .expect("upstream response")
         }
-        Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+        match upstream.body(body.clone()).send().await {
+            Ok(response) => {
+                let mut result = Response::builder().status(response.status());
+                for name in [
+                    "content-type",
+                    "cache-control",
+                    "content-disposition",
+                    "x-accel-buffering",
+                ] {
+                    if let Some(value) = response.headers().get(name) {
+                        result = result.header(name, value);
+                    }
+                }
+                return result
+                    .body(Body::from_stream(
+                        response
+                            .bytes_stream()
+                            .take_until(gateway.shutdown.cancelled_owned()),
+                    ))
+                    .expect("upstream response");
+            }
+            Err(error) if error.is_connect() && !retried => {
+                retried = true;
+                target = match resolve(&gateway, &id, chat, read).await {
+                    Ok(value) => value,
+                    Err(error) => return failure(error),
+                };
+                url = address(&target);
+            }
+            Err(error) => return unreachable(&error.to_string()),
+        }
     }
+}
+
+/// Where a request for workspace `id` goes: one published chat's (the
+/// connector names it in [`crate::remote_scope::HEADER`]), a read's, or any.
+async fn resolve(
+    gateway: &Gateway,
+    id: &str,
+    chat: bool,
+    read: bool,
+) -> anyhow::Result<WorkspaceTarget> {
+    if chat {
+        gateway.host.chat_target(id.to_owned(), read).await
+    } else if read {
+        gateway.host.read_target(id.to_owned()).await
+    } else {
+        gateway.host.target(id.to_owned()).await
+    }
+}
+
+/// The project's server did not take the request, even found again. The
+/// person reading this is at another device, so it says what to do there
+/// (clients name it by `project_server_unavailable`, as the front does);
+/// the cause stays in this computer's log.
+fn unreachable(cause: &str) -> Response {
+    tracing::warn!(%cause, "project server unreachable from the remote gateway");
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({"error": {
+            "code": "project_server_unavailable",
+            "message": "Your computer couldn't answer. Check that Haarness is open and up to date on it, then try again.",
+            "retryable": true,
+        }})),
+    )
+        .into_response()
 }
 
 /// Carry one client WebSocket to its upstream and back until either side
@@ -562,5 +623,101 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK, "{method}");
         }
         server.abort();
+    }
+
+    /// A host whose project's server moved: the first address it gives takes
+    /// no connection (the server stopped since it was found), later ones are
+    /// where it runs now, if anywhere.
+    struct Moved {
+        addresses: std::sync::Mutex<Vec<String>>,
+        resolved: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl WorkspaceHost for Moved {
+        async fn catalog(&self) -> anyhow::Result<WorkspaceListResponse> {
+            anyhow::bail!("unused")
+        }
+        async fn browse(
+            &self,
+            _: Option<String>,
+            _: BrowseOptions,
+        ) -> anyhow::Result<DirectoryListing> {
+            anyhow::bail!("unused")
+        }
+        async fn open(&self, _: String) -> anyhow::Result<WorkspaceInfo> {
+            anyhow::bail!("unused")
+        }
+        async fn close(&self, _: String) -> anyhow::Result<()> {
+            anyhow::bail!("unused")
+        }
+        async fn target(&self, _: String) -> anyhow::Result<WorkspaceTarget> {
+            let index = self
+                .resolved
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let addresses = self.addresses.lock().unwrap();
+            Ok(WorkspaceTarget {
+                url: addresses[index.min(addresses.len() - 1)].clone(),
+                token: "token".into(),
+            })
+        }
+    }
+
+    /// An address nothing listens on.
+    async fn closed_address() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        address
+    }
+
+    #[tokio::test]
+    async fn a_project_server_that_went_away_is_found_again() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/v1/threads",
+                any(|body: String| async move { Json(serde_json::json!({"body": body})) }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        let host = Arc::new(Moved {
+            addresses: std::sync::Mutex::new(vec![closed_address().await, live]),
+            resolved: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = routes(host.clone(), tokio_util::sync::CancellationToken::new());
+
+        // A write too: nothing reached the stopped server, so it goes once.
+        let (status, body) = send(&router, "POST", "/v1/host/workspaces/w/v1/threads").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["body"], "{}");
+        assert_eq!(host.resolved.load(std::sync::atomic::Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_project_server_that_stays_gone_is_said_plainly() {
+        let gone = closed_address().await;
+        let host = Arc::new(Moved {
+            addresses: std::sync::Mutex::new(vec![gone]),
+            resolved: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = routes(host.clone(), tokio_util::sync::CancellationToken::new());
+
+        let (status, body) = send(&router, "GET", "/v1/host/workspaces/w/v1/threads").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"]["code"], "project_server_unavailable");
+        assert_eq!(body["error"]["retryable"], true);
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("Your computer couldn't answer."),
+            "{message}"
+        );
+        assert!(!message.contains("127.0.0.1"), "no address: {message}");
+        assert_eq!(
+            host.resolved.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "found again once, not in a loop"
+        );
     }
 }

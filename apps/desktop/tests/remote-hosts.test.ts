@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import { ApiError } from "@haarness/sdk";
+import { errorText, errorTextLine } from "../src/renderer/error-text";
 import {
   cloudOrigin,
   connectHost,
@@ -190,7 +191,11 @@ test("a computer's projects, folders and one of its projects open through Cloud'
       const before = requests.length;
       (await connectHost(relay, { host, workspace: "w1", project: opened.view.project, checkout: opened.view.checkout }, say)).client.close();
       assert.deepEqual(requests.slice(before), [`GET /api/v1/remote-hosts/${host}/runtime/v1/host/workspaces/w1/v1/info`]);
-      await assert.rejects(hostCatalog(relay, "offline", say), /This computer is offline/);
+      // Cloud's own sentence reaches the window, which says it as everywhere.
+      await assert.rejects(hostCatalog(relay, "offline", say), (error: Error) => {
+        assert.equal(errorTextLine(errorText(error)), "Your computer isn't reachable. Open Haarness on it, then try again.");
+        return true;
+      });
       await assert.rejects(hostCatalog(relay, "gone", say), /not shared with your Haarness account anymore/);
       await assert.rejects(
         connectHost(relay, { host, workspace: "w1", apiUrl: "https://other.example" }, say),
@@ -204,4 +209,14 @@ test("Cloud's refusals read as plain next steps; anything else keeps its own wor
   assert.match(hostError(new ApiError(401, "unauthorized", "no", false, null), say).message, /Sign in to Haarness/);
   assert.match(hostError(new Error("Error: Sign in to Haarness to continue. Run `haarness login`."), say).message, /open your other computers/);
   assert.equal(hostError(new Error("Project folder is unavailable"), say).message, "Project folder is unavailable");
+  // A computer that answered the relay with nothing to say could not answer;
+  // what it said stays as the cause, for the log.
+  const bare = new ApiError(502, "http_error", "HTTP 502", false, "");
+  const failed = hostError(bare, say);
+  assert.equal(failed.message, "Your computer couldn't answer. Check that Haarness is open and up to date on it, then try again.");
+  assert.equal(failed.cause, bare);
+  assert.equal(
+    hostError(new ApiError(502, "project_server_unavailable", "This project's Haarness server is not reachable", true, null), say).message,
+    "Your computer couldn't answer. Check that Haarness is open and up to date on it, then try again.",
+  );
 });
