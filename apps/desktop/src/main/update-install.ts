@@ -1,8 +1,8 @@
 import { execFile, spawn } from "node:child_process";
-import { constants } from "node:fs";
-import { access, chmod, copyFile, lstat, mkdir, readdir, rename, rm, statfs } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { access, chmod, copyFile, lstat, mkdir, readdir, rm, statfs } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve, win32 } from "node:path";
-import { UpdateError, type Install } from "./updater";
+import { UpdateError, renameSoon, type Install } from "./updater";
 
 /** Runs a system tool; resolves with what it wrote, rejects when it fails. */
 export function run(command: string, args: string[]) {
@@ -118,7 +118,7 @@ export async function stageMacApp(input: { file: string; version: string; folder
   }
   const staged = join(input.folder, "Haarness.app");
   await rm(staged, { recursive: true, force: true });
-  await rename(app, staged);
+  await renameSoon(app, staged);
   await rm(unpacked, { recursive: true, force: true });
   await rm(input.file, { force: true });
   return staged;
@@ -130,7 +130,7 @@ export async function stageAppImage(input: { file: string; target: string }) {
   const staged = join(dirname(input.target), `.${basename(input.target)}.haarness-update`);
   await copyFile(input.file, staged + ".tmp");
   await chmod(staged + ".tmp", 0o755);
-  await rename(staged + ".tmp", staged);
+  await renameSoon(staged + ".tmp", staged);
   await rm(input.file, { force: true });
   return staged;
 }
@@ -197,8 +197,97 @@ if [ "$relaunch" = 1 ] && [ $# -gt 0 ]; then
 fi
 `;
 
-/** Starts installing as Haarness exits (see `HELPER`); Windows runs the setup,
- * which closes what is left of Haarness itself and offers to open it. */
+/**
+ * Installs a staged Windows setup once Haarness has exited, as `HELPER` does
+ * on macOS and Linux; run detached by Windows PowerShell 5.1 (any Windows 10
+ * or 11) with its inputs in the environment, so nothing needs quoting:
+ * HAARNESS_UPDATE_PID (Haarness), _SETUP, _RESULT, _VERSION, _BIN (Desktop's
+ * `resources\bin`), _RECORDS (the servers' records, `<cache>\workspaces`) and
+ * _APP (Haarness.exe, opened again when the setup fails).
+ *
+ * The setup ends every program running from the install folder at once,
+ * Desktop's own servers (`resources\bin\haarness.exe`) included: Windows
+ * cannot replace a running program. So those servers are first asked to stop
+ * on their own terms (`POST /v1/shutdown`, as `haarness serve --stop` does),
+ * for up to 15 seconds; servers of a standalone CLI elsewhere are not touched.
+ * Then the setup runs as electron-updater runs it (`--updated /S --force-run`:
+ * into the installed folder, no wizard, Haarness opened when done), and what
+ * it answered is written to _RESULT for the next launch.
+ */
+export const WINDOWS_HELPER = `
+$ErrorActionPreference = 'Continue'
+function Report([bool]$ok, [string]$reason) {
+  $json = @{ version = $env:HAARNESS_UPDATE_VERSION; ok = $ok; reason = $reason } | ConvertTo-Json -Compress
+  Set-Content -LiteralPath ($env:HAARNESS_UPDATE_RESULT + '.tmp') -Value $json -Encoding ascii
+  Move-Item -Force -LiteralPath ($env:HAARNESS_UPDATE_RESULT + '.tmp') -Destination $env:HAARNESS_UPDATE_RESULT
+}
+$deadline = (Get-Date).AddMinutes(2)
+while (Get-Process -Id ([int]$env:HAARNESS_UPDATE_PID) -ErrorAction SilentlyContinue) {
+  if ((Get-Date) -gt $deadline) { Report $false 'Haarness did not exit'; exit 1 }
+  Start-Sleep -Milliseconds 100
+}
+$bin = $env:HAARNESS_UPDATE_BIN.TrimEnd('\\', '/')
+$ours = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+  try { $_.Path -and ($_.Path.StartsWith($bin + '\\', [StringComparison]::OrdinalIgnoreCase) -or $_.Path.StartsWith($bin + '/', [StringComparison]::OrdinalIgnoreCase)) } catch { $false }
+} | ForEach-Object { $_.Id })
+if ($ours.Count -gt 0 -and (Test-Path -LiteralPath $env:HAARNESS_UPDATE_RECORDS)) {
+  foreach ($folder in Get-ChildItem -LiteralPath $env:HAARNESS_UPDATE_RECORDS -Directory -ErrorAction SilentlyContinue) {
+    try {
+      $record = Get-Content -Raw -LiteralPath (Join-Path $folder.FullName 'runtime.json') | ConvertFrom-Json
+      if (-not ($ours -contains [int]$record.pid)) { continue }
+      if ($record.url -notmatch '^http://(127\\.0\\.0\\.1|localhost|\\[::1\\]|0\\.0\\.0\\.0|\\[::\\]):(\\d+)') { continue }
+      $hostName = @{ '0.0.0.0' = '127.0.0.1'; '[::]' = '[::1]' }[$Matches[1]]
+      if (-not $hostName) { $hostName = $Matches[1] }
+      Invoke-RestMethod -Method Post -Uri ('http://' + $hostName + ':' + $Matches[2] + '/v1/shutdown') -Headers @{ Authorization = 'Bearer ' + $record.token } -TimeoutSec 5 | Out-Null
+    } catch {}
+  }
+  $deadline = (Get-Date).AddSeconds(15)
+  while ((Get-Date) -lt $deadline -and @($ours | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count -gt 0) {
+    Start-Sleep -Milliseconds 200
+  }
+}
+try {
+  $setup = Start-Process -FilePath $env:HAARNESS_UPDATE_SETUP -ArgumentList '--updated', '/S', '--force-run' -PassThru
+  $null = $setup.Handle
+  $setup.WaitForExit()
+  $code = $setup.ExitCode
+} catch {
+  $code = -1
+}
+if ($code -eq 0) { Report $true '' } else {
+  Report $false ('the setup ended with ' + $code)
+  # Whatever it left in place opens again, so no one is left without Haarness.
+  if (Test-Path -LiteralPath $env:HAARNESS_UPDATE_APP) { Start-Process -FilePath $env:HAARNESS_UPDATE_APP }
+}
+`;
+
+/** The Windows PowerShell command that runs `WINDOWS_HELPER` for a staged setup. */
+export function windowsInstallCommand(input: {
+  staged: string;
+  version: string;
+  result: string;
+  env: NodeJS.ProcessEnv;
+  pid: number;
+  windows: { bin: string; records: string; app: string };
+}) {
+  const env: NodeJS.ProcessEnv = {
+    ...input.env,
+    HAARNESS_UPDATE_PID: String(input.pid),
+    HAARNESS_UPDATE_SETUP: input.staged,
+    HAARNESS_UPDATE_RESULT: input.result,
+    HAARNESS_UPDATE_VERSION: input.version,
+    HAARNESS_UPDATE_BIN: input.windows.bin,
+    HAARNESS_UPDATE_RECORDS: input.windows.records,
+    HAARNESS_UPDATE_APP: input.windows.app,
+  };
+  return {
+    file: win32.join(input.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-EncodedCommand", Buffer.from(WINDOWS_HELPER, "utf16le").toString("base64")],
+    env,
+  };
+}
+
+/** Starts installing as Haarness exits (see `HELPER`, `WINDOWS_HELPER`). */
 export function launchInstall(input: {
   platform: NodeJS.Platform;
   target: string;
@@ -211,11 +300,18 @@ export function launchInstall(input: {
   reopen?: string[];
   /** The running app's own arguments; the reopened Linux app gets its flags (`--no-sandbox`). */
   argv?: string[];
+  /** Windows: Desktop's `resources\bin`, the servers' records folder, and Haarness.exe. */
+  windows?: { bin: string; records: string; app: string };
 }) {
   if (input.platform === "win32") {
-    // As electron-updater runs it: an update into the installed folder,
-    // without the wizard, opening Haarness when done. The setup waits for
-    // what is left of Haarness to exit.
+    if (!input.windows) throw new Error("The Windows install needs its folders.");
+    const command = windowsInstallCommand({ ...input, pid: process.pid, windows: input.windows });
+    if (existsSync(command.file)) {
+      spawn(command.file, command.args, { detached: true, stdio: "ignore", windowsHide: true, env: command.env }).unref();
+      return;
+    }
+    // A Windows without Windows PowerShell: the setup alone, which still
+    // ends what runs from the folder and opens Haarness when done.
     spawn(input.staged, ["--updated", "/S", "--force-run"], { detached: true, stdio: "ignore" }).unref();
     return;
   }
