@@ -11494,7 +11494,8 @@ fn the_band_names_the_approval_mode_apart_from_a_review_agent() {
     assert!(!band.contains("⏸"), "{band}");
     app.auto_permissions = true;
     let band = frame_text(&app, (120, 36));
-    assert!(band.lines().last().unwrap().contains("approvals: auto"));
+    let last = band.lines().last().unwrap().to_owned();
+    assert!(last.contains("  auto") && !last.contains("approvals:"), "{last}");
 }
 
 #[test]
@@ -18806,7 +18807,7 @@ async fn auto_mode_shortcut_and_restricted_requests_are_manual() {
     }
     assert_eq!(app.pending_permissions.len(), 3);
     assert!(app.auto_permissions_seen.values().all(|approved| !approved));
-    assert!(frame_text(&app, (140, 40)).contains("approvals: auto"));
+    assert!(frame_text(&app, (140, 40)).lines().last().unwrap().contains("  auto"));
     crate::input::handle_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),

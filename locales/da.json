@@ -1718,7 +1718,6 @@
   "Auto on for this chat · requests are allowed once · ctrl+y for Yolo": "Automatisk slået til for denne chat · anmodninger tillades én gang · ctrl+y for Yolo",
   "This server cannot keep a chat in Yolo · update Haarness": "Denne server kan ikke holde en chat i Yolo · opdater Haarness",
   "approvals: review": "godkendelser: gennemgang",
-  "approvals: auto": "godkendelser: automatisk",
   "approvals: --yolo": "godkendelser: --yolo",
   "Answer the approval above · ctrl+g to type": "Besvar godkendelsen ovenfor · ctrl+g for at skrive",
   "Haarness needs approval": "Haarness skal have godkendelse",

@@ -339,7 +339,7 @@ try:
     flagged=api('/v1/threads', {'title':'Auto flag verification','provider':'echo','model':'echo-1'})['id']
     start(flagged,'!tool bash '+json.dumps({'command':'printf flag-proof > flag.txt'}))
     until(lambda:len(api('/v1/permissions'))==1,'a new chat did not ask before --auto')
-    launch(flagged,'approvals: auto',extra=['--auto'])
+    launch(flagged,'  auto',extra=['--auto'])
     proof('flag.txt','flag-proof')
     assert api('/v1/threads/'+flagged+'/approval-mode')['mode']=='auto'
     check('haarness --auto opens the chat in Auto on the server and releases the request waiting in it')
@@ -370,7 +370,7 @@ try:
     finished()
     assert not (unset/'denied.txt').exists() and not api('/v1/permissions')
     check('with no setting in any file a new chat is in Auto: the reviewer approves an ask once or blocks it, and a deny rule still refuses')
-    launch(fresh,'approvals: auto',folder=unset,environment=unset_env)
+    launch(fresh,'  auto',folder=unset,environment=unset_env)
     check('the TUI opens a chat with no setting in Auto')
     plain=subprocess.run([str(binary),'--workspace',str(unset),'run','--title','Unset run','!tool bash '+json.dumps({'command':'printf unset-run-proof > unset-run.txt'})],env=unset_env,input='',text=True,capture_output=True,timeout=120)
     assert plain.returncode==0, plain.stderr

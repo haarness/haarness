@@ -1718,7 +1718,6 @@
   "Auto on for this chat · requests are allowed once · ctrl+y for Yolo": "이 채팅은 자동 승인 중 · 요청은 한 번만 허용 · ctrl+y로 Yolo",
   "This server cannot keep a chat in Yolo · update Haarness": "이 서버는 채팅을 Yolo로 유지할 수 없습니다 · Haarness를 업데이트하세요",
   "approvals: review": "승인: 검토",
-  "approvals: auto": "승인: 자동",
   "approvals: --yolo": "승인: --yolo",
   "Answer the approval above · ctrl+g to type": "위의 승인 요청에 답하세요 · ctrl+g로 입력",
   "Haarness needs approval": "Haarness에 승인이 필요합니다",
