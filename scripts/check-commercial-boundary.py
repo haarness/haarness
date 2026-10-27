@@ -3,8 +3,10 @@
 
 The words are kept as SHA-256 hashes, so the list itself says nothing. A file is
 split into words the way a reader sees them: camelCase, snake_case, kebab-case
-and digits all separate words, and case is ignored. Each word is hashed and
-looked up; so is each pair that starts with a lone "x" (for header prefixes).
+and digits all separate words, and case is ignored. Two or three camelCase parts
+are also read joined, so MyBrand is the word "mybrand". Each word is hashed and
+looked up; so is a lone "x" joined to the next word by "-" or "_" (a header
+prefix such as X-Name), but not "Mac OS X) Name" in a user agent.
 
 Usage:
   check-commercial-boundary.sh                 check tracked and untracked files
@@ -50,32 +52,46 @@ def _opaque(match: "re.Match") -> str:
     run = match.group(0)
     mixed = re.search(r"[a-z]", run) and re.search(r"[A-Z]", run) and re.search(r"[0-9]", run)
     return " " if mixed else run
+RUN = re.compile(r"[A-Za-z0-9]+")
 TOKEN = re.compile(r"[a-z0-9]+")
 LETTERS = re.compile(r"[a-z]+")
+# Split camelCase with "_" so XName reads as a header prefix, like X-Name and X_Name.
+HEADER = re.compile(r"(?<![a-z0-9])x[-_]([a-z0-9]+)")
 
-_seen: dict = {}
+# Digests, not verdicts: callers check against different lists.
+_digests: dict = {}
+_candidates: dict = {}
+
+
+def _camel(text: str) -> str:
+    return UPPER_RUN.sub(r"\1_\2", LOWER_UPPER.sub(r"\1_\2", text)).lower()
 
 
 def _blocked(word: str, blocked: frozenset) -> bool:
-    hit = _seen.get(word)
-    if hit is None:
-        hit = hashlib.sha256(word.encode()).hexdigest() in blocked
-        _seen[word] = hit
-    return hit
+    digest = _digests.get(word)
+    if digest is None:
+        digest = hashlib.sha256(word.encode()).hexdigest()
+        _digests[word] = digest
+    return digest in blocked
+
+
+def _words(run: str) -> tuple:
+    words = _candidates.get(run)
+    if words is None:
+        parts = TOKEN.findall(_camel(run))
+        # A word written in camelCase is still one word: MyBrand, useMyBrandAuth.
+        joined = ["".join(parts[i:j]) for i in range(len(parts)) for j in range(i + 1, min(i + 3, len(parts)) + 1)]
+        # Digits end a word too ("name2").
+        words = tuple({w for word in joined for w in [word, *([] if word.isalpha() else LETTERS.findall(word))]})
+        _candidates[run] = words
+    return words
 
 
 def flagged(text: str, blocked: frozenset = BLOCKED) -> bool:
-    text = UPPER_RUN.sub(r"\1 \2", LOWER_UPPER.sub(r"\1 \2", OPAQUE.sub(_opaque, text)))
-    tokens = TOKEN.findall(text.lower())
-    for index, token in enumerate(tokens):
-        if _blocked(token, blocked):
-            return True
-        # Digits end a word too ("name2"), but "x86" is not the word "x".
-        if not token.isalpha() and any(_blocked(word, blocked) for word in LETTERS.findall(token)):
-            return True
-        if token == "x" and index + 1 < len(tokens) and _blocked("x " + tokens[index + 1], blocked):
-            return True
-    return False
+    text = OPAQUE.sub(_opaque, text)
+    if any(_blocked(word, blocked) for run in RUN.findall(text) for word in _words(run)):
+        return True
+    return any(_blocked("x " + match.group(1), blocked) for match in HEADER.finditer(_camel(text)))
 
 
 def git(repository: str, *args: str) -> str:
@@ -133,13 +149,24 @@ def self_test() -> int:
             'const FONT: &str = "-apple-system";\n'
             'const PLIST_DTD: &str = "-//Apple//DTD PLIST 1.0//EN";\n'
             'const RG: &str = "rg-15.2.0-x86_64-apple-darwin.gz";\n'
-            '"integrity": "sha512-EWazOblFYUvlGZcfGhPUPmYh3nikUxBVb+y9MJun5f3hBi812X+8MSQTujLBtgK3cf51fJWbWfOjyeO954d+Eg=="'
+            '"integrity": "sha512-EWazOblFYUvlGZcfGhPUPmYh3nikUxBVb+y9MJun5f3hBi812X+8MSQTujLBtgK3cf51fJWbWfOjyeO954d+Eg=="\n'
+            'const UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15";'
         )
         if check_files(root) or check_files(root, blocked):
             print("Commercial boundary self-test failed: allowed platform strings were rejected.", file=sys.stderr)
             return 1
+        header = frozenset({hashlib.sha256(b"x zzboundarypair").hexdigest()})
+        for form, expected in (("X-Zzboundarypair-Token: 1", True), ("x_zzboundarypair", True),
+                               ("XZzboundarypairHeader", True), ("like Mac OS X) Zzboundarypair/605", False),
+                               ("max-zzboundarypair zzboundarypair", False)):
+            write(form)
+            if bool(check_files(root, header)) != expected:
+                verdict = "was not detected" if expected else "was rejected"
+                print(f"Commercial boundary self-test failed: {form} {verdict}.", file=sys.stderr)
+                return 1
         for form in ("zzboundarycanary", "Zzboundarycanary", "readZzboundarycanaryConfig",
                      "ZZBOUNDARYCANARY_HOME", "zzboundarycanary-state", "zzboundarycanary2",
+                     "ZzboundaryCanary", "useZzboundaryCanaryAuth",
                      "/Users/someone/work/projectfolder/zzboundarycanary/state"):
             write(form)
             if not check_files(root, blocked):
