@@ -1285,8 +1285,8 @@ fn shown_result(output: &str, metadata: &Value) -> (String, Value) {
     {
         Some(review) => (
             match review["rationale"].as_str() {
-                Some(reason) => format!("Blocked by Auto review: {reason}"),
-                None => "Blocked by Auto review".to_owned(),
+                Some(reason) => format!("Stopped by Auto's reviewer: {reason}"),
+                None => "Stopped by Auto's reviewer".to_owned(),
             },
             json!({"review": review}),
         ),

@@ -42,7 +42,7 @@ export const PROJECT_IMAGE_LIMITS = {
   paths: 20,
   bytes: 64 * 1024 * 1024,
   recheck: 20_000,
-  /** An image with more pixels is not decoded ("Too large to show"): 50 megapixels. */
+  /** An image with more pixels is not decoded ("Too big to display"): 50 megapixels. */
   pixels: 50_000_000,
   /** The least time between two reads of an image on screen, however often its file is written. */
   again: 1_000,

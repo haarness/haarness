@@ -1865,7 +1865,7 @@ async fn set_loop(
     let prompt = request
         .prompt
         .filter(|prompt| !prompt.trim().is_empty())
-        .ok_or_else(|| CoreError::Invalid("loop prompt is required".into()))?;
+        .ok_or_else(|| CoreError::Invalid("a loop needs a prompt".into()))?;
     let interval = request.interval_seconds.unwrap_or(300).clamp(30, 86_400);
     let config = haarness_protocol::LoopConfig {
         prompt,

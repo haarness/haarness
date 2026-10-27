@@ -636,7 +636,7 @@ pub(crate) fn workflow_command_args(
             None => Ok(serde_json::json!({})),
             Some(value @ serde_json::Value::Object(_)) => Ok(value),
             Some(serde_json::Value::Array(_)) => {
-                Err("Workflow JSON arguments must be an object".into())
+                Err("workflow arguments must be a JSON object".into())
             }
             Some(serde_json::Value::String(raw)) => Ok(serde_json::json!({ "input": raw })),
             Some(value) => Ok(serde_json::json!({ "input": value.to_string() })),
@@ -5071,18 +5071,18 @@ pub(crate) fn default_goal_completion() -> haarness_protocol::GoalCompletion {
     use haarness_protocol::GoalCompletionOption;
 
     haarness_protocol::GoalCompletion {
-        title: "Goal achieved — what next?".into(),
+        title: "Goal reached. What now?".into(),
         edit: GoalCompletionOption {
             label: "Edit objective".into(),
-            description: "Refine the previous goal text and start a new pursuit".into(),
+            description: "Change the goal's text and work toward it again".into(),
         },
         new: GoalCompletionOption {
             label: "Start fresh goal".into(),
-            description: "Type a new objective from scratch".into(),
+            description: "Write a new goal".into(),
         },
         clear: GoalCompletionOption {
             label: "Clear goal".into(),
-            description: "Remove the standing goal and stop tracking".into(),
+            description: "Remove the goal from this chat".into(),
         },
         dismiss: GoalCompletionOption {
             label: "Dismiss".into(),

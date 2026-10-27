@@ -110,7 +110,7 @@ export function ToolActivity(props: {
   // the reason rather than the text written for the model.
   const blocked = createMemo(() => reviewBlock(props.result));
   const verb = () => {
-    if (blocked() !== undefined) return t("Blocked by Auto review");
+    if (blocked() !== undefined) return t("Stopped by Auto's reviewer");
     const form = props.result
       ? props.result.is_error
         ? shape().attempt

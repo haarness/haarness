@@ -314,7 +314,7 @@ async fn parity_secret_reads_follow_the_file_really_opened_and_spare_node_module
         .unwrap();
     assert_eq!(
         result.output.text,
-        "No files found\n\n(skipped 1 secret-named file)"
+        "No files found\n\n(skipped 1 file with a secret's name)"
     );
     assert!(runtime.pending_permissions().is_empty());
 }

@@ -913,7 +913,7 @@ fn search_row(app: &App) -> Line {
         Overlay::Options {
             kind: crate::state::OptionsKind::WorkspaceCreateCustomBase,
             ..
-        } => Some(("Base ref", "branch, tag, or commit SHA")),
+        } => Some(("Base ref", "Branch, tag or commit")),
         _ => None,
     };
     if app.overlay_filter.is_empty() {

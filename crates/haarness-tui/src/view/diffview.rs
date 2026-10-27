@@ -876,12 +876,12 @@ const HELP: &[(&str, &str, &str)] = &[
     (
         "] / [",
         "Next / previous file",
-        "Select the next changed file",
+        "Go to the next or previous file with changes",
     ),
     (
         "↵",
         "Open item",
-        "Open the file, or fold and unfold a folder",
+        "Open a file, or open and close a folder",
     ),
     (
         "→ / ←",
@@ -891,30 +891,30 @@ const HELP: &[(&str, &str, &str)] = &[
     (
         "a",
         "Expand all folders",
-        "Open every folder in the file tree",
+        "Unfold the whole file tree",
     ),
     ("t", "Toggle file tree", "Show or hide the sidebar"),
     (
         "o",
         "Toggle patches",
-        "Show one selected patch or every patch",
+        "One file's patch, or all of them",
     ),
     (
         "v",
         "Toggle view",
-        "Switch between split and unified layout",
+        "Side by side, or one column",
     ),
     (
         "x",
         "Cycle context",
-        "Context lines per change: 4, 12, 50, all",
+        "Lines around each change: 4, 12, 50 or all",
     ),
     ("r", "Mark reviewed", "Dim a file you have finished reading"),
     ("c", "Comment", "Queue a note for your next message"),
     (
         "s",
         "Switch source",
-        "Working tree, main branch, or last turn",
+        "Uncommitted changes, the main branch or the last turn",
     ),
     (
         "g / G",

@@ -11,7 +11,7 @@ const CLAMP_OVER = 220;
 export function SystemTag() {
   return (
     <span class="badge setting-tag" title={t("From the system folder")}>
-      {t("Base")}
+      {t("System")}
     </span>
   );
 }

@@ -1280,7 +1280,7 @@ fn definitions(tools: &[rmcp::model::Tool]) -> Vec<ToolDefinition> {
                     tool = %tool.name,
                     original_chars = original.chars().count(),
                     limit,
-                    "truncated MCP tool description"
+                    "MCP tool description shortened"
                 );
             }
             let mut input_schema = (*tool.input_schema).clone();

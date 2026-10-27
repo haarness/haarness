@@ -15,7 +15,7 @@ use serde_json::{Map, Number, Value};
 use thiserror::Error;
 use tree_sitter::{Node, Parser};
 
-const NON_LITERAL_ERROR: &str = "workflow meta must be statically analyzable (literal values only)";
+const NON_LITERAL_ERROR: &str = "a workflow's meta must be written out as plain values";
 const FLAGGED_BUILTINS: &[&str] = &[
     "fs",
     "child_process",
@@ -232,7 +232,7 @@ impl WorkflowCatalog {
                 self.invalid.push(plugin_invalid(
                     &manifest_path,
                     &plugin_name,
-                    "Plugin manifest workflows must be a string or array of strings",
+                    "A plugin's workflows entry must be a path or a list of paths",
                 ));
                 return self;
             }
@@ -274,7 +274,7 @@ impl WorkflowCatalog {
                 self.invalid.push(plugin_invalid(
                     &target,
                     &plugin_name,
-                    "Plugin workflow path resolves outside the plugin root",
+                    "A plugin workflow's path leads outside the plugin folder",
                 ));
                 continue;
             }
@@ -287,7 +287,7 @@ impl WorkflowCatalog {
                 self.invalid.push(plugin_invalid(
                     &canonical,
                     &plugin_name,
-                    "Plugin workflow files must use .js, .mjs, or .ts",
+                    "A plugin workflow must be a .js, .mjs or .ts file",
                 ));
                 continue;
             }
@@ -616,10 +616,10 @@ fn parse_source(
         .filter(|node| is_default_export(*node, source))
         .count();
     if default_exports > 1 {
-        return Err("Multiple default exports; cannot determine the workflow".into());
+        return Err("More than one default export: which one is the workflow?".into());
     }
     let meta_node = find_meta_node(root, source)
-        .ok_or_else(|| "Missing meta export (export const meta / export default)".to_owned())?;
+        .ok_or_else(|| "No meta export: add export const meta, or export default".to_owned())?;
     let mut value = extract_value(meta_node, source).map_err(|()| NON_LITERAL_ERROR.to_owned())?;
     normalize_phases(&mut value)?;
     let meta: WorkflowMeta =
@@ -695,7 +695,7 @@ fn validate_portable_source(root: Node<'_>, source: &str) -> Result<(), String> 
         if statement.kind() == "export_statement" {
             return Err(portable_issue(
                 statement,
-                "Portable workflows cannot export from the script body",
+                "A portable workflow exports only its meta",
             ));
         }
     }
@@ -711,7 +711,7 @@ fn validate_portable_source(root: Node<'_>, source: &str) -> Result<(), String> 
             "import_statement" | "import_require_clause" => {
                 return Err(portable_issue(
                     node,
-                    "Portable workflows cannot import modules",
+                    "A portable workflow cannot import modules",
                 ));
             }
             "call_expression"
@@ -725,7 +725,7 @@ fn validate_portable_source(root: Node<'_>, source: &str) -> Result<(), String> 
             {
                 return Err(portable_issue(
                     node,
-                    "Portable workflows cannot import modules",
+                    "A portable workflow cannot import modules",
                 ));
             }
             "identifier" | "shorthand_property_identifier" => {
@@ -748,7 +748,7 @@ fn validate_portable_source(root: Node<'_>, source: &str) -> Result<(), String> 
                 {
                     return Err(portable_issue(
                         node,
-                        "Portable workflows cannot access Math.random",
+                        "A portable workflow cannot use Math.random",
                     ));
                 }
             }
@@ -764,7 +764,7 @@ fn validate_portable_source(root: Node<'_>, source: &str) -> Result<(), String> 
                 {
                     return Err(portable_issue(
                         node,
-                        "Portable workflows cannot access Math.random",
+                        "A portable workflow cannot use Math.random",
                     ));
                 }
             }
@@ -1734,6 +1734,6 @@ return client.fetch(labels.fetch + prose)
         assert_eq!(result.workflows.len(), 1);
         assert_eq!(result.workflows[0].invocation, "review-kit:review");
         assert_eq!(result.invalid.len(), 1);
-        assert!(result.invalid[0].error.contains("outside the plugin root"));
+        assert!(result.invalid[0].error.contains("outside the plugin folder"));
     }
 }

@@ -246,7 +246,7 @@ export function Markdown(props: {
   const projectLabels = () => ({
     unnamed: t("Image"),
     outside: t("Outside this project"),
-    large: t("Too large to show"),
+    large: t("Too big to display"),
     failed: t("Not available"),
   });
   /** Reads end with the reply: one still waiting for a slot is never started. */

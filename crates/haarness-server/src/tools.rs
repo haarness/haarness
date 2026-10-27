@@ -1473,7 +1473,7 @@ async fn fetch_page(client: &reqwest::Client, url: url::Url, raw: bool) -> CoreR
         tracing::info!(
             host = url.host_str().unwrap_or_default(),
             limit = WEBFETCH_MAX_BYTES,
-            "webfetch response too large"
+            "the page is too large to fetch"
         );
         return Err(CoreError::Tool(
             "Response too large (over the 6 MiB webfetch limit)".into(),
@@ -1991,7 +1991,7 @@ impl Tool for WorkflowTool {
                     CoreError::Invalid("name is required for workflow create".into())
                 })?;
                 let source = input.get("source").and_then(Value::as_str).ok_or_else(|| {
-                    CoreError::Invalid("source is required for workflow create".into())
+                    CoreError::Invalid("workflow create needs a source".into())
                 })?;
                 if input.get("overwrite").and_then(Value::as_bool) == Some(true) {
                     return Err(CoreError::Conflict(
@@ -4123,7 +4123,7 @@ fn with_skipped(mut output: ToolOutput, skipped: Skipped, partial: bool) -> Tool
     let mut reasons = Vec::new();
     if skipped.secret > 0 {
         reasons.push(format!(
-            "{at_least}{} secret-named file{}",
+            "{at_least}{} file{} with a secret's name",
             skipped.secret,
             plural(skipped.secret)
         ));
@@ -7195,7 +7195,7 @@ export default workflow({
         };
         let none = |count: usize| {
             format!(
-                "No files found\n\n(skipped {count} secret-named file{})",
+                "No files found\n\n(skipped {count} file{} with a secret's name)",
                 if count == 1 { "" } else { "s" }
             )
         };
@@ -7221,7 +7221,7 @@ export default workflow({
             assert!(!grep.text.contains(secret), "{secret}: {}", grep.text);
         }
         assert!(
-            grep.text.ends_with("\n\n(skipped 4 secret-named files)"),
+            grep.text.ends_with("\n\n(skipped 4 files with a secret's name)"),
             "{}",
             grep.text
         );
@@ -7245,7 +7245,7 @@ export default workflow({
         .await;
         assert!(linked.text.contains("needle packages/pkg/index.ts"));
         assert!(!linked.text.contains("needle packages/pkg/prod.env"));
-        assert!(linked.text.ends_with("(skipped 1 secret-named file)"));
+        assert!(linked.text.ends_with("(skipped 1 file with a secret's name)"));
         // No match: still says what it skipped.
         let empty = run("grep", json!({"pattern":"absent"})).await;
         assert_eq!(empty.text, none(4));
@@ -7265,13 +7265,13 @@ export default workflow({
         for secret in [".env", "prod.env", "app.env.local", "notes.txt"] {
             assert!(!names.contains(&secret), "{secret}: {}", glob.text);
         }
-        assert!(glob.text.ends_with("\n\n(skipped 4 secret-named files)"));
+        assert!(glob.text.ends_with("\n\n(skipped 4 files with a secret's name)"));
         assert_eq!(glob.metadata["skipped"], 4);
         assert_eq!(run("glob", json!({"pattern":"*.env"})).await.text, none(2));
         let nested = run("glob", json!({"pattern":"node_modules/**/*.env"})).await;
         assert_eq!(
             nested.text,
-            "node_modules/pkg/e.env\n\n(skipped 1 secret-named file)"
+            "node_modules/pkg/e.env\n\n(skipped 1 file with a secret's name)"
         );
 
         let list = run("list", json!({"path":"."})).await;
@@ -7288,12 +7288,12 @@ export default workflow({
         for secret in [".env", "prod.env", "app.env.local", "notes.txt"] {
             assert!(!names.contains(&secret), "{secret}: {}", list.text);
         }
-        assert!(list.text.ends_with("\n\n(skipped 4 secret-named files)"));
+        assert!(list.text.ends_with("\n\n(skipped 4 files with a secret's name)"));
         assert_eq!(list.metadata["skipped"], 4);
         let package = run("list", json!({"path":"node_modules/pkg"})).await;
         assert_eq!(package.text, "e.env");
         let linked = run("list", json!({"path":"node_modules/@s/pkg"})).await;
-        assert_eq!(linked.text, "index.ts\n\n(skipped 1 secret-named file)");
+        assert_eq!(linked.text, "index.ts\n\n(skipped 1 file with a secret's name)");
         assert_eq!(
             run("list", json!({"path":"conf.env.d"})).await.text,
             none(1)
@@ -7398,7 +7398,7 @@ export default workflow({
         }
         assert!(
             glob.text
-                .ends_with("(skipped 1 secret-named file and 3 files a read rule denies)"),
+                .ends_with("(skipped 1 file with a secret's name and 3 files a read rule denies)"),
             "{}",
             glob.text
         );
@@ -7444,7 +7444,7 @@ export default workflow({
         assert!(
             result
                 .text
-                .ends_with("\n\n(skipped at least 1 secret-named file)"),
+                .ends_with("\n\n(skipped at least 1 file with a secret's name)"),
             "{}",
             &result.text[result.text.len().saturating_sub(300)..]
         );

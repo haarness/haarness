@@ -11304,7 +11304,7 @@ fn a_batch_step_auto_review_blocked_reads_as_its_decision() {
         .unwrap_or_else(|| panic!("{text}"));
     assert!(step.contains("⊘"), "{step}");
     assert!(
-        step.contains("Blocked by Auto review: It uploads a key."),
+        step.contains("Stopped by Auto's reviewer: It uploads a key."),
         "{step}"
     );
     assert!(!text.contains("1 failed"), "{text}");
@@ -11361,7 +11361,7 @@ fn auto_reviews_note_its_block_and_a_slow_review_read_quietly() {
         .find(|line| line.contains("⊘ bash curl"))
         .unwrap_or_else(|| panic!("{text}"));
     assert!(
-        row.contains("  Blocked by Auto review: It uploads your SSH key."),
+        row.contains("  Stopped by Auto's reviewer: It uploads your SSH key."),
         "{row}"
     );
     assert!(!text.contains("Do not try"), "{text}");
@@ -19392,7 +19392,7 @@ async fn deferred_queue_events_are_scoped_and_never_roll_back_newer_edits() {
     assert_eq!(app.input_queue.items[0].text, "latest");
     let rendered = frame_text(&app, (100, 30));
     assert!(
-        rendered.contains("Queue paused — send when ready"),
+        rendered.contains("Queue on hold · send when you're ready"),
         "{rendered}"
     );
     assert!(rendered.contains("1. latest"), "{rendered}");
@@ -19511,7 +19511,7 @@ fn queue_strip_header_names_the_working_paused_and_editing_states() {
     app.active_turn = None;
     let paused = frame_text(&app, (100, 30));
     assert!(
-        paused.contains("▎ Queue paused — send when ready"),
+        paused.contains("▎ Queue on hold · send when you're ready"),
         "{paused}"
     );
     assert!(!paused.contains("Queued ·"), "{paused}");
@@ -19696,7 +19696,7 @@ async fn saving_a_queued_edit_keeps_its_place_and_sends_its_attachments() {
     assert_eq!(app.attachments, ["/tmp/draft.png"]);
     assert_eq!(app.notice, "Queued message saved");
     let text = frame_text(&app, (100, 30));
-    assert!(text.contains("Queue paused — send when ready"), "{text}");
+    assert!(text.contains("Queue on hold · send when you're ready"), "{text}");
     assert!(text.contains("2. second, with more"), "{text}");
 }
 
@@ -22770,7 +22770,7 @@ fn review_notes_fit_the_card_in_every_direction_without_bidi_marks() {
             status: PermissionReviewStatus::Failed,
             risk: None,
             rule: None,
-            rationale: Some("It could not decide (HTTP 500).".into()),
+            rationale: Some("The review failed (HTTP 500).".into()),
             reason: Some(ReviewReason::Error {
                 detail: "HTTP 500".into(),
             }),
@@ -22841,7 +22841,7 @@ fn review_notes_fit_the_card_in_every_direction_without_bidi_marks() {
                     .join(" ");
                 if language == crate::locale::Language::English && width == 100 {
                     let expected = [
-                        "Auto review unavailable: It could not decide (HTTP 500).",
+                        "Auto review unavailable: The review failed (HTTP 500).",
                         "This deletes /tmp/cache, outside the project, and your messages do not name it.",
                         "Auto review · Sharedstate: It pushes to main. Not requested.",
                         "outside the project, and your messages do not name it.",

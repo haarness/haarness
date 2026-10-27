@@ -1084,7 +1084,7 @@ class Fake {
   }
 }
 const fakeDocument = { createElement: (tag: string): Fake => new Fake(fakeDocument, tag) };
-const labels = { unnamed: "Image", outside: "Outside this project", large: "Too large to show", failed: "Not available" };
+const labels = { unnamed: "Image", outside: "Outside this project", large: "Too big to display", failed: "Not available" };
 const hold = (images: Fake[], shown: (path: string) => ShownImage | undefined, written?: Map<Fake, string>) =>
   holdProjectImages(
     { querySelectorAll: () => images } as unknown as ParentNode,
@@ -1152,7 +1152,7 @@ test("a reply's path image becomes the image its project showed, or a placeholde
 test("a remembered note shows on the placeholder at once", () => {
   const image = new Fake(fakeDocument, "img", { src: "big.png", alt: "Big" });
   hold([image], () => ({ note: "large" }));
-  assert.deepEqual(image.replacement!.children.map((child) => child.textContent), ["Big", "Too large to show"]);
+  assert.deepEqual(image.replacement!.children.map((child) => child.textContent), ["Big", "Too big to display"]);
   // Still with its path, so a later change reads it again.
   assert.equal(image.replacement!.dataset.projectPath, "big.png");
 });

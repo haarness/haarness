@@ -14,7 +14,7 @@ pub const BLOCKED_RECURRENCE_THRESHOLD: u32 = 3;
 pub fn new_goal_state(goal: &str, token_budget: Option<u64>) -> CoreResult<GoalState> {
     let goal = goal.trim();
     if goal.is_empty() {
-        return Err(CoreError::Invalid("goal text is empty".into()));
+        return Err(CoreError::Invalid("a goal needs some text".into()));
     }
     if token_budget == Some(0) {
         return Err(CoreError::Invalid(
@@ -457,7 +457,7 @@ fn xml_escape(value: &str) -> String {
 #[must_use]
 pub fn goal_line(state: Option<&GoalState>) -> String {
     let Some(state) = state.filter(|state| state.status != GoalStatus::Cleared) else {
-        return "No active goal. Set one with /goal <condition>.".into();
+        return "There is no goal yet. Start one with /goal <what done looks like>.".into();
     };
     let tokens = match (state.tokens_used, state.token_budget) {
         (used, Some(budget)) => format!("{used} / {budget} tokens"),
@@ -576,7 +576,7 @@ pub fn apply_goal_action(
             state.status = GoalStatus::Complete;
             state.awaiting_user_input = false;
             state.last_verdict = Some(GoalVerdict::Done);
-            state.last_reason = Some("marked complete by user".into());
+            state.last_reason = Some("the person marked it done".into());
             state.updated_at = Utc::now();
             let message = goal_line(Some(&state));
             (Some(state), message)
@@ -644,7 +644,7 @@ mod tests {
         let (next, _, _) = apply_goal_action(Some(state), GoalActionRequest::Complete).unwrap();
         let next = next.unwrap();
         assert_eq!(next.status, GoalStatus::Complete);
-        assert_eq!(next.last_reason.as_deref(), Some("marked complete by user"));
+        assert_eq!(next.last_reason.as_deref(), Some("the person marked it done"));
     }
 
     #[test]

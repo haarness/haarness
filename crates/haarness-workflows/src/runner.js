@@ -506,10 +506,10 @@ function validatePortable(body) {
     const propertyName = body[before] === "." || body[after] === ":"
     const methodName = body[after] === "(" && (body[before] === "{" || body[before] === ",")
     if (!propertyName && identifier.name === "import") {
-      throw new Error("Portable workflows cannot import modules")
+      throw new Error("A portable workflow cannot import modules")
     }
     if (!propertyName && identifier.name === "export") {
-      throw new Error("Portable workflows cannot export from the script body")
+      throw new Error("A portable workflow exports only its meta")
     }
     if (!propertyName && !methodName && portableBlocked.has(identifier.name)) {
       throw new Error(`Portable workflow global ${identifier.name} is unavailable`)
@@ -521,7 +521,7 @@ function validatePortable(body) {
     if (left.name === "Math" && right.name === "random") {
       const separator = body.slice(left.end, right.start).replace(/\s/g, "")
       if (separator === ".") {
-        throw new Error("Portable workflows cannot access Math.random")
+        throw new Error("A portable workflow cannot use Math.random")
       }
     }
   }

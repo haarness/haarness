@@ -36,7 +36,7 @@ export function ProviderForm(props: { close: () => void }) {
     if (!/^[a-z0-9_-]+$/.test(id))
       throw Error(
         t(
-          "Use lowercase letters, numbers, hyphens, or underscores for the provider ID.",
+          "A provider ID may only use lowercase letters, digits, - and _.",
         ),
       );
     if (

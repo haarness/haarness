@@ -4121,11 +4121,11 @@ test("Auto approvals allow once, inherit to agents, preserve Review and survive 
   const command =
     '!tool bash {"command":"printf auto-once-proof > auto-once.txt"}';
   await start(parent.id, command);
-  // Allow once + Auto waits in the Always menu, so the card's answers fit
+  // Allow once, then Auto waits in the Always menu, so the card's answers fit
   // one line: Deny, Always allow, Allow once.
   await page.getByRole("button", { name: "Always allow", exact: true }).click();
   await page
-    .getByRole("menuitem", { name: "Allow once + Auto", exact: true })
+    .getByRole("menuitem", { name: "Allow once, then Auto", exact: true })
     .click();
   await finished();
   expect(await readFile(join(workspace, "auto-once.txt"), "utf8")).toBe(
@@ -4312,7 +4312,7 @@ test("Auto's reviewer notes what it leaves to you, blocks with a reason and says
   await start("printf blocked > review-blocked.txt", "deny");
   await settled();
   expect(await client.listPermissions()).toHaveLength(0);
-  const row = page.locator(".tool-call").filter({ hasText: "Blocked by Auto review" }).last();
+  const row = page.locator(".tool-call").filter({ hasText: "Stopped by Auto's reviewer" }).last();
   await expect(row).toBeVisible();
   await expect(row).toHaveAttribute("data-status", "failed");
   await row.locator("summary").click();
@@ -4429,7 +4429,7 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
     });
   await still();
   const rest = await bottom();
-  // Its answers keep their places as Allow once + Auto leaves the Always
+  // Its answers keep their places as Allow once, then Auto leaves the Always
   // menu, and the keyboard stays on Allow once; the card is the same
   // element, updated.
   const deny = card.getByRole("button", { name: "Deny", exact: true });
@@ -4443,7 +4443,7 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
     node.dataset.probe = "kept";
   });
   await always.click();
-  await expect(page.getByRole("menuitem", { name: "Allow once + Auto", exact: true })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Allow once, then Auto", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await once.focus();
   await client.setApprovalMode(thread.id, { mode: "auto" });
@@ -4454,7 +4454,7 @@ test("Auto's review cues: never for quick reviews, at once on a switch, and on a
   expect(await across()).toEqual(places);
   await expect(once).toBeFocused();
   await always.click();
-  await expect(page.getByRole("menuitem", { name: "Allow once + Auto", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("menuitem", { name: "Allow once, then Auto", exact: true })).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(card).toHaveAttribute("data-probe", "kept");
   await card.screenshot({ path: test.info().outputPath("auto-review-deciding-light.png") });
@@ -4538,7 +4538,7 @@ test("Auto from a child view leaves its parent and siblings in Review", async ()
     .click();
   await page.getByRole("button", { name: "Always allow", exact: true }).click();
   await page
-    .getByRole("menuitem", { name: "Allow once + Auto", exact: true })
+    .getByRole("menuitem", { name: "Allow once, then Auto", exact: true })
     .click();
   await expect
     .poll(() =>
@@ -13025,7 +13025,7 @@ test("deferred input queue edits in the composer, reorders, reconnects and stays
   await composer.fill("preserve my unsent draft");
   await row("documentation later").getByRole("button", { name: "Edit queued message", exact: true }).click();
   await expect(composer).toHaveValue("documentation later");
-  await expect(queue.locator("header")).toContainText("Editing — sending saves it in place");
+  await expect(queue.locator("header")).toContainText("Editing · send to save your changes");
   await expect(page.getByRole("button", { name: "Save queued message", exact: true })).toBeVisible();
   // Esc leaves the edit and never stops the running work.
   await composer.press("Escape");
@@ -13069,7 +13069,7 @@ test("deferred input queue edits in the composer, reorders, reconnects and stays
   await composer.fill("preserve my unsent draft");
   await client.interruptThreadTree(id);
   await expect.poll(async () => (await client.activeTurn(id))).toBeNull();
-  await expect(queue.locator("header")).toContainText("Queue paused — send when ready");
+  await expect(queue.locator("header")).toContainText("Queue on hold · send when you're ready");
   await expect(page.getByRole("button", { name: "Allow once", exact: true })).toHaveCount(0);
   await page.screenshot({ path: "test-results/deferred-input-queue.png" });
   await row("edited documentation").getByRole("button", { name: "Send now", exact: true }).click();
@@ -13133,7 +13133,7 @@ test("Stop answers steering the agent has not read yet and leaves the queue paus
   // The continuation does not drain the queue Stop paused.
   await page.waitForTimeout(800);
   expect((await client.inputQueue(id)).items.map((item) => item.text)).toEqual(["queued until I say so"]);
-  await expect(queue.locator("header")).toContainText("Queue paused — send when ready");
+  await expect(queue.locator("header")).toContainText("Queue on hold · send when you're ready");
   // A new message runs first, then the paused queue continues.
   await send("something new first");
   await expect.poll(async () => (await client.inputQueue(id)).items.length).toBe(0);

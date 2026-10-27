@@ -783,7 +783,7 @@ async fn a_call_auto_review_blocked_shows_its_reason_live_from_a_subagent_and_on
         message["method"].as_str() == Some("session/update")
             && message["params"]["update"]["sessionUpdate"] == "tool_call_update"
             && message["params"]["update"]["content"][0]["content"]["text"]
-                == "Blocked by Auto review: Test verdict: deny."
+                == "Stopped by Auto's reviewer: Test verdict: deny."
     };
     // The text written for the model reaches the editor only in the model's
     // own words (the echo provider repeats it, a task returns its child's

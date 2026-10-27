@@ -568,7 +568,7 @@ fn normalize_workflow_arguments(
             None => Ok(Some(json!({}))),
             Some(value @ Value::Object(_)) => Ok(Some(value)),
             Some(Value::Array(_)) => Err(CoreError::Invalid(
-                "native workflow arguments must be a JSON object".into(),
+                "workflow arguments must be a JSON object".into(),
             )),
             Some(Value::String(raw)) => Ok(Some(json!({"input": raw}))),
             Some(value) => Ok(Some(json!({"input": value}))),

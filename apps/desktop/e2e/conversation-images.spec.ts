@@ -666,7 +666,7 @@ test("an image whose header hides its size is measured by the window before deco
   const comments = Buffer.concat(Array.from({ length: 1100 }, () => Buffer.from([0xff, 0xfe, 0x00, 0x02])));
   await writeFile(join(workspace, "out/huge.jpg"), Buffer.concat([bytes.subarray(0, 2), comments, bytes.subarray(2)]));
   const message = await reply("![Huge](out/huge.jpg)");
-  await expect(message.locator(".project-image .project-image-note")).toHaveText("Too large to show");
+  await expect(message.locator(".project-image .project-image-note")).toHaveText("Too big to display");
   await expect(message.locator("img")).toHaveCount(0);
   expect(errors).toEqual([]);
 });

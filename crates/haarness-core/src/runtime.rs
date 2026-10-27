@@ -7155,7 +7155,7 @@ async fn script_for_person(
 
 /// Why a command whose script is not what it was when its card was shown
 /// did not run, for the model. Neutral: who answered may not have read it
-/// (`haarness run` at a terminal, Allow once + Auto), and a slow re-read
+/// (`haarness run` at a terminal, Allow once, then Auto), and a slow re-read
 /// counts too.
 fn script_changed(path: &str, workspace: &Path) -> String {
     let path = Path::new(path);
@@ -9410,7 +9410,7 @@ impl RunnerTask {
                     let invalid = if !text.trim().is_empty() {
                         Some("provider returned plain text for a structured-output turn".to_owned())
                     } else if structured_output.is_none() && calls.is_empty() {
-                        Some("model did not produce structured output".to_owned())
+                        Some("the model's answer was not in the expected format".to_owned())
                     } else {
                         structured_output.as_ref().and_then(|value| {
                             crate::tool_validation::validate_arguments(
@@ -10222,7 +10222,7 @@ impl RunnerTask {
             .repository
             .goal_state(self.thread.id)
             .await?
-            .ok_or_else(|| CoreError::Tool("No active goal to update.".into()))?;
+            .ok_or_else(|| CoreError::Tool("There is no goal to update.".into()))?;
         match crate::goal::apply_model_goal_update(state, request)? {
             crate::goal::ModelGoalUpdate::Applied {
                 state,
@@ -10294,7 +10294,7 @@ impl RunnerTask {
             .goal_state(self.thread.id)
             .await?
             .filter(|state| state.status == GoalStatus::Active)
-            .ok_or_else(|| CoreError::Tool("No active goal to attach criteria to.".into()))?;
+            .ok_or_else(|| CoreError::Tool("There is no goal to add criteria to.".into()))?;
         let proposed_goal_id = state.goal_id.clone();
         let prompt = arguments
             .get("prompt")
@@ -12182,7 +12182,7 @@ impl RunnerTask {
                         Err(CoreError::Cancelled) => Ok(task.envelope(
                             &task.info(),
                             "cancelled",
-                            "This subagent was stopped intentionally. Do not relaunch or retry it.",
+                            "The person stopped this subagent on purpose. Do not start it again or retry it.",
                         )),
                         Err(error) if task.notice.is_some() => Err(CoreError::Tool(task.envelope(&task.info(), "error", &user_facing_error(&error)))),
                         Err(error) => Err(error),
@@ -12231,7 +12231,7 @@ impl RunnerTask {
                 Ok(text) => ("completed", text),
                 Err(CoreError::Cancelled) => (
                     "cancelled",
-                    "This subagent was stopped intentionally. Do not relaunch or retry it.".into(),
+                    "The person stopped this subagent on purpose. Do not start it again or retry it.".into(),
                 ),
                 Err(error) => ("error", user_facing_error(&error)),
             };

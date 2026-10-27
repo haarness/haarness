@@ -440,7 +440,7 @@ export function createBrowserHost(
       publish(e);
       return state(e);
     }
-    if (e) await dispose(e, "Browser opened in another window");
+    if (e) await dispose(e, "The browser is open in another window");
     let draftID: string | undefined;
     if (!thread) {
       const stored = data().values["browser-draft:" + connection];

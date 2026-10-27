@@ -67,7 +67,7 @@ pub fn set(
         !name.is_empty() && name.len() <= 256,
         "Invalid capability name"
     );
-    ensure!(!local || trust, "Project configuration is disabled");
+    ensure!(!local || trust, "Project configuration is turned off");
     let path = if local {
         workspace.join(".haarness/capabilities.json")
     } else {

@@ -234,9 +234,9 @@ export function InputQueue(props: { queue: InputQueueState; working: boolean }) 
   });
   const header = () =>
     q.editing()
-      ? t("Editing — sending saves it in place")
+      ? t("Editing · send to save your changes")
       : idle()
-        ? t("Queue paused — send when ready")
+        ? t("Queue on hold · send when you're ready")
         : t("Queued");
   return <Show when={q.supported() && (items().length || q.editing() || q.error())}>
     <section

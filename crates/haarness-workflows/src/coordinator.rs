@@ -807,14 +807,14 @@ impl WorkflowCoordinator {
         let project_source = source_path.is_some_and(|path| catalog.is_project_path(path));
         if project_source && dialect == ProtocolDialect::Native && !self.project_trusted {
             return Err(CoreError::PermissionDenied(format!(
-                "native project workflow {invocation} is disabled because project configuration is disabled"
+                "native project workflow {invocation} is disabled because project configuration is turned off"
             )));
         }
         // A chat's own workflow is trusted as inline source is.
         let chat_source = source_path.is_some_and(|path| catalog.is_chat_path(path));
         if chat_source && dialect == ProtocolDialect::Native && !self.project_trusted {
             return Err(CoreError::PermissionDenied(format!(
-                "native workflow {invocation} in this chat's folder is disabled because project configuration is disabled; use claude-portable source"
+                "native workflow {invocation} in this chat's folder is disabled because project configuration is turned off; use claude-portable source"
             )));
         }
         if source_path.is_none() && dialect == ProtocolDialect::Native && !self.project_trusted {
@@ -1614,7 +1614,7 @@ pub(crate) fn workflow_args(
     }
     let input = input.unwrap_or_else(|| json!({}));
     let args = input.as_object().ok_or_else(|| {
-        CoreError::Invalid("native workflow arguments must be a JSON object".into())
+        CoreError::Invalid("workflow arguments must be a JSON object".into())
     })?;
     let mut result = serde_json::Map::new();
     for (key, definition) in &definition.meta.arguments {

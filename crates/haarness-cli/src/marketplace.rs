@@ -692,7 +692,7 @@ pub async fn install(
         "Scope must be local or global"
     );
     let local = input["scope"] == "local";
-    ensure!(!local || trust, "Project configuration is disabled");
+    ensure!(!local || trust, "Project configuration is turned off");
     let root = if local {
         workspace.join(".haarness")
     } else {

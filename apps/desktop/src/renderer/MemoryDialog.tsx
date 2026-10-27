@@ -158,7 +158,7 @@ export function MemoryDialog(props: { close: () => void }) {
                         indexLimit > 1000
                       )
                         throw Error(
-                          t("Index limit must be between 1 and 1000."),
+                          t("The index limit is a number from 1 to 1000."),
                         );
                       accept(
                         await request<Status>({

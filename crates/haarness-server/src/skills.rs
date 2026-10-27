@@ -113,7 +113,7 @@ impl SkillRegistry for FilesystemSkillRegistry {
             .ok_or_else(|| CoreError::NotFound(format!("skill {name}")))?;
         if !trusted {
             return Err(CoreError::PermissionDenied(format!(
-                "project skill {name} is unavailable because project configuration is disabled"
+                "project skill {name} is unavailable because project configuration is turned off"
             )));
         }
         let canonical = self.describe(name).await?.name;
