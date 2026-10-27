@@ -50,8 +50,8 @@ pub fn data_folder() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    // Upstream PR #1145's rule, for the folder this crate writes previews and
-    // tool output to: a test never resolves the person's own data folder.
+    // The folder this crate writes previews and tool output to: a test never
+    // resolves the person's own data folder.
     #[test]
     fn a_test_never_resolves_the_persons_own_data_folder() {
         assert!(test_binary());

@@ -23,7 +23,7 @@ pub(crate) const ACTIONS: &[(&str, &str, &str)] = &[
     ("stash_save", "Save draft to stash", "ctrl+s"),
     ("editor", "External editor", "alt+e"),
     ("new", "New session", "alt+n"),
-    // Upstream's message keys. Alt with an arrow reaches the TUI in every
+    // Message keys. Alt with an arrow reaches the TUI in every
     // terminal, macOS Terminal's ESC-prefixed form included (`input::meta`),
     // and Alt+Left/Right stay word motions.
     ("messages_previous", "Previous message", "alt+up"),

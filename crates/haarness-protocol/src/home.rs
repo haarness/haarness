@@ -14,7 +14,7 @@ pub fn home_dir() -> Option<PathBuf> {
 
 /// Whether this process is a test binary that cargo built
 /// (`target/<profile>/deps/<crate>-<16 hex digits>`). Such a run must never
-/// write into the folders of the person running it (Upstream PR #1145): where
+/// write into the folders of the person running it: where
 /// Haarness would otherwise fall back to the home's data or cache folder, a
 /// test binary gets [`test_folder`] instead.
 #[must_use]

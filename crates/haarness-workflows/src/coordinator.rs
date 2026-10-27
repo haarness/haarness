@@ -1748,8 +1748,8 @@ fn host_error(error: HostError) -> CoreError {
 
 #[cfg(test)]
 mod lease_tests {
-    // Upstream PR #1145's rule: a test never leaves workflow leases in the
-    // cache of the person running it.
+    // A test never leaves workflow leases in the cache of the person running
+    // it.
     #[test]
     fn a_test_never_keeps_leases_in_the_persons_cache() {
         if std::env::var_os("HAARNESS_DATA_DIR").is_some()

@@ -20,8 +20,8 @@ use haarness_protocol::ThreadId;
 
 use super::{App, ToastVariant};
 
-/// Matches Desktop's `COMPLETION_GRACE_MS` and Upstream, which measured the
-/// next turn starting 31–192 ms after the previous one ended.
+/// Matches Desktop's `COMPLETION_GRACE_MS`: the next queued turn starts
+/// 31–192 ms after the previous one ends.
 pub const COMPLETION_GRACE: Duration = Duration::from_millis(500);
 
 /// Work at least this long earns a "finished" banner; quick turns stay quiet

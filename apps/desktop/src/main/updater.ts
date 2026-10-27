@@ -37,7 +37,7 @@ export class UpdateError extends Error {
 
 /** The first check waits until startup has settled. */
 export const FIRST_CHECK_MS = 10_000;
-/** Then one check every half hour (as Upstream Desktop does). */
+/** Then one check every half hour. */
 export const CHECK_EVERY_MS = 30 * 60_000;
 /** After a failed check or download: one minute, five, fifteen, then the half hour. */
 export const RETRY_AFTER_MS = [60_000, 5 * 60_000, 15 * 60_000];

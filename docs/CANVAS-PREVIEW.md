@@ -19,7 +19,6 @@ HTML runs in opaque sandboxed frames, without the app's storage, Electron bridge
 
 Desktop opts in with `tools.preview=true` on turns and commands; queued input preserves its `preview` capability through storage and restart. Clients that omit it retain their existing tool catalog and prompt. The server advertises `files.preview.v1`. TypeScript and Python SDKs expose `previewVersion`/`preview_version`, `currentPreview`/`current_preview` and `restorePreview`/`restore_preview` for authenticated, workspace-scoped version access.
 
-The Canvas behavior and sandbox are adapted from the earlier design and its fixes. The npm CDN replaces the internal mirror. The separate internal email service is not part of this port. The ported helper's MIT notice ships with Desktop as `upstream-preview-license.txt`.
 
 ## Verification
 

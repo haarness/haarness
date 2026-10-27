@@ -1301,8 +1301,8 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
-/// The footer left in the shell after quitting, as Upstream leaves one: which
-/// chat this was and the exact command that reopens it.
+/// The footer left in the shell after quitting: which chat this was and the
+/// exact command that reopens it.
 fn exit_summary(
     language: crate::locale::Language,
     title: &str,
