@@ -545,7 +545,7 @@ mod tests {
                     executable_fingerprint: None,
                     access_fingerprint: None,
                     trace_endpoint: None,
-                    base_config_dir: None,
+                    system_config_dir: None,
                 },
                 base,
             }),

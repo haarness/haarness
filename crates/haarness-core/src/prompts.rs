@@ -83,17 +83,17 @@ impl PromptName {
     #[must_use]
     pub fn about(self) -> &'static str {
         match self {
-            Self::System => "Main instructions of the build and general agents",
-            Self::Plan => "Main instructions of the plan agent",
-            Self::Review => "Main instructions of the review agent",
-            Self::Explore => "Main instructions of the explore agent",
-            Self::Compaction => "System prompt that summarizes a long conversation",
-            Self::Title => "System prompt that names a chat",
-            Self::Preview => "How to use the preview pane, sent with the preview tool",
-            Self::Ultracode => "Standing guidance of an Ultracode turn",
-            Self::MaxSteps => "Notice on an agent's last allowed step",
-            Self::Goal => "Standing instructions of a goal turn",
-            Self::AutoReview => "System prompt of Auto's reviewer",
+            Self::System => "Instructions for the build and general agents",
+            Self::Plan => "Instructions for the plan agent",
+            Self::Review => "Instructions for the review agent",
+            Self::Explore => "Instructions for the explore agent",
+            Self::Compaction => "Instructions for summarizing a long conversation",
+            Self::Title => "Instructions for naming a chat",
+            Self::Preview => "Preview pane guidance sent with the preview tool",
+            Self::Ultracode => "Guidance added to every Ultracode turn",
+            Self::MaxSteps => "Message sent when an agent reaches its step limit",
+            Self::Goal => "Guidance added to every goal turn",
+            Self::AutoReview => "Instructions for Auto's reviewer model",
         }
     }
 
@@ -202,12 +202,12 @@ impl PromptMode {
 pub struct PromptFile {
     pub name: PromptName,
     pub mode: PromptMode,
-    /// `based-on`: the [`prompt_hash`] of the built-in text the file was
+    /// `written-from`: the [`prompt_hash`] of the built-in text the file was
     /// written against.
-    pub based_on: Option<String>,
+    pub written_from: Option<String>,
     pub body: String,
     pub path: PathBuf,
-    /// The folder it is in: `base` or `global`.
+    /// The folder it is in: `system` or `global`.
     pub source: String,
 }
 
@@ -216,13 +216,13 @@ impl PromptFile {
     /// it. A stale file still applies.
     #[must_use]
     pub fn is_stale(&self) -> bool {
-        self.based_on
+        self.written_from
             .as_deref()
-            .is_some_and(|based_on| based_on != prompt_hash(&self.name.builtin()))
+            .is_some_and(|from| from != prompt_hash(&self.name.builtin()))
     }
 }
 
-/// The value a prompt file's `based-on` records: a short hash of a text.
+/// The value a prompt file's `written-from` records: a short hash of a text.
 #[must_use]
 pub fn prompt_hash(text: &str) -> String {
     let digest = Sha256::digest(text.as_bytes());
@@ -334,10 +334,10 @@ mod tests {
         PromptFile {
             name,
             mode,
-            based_on: None,
+            written_from: None,
             body: body.into(),
             path: PathBuf::from(format!("/team/prompts/{}.md", name.as_str())),
-            source: "base".into(),
+            source: "system".into(),
         }
     }
 
@@ -421,13 +421,13 @@ mod tests {
         let text = prompts.text(PromptName::System);
         assert!(text.starts_with("You are Acme's reviewer. Explain each finding.\n\n"));
         assert!(text.ends_with(SAFETY_BASELINE));
-        // An ejected prompt keeps its sandbox line: it is not repeated.
-        let ejected = Prompts::new(vec![file(
+        // A customized prompt keeps its sandbox line: it is not repeated.
+        let customized = Prompts::new(vec![file(
             PromptName::System,
             PromptMode::Replace,
             &PromptName::System.builtin(),
         )]);
-        let text = ejected.text(PromptName::System);
+        let text = customized.text(PromptName::System);
         assert_eq!(
             text.matches("This permission system is not an OS sandbox.")
                 .count(),
@@ -486,9 +486,9 @@ mod tests {
     fn a_file_written_against_another_builtin_text_is_stale() {
         let mut current = file(PromptName::Explore, PromptMode::Replace, "x");
         assert!(!current.is_stale());
-        current.based_on = Some(prompt_hash(&PromptName::Explore.builtin()));
+        current.written_from = Some(prompt_hash(&PromptName::Explore.builtin()));
         assert!(!current.is_stale());
-        current.based_on = Some("sha256:000000000000".into());
+        current.written_from = Some("sha256:000000000000".into());
         assert!(current.is_stale());
     }
 }

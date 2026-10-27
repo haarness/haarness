@@ -21,7 +21,7 @@ pub use btw::*;
 pub use cloud::*;
 pub use goal::*;
 pub use home::{
-    BASE_CONFIG_DIR_ENV, base_config_dir, base_config_dir_from, base_config_dir_problem, home_dir,
+    SYSTEM_CONFIG_DIR_ENV, system_config_dir, system_config_dir_from, system_config_dir_problem, home_dir,
     test_binary, test_binary_path, test_folder,
 };
 pub use input::*;
@@ -1017,7 +1017,7 @@ pub struct PluginInfo {
     pub spec: String,
     /// `haarness` for installed bundles; `haarness-global` or
     /// `haarness-local` for directly loaded Haarness plugin directories, and
-    /// `haarness-base` for those of the base configuration folder, which
+    /// `haarness-system` for those of the system configuration folder, which
     /// Haarness does not change (`managed` is false).
     pub source: String,
     #[serde(default)]
@@ -1056,8 +1056,8 @@ pub struct McpServerInfo {
     pub transport: String,
     pub status: String,
     pub detail: Option<String>,
-    /// `base` for a server of the base configuration folder
-    /// (`HAARNESS_BASE_CONFIG_DIR`), which Haarness lists but never changes:
+    /// `system` for a server of the system configuration folder
+    /// (`HAARNESS_SYSTEM_CONFIG_DIR`), which Haarness lists but never changes:
     /// an edit saves the person's own copy. Absent for every other server and
     /// from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]

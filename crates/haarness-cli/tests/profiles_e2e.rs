@@ -414,28 +414,28 @@ async fn real_cloud_upload_discovery_download_restore_auth_and_restart_persisten
         args.extend_from_slice(tail);
         fixture.ok("target", &args)
     };
-    let uploaded = remote(&["cloud-push", file.to_str().unwrap()]);
+    let uploaded = remote(&["push", file.to_str().unwrap()]);
     let id = uploaded["id"].as_str().unwrap().to_owned();
-    let listed = remote(&["cloud-list", "--query", "ENGINEERING"]);
+    let listed = remote(&["search", "--query", "ENGINEERING"]);
     assert_eq!(listed[0]["id"], id);
     assert!(
-        remote(&["cloud-list", "--offset", "1"])
+        remote(&["search", "--offset", "1"])
             .as_array()
             .unwrap()
             .is_empty()
     );
-    assert_eq!(remote(&["cloud-get", &id])["sha256"], uploaded["sha256"]);
+    assert_eq!(remote(&["info", &id])["sha256"], uploaded["sha256"]);
     let downloaded = fixture.root.join("downloaded.zip");
     remote(&[
-        "cloud-download",
+        "download",
         &id,
         "--output",
         downloaded.to_str().unwrap(),
     ]);
     assert_eq!(fs::read(&downloaded).unwrap(), fs::read(&file).unwrap());
-    remote(&["cloud-restore", &id, "--dry-run"]);
+    remote(&["pull", &id, "--dry-run"]);
     assert!(!fixture.root.join("target/config/haarness.json").exists());
-    remote(&["cloud-restore", &id]);
+    remote(&["pull", &id]);
     assert_eq!(
         fs::read(fixture.root.join("target/config/haarness.json")).unwrap(),
         fs::read(fixture.root.join("source/config/haarness.json")).unwrap()
@@ -460,9 +460,9 @@ async fn real_cloud_upload_discovery_download_restore_auth_and_restart_persisten
         "Second setup",
         "--output",
         second.to_str().unwrap(),
-        "--cloud",
+        "--push",
     ]);
-    assert_ne!(saved["cloud"]["id"], id);
+    assert_ne!(saved["pushed"]["id"], id);
     fixture.stop(&url, &token).await;
     let url = fixture.start(port, &token).await;
     let listed = fixture.ok(
@@ -473,7 +473,7 @@ async fn real_cloud_upload_discovery_download_restore_auth_and_restart_persisten
             &url,
             "--token",
             &token,
-            "cloud-list",
+            "search",
             "--json",
         ],
     );
@@ -486,7 +486,7 @@ async fn real_cloud_upload_discovery_download_restore_auth_and_restart_persisten
             &url,
             "--token",
             &token,
-            "cloud-delete",
+            "delete",
             &id,
             "--json",
         ],
@@ -509,7 +509,7 @@ async fn real_cloud_upload_discovery_download_restore_auth_and_restart_persisten
             &url,
             "--token",
             "wrong-token-fixture",
-            "cloud-list",
+            "search",
         ],
     );
     assert!(!denied.status.success());
@@ -522,7 +522,7 @@ async fn real_cloud_upload_discovery_download_restore_auth_and_restart_persisten
             "http://example.com",
             "--token",
             &token,
-            "cloud-list",
+            "search",
         ],
     );
     assert!(!insecure.status.success());

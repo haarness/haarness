@@ -71,7 +71,7 @@ The management commands:
 /workflow delete 019...
 ```
 
-Ultracode can be enabled durably with `/ultracode` or `/reasoning ultracode`.
+Ultracode can be enabled durably with `/ultracode`.
 A standalone, case-insensitive `ultracode` keyword in an ordinary request
 enables it for that turn only; identifier lookalikes and the `/ultracode`
 command itself are deliberately excluded from keyword detection.

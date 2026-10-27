@@ -63,7 +63,7 @@ enum Command {
         force: bool,
         /// Also upload the saved archive to the configured catalog.
         #[arg(long)]
-        cloud: bool,
+        push: bool,
     },
     /// Validate an archive and show its manifest without restoring anything.
     Inspect {
@@ -83,12 +83,12 @@ enum Command {
         dry_run: bool,
     },
     /// Upload a validated archive. Each upload receives a new immutable ID.
-    CloudPush {
+    Push {
         /// Profile archive (.profile.zip).
         file: PathBuf,
     },
     /// Discover stored profiles by name, newest first.
-    CloudList {
+    Search {
         /// Only profiles whose name contains this text.
         #[arg(long, default_value = "")]
         query: String,
@@ -100,12 +100,12 @@ enum Command {
         limit: usize,
     },
     /// Inspect a stored profile's metadata.
-    CloudGet {
+    Info {
         /// Stored profile id.
         id: Uuid,
     },
     /// Download and validate an archive without restoring it.
-    CloudDownload {
+    Download {
         /// Stored profile id.
         id: Uuid,
         /// Archive file to write.
@@ -116,7 +116,7 @@ enum Command {
         force: bool,
     },
     /// Download and restore a profile using the same local safety checks.
-    CloudRestore {
+    Pull {
         /// Stored profile id.
         id: Uuid,
         /// Overwrite files that already exist.
@@ -128,7 +128,7 @@ enum Command {
         dry_run: bool,
     },
     /// Delete one archive from the catalog.
-    CloudDelete {
+    Delete {
         /// Stored profile id.
         id: Uuid,
     },
@@ -152,10 +152,10 @@ pub async fn run(paths: &super::Paths, workspace: &Path, args: &ProfileArgs) -> 
             output,
             scope,
             force,
-            cloud,
+            push,
         } => {
-            // Validate cloud settings before writing a local archive when upload was requested.
-            if *cloud {
+            // Check the catalog settings before writing a local archive when an upload was asked for.
+            if *push {
                 let _ = remote(args)?;
             }
             let bytes = Archive::capture(&roots, name, (*scope).into())?;
@@ -166,12 +166,12 @@ pub async fn run(paths: &super::Paths, workspace: &Path, args: &ProfileArgs) -> 
                 "Profile excludes credential stores. Inline secrets in configuration or scripts are retained; inspect before sharing."
             );
             let manifest = Archive::decode(&bytes)?.manifest;
-            let cloud = if *cloud {
+            let pushed = if *push {
                 Some(upload(args, bytes).await?)
             } else {
                 None
             };
-            json!({"output":output, "manifest":manifest, "cloud":cloud})
+            json!({"output":output, "manifest":manifest, "pushed":pushed})
         }
         Command::Inspect { file } => {
             serde_json::to_value(Archive::decode(&haarness_profiles::read(file)?)?.manifest)?
@@ -181,8 +181,8 @@ pub async fn run(paths: &super::Paths, workspace: &Path, args: &ProfileArgs) -> 
             force,
             dry_run,
         } => restore(&roots, &haarness_profiles::read(file)?, *force, *dry_run)?,
-        Command::CloudPush { file } => upload(args, haarness_profiles::read(file)?).await?,
-        Command::CloudList {
+        Command::Push { file } => upload(args, haarness_profiles::read(file)?).await?,
+        Command::Search {
             query,
             offset,
             limit,
@@ -196,20 +196,20 @@ pub async fn run(paths: &super::Paths, workspace: &Path, args: &ProfileArgs) -> 
             let response = send(client.get(url), args).await?;
             serde_json::from_slice(&bounded(response, 1024 * 1024).await?)?
         }
-        Command::CloudGet { id } => {
+        Command::Info { id } => {
             let response = request(args, &id.to_string(), false).await?;
             serde_json::from_slice(&bounded(response, 1024 * 1024).await?)?
         }
-        Command::CloudDownload { id, output, force } => {
+        Command::Download { id, output, force } => {
             let bytes = download(args, *id).await?;
             let output = destination(output)?;
             haarness_profiles::write(&output, &bytes, *force)?;
             json!({"id":id, "output":output})
         }
-        Command::CloudRestore { id, force, dry_run } => {
+        Command::Pull { id, force, dry_run } => {
             restore(&roots, &download(args, *id).await?, *force, *dry_run)?
         }
-        Command::CloudDelete { id } => {
+        Command::Delete { id } => {
             request(args, &id.to_string(), true).await?;
             json!({"deleted":id})
         }
@@ -260,7 +260,7 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
                 result["output"].as_str().unwrap_or_default()
             )?;
             if let Ok(record) =
-                serde_json::from_value::<haarness_profiles::Record>(result["cloud"].clone())
+                serde_json::from_value::<haarness_profiles::Record>(result["pushed"].clone())
             {
                 writeln!(text, "Uploaded as {}", record.id)?;
             }
@@ -279,7 +279,7 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
                 writeln!(text, "  {}  ({} bytes)", entry.path, entry.size)?;
             }
         }
-        Command::Restore { force, .. } | Command::CloudRestore { force, .. } => {
+        Command::Restore { force, .. } | Command::Pull { force, .. } => {
             let paths = |key: &str| -> Vec<&str> {
                 result[key]
                     .as_array()
@@ -325,7 +325,7 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
                 )?;
             }
         }
-        Command::CloudPush { .. } => {
+        Command::Push { .. } => {
             let record: haarness_profiles::Record = serde_json::from_value(result.clone())?;
             writeln!(
                 text,
@@ -333,7 +333,7 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
                 record.name, record.id
             )?;
         }
-        Command::CloudList { .. } => {
+        Command::Search { .. } => {
             let records: Vec<haarness_profiles::Record> = serde_json::from_value(result.clone())?;
             if records.is_empty() {
                 writeln!(text, "No stored profiles.")?;
@@ -350,7 +350,7 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
                 )?;
             }
         }
-        Command::CloudGet { .. } => {
+        Command::Info { .. } => {
             let record: haarness_profiles::Record = serde_json::from_value(result.clone())?;
             writeln!(
                 text,
@@ -364,14 +364,14 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
                 record.size_bytes
             )?;
         }
-        Command::CloudDownload { id, .. } => {
+        Command::Download { id, .. } => {
             writeln!(
                 text,
                 "Downloaded {id} to {}",
                 result["output"].as_str().unwrap_or_default()
             )?;
         }
-        Command::CloudDelete { id } => writeln!(text, "Deleted {id}")?,
+        Command::Delete { id } => writeln!(text, "Deleted {id}")?,
     }
     Ok(text)
 }
@@ -430,7 +430,7 @@ fn remote(args: &ProfileArgs) -> Result<(reqwest::Client, reqwest::Url)> {
     let mut url = reqwest::Url::parse(
         args.url
             .as_deref()
-            .context("set --url or HAARNESS_PROFILE_URL for cloud profiles")?,
+            .context("set --url or HAARNESS_PROFILE_URL to reach a profile catalog")?,
     )
     .context("invalid profile server URL")?;
     let loopback = matches!(

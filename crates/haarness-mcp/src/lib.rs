@@ -676,7 +676,7 @@ impl NativeMcpRegistry {
     }
 
     /// Record where `name`'s configuration comes from, for clients to show
-    /// (`base` for the base configuration folder).
+    /// (`system` for the system configuration folder).
     pub fn set_scope(&self, name: &str, scope: Option<String>) {
         if let Some(entry) = self.servers.write().get_mut(name) {
             entry.info.scope = scope;

@@ -108,10 +108,10 @@ fn file(name: PromptName, mode: PromptMode, body: &str) -> PromptFile {
     PromptFile {
         name,
         mode,
-        based_on: None,
+        written_from: None,
         body: body.into(),
         path: PathBuf::from(format!("/team/prompts/{}.md", name.as_str())),
-        source: "base".into(),
+        source: "system".into(),
     }
 }
 

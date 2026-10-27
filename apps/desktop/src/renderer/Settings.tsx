@@ -1,7 +1,7 @@
 import type { GlobalShortcut } from "../global-shortcut";
 import { createSettingsSearch } from "./settings-search";
 import { physicalKey, searchEntries, shortcutField, shortcutFromField, shortcutLabel } from "./search";
-import { BaseTag, CurrentTag, PathText, SettingRow as Row } from "./SettingRow";
+import { SystemTag, CurrentTag, PathText, SettingRow as Row } from "./SettingRow";
 import { DiagnosticsSetting } from "./Diagnostics";
 import { UsageStatisticsSetting } from "./UsageStatistics";
 import { UpdateSettings } from "./Updates";
@@ -1410,8 +1410,8 @@ function Assets(props: { kind: string; cli: Cli }) {
       action: on ? "enable" : "disable",
       kind: kind(),
       name: item.name,
-      // A base folder item is shared by every project, as a global one is.
-      scope: item.scope === "global" || item.scope === "base" ? "global" : "local",
+      // A system folder item is shared by every project, as a global one is.
+      scope: item.scope === "global" || item.scope === "system" ? "global" : "local",
     });
     await app.catalogs();
     await refresh();
@@ -1485,7 +1485,7 @@ function Assets(props: { kind: string; cli: Cli }) {
             ]
               .filter(Boolean)
               .join(" · ")}
-            tag={item.scope === "base" ? <BaseTag /> : undefined}
+            tag={item.scope === "system" ? <SystemTag /> : undefined}
             target={props.kind + ":" + item.name}
           >
             <Show when={item.name in enabled()}>
@@ -1743,8 +1743,8 @@ function Mcp(props: { cli: Cli }) {
         servers.map((server) => server.name),
       ).catch(() => undefined);
   }
-  // A server of the base folder, which Haarness lists but never changes.
-  const fromBase = (server: T.McpServerInfo) => server.scope === "base";
+  // A server of the system folder, which Haarness lists but never changes.
+  const fromSystem = (server: T.McpServerInfo) => server.scope === "system";
   createEffect(() => {
     app.state.catalogVersion;
     void app.run(refresh);
@@ -1780,8 +1780,8 @@ function Mcp(props: { cli: Cli }) {
           <div class="setting-block">
             <header>
               <h3 data-setting={"mcp:" + server.name}>{server.name}</h3>
-              <Show when={fromBase(server)}>
-                <BaseTag />
+              <Show when={fromSystem(server)}>
+                <SystemTag />
               </Show>
               <span class="badge">{server.status}</span>
             </header>
@@ -1824,8 +1824,8 @@ function Mcp(props: { cli: Cli }) {
                   items={[
                     { label: "Enable", command: "enable" },
                     { label: "Disable", command: "disable" },
-                    // The base folder's servers are turned off, not removed.
-                    ...(fromBase(server) ? [] : [{ label: "Remove", command: "remove" }]),
+                    // The system folder's servers are turned off, not removed.
+                    ...(fromSystem(server) ? [] : [{ label: "Remove", command: "remove" }]),
                     { label: "Sign out", command: "logout" },
                   ].map((item) => ({
                     label: t(item.label),
@@ -1946,7 +1946,7 @@ function Plugins() {
             title={plugin.name}
             target={"plugin:" + plugin.name}
             description={plugin.description || plugin.source}
-            tag={plugin.source === "haarness-base" ? <BaseTag /> : undefined}
+            tag={plugin.source === "haarness-system" ? <SystemTag /> : undefined}
           >
             <Show when={plugin.managed}>
               <input
@@ -2144,7 +2144,7 @@ function Extensions(props: { cli: Cli }) {
 function Profiles(props: { cli: Cli }) {
   const app = useApp();
   /**
-   * Restore from a file (`restore <path>`) or the catalog (`cloud-restore
+   * Restore from a file (`restore <path>`) or the catalog (`pull
    * <id> --url …`): preview it, list the files it would replace, and replace
    * them only once the reader confirms.
    */
@@ -2217,12 +2217,12 @@ function Profiles(props: { cli: Cli }) {
           text={t("Manage catalog")}
           label={t("Manage catalog")}
           items={[
-            { label: "List profiles", command: "cloud-list" },
-            { label: "Upload profile", command: "cloud-push" },
-            { label: "View profile", command: "cloud-get" },
-            { label: "Download profile", command: "cloud-download" },
-            { label: "Restore profile", command: "cloud-restore" },
-            { label: "Delete profile", command: "cloud-delete" },
+            { label: "List profiles", command: "search" },
+            { label: "Upload profile", command: "push" },
+            { label: "View profile", command: "info" },
+            { label: "Download profile", command: "download" },
+            { label: "Restore profile", command: "pull" },
+            { label: "Delete profile", command: "delete" },
           ].map((item) => ({
             label: t(item.label),
             run: () =>
@@ -2239,19 +2239,19 @@ function Profiles(props: { cli: Cli }) {
                       placeholder: "https://haarness.example.com",
                       required: true,
                     },
-                    ...(item.command === "cloud-list"
+                    ...(item.command === "search"
                       ? []
                       : [
                           {
                             name: "target",
                             label:
-                              item.command === "cloud-push"
+                              item.command === "push"
                                 ? t("Local archive path")
                                 : t("Profile ID"),
                             required: true,
                           },
                         ]),
-                    ...(item.command === "cloud-download"
+                    ...(item.command === "download"
                       ? [
                           {
                             name: "output",
@@ -2264,13 +2264,13 @@ function Profiles(props: { cli: Cli }) {
                   {
                     description: t("Profiles are shared through the catalog of a Haarness server you run. Enter its address; Haarness signs in with the token in HAARNESS_PROFILE_TOKEN."),
                     submit: t(item.label),
-                    danger: item.command === "cloud-delete",
+                    danger: item.command === "delete",
                   },
                 );
                 if (!input) return;
                 await window.haarness.storage("profile-catalog:v1", input.url.trim());
-                if (item.command === "cloud-restore")
-                  return restore(["cloud-restore", input.target, "--url", input.url]);
+                if (item.command === "pull")
+                  return restore(["pull", input.target, "--url", input.url]);
                 const args = [
                   "profile",
                   item.command,

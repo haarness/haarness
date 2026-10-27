@@ -1,9 +1,9 @@
 //! Prompt files: `prompts/<name>.md` in the trusted folders, which replace,
 //! prepend to or append to Haarness's built-in prompts, and the `haarness
-//! prompt` commands that list, show, eject and compare them.
+//! prompt` commands that list, show, customize and compare them.
 //!
-//! The trusted folders are the base configuration folder
-//! (`HAARNESS_BASE_CONFIG_DIR`), then the global configuration folder, and
+//! The trusted folders are the system configuration folder
+//! (`HAARNESS_SYSTEM_CONFIG_DIR`), then the global configuration folder, and
 //! nothing else: prompts are the agent's core instructions, so a project's
 //! folders, plugins and any file a link leads into the project are never read.
 //! A project adds its own instructions through `AGENTS.md`. See
@@ -37,14 +37,14 @@ pub struct Scan {
     pub ignored: Vec<Ignored>,
 }
 
-/// THE TRUSTED FOLDERS, lowest priority first: the base folder, whose files
+/// THE TRUSTED FOLDERS, lowest priority first: the system folder, whose files
 /// apply first as defaults, then the global configuration folder. A folder
 /// trusted for prompts belongs here and in no other place.
 pub fn folders(config_dir: &Path) -> Vec<Folder> {
-    crate::layout::base_config_dir()
+    crate::layout::system_config_dir()
         .map(|dir| Folder {
             dir,
-            source: "base",
+            source: "system",
         })
         .into_iter()
         .chain([Folder {
@@ -64,7 +64,7 @@ pub fn scan(folders: &[Folder], workspace: &Path) -> Scan {
             continue;
         }
         // A folder the person names inside the project (the global folder
-        // when the project is the home folder, or a base folder there) stays
+        // when the project is the home folder, or a system folder there) stays
         // theirs; a link out of any other folder into the project does not.
         let held = crate::layout::real_path_within(&folder.dir, &project);
         let mut entries = match fs::read_dir(&dir) {
@@ -75,7 +75,7 @@ pub fn scan(folders: &[Folder], workspace: &Path) -> Scan {
             Err(_) => {
                 scan.ignored.push(Ignored {
                     path: dir,
-                    message: "The prompts folder could not be read.".into(),
+                    message: "Haarness could not open this prompts folder.".into(),
                 });
                 continue;
             }
@@ -102,7 +102,7 @@ fn read(
 ) -> std::result::Result<PromptFile, String> {
     if !held && crate::layout::real_path_within(path, project) {
         return Err(
-            "The file is inside the project, through a link. Prompt files are never read from a project."
+            "A link leads this file into the project, and Haarness never takes prompts from a project."
                 .into(),
         );
     }
@@ -115,14 +115,14 @@ fn read(
     })?;
     let content = fs::read_to_string(path).map_err(|_| "The file could not be read.".to_owned())?;
     let (front, body) = haarness_core::definitions::markdown(&content)
-        .map_err(|_| "The frontmatter could not be parsed.".to_owned())?;
+        .map_err(|_| "The header between the --- lines is not valid YAML.".to_owned())?;
     let invalid = || {
-        "The frontmatter is invalid: only `mode` and `based-on` are allowed, and `mode` is replace, prepend or append."
+        "The header may only set `mode` (replace, prepend or append) and `written-from`."
             .to_owned()
     };
     if front
         .keys()
-        .any(|key| !matches!(key.as_str(), "mode" | "based-on"))
+        .any(|key| !matches!(key.as_str(), "mode" | "written-from"))
     {
         return Err(invalid());
     }
@@ -131,13 +131,13 @@ fn read(
         Some(mode) => PromptMode::parse(mode.trim()).ok_or_else(invalid)?,
     };
     if body.trim().is_empty() {
-        return Err("The prompt is empty.".into());
+        return Err("The file has no prompt text below its header.".into());
     }
     Ok(PromptFile {
         name,
         mode,
-        based_on: front
-            .get("based-on")
+        written_from: front
+            .get("written-from")
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty()),
         body: body.to_owned(),
@@ -165,9 +165,9 @@ pub fn load(config_dir: &Path, workspace: &Path) -> Prompts {
             tracing::warn!(
                 name = file.name.as_str(),
                 path = %file.path.display(),
-                based_on = file.based_on.as_deref().unwrap_or_default(),
+                written_from = file.written_from.as_deref().unwrap_or_default(),
                 builtin = %prompt_hash(&file.name.builtin()),
-                "prompt file is stale: the built-in prompt changed since it was written"
+                "prompt file was written from an older built-in prompt"
             );
         }
     }
@@ -188,8 +188,8 @@ pub enum PromptCommand {
         /// Prompt name, from `haarness prompt list`.
         name: String,
     },
-    /// Write a built-in prompt to a prompt file to edit.
-    Eject {
+    /// Copy a built-in prompt into a prompt file you can edit.
+    Customize {
         /// Prompt name, from `haarness prompt list`.
         name: String,
         /// Folder to write prompts/<name>.md in (default: the global
@@ -219,7 +219,7 @@ pub fn run(config_dir: &Path, workspace: &Path, command: PromptCommand) -> Resul
             print!("{}", prompts.text(name));
             Ok(())
         }
-        PromptCommand::Eject { name, dir, force } => {
+        PromptCommand::Customize { name, dir, force } => {
             let name = prompt_name(&name)?;
             let dir = match dir {
                 Some(dir) => std::path::absolute(dir)?,
@@ -236,7 +236,7 @@ pub fn run(config_dir: &Path, workspace: &Path, command: PromptCommand) -> Resul
             fs::write(
                 &file,
                 format!(
-                    "---\nmode: replace\nbased-on: {}\n---\n{text}\n",
+                    "---\nmode: replace\nwritten-from: {}\n---\n{text}\n",
                     prompt_hash(&text)
                 ),
             )
@@ -249,7 +249,7 @@ pub fn run(config_dir: &Path, workspace: &Path, command: PromptCommand) -> Resul
             let read = folders.iter().any(|folder| same_folder(&folder.dir, &dir));
             if !read {
                 eprintln!(
-                    "Haarness does not read prompt files from {}. Set HAARNESS_BASE_CONFIG_DIR to it, or eject without --dir.",
+                    "Haarness does not read prompt files from {}. Set HAARNESS_SYSTEM_CONFIG_DIR to it, or leave out --dir.",
                     home(&dir)
                 );
             }
@@ -271,10 +271,10 @@ pub fn run(config_dir: &Path, workspace: &Path, command: PromptCommand) -> Resul
                     "{}: {}, {}",
                     home(&file.path),
                     file.mode.as_str(),
-                    match file.based_on.as_deref() {
-                        None => "no based-on".to_owned(),
-                        Some(based) if file.is_stale() => format!("stale, based-on {based}"),
-                        Some(based) => format!("based-on {based}, current"),
+                    match file.written_from.as_deref() {
+                        None => "no written-from".to_owned(),
+                        Some(from) if file.is_stale() => format!("stale, written from {from}"),
+                        Some(from) => format!("written from {from}, current"),
                     }
                 );
             }
@@ -311,7 +311,7 @@ fn list(scan: &Scan, json_output: bool) -> Result<()> {
                         "path": file.path,
                         "source": file.source,
                         "mode": file.mode.as_str(),
-                        "basedOn": file.based_on,
+                        "writtenFrom": file.written_from,
                         "stale": file.is_stale(),
                     })).collect::<Vec<_>>(),
                 })
@@ -364,9 +364,9 @@ fn list(scan: &Scan, json_output: bool) -> Result<()> {
 fn warn_stale<'a>(files: impl Iterator<Item = &'a PromptFile>) {
     for file in files.filter(|file| file.is_stale()) {
         eprintln!(
-            "Warning: {} was written against an earlier built-in prompt (based-on {}). Run `haarness prompt diff {}` to compare.",
+            "Warning: {} was written from an older built-in prompt ({}). Run `haarness prompt diff {}` to see what changed.",
             home(&file.path),
-            file.based_on.as_deref().unwrap_or_default(),
+            file.written_from.as_deref().unwrap_or_default(),
             file.name.as_str()
         );
     }
@@ -429,14 +429,14 @@ mod tests {
         write(
             &global.join("prompts/plan.md"),
             &format!(
-                "---\nmode: replace\nbased-on: {}\n---\nPlan in numbered steps.\n",
+                "---\nmode: replace\nwritten-from: {}\n---\nPlan in numbered steps.\n",
                 prompt_hash(&PromptName::Plan.builtin())
             ),
         );
         let folders = vec![
             Folder {
                 dir: base.clone(),
-                source: "base",
+                source: "system",
             },
             Folder {
                 dir: global.clone(),
@@ -499,11 +499,11 @@ mod tests {
         assert_eq!(
             messages
                 .iter()
-                .filter(|message| message.contains("frontmatter is invalid"))
+                .filter(|message| message.contains("header may only set"))
                 .count(),
             2
         );
-        assert!(messages.contains(&"The prompt is empty."));
+        assert!(messages.contains(&"The file has no prompt text below its header."));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -532,14 +532,14 @@ mod tests {
         assert!(
             scan_out.ignored[0]
                 .message
-                .contains("inside the project, through a link")
+                .contains("leads this file into the project")
         );
         // A folder the person names inside the project is theirs.
         write(&workspace.join("team/prompts/system.md"), "Team line.");
         let inside = scan(
             &[Folder {
                 dir: workspace.join("team"),
-                source: "base",
+                source: "system",
             }],
             &workspace,
         );

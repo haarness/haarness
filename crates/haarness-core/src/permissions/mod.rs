@@ -58,7 +58,7 @@ pub const CONFIG_EDIT_RULE: &str = "edit:<haarness configuration>";
 /// `.claude/settings.local.json`, `.mcp.json`, a plugin's `hooks/hooks.json`
 /// and `.claude-plugin/plugin.json`, the global configuration folder's
 /// `config.toml`, `extensions.json`, `extensions/` and `prompts/`, and every
-/// file of the base configuration folder (`HAARNESS_BASE_CONFIG_DIR`). An
+/// file of the system configuration folder (`HAARNESS_SYSTEM_CONFIG_DIR`). An
 /// agent that changes one could widen its own permissions, or rewrite its own
 /// instructions, at the next reload, so an edit asks a person unless a rule
 /// naming the file allows it. Names compare without case and without the
@@ -101,7 +101,7 @@ pub fn is_config_path(path: &Path) -> bool {
         return true;
     }
     global_config_dir().is_some_and(|global| is_global_config_path(&path, &global))
-        || base_config_dir().is_some_and(|base| is_base_config_path(&path, &base))
+        || system_config_dir().is_some_and(|base| is_system_config_path(&path, &base))
 }
 
 /// Whether `path` is one of the global configuration folder's own files:
@@ -159,11 +159,11 @@ pub fn is_global_config_path(path: &Path, global: &Path) -> bool {
         })
 }
 
-/// Whether `path` is inside the base configuration folder, as written or
+/// Whether `path` is inside the system configuration folder, as written or
 /// where the folder (or the file) really is: all of it is configuration that
 /// a team or device management ships, and Haarness only reads it.
 #[must_use]
-pub fn is_base_config_path(path: &Path, base: &Path) -> bool {
+pub fn is_system_config_path(path: &Path, base: &Path) -> bool {
     let path = normalize_absolute(path);
     let real_path = path.canonicalize().ok();
     let base = normalize_absolute(base);
@@ -193,25 +193,25 @@ pub fn set_global_config_dir(dir: PathBuf) {
     let _ = GLOBAL_CONFIG_DIR.set(dir);
 }
 
-static BASE_CONFIG_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+static SYSTEM_CONFIG_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
-/// Record the base configuration folder this process reads, if any (the
-/// CLI's resolved `HAARNESS_BASE_CONFIG_DIR`), so [`is_config_path`] protects
+/// Record the system configuration folder this process reads, if any (the
+/// CLI's resolved `HAARNESS_SYSTEM_CONFIG_DIR`), so [`is_config_path`] protects
 /// all of it. The first call wins.
-pub fn set_base_config_dir(dir: Option<PathBuf>) {
-    let _ = BASE_CONFIG_DIR.set(dir);
+pub fn set_system_config_dir(dir: Option<PathBuf>) {
+    let _ = SYSTEM_CONFIG_DIR.set(dir);
 }
 
-/// The base configuration folder: the one the CLI recorded, else the
+/// The system configuration folder: the one the CLI recorded, else the
 /// process environment's; never the machine's own in this crate's tests.
-fn base_config_dir() -> Option<PathBuf> {
-    if let Some(dir) = BASE_CONFIG_DIR.get() {
+fn system_config_dir() -> Option<PathBuf> {
+    if let Some(dir) = SYSTEM_CONFIG_DIR.get() {
         return dir.clone();
     }
     if cfg!(test) {
         return None;
     }
-    haarness_protocol::base_config_dir()
+    haarness_protocol::system_config_dir()
 }
 
 /// The global configuration folder: the one the CLI recorded, else
@@ -2192,7 +2192,7 @@ mod tests {
         for name in ["prompts/system.md", "Prompts/Plan.md", "prompts/new.md"] {
             assert!(is_global_config_path(&global.join(name), global), "{name}");
         }
-        // Every file of the base folder, at any depth.
+        // Every file of the system folder, at any depth.
         let base = Path::new("/opt/team/haarness");
         for name in [
             "haarness.json",
@@ -2203,9 +2203,9 @@ mod tests {
             "AGENTS.md",
             "new-file.txt",
         ] {
-            assert!(is_base_config_path(&base.join(name), base), "{name}");
+            assert!(is_system_config_path(&base.join(name), base), "{name}");
         }
-        assert!(is_base_config_path(
+        assert!(is_system_config_path(
             Path::new("/opt/team/haarness/x/../y.md"),
             base
         ));
@@ -2214,7 +2214,7 @@ mod tests {
             "/opt/team/other.md",
             "/opt/team/haarness-2/x.md",
         ] {
-            assert!(!is_base_config_path(Path::new(path), base), "{path}");
+            assert!(!is_system_config_path(Path::new(path), base), "{path}");
         }
         for path in [
             "config.toml",
@@ -2235,10 +2235,10 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_in_the_base_folder_always_asks_a_person() {
-        // The only test that records a base folder: a path nothing else edits.
+    fn an_edit_in_the_system_folder_always_asks_a_person() {
+        // The only test that records a system folder: a path nothing else edits.
         let base = std::env::temp_dir().join("haarness-permission-base-fixture");
-        set_base_config_dir(Some(base.clone()));
+        set_system_config_dir(Some(base.clone()));
         let mut engine = PermissionEngine::build_defaults();
         engine.add_rule(rule("edit:*", PermissionDecision::Allow));
         engine.add_rule(rule("*", PermissionDecision::Allow));

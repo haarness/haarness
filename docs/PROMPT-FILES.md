@@ -49,7 +49,7 @@ Instructions for one project belong in its `AGENTS.md`, not in a prompt file.
 | --- | --- |
 | `haarness prompt list` | Every prompt name, the files that change it with their mode, and stale or ignored files (on standard error). `--json` adds the current built-in hashes. |
 | `haarness prompt show <name>` | The prompt as Haarness sends it. |
-| `haarness prompt eject <name>` | Writes the built-in prompt to `prompts/<name>.md` in the global configuration folder, with `mode: replace` and `based-on`. `--dir <folder>` writes to another folder, such as a base folder you maintain; `--force` overwrites an existing file. |
+| `haarness prompt eject <name>` | Writes the built-in prompt to `prompts/<name>.md` in the global configuration folder, with `mode: replace` and `based-on`. `--dir <folder>` writes to another folder, such as a system folder you maintain; `--force` overwrites an existing file. |
 | `haarness prompt diff <name>` | Each file that changes the prompt, whether it is stale, the current built-in hash, and a unified diff from the built-in prompt to the prompt as sent. |
 
 ## Prompt names
@@ -85,14 +85,14 @@ Haarness reads prompt files from the `prompts` folder of these folders, lowest p
 
 | Order | Folder |
 | --- | --- |
-| 1 | The [base folder](CONFIGURATION-SCOPES.md#base-folder) named by `HAARNESS_BASE_CONFIG_DIR` |
+| 1 | The [system folder](CONFIGURATION-SCOPES.md#system-folder) named by `HAARNESS_SYSTEM_CONFIG_DIR` |
 | 2 | The global configuration folder: `~/.config/haarness` (`$HAARNESS_HOME/config` or `$XDG_CONFIG_HOME/haarness` when set, `<data dir>/config` with `--data-dir` or `HAARNESS_DATA_DIR`) |
 
-Files for the same prompt apply in this order, each to the text the previous ones made: a base folder's files apply first, as defaults; a `replace` file in the global folder discards what the base folder's did, unless it uses `{{builtin}}`, and a `prepend` or `append` file adds to it.
+Files for the same prompt apply in this order, each to the text the previous ones made: a system folder's files apply first, as defaults; a `replace` file in the global folder discards what the system folder's did, unless it uses `{{builtin}}`, and a `prepend` or `append` file adds to it.
 
-Haarness never reads prompt files from a project: not from its `.haarness` or `.opencode` folders, not from plugins, and not from any file inside the project that a link in one of the two folders leads to. Prompts are the agent's core instructions, and a cloned repository must not be able to rewrite them. A folder you name yourself inside the project (the base folder, or the global folder when the project is your home folder) stays yours and is read.
+Haarness never reads prompt files from a project: not from its `.haarness` or `.opencode` folders, not from plugins, and not from any file inside the project that a link in one of the two folders leads to. Prompts are the agent's core instructions, and a cloned repository must not be able to rewrite them. A folder you name yourself inside the project (the system folder, or the global folder when the project is your home folder) stays yours and is read.
 
-An agent's edit of a global prompt file always asks a person, like an edit of [Haarness's own configuration files](PERMISSIONS-AND-EXECUTION.md#haarnesss-own-configuration-files). [Configuration profiles](PROFILES.md) do not carry the `prompts` folder; copy prompt files yourself, or ship them in a base folder.
+An agent's edit of a global prompt file always asks a person, like an edit of [Haarness's own configuration files](PERMISSIONS-AND-EXECUTION.md#haarnesss-own-configuration-files). [Configuration profiles](PROFILES.md) do not carry the `prompts` folder; copy prompt files yourself, or ship them in a system folder.
 
 ## Safety baseline
 
@@ -134,4 +134,4 @@ The daemon log names each prompt file in effect (`prompt file` at INFO) and each
 | `Ignored …: The prompt is empty` | Add text to the body, or delete the file to use the built-in prompt. |
 | `Ignored …: The file is inside the project, through a link` | A link in the folder leads into the project. Copy the file into the folder instead. |
 | A prompt is marked `stale` | See [staying current](#staying-current-and-cache). The file applies meanwhile. |
-| `eject --dir` says Haarness does not read that folder | Point `HAARNESS_BASE_CONFIG_DIR` at it, or eject without `--dir`. |
+| `eject --dir` says Haarness does not read that folder | Point `HAARNESS_SYSTEM_CONFIG_DIR` at it, or eject without `--dir`. |

@@ -4455,16 +4455,14 @@ fn reasoning_command_opens_the_effort_modal() {
     ));
     app.apply_option(crate::state::OptionsKind::ReasoningEffort, "high");
     assert_eq!(app.reasoning_effort.as_deref(), Some("high"));
-    app.apply_option(crate::state::OptionsKind::ReasoningEffort, "ultracode");
-    assert!(app.thread.ultracode);
-    assert!(app.reasoning_effort.is_none());
+    app.thread.ultracode = true;
     app.apply_option(crate::state::OptionsKind::ReasoningEffort, "off");
     assert!(!app.thread.ultracode);
     assert!(app.reasoning_effort.is_none());
 }
 
 #[tokio::test]
-async fn reasoning_picker_exposes_ultracode_as_a_first_class_mode() {
+async fn reasoning_picker_lists_effort_levels_and_leaves_ultracode_to_its_command() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
     app.execute_command("/reasoning", &offline_client())
@@ -4473,13 +4471,15 @@ async fn reasoning_picker_exposes_ultracode_as_a_first_class_mode() {
     let crate::state::Overlay::Options { entries, .. } = &app.overlay else {
         panic!("/reasoning must open the options picker");
     };
-    let ultracode = entries
-        .iter()
-        .find(|entry| entry.value == "ultracode")
-        .expect("Ultracode option");
-    assert!(ultracode.description.contains("strongest compatible"));
+    assert!(!entries.iter().any(|entry| entry.value == "ultracode"));
     assert!(!entries.iter().any(|entry| entry.value == "xhigh"));
     assert!(!entries.iter().any(|entry| entry.value == "max"));
+    app.overlay = crate::state::Overlay::None;
+    app.execute_command("/reasoning ultracode", &offline_client())
+        .await
+        .unwrap();
+    assert!(!app.thread.ultracode);
+    assert!(app.notice.contains("does not support ultracode"), "{}", app.notice);
 }
 
 #[tokio::test]
@@ -4508,7 +4508,7 @@ async fn reasoning_commands_use_each_models_advertised_domain() {
     };
     assert_eq!(
         entries.iter().map(|e| e.value.as_str()).collect::<Vec<_>>(),
-        ["off", "none", "xhigh", "ultracode", "display"]
+        ["off", "none", "xhigh", "display"]
     );
     app.thread.model = "gpt-5.4-mini".into();
     app.normalize_reasoning();
@@ -4558,7 +4558,7 @@ async fn interactive_agent_selection_excludes_hidden_and_subagent_profiles() {
 }
 
 #[tokio::test]
-async fn reasoning_picker_focus_and_marker_follow_the_durable_ultracode_mode() {
+async fn reasoning_picker_marks_no_level_while_ultracode_is_on() {
     let mut thread = fixture_thread();
     thread.ultracode = true;
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
@@ -4567,31 +4567,23 @@ async fn reasoning_picker_focus_and_marker_follow_the_durable_ultracode_mode() {
     app.execute_command("/reasoning", &offline_client())
         .await
         .unwrap();
-    let crate::state::Overlay::Options { entries, .. } = &app.overlay else {
-        panic!("/reasoning must open the options picker");
-    };
-    let ultracode_index = app
-        .filtered_options(entries)
-        .iter()
-        .position(|entry| entry.value == "ultracode")
-        .expect("Ultracode option");
-    assert_eq!(
-        app.selection, ultracode_index,
-        "the durable mode owns initial focus"
-    );
-
+    assert_eq!(app.selection, 0, "focus starts on the first row");
     let rendered = app
         .lines((90, 24))
         .iter()
         .map(Line::text)
         .collect::<Vec<_>>();
-    let active = rendered
-        .iter()
-        .find(|line| line.contains("ultracode"))
-        .expect("rendered Ultracode row");
     assert!(
-        active.contains('●'),
-        "Ultracode must carry the active marker: {active}"
+        !rendered.iter().any(|line| line.contains("ultracode")),
+        "the picker lists effort levels only: {rendered:?}"
+    );
+    let default = rendered
+        .iter()
+        .find(|line| line.contains("provider default"))
+        .expect("provider default row");
+    assert!(
+        !default.contains('●'),
+        "Ultracode runs at the strongest effort, not the default: {default}"
     );
 }
 
@@ -21947,7 +21939,7 @@ async fn a_command_that_refuses_its_arguments_keeps_the_line() {
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
     for line in [
         "/loop 5 minutes check the deploy",
-        "/permissions-mode sometimes",
+        "/approvals sometimes",
     ] {
         app.composer.set_text(line.into());
         // Nothing listens on the offline client: nothing may be sent.
@@ -23403,7 +23395,7 @@ async fn ctrl_y_cycles_review_auto_yolo_and_the_band_shows_yolo_in_red() {
 }
 
 /// On a server that cannot keep Yolo, Ctrl+Y goes Auto → Review, and
-/// `/permissions-mode yolo` says why instead of asking the server. On a
+/// `/approvals yolo` says why instead of asking the server. On a
 /// server that can, it puts the chat in Yolo.
 #[tokio::test]
 async fn yolo_is_offered_only_where_the_server_keeps_it() {
@@ -23439,7 +23431,7 @@ async fn yolo_is_offered_only_where_the_server_keeps_it() {
         "This server cannot keep a chat in Yolo · update Haarness"
     );
     app.approval_yolo = true;
-    app.composer.set_text("/permissions-mode yolo".into());
+    app.composer.set_text("/approvals yolo".into());
     crate::input::handle_key(
         &mut app,
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),

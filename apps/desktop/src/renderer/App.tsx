@@ -775,7 +775,7 @@ export function App() {
         .filter((mode) => mode !== app.approvalMode())
         .map(
           (mode): SearchEntry => ({
-            key: "permission-mode:" + mode,
+            key: "approvals:" + mode,
             group: "Chat actions",
             name:
               mode === "review"

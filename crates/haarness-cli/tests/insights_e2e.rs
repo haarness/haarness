@@ -92,7 +92,7 @@ async fn real_cli_multi_project_history_matches_api_and_html_without_mutating_hi
     assert_eq!(std::fs::read(data.join("workspaces.json")).unwrap(), before);
     let current: Value = serde_json::from_str(&fixture.success(
         &fixture.workspaces[0],
-        &["stats", "--current-project", "--json"],
+        &["stats", "--here", "--json"],
     ))
     .unwrap();
     assert_eq!(current["total"]["turns"], 1);
@@ -274,7 +274,7 @@ fn exercise_tui(fixture: &Fixture, base: &str, token: &str) {
     wait_for_pane(&session, "h a a r n e s s");
     for (command, expected) in [
         ("/stats", "2 projects"),
-        ("/stats --current-project", "1 project ·"),
+        ("/stats --here", "1 project ·"),
         ("/insights --days 7", "Report:"),
     ] {
         Command::new("tmux")

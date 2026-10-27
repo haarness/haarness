@@ -1,7 +1,7 @@
 //! JSON/JSONC configuration and ecosystem-format compatibility.
 //!
 //! Haarness reads, in ascending precedence:
-//!   0. the base folder's `haarness.json{,c}` (`HAARNESS_BASE_CONFIG_DIR`,
+//!   0. the system folder's `haarness.json{,c}` (`HAARNESS_SYSTEM_CONFIG_DIR`,
 //!      read only, when set)
 //!   1. global `haarness.json{,c}` (including legacy aliases) (config dir)
 //!   2. project `haarness.json{,c}` (including legacy aliases) (workspace root)
@@ -48,7 +48,7 @@ pub struct JsonLayers {
     pub rules: Vec<PermissionRule>,
     /// MCP servers by name (trust-gated ones only included when trusted).
     pub mcp: BTreeMap<String, McpConfigureRequest>,
-    /// The servers of `mcp` whose entry in effect is the base folder's.
+    /// The servers of `mcp` whose entry in effect is the system folder's.
     pub base_mcp: BTreeSet<String>,
     pub commands: Vec<CommandInfo>,
     pub agents: Vec<CustomAgent>,
@@ -88,7 +88,7 @@ pub struct HookSource {
     pub block: Value,
     pub trusted: bool,
     pub plugin: bool,
-    /// A file of the base folder, which Haarness never changes.
+    /// A file of the system folder, which Haarness never changes.
     pub base: bool,
 }
 
@@ -103,7 +103,7 @@ const CONFIG_JSON: [&str; 4] = [
 
 /// Load every JSON/compat layer. `config_dir` is the directory holding the
 /// global haarness config; `home` is the user's home directory. The base
-/// folder `HAARNESS_BASE_CONFIG_DIR` names, when set, is read below every
+/// folder `HAARNESS_SYSTEM_CONFIG_DIR` names, when set, is read below every
 /// other layer.
 pub fn load_layers(
     config_dir: &Path,
@@ -112,8 +112,8 @@ pub fn load_layers(
     trust: bool,
     plugin_roots: &[PathBuf],
 ) -> JsonLayers {
-    let base = crate::layout::BaseFolder::for_workspace(workspace);
-    load_layers_with_base(
+    let base = crate::layout::SystemFolder::for_workspace(workspace);
+    load_layers_with_system(
         config_dir,
         base.as_ref(),
         home,
@@ -123,11 +123,11 @@ pub fn load_layers(
     )
 }
 
-/// [`load_layers`] with the base folder given rather than read from the
+/// [`load_layers`] with the system folder given rather than read from the
 /// environment.
-pub fn load_layers_with_base(
+pub fn load_layers_with_system(
     config_dir: &Path,
-    base: Option<&crate::layout::BaseFolder>,
+    base: Option<&crate::layout::SystemFolder>,
     home: Option<&Path>,
     workspace: &Path,
     trust: bool,
@@ -135,13 +135,13 @@ pub fn load_layers_with_base(
 ) -> JsonLayers {
     let mut layers = JsonLayers::default();
 
-    // The base folder: settings a team or device management ships, which
+    // The system folder: settings a team or device management ships, which
     // every other layer overrides. Only with one, so loading without it takes
     // exactly the steps it always has.
     if let Some(base) = base {
         if !base.root().is_dir() {
             layers.notices.push(format!(
-                "base config folder {} not found",
+                "system config folder {} not found",
                 base.root().display()
             ));
         }
@@ -221,10 +221,10 @@ pub fn load_layers_with_base(
     // Resource overrides use the same global -> ancestor -> project ordering.
     let resources = crate::layout::resource_roots(config_dir, home, workspace, trust);
     let compat = super::claude_compat(&layers.native);
-    // The base folder's commands, skills and agents come first, so every
+    // The system folder's commands, skills and agents come first, so every
     // other root replaces one of the same name.
     if let Some(base) = base {
-        discover_base_resources(&mut layers, base);
+        discover_system_resources(&mut layers, base);
     }
     // Claude Code roots are compatibility imports: they load before native
     // roots so a Haarness resource with the same name wins.
@@ -455,9 +455,9 @@ pub fn load_layers_with_base(
     layers
 }
 
-/// The base folder's commands, skills and agents, each file read where it
+/// The system folder's commands, skills and agents, each file read where it
 /// is unless a link leads it into the project.
-fn discover_base_resources(layers: &mut JsonLayers, base: &crate::layout::BaseFolder) {
+fn discover_system_resources(layers: &mut JsonLayers, base: &crate::layout::SystemFolder) {
     for name in ["command", "commands"] {
         let directory = base.root().join(name);
         for file in base.files(name) {
@@ -492,16 +492,16 @@ fn discover_base_resources(layers: &mut JsonLayers, base: &crate::layout::BaseFo
     }
 }
 
-/// The agents and commands the base folder alone defines, in its settings
+/// The agents and commands the system folder alone defines, in its settings
 /// and its folders, so a list of the merged ones can tell which come from it.
-pub fn base_definitions(base: &crate::layout::BaseFolder) -> (Vec<CustomAgent>, Vec<CommandInfo>) {
+pub fn system_definitions(base: &crate::layout::SystemFolder) -> (Vec<CustomAgent>, Vec<CommandInfo>) {
     let mut layers = JsonLayers::default();
     for name in CONFIG_JSON {
         if let Some(path) = base.entry(name) {
             apply_json_layer(&mut layers, &path, true, true);
         }
     }
-    discover_base_resources(&mut layers, base);
+    discover_system_resources(&mut layers, base);
     (layers.agents, layers.commands)
 }
 
@@ -985,8 +985,8 @@ fn apply_json_config(layers: &mut JsonLayers, path: &Path, trusted: bool) {
     apply_json_layer(layers, path, trusted, false);
 }
 
-/// [`apply_json_config`] for a file of any layer. A `base` file (one of the
-/// base folder's) is read as a global one is, except that its hooks are
+/// [`apply_json_config`] for a file of any layer. A `system` file (one of the
+/// system folder's) is read as a global one is, except that its hooks are
 /// marked read-only and its extension and plugin declarations, which only
 /// the global and project layers make, are not reported.
 fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: bool) {
@@ -2406,7 +2406,7 @@ mod tests {
                 .and_then(|defaults| defaults.approval_mode)
         };
         assert_eq!(
-            mode(&load_layers_with_base(
+            mode(&load_layers_with_system(
                 &config,
                 None,
                 None,
@@ -2423,7 +2423,7 @@ mod tests {
         .unwrap();
         migrate_toml(&config.join("config.toml"), &mut Vec::new()).unwrap();
         assert!(!config.join("config.toml").exists());
-        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        let layers = load_layers_with_system(&config, None, None, &workspace, true, &[]);
         assert_eq!(mode(&layers), Some(haarness_protocol::ApprovalMode::Review));
         let defaults = layers.native.defaults.as_ref().unwrap();
         assert_eq!(defaults.reasoning_effort.as_deref(), Some("high"));
@@ -2434,7 +2434,7 @@ mod tests {
             r#"{"defaults": {"approval_mode": "auto"}}"#,
         )
         .unwrap();
-        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        let layers = load_layers_with_system(&config, None, None, &workspace, true, &[]);
         assert_eq!(mode(&layers), Some(haarness_protocol::ApprovalMode::Review));
         // With no choice of the person's, a project can ask for Review.
         fs::write(config.join("haarness.json"), "{}").unwrap();
@@ -2443,7 +2443,7 @@ mod tests {
             r#"{"defaults": {"approval_mode": "review"}}"#,
         )
         .unwrap();
-        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        let layers = load_layers_with_system(&config, None, None, &workspace, true, &[]);
         assert_eq!(mode(&layers), Some(haarness_protocol::ApprovalMode::Review));
         // A project never asks for Yolo; a person's own file can, and a
         // project may still make that stricter.
@@ -2452,21 +2452,21 @@ mod tests {
             r#"{"defaults": {"approval_mode": "yolo"}}"#,
         )
         .unwrap();
-        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        let layers = load_layers_with_system(&config, None, None, &workspace, true, &[]);
         assert_eq!(mode(&layers), None);
         fs::write(
             config.join("haarness.json"),
             r#"{"defaults": {"approval_mode": "yolo"}}"#,
         )
         .unwrap();
-        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        let layers = load_layers_with_system(&config, None, None, &workspace, true, &[]);
         assert_eq!(mode(&layers), Some(haarness_protocol::ApprovalMode::Yolo));
         fs::write(
             workspace.join("haarness.json"),
             r#"{"defaults": {"approval_mode": "auto"}}"#,
         )
         .unwrap();
-        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        let layers = load_layers_with_system(&config, None, None, &workspace, true, &[]);
         assert_eq!(mode(&layers), Some(haarness_protocol::ApprovalMode::Auto));
         let _ = fs::remove_dir_all(root);
     }
@@ -2501,7 +2501,7 @@ mod tests {
             }}"#,
         )
         .unwrap();
-        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        let layers = load_layers_with_system(&config, None, None, &workspace, true, &[]);
         let review = &layers.auto_review;
         assert!(review.enabled, "a project cannot turn the reviewer off");
         assert_eq!(review.model.as_deref(), Some("anthropic/claude-haiku"));
@@ -2523,7 +2523,7 @@ mod tests {
             r#"{"auto_review": {"timeout": 300}}"#,
         )
         .unwrap();
-        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        let layers = load_layers_with_system(&config, None, None, &workspace, true, &[]);
         assert_eq!(layers.auto_review.timeout, Duration::from_secs(30));
         // A project's small_model is the project's chats' default, never the
         // reviewer's; the person's own is.
@@ -2532,7 +2532,7 @@ mod tests {
             r#"{"small_model": "openai/gpt-5", "auto_review": {"model": "openai/gpt-5"}}"#,
         )
         .unwrap();
-        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        let layers = load_layers_with_system(&config, None, None, &workspace, true, &[]);
         assert_eq!(layers.small_model.as_deref(), Some("openai/gpt-5"));
         assert_eq!(layers.auto_review.small_model, None);
         assert_eq!(
@@ -2544,7 +2544,7 @@ mod tests {
             "[defaults]\nsmall_model = \"anthropic/claude-haiku\"\n",
         )
         .unwrap();
-        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        let layers = load_layers_with_system(&config, None, None, &workspace, true, &[]);
         assert_eq!(
             layers.auto_review.small_model.as_deref(),
             Some("anthropic/claude-haiku")
@@ -2555,7 +2555,7 @@ mod tests {
             r#"{"small_model": "anthropic/claude-haiku"}"#,
         )
         .unwrap();
-        let layers = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        let layers = load_layers_with_system(&config, None, None, &workspace, true, &[]);
         assert_eq!(
             layers.auto_review.small_model.as_deref(),
             Some("anthropic/claude-haiku")
@@ -2564,12 +2564,12 @@ mod tests {
             layers.auto_review.model, None,
             "a project never names the reviewer"
         );
-        let layers = load_layers_with_base(&config, None, None, &workspace, false, &[]);
+        let layers = load_layers_with_system(&config, None, None, &workspace, false, &[]);
         assert!(layers.auto_review.project_block.is_empty());
         // Defaults: on, the chat's models, a minute.
         let empty = root.join("empty");
         fs::create_dir_all(&empty).unwrap();
-        let layers = load_layers_with_base(&empty, None, None, &empty, false, &[]);
+        let layers = load_layers_with_system(&empty, None, None, &empty, false, &[]);
         assert_eq!(
             layers.auto_review,
             haarness_core::AutoReviewSettings::default()
@@ -2580,9 +2580,9 @@ mod tests {
     }
 
     #[test]
-    fn the_base_folder_is_the_lowest_layer_and_is_never_written() {
+    fn the_system_folder_is_the_lowest_layer_and_is_never_written() {
         let root =
-            std::env::temp_dir().join(format!("haarness-base-layer-{}", uuid::Uuid::now_v7()));
+            std::env::temp_dir().join(format!("haarness-system-layer-{}", uuid::Uuid::now_v7()));
         let base_dir = root.join("team");
         let config = root.join("config");
         let workspace = root.join("workspace");
@@ -2643,10 +2643,10 @@ mod tests {
         )
         .unwrap();
         let before = snapshot(&base_dir);
-        let base = crate::layout::BaseFolder::at(base_dir.clone(), &workspace);
-        let layers = load_layers_with_base(&config, Some(&base), None, &workspace, true, &[]);
+        let base = crate::layout::SystemFolder::at(base_dir.clone(), &workspace);
+        let layers = load_layers_with_system(&config, Some(&base), None, &workspace, true, &[]);
         assert!(layers.errors.is_empty(), "{:?}", layers.errors);
-        // The global layer overrides the base folder key by key.
+        // The global layer overrides the system folder key by key.
         assert_eq!(layers.model.as_deref(), Some("global-model"));
         assert_eq!(layers.small_model.as_deref(), Some("team/base-small"));
         assert_eq!(
@@ -2658,7 +2658,7 @@ mod tests {
             .hook_sources
             .iter()
             .find(|source| source.path.starts_with(&base_dir))
-            .expect("the base folder's hooks are listed");
+            .expect("the system folder's hooks are listed");
         assert!(hook.base && hook.trusted && !hook.plugin);
         assert_eq!(layers.hooks.len(), 1);
         assert_eq!(layers.instruction_sources, ["/opt/team/rules.md"]);
@@ -2683,13 +2683,13 @@ mod tests {
         );
         let instructions = layers.instructions.unwrap();
         assert!(instructions.contains("Team rule: run the release checklist."));
-        assert_eq!(snapshot(&base_dir), before, "the base folder was written");
-        // Without a base folder nothing of it is read.
-        let without = load_layers_with_base(&config, None, None, &workspace, true, &[]);
+        assert_eq!(snapshot(&base_dir), before, "the system folder was written");
+        // Without a system folder nothing of it is read.
+        let without = load_layers_with_system(&config, None, None, &workspace, true, &[]);
         assert!(without.agents.iter().all(|agent| agent.id != "release"));
         assert!(!without.mcp.contains_key("docs"));
         assert!(without.instructions.is_none());
-        let (agents, commands) = base_definitions(&base);
+        let (agents, commands) = system_definitions(&base);
         assert_eq!(agents.len(), 2);
         assert!(commands.iter().any(|command| command.name == "git/ship"));
         fs::remove_dir_all(root).unwrap();
@@ -2697,9 +2697,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_link_from_the_base_folder_into_the_project_is_not_followed() {
+    fn a_link_from_the_system_folder_into_the_project_is_not_followed() {
         let root =
-            std::env::temp_dir().join(format!("haarness-base-link-{}", uuid::Uuid::now_v7()));
+            std::env::temp_dir().join(format!("haarness-system-link-{}", uuid::Uuid::now_v7()));
         let base_dir = root.join("team");
         let config = root.join("config");
         let workspace = root.join("workspace");
@@ -2768,9 +2768,9 @@ mod tests {
             base_dir.join("skills/planted"),
         )
         .unwrap();
-        let base = crate::layout::BaseFolder::at(base_dir.clone(), &workspace);
+        let base = crate::layout::SystemFolder::at(base_dir.clone(), &workspace);
         // Project configuration off: nothing of the project may load.
-        let layers = load_layers_with_base(&config, Some(&base), None, &workspace, false, &[]);
+        let layers = load_layers_with_system(&config, Some(&base), None, &workspace, false, &[]);
         assert!(layers.hooks.is_empty());
         assert!(layers.agents.iter().all(|agent| agent.id != "planted"));
         assert!(
@@ -2785,15 +2785,15 @@ mod tests {
                 .iter()
                 .all(|command| command.name != "planted-skill")
         );
-        // The base folder's own plugin and skill load; the linked ones never do.
+        // The system folder's own plugin and skill load; the linked ones never do.
         assert_eq!(
-            crate::plugins::base_plugin_roots_in(&base),
+            crate::plugins::system_plugin_roots_in(&base),
             [base_dir.join("plugins/local/team")]
         );
         assert_eq!(base.skill_folders("skills"), [base_dir.join("skills/team")]);
-        // A base folder the person points into the project stays theirs.
-        let inside = crate::layout::BaseFolder::at(workspace.join("planted"), &workspace);
-        let layers = load_layers_with_base(&config, Some(&inside), None, &workspace, false, &[]);
+        // A system folder the person points into the project stays theirs.
+        let inside = crate::layout::SystemFolder::at(workspace.join("planted"), &workspace);
+        let layers = load_layers_with_system(&config, Some(&inside), None, &workspace, false, &[]);
         assert_eq!(layers.hooks.len(), 1);
         assert!(layers.agents.iter().any(|agent| agent.id == "planted"));
         fs::remove_dir_all(root).unwrap();

@@ -25,7 +25,7 @@ pub(crate) fn analytics_query(
     let mut words = arguments.split_whitespace();
     while let Some(word) = words.next() {
         let (key, value) = match word {
-            "--current-project" => ("currentProject", "true".to_owned()),
+            "--here" => ("currentProject", "true".to_owned()),
             "--days" | "--limit" | "--project" => {
                 let value = words
                     .next()
@@ -42,10 +42,10 @@ pub(crate) fn analytics_query(
             }
             "--no-llm" => continue,
             _ if report => anyhow::bail!(
-                "Unknown option {word}; use --days N, --current-project, --project ID, --limit N or --open"
+                "Unknown option {word}; use --days N, --here, --project ID, --limit N or --open"
             ),
             _ => anyhow::bail!(
-                "Unknown option {word}; use --days N, --current-project, --project ID or --limit N"
+                "Unknown option {word}; use --days N, --here, --project ID or --limit N"
             ),
         };
         query.push((key.to_owned(), value));
@@ -290,7 +290,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command(
         "reasoning",
         &["think", "thinking"],
-        "Set effort or Ultracode orchestration: /reasoning high|xhigh|max|ultracode|off",
+        "Set reasoning effort: /reasoning high|xhigh|max|off",
     ),
     command(
         "ultracode",
@@ -311,12 +311,12 @@ pub const COMMANDS: &[CommandSpec] = &[
     command(
         "stats",
         &[],
-        "Cross-project analytics: --days N --current-project --project ID --limit N",
+        "Cross-project analytics: --days N --here --project ID --limit N",
     ),
     command(
         "insights",
         &[],
-        "Save an HTML insights report: --days N --current-project --project ID --limit N --open",
+        "Save an HTML insights report: --days N --here --project ID --limit N --open",
     ),
     command(
         "language",
@@ -431,9 +431,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     command("editor", &["edit"], "Compose the prompt in $EDITOR"),
     command("cancel", &["stop"], "Interrupt the active turn"),
     command(
-        "permissions-mode",
-        &["permission-mode"],
-        "Switch approvals: /permissions-mode [review|auto|yolo] · ctrl+y",
+        "approvals",
+        &[],
+        "Switch approvals: /approvals [review|auto|yolo] · ctrl+y",
     ),
     command("help", &["commands", "?"], "Show available commands"),
     command("exit", &["quit", "q"], "Exit Haarness"),
@@ -2339,7 +2339,7 @@ impl App {
                 }
             }
 
-            "permissions-mode" => match arguments.trim() {
+            "approvals" => match arguments.trim() {
                 "auto" => {
                     self.set_approval_mode(haarness_protocol::ApprovalMode::Auto, client)
                         .await;
@@ -2353,7 +2353,7 @@ impl App {
                         .await;
                 }
                 "" => self.cycle_approval_mode(client).await,
-                _ => self.refuse_command("Usage: /permissions-mode [review|auto|yolo]"),
+                _ => self.refuse_command("Usage: /approvals [review|auto|yolo]"),
             },
             "new" if self.is_untouched_session() => {
                 self.notice = "This session is already new · type to start".into();
@@ -2892,16 +2892,16 @@ impl App {
                             "Add one in .haarness/skills/<name>/SKILL.md".into(),
                         ]
                     } else {
-                        // Skills of the base folder this TUI started with
-                        // (`HAARNESS_BASE_CONFIG_DIR`) say so.
-                        let base = crate::config::base_config_dir();
+                        // Skills of the system folder this TUI started with
+                        // (`HAARNESS_SYSTEM_CONFIG_DIR`) say so.
+                        let base = crate::config::system_config_dir();
                         skills
                             .into_iter()
                             .map(|skill| {
                                 if base.as_ref().is_some_and(|base| {
                                     std::path::Path::new(&skill.path).starts_with(base)
                                 }) {
-                                    format!("{}  base  {}", skill.name, skill.description)
+                                    format!("{}  system  {}", skill.name, skill.description)
                                 } else {
                                     format!("{}  {}", skill.name, skill.description)
                                 }
@@ -3333,11 +3333,6 @@ impl App {
                     self.reasoning_effort = None;
                     self.notice = "Reasoning effort: provider default".into();
                 }
-                "ultracode" => {
-                    self.thread.ultracode = true;
-                    self.reasoning_effort = None;
-                    self.notice = "Ultracode enabled · strongest compatible reasoning".into();
-                }
                 effort => {
                     if !self
                         .reasoning_efforts()
@@ -3629,7 +3624,7 @@ impl App {
     }
 
     async fn set_reasoning_option(&mut self, value: &str, client: &ApiClient) -> Result<()> {
-        if !matches!(value, "off" | "ultracode" | "display")
+        if !matches!(value, "off" | "display")
             && !self
                 .reasoning_efforts()
                 .iter()
@@ -3638,23 +3633,21 @@ impl App {
             self.notice = self.unsupported_effort(value);
             return Ok(());
         }
-        if value != "display" {
-            let enabled = value == "ultracode";
-            if self.thread.ultracode != enabled {
-                self.thread = client
-                    .update_thread(
-                        self.thread.id,
-                        UpdateThreadRequest {
-                            title: None,
-                            archived: None,
-                            agent: None,
-                            provider: None,
-                            model: None,
-                            ultracode: Some(enabled),
-                        },
-                    )
-                    .await?;
-            }
+        // Picking an effort ends Ultracode, which runs at the strongest one.
+        if value != "display" && self.thread.ultracode {
+            self.thread = client
+                .update_thread(
+                    self.thread.id,
+                    UpdateThreadRequest {
+                        title: None,
+                        archived: None,
+                        agent: None,
+                        provider: None,
+                        model: None,
+                        ultracode: Some(false),
+                    },
+                )
+                .await?;
         }
         self.apply_option(OptionsKind::ReasoningEffort, value);
         Ok(())
@@ -5101,7 +5094,7 @@ pub(crate) fn default_goal_completion() -> haarness_protocol::GoalCompletion {
 /// Choices for the /reasoning modal, with the active state annotated.
 fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
     let language = app.language;
-    // The levels themselves (low, high, max, ultracode) are values typed after
+    // The levels themselves (low, high, max) are values typed after
     // /reasoning, so they stay as typed; what they mean is translated.
     let describe = |key: &str, active: bool| {
         if active {
@@ -5138,14 +5131,6 @@ fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
             value: effort.into(),
         });
     }
-    entries.push(OptionEntry {
-        label: "ultracode".into(),
-        description: describe(
-            "Workflow orchestration · strongest compatible reasoning",
-            app.thread.ultracode,
-        ),
-        value: "ultracode".into(),
-    });
     entries.push(OptionEntry {
         label: language.format(
             "Thinking display: {mode}",

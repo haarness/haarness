@@ -145,7 +145,7 @@ test("a definition says it is built in or names its plugin, never both at once",
   );
   // The person's own definitions say their scope instead; others are not guessed.
   assert.equal(definitionSource({ name: "mine", scope: "global" }, plugins), undefined);
-  assert.equal(definitionSource({ name: "base-agent", scope: "base" }, plugins), undefined);
+  assert.equal(definitionSource({ name: "base-agent", scope: "system" }, plugins), undefined);
   assert.equal(definitionSource({ name: "other:agent" }, plugins), undefined);
   assert.equal(definitionSource({ name: "claude-agent" }, plugins), undefined);
   assert.equal(definitionSource({ name: "near", path: "/data/plugins/kitchen/x.md" }, plugins), undefined);

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Prompt files end to end: `haarness prompt` and what a real daemon sends a provider.
 
-A mock Anthropic Messages server records every request. With a base folder and a global folder
+A mock Anthropic Messages server records every request. With a system folder and a global folder
 that hold prompt files, the script proves that:
 
-1. `haarness prompt list|show|eject|diff` work as documented: eject writes mode and based-on, a
-   stale based-on is marked and warned about, files with a bad name or frontmatter are listed as
+1. `haarness prompt list|show|customize|diff` work as documented: customize writes mode and written-from, a
+   stale written-from is marked and warned about, files with a bad name or frontmatter are listed as
    ignored with the reason, a project's `.haarness/prompts` is never read and a link from the
    global folder into the project is refused;
 2. a real chat sends the prompts as `prompt show` prints them: the main instructions (base file,
@@ -152,17 +152,17 @@ try:
     subprocess.run([str(binary), "--workspace", str(project), "serve", "--stop"], env=env, capture_output=True, timeout=60)
 
     # 1. The commands.
-    ejected = cli("prompt", "eject", "system").stdout
+    customized = cli("prompt", "customize", "system").stdout
     file = config / "prompts/system.md"
     text = file.read_text()
     based = json.loads(cli("prompt", "list", "--json").stdout)["prompts"][0]["builtin"]
-    check("`prompt eject` writes mode: replace and based-on with the built-in text",
-          "Wrote" in ejected and text.startswith(f"---\nmode: replace\nbased-on: {based}\n---\nYou are Haarness"))
-    check("`prompt eject` will not overwrite without --force", "Pass --force" in cli("prompt", "eject", "system", ok=False).stderr)
+    check("`prompt customize` writes mode: replace and written-from with the built-in text",
+          "Wrote" in customized and text.startswith(f"---\nmode: replace\nwritten-from: {based}\n---\nYou are Haarness"))
+    check("`prompt customize` will not overwrite without --force", "Pass --force" in cli("prompt", "customize", "system", ok=False).stderr)
     write(file, text.replace("You are Haarness, a local agentic coding harness. Work autonomously",
                              "You are Acme's coding agent. Work autonomously"))
     write(team / "prompts/system.md", "TEAM_BASE_LINE: follow the team checklist.\n")
-    write(team / "prompts/compaction.md", "---\nmode: prepend\nbased-on: sha256:000000000000\n---\nTEAM_SUMMARY_LINE\n")
+    write(team / "prompts/compaction.md", "---\nmode: prepend\nwritten-from: sha256:000000000000\n---\nTEAM_SUMMARY_LINE\n")
     write(config / "prompts/plan.md", "Number every step of the plan.\n")
     write(config / "prompts/title.md", "---\nmode: replace\n---\nName the chat in at most three words.\n")
     write(config / "prompts/sytem.md", "A typo.\n")
@@ -170,7 +170,7 @@ try:
     write(project / ".haarness/prompts/explore.md", "PROJECT_PROMPT_LINE\n")
     write(project / "planted.md", "---\nmode: replace\n---\nPLANTED_PROMPT_LINE\n")
     os.symlink(project / "planted.md", config / "prompts/goal.md")
-    based_env = {**env, "HAARNESS_BASE_CONFIG_DIR": str(team)}
+    based_env = {**env, "HAARNESS_SYSTEM_CONFIG_DIR": str(team)}
     listed = cli("prompt", "list", environment=based_env)
     (evidence / "prompt-list.txt").write_text(listed.stdout + "\n--- stderr\n" + listed.stderr)
     rows = [line.split() for line in listed.stdout.splitlines()]
@@ -178,11 +178,11 @@ try:
           rows[0][:2] == ["system", "append"] and rows[0][-1] == "(base)"
           and rows[1][0] == "replace" and rows[1][-1] == "(global)")
     check("`prompt list` marks the stale file and warns on stderr",
-          any(row[:2] == ["compaction", "stale"] for row in rows) and "written against an earlier built-in prompt" in listed.stderr)
+          any(row[:2] == ["compaction", "stale"] for row in rows) and "written from an older built-in prompt" in listed.stderr)
     check("Files with a bad name or frontmatter are listed as ignored, with why",
-          '"sytem" is not a prompt name' in listed.stderr and "frontmatter is invalid" in listed.stderr)
+          '"sytem" is not a prompt name' in listed.stderr and "header may only set" in listed.stderr)
     check("A link from the global folder into the project is refused",
-          "inside the project, through a link" in listed.stderr and "PLANTED" not in cli("prompt", "show", "goal", environment=based_env).stdout)
+          "leads this file into the project" in listed.stderr and "PLANTED" not in cli("prompt", "show", "goal", environment=based_env).stdout)
     check("A project's .haarness/prompts is never read",
           "PROJECT_PROMPT_LINE" not in cli("prompt", "show", "explore", environment=based_env).stdout
           and ".haarness/prompts" not in listed.stdout + listed.stderr)
@@ -193,8 +193,8 @@ try:
     diff = cli("prompt", "diff", "compaction", environment=based_env).stdout
     (evidence / "prompt-diff.txt").write_text(diff)
     check("`prompt diff` says the file is stale and shows the change",
-          "prepend, stale, based-on sha256:000000000000" in diff and "+TEAM_SUMMARY_LINE" in diff and "Current built-in compaction:" in diff)
-    # The global replace with {{builtin}} keeps what the base folder did.
+          "prepend, stale, written from sha256:000000000000" in diff and "+TEAM_SUMMARY_LINE" in diff and "Current built-in compaction:" in diff)
+    # The global replace with {{builtin}} keeps what the system folder did.
     write(file, "---\nmode: replace\n---\nYou are Acme's coding agent.\n\n{{builtin}}\n")
     shown = cli("prompt", "show", "system", environment=based_env).stdout
     check("{{builtin}} wraps what the lower folders made of the prompt",
@@ -216,7 +216,7 @@ try:
     offset = len(REQUESTS)
     api(f"/threads/{thread}/compact", {})
     summary = REQUESTS[offset]
-    check("The summary request uses the base folder's compaction file", system(summary).startswith("TEAM_SUMMARY_LINE\n\nYou are Haarness"))
+    check("The summary request uses the system folder's compaction file", system(summary).startswith("TEAM_SUMMARY_LINE\n\nYou are Haarness"))
     plan = turn(chat("plan"), "PLAN turn")
     check("The plan agent sends its own prompt with the global plan file",
           "Explore first, do not mutate files" in system(plan).split("\n\nYou are powered by")[0]
@@ -233,11 +233,11 @@ try:
     logs = "\n".join(path.read_text(errors="ignore") for path in data.rglob("*.log*"))
     check("The daemon log names each prompt file in effect and the stale one",
           any("prompt file" in line and str(file) in line for line in logs.splitlines())
-          and any("prompt file is stale" in line and "compaction" in line for line in logs.splitlines()))
+          and any("older built-in prompt" in line and "compaction" in line for line in logs.splitlines()))
     (evidence / "results.json").write_text(json.dumps(checks, indent=2))
     print(f"{len(checks)} checks passed", flush=True)
 finally:
-    for environment in (env, {**env, "HAARNESS_BASE_CONFIG_DIR": str(team)}):
+    for environment in (env, {**env, "HAARNESS_SYSTEM_CONFIG_DIR": str(team)}):
         subprocess.run([str(binary), "--workspace", str(project), "serve", "--stop"], env=environment,
                        capture_output=True, timeout=60)
     service.shutdown()

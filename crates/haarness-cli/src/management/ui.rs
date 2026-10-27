@@ -1452,15 +1452,15 @@ impl ManagementService {
                 .mcp(&json!({"action":"get","name":name,"scope":input["scope"]}))
                 .await?;
             let enabled = row["config"]["enabled"].as_bool().unwrap_or(true);
-            // A server of the base folder is never changed there: turning it
+            // A server of the system folder is never changed there: turning it
             // off saves the person's own copy, and it has no Edit or Remove.
-            let base = row["scope"] == "base";
+            let base = row["scope"] == "system";
             let mut view = View {
                 title: format!("MCP · {name}"),
                 lines: vec![
                     format!("Status: {}", text(&row, "runtimeStatus")),
                     if base {
-                        format!("Source: {} (base folder, read-only)", text(&row, "file"))
+                        format!("Source: {} (system folder, read-only)", text(&row, "file"))
                     } else {
                         format!("Source: {}", text(&row, "file"))
                     },
@@ -1468,7 +1468,7 @@ impl ManagementService {
                 entries: vec![entry(
                     if enabled { "Disable" } else { "Enable" },
                     if base {
-                        "Saved as your own setting over the base folder's"
+                        "Saved as your own setting over the system folder's"
                     } else {
                         "Persist this server's availability"
                     },
@@ -1522,7 +1522,7 @@ impl ManagementService {
             ..View::default()
         };
         for row in rows.as_array().into_iter().flatten() {
-            if row["scope"] == "base" {
+            if row["scope"] == "system" {
                 view.entries.push(entry(
                     text(row, "name"),
                     format!("{} · base", text(row, "runtimeStatus")),
@@ -1699,9 +1699,9 @@ impl ManagementService {
                 title: format!("{} · {}", text(&row, "event"), text(&row, "matcher")),
                 lines: vec![
                     text(&row["handler"], "command").into(),
-                    if row["source"]["scope"] == "base" {
+                    if row["source"]["scope"] == "system" {
                         format!(
-                            "Source: {} (base folder, read-only)",
+                            "Source: {} (system folder, read-only)",
                             text(&row["source"], "path")
                         )
                     } else {
