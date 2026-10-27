@@ -78,7 +78,7 @@ Click a queued row, or pick it from `/queue`, for its actions:
 - **Remove**
 - **Move up** or **Move down**
 
-**Edit** loads the message into the prompt and sets your draft aside. The queue's header reads `Editing — Enter saves it in place`, and the line `Esc or click cancels and restores your draft` appears under the queue. Enter saves in place; Esc or a click cancels and restores the draft, and never interrupts running work. Esc Esc, Ctrl+C twice and `/stop` stop work the same way as Desktop's Stop.
+**Edit** loads the message into the prompt and sets your draft aside. The queue's header reads `Editing · Enter saves your changes`, and the line `Esc or click cancels and restores your draft` appears under the queue. Enter saves in place; Esc or a click cancels and restores the draft, and never interrupts running work. Esc Esc, Ctrl+C twice and `/stop` stop work the same way as Desktop's Stop.
 
 Slash commands and shell-mode commands are not deferred. Deferred-message actions require a server advertising `input-queue.v1`; older servers retain ordinary steering support.
 

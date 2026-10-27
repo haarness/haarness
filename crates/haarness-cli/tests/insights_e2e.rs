@@ -90,10 +90,9 @@ async fn real_cli_multi_project_history_matches_api_and_html_without_mutating_hi
     assert!(stats["total"]["inputTokens"].as_u64().unwrap() > 0);
     assert!(stats["warnings"].as_array().unwrap().is_empty());
     assert_eq!(std::fs::read(data.join("workspaces.json")).unwrap(), before);
-    let current: Value = serde_json::from_str(&fixture.success(
-        &fixture.workspaces[0],
-        &["stats", "--here", "--json"],
-    ))
+    let current: Value = serde_json::from_str(
+        &fixture.success(&fixture.workspaces[0], &["stats", "--here", "--json"]),
+    )
     .unwrap();
     assert_eq!(current["total"]["turns"], 1);
     let limited: Value = serde_json::from_str(

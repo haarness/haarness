@@ -117,8 +117,7 @@ fn read(
     let (front, body) = haarness_core::definitions::markdown(&content)
         .map_err(|_| "The header between the --- lines is not valid YAML.".to_owned())?;
     let invalid = || {
-        "The header may only set `mode` (replace, prepend or append) and `written-from`."
-            .to_owned()
+        "The header may only set `mode` (replace, prepend or append) and `written-from`.".to_owned()
     };
     if front
         .keys()

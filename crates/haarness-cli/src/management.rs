@@ -1,7 +1,7 @@
 use super::{
-    Paths, adopt_system_mcp_entry, asset_layers, system_mcp_entry, loaded_mcp_entry,
-    mcp_config_for_display, mcp_config_target, mcp_entry_target, open_browser, read_mcp_entry,
-    receive_oauth_callback, release_base_mcp_copy, validate_asset_name, validate_mcp_name,
+    Paths, adopt_system_mcp_entry, asset_layers, loaded_mcp_entry, mcp_config_for_display,
+    mcp_config_target, mcp_entry_target, open_browser, read_mcp_entry, receive_oauth_callback,
+    release_base_mcp_copy, system_mcp_entry, validate_asset_name, validate_mcp_name,
     validate_qualified_model, write_mcp_changes, write_mcp_entry,
 };
 use crate::plugins;

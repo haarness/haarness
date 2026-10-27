@@ -4479,7 +4479,7 @@ async fn reasoning_picker_lists_effort_levels_and_leaves_ultracode_to_its_comman
         .await
         .unwrap();
     assert!(!app.thread.ultracode);
-    assert!(app.notice.contains("does not support ultracode"), "{}", app.notice);
+    assert!(app.notice.contains("does not support"), "{}", app.notice);
 }
 
 #[tokio::test]
@@ -4568,15 +4568,18 @@ async fn reasoning_picker_marks_no_level_while_ultracode_is_on() {
         .await
         .unwrap();
     assert_eq!(app.selection, 0, "focus starts on the first row");
+    let crate::state::Overlay::Options { entries, .. } = &app.overlay else {
+        panic!("/reasoning must open the options picker");
+    };
+    assert!(
+        !entries.iter().any(|entry| entry.value == "ultracode"),
+        "the picker lists effort levels only"
+    );
     let rendered = app
         .lines((90, 24))
         .iter()
         .map(Line::text)
         .collect::<Vec<_>>();
-    assert!(
-        !rendered.iter().any(|line| line.contains("ultracode")),
-        "the picker lists effort levels only: {rendered:?}"
-    );
     let default = rendered
         .iter()
         .find(|line| line.contains("provider default"))
@@ -9684,7 +9687,7 @@ async fn a_list_replaced_under_a_held_press_is_not_clicked() {
         let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
         app.input_queue = queue.clone();
         app.open_overlay(crate::state::Overlay::Options {
-            title: "Queued messages · paused — send when ready".into(),
+            title: "Queued messages · on hold".into(),
             kind: crate::state::OptionsKind::InputQueue,
             entries: queue
                 .items
@@ -11487,7 +11490,10 @@ fn the_band_names_the_approval_mode_apart_from_a_review_agent() {
     app.auto_permissions = true;
     let band = frame_text(&app, (120, 36));
     let last = band.lines().last().unwrap().to_owned();
-    assert!(last.contains("  auto") && !last.contains("approvals:"), "{last}");
+    assert!(
+        last.contains("  auto") && !last.contains("approvals:"),
+        "{last}"
+    );
 }
 
 #[test]
@@ -18799,7 +18805,13 @@ async fn auto_mode_shortcut_and_restricted_requests_are_manual() {
     }
     assert_eq!(app.pending_permissions.len(), 3);
     assert!(app.auto_permissions_seen.values().all(|approved| !approved));
-    assert!(frame_text(&app, (140, 40)).lines().last().unwrap().contains("  auto"));
+    assert!(
+        frame_text(&app, (140, 40))
+            .lines()
+            .last()
+            .unwrap()
+            .contains("  auto")
+    );
     crate::input::handle_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
@@ -19520,7 +19532,7 @@ fn queue_strip_header_names_the_working_paused_and_editing_states() {
     app.edit_queued_message(second).unwrap();
     let editing = frame_text(&app, (100, 30));
     assert!(
-        editing.contains("▎ Editing — Enter saves it in place"),
+        editing.contains("▎ Editing · Enter saves your changes"),
         "{editing}"
     );
     // The header says what Enter does; the line under the queue, how to back
@@ -19696,7 +19708,10 @@ async fn saving_a_queued_edit_keeps_its_place_and_sends_its_attachments() {
     assert_eq!(app.attachments, ["/tmp/draft.png"]);
     assert_eq!(app.notice, "Queued message saved");
     let text = frame_text(&app, (100, 30));
-    assert!(text.contains("Queue on hold · send when you're ready"), "{text}");
+    assert!(
+        text.contains("Queue on hold · send when you're ready"),
+        "{text}"
+    );
     assert!(text.contains("2. second, with more"), "{text}");
 }
 
@@ -21937,10 +21952,7 @@ fn a_typo_of_a_command_is_named_instead_of_sent() {
 async fn a_command_that_refuses_its_arguments_keeps_the_line() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
-    for line in [
-        "/loop 5 minutes check the deploy",
-        "/approvals sometimes",
-    ] {
+    for line in ["/loop 5 minutes check the deploy", "/approvals sometimes"] {
         app.composer.set_text(line.into());
         // Nothing listens on the offline client: nothing may be sent.
         crate::input::handle_key(

@@ -593,7 +593,10 @@ pub(crate) fn validate_plugin_tree(root: &Path) -> Result<()> {
                     )
                 })?;
                 if !resolved.starts_with(&root) {
-                    bail!("a link in the plugin leads outside its folder: {}", path.display());
+                    bail!(
+                        "a link in the plugin leads outside its folder: {}",
+                        path.display()
+                    );
                 }
             } else if metadata.is_dir() {
                 pending.push(path);

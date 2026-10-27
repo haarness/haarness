@@ -426,12 +426,7 @@ async fn real_cloud_upload_discovery_download_restore_auth_and_restart_persisten
     );
     assert_eq!(remote(&["info", &id])["sha256"], uploaded["sha256"]);
     let downloaded = fixture.root.join("downloaded.zip");
-    remote(&[
-        "download",
-        &id,
-        "--output",
-        downloaded.to_str().unwrap(),
-    ]);
+    remote(&["download", &id, "--output", downloaded.to_str().unwrap()]);
     assert_eq!(fs::read(&downloaded).unwrap(), fs::read(&file).unwrap());
     remote(&["pull", &id, "--dry-run"]);
     assert!(!fixture.root.join("target/config/haarness.json").exists());
@@ -468,27 +463,14 @@ async fn real_cloud_upload_discovery_download_restore_auth_and_restart_persisten
     let listed = fixture.ok(
         "target",
         &[
-            "profile",
-            "--url",
-            &url,
-            "--token",
-            &token,
-            "search",
-            "--json",
+            "profile", "--url", &url, "--token", &token, "search", "--json",
         ],
     );
     assert_eq!(listed.as_array().unwrap().len(), 2);
     fixture.ok(
         "target",
         &[
-            "profile",
-            "--url",
-            &url,
-            "--token",
-            &token,
-            "delete",
-            &id,
-            "--json",
+            "profile", "--url", &url, "--token", &token, "delete", &id, "--json",
         ],
     );
     assert_eq!(

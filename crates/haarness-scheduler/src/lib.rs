@@ -2287,7 +2287,7 @@ mod tests {
                 ..CreateSchedule::default()
             })
             .unwrap_err();
-        assert!(error.to_string().contains("minimum schedule interval"));
+        assert!(error.to_string().contains("at most once a minute"));
         let error = scheduler
             .create(CreateSchedule {
                 prompt: Some("test".into()),

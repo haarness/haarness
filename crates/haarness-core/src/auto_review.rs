@@ -412,7 +412,10 @@ fn list(title: &str, items: &[String]) -> Option<String> {
 
 fn instructions(policy: &str, settings: &AutoReviewSettings) -> String {
     let trusted: Vec<String> = [
-        list("What the user told you about their setup:", &settings.environment),
+        list(
+            "What the user told you about their setup:",
+            &settings.environment,
+        ),
         list(
             "The user allows these actions even when no message asks for them:",
             &settings.allow,

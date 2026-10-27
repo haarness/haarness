@@ -219,7 +219,11 @@ async fn auto_approves_what_the_reviewer_allows_and_blocks_what_it_denies() {
         .find(|request| request.output_schema.is_some())
         .cloned()
         .unwrap();
-    assert!(review.system.starts_with("An AI coding agent is about to take one action"));
+    assert!(
+        review
+            .system
+            .starts_with("An AI coding agent is about to take one action")
+    );
     assert_eq!(review.parameters.temperature, Some(0.0));
     assert_eq!(review.parameters.max_output_tokens, Some(2048));
     assert!(review.tools.is_empty());

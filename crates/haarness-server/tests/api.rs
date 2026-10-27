@@ -9251,7 +9251,7 @@ async fn cancelling_one_foreground_subagent_returns_a_terminal_notice_without_a_
             if name == "task"
                 && !is_error
                 && output.contains("state=\"cancelled\"")
-                && output.contains("Do not relaunch"))));
+                && output.contains("Do not start it again"))));
 }
 
 #[tokio::test]

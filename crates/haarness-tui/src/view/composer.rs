@@ -94,7 +94,7 @@ pub fn queued_strip(app: &App, width: usize) -> TaggedLines {
     let (label, detail, tone, rail) = if editing.is_some() {
         (
             language.text("Editing"),
-            format!(" — {}", language.text("Enter saves it in place")),
+            format!(" · {}", language.text("Enter saves your changes")),
             theme.accent,
             theme.accent,
         )
@@ -107,8 +107,8 @@ pub fn queued_strip(app: &App, width: usize) -> TaggedLines {
         )
     } else {
         (
-            language.text("Queue paused"),
-            format!(" — {}", language.text("send when ready")),
+            language.text("Queue on hold"),
+            format!(" · {}", language.text("send when you're ready")),
             theme.accent,
             theme.accent,
         )

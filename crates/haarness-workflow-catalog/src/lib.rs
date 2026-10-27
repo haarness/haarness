@@ -1589,13 +1589,13 @@ return client.fetch(labels.fetch + prose)
             result
                 .invalid
                 .iter()
-                .any(|item| item.error.contains("literal"))
+                .any(|item| item.error.contains("plain values"))
         );
         assert!(
             result
                 .invalid
                 .iter()
-                .any(|item| item.error.contains("Missing meta"))
+                .any(|item| item.error.contains("No meta export"))
         );
     }
 
@@ -1734,6 +1734,10 @@ return client.fetch(labels.fetch + prose)
         assert_eq!(result.workflows.len(), 1);
         assert_eq!(result.workflows[0].invocation, "review-kit:review");
         assert_eq!(result.invalid.len(), 1);
-        assert!(result.invalid[0].error.contains("outside the plugin folder"));
+        assert!(
+            result.invalid[0]
+                .error
+                .contains("outside the plugin folder")
+        );
     }
 }

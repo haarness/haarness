@@ -644,7 +644,10 @@ mod tests {
         let (next, _, _) = apply_goal_action(Some(state), GoalActionRequest::Complete).unwrap();
         let next = next.unwrap();
         assert_eq!(next.status, GoalStatus::Complete);
-        assert_eq!(next.last_reason.as_deref(), Some("the person marked it done"));
+        assert_eq!(
+            next.last_reason.as_deref(),
+            Some("the person marked it done")
+        );
     }
 
     #[test]

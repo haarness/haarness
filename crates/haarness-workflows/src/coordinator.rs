@@ -1613,9 +1613,9 @@ pub(crate) fn workflow_args(
         return Ok(input);
     }
     let input = input.unwrap_or_else(|| json!({}));
-    let args = input.as_object().ok_or_else(|| {
-        CoreError::Invalid("workflow arguments must be a JSON object".into())
-    })?;
+    let args = input
+        .as_object()
+        .ok_or_else(|| CoreError::Invalid("workflow arguments must be a JSON object".into()))?;
     let mut result = serde_json::Map::new();
     for (key, definition) in &definition.meta.arguments {
         let Some(raw) = args.get(key).or(definition.default.as_ref()) else {
