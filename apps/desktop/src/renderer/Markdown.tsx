@@ -185,7 +185,7 @@ export function Markdown(props: {
   /**
    * The person asked for the image this button names: it, and the reply's
    * other images from the same host, are fetched by the app and replace
-   * their placeholders. Images from other hosts keep waiting for their own click.
+   * their placeholders. An image on any other host still needs a click of its own.
    * Only placeholders the app made count, and only addresses on that host.
    */
   async function loadImages(button: HTMLButtonElement) {

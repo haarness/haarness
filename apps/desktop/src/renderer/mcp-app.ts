@@ -223,7 +223,7 @@ export function policy(meta?: Meta) {
     .join("; ");
 }
 
-/** The domains the host actually granted, as `hostCapabilities.sandbox.csp` reports them. */
+/** The domains granted in the end, from `hostCapabilities.sandbox.csp`. */
 export function granted(meta?: Meta) {
   return {
     connectDomains: sources(meta?.csp?.connectDomains),

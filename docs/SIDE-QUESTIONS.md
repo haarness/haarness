@@ -65,7 +65,7 @@ of its own for the next question at the bottom.
 | Key | What it does |
 | --- | --- |
 | `enter` | Ask; `shift+enter` (or `alt+enter`, `ctrl+j`) adds a line |
-| `esc` | Back to the chat. An answer still being written keeps going, and `/btw` brings the thread back |
+| `esc` | Back to the chat. An answer that is still arriving carries on, and `/btw` reopens the thread |
 | `ctrl+c` | Clear the box; with nothing to clear, stop the answer being written; then back to the chat |
 | `/clear` or `/new` (typed in the box) | Start a new thread |
 | `/copy` (typed in the box) | Copy the last answer |
@@ -97,7 +97,7 @@ and whether it is open are remembered.
 | Put it away | **×** at the end of its header, or **⇧⌘J** again from its box; either way the keyboard goes back to the message box. `esc` in an idle box goes back without closing it, or puts it away where it covers the workspace |
 | Another thread | **+** in its header, or **New side chat** in **Search** |
 | Stop an answer | The stop key, or `esc` in its box |
-| Close a thread | Its tab's ×, a middle click, or **⌘W** (Ctrl+W elsewhere) while the keyboard is in the side chat (elsewhere ⌘W still closes the window). Closing the last one puts the side chat away |
+| Close a thread | Its tab's ×, a middle click, or **⌘W** (Ctrl+W elsewhere) while the keyboard is in the side chat (elsewhere ⌘W still closes the window). When the last one closes, the side chat closes too |
 
 The conversation keeps at least 480 pixels and the side panel 360; the side
 chat gives way first, down to 300. Where the three do not fit, the side chat

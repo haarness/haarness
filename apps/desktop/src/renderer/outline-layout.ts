@@ -56,7 +56,7 @@ export function slices(count: number, max = FOLD_MAX) {
   return Array.from({ length: max }, (_, k) => Math.floor((k * count) / max));
 }
 
-/** Index of the slice that holds prompt `i`. `starts` ascends from 0. */
+/** Which slice prompt `i` falls in. `starts` is sorted and begins at 0. */
 export function sliceOf(starts: readonly number[], i: number) {
   let lo = 0;
   let hi = starts.length - 1;
