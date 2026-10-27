@@ -573,8 +573,9 @@ fn gemini_contents(messages: Vec<ProviderMessage>) -> CoreResult<Vec<Value>> {
                 attachments,
             } if role != "developer" => {
                 let media = crate::media::load_all_with_limit(&attachments, 10 * 1024 * 1024)?;
-                let mut parts = Vec::with_capacity(media.len() + usize::from(!content.is_empty()));
-                if !content.is_empty() {
+                let text = !content.trim().is_empty();
+                let mut parts = Vec::with_capacity(media.len() + usize::from(text));
+                if text {
                     parts.push(json!({"text": content}));
                 }
                 parts.extend(media.into_iter().map(
@@ -1145,5 +1146,18 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
             contents[0]["parts"][6]["inlineData"]["mimeType"],
             "application/pdf"
         );
+    }
+
+    #[test]
+    fn a_photo_sent_without_text_has_no_blank_text_part() {
+        let contents = gemini_contents(vec![ProviderMessage::Media {
+            role: "user".into(),
+            content: " \n".into(),
+            attachments: vec!["data:image/png;base64,iVBORw0KGgo=".into()],
+        }])
+        .unwrap();
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 1, "{parts:?}");
+        assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
     }
 }
