@@ -2927,5 +2927,11 @@
   "This copy of Haarness can’t replace itself, so updates come as an installer.": "Haarness’ın bu kopyası kendini değiştiremez, bu yüzden güncellemeler yükleyici olarak gelir.",
   "Last checked {time}": "Son denetim: {time}",
   "Download updates automatically": "Güncellemeleri otomatik indir",
-  "New versions download in the background and install when Haarness restarts.": "Yeni sürümler arka planda indirilir ve Haarness yeniden başladığında kurulur."
+  "New versions download in the background and install when Haarness restarts.": "Yeni sürümler arka planda indirilir ve Haarness yeniden başladığında kurulur.",
+  "Less than a day left at this pace": "Bu hızla bir günden az kaldı",
+  "About 1 day left at this pace": "Bu hızla yaklaşık 1 gün kaldı",
+  "Ends {date}": "{date} tarihinde biter",
+  "On hold": "Bekletiliyor",
+  "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Aşım kapalı, bu yüzden satın alınan krediler harcanmaz. Faturalandırmadan açın.",
+  "Your free trial didn't start: that card was already used for a trial.": "Ücretsiz denemeniz başlamadı: bu kart daha önce bir denemede kullanıldı."
 }

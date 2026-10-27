@@ -2927,5 +2927,11 @@
   "This copy of Haarness can’t replace itself, so updates come as an installer.": "Esta copia de Haarness no puede reemplazarse a sí misma, así que las actualizaciones llegan como instalador.",
   "Last checked {time}": "Última comprobación: {time}",
   "Download updates automatically": "Descargar actualizaciones automáticamente",
-  "New versions download in the background and install when Haarness restarts.": "Las nuevas versiones se descargan en segundo plano y se instalan cuando Haarness se reinicia."
+  "New versions download in the background and install when Haarness restarts.": "Las nuevas versiones se descargan en segundo plano y se instalan cuando Haarness se reinicia.",
+  "Less than a day left at this pace": "Queda menos de un día a este ritmo",
+  "About 1 day left at this pace": "Queda alrededor de 1 día a este ritmo",
+  "Ends {date}": "Termina el {date}",
+  "On hold": "Retenidos",
+  "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "El exceso está desactivado, así que los créditos comprados no se gastan. Actívalo en Facturación.",
+  "Your free trial didn't start: that card was already used for a trial.": "Tu prueba gratuita no empezó: esa tarjeta ya se usó para una prueba."
 }

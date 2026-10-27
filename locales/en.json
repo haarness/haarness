@@ -2927,5 +2927,11 @@
   "This copy of Haarness can’t replace itself, so updates come as an installer.": "This copy of Haarness can’t replace itself, so updates come as an installer.",
   "Last checked {time}": "Last checked {time}",
   "Download updates automatically": "Download updates automatically",
-  "New versions download in the background and install when Haarness restarts.": "New versions download in the background and install when Haarness restarts."
+  "New versions download in the background and install when Haarness restarts.": "New versions download in the background and install when Haarness restarts.",
+  "Less than a day left at this pace": "Less than a day left at this pace",
+  "About 1 day left at this pace": "About 1 day left at this pace",
+  "Ends {date}": "Ends {date}",
+  "On hold": "On hold",
+  "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Overage is off, so purchased credits are not spent. Turn it on in Billing.",
+  "Your free trial didn't start: that card was already used for a trial.": "Your free trial didn't start: that card was already used for a trial."
 }

@@ -221,7 +221,10 @@ export function AccountMenu(props: {
     const s = summary();
     if (!s) return undefined;
     if (billing().error) return t("Billing unavailable");
-    const total = creditsShort(addCredits(s.includedCredits, s.purchasedCredits));
+    // Credits that can pay: purchased ones only with overage on, and never while on hold.
+    const total = creditsShort(
+      s.overageOptIn && !s.purchasedFrozen ? addCredits(s.includedCredits, s.purchasedCredits) : s.includedCredits,
+    );
     return t("{plan} · {credits} credits", { plan: planLabel(s) ?? t("No plan"), credits: total });
   };
   return (
@@ -436,13 +439,17 @@ export function AccountMenu(props: {
                       <dt>{t("Included credits")}</dt>
                       <dd data-testid="included-credits">{credits(s().includedCredits)}</dd>
                       <span>
-                        {s().resetsAt ? t("Resets {date}", { date: date(s().resetsAt!) }) : t("From your plan")}
+                        {s().resetsAt
+                          ? s().trial || s().cancelAtPeriodEnd
+                            ? t("Ends {date}", { date: date(s().resetsAt!) })
+                            : t("Resets {date}", { date: date(s().resetsAt!) })
+                          : t("From your plan")}
                       </span>
                     </div>
                     <div>
                       <dt>{t("Purchased credits")}</dt>
                       <dd data-testid="purchased-credits">{credits(s().purchasedCredits)}</dd>
-                      <span>{t("Never expire")}</span>
+                      <span>{s().purchasedFrozen ? t("On hold") : t("Never expire")}</span>
                     </div>
                     <div>
                       <dt>{t("Cloud compute")}</dt>
@@ -453,8 +460,20 @@ export function AccountMenu(props: {
                   <Show when={/[1-9]/.test(s().heldCredits)}>
                     <p class="account-note">{t("{credits} credits are held by requests in progress.", { credits: credits(s().heldCredits) })}</p>
                   </Show>
+                  <Show when={!s().overageOptIn && !s().purchasedFrozen && /[1-9]/.test(s().purchasedCredits)}>
+                    <p class="account-note" data-testid="overage-off">{t("Overage is off, so purchased credits are not spent. Turn it on in Billing.")}</p>
+                  </Show>
                   <Show when={!s().outOfCredits && s().daysLeft != null && s().daysLeft! < 30}>
-                    <p class="account-note" data-testid="days-left">{t("About {days} days left at this pace", { days: s().daysLeft! })}</p>
+                    <p class="account-note" data-testid="days-left">
+                      {s().daysLeft === 0
+                        ? t("Less than a day left at this pace")
+                        : s().daysLeft === 1
+                          ? t("About 1 day left at this pace")
+                          : t("About {days} days left at this pace", { days: s().daysLeft! })}
+                    </p>
+                  </Show>
+                  <Show when={s().trialRefused}>
+                    <p class="account-note">{t("Your free trial didn't start: that card was already used for a trial.")}</p>
                   </Show>
                   <Show when={s().autoTopupFailure}>
                     {reason => <p class="form-error" role="status">{t("The last automatic top-up failed, so they are off: {reason}", { reason: reason() })}</p>}

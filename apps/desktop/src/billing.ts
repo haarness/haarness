@@ -8,8 +8,10 @@ export type BillingState = {
     plan: string;
     subscriptionStatus?: string | null;
     accountStatus: string;
+    /** Credits left, counting what requests in flight hold, so the balance does not dip during a reply. */
     includedCredits: string;
     purchasedCredits: string;
+    /** Credits requests in flight hold; part of the balances above. */
     heldCredits: string;
     cloudUnits: string;
     cloudUnitsHeld: string;
@@ -26,11 +28,15 @@ export type BillingState = {
     /** The current allowance is the one-time trial. */
     trial?: boolean;
     trialAvailable?: boolean;
+    /** A trial checkout saved a card that had already been used for a trial. */
+    trialRefused?: boolean;
+    /** Purchased credits are on hold and pay for nothing. */
+    purchasedFrozen?: boolean;
     autoTopup?: boolean;
     autoTopupFailure?: string | null;
     /** Days the credits that can pay last at the last week's pace. */
     daysLeft?: number | null;
-    /** A plan is current but no AI credit can pay. */
+    /** The account has a plan or purchased credits, yet no AI credit can pay. */
     outOfCredits?: boolean;
   } | null;
 };

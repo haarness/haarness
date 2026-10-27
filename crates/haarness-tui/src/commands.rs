@@ -4733,9 +4733,12 @@ impl App {
     /// `/billing`: balances on top, and the next step one Enter away instead
     /// of a page of URLs and a line of subcommands to retype.
     pub(crate) fn open_billing(&mut self) {
+        // Purchased credits pay only with overage on, and buying more does not turn it on.
         let idle_purchase = self.billing.summary.as_ref().is_some_and(|summary| {
             !summary.overage_opt_in
-                && haarness_account::billing::display_credits(&summary.purchased_credits) != "0"
+                && (summary.out_of_credits
+                    || haarness_account::billing::display_credits(&summary.purchased_credits)
+                        != "0")
         });
         let mut entries = if self.billing.logged_in {
             vec![
@@ -4795,7 +4798,9 @@ impl App {
     /// Open one of the account's billing pages: `open`, `topup` or `usage`.
     fn open_billing_page(&mut self, page: &str) {
         let Some(summary) = &self.billing.summary else {
-            self.notice = if self.billing.logged_in {
+            self.notice = if let Some(error) = &self.billing.error {
+                format!("Cloud billing unavailable · {error}")
+            } else if self.billing.logged_in {
                 "Cloud billing is still loading · try again in a moment".into()
             } else {
                 "Not signed in to Haarness Cloud · /connect haarness".into()

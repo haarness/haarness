@@ -1210,23 +1210,47 @@ fn billing_preface(
         plan = format!("{plan} · {verb} {}", day(at));
     }
     lines.push(format!("Account  {}", summary.account_name));
+    if summary.account_status != "active" {
+        lines.push(format!(
+            "\u{26a0}  Account {}  Cloud requests are paused until billing is resolved",
+            summary.account_status
+        ));
+    }
     lines.push(format!("Plan  {plan}"));
     let mut included = format!("{} credits", display_credits(&summary.included_credits));
     if let Some(at) = &summary.resets_at {
-        included = format!("{included} · resets {}", day(at));
+        // A trial's allowance, or one on a plan set to end, stops there instead of refilling.
+        let verb = if summary.trial || summary.cancel_at_period_end {
+            "ends"
+        } else {
+            "resets"
+        };
+        included = format!("{included} · {verb} {}", day(at));
     }
     lines.push(format!("Included AI  {included}"));
-    lines.push(format!(
-        "Purchased  {} credits",
-        display_credits(&summary.purchased_credits)
-    ));
+    let purchased = display_credits(&summary.purchased_credits);
+    lines.push(if summary.purchased_frozen {
+        format!("Purchased  {purchased} credits · on hold until a payment dispute is resolved")
+    } else {
+        format!("Purchased  {purchased} credits")
+    });
     let held = display_credits(&summary.held_credits);
     if held != "0" {
         lines.push(format!("Reserved  {held} credits in use"));
     }
     lines.push(format!("Cloud compute  {} units", summary.cloud_units));
     if summary.out_of_credits {
-        lines.push("\u{26a0}  Out of credits  add credits with /billing topup".into());
+        // Purchased credits pay only with overage on, and buying more does not turn it on.
+        lines.push(
+            if summary.overage_opt_in {
+                "\u{26a0}  Out of credits  add credits with /billing topup"
+            } else if purchased != "0" && !summary.purchased_frozen {
+                "\u{26a0}  Out of credits  turn on overage so your purchased credits pay"
+            } else {
+                "\u{26a0}  Out of credits  add credits and turn on overage to keep working"
+            }
+            .into(),
+        );
     } else if let Some(days) = summary.days_left.filter(|days| *days < 30) {
         // Whole days at this week's pace: none left is under a day, not 0.
         let left = if days == 0 {
@@ -1244,7 +1268,7 @@ fn billing_preface(
     }
     if summary.overage_opt_in {
         lines.push("Overage  on · purchased credits pay past your allowance".into());
-    } else if display_credits(&summary.purchased_credits) != "0" {
+    } else if purchased != "0" {
         lines.push("Overage  off · purchased credits are not spent".into());
     }
     if let Some(reason) = &summary.auto_topup_failure {
@@ -1253,6 +1277,9 @@ fn billing_preface(
         ));
     } else if summary.auto_topup {
         lines.push("Auto top-up  on · your saved card buys credits when you run low".into());
+    }
+    if summary.trial_refused {
+        lines.push("Free trial  not started · that card was already used for a trial".into());
     }
     if summary.trial_available {
         lines.push("Free trial  available · start it with /billing open".into());
@@ -2901,6 +2928,37 @@ mod tests {
             lines
                 .iter()
                 .any(|line| line.contains("the last charge failed: Your card was declined.")),
+            "{lines:?}"
+        );
+        // Nothing included is left and buying more would not pay without overage.
+        assert!(
+            lines.iter().any(|line| line
+                .contains("Out of credits  add credits and turn on overage to keep working")),
+            "{lines:?}"
+        );
+
+        // Purchased credits wait for overage; a trial's allowance ends rather than resets.
+        let lines = billing_preface(
+            &billing(serde_json::json!({
+                "plan": "trial", "subscriptionStatus": null, "trial": true, "outOfCredits": true,
+                "includedCredits": "0", "purchasedCredits": "50", "resetsAt": "2026-11-08T10:00:00Z",
+                "accountStatus": "suspended", "trialRefused": false,
+            })),
+            crate::locale::Language::English,
+        );
+        assert!(
+            lines.iter().any(|line| line
+                .contains("Out of credits  turn on overage so your purchased credits pay")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"Included AI  0 credits · ends Nov 8".to_owned()),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("\u{26a0}  Account suspended")),
             "{lines:?}"
         );
 

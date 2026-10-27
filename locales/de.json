@@ -2927,5 +2927,11 @@
   "This copy of Haarness can’t replace itself, so updates come as an installer.": "Diese Kopie von Haarness kann sich nicht selbst ersetzen, daher kommen Updates als Installationsprogramm.",
   "Last checked {time}": "Zuletzt geprüft: {time}",
   "Download updates automatically": "Updates automatisch laden",
-  "New versions download in the background and install when Haarness restarts.": "Neue Versionen werden im Hintergrund geladen und beim Neustart von Haarness installiert."
+  "New versions download in the background and install when Haarness restarts.": "Neue Versionen werden im Hintergrund geladen und beim Neustart von Haarness installiert.",
+  "Less than a day left at this pace": "Bei diesem Tempo weniger als ein Tag übrig",
+  "About 1 day left at this pace": "Bei diesem Tempo noch etwa 1 Tag",
+  "Ends {date}": "Endet am {date}",
+  "On hold": "Zurückgehalten",
+  "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Mehrverbrauch ist aus, daher werden gekaufte Credits nicht ausgegeben. Schalte ihn unter Abrechnung ein.",
+  "Your free trial didn't start: that card was already used for a trial.": "Deine kostenlose Testphase hat nicht begonnen: Diese Karte wurde bereits für eine Testphase genutzt."
 }
