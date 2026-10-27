@@ -175,7 +175,7 @@ where the damage is bounded. Exit codes, JSON records and Ctrl-C:
 | **Your Chrome** | Haarness for Chrome lets agents use your own signed-in Chrome; every site asks in each chat. [Use your Chrome](https://haarness.ai/docs/desktop/use-your-chrome) |
 | **Your product** | A versioned `/v1` server API with generated TypeScript and Python SDKs. [API](docs/API.md) · [SDKs](sdks/README.md) |
 | **Haarness Cloud** | Workspaces that keep running, schedules, remote control of your own computers, one account for every model. [haarness.ai](https://haarness.ai) |
-| **Your phone** | Follow chats on your own computers and in Cloud, and approve or answer from the Lock Screen or a notification. [Haarness for iPhone](https://github.com/haarness/haarness-ios) · [Haarness for Android](https://github.com/haarness/haarness-android) |
+| **Your phone** | Follow chats on your own computers and in Cloud, and approve or answer from the Lock Screen or a notification. [Haarness for iPhone](https://haarness.ai/product/ios) · [Haarness for Android](https://haarness.ai/product/android) |
 
 <p align="center">
   <img alt="The Haarness terminal UI after a finished chat" src=".github/assets/tui.png" width="100%">
@@ -289,9 +289,9 @@ DTOs, MCP SDK types, CLI parsing or OpenTUI; outer crates implement those ports,
 | --- | --- |
 | **[haarness](https://github.com/haarness/haarness)** | This repository: the agent, terminal UI, Desktop, server and SDKs. Apache 2.0. |
 | **[haarness-router](https://github.com/haarness/haarness-router)** | A stateless, OpenAI-compatible model router you can host yourself. MIT. |
-| **[haarness-cloud](https://github.com/haarness/haarness-cloud)** | Haarness Cloud: accounts, hosted workspaces, the attach gateway, billing and the marketplace. |
-| **[haarness-ios](https://github.com/haarness/haarness-ios)** | Haarness for iPhone: remote hosts, Cloud workspaces and agents, approvals on the go. |
-| **[haarness-android](https://github.com/haarness/haarness-android)** | Haarness for Android: the same remote hosts, Cloud workspaces, agents and approvals, for Android phones and tablets. |
+
+[Haarness Cloud](https://haarness.ai/product/cloud) is the hosted service at haarness.ai. The phone apps for
+[iPhone and iPad](https://haarness.ai/product/ios) and [Android](https://haarness.ai/product/android) are coming soon.
 
 ## Contributing
 
