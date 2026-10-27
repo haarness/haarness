@@ -112,6 +112,9 @@ async function launch(extra: Record<string, string> = {}) {
     win.show();
   });
   await expect(page.locator(".sidebar-footer")).toBeVisible({ timeout: 90_000 });
+  // Desktop starts the chat home's server as it opens; a test that quits before it is up would stop nothing and
+  // leave it running.
+  await expect.poll(() => page.evaluate(() => window.haarness.chatHomeRunning()), { timeout: 90_000 }).toBe(true);
   return data;
 }
 async function quit() {
