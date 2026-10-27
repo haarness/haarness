@@ -142,7 +142,7 @@ try:
     api('/v1/threads/' + thread + '/approval-mode', {'mode': 'auto'}, 'PUT')
     run(['tmux', 'new-session', '-d', '-x', '150', '-y', '40', '-s', name,
          pane_command(env, [binary, '--workspace', workspace, '--trust-project', '--thread', thread])])
-    until(lambda: 'approvals: auto' in capture(), 'the TUI did not open in Auto')
+    until(lambda: '  auto' in capture(), 'the TUI did not open in Auto')
 
     start(thread, 'printf allowed > allowed.txt')
     never_reviewing('a quick approval')
@@ -215,7 +215,7 @@ try:
     finished()
     assert not (workspace / 'switched.txt').exists()
     keys('C-y')
-    until(lambda: 'approvals: auto' in capture(), 'Ctrl+Y did not return to Auto')
+    until(lambda: '  auto' in capture(), 'Ctrl+Y did not return to Auto')
     check('switching to Review mid-review ends the review and shows the prompt; nothing is approved')
 
     turn = start(thread, 'printf stopped > stopped.txt', 'stall')

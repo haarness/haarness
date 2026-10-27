@@ -1718,7 +1718,6 @@
   "Auto on for this chat · requests are allowed once · ctrl+y for Yolo": "Bu sohbet için otomatik açık · istekler bir kez izin alır · Yolo için ctrl+y",
   "This server cannot keep a chat in Yolo · update Haarness": "Bu sunucu bir sohbeti Yolo'da tutamaz · Haarness'ı güncelleyin",
   "approvals: review": "onaylar: inceleme",
-  "approvals: auto": "onaylar: otomatik",
   "approvals: --yolo": "onaylar: --yolo",
   "Answer the approval above · ctrl+g to type": "Yukarıdaki onaya yanıt verin · yazmak için ctrl+g",
   "Haarness needs approval": "Haarness onay gerektiriyor",

@@ -1718,7 +1718,6 @@
   "Auto on for this chat · requests are allowed once · ctrl+y for Yolo": "此聊天已开启自动批准 · 请求仅允许一次 · ctrl+y 切换为 Yolo",
   "This server cannot keep a chat in Yolo · update Haarness": "此服务器无法让聊天保持 Yolo · 请更新 Haarness",
   "approvals: review": "批准：审查",
-  "approvals: auto": "批准：自动",
   "approvals: --yolo": "批准：--yolo",
   "Answer the approval above · ctrl+g to type": "请先回答上方的批准请求 · ctrl+g 输入文字",
   "Haarness needs approval": "Haarness 需要批准",

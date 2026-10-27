@@ -350,6 +350,7 @@ fn status_band(app: &App, width: usize) -> Line {
     // model".
     //
     // Permission mode names what it is: an agent can be called "review" too.
+    // Auto is plain "auto": it reads as the mode on its own.
     // `--yolo` answers this TUI's requests whatever the chat's own mode is.
     // In Auto, Yolo or --yolo, requests are answered without asking, which
     // the band keeps saying ahead of a passing notice's detail (as "auto" or
@@ -362,7 +363,7 @@ fn status_band(app: &App, width: usize) -> Line {
         ("approvals: --yolo", "--yolo")
     } else {
         match chat_mode {
-            haarness_protocol::ApprovalMode::Auto => ("approvals: auto", "auto"),
+            haarness_protocol::ApprovalMode::Auto => ("auto", "auto"),
             haarness_protocol::ApprovalMode::Yolo => ("approvals: yolo", "yolo"),
             haarness_protocol::ApprovalMode::Review => ("approvals: review", "review"),
         }
