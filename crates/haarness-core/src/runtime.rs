@@ -982,12 +982,13 @@ fn sent_images(messages: &[ProviderMessage]) -> Vec<SentImage> {
     });
     for (index, message) in wire.enumerate() {
         let (attachments, first) = match message {
-            // A media message's text, when it has any, is its first block.
+            // A media message's text, when it has any, is its first block;
+            // adapters leave blank text out.
             ProviderMessage::Media {
                 content,
                 attachments,
                 ..
-            } => (attachments, (None, usize::from(!content.is_empty()))),
+            } => (attachments, (None, usize::from(!content.trim().is_empty()))),
             // A tool result is one block whose own content starts with text.
             ProviderMessage::ToolResult { attachments, .. } => (attachments, (Some(0), 1)),
             _ => continue,
@@ -17111,6 +17112,23 @@ mod tests {
                 ("result", false),
             ]
         );
+    }
+
+    #[test]
+    fn photos_sent_without_text_are_named_by_their_own_blocks() {
+        // Adapters leave blank text out, so the photos start the message.
+        let messages = [ProviderMessage::Media {
+            role: "user".into(),
+            content: " \n".into(),
+            attachments: vec![sized_image("a.png", 64), sized_image("b.png", 64)],
+        }];
+        let (names, choice) = left_out(
+            "HTTP 400 Bad Request: messages.0.content.1.image.source.base64: Could not process image",
+            &messages,
+            &[],
+        );
+        assert_eq!(choice, super::RefusedImages::Named);
+        assert_eq!(names, ["b.png"]);
     }
 
     #[test]
