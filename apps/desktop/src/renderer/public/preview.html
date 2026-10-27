@@ -2,22 +2,30 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob: https://unpkg.com; style-src 'unsafe-inline' https://unpkg.com; img-src data: blob: https://unpkg.com; font-src data: https://unpkg.com; media-src data: blob:; connect-src 'none'; frame-src blob: data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>Preview sandbox</title><style>html,body,iframe{margin:0;width:100%;height:100%;border:0;display:block;overflow:hidden}</style></head><body>
 <script>
-// Only the app can replace this frame. Generated pages cannot access their opaque owner.
-let frame, key;
-addEventListener('message', event => {
-  const data = event.data;
-  if (event.source === parent && data && data.type === 'render' && typeof data.html === 'string') {
-    key = data.preview;
-    if (frame) frame.remove();
-    frame = document.createElement('iframe');
-    frame.title = 'Preview content';
-    frame.setAttribute('sandbox', 'allow-scripts allow-downloads');
-    frame.setAttribute('referrerpolicy', 'no-referrer');
-    frame.srcdoc = data.html;
-    document.body.append(frame);
-  } else if (frame && event.source === frame.contentWindow && data && data.preview === key) {
-    parent.postMessage(data, '*');
-  }
-});
-parent.postMessage({type:'preview-host-ready'}, '*');
+// The app hands this page each version to show; the page puts it in a fresh
+// sandboxed frame and passes that frame's reports back. Nothing inside the
+// frame can reach this page, so only the app can change what it shows.
+(() => {
+  let shown = null;
+  let previewId = null;
+  const show = (data) => {
+    shown?.remove();
+    previewId = data.preview;
+    shown = document.createElement('iframe');
+    shown.title = 'Preview content';
+    shown.setAttribute('sandbox', 'allow-scripts allow-downloads');
+    shown.setAttribute('referrerpolicy', 'no-referrer');
+    shown.srcdoc = data.html;
+    document.body.append(shown);
+  };
+  addEventListener('message', ({ source, data }) => {
+    if (!data) return;
+    if (source === parent) {
+      if (data.type === 'render' && typeof data.html === 'string') show(data);
+      return;
+    }
+    if (shown && source === shown.contentWindow && data.preview === previewId) parent.postMessage(data, '*');
+  });
+  parent.postMessage({ type: 'preview-host-ready' }, '*');
+})();
 </script></body></html>

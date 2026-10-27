@@ -1,286 +1,270 @@
-// Adapted from Upstream (MIT). See public/upstream-preview-license.txt.
-// Safe rendering of model-written HTML in the file panel and conversation.
-// Two layers (see docs/CANVAS-PREVIEW.md):
-// - rewrite: known public CDN references are pointed at the public npm CDN so common libraries work.
-// - document: a CSP <meta> and a sandboxed iframe make every other request fail closed.
+// Shows HTML that a model wrote, in the file panel and in the conversation,
+// without handing it the app. See docs/CANVAS-PREVIEW.md.
+//
+// The page runs two frames deep. The outer frame is an opaque document whose
+// Content-Security-Policy decides where the page may navigate; the inner one
+// holds the page itself under a second policy that refuses every request
+// except to one public npm CDN. Links to other well-known CDNs are pointed at
+// that one before the page loads, so common libraries keep working.
 export namespace Preview {
+  /** The only origin a previewed page may load scripts, styles, fonts and images from. */
   export const MIRROR = "https://unpkg.com";
 
   export type Kind = "html" | "markdown" | "svg" | "image";
 
+  /** One CDN link pointed at the mirror. `exact` is false when the mirror's file layout may differ. */
   export type Replacement = { from: string; to: string; exact: boolean };
 
   export type Report = {
     html: string;
     replaced: Replacement[];
+    /** Remote addresses the page names that the policy will refuse. */
     blocked: string[];
   };
 
+  /** What a previewed page reports to the app. */
   export type Message =
     | { type: "ready" }
     | { type: "navigation" }
     | { type: "size"; height: number; width: number }
     | { type: "error"; message: string }
-    | { type: "blocked"; url: string; directive: string }
-    | { type: "snapshot"; html: string };
+    | { type: "blocked"; url: string; directive: string };
 
-  const IMAGES = new Set([
-    "png",
-    "jpg",
-    "jpeg",
-    "gif",
-    "webp",
-    "avif",
-    "bmp",
-    "ico",
+  const KINDS = new Map<string, Kind>([
+    ["html", "html"],
+    ["htm", "html"],
+    ["svg", "svg"],
+    ...["md", "markdown", "mdx", "mdown", "mkd", "mkdn"].map((ext): [string, Kind] => [ext, "markdown"]),
+    ...["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico"].map((ext): [string, Kind] => [ext, "image"]),
   ]);
-  const MARKDOWN = new Set(["md", "markdown", "mdx", "mdown", "mkd", "mkdn"]);
 
+  /** How a file shows in Preview, from its extension; undefined when it has no preview. */
   export function kind(path: string): Kind | undefined {
-    const ext = path.split(".").pop()?.toLowerCase() ?? "";
-    if (ext === "html" || ext === "htm") return "html";
-    if (ext === "svg") return "svg";
-    if (MARKDOWN.has(ext)) return "markdown";
-    if (IMAGES.has(ext)) return "image";
-    return undefined;
+    const dot = path.lastIndexOf(".");
+    return dot < 0 ? undefined : KINDS.get(path.slice(dot + 1).toLowerCase());
   }
 
-  const TAIL = `[^\\s"'<>()\`]+`;
+  // The rest of a URL: it stops at white space, a quote, an angle bracket, a
+  // parenthesis or a backtick.
+  const URL_REST = String.raw`[^\s"'<>()\x60]+`;
+  const SEGMENT = String.raw`[^/\s"'<>]+`;
+  const SCHEME = String.raw`(?:https?:)?//`;
 
-  // Each rule maps a public CDN URL to the mirror's `pkg@version/path` layout.
-  // `exact` is false when the source layout doesn't map one-to-one and the target may 404.
-  const RULES: {
-    pattern: RegExp;
-    map: (...parts: string[]) => { path: string; exact: boolean };
-  }[] = [
+  type Rule = { pattern: RegExp; target: (parts: Record<string, string | undefined>) => [path: string, exact: boolean] };
+
+  // Each rule names a public CDN layout and the matching `package@version/file`
+  // path on the mirror.
+  const RULES: Rule[] = [
     {
+      pattern: new RegExp(`${SCHEME}cdn\\.jsdelivr\\.net/npm/(?<rest>${URL_REST})`, "g"),
+      target: ({ rest }) => [rest!, true],
+    },
+    {
+      // Already on the mirror: only the scheme is made explicit.
+      pattern: new RegExp(`${SCHEME}unpkg\\.com/(?<rest>${URL_REST})`, "g"),
+      target: ({ rest }) => [rest!, true],
+    },
+    {
+      // cdnjs folders are named after the library, which npm spells in lower
+      // case, and its file layout is its own: the mirror path is a best guess.
       pattern: new RegExp(
-        `(?:https?:)?//cdn\\.jsdelivr\\.net/npm/(${TAIL})`,
+        `${SCHEME}cdnjs\\.cloudflare\\.com/ajax/libs/(?<library>${SEGMENT})/(?<version>${SEGMENT})/(?<file>${URL_REST})`,
         "g",
       ),
-      map: (rest) => ({ path: rest, exact: true }),
+      target: ({ library, version, file }) => [`${library!.toLowerCase()}@${version}/${file}`, false],
     },
     {
-      pattern: new RegExp(`(?:https?:)?//unpkg\\.com/(${TAIL})`, "g"),
-      map: (rest) => ({ path: rest, exact: true }),
-    },
-    {
-      // cdnjs: /ajax/libs/<lib>/<version>/<file>; npm names are lowercase and dist folders differ.
-      pattern: new RegExp(
-        `(?:https?:)?//cdnjs\\.cloudflare\\.com/ajax/libs/([^/\\s"'<>]+)/([^/\\s"'<>]+)/(${TAIL})`,
-        "g",
-      ),
-      map: (lib, version, file) => ({
-        path: `${lib.toLowerCase()}@${version}/${file}`,
-        exact: false,
-      }),
-    },
-    {
-      // d3js.org/d3.v7.min.js -> d3@7/dist/d3.min.js
-      pattern: /(?:https?:)?\/\/d3js\.org\/d3(?:\.v(\d+))?(\.min)?\.js/g,
-      map: (major, min) => ({
-        path: `d3@${major || "7"}/dist/d3${min ?? ""}.js`,
-        exact: true,
-      }),
+      // d3js.org/d3.v7.min.js is d3@7/dist/d3.min.js.
+      pattern: new RegExp(`${SCHEME}d3js\\.org/d3(?:\\.v(?<major>\\d+))?(?<min>\\.min)?\\.js`, "g"),
+      target: ({ major, min }) => [`d3@${major ?? "7"}/dist/d3${min ?? ""}.js`, true],
     },
   ];
 
+  /** Points known CDN links at the mirror and lists the remote addresses that stay blocked. */
   export function rewrite(html: string, mirror = MIRROR): Report {
     const replaced: Replacement[] = [];
-    const out = RULES.reduce(
-      (text, rule) =>
-        text.replace(rule.pattern, (from: string, ...rest: unknown[]) => {
-          // Callback args are (match, ...groups, offset, input); groups end at the numeric offset.
-          const groups = rest.slice(
-            0,
-            rest.findIndex((part) => typeof part === "number"),
-          );
-          const target = rule.map(
-            ...groups.map((part) => (typeof part === "string" ? part : "")),
-          );
-          const to = `${mirror}/${target.path}`;
-          if (from !== to) replaced.push({ from, to, exact: target.exact });
-          return to;
-        }),
-      html,
-    );
-    return { html: out, replaced, blocked: blocked(out, mirror) };
+    let text = html;
+    for (const rule of RULES) {
+      text = text.replace(rule.pattern, (...args: unknown[]) => {
+        const from = args[0] as string;
+        const parts = args[args.length - 1] as Record<string, string | undefined>;
+        const [path, exact] = rule.target(parts);
+        const to = `${mirror}/${path}`;
+        if (to !== from) replaced.push({ from, to, exact });
+        return to;
+      });
+    }
+    return { html: text, replaced, blocked: blocked(text, mirror) };
   }
 
-  // Remote subresources that the CSP will block (anything not on the mirror).
-  export function blocked(html: string, mirror = MIRROR) {
-    const host = new URL(mirror).host;
-    const url = `((?:https?:)?//[^\\s"'<>()\`]+)`;
-    const patterns = [
-      new RegExp(
-        `<(?:script|link|img|iframe|source|video|audio|embed|object)\\b[^>]*?\\b(?:src|href|data)\\s*=\\s*["']?${url}`,
-        "gi",
-      ),
-      new RegExp(`url\\(\\s*["']?${url}`, "gi"),
-      new RegExp(`@import\\s+["']${url}`, "gi"),
-      new RegExp(`\\bfrom\\s+["']${url}`, "gi"),
-      new RegExp(`\\bimport\\(\\s*["']${url}`, "gi"),
-      new RegExp(`\\bfetch\\(\\s*["']${url}`, "gi"),
-    ];
-    const found = patterns.flatMap((pattern) =>
-      Array.from(html.matchAll(pattern), (match) => match[1]),
-    );
-    return Array.from(new Set(found)).filter((item) => {
-      const parsed = URL.canParse(item, "https://x")
-        ? new URL(item, "https://x")
-        : undefined;
-      return parsed?.host !== host;
-    });
+  // Places in a page where a remote address makes the browser fetch it.
+  const FETCHES = [
+    String.raw`<(?:script|link|img|iframe|source|video|audio|embed|object)\b[^>]*?\b(?:src|href|data)\s*=\s*["']?`,
+    String.raw`url\(\s*["']?`,
+    String.raw`@import\s+["']`,
+    String.raw`\bfrom\s+["']`,
+    String.raw`\bimport\(\s*["']`,
+    String.raw`\bfetch\(\s*["']`,
+  ].map((lead) => new RegExp(`${lead}(${SCHEME}${URL_REST})`, "gi"));
+
+  function hostOf(address: string): string | undefined {
+    try {
+      return new URL(address, "https://page.invalid").host;
+    } catch {
+      return undefined;
+    }
   }
 
-  export function policy(mirror = MIRROR) {
+  /** Remote addresses in the page that are not on the mirror, each once, in the order found. */
+  export function blocked(html: string, mirror = MIRROR): string[] {
+    const allowed = new URL(mirror).host;
+    const found = new Set<string>();
+    for (const pattern of FETCHES) for (const match of html.matchAll(pattern)) found.add(match[1]);
+    return [...found].filter((address) => hostOf(address) !== allowed);
+  }
+
+  /** The page's Content-Security-Policy: inline code and the mirror, and nothing else. */
+  export function policy(mirror = MIRROR): string {
     const origin = new URL(mirror).origin;
-    return [
-      "default-src 'none'",
-      `script-src 'unsafe-inline' 'unsafe-eval' blob: ${origin}`,
-      `style-src 'unsafe-inline' ${origin}`,
-      `font-src data: ${origin}`,
-      `img-src data: blob: ${origin}`,
-      "media-src data: blob:",
-      "connect-src 'none'",
-      "frame-src 'none'",
-      "worker-src blob:",
-      "form-action 'none'",
-      "base-uri 'none'",
-    ].join("; ");
+    const directives: [string, string][] = [
+      ["default-src", "'none'"],
+      ["script-src", `'unsafe-inline' 'unsafe-eval' blob: ${origin}`],
+      ["style-src", `'unsafe-inline' ${origin}`],
+      ["font-src", `data: ${origin}`],
+      ["img-src", `data: blob: ${origin}`],
+      ["media-src", "data: blob:"],
+      ["connect-src", "'none'"],
+      ["frame-src", "'none'"],
+      ["worker-src", "blob:"],
+      ["form-action", "'none'"],
+      ["base-uri", "'none'"],
+    ];
+    return directives.map(([name, sources]) => `${name} ${sources}`).join("; ");
   }
 
-  // Serializes the page as rendered, for email: canvases become images, form state becomes
-  // attributes, and scripts, handlers, javascript: URLs and our injected tags are removed.
-  export const SNAPSHOT = `function snap(){var root=document.documentElement.cloneNode(true),i,j;
-var from=document.querySelectorAll("canvas"),to=root.querySelectorAll("canvas");
-for(i=0;i<from.length&&i<to.length;i++){try{var c=from[i],r=c.getBoundingClientRect(),img=document.createElement("img");img.src=c.toDataURL("image/png");if(c.id)img.id=c.id;if(c.getAttribute("class"))img.setAttribute("class",c.getAttribute("class"));if(c.getAttribute("style"))img.setAttribute("style",c.getAttribute("style"));img.style.width=r.width+"px";img.style.height=r.height+"px";img.setAttribute("width",String(Math.round(r.width)));img.setAttribute("height",String(Math.round(r.height)));img.setAttribute("alt",c.getAttribute("aria-label")||"");to[i].parentNode.replaceChild(img,to[i])}catch(e){}}
-var fi=document.querySelectorAll("input,textarea,select"),ti=root.querySelectorAll("input,textarea,select");
-for(i=0;i<fi.length&&i<ti.length;i++){var a=fi[i],b=ti[i];if(a.tagName==="TEXTAREA")b.textContent=a.value;else if(a.tagName==="SELECT"){for(j=0;j<a.options.length&&j<b.options.length;j++){if(a.options[j].selected)b.options[j].setAttribute("selected","");else b.options[j].removeAttribute("selected")}}else if(a.type==="checkbox"||a.type==="radio"){if(a.checked)b.setAttribute("checked","");else b.removeAttribute("checked")}else b.setAttribute("value",a.value)}
-var drop=root.querySelectorAll("script,noscript,template,[data-haarness-preview]");
-for(i=0;i<drop.length;i++)if(drop[i].parentNode)drop[i].parentNode.removeChild(drop[i]);
-var all=root.querySelectorAll("*");
-for(i=0;i<all.length;i++){var at=all[i].attributes;for(j=at.length-1;j>=0;j--){var n=at[j].name.toLowerCase(),v=at[j].value.trim().toLowerCase();if(n.indexOf("on")===0||(v.indexOf("javascript:")===0&&(n==="href"||n==="src"||n==="action"||n==="formaction"||n==="xlink:href")))all[i].removeAttribute(at[j].name)}}
-return "<!doctype html>\\n"+root.outerHTML}`;
-
-  // Posts size, runtime errors and CSP violations to the parent frame, tagged with `id`, and
-  // answers snapshot requests from the parent.
-  function bridge(id: string) {
-    return `<script data-haarness-preview>(function(){var id=${JSON.stringify(id)};function post(m){m.preview=id;try{parent.postMessage(m,"*")}catch(e){}}
-${SNAPSHOT}
-addEventListener("message",function(e){var d=e.data;if(e.source!==parent||!d||d.preview!==id||d.type!=="snapshot")return;post({type:"snapshot",html:snap()})});
-function size(){var d=document.documentElement,b=document.body;post({type:"size",height:Math.max(d.scrollHeight,b?b.scrollHeight:0),width:Math.max(d.scrollWidth,b?b.scrollWidth:0)})}
-var ro=typeof ResizeObserver==="function"?new ResizeObserver(size):null;
-addEventListener("DOMContentLoaded",function(){if(ro&&document.body)ro.observe(document.body);size()});
-addEventListener("load",function(){size();post({type:"ready"})});
-// Keep ordinary links on the page. The outer frame's CSP also blocks navigation initiated
-// directly by scripts or meta refresh; this handler is only a usability aid.
-addEventListener("click",function(e){var a=e.target&&e.target.closest?e.target.closest("a[href],area[href]"):null;if(!a)return;var href=a.getAttribute("href")||"";if(href.charAt(0)==="#"){e.preventDefault();var name=href.slice(1);try{name=decodeURIComponent(name)}catch(e){}var target=document.getElementById(name)||document.getElementsByName(name)[0];if(target)target.scrollIntoView();else if(!name||name.toLowerCase()==="top")window.scrollTo(0,0);return}if(/^blob:|^data:/i.test(href)&&a.hasAttribute("download"))return;e.preventDefault();post({type:"navigation"})},true);
-addEventListener("error",function(e){var t=e.target;post({type:"error",message:String(e.message||(t&&(t.src||t.href))||"Resource failed to load")})},true);
-addEventListener("unhandledrejection",function(e){post({type:"error",message:String(e.reason&&e.reason.message||e.reason)})});
-addEventListener("securitypolicyviolation",function(e){post({type:"blocked",url:String(e.blockedURI),directive:String(e.violatedDirective)})});
-})()</script>`;
+  // Runs inside the page. It reports the page's size as it changes, that it
+  // loaded, its errors and the requests the policy refused, each tagged with
+  // the preview id; it keeps in-page links working and turns every other link
+  // into a "navigation" report. The outer frame's policy is what actually stops
+  // navigation by script or meta refresh; this only makes clicks behave.
+  function reporter(previewId: string) {
+    const body = `
+var previewId = ${JSON.stringify(previewId).replace(/</g, "\\u003c")};
+function report(message) { message.preview = previewId; try { parent.postMessage(message, "*"); } catch (_) {} }
+function reportSize() {
+  var root = document.documentElement, body = document.body;
+  report({ type: "size",
+    height: Math.max(root.scrollHeight, body ? body.scrollHeight : 0),
+    width: Math.max(root.scrollWidth, body ? body.scrollWidth : 0) });
+}
+var watcher = typeof ResizeObserver === "function" ? new ResizeObserver(reportSize) : null;
+addEventListener("DOMContentLoaded", function () { if (watcher && document.body) watcher.observe(document.body); reportSize(); });
+addEventListener("load", function () { reportSize(); report({ type: "ready" }); });
+addEventListener("click", function (event) {
+  var link = event.target && event.target.closest ? event.target.closest("a[href],area[href]") : null;
+  if (!link) return;
+  var href = link.getAttribute("href") || "";
+  if (href.charAt(0) === "#") {
+    event.preventDefault();
+    var name = href.slice(1);
+    try { name = decodeURIComponent(name); } catch (_) {}
+    var target = document.getElementById(name) || document.getElementsByName(name)[0];
+    if (target) target.scrollIntoView();
+    else if (name === "" || name.toLowerCase() === "top") scrollTo(0, 0);
+    return;
+  }
+  if (link.hasAttribute("download") && /^(?:blob|data):/i.test(href)) return;
+  event.preventDefault();
+  report({ type: "navigation" });
+}, true);
+addEventListener("error", function (event) {
+  var source = event.target;
+  report({ type: "error", message: String(event.message || (source && (source.src || source.href)) || "Resource failed to load") });
+}, true);
+addEventListener("unhandledrejection", function (event) {
+  var reason = event.reason;
+  report({ type: "error", message: String(reason && reason.message || reason) });
+});
+addEventListener("securitypolicyviolation", function (event) {
+  report({ type: "blocked", url: String(event.blockedURI), directive: String(event.violatedDirective) });
+});`;
+    return `<script data-haarness-preview>(function () {${body}\n})();</script>`;
   }
 
-  // Builds the srcdoc for a sandboxed iframe: CDN rewrite + CSP + bridge, injected after the doctype
-  // (before it would force quirks mode) and ahead of any page content so the policy applies to all of it.
-  export function document(
-    input: string,
-    opts: { id: string; mirror?: string },
-  ) {
-    const report = rewrite(input, opts.mirror);
-    const head = `<meta data-haarness-preview http-equiv="Content-Security-Policy" content="${policy(opts.mirror)}">${bridge(opts.id)}`;
-    const doctype =
-      report.html.match(/^\s*<!doctype[^>]*>/i)?.[0] ?? "<!doctype html>";
-    const rest = report.html.replace(/^\s*<!doctype[^>]*>/i, "");
-    return { ...report, html: `${doctype}${head}${rest}` };
+  const DOCTYPE = /^\s*<!doctype[^>]*>/i;
+
+  /**
+   * The page with its CDN links rewritten and the policy and reporter put in
+   * front of everything it contains, so the policy covers all of it. They go
+   * after the doctype: anything before it would put the page in quirks mode.
+   */
+  export function document(input: string, options: { id: string; mirror?: string }): Report {
+    const report = rewrite(input, options.mirror);
+    const doctype = report.html.match(DOCTYPE)?.[0] ?? "<!doctype html>";
+    const page = report.html.replace(DOCTYPE, "");
+    const guard =
+      `<meta data-haarness-preview http-equiv="Content-Security-Policy" content="${policy(options.mirror)}">` +
+      reporter(options.id);
+    return { ...report, html: doctype + guard + page };
   }
 
-  // A document's CSP cannot restrict its own navigation. Put the page in a second, opaque
-  // frame: the trusted owner's frame-src policy is checked BEFORE child navigation requests.
-  // srcdoc inherits this policy and still permits inline scripts and the approved CDN.
-  export function frame(input: string, opts: { id: string; mirror?: string }) {
-    const doc = document(input, opts);
-    const html = doc.html
-      .replace(/&/g, "&amp;")
-      .replace(/"/g, "&quot;")
-      .replace(/</g, "&lt;");
-    const id = JSON.stringify(opts.id).replace(/</g, "\\u003c");
-    // WebKit checks local downloads against the owner's frame policy as well. Network
-    // navigation remains forbidden; the page's own policy still forbids nested frames.
-    const owner = policy(opts.mirror).replace(
-      "frame-src 'none'",
-      "frame-src blob: data:",
-    );
-    return {
-      ...doc,
-      html: `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${owner}"><title>Preview</title><style>html,body,iframe{margin:0;border:0;width:100%;height:100%;display:block}html,body{overflow:hidden}</style></head><body>
-<script>(function(){var id=${id};function post(m){if(parent===window)return;m.preview=id;parent.postMessage(m,"*")}
-addEventListener("message",function(e){var f=document.getElementById("page"),d=e.data;if(!f||!d||d.preview!==id)return;if(e.source===parent&&d.type==="snapshot"){f.contentWindow.postMessage(d,"*");return}if(e.source===f.contentWindow&&["ready","size","error","blocked","snapshot","navigation"].indexOf(d.type)!==-1)post(d)});
-addEventListener("securitypolicyviolation",function(e){post({type:"blocked",url:String(e.blockedURI),directive:String(e.violatedDirective)});if(e.violatedDirective==="frame-src")post({type:"navigation"})});
-})()</script><iframe id="page" title="Page" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer" srcdoc="${html}"></iframe></body></html>`,
-    };
-  }
-
-  export function message(data: unknown, id: string): Message | undefined {
-    if (!data || typeof data !== "object") return undefined;
-    const value = data as Record<string, unknown>;
-    if (value.preview !== id) return undefined;
-    if (value.type === "ready" || value.type === "navigation")
-      return { type: value.type };
-    if (value.type === "size" && typeof value.height === "number")
-      return {
-        type: "size",
-        height: value.height,
-        width: typeof value.width === "number" ? value.width : 0,
-      };
-    if (value.type === "error")
-      return { type: "error", message: String(value.message) };
-    if (value.type === "blocked")
-      return {
-        type: "blocked",
-        url: String(value.url),
-        directive: String(value.directive),
-      };
-    if (value.type === "snapshot" && typeof value.html === "string")
-      return { type: "snapshot", html: value.html };
-    return undefined;
+  function attribute(text: string): string {
+    return text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
   }
 
   /**
-   * Whether the page runs JavaScript: an executable <script> (no type, a JavaScript type or a
-   * module; not JSON or templates), an inline on* handler, or a javascript: URL in an attribute.
-   * Comments are ignored, so a note like `<!-- no <script> needed -->` doesn't count.
+   * The outer frame around the page. A document's own policy cannot stop it
+   * from navigating, but the policy of the frame that holds it can: frame-src
+   * is checked before a child frame navigates. So the page sits in a frame of
+   * this opaque document, whose frame-src allows only blob: and data: (local
+   * downloads, which WebKit also checks against it). It passes the page's
+   * reports up to the app and turns a refused navigation into one.
    */
-  export function scripted(html: string) {
-    const text = html.replace(/<!--[\s\S]*?-->/g, "");
-    const scripts = Array.from(text.matchAll(/<script\b([^>]*)>/gi)).some(
-      (match) => {
-        const type = match[1]
-          .match(/\btype\s*=\s*["']?([^"'\s>]+)/i)?.[1]
-          ?.toLowerCase();
-        return !type || type === "module" || /(?:java|ecma)script/.test(type);
-      },
-    );
-    if (scripts) return true;
-    return (text.match(/<[a-z][^>]*>/gi) ?? []).some(
-      (tag) =>
-        /\son[a-z]+\s*=/i.test(tag) ||
-        /\s(?:href|src|action|formaction)\s*=\s*["']?\s*javascript:/i.test(tag),
-    );
+  export function frame(input: string, options: { id: string; mirror?: string }): Report {
+    const page = document(input, options);
+    const outerPolicy = policy(options.mirror).replace("frame-src 'none'", "frame-src blob: data:");
+    const previewId = JSON.stringify(options.id).replace(/</g, "\\u003c");
+    const relay = `<script>(function () {
+var previewId = ${previewId};
+var kinds = ["ready", "size", "error", "blocked", "navigation"];
+function up(message) { if (parent === window) return; message.preview = previewId; parent.postMessage(message, "*"); }
+addEventListener("message", function (event) {
+  var inner = document.getElementById("page"), data = event.data;
+  if (!inner || !data || data.preview !== previewId) return;
+  if (event.source === inner.contentWindow && kinds.indexOf(data.type) >= 0) up(data);
+});
+addEventListener("securitypolicyviolation", function (event) {
+  up({ type: "blocked", url: String(event.blockedURI), directive: String(event.violatedDirective) });
+  if (event.violatedDirective === "frame-src") up({ type: "navigation" });
+});
+})();</script>`;
+    const style = "html,body,iframe{margin:0;border:0;width:100%;height:100%;display:block}html,body{overflow:hidden}";
+    const html =
+      `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${outerPolicy}">` +
+      `<title>Preview</title><style>${style}</style></head><body>\n${relay}` +
+      `<iframe id="page" title="Page" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer" srcdoc="${attribute(page.html)}"></iframe>` +
+      `</body></html>`;
+    return { ...page, html };
   }
 
-  export function summary(report: Pick<Report, "replaced" | "blocked">) {
-    const lines = [
-      ...report.replaced.map((item) =>
-        item.exact
-          ? `Rewritten to mirror: ${item.from} -> ${item.to}`
-          : `Rewritten to mirror, path layout differs and may 404 (prefer ${MIRROR}/PKG@VERSION/dist/...): ${item.from} -> ${item.to}`,
-      ),
-      ...report.blocked.map(
-        (item) => `Blocked (only ${MIRROR} is allowed): ${item}`,
-      ),
-    ];
-    return lines.join("\n");
+  /** A report from the preview with this id, or undefined for anything else. */
+  export function message(data: unknown, id: string): Message | undefined {
+    if (typeof data !== "object" || data === null) return undefined;
+    const value = data as Record<string, unknown>;
+    if (value.preview !== id) return undefined;
+    switch (value.type) {
+      case "ready":
+      case "navigation":
+        return { type: value.type };
+      case "size":
+        if (typeof value.height !== "number") return undefined;
+        return { type: "size", height: value.height, width: typeof value.width === "number" ? value.width : 0 };
+      case "error":
+        return { type: "error", message: String(value.message) };
+      case "blocked":
+        return { type: "blocked", url: String(value.url), directive: String(value.directive) };
+      default:
+        return undefined;
+    }
   }
 }
