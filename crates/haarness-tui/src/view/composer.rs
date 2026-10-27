@@ -585,24 +585,9 @@ fn left_variants(app: &App) -> Vec<Vec<Span>> {
             vec![chip],
         ];
     }
+    // Credit balances live in /billing: during a reply Cloud holds the
+    // request's worst case, so a balance here would dip and recover each turn.
     let mut full = model.clone();
-    if let Some(billing) = &app.billing.summary {
-        full.push(
-            Span::new(
-                if app.billing.error.is_some() {
-                    "  Cloud credits unavailable · /billing".to_owned()
-                } else {
-                    format!(
-                        "  Cloud {} included · {} purchased · /billing",
-                        haarness_account::billing::display_credits(&billing.included_credits),
-                        haarness_account::billing::display_credits(&billing.purchased_credits)
-                    )
-                },
-                theme.muted,
-            )
-            .on(theme.surface),
-        );
-    }
     for (badge, color) in badges(app) {
         full.push(Span::new("  ", theme.muted).on(theme.surface));
         full.push(
