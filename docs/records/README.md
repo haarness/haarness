@@ -6,6 +6,7 @@ code at its date and is not updated afterwards: for current behaviour, read the
 
 Name new records `YYYY-MM-DD-topic.md` with the date the work was verified, and add a line here.
 
+- [2026-10-27 Release 0.1.8](2026-10-27-release-0.1.8.md): plain errors on every surface: 0.1.8 with updates proven from 0.1.7 on macOS, Linux and the TUI, Cloud and its 0.1.8 workspace image, iPhone build 2 in TestFlight, the Android bundle built.
 - [2026-10-27 Release 0.1.7](2026-10-27-release-0.1.7.md): the first update from a self-updating release, proven from 0.1.6 copies installed by `install.sh` on macOS, Linux and the TUI against staging and production; App Management protects a notarized app, so macOS proofs launch it as people do.
 - [2026-10-27 Updates on Linux and Windows](2026-10-27-linux-windows-updates.md): the AppImage self-update proven in a Docker desktop session against the release service (`scripts/test-linux-update.sh`); on Windows, Desktop's servers stop cleanly before the setup replaces them, a helper reports the setup's outcome and reopens Haarness when it fails, and antivirus-held files are waited out; the setup itself is not yet proven on Windows.
 - [2026-10-26 Updates](2026-10-26-updates.md): Desktop finds, downloads, verifies and installs new versions by itself, with Restart to update in the sidebar and the state in Settings → About; the TUI's home screen says when a newer CLI is out and `haarness --update` installs it; shipped and proven against the real release service as 0.1.6.
