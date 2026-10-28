@@ -36,6 +36,7 @@ p{margin:4px 0}button{margin:4px 4px 0 0}
 <button id="read-other">Read another resource</button>
 <button id="fetch">Fetch undeclared</button>
 <button id="fetch-declared">Fetch declared</button>
+<button id="wasm">Add in a worker</button>
 <button id="leave">Leave the page</button>
 <div style="height:120px"></div>
 <script>
@@ -104,6 +105,28 @@ click("fetch", () => fetch("https://undeclared.example/data").then(() => out("st
 click("fetch-declared", () => {
   const before = blocked;
   fetch("https://live.weather.example/data").then(() => out("status", "fetched"), () => blocked === before && out("status", "fetch failed"));
+});
+// As a map library draws its tiles: a worker the page starts from a blob: URL fetches a WebAssembly
+// module the page made (a blob: URL too, declared below) and runs it; eval stays refused there.
+click("wasm", () => {
+  const add = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 7, 1, 96, 2, 127, 127, 1, 127, 3, 2, 1, 0, 7, 7, 1, 3, 97,
+    100, 100, 0, 0, 10, 9, 1, 7, 0, 32, 0, 32, 1, 106, 11]);
+  const module = URL.createObjectURL(new Blob([add], { type: "application/wasm" }));
+  const code = `onmessage = async (event) => {
+    let evaluated = "eval ran";
+    try { eval("1"); } catch (error) { evaluated = "eval refused"; }
+    try {
+      const bytes = await (await fetch(event.data)).arrayBuffer();
+      const { instance } = await WebAssembly.instantiate(bytes);
+      postMessage("wasm " + instance.exports.add(19, 23) + ", " + evaluated);
+    } catch (error) { postMessage("wasm " + error.name + ", " + evaluated); }
+  };`;
+  try {
+    const worker = new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+    worker.onmessage = (event) => out("status", event.data);
+    worker.onerror = () => out("status", "wasm worker refused");
+    worker.postMessage(module);
+  } catch (error) { out("status", "wasm worker " + error.name); }
 });
 click("leave", () => { location.href = "https://example.com/elsewhere"; });
 request("ui/initialize", { protocolVersion: "2026-01-26", appInfo: { name: "weather-fixture", version: "1" }, appCapabilities: {} })
@@ -175,8 +198,9 @@ for line in sys.stdin:
             result = {'contents': [{
                 'uri': URI, 'mimeType': MIME, 'text': PAGE,
                 '_meta': {'ui': {'prefersBorder': True, 'csp': {
-                    # Declared without a scheme: the page may reach it over https.
-                    'connectDomains': ['https://api.weather.example', 'live.weather.example'],
+                    # Declared without a scheme: the page may reach it over https. blob: is what the
+                    # page makes itself, here the WebAssembly module its worker fetches.
+                    'connectDomains': ['https://api.weather.example', 'live.weather.example', 'blob:'],
                     # Only host sources reach the policy; the rest is dropped.
                     'resourceDomains': ['https://cdn.weather.example', "'unsafe-eval'", 'https://x.example; script-src *'],
                 }}},

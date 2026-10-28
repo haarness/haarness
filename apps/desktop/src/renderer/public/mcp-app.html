@@ -1,6 +1,6 @@
 <!doctype html><html><head><meta charset="UTF-8">
-<!-- The ceiling for every MCP App page this frame holds, secure origins only: the page's own policy (mcp-app.ts) narrows it to the public hosts its server declared. frame-src 'none' keeps the page from navigating its frame anywhere. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https:; style-src 'unsafe-inline' https:; img-src data: blob: https:; font-src data: https:; media-src data: blob: https:; connect-src https: wss:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<!-- The ceiling for every MCP App page this frame holds, secure origins and what the page makes itself (blob:, data:) only: the page's own policy (mcp-app.ts) narrows it to what its server declared. The page inherits this policy, and a worker it starts inherits both, so WebAssembly ('wasm-unsafe-eval', never 'unsafe-eval') and blob: workers must be allowed here too. frame-src 'none' keeps the page from navigating its frame anywhere. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: data: https:; style-src 'unsafe-inline' blob: data: https:; img-src data: blob: https:; font-src data: blob: https:; media-src data: blob: https:; connect-src blob: data: https: wss:; worker-src blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>App sandbox</title><style>html,body,iframe{margin:0;border:0;width:100%;height:100%;display:block;overflow:hidden;background:transparent}</style></head><body>
 <script>
 // Only the app fills this frame, and only the page it put here talks back through it.
