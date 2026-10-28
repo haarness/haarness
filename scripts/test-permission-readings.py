@@ -27,10 +27,13 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
 9. holding_always: through a server, Always on `cat ~/.gitconfig` from a project under the home folder
    remembers that file alone (saved for the folder), and Always on `cd ~ && ls` the home folder alone, so
    both run again without asking while `cat ~/.ssh/config` and `cat ~/.netrc` still ask.
+10. workdir_home: a line run with `~` as its `workdir`, from a project under the home folder, asks for the
+   home folder alone beside the file it names there, with no rule and with only `~/.gitconfig` allowed.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
-toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins, holding_always). No model is
+toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins, holding_always,
+workdir_home). No model is
 called; nothing outside the fixture is touched.
 """
 import json
@@ -403,9 +406,34 @@ def case_holding_always():
            'the folder alone; ~/.ssh/config and ~/.netrc still ask')
 
 
+def case_workdir_home():
+    """A line run in the home folder asks about the folder itself, not only the files it names there."""
+    for name, allowed in [('workdir-home', False), ('workdir-home-file', True)]:
+        _, env = environment(name)
+        home = Path(env['HOME']).resolve()
+        folder = home / 'work' / 'app'
+        folder.mkdir(parents=True, exist_ok=True)
+        (home / '.gitconfig').write_text('[user]\n\tname = Fixture\n')
+        config = {'model': 'echo/echo-1', **REVIEW}
+        if allowed:
+            # What Always saves after `cat ~/.gitconfig`.
+            config['permission'] = {'external_directory': {f'{home}/.gitconfig': 'allow'}}
+        (folder / 'haarness.json').write_text(json.dumps(config))
+        subprocess.run(['git', 'init', '-q', str(folder)], check=True)
+        try:
+            command = 'cat .gitconfig && tar cf probe.tar .gitconfig'
+            output = call(env, folder, 'bash', {'workdir': '~', 'command': command}, code=1)
+            assert 'Stopped:' in output and f'"{home}/":"allow"' in output, output
+            assert not (home / 'probe.tar').exists(), 'the line ran in the home folder without asking'
+        finally:
+            stop(env, folder)
+    passed('a line run with ~ as its workdir asks for the home folder itself, also with ~/.gitconfig allowed')
+
+
 CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
          'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev,
-         'action_case': case_action_case, 'sign_ins': case_sign_ins, 'holding_always': case_holding_always}
+         'action_case': case_action_case, 'sign_ins': case_sign_ins, 'holding_always': case_holding_always,
+         'workdir_home': case_workdir_home}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]

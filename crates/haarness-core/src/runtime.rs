@@ -14729,7 +14729,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             .get("workdir")
             .and_then(serde_json::Value::as_str)
             .map(|dir| crate::permissions::resolve_permission_path(workspace, dir));
-        let analysis = crate::permissions::bash::analyze_in(
+        let mut analysis = crate::permissions::bash::analyze_in(
             command,
             workspace,
             workdir.as_deref().unwrap_or(workspace),
@@ -14746,8 +14746,16 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 external_path_request(workspace, workdir, ExternalPathKind::Directory)
         {
             if !external_patterns.contains(&pattern) {
-                external_patterns.push(pattern);
+                external_patterns.push(pattern.clone());
             }
+            // The line runs in that folder, so it is asked about itself
+            // beside any file the line names there, as after a `cd` to it.
+            analysis.paths.push(crate::permissions::bash::NamedPath {
+                path: path.clone(),
+                file: false,
+                literal: true,
+                outside: Some(pattern),
+            });
             external_paths.push(path);
         }
         let mut plans = Vec::new();
@@ -15588,6 +15596,22 @@ mod shell_reading_tests {
         for plan in [bash("cat ../../.netrc"), bash("cd ../.. && ls")] {
             assert_eq!(verdict(&saved, &plan), Allow, "{:?}", plan.patterns);
         }
+        // A line run in that folder (its `workdir`) is asked about the folder
+        // too, beside the files it names there, so Always on one of those
+        // files does not let the line run there.
+        let workdir = |command: &str| {
+            outside(
+                "bash",
+                json!({ "workdir": home.display().to_string(), "command": command }),
+            )
+        };
+        let there = workdir("cat .gitconfig && tar cf probe.tar .gitconfig");
+        assert_eq!(there.patterns, vec![file(".gitconfig"), itself.clone()]);
+        assert_eq!(verdict(&remembered, &there), Ask);
+        assert_eq!(workdir("ls").patterns, vec![itself.clone()]);
+        let entered = bash(&format!("cd {} && cat .gitconfig", home.display()));
+        assert_eq!(entered.patterns, vec![itself.clone(), file(".gitconfig")]);
+        assert_eq!(verdict(&remembered, &entered), Ask);
         std::fs::remove_dir_all(&made).unwrap();
     }
 
