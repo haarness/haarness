@@ -2,6 +2,7 @@ import { t, language, errorLine } from "./i18n";
 import { useApp } from "./state";
 import { Icon } from "./ui";
 import { MenuButton } from "./MenuButton";
+import { LIFTED_IN_FRAME } from "./transcript-press";
 import {
   Show,
   createEffect,
@@ -15,6 +16,7 @@ import {
   HOVER,
   INPUT,
   LEFT,
+  LIFT,
   MAX_HEIGHT,
   PROTOCOL_VERSION,
   WHEEL,
@@ -298,6 +300,10 @@ export function McpAppView(props: {
       }
       if (message && LEFT in message) {
         if (message[LEFT] === token) setLeft(true);
+        return;
+      }
+      if (message && LIFT in message) {
+        if (message[LIFT] === token) window.dispatchEvent(new Event(LIFTED_IN_FRAME));
         return;
       }
       void bridge.receive(message, data.active === true);

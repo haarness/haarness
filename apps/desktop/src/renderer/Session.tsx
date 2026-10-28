@@ -102,6 +102,7 @@ import { isTextEntry } from "./text-entry";
 import { selection as chatSelection } from "./sidebar-selection";
 import { Markdown } from "./Markdown";
 import { createReplySelection } from "./reply-selection";
+import { createTranscriptPress, listenForPress } from "./transcript-press";
 import { ConversationOutline } from "./ConversationOutline";
 import { promptTitle, readingMark } from "./outline-layout";
 import {
@@ -818,8 +819,9 @@ export function Session() {
    * is first known, after layout and before the frame is painted, so no frame
    * shows the list short of its end, or past it and pulled back. */
   function keepLatest() {
-    // User input can arrive after a stream delta scheduled this frame.
-    if (!follow() || !scrolling || toggled) return;
+    // User input can arrive after a stream delta scheduled this frame. A
+    // press held in the transcript keeps the view where it is.
+    if (!follow() || !scrolling || toggled || press.held()) return;
     // A running step just opened holds the view until more is written.
     if (quietUntil) {
       if (
@@ -839,6 +841,10 @@ export function Session() {
     // Height contraction and virtual-row measurement can reduce scrollTop
     // without user input. Upward input pauses synchronously in the handlers
     // below; geometry changes alone must not change the user's follow choice.
+    // A press held in the transcript that takes the view up and away from the
+    // end, as a selection dragged past its top edge does, is the reader
+    // scrolling; one that leaves it at the end is the list growing shorter.
+    if (press.held() && follow() && top < lastTop && remaining > 4) pauseFollowing();
     if (!follow() && top > lastTop && remaining <= 4) setFollow(true);
     lastTop = top;
   }
@@ -854,6 +860,20 @@ export function Session() {
     pauseFollowing(true);
     lastTop = scrolling.scrollTop;
   }
+  /* A press held in the transcript (transcript-press.ts) keeps the view
+     where it is while output streams. Once it ends, the view takes the
+     newest output again at once, before a click it ends reads where the rows
+     are, unless the press scrolled it up: then Jump to latest shows. */
+  const press = createTranscriptPress(() => {
+    if (follow()) keepLatest();
+  });
+  onMount(() => {
+    const stop = listenForPress(press, ({ target }) => target instanceof Node && scrolling.contains(target));
+    onCleanup(() => {
+      stop();
+      press.clear();
+    });
+  });
   onMount(() => {
     // Markdown, images, virtual rows and panel resizing can change height
     // without a new token. Only follow these reflows while following output.
@@ -1708,6 +1728,8 @@ export function Session() {
               }
             });
         lastTop = 0;
+        // A press held in the chat shown before is no reader of this one.
+        press.clear();
         resumeFollowing();
       },
     ),

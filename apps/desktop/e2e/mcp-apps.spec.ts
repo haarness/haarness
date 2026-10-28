@@ -323,9 +323,10 @@ test("the page cannot call tools, read other resources, reach undeclared hosts o
   await frame.getByRole("button", { name: "Fetch undeclared" }).click();
   await expect(frame.locator("#status")).toHaveText("blocked connect-src");
   // A host declared without a scheme is in the policy as https, so the
-  // request leaves the page (and fails: the host does not exist).
+  // request leaves the page (and fails: the host does not exist). The
+  // declared blob: is the page's own content, kept as written.
   const declared = await frame.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute("content");
-  expect(declared).toContain("connect-src https://api.weather.example https://live.weather.example;");
+  expect(declared).toContain("connect-src https://api.weather.example https://live.weather.example blob:;");
   await frame.getByRole("button", { name: "Fetch declared" }).click();
   await expect(frame.locator("#status")).toHaveText("fetch failed");
   await page.waitForTimeout(500);
@@ -345,6 +346,21 @@ test("the page cannot call tools, read other resources, reach undeclared hosts o
   await expect(content(view).locator("#input")).toHaveText('input {"city":"Beja","automessage":true}');
   // Only the three links the person allowed ever reached the system.
   expect((await calls()).shell).toHaveLength(3);
+  expect(errors).toEqual([]);
+});
+
+test("the page runs WebAssembly in a worker it starts from a blob: URL, where eval and undeclared hosts stay refused", async () => {
+  const view = await show('{"city":"Sintra"}');
+  const frame = content(view);
+  await steady(view);
+  await frame.getByRole("button", { name: "Add in a worker" }).click();
+  // The worker fetched the module from the page's own blob: URL, compiled and ran it; it reached
+  // no further than the page may.
+  await expect(frame.locator("#status")).toHaveText("wasm 42, eval refused, undeclared host refused");
+  const declared = await frame.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute("content");
+  expect(declared).toContain("'wasm-unsafe-eval'");
+  expect(declared).toContain("worker-src blob:");
+  expect(declared).not.toContain("'unsafe-eval'");
   expect(errors).toEqual([]);
 });
 
@@ -369,4 +385,37 @@ test("scrolling over a page scrolls the conversation", async () => {
   await page.mouse.move(box.x + box.width / 2, box.y + Math.min(box.height / 2, 120));
   await page.mouse.wheel(0, -400);
   await expect.poll(() => transcript.evaluate((element) => element.scrollTop)).toBeLessThan(bottom - 100);
+});
+
+// Last: the reply it streams under the newest page moves that page up, out of the way of the tests above.
+test("a press that begins in the conversation and is let go over a page lets the view follow a reply again", async () => {
+  const view = await show('{"city":"Lagos"}');
+  const transcript = page.locator(".transcript");
+  const gap = () => transcript.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  // Following again, after the wheel of the test above.
+  if (await jump.isVisible()) await jump.click();
+  await expect.poll(gap).toBeLessThan(5);
+  await steady(view);
+  const turn = await client.startTurn(thread, { requestId: crypto.randomUUID(), text: "::scrollstream" });
+  const live = page.getByTestId("streaming-reply");
+  await expect(live).toContainText("STREAM_REFLOW_STAGE_ONE");
+  await expect.poll(gap).toBeLessThan(5);
+  // From the reply's words up onto the page, let go there: the window sees no pointerup.
+  const words = (await live.locator("p").first().boundingBox())!;
+  const frame = (await view.locator("iframe").boundingBox())!;
+  const shown = (await transcript.boundingBox())!;
+  const over = { x: frame.x + frame.width / 2, y: Math.max(frame.y, shown.y) + 20 };
+  expect(over.y).toBeLessThan(frame.y + frame.height);
+  await page.mouse.move(words.x + 8, words.y + words.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(over.x, over.y, { steps: 6 });
+  await page.mouse.up();
+  // The press is over, so the view goes on with the reply as it grows.
+  await client.waitTurn(turn.id);
+  await expect(transcript).toContainText("STREAM_REFLOW_DONE");
+  await expect.poll(gap).toBeLessThan(5);
+  await expect(jump).toHaveCount(0);
+  await page.evaluate(() => window.getSelection()?.removeAllRanges());
+  expect(errors).toEqual([]);
 });
