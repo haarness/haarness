@@ -20,14 +20,17 @@
 //! is, and a refusal is handled as before.
 //!
 //! There are two totals. The images alone are held to their bytes and number
-//! (`bytes`, `count`), and only images go for them. Every attachment sent
-//! inline (images, PDFs, audio, video), with the text of the messages so far,
-//! is held to what one request carries (`request`); for that one the
-//! attachments of earlier turns go, and the images of this turn, but never a
-//! PDF, audio or video of the turn that passed it: what the model read or
-//! heard in this turn stays, or a note would send it to read the file again,
-//! and again. A request that is too large all the same is refused, and
-//! compaction answers that once.
+//! (`bytes`, `count`), and only images go for them. Where the provider states
+//! what it takes in one request (`request`), every attachment sent inline
+//! (images, PDFs, audio, video), with the text of the messages so far, is
+//! held to that too; for it the attachments of earlier turns go, and the
+//! images of this turn, but never a PDF, audio or video of the turn that
+//! passed it: what the model read or heard in this turn stays, or a note
+//! would send it to read the file again, and again. The measure is close,
+//! not exact: the text after the last attachment, JSON escaping and the
+//! system prompt and tools are left to the room the provider leaves. A
+//! request that is too large all the same is refused, and compaction answers
+//! that once.
 //!
 //! A new attachment moves the cut only when the kept ones pass a limit
 //! again, not on every request, so the replaced prefix, and the provider's
@@ -164,11 +167,14 @@ fn plan<'a>(messages: &'a [ProviderMessage], origins: &[Origin], limits: ImageLi
     debug_assert_eq!(messages.len(), origins.len());
     let origin = |message: usize| origins.get(message).copied().unwrap_or_default();
     let mut media = Vec::new();
-    // The text of the messages up to and including each one.
-    let mut text = Vec::with_capacity(messages.len());
+    // The text of the messages up to and including each one, where the
+    // whole request is measured.
+    let mut text = Vec::new();
     for (index, message) in messages.iter().enumerate() {
-        let before = text.last().copied().unwrap_or(0_usize);
-        text.push(before.saturating_add(text_bytes(message)));
+        if limits.request.is_some() {
+            let before = text.last().copied().unwrap_or(0_usize);
+            text.push(before.saturating_add(text_bytes(message)));
+        }
         let attachments = match message {
             // Adapters drop developer-role messages, and their media.
             ProviderMessage::Media {
@@ -229,7 +235,10 @@ fn plan<'a>(messages: &'a [ProviderMessage], origins: &[Origin], limits: ImageLi
         }
         // Past what the request carries, with the text so far, any earlier
         // turn's attachment goes, but of this turn's only images.
-        let room = limits.request.saturating_sub(text[item.message]);
+        let Some(request) = limits.request else {
+            continue;
+        };
+        let room = request.saturating_sub(text[item.message]);
         if totals.kept > room {
             for (mark, newest) in [(room / 5 * 3, false), (room, true)] {
                 let mut position = 0;
@@ -723,7 +732,7 @@ mod tests {
         let bedrock = ImageLimits {
             bytes: 15 * MIB,
             count: None,
-            request: 20_000_000 - crate::REQUEST_ALLOWANCE,
+            request: Some(20_000_000 - crate::REQUEST_ALLOWANCE),
         };
         let photographed = Chat::default()
             .opens(photos(3, 7 * MIB / 2))
@@ -762,11 +771,11 @@ mod tests {
         }
         let mut rng = Rng(0x2545_f491_4f6c_dd1d);
         let limits = [
-            (25 * 1024, None, 30 * 1024),
-            (15 * 1024, None, 18 * 1024),
-            (25 * 1024, Some(100), 30 * 1024),
-            (25 * 1024, Some(6), 12 * 1024),
-            (10 * 1024, Some(3), 40 * 1024),
+            (25 * 1024, None, Some(30 * 1024)),
+            (15 * 1024, None, Some(18 * 1024)),
+            (25 * 1024, Some(100), None),
+            (25 * 1024, Some(6), Some(12 * 1024)),
+            (10 * 1024, Some(3), Some(40 * 1024)),
         ];
         let removed_names = |before: &[ProviderMessage], after: &[ProviderMessage]| {
             let kept = sent(after);
@@ -874,7 +883,9 @@ mod tests {
                 .rposition(|message| !sent(std::slice::from_ref(message)).is_empty())
             {
                 let text = messages[..=last].iter().map(text_bytes).sum::<usize>();
-                if kept.iter().map(|(source, _)| size(source)).sum::<usize>() + text > request {
+                if request.is_some_and(|request| {
+                    kept.iter().map(|(source, _)| size(source)).sum::<usize>() + text > request
+                }) {
                     let turn = origins[last].turn;
                     assert!(turn.is_some());
                     assert!(
@@ -898,6 +909,14 @@ mod tests {
                 reused.extend_from_slice(&messages[at..]);
                 assert_eq!(same, reused == full);
             }
+        }
+    }
+
+    /// Anthropic's limits: 25 MiB of images, and 32 MB in a request.
+    fn anthropic() -> ImageLimits {
+        ImageLimits {
+            request: Some(32_000_000 - crate::REQUEST_ALLOWANCE),
+            ..ImageLimits::default()
         }
     }
 
@@ -927,7 +946,7 @@ mod tests {
                 false,
             )
             .opens(attached("and this", vec![second.clone()]));
-        let cut = bound(&mut chat.messages, &chat.origins, ImageLimits::default());
+        let cut = bound(&mut chat.messages, &chat.origins, anthropic());
         assert_eq!(
             cut,
             Some(Cut {
@@ -994,13 +1013,13 @@ mod tests {
                 vec![file("application/pdf", "a.pdf", PDF_10)],
             ))
             .reads("b.pdf", PDF_10);
-        assert_eq!(both.bounded(ImageLimits::default()), ["a.pdf", "b.pdf"]);
+        assert_eq!(both.bounded(anthropic()), ["a.pdf", "b.pdf"]);
         // One 19 MiB PDF the model read: past the 25 MiB of images, but
         // not past the request.
         let large = Chat::default()
             .opens(user("read b.pdf"))
             .reads("b.pdf", PDF_19);
-        assert_eq!(large.bounded(ImageLimits::default()), ["b.pdf"]);
+        assert_eq!(large.bounded(anthropic()), ["b.pdf"]);
         // Two 10 MiB PDFs in two turns.
         let turns = Chat::default()
             .opens(attached(
@@ -1011,7 +1030,7 @@ mod tests {
                 "and this",
                 vec![file("application/pdf", "b.pdf", PDF_10)],
             ));
-        assert_eq!(turns.bounded(ImageLimits::default()), ["a.pdf", "b.pdf"]);
+        assert_eq!(turns.bounded(anthropic()), ["a.pdf", "b.pdf"]);
     }
 
     #[test]
@@ -1023,10 +1042,7 @@ mod tests {
             .opens(user("read a.pdf and b.pdf"))
             .reads("a.pdf", PDF_15)
             .reads("b.pdf", PDF_15);
-        assert_eq!(
-            bound(&mut chat.messages, &chat.origins, ImageLimits::default()),
-            None
-        );
+        assert_eq!(bound(&mut chat.messages, &chat.origins, anthropic()), None);
         // Read again in a later turn, the earlier read goes and the new one
         // stays.
         let chat = Chat::default()
@@ -1037,8 +1053,8 @@ mod tests {
             .opens(user("look at a.pdf again"))
             .reads("a.pdf", PDF_15);
         let (messages, origins) = (chat.messages.clone(), chat.origins.clone());
-        assert_eq!(chat.bounded(ImageLimits::default()), ["a.pdf"]);
-        assert_eq!(removed(&messages, &origins, ImageLimits::default()), 2);
+        assert_eq!(chat.bounded(anthropic()), ["a.pdf"]);
+        assert_eq!(removed(&messages, &origins, anthropic()), 2);
     }
 
     #[test]
@@ -1050,7 +1066,7 @@ mod tests {
             .reads("report.pdf", PDF_15)
             .opens(user("now check the page"))
             .shots(&["s1", "s2"], 5 * MIB);
-        assert_eq!(chat.bounded(ImageLimits::default()), ["s1", "s2"]);
+        assert_eq!(chat.bounded(anthropic()), ["s1", "s2"]);
         // The other way round, the earlier screenshots go before a PDF.
         let chat = Chat::default()
             .opens(user("check the page"))
@@ -1058,14 +1074,14 @@ mod tests {
             .opens(user("read the report"))
             .reads("report.pdf", PDF_15);
         let (messages, origins) = (chat.messages.clone(), chat.origins.clone());
-        assert_eq!(chat.bounded(ImageLimits::default()), ["report.pdf"]);
-        assert_eq!(removed(&messages, &origins, ImageLimits::default()), 2);
+        assert_eq!(chat.bounded(anthropic()), ["report.pdf"]);
+        assert_eq!(removed(&messages, &origins, anthropic()), 2);
         // This turn's screenshots go too, oldest first, but never its PDF.
         let chat = Chat::default()
             .opens(user("read the report, then check the page"))
             .reads("report.pdf", PDF_15)
             .shots(&["s1", "s2", "s3"], 4 * MIB);
-        assert_eq!(chat.bounded(ImageLimits::default()), ["report.pdf", "s3"]);
+        assert_eq!(chat.bounded(anthropic()), ["report.pdf", "s3"]);
     }
 
     #[test]
@@ -1088,7 +1104,31 @@ mod tests {
                 "and this",
                 vec![file("application/pdf", "b.pdf", PDF_10)],
             ));
-        assert_eq!(chat.bounded(ImageLimits::default()), ["b.pdf"]);
+        assert_eq!(chat.bounded(anthropic()), ["b.pdf"]);
+    }
+
+    #[test]
+    fn where_the_provider_states_no_request_size_earlier_turns_files_stay() {
+        // Three 9 MiB PDFs in three turns: 37.7 MB, which the Gemini API
+        // takes. Only a provider that states a size cuts for it.
+        let pdf = |name: &str| file("application/pdf", name, 12_582_912);
+        let chat = || {
+            Chat::default()
+                .opens(attached("here is a", vec![pdf("a.pdf")]))
+                .opens(attached("here is b", vec![pdf("b.pdf")]))
+                .opens(attached("here is c", vec![pdf("c.pdf")]))
+        };
+        let mut gemini = chat();
+        assert_eq!(
+            bound(
+                &mut gemini.messages,
+                &gemini.origins,
+                ImageLimits::default()
+            ),
+            None
+        );
+        assert_eq!(sent(&gemini.messages), ["a.pdf", "b.pdf", "c.pdf"]);
+        assert_eq!(chat().bounded(anthropic()), ["c.pdf"]);
     }
 
     #[test]
@@ -1121,7 +1161,7 @@ mod tests {
             ],
         )];
         let origins = turns(&messages);
-        assert_eq!(bound(&mut messages, &origins, ImageLimits::default()), None);
+        assert_eq!(bound(&mut messages, &origins, anthropic()), None);
         assert_eq!(sent(&messages), ["one.pdf", "two.pdf"]);
     }
 
@@ -1133,7 +1173,7 @@ mod tests {
             attached("c", vec![file("application/pdf", "spec.pdf", 10 * MIB)]),
         ];
         let origins = turns(&messages);
-        bound(&mut messages, &origins, ImageLimits::default());
+        bound(&mut messages, &origins, anthropic());
         assert_eq!(sent(&messages), ["spec.pdf"]);
         let notes = serde_json::to_string(&messages).unwrap();
         assert!(notes.contains("[Audio talk.mp3 omitted to keep the request within the provider's limits. It is no longer audible:"));

@@ -17,8 +17,8 @@ use std::{
 use async_trait::async_trait;
 use futures::stream;
 use haarness_core::{
-    AgentRuntime, CoreError, CoreResult, EventBus, ModelProvider, ProviderEvent, ProviderMessage,
-    ProviderRequest, ProviderStream, RuntimeConfig, StaticProviderRegistry,
+    AgentRuntime, CoreError, CoreResult, EventBus, ImageLimits, ModelProvider, ProviderEvent,
+    ProviderMessage, ProviderRequest, ProviderStream, RuntimeConfig, StaticProviderRegistry,
 };
 use haarness_protocol::{
     CreateThreadRequest, ItemData, ProviderInfo, RequestId, StartTurnRequest, ThreadId, Turn,
@@ -35,14 +35,17 @@ const MIB: u64 = 1024 * 1024;
 const TOO_LARGE: &str =
     "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes.";
 
-/// Refuses a request whose media pass 32 MB, as Anthropic does, every
-/// request once `refusing` holds an error, and the requests `refused` names
-/// by their place: as the stream's first item, or with `early` before any
-/// stream. It reads each file the person names as `read <name>` with the
-/// read tool, in turn, then answers. Told that a file it read was left out,
-/// it reads it again, as a model follows the note.
+/// Refuses a request whose media pass 32 MB and states that size, as
+/// Anthropic does; with `unstated`, it takes 100 MB and states nothing, as
+/// the Gemini API does. It also refuses every request once `refusing` holds
+/// an error, and the requests `refused` names by their place: as the
+/// stream's first item, or with `early` before any stream. It reads each
+/// file the person names as `read <name>` with the read tool, in turn, then
+/// answers. Told that a file it read was left out, it reads it again, as a
+/// model follows the note.
 #[derive(Default)]
 struct Sized {
+    unstated: AtomicBool,
     refusing: Mutex<Option<String>>,
     refused: Mutex<Vec<usize>>,
     early: AtomicBool,
@@ -143,6 +146,13 @@ impl ModelProvider for Sized {
             models: vec![],
         }
     }
+    fn image_limits(&self, _model: &str) -> ImageLimits {
+        ImageLimits {
+            request: (!self.unstated.load(Ordering::SeqCst))
+                .then_some(32_000_000 - haarness_core::REQUEST_ALLOWANCE),
+            ..ImageLimits::default()
+        }
+    }
     async fn stream(
         &self,
         request: ProviderRequest,
@@ -156,7 +166,12 @@ impl ModelProvider for Sized {
         }
         let place = self.requests.lock().unwrap().len();
         let refusal = self.refusing.lock().unwrap().clone().or_else(|| {
-            (media_bytes(&request) > 32_000_000 || self.refused.lock().unwrap().contains(&place))
+            let most = if self.unstated.load(Ordering::SeqCst) {
+                100_000_000
+            } else {
+                32_000_000
+            };
+            (media_bytes(&request) > most || self.refused.lock().unwrap().contains(&place))
                 .then(|| TOO_LARGE.to_owned())
         });
         let wanted = next_read(&request.messages);
@@ -587,4 +602,32 @@ async fn where_the_chat_cannot_compact_a_refusal_of_its_bytes_still_says_what_to
         done.error.unwrap(),
         "Size fixture refused this request as too large. The files in this chat are too large to send together: continue in a new chat, or with smaller files."
     );
+}
+
+#[tokio::test]
+async fn a_provider_that_states_no_request_size_keeps_earlier_turns_files() {
+    // Three turns each attaching a 9 MiB PDF: 37.7 MB, which a provider
+    // taking 100 MB carries whole, as it did before PDFs were counted.
+    let fixture = Fixture::new();
+    fixture.provider.unstated.store(true, Ordering::SeqCst);
+    let thread = fixture.thread().await;
+    for name in ["a.pdf", "b.pdf", "c.pdf"] {
+        let pdf = fixture.pdf(name, 9);
+        let done = fixture
+            .turn(thread, &format!("Here is {name}"), vec![pdf])
+            .await;
+        assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    }
+    assert_eq!(
+        pdfs_and_notes(&fixture.requests()),
+        [
+            (vec!["a.pdf".to_owned()], 0),
+            (vec!["a.pdf".to_owned(), "b.pdf".to_owned()], 0),
+            (
+                vec!["a.pdf".to_owned(), "b.pdf".to_owned(), "c.pdf".to_owned()],
+                0
+            )
+        ]
+    );
+    assert_eq!(fixture.summaries(), 0);
 }
