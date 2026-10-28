@@ -3601,17 +3601,19 @@ const RUNS_IN_SHELL: &[&str] = &["time", "trap", "mapfile", "readarray", "enable
 /// folder and redirects are read from there too (`cd src && cat
 /// ../README.md` reads the project's `README.md`).
 ///
-/// Followed only while every step before is either a plain `cd` or `pushd`
-/// (one folder [`plain_path`] takes, not a `pushd +N` place in the folder
-/// stack, with no assignment, substitution or word after a redirect) or a
-/// command that cannot move the shell: a program written as a literal name
-/// that is not a builtin [`moves_shell`] or [`RUNS_IN_SHELL`] names. From any
-/// other step on (a pipeline, a subshell, a group, an `||` list, `popd`, a
-/// `cd` that is not plain, a program nobody can name …), paths are read from
-/// the project as for any line. A step that ran in the shell may have set
-/// `CDPATH` or `HOME`, so a relative `cd` after one is not followed either;
-/// a rooted one is. Past [`MAX_MOVES`] or a folder of [`MAX_PLACED_BYTES`]
-/// nothing more is followed.
+/// Only the `cd`s and `pushd`s at the start of the chain are followed, each
+/// plain: one folder [`plain_path`] takes that is a folder now (not a `pushd
+/// +N` place in the folder stack), with no assignment, substitution or word
+/// after a redirect. After them, every step is read from the folder they
+/// reached while each step before it is a command that cannot move the
+/// shell: a program written as a literal name that is not a builtin
+/// [`moves_shell`] or [`RUNS_IN_SHELL`] names. Any other step (a pipeline, a
+/// subshell, a group, an `||` list, `popd`, a `cd` that is not plain, a
+/// program nobody can name …), and a `cd` after a step that ran (it may have
+/// set `CDPATH` or `HOME`, or made a link where the `cd` goes), leaves the
+/// rest of the line read from where the shell started, as for any line.
+/// Past [`MAX_MOVES`] or a folder of [`MAX_PLACED_BYTES`] nothing more is
+/// followed.
 fn chain_folders(
     chain: tree_sitter::Node<'_>,
     source: &str,
@@ -3619,7 +3621,7 @@ fn chain_folders(
 ) -> HashMap<usize, Rc<Path>> {
     let mut folders = HashMap::new();
     let mut folder: Rc<Path> = Rc::from(workspace);
-    let (mut moves, mut steered) = (0, false);
+    let (mut moves, mut ran) = (0, false);
     for (node, outer) in steps(chain) {
         let (Some(command), redirects) = statement(node, &outer) else {
             break;
@@ -3659,16 +3661,17 @@ fn chain_folders(
                     && program.literal
                     && matches!(program.value.as_str(), "cd" | "pushd")
                     && plain_path(target)
-                    && !(program.value == "pushd" && target.value.starts_with('+')) =>
+                    && !names_no_path(&program.value, &target.value) =>
             {
-                if steered && !target.value.starts_with('/') {
-                    break;
-                }
                 let target = home_expansion(&target.raw, &target.value)
                     .unwrap_or_else(|| PathBuf::from(&target.value));
                 let next = folder.join(target);
                 moves += 1;
-                if moves > MAX_MOVES || next.as_os_str().len() > MAX_PLACED_BYTES {
+                if ran
+                    || moves > MAX_MOVES
+                    || next.as_os_str().len() > MAX_PLACED_BYTES
+                    || !next.is_dir()
+                {
                     break;
                 }
                 folder = Rc::from(next);
@@ -3678,7 +3681,7 @@ fn chain_folders(
                     && !moves_shell(command, source)
                     && !RUNS_IN_SHELL.contains(&program_name(&program.value).as_str()) =>
             {
-                steered = true;
+                ran = true;
             }
             _ => break,
         }
@@ -5304,10 +5307,12 @@ mod regression {
         let workspace = root.join("project");
         std::fs::create_dir_all(workspace.join("deep/er/x")).unwrap();
         std::fs::create_dir_all(workspace.join("a")).unwrap();
-        std::fs::create_dir_all(workspace.join("sub")).unwrap();
+        std::fs::create_dir_all(workspace.join("sub/deeper")).unwrap();
         std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
         std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
         std::os::unix::fs::symlink("../deep/er/x", workspace.join("a/l")).unwrap();
+        std::os::unix::fs::symlink("../deep", workspace.join("sub/l")).unwrap();
         let parent = vec![glob(&root.canonicalize().unwrap())];
         // Inside the project, read from where the `cd`s went: the
         // command's paths and its redirects, also after commands that
@@ -5347,9 +5352,10 @@ mod regression {
         }
         // Read from the project, as before, where the folder is not known
         // for sure: after `;`, in a subshell, a `cd` to a folder nobody can
-        // tell, a relative `cd` after a step that ran in the shell, a step
-        // that may move it, a pipeline, an `||` list, `cd` run by another
-        // program, and a word the shell joins across lines.
+        // tell or that is not there, a `cd` after another step (which may
+        // have made a link where it goes), a step that may move the shell, a
+        // pipeline, an `||` list, `cd` run by another program, and a word the
+        // shell joins across lines.
         let today = analyze("cat ../x", &workspace).external_dirs;
         assert_eq!(today, parent);
         for command in [
@@ -5358,6 +5364,13 @@ mod regression {
             "cd \"$D\" && cat ../x",
             "cd sub/../src && cat ../x",
             "make && cd sub && cat ../x",
+            "cd nosuch && cat ../x",
+            "cd sub && make && cd deeper && cat ../x",
+            &format!(
+                "ln -sfn {} sub/l && cd {} && cat ../x",
+                root.join("outside").display(),
+                workspace.join("sub/l").display()
+            ),
             "cd sub && eval true && cat ../x",
             "cd sub && time true && cat ../x",
             "cd sub && $run && cat ../x",
