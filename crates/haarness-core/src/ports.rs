@@ -911,6 +911,32 @@ pub struct HookDecision {
     pub always: bool,
 }
 
+/// Whom a lifecycle hook runs for: the chat, the agent acting in it, and
+/// the folder of its own the chat works in.
+#[derive(Debug, Clone)]
+pub struct HookCall {
+    pub thread: ThreadId,
+    /// The agent acting: the chat's agent when it starts, the one a prompt,
+    /// tool call or permission request runs on. `None` for other events.
+    pub agent: Option<String>,
+    /// The chat's own folder (a chat created with a `directory`, as every
+    /// chat of the chat home is): its hooks run there and get it as their
+    /// project folder. `None` for a chat of the project folder.
+    pub folder: Option<PathBuf>,
+}
+
+impl HookCall {
+    /// A call for chat `thread`, with no agent, run in the project folder.
+    #[must_use]
+    pub fn new(thread: ThreadId) -> Self {
+        Self {
+            thread,
+            agent: None,
+            folder: None,
+        }
+    }
+}
+
 /// Claude-Code-compatible lifecycle hooks. Implemented by the composition
 /// root from configuration; the core only invokes them.
 #[async_trait]
@@ -924,18 +950,18 @@ pub trait HookPort: Send + Sync {
     ) -> CoreResult<()> {
         Ok(())
     }
-    async fn pre_tool_use(&self, thread: ThreadId, tool: &str, arguments: &Value) -> HookDecision;
+    async fn pre_tool_use(&self, call: &HookCall, tool: &str, arguments: &Value) -> HookDecision;
     /// A tool finished (`is_error`: it failed). Only `context` and `block`
     /// count: both reach the model after the tool's own result.
     async fn post_tool_use(
         &self,
-        thread: ThreadId,
+        call: &HookCall,
         tool: &str,
         arguments: &Value,
         output: &str,
         is_error: bool,
     ) -> HookDecision;
-    async fn user_prompt_submit(&self, thread: ThreadId, prompt: &str) -> HookDecision;
+    async fn user_prompt_submit(&self, call: &HookCall, prompt: &str) -> HookDecision;
     /// A prompt is about to be shown for `permission` and the `patterns` it
     /// asks about. `detail` is the tool's arguments; when a pattern names
     /// where a file path really leads (a link's target), the runtime asks
@@ -944,34 +970,35 @@ pub trait HookPort: Send + Sync {
     /// answer Always for this request (see [`HookDecision::always`]).
     async fn permission_request(
         &self,
-        thread: ThreadId,
+        call: &HookCall,
         permission: &str,
         patterns: &[String],
         always: Option<&[String]>,
         detail: &Value,
     ) -> HookDecision;
-    async fn stop(&self, thread: ThreadId);
+    async fn stop(&self, call: &HookCall);
     /// Observes only a committed compaction, never a discarded summary.
-    async fn post_compact(&self, _thread: ThreadId, _trigger: &str, _item: &Item) {}
+    async fn post_compact(&self, _call: &HookCall, _trigger: &str, _item: &Item) {}
     /// Observes a terminal failure once, after automatic recovery is exhausted.
-    async fn stop_failure(&self, _thread: ThreadId, _turn: TurnId, _detail: &Value) {}
-    /// A thread was created (`SessionStart` / `session.start`).
-    async fn session_start(&self, _thread: ThreadId, _agent: &str) {}
+    async fn stop_failure(&self, _call: &HookCall, _turn: TurnId, _detail: &Value) {}
+    /// A thread was created (`SessionStart` / `session.start`), with its
+    /// agent in `call`.
+    async fn session_start(&self, _call: &HookCall) {}
     /// A thread was archived (`SessionEnd` / `session.end`).
-    async fn session_end(&self, _thread: ThreadId, _reason: &str) {}
+    async fn session_end(&self, _call: &HookCall, _reason: &str) {}
     /// A root turn completed, after `stop` (`TurnEnd` / `chat.turn.end`).
     /// `detail` carries `turnId`, `agent`, `provider`, `model` and `finishReason`.
-    async fn turn_end(&self, _thread: ThreadId, _turn: TurnId, _detail: &Value) {}
+    async fn turn_end(&self, _call: &HookCall, _turn: TurnId, _detail: &Value) {}
     /// Attention-worthy moments: a pending permission prompt or a completed
     /// turn (`Notification`). Observational only; never awaited on the hot path.
-    async fn notification(&self, _thread: ThreadId, _kind: &str, _message: &str) {}
+    async fn notification(&self, _call: &HookCall, _kind: &str, _message: &str) {}
     /// A new configuration generation became active (`ConfigChange`).
     async fn config_change(&self, _detail: &Value) {}
     /// A slash command is about to expand (`command.execute.before`). A block
     /// aborts the command before its template runs; context joins the turn.
     async fn command_execute_before(
         &self,
-        _thread: ThreadId,
+        _call: &HookCall,
         _command: &str,
         _arguments: &str,
     ) -> HookDecision {

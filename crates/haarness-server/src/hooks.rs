@@ -8,8 +8,10 @@
 //!     "hooks": [{ "type": "command", "command": "./check.sh", "timeout": 10 }] } ] } }
 //! ```
 //!
-//! Stdin payload: `{"hook_event_name", "session_id", "cwd", "tool_name",
-//! "tool_input", "prompt", "tool_response"}` (fields per event). Stdout may
+//! Stdin payload: `{"hook_event_name", "session_id", "cwd", "agent",
+//! "tool_name", "tool_input", "prompt", "tool_response"}` (fields per event).
+//! A hook runs in the folder its chat works in (its own, or the project
+//! folder), which `cwd` and the project folder variables name. Stdout may
 //! carry `{"decision": "block", "reason", "additionalContext",
 //! "hookSpecificOutput": {"permissionDecision": "allow"|"deny"|"ask"}}`; a
 //! `PermissionRequest` hook answers with `hookSpecificOutput.decision`
@@ -28,13 +30,12 @@
 //! any free text taken from a hook (stderr, block reasons) is redacted,
 //! stripped of control characters and clipped first.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use haarness_core::shell_text::{ShellKind, place_placeholders};
-use haarness_core::{HookDecision, HookPort, PermissionDecision};
-use haarness_protocol::ThreadId;
+use haarness_core::{HookCall, HookDecision, HookPort, PermissionDecision};
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
@@ -167,20 +168,26 @@ impl ConfiguredHooks {
             .collect()
     }
 
-    async fn run(&self, entry: &HookEntry, payload: &Value) -> HookOutcome {
+    /// Where the hooks of `call` run, and which folder they get as the
+    /// project's: the chat's own folder, else the project folder.
+    fn folder<'a>(&'a self, call: &'a HookCall) -> &'a Path {
+        call.folder.as_deref().unwrap_or(&self.workspace)
+    }
+
+    async fn run(&self, entry: &HookEntry, payload: &Value, folder: &Path) -> HookOutcome {
         use tokio::io::AsyncWriteExt as _;
         use tokio::process::Command;
-        let (program, arguments) = hook_invocation(entry, &self.workspace);
+        let (program, arguments) = hook_invocation(entry, folder);
         let mut command = Command::new(program);
         command.args(arguments);
         for name in haarness_core::private_env_names() {
             command.env_remove(name);
         }
         command
-            .current_dir(dunce::simplified(&self.workspace))
-            .env("HAARNESS_PROJECT_DIR", &self.workspace)
-            .env("OPENCODE_PROJECT_DIR", &self.workspace)
-            .env("CLAUDE_PROJECT_DIR", &self.workspace)
+            .current_dir(dunce::simplified(folder))
+            .env("HAARNESS_PROJECT_DIR", folder)
+            .env("OPENCODE_PROJECT_DIR", folder)
+            .env("CLAUDE_PROJECT_DIR", folder)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -369,16 +376,29 @@ impl ConfiguredHooks {
         outcome
     }
 
-    async fn run_event(&self, event: &str, tool: Option<&str>, payload: &Value) -> HookOutcome {
-        self.run_matching(event, tool.as_slice(), payload).await
+    async fn run_event(
+        &self,
+        event: &str,
+        tool: Option<&str>,
+        payload: &Value,
+        folder: &Path,
+    ) -> HookOutcome {
+        self.run_matching(event, tool.as_slice(), payload, folder)
+            .await
     }
 
-    async fn run_matching(&self, event: &str, values: &[&str], payload: &Value) -> HookOutcome {
+    async fn run_matching(
+        &self,
+        event: &str,
+        values: &[&str],
+        payload: &Value,
+        folder: &Path,
+    ) -> HookOutcome {
         let mut combined = HookOutcome::default();
         // Always holds only when every hook that allowed answered Always.
         let mut always = None;
         for entry in self.matching(event, values) {
-            let outcome = self.run(entry, payload).await;
+            let outcome = self.run(entry, payload, folder).await;
             // The first block stops an action; after a tool ran, every
             // hook's feedback reaches the model.
             if let Some(block) = outcome.block {
@@ -1144,17 +1164,19 @@ fn claude_alias(name: &str) -> Option<&'static str> {
 
 #[async_trait]
 impl HookPort for ConfiguredHooks {
-    async fn pre_tool_use(&self, thread: ThreadId, tool: &str, arguments: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, call: &HookCall, tool: &str, arguments: &Value) -> HookDecision {
         self.run_event(
             "PreToolUse",
             Some(tool),
             &json!({
                 "hook_event_name": "PreToolUse",
-                "session_id": thread,
-                "cwd": self.workspace,
+                "session_id": call.thread,
+                "cwd": self.folder(call),
+                "agent": call.agent,
                 "tool_name": tool,
                 "tool_input": arguments,
             }),
+            self.folder(call),
         )
         .await
         .into()
@@ -1162,7 +1184,7 @@ impl HookPort for ConfiguredHooks {
 
     async fn post_tool_use(
         &self,
-        thread: ThreadId,
+        call: &HookCall,
         tool: &str,
         arguments: &Value,
         output: &str,
@@ -1179,13 +1201,15 @@ impl HookPort for ConfiguredHooks {
                 Some(tool),
                 &json!({
                     "hook_event_name": event,
-                    "session_id": thread,
-                    "cwd": self.workspace,
+                    "session_id": call.thread,
+                    "cwd": self.folder(call),
+                    "agent": call.agent,
                     "tool_name": tool,
                     "tool_input": arguments,
                     "tool_response": {"output": output, "is_error": is_error},
                     "error": is_error.then_some(output),
                 }),
+                self.folder(call),
             )
             .await;
         if !is_error && let Some(file_path) = changed_file(tool, arguments) {
@@ -1195,12 +1219,14 @@ impl HookPort for ConfiguredHooks {
                     Some(tool),
                     &json!({
                         "hook_event_name": "FileChanged",
-                        "session_id": thread,
-                        "cwd": self.workspace,
+                        "session_id": call.thread,
+                        "cwd": self.folder(call),
+                        "agent": call.agent,
                         "tool_name": tool,
                         "tool_input": arguments,
                         "file_path": file_path,
                     }),
+                    self.folder(call),
                 )
                 .await;
         }
@@ -1212,16 +1238,18 @@ impl HookPort for ConfiguredHooks {
         }
     }
 
-    async fn user_prompt_submit(&self, thread: ThreadId, prompt: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, call: &HookCall, prompt: &str) -> HookDecision {
         self.run_event(
             "UserPromptSubmit",
             None,
             &json!({
                 "hook_event_name": "UserPromptSubmit",
-                "session_id": thread,
-                "cwd": self.workspace,
+                "session_id": call.thread,
+                "cwd": self.folder(call),
+                "agent": call.agent,
                 "prompt": prompt,
             }),
+            self.folder(call),
         )
         .await
         .into()
@@ -1229,7 +1257,7 @@ impl HookPort for ConfiguredHooks {
 
     async fn permission_request(
         &self,
-        thread: ThreadId,
+        call: &HookCall,
         permission: &str,
         patterns: &[String],
         always: Option<&[String]>,
@@ -1237,8 +1265,9 @@ impl HookPort for ConfiguredHooks {
     ) -> HookDecision {
         let mut payload = json!({
             "hook_event_name": "PermissionRequest",
-            "session_id": thread,
-            "cwd": self.workspace,
+            "session_id": call.thread,
+            "cwd": self.folder(call),
+            "agent": call.agent,
             "tool_name": permission,
             "tool_input": detail,
             "permission_patterns": patterns,
@@ -1259,89 +1288,98 @@ impl HookPort for ConfiguredHooks {
                 "destination": "session",
             }]);
         }
-        self.run_event("PermissionRequest", Some(permission), &payload)
-            .await
-            .into()
+        self.run_event(
+            "PermissionRequest",
+            Some(permission),
+            &payload,
+            self.folder(call),
+        )
+        .await
+        .into()
     }
 
-    async fn post_compact(&self, thread: ThreadId, trigger: &str, item: &haarness_protocol::Item) {
+    async fn post_compact(&self, call: &HookCall, trigger: &str, item: &haarness_protocol::Item) {
         let _ = self
             .run_event(
                 "PostCompact",
                 Some(trigger),
                 &json!({
-                    "hook_event_name":"PostCompact", "session_id":thread, "cwd":self.workspace,
+                    "hook_event_name":"PostCompact", "session_id":call.thread, "cwd":self.folder(call),
                     "trigger":trigger, "compaction":item,
                 }),
+                self.folder(call),
             )
             .await;
     }
-    async fn stop_failure(
-        &self,
-        thread: ThreadId,
-        turn: haarness_protocol::TurnId,
-        detail: &Value,
-    ) {
+    async fn stop_failure(&self, call: &HookCall, turn: haarness_protocol::TurnId, detail: &Value) {
         let mut payload = detail.clone();
         payload["hook_event_name"] = json!("StopFailure");
-        payload["session_id"] = json!(thread);
+        payload["session_id"] = json!(call.thread);
         payload["turn_id"] = json!(turn);
-        payload["cwd"] = json!(self.workspace);
+        payload["cwd"] = json!(self.folder(call));
         let _ = self
-            .run_matching("StopFailure", &failure_names(detail), &payload)
+            .run_matching(
+                "StopFailure",
+                &failure_names(detail),
+                &payload,
+                self.folder(call),
+            )
             .await;
     }
 
-    async fn stop(&self, thread: ThreadId) {
+    async fn stop(&self, call: &HookCall) {
         let _ = self
             .run_event(
                 "Stop",
                 None,
                 &json!({
                     "hook_event_name": "Stop",
-                    "session_id": thread,
-                    "cwd": self.workspace,
+                    "session_id": call.thread,
+                    "cwd": self.folder(call),
                 }),
+                self.folder(call),
             )
             .await;
     }
 
-    async fn session_start(&self, thread: ThreadId, agent: &str) {
+    async fn session_start(&self, call: &HookCall) {
         let _ = self
             .run_event(
                 "SessionStart",
                 Some("startup"),
                 &json!({
                     "hook_event_name": "SessionStart",
-                    "session_id": thread,
-                    "cwd": self.workspace,
+                    "session_id": call.thread,
+                    "cwd": self.folder(call),
                     "source": "startup",
-                    "agent": agent,
+                    "agent": call.agent,
                 }),
+                self.folder(call),
             )
             .await;
     }
 
-    async fn session_end(&self, thread: ThreadId, reason: &str) {
+    async fn session_end(&self, call: &HookCall, reason: &str) {
         let _ = self
             .run_event(
                 "SessionEnd",
                 Some(reason),
                 &json!({
                     "hook_event_name": "SessionEnd",
-                    "session_id": thread,
-                    "cwd": self.workspace,
+                    "session_id": call.thread,
+                    "cwd": self.folder(call),
                     "reason": reason,
                 }),
+                self.folder(call),
             )
             .await;
     }
 
-    async fn turn_end(&self, thread: ThreadId, turn: haarness_protocol::TurnId, detail: &Value) {
+    async fn turn_end(&self, call: &HookCall, turn: haarness_protocol::TurnId, detail: &Value) {
         let mut payload = json!({
             "hook_event_name": "TurnEnd",
-            "session_id": thread,
-            "cwd": self.workspace,
+            "session_id": call.thread,
+            "cwd": self.folder(call),
             "turn_id": turn,
             "agent": detail.get("agent"),
             "provider": detail.get("provider"),
@@ -1353,21 +1391,24 @@ impl HookPort for ConfiguredHooks {
                 target.entry(key.clone()).or_insert_with(|| value.clone());
             }
         }
-        let _ = self.run_event("TurnEnd", None, &payload).await;
+        let _ = self
+            .run_event("TurnEnd", None, &payload, self.folder(call))
+            .await;
     }
 
-    async fn notification(&self, thread: ThreadId, kind: &str, message: &str) {
+    async fn notification(&self, call: &HookCall, kind: &str, message: &str) {
         let _ = self
             .run_event(
                 "Notification",
                 Some(kind),
                 &json!({
                     "hook_event_name": "Notification",
-                    "session_id": thread,
-                    "cwd": self.workspace,
+                    "session_id": call.thread,
+                    "cwd": self.folder(call),
                     "notification_type": kind,
                     "message": message,
                 }),
+                self.folder(call),
             )
             .await;
     }
@@ -1383,7 +1424,9 @@ impl HookPort for ConfiguredHooks {
                 target.entry(key.clone()).or_insert_with(|| value.clone());
             }
         }
-        let _ = self.run_event("ConfigChange", None, &payload).await;
+        let _ = self
+            .run_event("ConfigChange", None, &payload, &self.workspace)
+            .await;
     }
 }
 
@@ -1480,6 +1523,7 @@ pub(crate) mod log_capture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use haarness_protocol::ThreadId;
     use log_capture::Capture;
 
     #[test]
@@ -1538,20 +1582,32 @@ mod tests {
                 {"matcher": "billing_error"}, {"matcher": "max_output_tokens|unknown"}]}),
             async |hooks| {
                 hooks
-                    .stop_failure(thread, turn, &failure("provider", "rate_limit"))
+                    .stop_failure(
+                        &HookCall::new(thread),
+                        turn,
+                        &failure("provider", "rate_limit"),
+                    )
                     .await;
                 hooks
-                    .stop_failure(thread, turn, &failure("provider", "unknown"))
+                    .stop_failure(
+                        &HookCall::new(thread),
+                        turn,
+                        &failure("provider", "unknown"),
+                    )
                     .await;
                 hooks
-                    .stop_failure(thread, turn, &failure("incomplete", "incomplete"))
+                    .stop_failure(
+                        &HookCall::new(thread),
+                        turn,
+                        &failure("incomplete", "incomplete"),
+                    )
                     .await;
                 hooks
-                    .stop_failure(thread, turn, &failure("tool", "tool"))
+                    .stop_failure(&HookCall::new(thread), turn, &failure("tool", "tool"))
                     .await;
                 // A detail without `error_type`, as an older runtime sent it.
                 hooks
-                    .stop_failure(thread, turn, &json!({"error": "provider"}))
+                    .stop_failure(&HookCall::new(thread), turn, &json!({"error": "provider"}))
                     .await;
             },
         )
@@ -1608,7 +1664,11 @@ mod tests {
             std::env::temp_dir(),
         );
         let decision = hooks
-            .pre_tool_use(ThreadId::new(), "bash", &json!({"command": "true"}))
+            .pre_tool_use(
+                &HookCall::new(ThreadId::new()),
+                "bash",
+                &json!({"command": "true"}),
+            )
             .await;
         assert_eq!(decision.block.as_deref(), Some("nope"));
 
@@ -1621,7 +1681,11 @@ mod tests {
             std::env::temp_dir(),
         );
         let decision = hooks
-            .pre_tool_use(ThreadId::new(), "bash", &json!({"command": "true"}))
+            .pre_tool_use(
+                &HookCall::new(ThreadId::new()),
+                "bash",
+                &json!({"command": "true"}),
+            )
             .await;
         assert!(decision.block.is_none());
         assert_eq!(decision.permission, Some(PermissionDecision::Allow));
@@ -1642,7 +1706,7 @@ mod tests {
         );
         let _ = hooks
             .post_tool_use(
-                ThreadId::new(),
+                &HookCall::new(ThreadId::new()),
                 "bash",
                 &json!({"command": "ls"}),
                 "listing",
@@ -1681,7 +1745,7 @@ mod tests {
         );
         let _ = hooks
             .post_tool_use(
-                ThreadId::new(),
+                &HookCall::new(ThreadId::new()),
                 "bash",
                 &json!({"command": "false"}),
                 "failed",
@@ -1839,7 +1903,7 @@ mod tests {
         );
         let _ = hooks
             .post_tool_use(
-                ThreadId::new(),
+                &HookCall::new(ThreadId::new()),
                 "bash",
                 &json!({"command": "false"}),
                 "failed",
@@ -1868,7 +1932,7 @@ mod tests {
         );
         let decision = hooks
             .permission_request(
-                ThreadId::new(),
+                &HookCall::new(ThreadId::new()),
                 "bash",
                 &["cargo test".to_owned()],
                 None,
@@ -1899,7 +1963,7 @@ mod tests {
         );
         let decision = hooks
             .permission_request(
-                ThreadId::new(),
+                &HookCall::new(ThreadId::new()),
                 "bash",
                 &["git status --short".to_owned()],
                 always,
@@ -1990,7 +2054,7 @@ mod tests {
             async move {
                 hooks
                     .permission_request(
-                        ThreadId::new(),
+                        &HookCall::new(ThreadId::new()),
                         "bash",
                         &["git status".to_owned()],
                         Some(&["git status *".to_owned()]),
@@ -2023,7 +2087,7 @@ mod tests {
         );
         let decision = hooks
             .permission_request(
-                ThreadId::new(),
+                &HookCall::new(ThreadId::new()),
                 "bash",
                 &["npm install".to_owned()],
                 None,
@@ -2047,7 +2111,7 @@ mod tests {
             async move {
                 let permission = hooks
                     .permission_request(
-                        ThreadId::new(),
+                        &HookCall::new(ThreadId::new()),
                         "bash",
                         &["rm -rf build".to_owned()],
                         None,
@@ -2055,7 +2119,11 @@ mod tests {
                     )
                     .await;
                 let pre = hooks
-                    .pre_tool_use(ThreadId::new(), "bash", &json!({"command": "rm -rf build"}))
+                    .pre_tool_use(
+                        &HookCall::new(ThreadId::new()),
+                        "bash",
+                        &json!({"command": "rm -rf build"}),
+                    )
                     .await;
                 (permission, pre)
             }
@@ -2080,7 +2148,7 @@ mod tests {
         );
         let decision = hooks
             .pre_tool_use(
-                ThreadId::new(),
+                &HookCall::new(ThreadId::new()),
                 "bash",
                 &json!({"command": "cargo test --all"}),
             )
@@ -2126,17 +2194,22 @@ mod tests {
                 "ConfigChange": [{}],
             }),
             async |hooks| {
-                hooks.session_start(thread, "build").await;
-                hooks.session_end(thread, "archived").await;
+                hooks
+                    .session_start(&HookCall {
+                        agent: Some("build".into()),
+                        ..HookCall::new(thread)
+                    })
+                    .await;
+                hooks.session_end(&HookCall::new(thread), "archived").await;
                 hooks
                     .turn_end(
-                        thread,
+                        &HookCall::new(thread),
                         turn,
                         &json!({"agent":"build","provider":"echo","model":"echo-1","finishReason":"stop","turnId":turn}),
                     )
                     .await;
-                hooks.notification(thread, "turn_completed", "Session completed").await;
-                hooks.notification(thread, "permission_prompt", "Permission needed: bash").await;
+                hooks.notification(&HookCall::new(thread), "turn_completed", "Session completed").await;
+                hooks.notification(&HookCall::new(thread), "permission_prompt", "Permission needed: bash").await;
                 hooks.config_change(&json!({"source":"reload"})).await;
             },
         )
@@ -2181,10 +2254,10 @@ mod tests {
             "PostCompact":[{"matcher":"manual"}],
             "StopFailure":[{"matcher":"incomplete|content_filter"}]
         }), async |hooks| {
-            hooks.post_compact(thread, "automatic", &item).await;
-            hooks.post_compact(thread, "manual", &item).await;
-            hooks.stop_failure(thread, turn, &json!({"error":"provider"})).await;
-            hooks.stop_failure(thread, turn, &json!({"error":"incomplete","error_details":"truncated","provider_id":"echo","model_id":"echo-1"})).await;
+            hooks.post_compact(&HookCall::new(thread), "automatic", &item).await;
+            hooks.post_compact(&HookCall::new(thread), "manual", &item).await;
+            hooks.stop_failure(&HookCall::new(thread), turn, &json!({"error":"provider"})).await;
+            hooks.stop_failure(&HookCall::new(thread), turn, &json!({"error":"incomplete","error_details":"truncated","provider_id":"echo","model_id":"echo-1"})).await;
         }).await;
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["hook_event_name"], "PostCompact");
@@ -2209,7 +2282,7 @@ mod tests {
             async |hooks| {
                 hooks
                     .post_tool_use(
-                        thread,
+                        &HookCall::new(thread),
                         "write",
                         &json!({"path":"src/lib.rs","content":"x"}),
                         "ok",
@@ -2218,7 +2291,7 @@ mod tests {
                     .await;
                 hooks
                     .post_tool_use(
-                        thread,
+                        &HookCall::new(thread),
                         "edit",
                         &json!({"path":"README.md","old":"a","new":"b"}),
                         "failed",
@@ -2227,7 +2300,7 @@ mod tests {
                     .await;
                 hooks
                     .post_tool_use(
-                        thread,
+                        &HookCall::new(thread),
                         "bash",
                         &json!({"command":"touch other"}),
                         "ok",
@@ -2235,7 +2308,13 @@ mod tests {
                     )
                     .await;
                 hooks
-                    .post_tool_use(thread, "read", &json!({"path":"src/lib.rs"}), "ok", false)
+                    .post_tool_use(
+                        &HookCall::new(thread),
+                        "read",
+                        &json!({"path":"src/lib.rs"}),
+                        "ok",
+                        false,
+                    )
                     .await;
             },
         )
@@ -2263,11 +2342,12 @@ mod tests {
         let events = captured(
             json!({"PostToolUse": [{}], "PostToolUseFailure": [{"matcher": "Bash"}]}),
             async |hooks| {
+                let call = HookCall::new(thread);
                 hooks
-                    .post_tool_use(thread, "bash", &json!({"command": "false"}), "exit 1", true)
+                    .post_tool_use(&call, "bash", &json!({"command": "false"}), "exit 1", true)
                     .await;
                 hooks
-                    .post_tool_use(thread, "bash", &json!({"command": "true"}), "ok", false)
+                    .post_tool_use(&call, "bash", &json!({"command": "true"}), "ok", false)
                     .await;
             },
         )
@@ -2283,6 +2363,101 @@ mod tests {
                 ("PostToolUse", &Value::Null)
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_chat_with_a_folder_of_its_own_runs_its_hooks_there() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-hook-chat-folder-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(root.join("home/2026-10-28/chat-1a2b")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let (project, folder) = (root.join("home"), root.join("home/2026-10-28/chat-1a2b"));
+        let log = root.join("hooks.log");
+        // One line per run: where the hook ran, the project folder it got
+        // in its environment and as a placeholder, then its payload.
+        let record = format!(
+            r#"printf '%s|%s|%s|' "$(pwd -P)" "$CLAUDE_PROJECT_DIR" "${{CLAUDE_PROJECT_DIR}}" >> '{log}'; cat >> '{log}'; echo >> '{log}'"#,
+            log = log.display()
+        );
+        let group = json!([{"hooks": [{"command": record}]}]);
+        let hooks = ConfiguredHooks::new(
+            ConfiguredHooks::parse_block(&json!({
+                "UserPromptSubmit": group, "PreToolUse": group, "PermissionRequest": group,
+                "PostToolUse": group, "FileChanged": group, "Stop": group,
+            })),
+            project.clone(),
+        );
+        let thread = ThreadId::new();
+        let chat = HookCall {
+            thread,
+            agent: Some("build".into()),
+            folder: Some(folder.clone()),
+        };
+        let write = json!({"path": "notes.md", "content": "x"});
+        let _ = hooks.user_prompt_submit(&chat, "tidy up").await;
+        let _ = hooks.pre_tool_use(&chat, "write", &write).await;
+        let _ = hooks
+            .permission_request(&chat, "edit", &["notes.md".into()], None, &write)
+            .await;
+        let _ = hooks
+            .post_tool_use(&chat, "write", &write, "Wrote notes.md", false)
+            .await;
+        hooks
+            .stop(&HookCall {
+                agent: None,
+                ..chat.clone()
+            })
+            .await;
+        // A chat of the project folder runs its hooks there, as before.
+        hooks.stop(&HookCall::new(thread)).await;
+        let written = std::fs::read_to_string(&log).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        let runs: Vec<(String, String, String, Value)> = written
+            .lines()
+            .map(|line| {
+                let parts: Vec<&str> = line.splitn(4, '|').collect();
+                (
+                    parts[0].to_owned(),
+                    parts[1].to_owned(),
+                    parts[2].to_owned(),
+                    serde_json::from_str(parts[3]).unwrap(),
+                )
+            })
+            .collect();
+        let events: Vec<&str> = runs
+            .iter()
+            .map(|(_, _, _, payload)| payload["hook_event_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            events,
+            [
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PermissionRequest",
+                "PostToolUse",
+                "FileChanged",
+                "Stop",
+                "Stop"
+            ]
+        );
+        let (folder, project) = (folder.display().to_string(), project.display().to_string());
+        for (index, (ran_in, env, placeholder, payload)) in runs.iter().enumerate() {
+            let expected = if index < 6 { &folder } else { &project };
+            assert_eq!(ran_in, expected, "{payload}");
+            assert_eq!(env, expected, "{payload}");
+            assert_eq!(placeholder, expected, "{payload}");
+            assert_eq!(payload["cwd"], json!(expected), "{payload}");
+            assert_eq!(payload["session_id"], json!(thread));
+            // The agent is named where one acts: prompts, tools, permissions.
+            if index < 5 {
+                assert_eq!(payload["agent"], "build", "{payload}");
+            } else {
+                assert!(payload.get("agent").is_none(), "{payload}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -2301,11 +2476,11 @@ mod tests {
             })),
             std::env::temp_dir(),
         );
-        let thread = ThreadId::new();
+        let call = HookCall::new(ThreadId::new());
         // Every hook's feedback reaches the model, beside the context.
         let decision = hooks
             .post_tool_use(
-                thread,
+                &call,
                 "edit",
                 &json!({"path": "src/lib.rs"}),
                 "Edited",
@@ -2318,7 +2493,7 @@ mod tests {
         );
         assert_eq!(decision.context.as_deref(), Some("formatter ran"));
         let decision = hooks
-            .post_tool_use(thread, "bash", &json!({"command": "false"}), "failed", true)
+            .post_tool_use(&call, "bash", &json!({"command": "false"}), "failed", true)
             .await;
         assert_eq!(decision.block.as_deref(), Some("retry with --force"));
         assert!(decision.context.is_none());
@@ -2513,7 +2688,11 @@ mod tests {
             json!([{"command": "SECRET_TOKEN=PRIVATE_SUFFIX sh -c 'echo \"auth failed: password=PRIVATE_SUFFIX\" >&2; echo second line >&2; exit 1'"}]),
         );
         let decision = hooks
-            .pre_tool_use(ThreadId::new(), "bash", &json!({"command": "true"}))
+            .pre_tool_use(
+                &HookCall::new(ThreadId::new()),
+                "bash",
+                &json!({"command": "true"}),
+            )
             .await;
         assert!(decision.block.is_none(), "a non-2 failure never blocks");
         let failed = capture.matching("hook command failed");
@@ -2534,7 +2713,7 @@ mod tests {
             "UserPromptSubmit",
             json!([{"command": "definitely-missing-hook-binary --token PRIVATE_SUFFIX"}]),
         )
-        .user_prompt_submit(ThreadId::new(), "hello")
+        .user_prompt_submit(&HookCall::new(ThreadId::new()), "hello")
         .await;
         let missing = capture.matching("hook command failed");
         assert_eq!(missing.len(), 2, "{:?}", capture.lines());
@@ -2546,7 +2725,7 @@ mod tests {
         #[cfg(unix)]
         {
             hooks_for("Stop", json!([{"command": "kill -9 $$"}]))
-                .stop(ThreadId::new())
+                .stop(&HookCall::new(ThreadId::new()))
                 .await;
             let killed = capture.matching("hook command failed");
             assert_eq!(killed.len(), 3, "{:?}", capture.lines());
@@ -2558,7 +2737,7 @@ mod tests {
             "PreToolUse",
             json!([{"command": "API_KEY=PRIVATE_SUFFIX sleep 5", "timeout": 1}]),
         )
-        .pre_tool_use(ThreadId::new(), "bash", &json!({}))
+        .pre_tool_use(&HookCall::new(ThreadId::new()), "bash", &json!({}))
         .await;
         let timed_out = capture.matching("hook timed out");
         assert_eq!(timed_out.len(), 1, "{:?}", capture.lines());
@@ -2579,7 +2758,7 @@ mod tests {
             tokio::time::timeout(
                 Duration::from_secs(10),
                 hooks_for("PreToolUse", json!([{"command": "sleep 30", "timeout": 1}]))
-                    .pre_tool_use(ThreadId::new(), "bash", &input),
+                    .pre_tool_use(&HookCall::new(ThreadId::new()), "bash", &input),
             )
             .await
             .expect("the hook's timeout applies while its payload is written");
@@ -2603,7 +2782,7 @@ mod tests {
                 "PreToolUse",
                 json!([{"command": "sleep 30", "timeout": 2, "async": true}]),
             )
-            .pre_tool_use(ThreadId::new(), "bash", &input),
+            .pre_tool_use(&HookCall::new(ThreadId::new()), "bash", &input),
         )
         .await
         .expect("an async hook never holds the turn");
@@ -2632,7 +2811,7 @@ mod tests {
         );
         tokio::time::timeout(
             Duration::from_secs(10),
-            hooks.pre_tool_use(ThreadId::new(), "bash", &input),
+            hooks.pre_tool_use(&HookCall::new(ThreadId::new()), "bash", &input),
         )
         .await
         .expect("output is read while the payload is written");
@@ -2653,19 +2832,25 @@ mod tests {
             "PreToolUse",
             json!([{"command": "TOKEN=PRIVATE_SUFFIX sh -c 'printf \"policy: no pushes\\nsee token=PRIVATE_SUFFIX\" >&2; exit 2'"}]),
         );
-        let decision = exit_two.pre_tool_use(thread, "bash", &json!({})).await;
+        let decision = exit_two
+            .pre_tool_use(&HookCall::new(thread), "bash", &json!({}))
+            .await;
         assert!(decision.block.is_some());
         let json_deny = hooks_for(
             "PreToolUse",
             json!([{"command": r#"echo '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"protected path"}}'"#}]),
         );
-        let decision = json_deny.pre_tool_use(thread, "edit", &json!({})).await;
+        let decision = json_deny
+            .pre_tool_use(&HookCall::new(thread), "edit", &json!({}))
+            .await;
         assert_eq!(decision.permission, Some(PermissionDecision::Deny));
         let failed_block = hooks_for(
             "UserPromptSubmit",
             json!([{"command": r#"echo '{"decision":"block","reason":"secret=PRIVATE_SUFFIX in prompt"}'; exit 1"#}]),
         );
-        let decision = failed_block.user_prompt_submit(thread, "hi").await;
+        let decision = failed_block
+            .user_prompt_submit(&HookCall::new(thread), "hi")
+            .await;
         assert!(decision.block.is_some());
 
         let blocked = capture.matching("hook blocked");
@@ -2707,7 +2892,7 @@ mod tests {
 
         // Observational events cannot be blocked, so they never claim one at INFO.
         hooks_for("Stop", json!([{"command": "echo stop >&2; exit 2"}]))
-            .stop(thread)
+            .stop(&HookCall::new(thread))
             .await;
         assert_eq!(capture.matching("hook blocked").len(), 3);
         assert_eq!(
@@ -2726,7 +2911,7 @@ mod tests {
             "PreToolUse",
             json!([{"command": "PASSWORD=PRIVATE_SUFFIX sh -c 'echo late failure >&2; exit 3'", "async": true}]),
         )
-        .pre_tool_use(ThreadId::new(), "bash", &json!({}))
+        .pre_tool_use(&HookCall::new(ThreadId::new()), "bash", &json!({}))
         .await;
         assert!(decision.block.is_none());
         let failed = tokio::time::timeout(Duration::from_secs(10), async {

@@ -1,6 +1,6 @@
 use super::*;
-use haarness_core::{CustomAgent, HookDecision, HookPort};
-use haarness_protocol::{Item, ItemData, ThreadId, TurnId};
+use haarness_core::{CustomAgent, HookCall, HookDecision, HookPort};
+use haarness_protocol::{Item, ItemData, TurnId};
 use std::path::PathBuf;
 use std::sync::{
     Mutex,
@@ -54,12 +54,12 @@ struct Hooks {
 }
 #[async_trait]
 impl HookPort for Hooks {
-    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
         HookDecision::default()
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
@@ -67,12 +67,12 @@ impl HookPort for Hooks {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -80,11 +80,11 @@ impl HookPort for Hooks {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: ThreadId) {}
-    async fn post_compact(&self, _: ThreadId, trigger: &str, _: &Item) {
+    async fn stop(&self, _: &HookCall) {}
+    async fn post_compact(&self, _: &HookCall, trigger: &str, _: &Item) {
         self.compacted.lock().unwrap().push(trigger.into());
     }
-    async fn stop_failure(&self, _: ThreadId, _: TurnId, detail: &Value) {
+    async fn stop_failure(&self, _: &HookCall, _: TurnId, detail: &Value) {
         self.failures.lock().unwrap().push(detail.clone());
         if let Some((entered, release)) = &self.failure_gate {
             entered.notify_one();

@@ -3,8 +3,8 @@
 use anyhow::{Context as _, Result, bail};
 use async_trait::async_trait;
 use haarness_core::{
-    CoreError, CoreResult, HookDecision, HookPort, PermissionDecision, ProviderRequest, Tool,
-    ToolContext, ToolDefinition, ToolOutput, ToolRegistry,
+    CoreError, CoreResult, HookCall, HookDecision, HookPort, PermissionDecision, ProviderRequest,
+    Tool, ToolContext, ToolDefinition, ToolOutput, ToolRegistry,
 };
 use haarness_protocol::ThreadId;
 use serde::{Deserialize, Serialize};
@@ -707,22 +707,22 @@ fn append(target: &mut Option<String>, text: &str) {
 }
 #[async_trait]
 impl HookPort for CombinedHooks {
-    async fn pre_tool_use(&self, thread: ThreadId, tool: &str, arguments: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, call: &HookCall, tool: &str, arguments: &Value) -> HookDecision {
         let prior = if let Some(inner) = &self.inner {
-            inner.pre_tool_use(thread, tool, arguments).await
+            inner.pre_tool_use(call, tool, arguments).await
         } else {
             HookDecision::default()
         };
         self.decision(
             "tool.before",
-            json!({"threadId":thread,"tool":tool,"arguments":arguments}),
+            json!({"threadId":call.thread,"tool":tool,"arguments":arguments}),
             prior,
         )
         .await
     }
     async fn post_tool_use(
         &self,
-        thread: ThreadId,
+        call: &HookCall,
         tool: &str,
         arguments: &Value,
         output: &str,
@@ -730,14 +730,14 @@ impl HookPort for CombinedHooks {
     ) -> HookDecision {
         let prior = if let Some(inner) = &self.inner {
             inner
-                .post_tool_use(thread, tool, arguments, output, is_error)
+                .post_tool_use(call, tool, arguments, output, is_error)
                 .await
         } else {
             HookDecision::default()
         };
         // Extensions see the command hooks' context; a command hook's
         // feedback stays its own and never stops them.
-        let result = self.decision("tool.after", json!({"threadId":thread,"tool":tool,"arguments":arguments,"output":output,"isError":is_error}), HookDecision { context: prior.context, ..HookDecision::default() }).await;
+        let result = self.decision("tool.after", json!({"threadId":call.thread,"tool":tool,"arguments":arguments,"output":output,"isError":is_error}), HookDecision { context: prior.context, ..HookDecision::default() }).await;
         let mut context = result.context;
         if let Some(error) = result.block {
             append(&mut context, &error);
@@ -748,18 +748,22 @@ impl HookPort for CombinedHooks {
             ..HookDecision::default()
         }
     }
-    async fn user_prompt_submit(&self, thread: ThreadId, prompt: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, call: &HookCall, prompt: &str) -> HookDecision {
         let prior = if let Some(inner) = &self.inner {
-            inner.user_prompt_submit(thread, prompt).await
+            inner.user_prompt_submit(call, prompt).await
         } else {
             HookDecision::default()
         };
-        self.decision("prompt", json!({"threadId":thread,"prompt":prompt}), prior)
-            .await
+        self.decision(
+            "prompt",
+            json!({"threadId":call.thread,"prompt":prompt}),
+            prior,
+        )
+        .await
     }
     async fn permission_request(
         &self,
-        thread: ThreadId,
+        call: &HookCall,
         permission: &str,
         patterns: &[String],
         always: Option<&[String]>,
@@ -768,7 +772,7 @@ impl HookPort for CombinedHooks {
         // Extensions answer first; command hooks only see
         // prompts that extensions leave open.
         for host in &self.extensions.hosts {
-            let input = json!({"threadId":thread,"permission":permission,"patterns":patterns,"detail":detail});
+            let input = json!({"threadId":call.thread,"permission":permission,"patterns":patterns,"detail":detail});
             match host.hook("permission.ask", input).await {
                 Ok(value) => match value["status"].as_str() {
                     Some("allow") => {
@@ -802,18 +806,18 @@ impl HookPort for CombinedHooks {
         }
         if let Some(inner) = &self.inner {
             inner
-                .permission_request(thread, permission, patterns, always, detail)
+                .permission_request(call, permission, patterns, always, detail)
                 .await
         } else {
             HookDecision::default()
         }
     }
-    async fn stop(&self, thread: ThreadId) {
+    async fn stop(&self, call: &HookCall) {
         if let Some(inner) = &self.inner {
-            inner.stop(thread).await;
+            inner.stop(call).await;
         }
         for host in &self.extensions.hosts {
-            if let Err(error) = host.hook("stop", json!({"threadId":thread})).await {
+            if let Err(error) = host.hook("stop", json!({"threadId":call.thread})).await {
                 tracing::warn!(%error, "extension stop hook failed");
             }
         }
@@ -885,56 +889,51 @@ impl HookPort for CombinedHooks {
         }
         Ok(())
     }
-    async fn session_start(&self, thread: ThreadId, agent: &str) {
+    async fn session_start(&self, call: &HookCall) {
         if let Some(inner) = &self.inner {
-            inner.session_start(thread, agent).await;
+            inner.session_start(call).await;
         }
         self.observe(
             "session.start",
-            json!({"threadId":thread,"agent":agent,"directory":self.extensions.workspace}),
+            json!({"threadId":call.thread,"agent":call.agent,"directory":self.extensions.workspace}),
         )
         .await;
     }
-    async fn session_end(&self, thread: ThreadId, reason: &str) {
+    async fn session_end(&self, call: &HookCall, reason: &str) {
         if let Some(inner) = &self.inner {
-            inner.session_end(thread, reason).await;
+            inner.session_end(call, reason).await;
         }
         self.observe(
             "session.end",
-            json!({"threadId":thread,"reason":reason,"directory":self.extensions.workspace}),
+            json!({"threadId":call.thread,"reason":reason,"directory":self.extensions.workspace}),
         )
         .await;
     }
-    async fn post_compact(&self, thread: ThreadId, trigger: &str, item: &haarness_protocol::Item) {
+    async fn post_compact(&self, call: &HookCall, trigger: &str, item: &haarness_protocol::Item) {
         if let Some(inner) = &self.inner {
-            inner.post_compact(thread, trigger, item).await;
+            inner.post_compact(call, trigger, item).await;
         }
         self.observe(
             "session.compacted",
-            json!({"threadId":thread,"trigger":trigger,"compaction":item}),
+            json!({"threadId":call.thread,"trigger":trigger,"compaction":item}),
         )
         .await;
     }
-    async fn stop_failure(
-        &self,
-        thread: ThreadId,
-        turn: haarness_protocol::TurnId,
-        detail: &Value,
-    ) {
+    async fn stop_failure(&self, call: &HookCall, turn: haarness_protocol::TurnId, detail: &Value) {
         if let Some(inner) = &self.inner {
-            inner.stop_failure(thread, turn, detail).await;
+            inner.stop_failure(call, turn, detail).await;
         }
         self.observe(
             "chat.turn.failed",
-            json!({"threadId":thread,"turnId":turn,"detail":detail}),
+            json!({"threadId":call.thread,"turnId":turn,"detail":detail}),
         )
         .await;
     }
-    async fn turn_end(&self, thread: ThreadId, turn: haarness_protocol::TurnId, detail: &Value) {
+    async fn turn_end(&self, call: &HookCall, turn: haarness_protocol::TurnId, detail: &Value) {
         if let Some(inner) = &self.inner {
-            inner.turn_end(thread, turn, detail).await;
+            inner.turn_end(call, turn, detail).await;
         }
-        let mut input = json!({"threadId":thread,"turnId":turn});
+        let mut input = json!({"threadId":call.thread,"turnId":turn});
         if let (Some(target), Some(extra)) = (input.as_object_mut(), detail.as_object()) {
             for (key, value) in extra {
                 target.entry(key.clone()).or_insert_with(|| value.clone());
@@ -942,9 +941,9 @@ impl HookPort for CombinedHooks {
         }
         self.observe("chat.turn.end", input).await;
     }
-    async fn notification(&self, thread: ThreadId, kind: &str, message: &str) {
+    async fn notification(&self, call: &HookCall, kind: &str, message: &str) {
         if let Some(inner) = &self.inner {
-            inner.notification(thread, kind, message).await;
+            inner.notification(call, kind, message).await;
         }
     }
     async fn config_change(&self, detail: &Value) {
@@ -954,20 +953,18 @@ impl HookPort for CombinedHooks {
     }
     async fn command_execute_before(
         &self,
-        thread: ThreadId,
+        call: &HookCall,
         command: &str,
         arguments: &str,
     ) -> HookDecision {
         let prior = if let Some(inner) = &self.inner {
-            inner
-                .command_execute_before(thread, command, arguments)
-                .await
+            inner.command_execute_before(call, command, arguments).await
         } else {
             HookDecision::default()
         };
         self.decision(
             "command.execute.before",
-            json!({"threadId":thread,"command":command,"arguments":arguments}),
+            json!({"threadId":call.thread,"command":command,"arguments":arguments}),
             prior,
         )
         .await

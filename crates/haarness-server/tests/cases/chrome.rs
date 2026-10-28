@@ -2,7 +2,7 @@
 //! Chrome extension hosts end to end through the HTTP server.
 use super::*;
 use futures::SinkExt as _;
-use haarness_core::{HookDecision, HookPort, PermissionDecision as D, PermissionRule};
+use haarness_core::{HookCall, HookDecision, HookPort, PermissionDecision as D, PermissionRule};
 use haarness_protocol::{ItemData, PermissionReply, PermissionReplyDecision as Reply};
 use serde_json::json;
 use std::{
@@ -90,12 +90,7 @@ impl ToolRegistry for WithChrome {
 struct ApproveAll;
 #[async_trait]
 impl HookPort for ApproveAll {
-    async fn pre_tool_use(
-        &self,
-        _: haarness_protocol::ThreadId,
-        _: &str,
-        _: &Value,
-    ) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
         HookDecision {
             permission: Some(D::Allow),
             ..HookDecision::default()
@@ -103,7 +98,7 @@ impl HookPort for ApproveAll {
     }
     async fn post_tool_use(
         &self,
-        _: haarness_protocol::ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
@@ -111,12 +106,12 @@ impl HookPort for ApproveAll {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn user_prompt_submit(&self, _: haarness_protocol::ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: haarness_protocol::ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -127,7 +122,7 @@ impl HookPort for ApproveAll {
             ..HookDecision::default()
         }
     }
-    async fn stop(&self, _: haarness_protocol::ThreadId) {}
+    async fn stop(&self, _: &HookCall) {}
 }
 
 struct Chrome {
