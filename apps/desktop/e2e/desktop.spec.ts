@@ -289,9 +289,13 @@ test.beforeAll(async () => {
     HAARNESS_VOICE_TEST_HELPER: join(temporary, "voice-fixture"),
     // Schedules are written into this run's folder and never handed to
     // launchd, systemd or Task Scheduler; the one test that runs a schedule
-    // natively registers it itself.
+    // natively registers it itself. HAARNESS_NATIVE_SCHEDULE_E2E=1, for a
+    // disposable machine only, lets Desktop register it as it does for a
+    // person.
     HAARNESS_SCHEDULE_SKIP_INSTALL: "1",
   });
+  if (process.env.HAARNESS_NATIVE_SCHEDULE_E2E === "1")
+    delete env.HAARNESS_SCHEDULE_SKIP_INSTALL;
   if (process.env.HAARNESS_RIPGREP_E2E === "1") {
     env.HAARNESS_HOME = join(temporary, "isolated haarness home");
     env.HOME = join(temporary, "isolated home");
@@ -6794,31 +6798,59 @@ test("schedule pickers, native execution and grouped conversations work end to e
     // The definition is in this run's own folder, not where the system
     // scheduler would load it at the next login: register it from there for
     // this test alone, then start it the way its system scheduler would.
+    // With HAARNESS_NATIVE_SCHEDULE_E2E=1 (a disposable machine only)
+    // Desktop registers it with this user's own scheduler, as it does for a
+    // person, and the test checks that it did.
+    const registered = process.env.HAARNESS_NATIVE_SCHEDULE_E2E === "1";
     const definitions = join(env.HAARNESS_DATA_DIR, "config", "scheduler");
+    const quietly = (program: string, ...steps: string[][]) => () => {
+      for (const step of steps)
+        try {
+          execFileSync(program, step, { stdio: "ignore" });
+        } catch {
+          // Its run already took it back, as a completed one-time schedule does.
+        }
+    };
     let source = "launchd";
     if (process.platform === "darwin") {
       const name = `dev.haarness.schedule.${id}`;
-      const plist = join(definitions, "launchd", `${name}.plist`);
-      expect(existsSync(plist)).toBe(true);
-      expect(existsSync(join(homedir(), "Library", "LaunchAgents", `${name}.plist`))).toBe(false);
       const domain = `gui/${process.getuid!()}`;
-      unregister = () => execFileSync("/bin/launchctl", ["bootout", `${domain}/${name}`], { stdio: "ignore" });
-      execFileSync("/bin/launchctl", ["bootstrap", domain, plist]);
+      if (registered) {
+        execFileSync("/bin/launchctl", ["print", `${domain}/${name}`], { stdio: "ignore" });
+      } else {
+        const plist = join(definitions, "launchd", `${name}.plist`);
+        expect(existsSync(plist)).toBe(true);
+        expect(existsSync(join(homedir(), "Library", "LaunchAgents", `${name}.plist`))).toBe(false);
+        unregister = quietly("/bin/launchctl", ["bootout", `${domain}/${name}`]);
+        execFileSync("/bin/launchctl", ["bootstrap", domain, plist]);
+      }
       execFileSync("/bin/launchctl", ["kickstart", `${domain}/${name}`]);
     } else if (process.platform === "linux") {
       source = "systemd-user";
       const unit = `haarness-schedule-${id}`;
-      const units = [".service", ".timer"].map((kind) => join(definitions, "systemd", unit + kind));
-      expect(units.every((path) => existsSync(path))).toBe(true);
-      unregister = () => execFileSync("systemctl", ["--user", "disable", `${unit}.service`, `${unit}.timer`], { stdio: "ignore" });
-      execFileSync("systemctl", ["--user", "link", ...units], { stdio: "ignore" });
-      execFileSync("systemctl", ["--user", "daemon-reload"]);
+      const names = [`${unit}.service`, `${unit}.timer`];
+      if (registered) {
+        execFileSync("systemctl", ["--user", "is-enabled", `${unit}.timer`], { stdio: "ignore" });
+      } else {
+        const units = names.map((name) => join(definitions, "systemd", name));
+        expect(units.every((path) => existsSync(path))).toBe(true);
+        unregister = quietly(
+          "systemctl",
+          ["--user", "stop", ...names],
+          ["--user", "disable", ...names],
+          ["--user", "daemon-reload"],
+        );
+        execFileSync("systemctl", ["--user", "link", ...units], { stdio: "ignore" });
+        execFileSync("systemctl", ["--user", "daemon-reload"]);
+      }
       execFileSync("systemctl", ["--user", "start", "--no-block", `${unit}.service`]);
     } else {
       source = "windows-task";
       const task = `Haarness\\Schedule\\${id}`;
-      unregister = () => execFileSync("schtasks.exe", ["/Delete", "/TN", task, "/F"], { stdio: "ignore" });
-      execFileSync("schtasks.exe", ["/Create", "/TN", task, "/XML", join(definitions, "tasks", `${id}.xml`), "/F"], { stdio: "ignore" });
+      if (!registered) {
+        unregister = quietly("schtasks.exe", ["/Delete", "/TN", task, "/F"]);
+        execFileSync("schtasks.exe", ["/Create", "/TN", task, "/XML", join(definitions, "tasks", `${id}.xml`), "/F"], { stdio: "ignore" });
+      }
       execFileSync("schtasks.exe", ["/Run", "/TN", task], { stdio: "ignore" });
     }
     await expect
@@ -6963,11 +6995,7 @@ test("schedule pickers, native execution and grouped conversations work end to e
     await expect(group.locator(".session-row")).toHaveCount(1);
     expect(errors).toEqual([]);
   } finally {
-    try {
-      unregister?.();
-    } catch {
-      // Its run already unloaded it, as a completed one-time schedule does.
-    }
+    unregister?.();
     if (id && jobs().some((job) => job.id === id)) command(["remove", id]);
     await new Promise<void>((resolve) => provider.close(() => resolve()));
     if (

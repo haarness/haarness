@@ -62,7 +62,9 @@ operating system, and puts the launchd and systemd ones in `<config>/scheduler/l
 `<config>/scheduler/systemd/` instead, where neither loads them at the next login. This is how the
 end-to-end scripts and the Desktop specs test schedules (`scripts/e2e_env.py`,
 `apps/desktop/playwright.config.ts` and `apps/desktop/e2e/fixtures/isolated-env.ts` set it); a spec
-that runs one natively registers it from there itself and takes it back.
+that runs one natively registers it from there itself and takes it back. On a disposable machine,
+`HAARNESS_NATIVE_SCHEDULE_E2E=1` has `desktop.spec.ts` let Desktop register it instead, and checks
+that it did.
 
 ## What a run does
 
