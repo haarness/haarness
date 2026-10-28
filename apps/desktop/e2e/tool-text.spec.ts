@@ -216,3 +216,61 @@ test("an edit's card shows what turns a changed line around as a quiet code, and
   expect(await readFile(join(project, "access.js"), "utf8")).toBe('if (role != "user") {\n  allow();\n}\n');
   expect(errors).toEqual([]);
 });
+
+test("a right-to-left name keeps its code in one piece on its row and in its panel", async () => {
+  const name = "ملف\u200f.txt";
+  await writeFile(join(project, name), "سطر\n");
+  await send("!tool read " + JSON.stringify({ path: name }));
+  await idle();
+  const row = page.locator("details.tool-call").last();
+  await page.evaluate(() => (window as any).haarness.preferences({ language: "ar" }));
+  try {
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    await expect(row.locator(".tool-target")).toHaveText(isolated("ملف\\u{200F}.txt"));
+    await row.locator("summary").click();
+    const input = row.locator(".tool-input");
+    await expect(input.locator(".spelled-code")).toHaveText("\\u{200F}");
+    expect(await chip(input)).toEqual(CHIP);
+    // The code reads left to right as written, after the name, not torn
+    // around it.
+    const order = await row.locator(".tool-target").evaluate((element) => {
+      const range = document.createRange();
+      const text = element.firstChild!;
+      const at = (index: number) => {
+        range.setStart(text, index);
+        range.setEnd(text, index + 1);
+        return range.getBoundingClientRect().left;
+      };
+      const content = text.textContent!;
+      const backslash = content.indexOf("\\");
+      return { backslash: at(backslash), brace: at(content.indexOf("}")) };
+    });
+    expect(order.backslash).toBeLessThan(order.brace);
+    await pictures("rtl-target", row);
+  } finally {
+    await page.evaluate(() => (window as any).haarness.preferences({ language: "en" }));
+  }
+  expect(errors).toEqual([]);
+});
+
+test("a script a command runs, and each file of a patch, are named with their codes on the card", async () => {
+  const script = "run​.sh";
+  await writeFile(join(project, script), "echo hi\n");
+  await send("!tool bash " + JSON.stringify({ command: "sh " + script }));
+  const card = page.locator(".prompt-dock.approval");
+  await card.locator(".approval-script-toggle").click();
+  const path = card.locator(".approval-script-body .change-path");
+  await expect(path).toHaveText("run\\u{200B}.sh");
+  expect(await chip(path)).toEqual(CHIP);
+  await page.getByRole("button", { name: "Deny", exact: true }).click();
+  await idle();
+  const patch = "*** Begin Patch\n*** Add File: a​.txt\n+one\n*** Add File: b.txt\n+two\n*** End Patch\n";
+  await send("!tool apply_patch " + JSON.stringify({ input: patch }));
+  const headers = card.locator(".approval-changes .change-path");
+  await expect(headers).toHaveText(["a\\u{200B}.txt", "b.txt"]);
+  expect(await chip(headers.first())).toEqual(CHIP);
+  await pictures("approval-files", card);
+  await page.getByRole("button", { name: "Deny", exact: true }).click();
+  await idle();
+  expect(errors).toEqual([]);
+});

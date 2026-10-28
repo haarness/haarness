@@ -277,11 +277,9 @@ export function ToolActivity(props: {
                       </div>
                       <Show when={input().text}>
                         <pre class="tool-input">
-                          {/* A command reads as on its approval card: what
-                              would not show is a quiet code. */}
-                          <Show when={input().label === "Shell"} fallback={input().text}>
-                            <SpelledOut text={input().text} />
-                          </Show>
+                          {/* What the call was given reads as on an approval
+                              card: what would not show is a quiet code. */}
+                          <SpelledOut text={input().text} />
                         </pre>
                       </Show>
                       <Show
@@ -468,7 +466,9 @@ export function ChangePreview(props: {
   return (
     <div class="change-preview">
       <Show when={props.showPath && props.change.path}>
-        <div class="change-path">{props.change.path}</div>
+        <div class="change-path">
+          <SpelledOut text={props.change.path} />
+        </div>
       </Show>
       <div class="change-lines">
         <For each={shown()}>
