@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Item, ItemData } from "@haarness/sdk";
-import { spelledOutParts, spelledOutText, turnsDirection, withoutEscapes } from "../src/renderer/display-text";
+import { spelledOutParts, spelledOutPlain, spelledOutText, turnsDirection, withoutEscapes } from "../src/renderer/display-text";
 import { describeTool, resultText, toolInput, toolTarget, toolTitle } from "../src/renderer/transcript";
 import { findConversationMessages } from "../src/renderer/conversation-history";
 import { agentTaskError, type AgentTask } from "../src/renderer/agent-tasks";
@@ -200,4 +200,28 @@ test("a code in plain text stays one left-to-right piece beside right-to-left wo
   assert.equal(spelledOutText("ملف\u200f.txt"), "ملف\u2066\\u{200F}\u2069.txt");
   // Text with nothing to spell out gains nothing.
   assert.equal(spelledOutText("ملف.txt"), "ملف.txt");
+});
+
+test("a browser step names what it typed, chose or opened with its codes, as the Chrome card does", () => {
+  const target = (action: string, args: unknown) => describeTool("browser_" + action, args).target;
+  assert.equal(target("fill", { text: "invoice\u202efdp.exe" }), "“" + isolated("invoice\\u{202E}fdp.exe") + "”");
+  assert.equal(target("navigate", { url: "https://example.org/\u200bpay" }), isolated("https://example.org/\\u{200B}pay"));
+  assert.equal(target("select", { values: ["a\u2066b"] }), "“" + isolated("a\\u{2066}b") + "”");
+  assert.equal(target("fill", { text: "  جواب  نهائي " }), "“جواب نهائي”");
+});
+
+test("find in chat previews a call's arguments with their codes and finds a code by its text", () => {
+  const item = (sequence: number, data: ItemData): Item => ({
+    id: String(sequence),
+    threadId: "thread",
+    turnId: "turn",
+    sequence,
+    createdAt: "2026-10-28T00:00:00Z",
+    data,
+  });
+  const items = [item(1, { type: "tool_call", name: "bash", call_id: "call", arguments: { command: "cat x\u202efdp.sh" } })];
+  const [hit] = findConversationMessages(items, items, "\\u{202E}");
+  assert.equal(hit?.id, "1");
+  assert.ok(!/[\u2066-\u2069\u202e]/.test(hit.before + hit.match + hit.after));
+  assert.equal(spelledOutPlain("x\u202ey"), "x\\u{202E}y");
 });
