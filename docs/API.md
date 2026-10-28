@@ -181,12 +181,14 @@ limits and retries pre-output context-overflow/HTTP-413 failures after safe
 compaction, under a bounded per-turn recovery ceiling. A refusal of the request
 for its size in bytes (an HTTP 413, Bedrock's "413 Payload Too Large" or
 Gemini's "Request payload size exceeds the limit", rather than a context too
-long in tokens) compacts once until the provider takes a request again: when it
-refuses the compacted request as well, the turn fails with one error saying the
-files in the chat are too large to send together, and to continue in a new chat
-or with smaller files, instead of summarizing the summary. Where the chat cannot
-compact (a child agent, compaction turned off, input queued meanwhile) such a
-refusal fails the turn with the same advice.
+long in tokens or a rate limit) compacts once until the provider takes a
+request again: when it refuses the compacted request as well, the turn fails
+with one error saying the chat is too large for the provider to take in one
+request, and to continue in a new chat or attach smaller files, instead of
+summarizing the summary. Where the chat cannot compact (compaction turned off,
+input queued meanwhile) such a refusal fails the turn with the same advice; a
+child agent's failure only says the provider refused the request as too large,
+for the model that started it.
 
 Workspace create accepts `{name, fromRef?, branch?, path?}` and always creates
 a unique, non-tracking Git branch. `GET /v1/workspaces/refs` discovers local

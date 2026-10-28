@@ -37,8 +37,8 @@ MIB = 1024 * 1024
 TOO_LARGE = 'ALWAYS_TOO_LARGE'
 TOO_LONG = 'ALWAYS_TOO_LONG'
 SUMMARY = 'Summarize this conversation for continuation:'
-PLAIN = ('refused this request as too large, even after the chat was compacted. The files in this chat '
-         'are too large to send together: continue in a new chat, or with smaller files.')
+PLAIN = ('This chat is too large for Anthropic to take in one request, even after compacting: '
+         'continue in a new chat, or attach smaller files.')
 NOTE = 'omitted to keep the request within the provider'
 READS = []
 
@@ -288,8 +288,8 @@ try:
     assert len(summaries) == 1, f'{len(summaries)} summary requests'
     assert len(sent) == 3, f'expected refused, summary, refused; saw {len(sent)}'
     errors = items_of(large, 'error')
-    assert len(errors) == 1 and errors[0]['message'].endswith(PLAIN), errors
-    assert state.get('error', '').endswith(PLAIN), state.get('error')
+    assert len(errors) == 1 and errors[0]['message'] == PLAIN, errors
+    assert state.get('error') == PLAIN, state.get('error')
     assert len(items_of(large, 'compaction')) == 1
     results.append({'check': 'refused as too large again after compacting: one summary, one plain error',
                     'error': errors[0]['message']})
@@ -310,11 +310,11 @@ try:
 
     run(['tmux', '-L', socket, 'new-session', '-d', '-x', '140', '-y', '45', '-s', session,
          e2e_tmux.pane_command(env, args + ['--thread', large])])
-    screen = until(lambda: (lambda text: text if 'or with smaller files.' in text else None)(pane(session)),
+    screen = until(lambda: (lambda text: text if 'or attach smaller files.' in text else None)(pane(session)),
                    'TUI did not show the error', timeout=60)
     (EVIDENCE / 'tui.txt').write_text(screen)
     # The error wraps beside the side panel.
-    assert '× Anthropic refused this request as too large, even after the chat was compacted.' in screen, screen
+    assert '× This chat is too large for Anthropic to take in one request' in screen, screen
     results.append({'check': 'TUI transcript shows the plain error', 'capture': str(EVIDENCE / 'tui.txt')})
     print('PASS TUI shows the plain error', flush=True)
     (EVIDENCE / 'results.json').write_text(json.dumps(results, indent=2))
