@@ -151,6 +151,12 @@ const PATH_COMMANDS: &[&str] = &[
     "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
 ];
 
+/// Programs that only look at the files they are given (their names, sizes,
+/// kinds, where they lead), never print or change what is in them.
+const LOOKS_ONLY: &[&str] = &[
+    "basename", "dirname", "du", "file", "ls", "readlink", "realpath", "stat", "test", "[",
+];
+
 /// Programs that destroy their file operands, for `xargs` in front of them.
 const DESTROYERS: &[&str] = &["rm", "rmdir", "unlink", "shred", "truncate"];
 /// Programs `find -exec` may run on what it finds without changing it. Any
@@ -2042,8 +2048,12 @@ impl Reader<'_> {
             self.check_deletions(&name, arguments, source);
         }
         // Any other program given where Haarness keeps sign-ins, by a
-        // literal path (`jq . <data>/auth.json`).
-        if complete && !PATH_COMMANDS.contains(&name.as_str()) {
+        // literal path (`jq . <data>/auth.json`), unless it only looks at
+        // the file (`ls -l`, `stat`, `test -f`).
+        if complete
+            && !PATH_COMMANDS.contains(&name.as_str())
+            && !LOOKS_ONLY.contains(&name.as_str())
+        {
             for word in arguments {
                 let (value, complete) = path_literal(word.node, source);
                 self.name_path(&word.raw, &value, complete, None);
