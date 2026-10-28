@@ -1221,33 +1221,8 @@ async fn run_with_client(
     event_task.abort();
     statusline_task.abort();
     client.disconnect_all_ptys();
-    // Remember the last meaningful session for an explicit `--continue`.
-    // A fresh, untouched home thread must not replace that resume target.
-    let root_thread = app
-        .parent_stack
-        .first()
-        .map_or(app.thread.id, |parent| parent.id);
-    let offset = app.effective_viewport_offset();
-    let expanded = app
-        .expanded
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
+    save_leaving_state(&app);
     let meaningful = !app.items.is_empty();
-    config::save_state(move |state| {
-        if meaningful {
-            let root_thread = root_thread.to_string();
-            state.last_thread = Some(root_thread.clone());
-            state.viewport_offset = Some(offset);
-            state.thread_views.insert(
-                root_thread,
-                config::ThreadViewState {
-                    viewport_offset: offset,
-                    expanded,
-                },
-            );
-        }
-    });
     draft_save?;
     if quit && meaningful && client.supports_local_workspace_switch() {
         let root = app.parent_stack.first().unwrap_or(&app.thread);
@@ -1299,6 +1274,40 @@ fn shell_quote(value: &str) -> String {
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
     }
+}
+
+/// What the TUI saves as it leaves: the last meaningful session, for an
+/// explicit `--continue`, with its view, and the favorites and recent models
+/// no save could write yet (`preferences::Unsaved`). Whether it was saved.
+fn save_leaving_state(app: &App) -> bool {
+    // A fresh, untouched home thread must not replace that resume target.
+    let root_thread = app
+        .parent_stack
+        .first()
+        .map_or(app.thread.id, |parent| parent.id);
+    let offset = app.effective_viewport_offset();
+    let expanded = app
+        .expanded
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let meaningful = !app.items.is_empty();
+    let unsaved = app.unsaved.clone();
+    config::save_state(move |state| {
+        if meaningful {
+            let root_thread = root_thread.to_string();
+            state.last_thread = Some(root_thread.clone());
+            state.viewport_offset = Some(offset);
+            state.thread_views.insert(
+                root_thread,
+                config::ThreadViewState {
+                    viewport_offset: offset,
+                    expanded,
+                },
+            );
+        }
+        unsaved.apply(state);
+    })
 }
 
 /// The footer left in the shell after quitting: which chat this was and the

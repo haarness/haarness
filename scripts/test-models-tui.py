@@ -21,10 +21,10 @@ env={**os.environ,'HAARNESS_DATA_DIR':str(root/'data')}
 for key in ['HAARNESS_TEST_PROVIDER','OPENAI_API_KEY','ANTHROPIC_API_KEY','GEMINI_API_KEY','GOOGLE_API_KEY']:
     env.pop(key,None)
 def run(args,**kwargs): return subprocess.run(args,check=True,text=True,capture_output=True,**kwargs).stdout
-def capture(): return run(['tmux','capture-pane','-p','-t',name+':0.0'])
-def keys(*values): run(['tmux','send-keys','-t',name+':0.0',*values])
-def command(value):
-    keys('C-u');run(['tmux','send-keys','-l','-t',name+':0.0',value]);keys('Enter')
+def capture(pane=name+':0.0'): return run(['tmux','capture-pane','-p','-t',pane])
+def keys(*values,pane=name+':0.0'): run(['tmux','send-keys','-t',pane,*values])
+def command(value,pane=name+':0.0'):
+    keys('C-u',pane=pane);run(['tmux','send-keys','-l','-t',pane,value]);keys('Enter',pane=pane)
 def until(predicate,label):
     until=time.monotonic()+30
     while time.monotonic()<until:
@@ -52,10 +52,37 @@ try:
     (root/'refreshed.txt').write_text(screen)
     keys('Enter')
     until(lambda:'Future Reasoner' in capture() and 'Select model' not in capture(),'New model was not selected')
+    # A second terminal on the same config folder, started before either
+    # saves: each favorites and picks a model, and neither undoes the other.
+    models[:]=[{'id':'gpt-6-astra'},{'id':'future-deployment','display_name':'Future Reasoner'}]
+    time.sleep(1.1)
+    second=name+':1.0'
+    run(['tmux','new-window','-t',name+':1',e2e_tmux.pane_command(env,args)])
+    until(lambda:'Ask anything' in capture(second),'Second TUI did not open')
+    for pane,word,label in ((name+':0.0','astra','GPT-6 Astra'),(second,'future','Future Reasoner')):
+        command('/models',pane=pane)
+        until(lambda:'Select model' in capture(pane) and 'GPT-6 Astra' in capture(pane),'Picker not opened in '+pane)
+        run(['tmux','send-keys','-l','-t',pane,word])
+        keys('C-f',pane=pane)
+        until(lambda:'★ '+label in capture(pane),'Favorite not shown in '+pane)
+        keys('Enter',pane=pane)
+        until(lambda:'Select model' not in capture(pane),'Model not picked in '+pane)
+    state=(root/'data'/'config'/'tui-state.toml').read_text()
+    (root/'two-terminals-state.toml').write_text(state)
+    for key in ('model_favorites','model_recents'):
+        line=next(line for line in state.splitlines() if line.startswith(key))
+        assert 'catalog-test/gpt-6-astra' in line and 'catalog-test/future-deployment' in line,state
+    run(['tmux','kill-window','-t',name+':1'])
+    run(['tmux','respawn-pane','-k','-t',name+':0.0',e2e_tmux.pane_command(env,args)])
+    until(lambda:'Reasoner' in capture() or 'Astra' in capture(),'TUI did not reopen')
+    command('/models')
+    until(lambda:'★ GPT-6 Astra' in capture() and '★ Future Reasoner' in capture(),'Both favorites not kept after a restart')
+    (root/'two-terminals.txt').write_text(capture())
+    keys('Escape')
     models.clear();keys('Escape');time.sleep(1.1);command('/models')
     until(lambda:'Welcome to Haarness' in capture() and 'Haarness needs an AI model' in capture(),'Empty catalog did not offer provider setup')
     (root/'empty.txt').write_text(capture())
-    print('PASS real TUI: friendly name, connected-only picker, refresh, selection, empty catalog.',flush=True)
+    print('PASS real TUI: friendly name, connected-only picker, refresh, selection, two terminals keep both favorites and recents, empty catalog.',flush=True)
 finally:
     subprocess.run(['tmux','kill-session','-t',name],capture_output=True)
     if endpoint:
