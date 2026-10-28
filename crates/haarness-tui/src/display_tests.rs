@@ -129,3 +129,145 @@ fn tool_output_and_errors_show_without_their_escape_sequences() {
     };
     assert_eq!(output, coloured, "the model's text is unchanged");
 }
+
+/// A direction override, a zero-width space and a carriage return in a
+/// command show on the card as codes in the muted color, in the command, in
+/// the rule Always saves and in the one-line summary, in an RTL language
+/// too; the call's row above the card shows the same codes. The request
+/// itself, which the answer refers to, is unchanged.
+#[tokio::test]
+async fn an_approval_shows_what_is_invisible_in_it_as_quiet_codes() {
+    let thread = fixture_thread();
+    let command = "cat report\u{202e}fdp.sh\u{200b} && cd dist\r\nrm -r cache";
+    let call = tool_call(
+        1,
+        &thread,
+        "call-hidden",
+        "bash",
+        serde_json::json!({"command": command}),
+    );
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        vec![call],
+        vec![],
+        vec![],
+    );
+    let rule = "bash:cat report\u{202e}*";
+    let event = fixture_event(
+        "permission.requested",
+        thread.id,
+        thread.id,
+        serde_json::json!({
+            "permissionId": "perm-hidden",
+            "permission": "bash",
+            "operation": format!("bash:{command}"),
+            "patterns": [command],
+            "alwaysPatterns": [rule],
+            "detail": {"command": command},
+            "callId": "call-hidden",
+        }),
+    );
+    app.reduce(event, &offline_client()).await.unwrap();
+    let hidden = ['\u{202e}', '\u{200b}', '\r', '\u{2061}', '\u{2062}'];
+    for language in [
+        crate::locale::Language::English,
+        crate::locale::Language::Arabic,
+    ] {
+        app.language = language;
+        let text: String = app
+            .lines((100, 40))
+            .iter()
+            .map(|line| line_text(line) + "\n")
+            .collect();
+        assert!(
+            !text.contains(hidden),
+            "nothing invisible reaches the terminal: {text:?}"
+        );
+        assert!(
+            text.contains("bash cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D}"),
+            "the call's row: {text}"
+        );
+        // The card's own rows: the command, its codes quiet and on their
+        // own, and the rule Always would save.
+        let card = crate::view::approval::approval_lines(&app, 100, 30).lines;
+        let card_text: String = card.iter().map(|line| line_text(line) + "\n").collect();
+        assert!(
+            card_text.contains("$ cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D}"),
+            "{card_text}"
+        );
+        assert!(card_text.contains("  rm -r cache"), "{card_text}");
+        assert!(card_text.contains("cat report\\u{202E}*"), "{card_text}");
+        assert!(!card_text.contains(hidden), "{card_text:?}");
+        let spans: Vec<_> = card.iter().flat_map(|line| &line.spans).collect();
+        for code in ["\\u{202E}", "\\u{200B}", "\\u{D}"] {
+            let quiet = spans
+                .iter()
+                .filter(|span| span.text.contains(code))
+                .collect::<Vec<_>>();
+            assert!(!quiet.is_empty(), "{code}: {spans:#?}");
+            assert!(
+                quiet
+                    .iter()
+                    .all(|span| span.text == code && span.fg == app.theme.muted),
+                "{code} is quiet on its own: {spans:#?}"
+            );
+        }
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.text == "cat report" && span.fg == app.theme.text),
+            "{spans:#?}"
+        );
+    }
+    let pending = &app.pending_permissions[0];
+    assert_eq!(pending.always_patterns, [rule]);
+    assert_eq!(pending.detail["command"], command);
+    let summary = crate::view::approval::summary(pending, crate::locale::Language::English);
+    assert!(
+        summary.ends_with("cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D}"),
+        "{summary}"
+    );
+}
+
+/// An ordinary command reads on its card exactly as written: no codes, one
+/// span of text per row, whatever the script or emoji in it.
+#[tokio::test]
+async fn an_ordinary_command_reads_on_its_card_as_written() {
+    let thread = fixture_thread();
+    let command = "git commit -m \"修复: نص عربي 👩\u{200d}💻 café\"\nnpm test";
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let event = fixture_event(
+        "permission.requested",
+        thread.id,
+        thread.id,
+        serde_json::json!({
+            "permissionId": "perm-plain",
+            "permission": "bash",
+            "operation": format!("bash:{command}"),
+            "patterns": [command],
+            "alwaysPatterns": ["bash:git commit *"],
+            "detail": {"command": command},
+        }),
+    );
+    app.reduce(event, &offline_client()).await.unwrap();
+    let card = crate::view::approval::approval_lines(&app, 100, 30).lines;
+    let card_text: String = card.iter().map(|line| line_text(line) + "\n").collect();
+    assert!(
+        card_text.contains("$ git commit -m \"修复: نص عربي 👩\u{200d}💻 café\""),
+        "{card_text}"
+    );
+    assert!(card_text.contains("  npm test"), "{card_text}");
+    assert!(!card_text.contains("\\u{"), "{card_text}");
+    let row = card
+        .iter()
+        .find(|line| line_text(line).contains("git commit"))
+        .unwrap();
+    assert!(
+        row.spans
+            .iter()
+            .filter(|span| span.selectable && !span.text.trim().is_empty())
+            .all(|span| span.fg == app.theme.text),
+        "{row:#?}"
+    );
+}

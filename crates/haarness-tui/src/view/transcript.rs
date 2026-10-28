@@ -53,28 +53,31 @@ fn primary_argument(
     name: &str,
     arguments: &serde_json::Value,
 ) -> Option<String> {
+    // As the call carries it, with what would not show, or would reorder
+    // the row, written as its code, as on the call's approval card.
     let text = |key: &str| {
         arguments
             .get(key)
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.trim().is_empty())
+            .map(crate::escapes::literal)
     };
     // A resource row names the resource it read, or the server it listed.
     if same_tool(name, "mcp_resource_read") {
-        return text("uri").map(str::to_owned);
+        return text("uri");
     }
     if same_tool(name, "mcp_resource_list") {
-        return text("server").map(str::to_owned);
+        return text("server");
     }
     if (same_tool(name, "grep") || same_tool(name, "glob"))
         && let Some(pattern) = text("pattern")
     {
         return Some(text("path").map_or_else(
-            || pattern.to_owned(),
+            || pattern.clone(),
             |path| {
                 language.format(
                     "{pattern} in {path}",
-                    &[("pattern", pattern), ("path", path)],
+                    &[("pattern", &pattern), ("path", &path)],
                 )
             },
         ));
@@ -92,7 +95,6 @@ fn primary_argument(
     ]
     .iter()
     .find_map(|key| text(key))
-    .map(str::to_owned)
 }
 
 /// What a tool row names after the tool: [`primary_argument`], or the files

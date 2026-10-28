@@ -17,6 +17,7 @@ use haarness_opentui::{Line, Span, attr};
 use haarness_protocol::{PendingPermissionInfo, PermissionScript, ScriptWithheld};
 use unicode_segmentation::UnicodeSegmentation as _;
 
+use crate::escapes::{code_open_after, literal, marked, marked_spans};
 use crate::locale::Language;
 use crate::state::{App, PermissionChoice, SubjectFit};
 use crate::theme::Theme;
@@ -91,7 +92,7 @@ fn headline(pending: &PendingPermissionInfo) -> &str {
 /// `chrome-<category>:<thread id>:<origin>` (prefixed `browser_site:` when it
 /// rides in a combined request), and the person should read what it lets the
 /// agent do, not the rule.
-fn chrome_access(pattern: &str, language: Language) -> Option<String> {
+fn chrome_access(pattern: &str, language: Language, show: Show) -> Option<String> {
     let rest = pattern.strip_prefix("browser_site:").unwrap_or(pattern);
     let (category, rest) = rest.strip_prefix("chrome-")?.split_once(':')?;
     // The origin carries a colon of its own; the chat id never does.
@@ -107,7 +108,7 @@ fn chrome_access(pattern: &str, language: Language) -> Option<String> {
         "scripts" => "Run scripts on {origin} in Chrome",
         _ => return None,
     };
-    Some(language.format(key, &[("origin", origin)]))
+    Some(language.format(key, &[("origin", &show(origin))]))
 }
 
 /// The call's own arguments, one `name: value` row each: the address it
@@ -115,7 +116,7 @@ fn chrome_access(pattern: &str, language: Language) -> Option<String> {
 /// once" approves exactly this call, so it is shown as sent, minus the
 /// broker's `__browser` plumbing and the tab and frame ids, which name
 /// nothing a person can check (the site lines say where).
-fn chrome_arguments(detail: &serde_json::Value) -> Vec<String> {
+fn chrome_arguments(detail: &serde_json::Value, show: Show) -> Vec<String> {
     /// What a person reads first, ahead of the rest in the order sent.
     const FIRST: [&str; 4] = ["url", "script", "text", "paths"];
     let Some(arguments) = detail.as_object() else {
@@ -152,8 +153,13 @@ fn chrome_arguments(detail: &serde_json::Value) -> Vec<String> {
         }
         // A script keeps its own lines, under its name; blank ones would
         // only spend the card's rows.
+        let value = show(&value);
         let mut lines = value.lines().filter(|line| !line.trim().is_empty());
-        rows.push(format!("{name}: {}", lines.next().unwrap_or_default()));
+        rows.push(format!(
+            "{}: {}",
+            show(name),
+            lines.next().unwrap_or_default()
+        ));
         rows.extend(lines.take(MAX_CHROME_ROWS).map(|line| format!("  {line}")));
     }
     rows
@@ -162,7 +168,11 @@ fn chrome_arguments(detail: &serde_json::Value) -> Vec<String> {
 /// What a Chrome request lets the agent do, one line per site and kind of
 /// access, followed by anything else it asks alongside (a file it would
 /// upload) and then the call itself.
-fn chrome_subject(pending: &PendingPermissionInfo, language: Language) -> Option<String> {
+fn chrome_subject(
+    pending: &PendingPermissionInfo,
+    language: Language,
+    show: Show,
+) -> Option<String> {
     let mut lines = Vec::new();
     let mut other = Vec::new();
     for pattern in &pending.patterns {
@@ -172,27 +182,37 @@ fn chrome_subject(pending: &PendingPermissionInfo, language: Language) -> Option
         if bare != *pattern && pending.patterns.contains(&bare) {
             continue;
         }
-        if let Some(line) = chrome_access(pattern, language) {
+        if let Some(line) = chrome_access(pattern, language, show) {
             if !lines.contains(&line) {
                 lines.push(line);
             }
         } else if !pattern.starts_with("browser:") && !pattern.starts_with("browser_site:") {
-            other.push(pattern.clone());
+            other.push(show(pattern));
         }
     }
     if lines.is_empty() {
         return None;
     }
     lines.extend(other);
-    lines.extend(chrome_arguments(&pending.detail));
+    lines.extend(chrome_arguments(&pending.detail, show));
     Some(lines.join("\n"))
+}
+
+/// How a card writes text the request carries (a command, a path, a rule,
+/// an agent's name), as against its own words: as sent, or with what is
+/// invisible in it shown as codes ([`literal`], [`marked`]).
+type Show<'a> = &'a dyn Fn(&str) -> String;
+
+/// The text as sent, for comparing it with other text the request carries.
+fn as_sent(text: &str) -> String {
+    text.to_owned()
 }
 
 /// The one thing being approved: the command, path, or url the server sent as
 /// detail, else the raw patterns, else the operation string's subject half.
-fn subject(pending: &PendingPermissionInfo, language: Language) -> Option<String> {
+fn subject(pending: &PendingPermissionInfo, language: Language, show: Show) -> Option<String> {
     if pending.explicit
-        && let Some(subject) = chrome_subject(pending, language)
+        && let Some(subject) = chrome_subject(pending, language, show)
     {
         return Some(subject);
     }
@@ -202,17 +222,17 @@ fn subject(pending: &PendingPermissionInfo, language: Language) -> Option<String
             let previous = details["previousModel"]
                 .as_str()
                 .filter(|previous| *previous != model);
-            let mut text = format!("Agent: {agent}\nModel: {model}");
+            let mut text = format!("Agent: {}\nModel: {}", show(agent), show(model));
             if let Some(previous) = previous {
                 text.push_str("\nPrevious model: ");
-                text.push_str(previous);
+                text.push_str(&show(previous));
             }
             if let Some(reason) = pending.detail["reason"]
                 .as_str()
                 .filter(|value| !value.trim().is_empty())
             {
                 text.push_str("\nReason: ");
-                text.push_str(reason);
+                text.push_str(&show(reason));
             }
             return Some(text);
         }
@@ -226,11 +246,15 @@ fn subject(pending: &PendingPermissionInfo, language: Language) -> Option<String
         {
             // A path that a link or `..` takes elsewhere is also asked about
             // where it leads; name that file, since it is what gets opened.
-            let mut text = value.to_owned();
+            let mut text = show(value);
             if key == "path" {
                 for target in link_targets(pending) {
                     text.push('\n');
-                    text.push_str(&language.text("Leads to {path}").replace("{path}", target));
+                    text.push_str(
+                        &language
+                            .text("Leads to {path}")
+                            .replace("{path}", &show(target)),
+                    );
                 }
             }
             // A command Haarness could not read all of asks because a rule
@@ -246,7 +270,7 @@ fn subject(pending: &PendingPermissionInfo, language: Language) -> Option<String
                     text.push_str(
                         &language
                             .text("Haarness could not read all of this command; a rule for {rule} may apply.")
-                            .replace("{rule}", rule),
+                            .replace("{rule}", &show(rule)),
                     );
                 }
             }
@@ -254,17 +278,21 @@ fn subject(pending: &PendingPermissionInfo, language: Language) -> Option<String
         }
     }
     if !pending.patterns.is_empty() {
-        return Some(pending.patterns.join("  "));
+        let patterns: Vec<String> = pending
+            .patterns
+            .iter()
+            .map(|pattern| show(pattern))
+            .collect();
+        return Some(patterns.join("  "));
     }
     // An operation with no category prefix is itself the subject; dropping it
     // would leave the card with nothing to show.
     let operation = pending.operation.trim();
-    Some(
+    Some(show(
         operation
             .split_once(':')
-            .map_or(operation, |(_, rest)| rest.trim())
-            .to_owned(),
-    )
+            .map_or(operation, |(_, rest)| rest.trim()),
+    ))
     .filter(|subject| !subject.is_empty())
 }
 
@@ -284,12 +312,14 @@ fn link_targets(pending: &PendingPermissionInfo) -> impl Iterator<Item = &str> {
 }
 
 /// The rules an "always" would persist, worth a row only where they say more
-/// than the subject already did. The stored rule carries a `category:` prefix
-/// that the headline has just spelled out in words, so it comes off here.
+/// than the subject already did (`subject` as sent). The stored rule carries
+/// a `category:` prefix that the headline has just spelled out in words, so
+/// it comes off here.
 fn always_rules(
     pending: &PendingPermissionInfo,
     subject: Option<&str>,
     language: Language,
+    show: Show,
 ) -> Vec<String> {
     // Allowing a Chrome site in this chat covers exactly the lines shown;
     // the chip says so, and the stored rule is plumbing.
@@ -304,7 +334,7 @@ fn always_rules(
         return vec![
             language
                 .text("only agent {agent} in this chat")
-                .replace("{agent}", agent),
+                .replace("{agent}", &show(agent)),
         ];
     }
     let prefix = format!("{}:", category(pending));
@@ -326,10 +356,10 @@ fn always_rules(
                     other if !other.is_empty() => language
                         .text("every {kind} request")
                         .replace("{kind}", other),
-                    _ => rule,
+                    _ => show(&rule),
                 }
             } else {
-                rule
+                show(&rule)
             }
         })
         .collect()
@@ -341,7 +371,7 @@ fn always_rules(
 /// Never the wire's `kind:subject` rule.
 pub fn summary(pending: &PendingPermissionInfo, language: Language) -> String {
     let headline = language.text(headline(pending));
-    match subject(pending, language) {
+    match subject(pending, language, &literal) {
         Some(subject) => format!("{headline}: {}", subject.lines().next().unwrap_or_default()),
         None => headline.to_owned(),
     }
@@ -788,8 +818,16 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
     let inner = width.saturating_sub(RAIL.width() + 2).max(20);
     let staged = app.confirm_always.filter(|_| focused);
 
-    let subject = subject(pending, language);
-    let rules = always_rules(pending, subject.as_deref(), language);
+    // What the request carries shows its invisible characters as quiet
+    // codes, so nothing on the card hides or reorders what runs; the answer
+    // and the rule it saves are the request's own, as sent.
+    let rules = always_rules(
+        pending,
+        subject(pending, language, &as_sent).as_deref(),
+        language,
+        &marked,
+    );
+    let subject = subject(pending, language, &marked);
     let subject_cap = if pending.explicit {
         MAX_CHROME_ROWS
     } else {
@@ -967,6 +1005,15 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
         // With no row to say how to scroll, a subject cut short ends in an
         // ellipsis on the one row the terminal has for it.
         let truncated = !show_scroll && subject_count < subject_rows.len();
+        // A code a wrap broke across rows stays quiet on the row it ends on.
+        let starts_in_code: Vec<bool> = subject_rows
+            .iter()
+            .scan(false, |open, (_, row)| {
+                let start = *open;
+                *open = code_open_after(row, start);
+                Some(start)
+            })
+            .collect();
         for (index, (kind, row)) in subject_rows
             .iter()
             .enumerate()
@@ -975,16 +1022,22 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
         {
             let spans = match kind {
                 Row::Subject => {
+                    let mut in_code = starts_in_code[index];
                     let prefix = if command && index == 0 { "$ " } else { "  " };
                     let text = if truncated {
-                        format!(
-                            "{prefix}{}",
-                            single_line(&format!("{row} …"), inner.saturating_sub(2))
-                        )
+                        single_line(&format!("{row} …"), inner.saturating_sub(2))
                     } else {
-                        format!("{prefix}{row}")
+                        row.clone()
                     };
-                    vec![Span::new(text, theme.text).on(theme.overlay)]
+                    let mut spans = vec![Span::new(prefix, theme.text).on(theme.overlay)];
+                    spans.extend(marked_spans(
+                        &text,
+                        theme.text,
+                        theme.muted,
+                        theme.overlay,
+                        &mut in_code,
+                    ));
+                    spans
                 }
                 Row::ScriptName | Row::ScriptCut => vec![
                     Span::new(
@@ -1093,24 +1146,20 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
         );
     }
     for rule in staged_rules.iter().take(rule_count) {
-        push_row(
-            &mut panel,
-            vec![
-                Span::new(
-                    format!("  {}", single_line(rule, inner.saturating_sub(2))),
-                    theme.text,
-                )
-                .on(theme.overlay),
-            ],
-            width,
-            theme,
-            focused,
-        );
+        let mut spans = vec![Span::new("  ", theme.text).on(theme.overlay)];
+        spans.extend(marked_spans(
+            &single_line(rule, inner.saturating_sub(2)),
+            theme.text,
+            theme.muted,
+            theme.overlay,
+            &mut false,
+        ));
+        push_row(&mut panel, spans, width, theme, focused);
     }
     if let Some(allows) = allows.filter(|_| show_allows) {
         push_row(
             &mut panel,
-            vec![Span::new(allows, theme.muted).on(theme.overlay)],
+            marked_spans(&allows, theme.muted, theme.muted, theme.overlay, &mut false),
             width,
             theme,
             focused,
