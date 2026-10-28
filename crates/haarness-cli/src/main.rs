@@ -7098,6 +7098,7 @@ fn compose_runtime_sources(
         yolo,
     )?;
     runtime_config.auto_review = json_layers.auto_review.clone();
+    runtime_config.global_rules = json_layers.global_rules().to_vec();
     runtime_config.disabled_agents = capability_state::disabled(paths, workspace, trust, "agent")?;
     runtime_config
         .disabled_agents
@@ -10898,6 +10899,8 @@ fn runtime_config(
         },
         read_roots: Vec::new(),
         base_rules,
+        // Set by the composition root, which knows the layers.
+        global_rules: Vec::new(),
         granted_rules: persisted_rules,
         default_agent: defaults.agent,
         default_provider: defaults.provider,

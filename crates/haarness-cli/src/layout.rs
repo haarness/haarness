@@ -438,16 +438,30 @@ pub fn resource_roots(
     workspace: &Path,
     project_config: bool,
 ) -> Vec<PathBuf> {
+    resource_roots_scoped(config, home, workspace, project_config)
+        .into_iter()
+        .map(|(root, _)| root)
+        .collect()
+}
+
+/// [`resource_roots`], each with whether it is one of the project's own
+/// folders rather than the person's.
+pub fn resource_roots_scoped(
+    config: &Path,
+    home: Option<&Path>,
+    workspace: &Path,
+    project_config: bool,
+) -> Vec<(PathBuf, bool)> {
     let mut roots = Vec::new();
     if let Some(home) = home {
-        roots.extend([".opencode", ".haarness"].map(|name| home.join(name)));
+        roots.extend([".opencode", ".haarness"].map(|name| (home.join(name), false)));
     }
-    roots.push(config.to_path_buf());
+    roots.push((config.to_path_buf(), false));
     for directory in project_directories(workspace)
         .into_iter()
         .filter(|_| project_config)
     {
-        roots.extend([".opencode", ".haarness"].map(|name| directory.join(name)));
+        roots.extend([".opencode", ".haarness"].map(|name| (directory.join(name), true)));
     }
     roots
 }
