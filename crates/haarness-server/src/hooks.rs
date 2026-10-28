@@ -204,31 +204,35 @@ impl ConfiguredHooks {
         }
     }
 
-    async fn run(&self, entry: &HookEntry, payload: &Value, folders: Folders<'_>) -> HookOutcome {
-        use tokio::io::AsyncWriteExt as _;
-        let label = HookLabel::new(entry, payload);
-        if folders.chat_folder_gone {
-            label.moved();
-        }
-        // A chat's folder can be there and still not be entered (it lost its
-        // search permission, or an earlier hook of the same event deleted
-        // it): the hook then starts in the project folder, which its `cwd`
-        // names, rather than not at all.
+    /// Where a hook that failed to start in `folders` starts again. A chat's
+    /// folder can be there and still not be entered (it lost its search
+    /// permission, or an earlier hook of the same event deleted it): the hook
+    /// then starts in the project folder, which its `cwd` names, rather than
+    /// not at all. Any other failure (a program that is not there) is not
+    /// tried again.
+    fn fallback(&self, folders: Folders<'_>) -> Option<Folders<'_>> {
         let in_project = Folders {
             chat_folder_gone: true,
             ..self.folders(None)
         };
+        (folders.cwd != in_project.cwd && !enterable(folders.cwd)).then_some(in_project)
+    }
+
+    async fn run(&self, entry: &HookEntry, payload: &Value, folders: Folders<'_>) -> HookOutcome {
+        use tokio::io::AsyncWriteExt as _;
+        let label = HookLabel::new(entry, payload);
+        let first = hook_command(entry, folders).spawn();
         let moved;
-        let (payload, spawned) = match hook_command(entry, folders).spawn() {
-            Err(_) if folders.cwd != in_project.cwd => {
-                label.moved();
-                let mut payload = payload.clone();
-                payload["cwd"] = json!(in_project.cwd);
-                moved = payload;
-                (&moved, hook_command(entry, in_project).spawn())
-            }
-            spawned => (payload, spawned),
-        };
+        let (payload, folders, spawned) =
+            match first.is_err().then(|| self.fallback(folders)).flatten() {
+                Some(in_project) => {
+                    let mut payload = payload.clone();
+                    payload["cwd"] = json!(in_project.cwd);
+                    moved = payload;
+                    (&moved, in_project, hook_command(entry, in_project).spawn())
+                }
+                None => (payload, folders, first),
+            };
         let mut child = match spawned {
             Ok(child) => child,
             Err(error) => {
@@ -243,6 +247,9 @@ impl ConfiguredHooks {
                 return HookOutcome::default();
             }
         };
+        if folders.chat_folder_gone {
+            label.moved();
+        }
         // The payload is written while the output is read, both within the
         // hook's timeout. Written first, a payload larger than the pipe holds
         // waited, with no limit, for a hook that never reads it, and for one
@@ -487,6 +494,15 @@ impl ConfiguredHooks {
             combined.permission == Some(PermissionDecision::Allow) && always == Some(true);
         combined
     }
+}
+
+/// Whether a hook's process can start in `folder`: a folder it may enter.
+fn enterable(folder: &Path) -> bool {
+    #[cfg(unix)]
+    if nix::unistd::access(folder, nix::unistd::AccessFlags::X_OK).is_err() {
+        return false;
+    }
+    folder.is_dir()
 }
 
 /// The process for `entry`, started in `folders.cwd` and told
@@ -793,8 +809,8 @@ impl HookLabel {
         );
     }
 
-    /// One WARN per hook that ran in the project folder because it could not
-    /// start in its chat's own folder.
+    /// One WARN per hook that started in the project folder because it could
+    /// not start in its chat's own folder, once it has started there.
     fn moved(&self) {
         tracing::warn!(
             event = %self.event,
@@ -2756,6 +2772,38 @@ mod tests {
         assert!(moved[0].starts_with("WARN ") && moved[0].contains(" event=PreToolUse"));
     }
 
+    /// A folder a test made under the temporary folder, removed when the test
+    /// ends, also when it fails, after any folder of it the test closed is
+    /// opened again.
+    #[cfg(unix)]
+    struct Scratch {
+        root: PathBuf,
+        closed: Option<PathBuf>,
+    }
+
+    #[cfg(unix)]
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("{name}-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            Self {
+                root: root.canonicalize().unwrap(),
+                closed: None,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt as _;
+            if let Some(closed) = &self.closed {
+                let _ = std::fs::set_permissions(closed, std::fs::Permissions::from_mode(0o755));
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
     /// A chat's folder that is there but cannot be entered (no search
     /// permission), or that an earlier hook of the same event deleted, fails
     /// the hook's start there; it starts again in the project folder, which
@@ -2765,18 +2813,15 @@ mod tests {
     async fn a_hook_that_cannot_start_in_its_chat_folder_starts_in_the_project_folder() {
         use std::os::unix::fs::PermissionsExt as _;
         let (capture, _guard) = Capture::install();
-        let root = std::env::temp_dir().join(format!(
-            "haarness-hook-closed-folder-{}",
-            uuid::Uuid::now_v7()
-        ));
-        std::fs::create_dir_all(root.join("home/2026-10-28")).unwrap();
-        let root = root.canonicalize().unwrap();
-        let project = root.join("home");
+        let mut scratch = Scratch::new("haarness-hook-closed-folder");
+        let project = scratch.root.join("home");
         let (closed, deleted) = (
             project.join("2026-10-28/closed"),
             project.join("2026-10-28/deleted"),
         );
-        let log = root.join("guard.log");
+        std::fs::create_dir_all(&closed).unwrap();
+        std::fs::create_dir_all(&deleted).unwrap();
+        let log = scratch.root.join("guard.log");
         let guard = format!(
             r#"printf '%s|' "$(pwd -P)" >> '{log}'; cat >> '{log}'; echo >> '{log}'; echo 'guard: no writes' >&2; exit 2"#,
             log = log.display()
@@ -2791,24 +2836,30 @@ mod tests {
             ]})),
             project.clone(),
         );
-        std::fs::create_dir(&closed).unwrap();
-        std::fs::create_dir(&deleted).unwrap();
+        scratch.closed = Some(closed.clone());
         std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Whoever may enter any folder (root) can still start there: the
+        // closed folder then proves nothing and is left out.
+        let closed_holds = std::process::Command::new("true")
+            .current_dir(&closed)
+            .status()
+            .is_err();
         let call = |folder: &Path| HookCall {
             folder: Some(folder.to_path_buf()),
             ..HookCall::new(ThreadId::new())
         };
         let input = json!({"path": "notes.md"});
-        let refused = [
-            hooks.pre_tool_use(&call(&closed), "write", &input).await,
-            hooks.pre_tool_use(&call(&deleted), "edit", &input).await,
-        ];
-        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let written = std::fs::read_to_string(&log).unwrap_or_default();
-        std::fs::remove_dir_all(&root).unwrap();
+        let mut refused = Vec::new();
+        if closed_holds {
+            refused.push(hooks.pre_tool_use(&call(&closed), "write", &input).await);
+        } else {
+            eprintln!("skipped: this user may enter a folder with no permissions");
+        }
+        refused.push(hooks.pre_tool_use(&call(&deleted), "edit", &input).await);
         for decision in &refused {
             assert_eq!(decision.block.as_deref(), Some("guard: no writes"));
         }
+        let written = std::fs::read_to_string(&log).unwrap_or_default();
         let runs: Vec<(&str, Value)> = written
             .lines()
             .map(|line| {
@@ -2816,15 +2867,111 @@ mod tests {
                 (ran_in, serde_json::from_str(payload).unwrap())
             })
             .collect();
-        assert_eq!(runs.len(), 2, "{written}");
+        assert_eq!(runs.len(), refused.len(), "{written}");
         for (ran_in, payload) in &runs {
             assert_eq!(*ran_in, project.display().to_string(), "{payload}");
             assert_eq!(payload["cwd"], json!(project), "{payload}");
         }
         let moved = capture
             .matching("hook ran in the project folder: it could not start in its chat's folder");
-        assert_eq!(moved.len(), 2, "{:?}", capture.lines());
+        assert_eq!(moved.len(), refused.len(), "{:?}", capture.lines());
         assert!(capture.matching("hook failed to spawn").is_empty());
+    }
+
+    /// Only a chat's folder that a hook may not enter (gone, or closed to
+    /// it) sends it to the project folder once it failed to start; a healthy
+    /// chat folder or the project folder itself does not.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_chat_folder_a_hook_cannot_enter_sends_it_to_the_project_folder() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut scratch = Scratch::new("haarness-hook-fallback");
+        let project = scratch.root.join("home");
+        let (notes, closed) = (
+            project.join("2026-10-28/notes"),
+            project.join("2026-10-28/closed"),
+        );
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::create_dir_all(&closed).unwrap();
+        let hooks = ConfiguredHooks::new(Vec::new(), project.clone());
+        let fallback = |folder: &Path| {
+            let call = HookCall {
+                folder: Some(folder.to_path_buf()),
+                ..HookCall::new(ThreadId::new())
+            };
+            hooks
+                .fallback(hooks.folders(Some(&call)))
+                .map(|folders| folders.cwd.to_path_buf())
+        };
+        assert_eq!(fallback(&notes), None);
+        assert_eq!(hooks.fallback(hooks.folders(None)).map(|f| f.cwd), None);
+        // Gone once its hooks were sent there.
+        let gone = project.join("2026-10-28/gone");
+        let sent = HookCall {
+            folder: Some(gone.clone()),
+            ..HookCall::new(ThreadId::new())
+        };
+        std::fs::create_dir_all(&gone).unwrap();
+        let folders = hooks.folders(Some(&sent));
+        std::fs::remove_dir(&gone).unwrap();
+        assert_eq!(
+            hooks.fallback(folders).map(|f| f.cwd),
+            Some(project.as_path())
+        );
+        scratch.closed = Some(closed.clone());
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::process::Command::new("true")
+            .current_dir(&closed)
+            .status()
+            .is_err()
+        {
+            assert_eq!(fallback(&closed), Some(project.clone()));
+        } else {
+            eprintln!("skipped: this user may enter a folder with no permissions");
+        }
+    }
+
+    /// A hook that starts nowhere (its program is missing) is not tried a
+    /// second time in the project folder, and the log says only that it
+    /// failed to start, not that it moved: in a chat's own folder, in one
+    /// that is gone, and in the project folder.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_whose_program_is_missing_is_not_tried_again() {
+        let (capture, _guard) = Capture::install();
+        let scratch = Scratch::new("haarness-hook-missing-program");
+        let project = scratch.root.join("home");
+        let notes = project.join("2026-10-28/notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let hooks = ConfiguredHooks::new(
+            vec![entry(
+                "haarness-hook-test-missing-program",
+                &["--check"],
+                None,
+            )],
+            project.clone(),
+        );
+        for folder in [Some(notes), Some(project.join("2026-10-28/gone")), None] {
+            let call = HookCall {
+                folder,
+                ..HookCall::new(ThreadId::new())
+            };
+            let decision = hooks.pre_tool_use(&call, "bash", &json!({})).await;
+            assert!(decision.block.is_none());
+        }
+        assert_eq!(
+            capture.matching("hook failed to spawn").len(),
+            3,
+            "{:?}",
+            capture.lines()
+        );
+        assert!(
+            capture
+                .matching("hook ran in the project folder: it could not start in its chat's folder")
+                .is_empty(),
+            "{:?}",
+            capture.lines()
+        );
     }
 
     fn entry(command: &str, args: &[&str], shell: Option<&str>) -> HookEntry {
