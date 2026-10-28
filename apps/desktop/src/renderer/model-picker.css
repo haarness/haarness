@@ -86,6 +86,11 @@
     inset-inline-start var(--slow) var(--ease),
     scale var(--fast) var(--ease);
 }
+/* Right to left the offset is from the right, so the thumb moves right by
+   half its width to centre on it, as it moves left by half from the left. */
+:root[dir="rtl"] .reasoning-thumb {
+  translate: 50% -50%;
+}
 .reasoning-slider:hover .reasoning-thumb {
   scale: 1.06;
 }
@@ -190,4 +195,11 @@
   display: block;
   margin: var(--s3) 0 0 auto;
   min-height: 28px;
+}
+/* Marks the level the configuration sets, quietly, beside its name. */
+.reasoning-default {
+  margin-inline-start: var(--s1);
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  font-weight: 400;
 }

@@ -102,6 +102,7 @@ import { createProjectOverview } from "./project-overview";
 import { carryDraft } from "./draft-carry";
 import { checkAttachments, fileAttachments, type Attachment } from "./media";
 import type { SearchEntry } from "./search";
+import { requestedReasoning } from "./reasoning";
 import {
   commandNote,
   followRun,
@@ -2365,7 +2366,9 @@ function createApp(saved?: Preferences) {
       attachments,
       ...mentioned,
       requestId: pending.requestId,
-      ...(effort ? { reasoningEffort: effort } : {}),
+      ...(requestedReasoning(effort, state.connection?.info.defaultReasoningEffort)
+        ? { reasoningEffort: effort }
+        : {}),
     };
     if (pending.method === "executeCommand" && command) {
       const response = await targetApi<T.CommandExecutionResponse>(
