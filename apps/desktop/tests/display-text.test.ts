@@ -17,8 +17,17 @@ test("colours, titles and cursor moves leave only their text", () => {
     ["\u001bPq#1;2;9;9;9\u001b\\x", "x"],
     ["\u001b_hidden\u001b\\shown", "shown"],
     ["\u001b(B\u001b7\u001b8\u001b>plain", "plain"],
-    ["\u009b1mc1\u009b22m", "c1"],
-    ["\u009d2;name\u009cc1 name", "c1 name"],
+  ])
+    assert.equal(withoutEscapes(raw), shown, JSON.stringify(raw));
+});
+
+test("a C1 control goes on its own and hides nothing", () => {
+  for (const [raw, shown] of [
+    ["She wrote â\u0080\u009csoonâ\u0080\u009d and stopped.", "She wrote âsoonâ and stopped."],
+    ["Ð\u009fÑ\u0080Ð¸ the rest", "ÐÑÐ¸ the rest"],
+    ["ç\u009b® list\nnext", "ç® list\nnext"],
+    ["a\u0090b\u0098c\u009ed\u009fe\u009cf", "abcdef"],
+    ["\u009b31mtext", "31mtext"],
   ])
     assert.equal(withoutEscapes(raw), shown, JSON.stringify(raw));
 });

@@ -1,6 +1,6 @@
-//! Text a command, a tool or a server wrote, as the TUI shows it.
+//! Text a command, a tool or a server wrote, as the TUI draws it.
 //!
-//! Such text can carry terminal escape sequences (colours, cursor moves, a
+//! Such text may hold terminal escape sequences (colours, cursor moves, a
 //! window title) and other control characters. The renderer never hands
 //! them to the terminal, but what follows the escape byte would show as
 //! `[31m` or `]0;title` fragments, so output loses its sequences whole
@@ -16,9 +16,6 @@ use haarness_opentui::{Color, Span};
 
 const ESC: char = '\u{1b}';
 const BEL: char = '\u{7}';
-/// The C1 forms of CSI and of the string terminator.
-const C1_CSI: char = '\u{9b}';
-const C1_ST: char = '\u{9c}';
 
 /// What an escape sequence still waits for.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,16 +37,20 @@ struct Pending {
     waiting: Waiting,
 }
 
-/// `text` without its escape sequences and stray control characters: CSI
-/// (`ESC [ … m`), OSC (`ESC ] … BEL`), DCS, SOS, PM and APC strings, the
-/// two- and three-character escapes (`ESC 7`, `ESC ( B`) and the C1 forms
-/// of all of them. Tab, line feed and carriage return stay.
+/// `text` with every escape sequence and every other control character
+/// taken out: CSI (`ESC [ … m`), OSC (`ESC ] … BEL`), DCS, SOS, PM and APC
+/// strings, and the two- and three-character escapes (`ESC 7`, `ESC ( B`).
+/// Tab, line feed and carriage return stay. A C1 control (U+0080–U+009F) starts
+/// nothing and goes on its own: a program's 8-bit control bytes reach the
+/// TUI as U+FFFD, so a C1 code point here is almost always text decoded
+/// twice (`â\u{80}\u{9c}` for an opening quote), and the line around it
+/// shows.
 ///
 /// Removing a sequence can complete another around it (`ESC ESC[22m[32m`),
 /// and that one goes too, as removing them over and over until none is left
 /// would: an unfinished sequence waits on a stack while the ones inside it
-/// complete. A string that never ends stops at the end of its line, so the
-/// lines after it still show. Linear in the length of `text`.
+/// complete. A string that never ends stops where its line does, and the
+/// lines below it still show. Linear in the length of `text`.
 pub(crate) fn without_escapes(text: &str) -> Cow<'_, str> {
     if !text
         .chars()
@@ -79,19 +80,11 @@ pub(crate) fn without_escapes(text: &str) -> Cow<'_, str> {
 fn step(kept: &mut String, pending: &mut Vec<Pending>, character: char) {
     loop {
         let Some(open) = pending.last_mut() else {
-            let waiting = match character {
-                ESC => Waiting::Introducer,
-                C1_CSI => Waiting::Csi,
-                // OSC, DCS, SOS, PM and APC.
-                '\u{9d}' | '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
-                    Waiting::Text { escape: false }
-                }
-                _ => {
-                    kept.push(character);
-                    return;
-                }
-            };
-            return begin(kept, pending, waiting, character);
+            if character == ESC {
+                return begin(kept, pending, Waiting::Introducer, ESC);
+            }
+            kept.push(character);
+            return;
         };
         let code = u32::from(character);
         match open.waiting {
@@ -141,7 +134,7 @@ fn step(kept: &mut String, pending: &mut Vec<Pending>, character: char) {
                 continue;
             }
             Waiting::Text { escape: false } => match character {
-                BEL | C1_ST => return finish(kept, pending),
+                BEL => return finish(kept, pending),
                 ESC => open.waiting = Waiting::Text { escape: true },
                 '\n' => {
                     // Never ended on its line: drop it and keep the line
@@ -175,17 +168,18 @@ fn finish(kept: &mut String, pending: &mut Vec<Pending>) {
     }
 }
 
-/// Whether an approval card shows `character` as a code: a control
-/// character but tab and line feed (a carriage return always, also at the
-/// end of a line, where a shell keeps it in the word before it: `cd dist`
-/// then CR LF goes into a folder named `dist` and a carriage return), an
-/// invisible format character or another default-ignorable one, such as
-/// the direction marks, overrides and isolates that reorder what is shown
-/// and the zero-width spaces that hide a difference, and the line and
-/// paragraph separators. The zero-width joiner and non-joiner and the
-/// variation selectors of emoji and ideographs (U+FE00–U+FE0F,
-/// U+E0100–U+E01EF) stay, and so do the format characters that draw a
-/// visible sign (U+0600–U+0605, U+06DD): emoji and scripts need them.
+/// Whether an approval card shows `character` as a code. That is any
+/// control character other than tab and line feed (a carriage return
+/// always, also at the end of a line, where a shell keeps it in the word
+/// before it: `cd dist` then CR LF goes into a folder named `dist` and a
+/// carriage return), an invisible format character or another
+/// default-ignorable one, such as the direction marks, overrides and
+/// isolates that reorder what is shown and the zero-width spaces that hide
+/// a difference, and the line and paragraph separators. Left as they are:
+/// the joiners U+200C and U+200D and the variation selectors
+/// U+FE00–U+FE0F and U+E0100–U+E01EF, without which emoji sequences and
+/// many writing systems would not join or pick their glyphs, and the format
+/// characters that draw a visible sign (U+0600–U+0605, U+06DD).
 #[must_use]
 fn shows_as_code(character: char) -> bool {
     if character.is_control() {
@@ -344,8 +338,6 @@ mod tests {
             ("\u{1b}Pq#1;2;9;9;9\u{1b}\\x", "x"),
             ("\u{1b}_hidden\u{1b}\\shown", "shown"),
             ("\u{1b}(B\u{1b}7\u{1b}8\u{1b}>plain", "plain"),
-            ("\u{9b}1mc1\u{9b}22m", "c1"),
-            ("\u{9d}2;name\u{9c}c1 name", "c1 name"),
         ] {
             assert_eq!(without_escapes(raw), shown, "{raw:?}");
         }
@@ -377,6 +369,24 @@ mod tests {
             "ring zero rub"
         );
         assert!(matches!(without_escapes("plain\ttext"), Cow::Borrowed(_)));
+    }
+
+    /// Text decoded twice carries C1 code points: each goes on its own and
+    /// starts nothing, so the rest of its line still shows.
+    #[test]
+    fn a_c1_control_goes_alone_and_hides_nothing() {
+        for (raw, shown) in [
+            (
+                "She wrote â\u{80}\u{9c}soonâ\u{80}\u{9d} and stopped.",
+                "She wrote âsoonâ and stopped.",
+            ),
+            ("Ð\u{9f}Ñ\u{80}Ð¸ the rest", "ÐÑÐ¸ the rest"),
+            ("ç\u{9b}® list\nnext", "ç® list\nnext"),
+            ("a\u{90}b\u{98}c\u{9e}d\u{9f}e\u{9c}f", "abcdef"),
+            ("\u{9b}31mtext", "31mtext"),
+        ] {
+            assert_eq!(without_escapes(raw), shown, "{raw:?}");
+        }
     }
 
     /// What people write reads exactly as before: emoji and their
