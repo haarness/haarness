@@ -1070,7 +1070,7 @@ impl App {
             self.close_overlay();
             return;
         };
-        crate::config::save_diff_preferences(viewer.preferences());
+        crate::config::save_diff_preferences(viewer.opened_with, viewer.preferences());
         let comments = viewer.comments.clone();
         self.close_overlay();
         if comments.is_empty() {

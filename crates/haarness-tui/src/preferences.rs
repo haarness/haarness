@@ -16,32 +16,99 @@ pub(crate) struct StashedPrompt {
     pub workspace: String,
     pub shell: bool,
 }
+
+/// Changes to `tui-state.toml` that a save could not write. They stay in
+/// effect until the TUI quits. Each is one change, laid over what is saved
+/// when a later save writes it, so it leaves another TUI's other changes
+/// alone (on the same favorite or shortcut, the later save wins): favorites
+/// and recent models go in with the next save of the model lists that works
+/// or the save as the TUI leaves, shortcuts only with the next `/keybinds`
+/// save that works, which checks them as it checks the form. A kept shortcut
+/// whose key another TUI takes meanwhile is dropped.
+#[derive(Clone, Default)]
+pub(crate) struct Unsaved {
+    /// Favorite toggles, oldest first, as (model, favorite).
+    pub favorites: Vec<(String, bool)>,
+    /// Models used, oldest first.
+    pub recents: Vec<String>,
+    /// The shortcuts a `/keybinds` save changed, by action.
+    pub keybindings: std::collections::BTreeMap<String, String>,
+}
+
+impl Unsaved {
+    /// Lay the favorites and recent models over `state`.
+    pub(crate) fn apply(&self, state: &mut config::TuiState) {
+        for (model, favorite) in &self.favorites {
+            set_favorite(&mut state.model_favorites, model, *favorite);
+        }
+        for model in &self.recents {
+            put_first(&mut state.model_recents, model);
+        }
+    }
+}
+
 impl App {
     pub(crate) fn toggle_model_favorite(&mut self) {
         let Some(model) = self.filtered_models().get(self.selection).cloned() else {
             return;
         };
-        if self.model_favorites.contains(&model) {
-            self.model_favorites.retain(|m| m != &model);
-        } else {
-            self.model_favorites.push(model.clone());
-        }
-        let favorites = self.model_favorites.clone();
-        config::save_state(|s| s.model_favorites = favorites);
+        let favorite = !self.model_favorites.contains(&model);
+        set_favorite(&mut self.model_favorites, &model, favorite);
+        self.unsaved.favorites.retain(|(m, _)| m != &model);
+        self.unsaved.favorites.push((model.clone(), favorite));
+        let saved = self.save_model_lists(|_| {});
         self.selection = self
             .filtered_models()
             .iter()
             .position(|m| m == &model)
             .unwrap_or(0);
-        self.notice = "Model favorites saved".into();
+        self.notice = if saved {
+            "Model favorites saved"
+        } else {
+            // The picker shows the change; the next launch will not.
+            "Model favorites not saved · kept until you quit"
+        }
+        .into();
     }
     pub(crate) fn remember_model(&mut self) {
         let model = format!("{}/{}", self.thread.provider, self.thread.model);
-        self.model_recents.retain(|m| m != &model);
-        self.model_recents.insert(0, model);
-        self.model_recents.truncate(10);
-        let recents = self.model_recents.clone();
-        config::save_state(|s| s.model_recents = recents);
+        put_first(&mut self.model_recents, &model);
+        self.unsaved.recents.retain(|m| m != &model);
+        self.unsaved.recents.push(model);
+        self.save_model_lists(|_| {});
+    }
+    /// Save the changes to the model lists no save could write yet (the one
+    /// just made among them), and show the lists as saved: another TUI on
+    /// the same folder may have changed them since this one read them, and
+    /// saving this one's whole lists would undo that. Whether they were
+    /// saved; when they were not, this TUI keeps showing them.
+    fn save_model_lists(&mut self, change: impl FnOnce(&mut config::TuiState)) -> bool {
+        let unsaved = self.unsaved.clone();
+        let mut lists = None;
+        let saved = config::save_state(|s| {
+            change(s);
+            unsaved.apply(s);
+            lists = Some((s.model_favorites.clone(), s.model_recents.clone()));
+        });
+        if let Some((favorites, recents)) = lists.filter(|_| saved) {
+            self.unsaved.favorites.clear();
+            self.unsaved.recents.clear();
+            self.model_favorites = favorites;
+            self.model_recents = recents;
+        }
+        saved
+    }
+    /// Carry what another `App` of this TUI could not save (a server switch
+    /// starts a new one from the saved state): it stays in effect here too.
+    pub(crate) fn keep_unsaved(&mut self, mut unsaved: Unsaved) {
+        for (model, favorite) in &unsaved.favorites {
+            set_favorite(&mut self.model_favorites, model, *favorite);
+        }
+        for model in &unsaved.recents {
+            put_first(&mut self.model_recents, model);
+        }
+        crate::keybindings::lay_over_unsaved(&mut self.keybindings, &mut unsaved.keybindings);
+        self.unsaved = unsaved;
     }
     pub(crate) fn stash_view(&mut self, input: &Value) -> Result<ManagementView> {
         let action = input["action"].as_str().unwrap_or("view");
@@ -168,4 +235,20 @@ impl App {
             shell: self.shell_mode,
         }
     }
+}
+
+/// Add `model` to `favorites` or take it out, leaving the others as they are.
+fn set_favorite(favorites: &mut Vec<String>, model: &str, favorite: bool) {
+    if !favorite {
+        favorites.retain(|m| m != model);
+    } else if !favorites.iter().any(|m| m == model) {
+        favorites.push(model.to_owned());
+    }
+}
+
+/// `model` as the most recent of `recents`, which keep the last ten.
+fn put_first(recents: &mut Vec<String>, model: &str) {
+    recents.retain(|m| m != model);
+    recents.insert(0, model.to_owned());
+    recents.truncate(10);
 }

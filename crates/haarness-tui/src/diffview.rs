@@ -777,6 +777,9 @@ pub struct DiffViewer {
     /// Columns the patch pane had in the last frame. Split needs room, so the
     /// resolved layout is a function of this as well as the reader's choice.
     pub pane_width: std::cell::Cell<usize>,
+    /// The choices the viewer opened with: closing it saves only what the
+    /// reader changed since (`config::save_diff_preferences`).
+    pub opened_with: DiffPreferences,
 }
 
 impl DiffViewer {
@@ -807,7 +810,9 @@ impl DiffViewer {
             loading: false,
             omitted_files: None,
             pane_width: std::cell::Cell::new(0),
+            opened_with: DiffPreferences::default(),
         };
+        viewer.opened_with = viewer.preferences();
         viewer.rebuild_files();
         viewer
     }
