@@ -369,7 +369,6 @@ pub(crate) fn display(text: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub(crate) async fn apply(app: &mut App, client: &ApiClient) -> Result<bool> {
-    crate::file_search::settle(app).await;
     let Some((start, query)) = app.composer.mention_query() else {
         return Ok(false);
     };

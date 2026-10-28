@@ -533,6 +533,9 @@ pub async fn handle_key_at(
     if key.kind == KeyEventKind::Release {
         return Ok(AppAction::Continue);
     }
+    // Any key lets go of a Tab or Enter held for the `@` list's answer
+    // (see `crate::file_search`).
+    app.file_search.release();
     app.follow_permission_head();
     // A one-key answer still settling meets the next key before anything
     // else does: typing decides in `permission_letter`; a key that takes
@@ -1039,7 +1042,7 @@ pub async fn handle_key_at(
     }
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('p' | 'n'))
-        && (app.slash_suggestions().is_some() || !app.shown_mentions().is_empty())
+        && (app.slash_suggestions().is_some() || app.mention_list_open())
     {
         app.move_selection(if key.code == KeyCode::Char('p') {
             -1
@@ -1131,7 +1134,13 @@ pub async fn handle_key_at(
         KeyCode::Esc => {
             if app.selection_range.is_some() {
                 app.selection_range = None;
-            } else if !app.mention_suggestions.is_empty() || app.slash_suggestions().is_some() {
+            } else if !app.mention_suggestions.is_empty()
+                || app.slash_suggestions().is_some()
+                || app.mention_list_open()
+            {
+                // An `@` list still waiting for its files closes too, and
+                // stays closed when they would have come.
+                app.file_search.stop();
                 app.mention_suggestions.clear();
                 app.mention_resources.want = None;
                 app.autocomplete_hidden = true;
@@ -1166,7 +1175,7 @@ pub async fn handle_key_at(
             }
         }
         KeyCode::Up => {
-            if app.slash_suggestions().is_some() || !app.shown_mentions().is_empty() {
+            if app.slash_suggestions().is_some() || app.mention_list_open() {
                 app.move_selection(-1);
             } else if !app.composer.move_up() && app.composer.history_prev() {
                 app.selection = 0;
@@ -1177,7 +1186,7 @@ pub async fn handle_key_at(
             }
         }
         KeyCode::Down => {
-            if app.slash_suggestions().is_some() || !app.shown_mentions().is_empty() {
+            if app.slash_suggestions().is_some() || app.mention_list_open() {
                 app.move_selection(1);
             } else if !app.composer.move_down() {
                 app.composer.history_next();
@@ -1207,10 +1216,12 @@ pub async fn handle_key_at(
             app.selection = 0;
         }
         KeyCode::Tab | KeyCode::BackTab => {
-            if crate::prompt_context::apply(app, client).await? {
+            if crate::file_search::hold(app, client, key) {
+                // Picks once the answer to the query typed is shown.
+            } else if crate::prompt_context::apply(app, client).await? {
                 // A directory selection immediately opens its next level;
                 // completed files have no active query and simply clear.
-                refresh_mentions(app, client).await;
+                refresh_mentions(app, client);
             } else if let Some(commands) = app.slash_suggestions() {
                 if let Some(entry) = selected(&commands, app.selection) {
                     let name = entry.name.clone();
@@ -1240,14 +1251,16 @@ pub async fn handle_key_at(
                 app.return_undo_draft();
                 app.autocomplete_hidden = false;
                 app.selection = 0;
-                refresh_mentions(app, client).await;
+                refresh_mentions(app, client);
             }
         }
         KeyCode::Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 app.composer.insert_char('\n');
+            } else if crate::file_search::hold(app, client, key) {
+                // Picks once the answer to the query typed is shown.
             } else if crate::prompt_context::apply(app, client).await? {
-                refresh_mentions(app, client).await;
+                refresh_mentions(app, client);
             } else if app.queue_edit.is_some() {
                 // Saving replaces the queued message in place. Alt+Enter
                 // would queue anyway, so both keys save.
@@ -1342,7 +1355,7 @@ pub async fn handle_key_at(
                             app.composer.set_text_split(before, after);
                             app.mention_resources.want = Some(returned.row);
                             app.autocomplete_hidden = false;
-                            refresh_mentions(app, client).await;
+                            refresh_mentions(app, client);
                         }
                         None => app.composer.set_text(text),
                     },
@@ -1377,7 +1390,7 @@ pub async fn handle_key_at(
             app.composer.insert_char(character);
             app.autocomplete_hidden = false;
             app.selection = 0;
-            refresh_mentions(app, client).await;
+            refresh_mentions(app, client);
         }
         _ => {}
     }
@@ -1559,7 +1572,7 @@ pub(crate) fn apply_mention(app: &mut App, client: &ApiClient) -> bool {
 /// cursor, off the key path while the event loop runs (see
 /// `crate::file_search`). Errors and missing endpoints degrade to no
 /// suggestions.
-pub(crate) async fn refresh_mentions(app: &mut App, client: &ApiClient) {
+pub(crate) fn refresh_mentions(app: &mut App, client: &ApiClient) {
     if app.shell_mode || app.composer.text().starts_with('/') {
         app.file_search.stop();
         app.mention_suggestions.clear();
@@ -1569,7 +1582,7 @@ pub(crate) async fn refresh_mentions(app: &mut App, client: &ApiClient) {
         Some((_, query)) => {
             // Resources are asked for the first time `@` opens.
             app.ask_resources(client);
-            crate::file_search::search(app, client, query).await;
+            crate::file_search::search(app, client, query);
         }
         None => {
             app.file_search.stop();
