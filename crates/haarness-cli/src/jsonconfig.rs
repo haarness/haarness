@@ -439,6 +439,12 @@ pub fn load_layers_with_system(
             .then_some("a read rule denies it")
     };
     for (file, trusted) in local_files {
+        // Said to the person too, as a remote file that cannot be read is.
+        if let Some(reason) = instruction_files::file_left_out(&file, workspace, trusted, &denied) {
+            layers
+                .notices
+                .push(format!("skipped instructions {}: {reason}", file.display()));
+        }
         if let Some(content) = instruction_files::read_with_imports(
             &file,
             workspace,
@@ -3057,6 +3063,15 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&older, project.join("AGENTS.md")).unwrap();
         let layers = load_layers(&config, Some(&home), &project, true, &[]);
+        // The person is told too.
+        assert!(
+            layers.notices.contains(&format!(
+                "skipped instructions {}: Haarness keeps sign-ins there",
+                store.display()
+            )),
+            "{:?}",
+            layers.notices
+        );
         let instructions = layers.instructions.expect("instructions");
         for hidden in ["SIGN_IN_SECRET", "KEY_SECRET"] {
             assert!(!instructions.contains(hidden), "{instructions}");
