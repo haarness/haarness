@@ -574,25 +574,35 @@ impl ProviderEvent {
 
 pub type ProviderStream = Pin<Box<dyn Stream<Item = CoreResult<ProviderEvent>> + Send>>;
 
-/// How many bytes of media (images, PDFs, audio, video), and how many
-/// images, one request to a provider may carry. Past either, the runtime
-/// replaces the oldest attachments of the request with a short note (see
-/// [`ModelProvider::image_limits`]).
+/// How many images, and how many bytes of them, one request to a provider
+/// may carry, and how many bytes of every attachment and text together.
+/// Past any of these, the runtime replaces the oldest attachments of the
+/// request with a short note (see [`ModelProvider::image_limits`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageLimits {
-    /// Base64 bytes of the request's media, leaving the rest of the
+    /// Base64 bytes of the request's images, leaving the rest of the
     /// provider's request size to the text.
     pub bytes: usize,
     /// Images in one request, where the provider documents a number.
     pub count: Option<usize>,
+    /// Bytes of the request's media (images, PDFs, audio, video, as base64)
+    /// and its messages' text together: what the provider takes in one
+    /// request, less room for the system prompt and the tools.
+    pub request: usize,
 }
 
+/// Room a request leaves for its system prompt, tool definitions and
+/// framing, which the media budget does not see.
+pub const REQUEST_ALLOWANCE: usize = 1024 * 1024;
+
 impl Default for ImageLimits {
-    /// 25 MiB of media: most providers take 32 MB or more in a request.
+    /// 25 MiB of images, and 32 MB in all: most providers take 32 MB or
+    /// more in a request.
     fn default() -> Self {
         Self {
             bytes: 25 * 1024 * 1024,
             count: None,
+            request: 32_000_000 - REQUEST_ALLOWANCE,
         }
     }
 }
@@ -642,8 +652,9 @@ pub trait ModelProvider: Send + Sync {
     fn explicit_prompt_cache_scope(&self, _model: &str) -> Option<String> {
         None
     }
-    /// The media one request for `model` may carry. The default holds them
-    /// to 25 MiB and counts no images.
+    /// The media one request for `model` may carry. The default holds the
+    /// images to 25 MiB and the whole request to 32 MB, and counts no
+    /// images.
     fn image_limits(&self, _model: &str) -> ImageLimits {
         ImageLimits::default()
     }
