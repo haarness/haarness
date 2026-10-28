@@ -138,7 +138,7 @@ impl ModelProvider for BedrockProvider {
         &self.instance.id
     }
 
-    /// Bedrock takes 20 MB in a request; its media get 15 MiB of it. A
+    /// Bedrock takes 20 MB in a request; its images get 15 MiB of it. A
     /// Claude model takes as many images as it does from Anthropic, named by
     /// its id or an ARN holding it (a foundation model or a cross-region
     /// inference profile). An application inference profile's ARN names no
@@ -152,6 +152,7 @@ impl ModelProvider for BedrockProvider {
         haarness_core::ImageLimits {
             bytes: 15 * 1024 * 1024,
             count,
+            request: 20_000_000 - haarness_core::REQUEST_ALLOWANCE,
         }
     }
 
@@ -679,6 +680,7 @@ mod tests {
             haarness_core::ImageLimits {
                 bytes: 15 * 1024 * 1024,
                 count: Some(100),
+                request: 20_000_000 - haarness_core::REQUEST_ALLOWANCE,
             }
         );
         assert_eq!(provider.image_limits("amazon.nova-pro-v1:0").count, None);

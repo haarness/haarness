@@ -6,21 +6,28 @@
 //! out what that request added would hide each new attachment in turn. So
 //! before a request is sent, once its media pass the provider's
 //! [`ImageLimits`], older attachments are replaced with a short note, and the
-//! newest always reach the model. Every attachment sent inline (images, PDFs,
-//! audio, video) counts toward the bytes; only images count toward the
-//! number of images.
+//! newest always reach the model.
 //!
 //! The cut is a replay over the attachments in order: each one joins the
-//! kept total, and when the message holding it takes that total past a limit
+//! kept totals, and when the message holding it takes a total past its limit
 //! the cut happens there. It never takes what the person attached to their
 //! own messages in that message's turn. It replaces the oldest of the other
-//! attachments that came before, down to three fifths of the limits (the
+//! attachments that came before, down to three fifths of the limit (the
 //! lower mark); what it cannot reach that way stays. The attachments of the
 //! message that passed the limit go only when they and the person's together
 //! still pass the limit itself, oldest first and only until the request
 //! fits; when the person's attachments alone pass it the request goes as it
-//! is, and a refusal is handled as before. Past the number of images alone,
-//! only images go.
+//! is, and a refusal is handled as before.
+//!
+//! There are two totals. The images alone are held to their bytes and number
+//! (`bytes`, `count`), and only images go for them. Every attachment sent
+//! inline (images, PDFs, audio, video), with the text of the messages so far,
+//! is held to what one request carries (`request`); for that one the
+//! attachments of earlier turns go, and the images of this turn, but never a
+//! PDF, audio or video of the turn that passed it: what the model read or
+//! heard in this turn stays, or a note would send it to read the file again,
+//! and again. A request that is too large all the same is refused, and
+//! compaction answers that once.
 //!
 //! A new attachment moves the cut only when the kept ones pass a limit
 //! again, not on every request, so the replaced prefix, and the provider's
@@ -124,7 +131,7 @@ struct Media<'a> {
     message: usize,
     source: &'a str,
     bytes: usize,
-    /// Counts toward the number of images.
+    /// Counts toward the images' limits.
     image: bool,
 }
 
@@ -136,11 +143,32 @@ struct Plan<'a> {
     kept: usize,
 }
 
+/// The bytes of a message's text as a provider receives it: what it says,
+/// a tool call's arguments and the reasoning replayed with it.
+pub(crate) fn text_bytes(message: &ProviderMessage) -> usize {
+    match message {
+        ProviderMessage::Text { content, .. } | ProviderMessage::Media { content, .. } => {
+            content.len()
+        }
+        ProviderMessage::ToolCall {
+            name,
+            arguments,
+            provider_metadata,
+            ..
+        } => name.len() + arguments.to_string().len() + provider_metadata.to_string().len(),
+        ProviderMessage::ToolResult { output, .. } => output.len(),
+    }
+}
+
 fn plan<'a>(messages: &'a [ProviderMessage], origins: &[Origin], limits: ImageLimits) -> Plan<'a> {
     debug_assert_eq!(messages.len(), origins.len());
     let origin = |message: usize| origins.get(message).copied().unwrap_or_default();
     let mut media = Vec::new();
+    // The text of the messages up to and including each one.
+    let mut text = Vec::with_capacity(messages.len());
     for (index, message) in messages.iter().enumerate() {
+        let before = text.last().copied().unwrap_or(0_usize);
+        text.push(before.saturating_add(text_bytes(message)));
         let attachments = match message {
             // Adapters drop developer-role messages, and their media.
             ProviderMessage::Media {
@@ -169,42 +197,89 @@ fn plan<'a>(messages: &'a [ProviderMessage], origins: &[Origin], limits: ImageLi
     let mut dropped = vec![false; media.len()];
     // The attachments still sent, oldest first.
     let mut sent = Vec::new();
-    let (mut kept, mut count) = (0_usize, 0_usize);
+    let mut totals = Totals::default();
     for (index, item) in media.iter().enumerate() {
         sent.push(index);
-        kept = kept.saturating_add(item.bytes);
-        count += usize::from(item.image);
-        if !over(kept, count, limit) {
-            continue;
-        }
+        totals.join(item);
         // The person's own attachments in the turn this one belongs to stay.
         let turn = origin(item.message).turn;
         let own = |message: usize| {
             let origin = origin(message);
             origin.person && turn.is_some() && origin.turn == turn
         };
-        // The attachments before this message go down to the lower mark;
-        // this message's only while the request would still pass the limit.
-        for (mark, newest) in [(target, false), (limit, true)] {
-            let mut position = 0;
-            while over(kept, count, mark) && position < sent.len() {
-                let oldest = &media[sent[position]];
-                // Within the bytes, only an image lowers the number of images.
-                let helps = kept > mark.0 || oldest.image;
-                if !helps || own(oldest.message) || (oldest.message == item.message) != newest {
-                    position += 1;
-                    continue;
+        // Past the images' limits only images go. The images before this
+        // message go down to the lower mark; this message's only while the
+        // request would still pass the limit.
+        if item.image && over(totals.images, totals.count, limit) {
+            for (mark, newest) in [(target, false), (limit, true)] {
+                let mut position = 0;
+                while over(totals.images, totals.count, mark) && position < sent.len() {
+                    let oldest = &media[sent[position]];
+                    if !oldest.image
+                        || own(oldest.message)
+                        || (oldest.message == item.message) != newest
+                    {
+                        position += 1;
+                        continue;
+                    }
+                    dropped[sent.remove(position)] = true;
+                    totals.leave(oldest);
                 }
-                dropped[sent.remove(position)] = true;
-                kept -= oldest.bytes;
-                count -= usize::from(oldest.image);
+            }
+        }
+        // Past what the request carries, with the text so far, any earlier
+        // turn's attachment goes, but of this turn's only images.
+        let room = limits.request.saturating_sub(text[item.message]);
+        if totals.kept > room {
+            for (mark, newest) in [(room / 5 * 3, false), (room, true)] {
+                let mut position = 0;
+                while totals.kept > mark && position < sent.len() {
+                    let oldest = &media[sent[position]];
+                    let this_turn = turn.is_some() && origin(oldest.message).turn == turn;
+                    if own(oldest.message)
+                        || (this_turn && !oldest.image)
+                        || (oldest.message == item.message) != newest
+                    {
+                        position += 1;
+                        continue;
+                    }
+                    dropped[sent.remove(position)] = true;
+                    totals.leave(oldest);
+                }
             }
         }
     }
     Plan {
         media,
         dropped,
-        kept,
+        kept: totals.kept,
+    }
+}
+
+/// What the attachments still sent hold: the images' bytes and number, and
+/// the bytes of them all.
+#[derive(Default)]
+struct Totals {
+    images: usize,
+    count: usize,
+    kept: usize,
+}
+
+impl Totals {
+    fn join(&mut self, media: &Media<'_>) {
+        self.kept = self.kept.saturating_add(media.bytes);
+        if media.image {
+            self.images = self.images.saturating_add(media.bytes);
+            self.count += 1;
+        }
+    }
+
+    fn leave(&mut self, media: &Media<'_>) {
+        self.kept -= media.bytes;
+        if media.image {
+            self.images -= media.bytes;
+            self.count -= 1;
+        }
     }
 }
 
@@ -648,6 +723,7 @@ mod tests {
         let bedrock = ImageLimits {
             bytes: 15 * MIB,
             count: None,
+            request: 20_000_000 - crate::REQUEST_ALLOWANCE,
         };
         let photographed = Chat::default()
             .opens(photos(3, 7 * MIB / 2))
@@ -686,11 +762,11 @@ mod tests {
         }
         let mut rng = Rng(0x2545_f491_4f6c_dd1d);
         let limits = [
-            (25 * 1024, None),
-            (15 * 1024, None),
-            (25 * 1024, Some(100)),
-            (25 * 1024, Some(6)),
-            (10 * 1024, Some(3)),
+            (25 * 1024, None, 30 * 1024),
+            (15 * 1024, None, 18 * 1024),
+            (25 * 1024, Some(100), 30 * 1024),
+            (25 * 1024, Some(6), 12 * 1024),
+            (10 * 1024, Some(3), 40 * 1024),
         ];
         let removed_names = |before: &[ProviderMessage], after: &[ProviderMessage]| {
             let kept = sent(after);
@@ -744,8 +820,12 @@ mod tests {
                 });
                 origins.push(Origin { turn, person });
             }
-            let (bytes, count) = limits[rng.below(5)];
-            let limits = ImageLimits { bytes, count };
+            let (bytes, count, request) = limits[rng.below(5)];
+            let limits = ImageLimits {
+                bytes,
+                count,
+                request,
+            };
             let mut full = messages.clone();
             let cut = bound(&mut full, &origins, limits);
             // Counting changes nothing and agrees with the cut.
@@ -753,38 +833,55 @@ mod tests {
                 removed(&messages, &origins, limits),
                 cut.map_or(0, |cut| cut.removed)
             );
-            // Past the bytes only the person's own attachments of one turn
-            // stay; past the number of images, only their images.
-            let images = |messages: &[ProviderMessage]| {
-                messages
-                    .iter()
-                    .flat_map(|message| match message {
-                        ProviderMessage::Media { attachments, .. }
-                        | ProviderMessage::ToolResult { attachments, .. } => attachments.as_slice(),
-                        _ => &[],
-                    })
-                    .filter(|source| crate::attachments::is_image_source(source))
-                    .count()
-            };
-            let one_turn = |carries: &dyn Fn(&ProviderMessage) -> bool| {
-                let owners = full
-                    .iter()
-                    .zip(&origins)
-                    .filter(|(message, _)| carries(message))
-                    .map(|(_, origin)| *origin)
-                    .collect::<Vec<_>>();
+            // What is still sent, and where it came from.
+            let kept = full
+                .iter()
+                .zip(&origins)
+                .flat_map(|(message, origin)| match message {
+                    ProviderMessage::Media { attachments, .. }
+                    | ProviderMessage::ToolResult { attachments, .. } => attachments
+                        .iter()
+                        .map(|source| (source.as_str(), *origin))
+                        .collect(),
+                    _ => Vec::new(),
+                })
+                .collect::<Vec<_>>();
+            let image = |source: &&str| crate::attachments::is_image_source(source);
+            let size = |source: &str| crate::attachments::sent_bytes(source);
+            // Past the images' limits only the person's own images of one
+            // turn stay.
+            let images = kept.iter().filter(|(source, _)| image(source));
+            if images
+                .clone()
+                .map(|(source, _)| size(source))
+                .sum::<usize>()
+                > bytes
+                || count.is_some_and(|most| images.clone().count() > most)
+            {
+                let owners = images.map(|(_, origin)| *origin).collect::<Vec<_>>();
                 assert!(
                     owners
                         .iter()
                         .all(|origin| origin.person && origin.turn.is_some())
                 );
                 assert!(owners.windows(2).all(|pair| pair[0].turn == pair[1].turn));
-            };
-            if cut.is_some_and(|cut| cut.kept > bytes) {
-                one_turn(&|message| !sent(std::slice::from_ref(message)).is_empty());
             }
-            if count.is_some_and(|most| images(&full) > most) {
-                one_turn(&|message| images(std::slice::from_ref(message)) > 0);
+            // Past what the request carries, with the text up to the last
+            // attachment, only that turn's stay: the person's, and what
+            // else is not an image.
+            if let Some(last) = messages
+                .iter()
+                .rposition(|message| !sent(std::slice::from_ref(message)).is_empty())
+            {
+                let text = messages[..=last].iter().map(text_bytes).sum::<usize>();
+                if kept.iter().map(|(source, _)| size(source)).sum::<usize>() + text > request {
+                    let turn = origins[last].turn;
+                    assert!(turn.is_some());
+                    assert!(
+                        kept.iter().all(|(source, origin)| origin.turn == turn
+                            && (origin.person || !image(source)))
+                    );
+                }
             }
             for at in 1..messages.len() {
                 let mut prefix = messages[..at].to_vec();
@@ -854,40 +951,144 @@ mod tests {
         );
     }
 
+    /// The base64 of a PDF of 10, 15 and 19 MiB.
+    const PDF_10: usize = 13_981_016;
+    const PDF_15: usize = 20 * MIB;
+    const PDF_19: usize = 26_563_928;
+
+    /// The model reading `name`, a PDF whose base64 is `bytes` long.
+    fn read(name: &str, bytes: usize) -> [ProviderMessage; 2] {
+        [
+            ProviderMessage::ToolCall {
+                call_id: name.into(),
+                name: "read".into(),
+                arguments: serde_json::json!({ "path": name }),
+                provider_metadata: serde_json::Value::Null,
+            },
+            ProviderMessage::ToolResult {
+                call_id: name.into(),
+                name: "read".into(),
+                output: format!("PDF read successfully: {name}"),
+                is_error: false,
+                attachments: vec![file("application/pdf", name, bytes)],
+            },
+        ]
+    }
+
+    impl Chat {
+        fn reads(mut self, name: &str, bytes: usize) -> Self {
+            for message in read(name, bytes) {
+                self = self.add(message, false);
+            }
+            self
+        }
+    }
+
     #[test]
-    fn a_pdf_the_model_read_is_noted_beside_the_images() {
-        // A PDF read in an earlier turn, then screenshots in this one.
-        let report = ProviderMessage::ToolResult {
-            call_id: "read".into(),
-            name: "read".into(),
-            output: "PDF read successfully".into(),
-            is_error: false,
-            attachments: vec![file("application/pdf", "report.pdf", 16 * MIB)],
-        };
+    fn what_one_request_carried_before_is_sent_as_it_is() {
+        // The person attaches a 10 MiB PDF and the model reads another: 28
+        // MB, under Anthropic's 32.
+        let both = Chat::default()
+            .opens(attached(
+                "compare with b.pdf",
+                vec![file("application/pdf", "a.pdf", PDF_10)],
+            ))
+            .reads("b.pdf", PDF_10);
+        assert_eq!(both.bounded(ImageLimits::default()), ["a.pdf", "b.pdf"]);
+        // One 19 MiB PDF the model read: past the 25 MiB of images, but
+        // not past the request.
+        let large = Chat::default()
+            .opens(user("read b.pdf"))
+            .reads("b.pdf", PDF_19);
+        assert_eq!(large.bounded(ImageLimits::default()), ["b.pdf"]);
+        // Two 10 MiB PDFs in two turns.
+        let turns = Chat::default()
+            .opens(attached(
+                "read this",
+                vec![file("application/pdf", "a.pdf", PDF_10)],
+            ))
+            .opens(attached(
+                "and this",
+                vec![file("application/pdf", "b.pdf", PDF_10)],
+            ));
+        assert_eq!(turns.bounded(ImageLimits::default()), ["a.pdf", "b.pdf"]);
+    }
+
+    #[test]
+    fn what_the_model_read_in_this_turn_is_never_noted() {
+        // Two 15 MiB PDFs read in one turn pass the request: neither is
+        // noted, or the note would send the model to read it again. The
+        // provider's refusal is answered by compacting.
+        let mut chat = Chat::default()
+            .opens(user("read a.pdf and b.pdf"))
+            .reads("a.pdf", PDF_15)
+            .reads("b.pdf", PDF_15);
+        assert_eq!(
+            bound(&mut chat.messages, &chat.origins, ImageLimits::default()),
+            None
+        );
+        // Read again in a later turn, the earlier read goes and the new one
+        // stays.
+        let chat = Chat::default()
+            .opens(user("read a.pdf"))
+            .reads("a.pdf", PDF_15)
+            .opens(user("read b.pdf"))
+            .reads("b.pdf", PDF_15)
+            .opens(user("look at a.pdf again"))
+            .reads("a.pdf", PDF_15);
+        let (messages, origins) = (chat.messages.clone(), chat.origins.clone());
+        assert_eq!(chat.bounded(ImageLimits::default()), ["a.pdf"]);
+        assert_eq!(removed(&messages, &origins, ImageLimits::default()), 2);
+    }
+
+    #[test]
+    fn an_earlier_turns_pdf_goes_before_this_turns_screenshots() {
+        // A 15 MiB PDF read in an earlier turn, then screenshots in this
+        // one: 31.5 MB in all.
         let chat = Chat::default()
             .opens(user("read the report"))
-            .add(report, false)
+            .reads("report.pdf", PDF_15)
             .opens(user("now check the page"))
             .shots(&["s1", "s2"], 5 * MIB);
         assert_eq!(chat.bounded(ImageLimits::default()), ["s1", "s2"]);
-        // The other way round, the screenshots go before a newer PDF.
-        let mut chat = Chat::default()
+        // The other way round, the earlier screenshots go before a PDF.
+        let chat = Chat::default()
             .opens(user("check the page"))
             .shots(&["s1", "s2"], 5 * MIB)
-            .opens(user("read the report"));
-        chat = chat.add(
-            ProviderMessage::ToolResult {
-                call_id: "read".into(),
-                name: "read".into(),
-                output: "PDF read successfully".into(),
-                is_error: false,
-                attachments: vec![file("application/pdf", "report.pdf", 16 * MIB)],
-            },
-            false,
-        );
+            .opens(user("read the report"))
+            .reads("report.pdf", PDF_15);
         let (messages, origins) = (chat.messages.clone(), chat.origins.clone());
         assert_eq!(chat.bounded(ImageLimits::default()), ["report.pdf"]);
         assert_eq!(removed(&messages, &origins, ImageLimits::default()), 2);
+        // This turn's screenshots go too, oldest first, but never its PDF.
+        let chat = Chat::default()
+            .opens(user("read the report, then check the page"))
+            .reads("report.pdf", PDF_15)
+            .shots(&["s1", "s2", "s3"], 4 * MIB);
+        assert_eq!(chat.bounded(ImageLimits::default()), ["report.pdf", "s3"]);
+    }
+
+    #[test]
+    fn the_text_so_far_counts_toward_the_request() {
+        // Two 10 MiB PDFs fit beside a short chat, not beside 4 MB of text.
+        let long = "x".repeat(4_000_000);
+        let chat = Chat::default()
+            .opens(attached(
+                "read this",
+                vec![file("application/pdf", "a.pdf", PDF_10)],
+            ))
+            .add(
+                ProviderMessage::Text {
+                    role: "assistant".into(),
+                    content: long,
+                },
+                false,
+            )
+            .opens(attached(
+                "and this",
+                vec![file("application/pdf", "b.pdf", PDF_10)],
+            ));
+        assert_eq!(chat.bounded(ImageLimits::default()), ["b.pdf"]);
     }
 
     #[test]
