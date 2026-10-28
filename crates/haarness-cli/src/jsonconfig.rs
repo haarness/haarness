@@ -2987,6 +2987,92 @@ mod tests {
     }
 
     #[test]
+    fn instruction_files_named_by_a_project_or_a_link_never_bring_in_sign_ins() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-files-out-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let home = root.join("home");
+        let project = root.join("project");
+        let own = root.join("own");
+        for dir in [
+            config.clone(),
+            home.join(".st/data"),
+            home.join(".ssh"),
+            project.join(".git"),
+            own.join(".git"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let store = home.join(".st/data/auth.json");
+        let older = home.join(".st/auth.json");
+        fs::write(&store, "SIGN_IN_SECRET").unwrap();
+        fs::write(&older, "OLDER_SIGN_IN_SECRET").unwrap();
+        fs::write(home.join(".ssh/id_ed25519"), "KEY_SECRET").unwrap();
+        haarness_core::record_credential_store(store.clone(), false);
+        haarness_core::record_credential_store(older.clone(), false);
+        fs::write(config.join("AGENTS.md"), "GLOBAL_BODY").unwrap();
+        fs::write(
+            config.join("haarness.json"),
+            format!(
+                r#"{{"permission":{{"read":{{"{}/*":"deny","*AGENTS.md":"deny"}}}}}}"#,
+                home.join(".ssh").display()
+            ),
+        )
+        .unwrap();
+        // The project names a store and a key by `instructions`, and its
+        // AGENTS.md is a link to another store.
+        fs::write(
+            project.join("haarness.json"),
+            format!(
+                r#"{{"instructions":["~/.st/data/auth.json","~/.ssh/id_ed25519","{}"]}}"#,
+                store.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&older, project.join("AGENTS.md")).unwrap();
+        let layers = load_layers(&config, Some(&home), &project, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        for hidden in ["SIGN_IN_SECRET", "KEY_SECRET"] {
+            assert!(!instructions.contains(hidden), "{instructions}");
+        }
+        // The person's own file still loads, a read rule about it or not.
+        assert!(instructions.contains("GLOBAL_BODY"), "{instructions}");
+        assert!(
+            instructions.contains(&format!(
+                "[Instruction file omitted: {} (Haarness keeps sign-ins there)]",
+                store.display()
+            )),
+            "{instructions}"
+        );
+        assert!(
+            instructions.contains("(a read rule denies it)]"),
+            "{instructions}"
+        );
+        #[cfg(unix)]
+        assert!(
+            instructions.contains(&format!(
+                "[Instruction file omitted: {} (Haarness keeps sign-ins there)]",
+                project.join("AGENTS.md").display()
+            )),
+            "{instructions}"
+        );
+        // A project's own AGENTS.md loads as before under a read rule that
+        // covers it.
+        fs::write(own.join("AGENTS.md"), "OWN_PROJECT_BODY").unwrap();
+        let layers = load_layers(&config, Some(&home), &own, true, &[]);
+        assert!(
+            layers
+                .instructions
+                .expect("instructions")
+                .contains("OWN_PROJECT_BODY")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn remote_instruction_urls_hide_their_credentials_in_the_prompt_and_notices() {
         let root = std::env::temp_dir().join(format!(
             "haarness-instruction-credentials-{}",
