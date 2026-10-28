@@ -26,6 +26,7 @@ import { watchOpenImages } from "./ImageViewer";
 import { Icon } from "./ui";
 import { requestReview } from "./Review";
 import { Shimmer } from "./Shimmer";
+import { Literal } from "./Literal";
 import { useApp } from "./state";
 import { appsOff, loadMcpServers, mcpServersKnown, readOnlyServer, setApps } from "./mcp-servers";
 import { markSelection, selectedByClick, type SelectionMark } from "./selection-click";
@@ -274,7 +275,13 @@ export function ToolActivity(props: {
                         </Show>
                       </div>
                       <Show when={input().text}>
-                        <pre class="tool-input">{input().text}</pre>
+                        <pre class="tool-input">
+                          {/* A command reads as on its approval card: what
+                              would not show is a quiet code. */}
+                          <Show when={input().label === "Shell"} fallback={input().text}>
+                            <Literal text={input().text} />
+                          </Show>
+                        </pre>
                       </Show>
                       <Show
                         when={props.result}

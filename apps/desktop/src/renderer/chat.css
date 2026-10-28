@@ -2109,6 +2109,12 @@ html[dir="rtl"] .tool-target {
 .literal-code {
   color: var(--muted);
 }
+/* Where the text is muted already (a Shell panel's command, a request's
+   detail), its codes stay a step quieter still. */
+.tool-input .literal-code,
+.prompt-detail .literal-code {
+  color: var(--faint);
+}
 /* An explicit Chrome request names each site it asks for, one per line. */
 .prompt-subject.chrome-approval {
   list-style: none;

@@ -144,7 +144,7 @@ function humanTarget(record: Record<string, unknown> | undefined) {
   for (const key of humanFields) {
     const value = record?.[key];
     if (typeof value !== "string") continue;
-    const text = value.replace(/\s+/g, " ").trim();
+    const text = literalText(value).replace(/\s+/g, " ").trim();
     if (text && !opaqueId(text)) return text;
   }
   return "";
@@ -213,15 +213,15 @@ export function describeTool(name: string, args: unknown): ToolShape {
       ...known,
       target:
         typeof record.path === "string"
-          ? t("{pattern} in {path}", { pattern: record.pattern, path: record.path })
-          : record.pattern,
+          ? t("{pattern} in {path}", { pattern: literalText(record.pattern), path: literalText(record.path) })
+          : literalText(record.pattern),
     };
   if (name === "list" && ["", ".", "./"].includes(toolTarget(args)))
     // The root has no name of its own; "." would only make a reader pause.
     return { ...known, target: t("the project folder") };
   if (name === "apply_patch" && typeof record?.input === "string") {
     // The envelope is instructions for the tool; the reader wants the files.
-    const files = patchFiles(record.input).map((file) => file.path);
+    const files = patchFiles(record.input).map((file) => literalText(file.path));
     if (files.length)
       return {
         ...known,
@@ -232,10 +232,10 @@ export function describeTool(name: string, args: unknown): ToolShape {
   // A resource row names the resource it read, or the server it listed.
   if (name === "mcp_resource_read" || name === "mcp_resource_list") {
     const value = name === "mcp_resource_read" ? record?.uri : record?.server;
-    return { ...known, target: typeof value === "string" ? value.trim() : "" };
+    return { ...known, target: typeof value === "string" ? literalText(value.trim()) : "" };
   }
   if (name === "load_tool" && Array.isArray(record?.queries))
-    return { ...known, target: targetList(record.queries.filter((query): query is string => typeof query === "string")) };
+    return { ...known, target: targetList(record.queries.filter((query): query is string => typeof query === "string").map(literalText)) };
   if (known && !familyTools.has(name) && !["execute", "skill", "question", "todo", "todowrite", "todoread"].includes(name))
     return { ...known, target: humanTarget(record) };
   if (known) return { ...known, target: toolTarget(args) };
@@ -386,7 +386,7 @@ export function toolInput(name: string, args: unknown) {
     const directory = record?.workdir ?? record?.cwd;
     return {
       label: "Shell",
-      text: "$ " + literalText(command.trim()),
+      text: "$ " + command.trim(),
       context: typeof directory === "string" ? directory : "",
     };
   }

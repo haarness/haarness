@@ -42,6 +42,14 @@ async function pictures(name: string, target: Locator) {
   await page.evaluate(() => (window as any).haarness.preferences({ theme: "light" }));
 }
 
+/** Whether `element`'s codes are drawn in a quieter color than its text. */
+async function quietness(element: Locator) {
+  return element.evaluate((element) => {
+    const code = getComputedStyle(element.querySelector(".literal-code")!).color;
+    return { quieter: code !== getComputedStyle(element).color };
+  });
+}
+
 test.beforeAll(async () => {
   test.setTimeout(120000);
   root = await realpath(await mkdtemp(join(process.env.HAARNESS_E2E_DIR ?? tmpdir(), "haarness-tool-text-")));
@@ -151,6 +159,15 @@ test("an approval shows what is invisible in a command as quiet codes, right to 
   await page.getByRole("button", { name: "Deny", exact: true }).click();
   await idle();
   await expect(readFile(join(project, "ran.txt"), "utf8")).rejects.toThrow();
+  // Opened, its Shell panel draws the command the same way, the codes a
+  // step quieter than the muted command.
+  const denied = page.locator("details.tool-call").last();
+  await denied.locator("summary").click();
+  const input = denied.locator(".tool-input");
+  await expect(input).toHaveText("$ " + shown);
+  await expect(input.locator(".literal-code")).toHaveText(["\\u{202E}", "\\u{200B}", "\\u{D}"]);
+  expect(await quietness(input)).toEqual({ quieter: true });
+  await pictures("shell-panel", denied);
   const [thread] = await api("listThreads");
   const items = await api("listItems", thread.id);
   const call = items.filter((item: any) => item.data.type === "tool_call").at(-1);
