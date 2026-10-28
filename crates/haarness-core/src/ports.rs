@@ -800,6 +800,10 @@ pub trait ToolRegistry: Send + Sync {
     fn resource_servers(&self) -> Vec<String> {
         Vec::new()
     }
+    /// The MCP server that offers tool `name`, as its configuration names it.
+    fn tool_server(&self, _name: &str) -> Option<String> {
+        None
+    }
 
     /// Exact registrations win. Repair only unambiguous capitalization or the
     /// known function namespace; never guess spellings or choose by permission.
@@ -1032,6 +1036,17 @@ pub trait McpRegistry: Send + Sync {
     async fn disconnect(&self, name: &str) -> CoreResult<McpServerInfo>;
     async fn tools(&self, name: &str) -> CoreResult<Vec<ToolDefinition>>;
     async fn call(&self, name: &str, tool: &str, arguments: Value) -> CoreResult<ToolOutput>;
+    /// The server that offers tool `tool` (`mcp__<server>__<tool>`). By
+    /// default what comes before the first `__` after `mcp__`, for
+    /// registries that keep no map of their tools.
+    fn tool_server(&self, tool: &str) -> Option<String> {
+        let rest = tool.strip_prefix("mcp__")?;
+        Some(
+            rest.split_once("__")
+                .map_or(rest, |(server, _)| server)
+                .to_owned(),
+        )
+    }
     /// Connected servers that declare the resources capability, by name.
     /// The model's resource tools are offered only while there is one.
     fn resource_servers(&self) -> Vec<String> {

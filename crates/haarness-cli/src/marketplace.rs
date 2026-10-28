@@ -202,7 +202,7 @@ pub async fn service(
     let skills = std::sync::Arc::new(haarness_server::FilesystemSkillRegistry::new_scoped(
         crate::skill_roots(paths, workspace, trust, &config),
     ));
-    let mcp = crate::mcp_from_config(paths, &config).await;
+    let mcp = crate::mcp_from_config(paths, workspace, &config).await;
     Ok(crate::management::ManagementService::new(
         paths.clone(),
         workspace.to_path_buf(),

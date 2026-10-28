@@ -2170,6 +2170,17 @@ impl AgentRuntime {
         self.workspace.display().to_string()
     }
 
+    /// `tools`, a tool mask a workflow agent was given (its script may be
+    /// one the model wrote), with each key that names a tool as providers
+    /// were sent it under the tool's own name (see [`crate::wire_names`]).
+    #[must_use]
+    pub fn own_tool_names(&self, tools: HashMap<String, bool>) -> HashMap<String, bool> {
+        let definitions = self.components().tools.list();
+        let names =
+            crate::wire_names::WireNames::new(definitions.iter().map(|tool| tool.name.as_str()));
+        names.own_keys(tools).into_iter().collect()
+    }
+
     /// Authoritative catalog for clients. With a thread id, session-local
     /// promotions and that thread's provider context are reflected.
     pub async fn tool_catalog(
@@ -2211,7 +2222,7 @@ impl AgentRuntime {
         if let Some(mode) = *self.lazy_tool_mode.read() {
             lazy_tools.mode = mode;
         }
-        Ok(select_tools(
+        let mut response = select_tools(
             components.tools.list(),
             &components.config.tool_availability,
             &live,
@@ -2219,7 +2230,17 @@ impl AgentRuntime {
             &promoted,
             context_window,
         )
-        .response)
+        .response;
+        // The server a tool comes from, as it is named: `a__b`'s tools read
+        // `mcp__a__b__…`, which names it only up to its first `__`.
+        for entry in &mut response.tools {
+            if entry.source.starts_with("mcp:")
+                && let Some(server) = components.tools.tool_server(&entry.id)
+            {
+                entry.source = format!("mcp:{server}");
+            }
+        }
+        Ok(response)
     }
 
     /// Set or clear a live workspace override and durably persist the whole
@@ -3297,8 +3318,9 @@ impl AgentRuntime {
                 .map_or_else(HashSet::new, |entry| entry.value().clone());
             let selection = select_tools(
                 catalog
-                    .into_iter()
+                    .iter()
                     .filter(|tool| !engine.disables_tool(&tool.name) && !is_goal_tool(&tool.name))
+                    .cloned()
                     .collect(),
                 &components.config.tool_availability,
                 &self.tool_availability.read(),
@@ -3361,7 +3383,13 @@ impl AgentRuntime {
         // Return local refusals and allow a bounded text-only recovery; never
         // resolve a live executor or persist these synthetic exchanges.
         for attempt in 0..3 {
-            let mut stream = provider.stream(prepared.clone(), cancel.clone()).await?;
+            let mut stream = crate::wire_names::stream(
+                provider.as_ref(),
+                prepared.clone(),
+                &catalog,
+                cancel.clone(),
+            )
+            .await?;
             // An attempt after refused tool calls answers from scratch, so
             // whatever the previous one wrote before its calls is taken back.
             if attempt > 0 {
@@ -9148,6 +9176,13 @@ impl RunnerTask {
                         result = hooks.prepare_request(self.thread.id, &mut provider_request) => result?,
                     }
                 }
+                // The names this request gives its tools on the wire, from
+                // its tools, its history and the catalog they were chosen
+                // from; the model's calls are read back to the tools' own.
+                let wire_names = Arc::new(crate::wire_names::WireNames::for_request(
+                    &provider_request,
+                    || catalog.iter().map(|tool| tool.name.as_str()),
+                ));
                 self.prepared_prompts.lock().remember(
                     self.thread.id,
                     self.turn.id,
@@ -9203,9 +9238,10 @@ impl RunnerTask {
                     biased;
                     () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
                     result = provider
-                        .stream(provider_request, self.cancel.clone())
+                        .stream(wire_names.applied(provider_request), self.cancel.clone())
                         .instrument(provider_span.clone()) => result,
                 };
+                let stream_result = stream_result.map(|stream| wire_names.read_back(stream));
                 let stream_result = match lead {
                     Some(lead) => stream_result.map(|stream| lead.watch(stream)),
                     None => stream_result,
@@ -10525,6 +10561,15 @@ impl RunnerTask {
                     })
             })
             .collect::<CoreResult<Vec<_>>>()?;
+        // A tool the model names as providers were sent it is the tool it
+        // stands for (see `crate::wire_names`).
+        let definitions = self.tools.list();
+        let names =
+            crate::wire_names::WireNames::new(definitions.iter().map(|tool| tool.name.as_str()));
+        let queries: Vec<String> = queries
+            .iter()
+            .map(|query| names.own(query).to_owned())
+            .collect();
         let catalog = self
             .last_tool_catalog
             .lock()
@@ -10535,7 +10580,7 @@ impl RunnerTask {
                 "lazy tool loading is not active for this provider round".into(),
             ));
         }
-        let matched = search_deferred_tools(&self.tools.list(), &catalog, &queries);
+        let matched = search_deferred_tools(&definitions, &catalog, &queries);
         let loaded = self.promote_tools(matched);
         let value = load_tool_result(&loaded, &catalog);
         Ok(ToolOutput {
@@ -13205,7 +13250,7 @@ async fn generate_title(
     let cancel = CancellationToken::new();
     let _cancel = cancel.clone().drop_guard();
     let text = tokio::time::timeout(std::time::Duration::from_secs(300), async {
-        let mut stream = provider.stream(request, cancel).await?;
+        let mut stream = crate::wire_names::stream(provider.as_ref(), request, &[], cancel).await?;
         let mut title = String::new();
         while let Some(event) = stream.next().await {
             if let ProviderEvent::TextDelta(delta) = event? {
@@ -13624,7 +13669,7 @@ async fn summarize_context(
     let mut stream = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(CoreError::Cancelled),
-        result = provider.stream(request, cancel.clone()) => result?,
+        result = crate::wire_names::stream(provider.as_ref(), request, &[], cancel.clone()) => result?,
     };
     let mut text = String::new();
     let mut finished = false;

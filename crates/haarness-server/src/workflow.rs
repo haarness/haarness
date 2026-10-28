@@ -599,7 +599,7 @@ impl WorkflowRuntimeAdapter {
                     // Nested orchestration remains available, but only when
                     // the workflow author opts in with
                     // `tools: { workflow: true }` on that agent call.
-                    tools: Some(workflow_agent_tools(input.tools.as_ref())),
+                    tools: Some(runtime.own_tool_names(workflow_agent_tools(input.tools.as_ref()))),
                     command: None,
                     ..Default::default()
                 },
