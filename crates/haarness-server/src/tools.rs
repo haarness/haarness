@@ -3036,9 +3036,17 @@ impl Tool for BuiltinTool {
                 // workers, as glob's does: a large tree or a slow disk holds
                 // none of them, and Stop ends the call at once.
                 let workspace = context.workspace.clone();
+                let chat_home = context.execution.chat_home.clone();
                 let cancel = context.cancel.clone();
                 let walk = tokio::task::spawn_blocking(move || {
-                    text::grep_walk(&regex, &root, &workspace, &secrets, &cancel)
+                    text::grep_walk(
+                        &regex,
+                        &root,
+                        &workspace,
+                        chat_home.as_deref(),
+                        &secrets,
+                        &cancel,
+                    )
                 });
                 let found = tokio::select! {
                     () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
@@ -4821,6 +4829,18 @@ fn output_preview(text: &str) -> String {
         bytes += size;
     }
     preview.join("\n")
+}
+
+/// Whether `path` lies in the chat home `chat_home` (see
+/// [`haarness_core::ExecutionSettings::chat_home`]), whose searches read no
+/// ignore file from the folders above it.
+pub(crate) fn within_chat_home(path: &Path, chat_home: Option<&Path>) -> bool {
+    chat_home.is_some_and(|home| {
+        path.starts_with(home)
+            || path
+                .canonicalize()
+                .is_ok_and(|path| home.canonicalize().is_ok_and(|home| path.starts_with(home)))
+    })
 }
 
 pub(crate) fn tool_output_dir() -> PathBuf {

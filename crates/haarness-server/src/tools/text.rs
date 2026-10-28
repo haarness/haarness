@@ -347,10 +347,12 @@ impl GrepStop {
 /// every file is where it is named. A file that is not UTF-8 throughout is
 /// not searched (as before files were read a line at a time); a secret-named
 /// or denied file is counted, not read. Stop ends it between any two reads.
+/// Inside `chat_home` no ignore file above `root` is read.
 pub(super) fn grep_walk(
     regex: &regex::Regex,
     root: &Path,
     workspace: &Path,
+    chat_home: Option<&Path>,
     secrets: &super::SecretFilter,
     cancel: &CancellationToken,
 ) -> CoreResult<GrepFound> {
@@ -361,6 +363,7 @@ pub(super) fn grep_walk(
     };
     let walk = ignore::WalkBuilder::new(root)
         .standard_filters(true)
+        .parents(!super::within_chat_home(root, chat_home))
         .build()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()));
@@ -526,14 +529,58 @@ mod tests {
         let secrets = super::super::SecretFilter::new(&root, ".", &root, None);
         let regex = regex::Regex::new("hit").unwrap();
         let cancel = CancellationToken::new();
-        let found = grep_walk(&regex, &root, &root, &secrets, &cancel).unwrap();
+        let found = grep_walk(&regex, &root, &root, None, &secrets, &cancel).unwrap();
         assert_eq!(found.matches, vec!["utf8.txt:1:hit".to_owned()]);
         assert_eq!(found.stopped, None);
         cancel.cancel();
         assert!(matches!(
-            grep_walk(&regex, &root, &root, &secrets, &cancel),
+            grep_walk(&regex, &root, &root, None, &secrets, &cancel),
             Err(CoreError::Cancelled)
         ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The chat home under a repository whose `.gitignore` hides everything
+    /// (a home folder kept in Git): a chat's search still sees its files,
+    /// and its own ignore files still count. A folder that is not in the
+    /// chat home reads the ignore files above it, as ripgrep does.
+    #[test]
+    fn grep_in_the_chat_home_reads_no_ignore_file_above_it() {
+        let root = grep_fixture(&[(".gitignore", b"*\n")]);
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let home = root.join("Chat folders");
+        let chat = home.join("2026-10-28/chat-1a2b");
+        std::fs::create_dir_all(chat.join("notes")).unwrap();
+        std::fs::write(chat.join("plan.md"), "needle\n").unwrap();
+        std::fs::write(chat.join("notes/deep.md"), "needle\n").unwrap();
+        std::fs::write(chat.join("skipped.md"), "needle\n").unwrap();
+        std::fs::write(chat.join(".ignore"), "skipped.md\n").unwrap();
+        let regex = regex::Regex::new("needle").unwrap();
+        let search = |root: &Path, chat_home: Option<&Path>| {
+            let secrets = super::super::SecretFilter::new(&chat, ".", root, None);
+            let mut found = grep_walk(
+                &regex,
+                root,
+                &chat,
+                chat_home,
+                &secrets,
+                &CancellationToken::new(),
+            )
+            .unwrap()
+            .matches;
+            found.sort();
+            found
+        };
+        assert_eq!(
+            search(&chat, Some(&home)),
+            ["notes/deep.md:1:needle", "plan.md:1:needle"]
+        );
+        assert_eq!(
+            search(&chat.join("notes"), Some(&home)),
+            ["notes/deep.md:1:needle"]
+        );
+        // Anywhere else, as before.
+        assert!(search(&chat, None).is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -550,7 +597,15 @@ mod tests {
     fn grep(root: &Path, pattern: &str) -> GrepFound {
         let secrets = super::super::SecretFilter::new(root, ".", root, None);
         let regex = regex::Regex::new(pattern).unwrap();
-        grep_walk(&regex, root, root, &secrets, &CancellationToken::new()).unwrap()
+        grep_walk(
+            &regex,
+            root,
+            root,
+            None,
+            &secrets,
+            &CancellationToken::new(),
+        )
+        .unwrap()
     }
 
     #[test]
