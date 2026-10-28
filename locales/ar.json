@@ -2939,5 +2939,6 @@
   "On hold": "معلّق",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "الاستخدام الإضافي متوقف، لذا لا يُنفق الرصيد المشترى. فعّله من الفوترة.",
   "Your free trial didn't start: that card was already used for a trial.": "لم تبدأ تجربتك المجانية: سبق استخدام هذه البطاقة لتجربة.",
-  "The attachments come to {size}, over the {limit} limit for media in one message": "يبلغ حجم المرفقات {size}، وهو أكبر من حد {limit} للوسائط في الرسالة الواحدة"
+  "The attachments come to {size}, over the {limit} limit for media in one message": "يبلغ حجم المرفقات {size}، وهو أكبر من حد {limit} للوسائط في الرسالة الواحدة",
+  "its images and PDFs would take the message over the 20 MiB limit for media": "صوره وملفات PDF فيه ستتجاوز بالرسالة حد 20 MiB للوسائط"
 }
