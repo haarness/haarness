@@ -22,12 +22,14 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use futures::StreamExt as _;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
+use serde_json::Value;
+
 use crate::{
     CoreResult, ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest, ProviderStream,
+    ToolDefinition,
 };
 
 /// The longest tool name every provider takes.
@@ -231,14 +233,18 @@ impl WireNames {
 }
 
 /// Stream `request` from `provider` with its tool names on the wire as
-/// [`WireNames::for_request`] gives them (from the request alone), and the
+/// [`WireNames::for_request`] gives them for `catalog` (the tools of the
+/// chat's turns, so a side question names them as its turns do), and the
 /// calls that come back under the tools' own names.
 pub async fn stream(
     provider: &dyn ModelProvider,
     request: ProviderRequest,
+    catalog: &[ToolDefinition],
     cancel: CancellationToken,
 ) -> CoreResult<ProviderStream> {
-    let names = Arc::new(WireNames::for_request(&request, std::iter::empty));
+    let names = Arc::new(WireNames::for_request(&request, || {
+        catalog.iter().map(|tool| tool.name.as_str())
+    }));
     let stream = provider.stream(names.applied(request), cancel).await?;
     Ok(names.read_back(stream))
 }
@@ -316,8 +322,7 @@ fn hash(parts: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ToolDefinition;
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     fn tool(name: &str) -> ToolDefinition {
         ToolDefinition {
@@ -665,7 +670,7 @@ mod tests {
     async fn a_request_streamed_through_its_names_goes_out_and_comes_back_translated() {
         let provider = Recorder(std::sync::Mutex::default());
         let sent = request(&["mcp__Docs Server__files.read"], &["mcp__srv__what?"]);
-        let called: Vec<String> = stream(&provider, sent, CancellationToken::new())
+        let called: Vec<String> = stream(&provider, sent, &[], CancellationToken::new())
             .await
             .unwrap()
             .map(|event| match event.unwrap() {
