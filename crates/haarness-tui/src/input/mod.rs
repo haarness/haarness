@@ -1496,8 +1496,12 @@ pub(crate) fn unknown_slash_command(app: &App) -> Option<String> {
     (command_like && !app.is_known_command(text)).then(|| name.to_owned())
 }
 
-/// Complete the selected @-mention, when suggestions are showing.
-pub(crate) fn apply_mention(app: &mut App) -> bool {
+/// Complete the selected @-mention, when suggestions are showing. What the
+/// row is comes from the server's answer alone (a folder ends with `/`):
+/// nothing here looks at a disk, which may hold up the keyboard as long as a
+/// slow mount takes and, with a server on another computer, is not the disk
+/// the row is on.
+pub(crate) fn apply_mention(app: &mut App, client: &ApiClient) -> bool {
     if app.shown_mentions().is_empty() {
         return false;
     }
@@ -1512,6 +1516,16 @@ pub(crate) fn apply_mention(app: &mut App) -> bool {
         return true;
     }
     let end = start + 1 + query.len();
+    if path.ends_with('/') {
+        app.composer.replace_range(start, end, &format!("@{path}"));
+        app.mention_suggestions.clear();
+        app.selection = 0;
+        return true;
+    }
+    // A media file becomes an attachment the server reads from its own
+    // disk, where the file is. A client attached to a server sends the
+    // files it attaches from this computer instead, so there the mention
+    // stays text.
     let absolute = if let Some(rest) = path.strip_prefix("~/") {
         haarness_protocol::home_dir().map(|home| home.join(rest))
     } else if std::path::Path::new(&path).is_absolute() {
@@ -1522,19 +1536,12 @@ pub(crate) fn apply_mention(app: &mut App) -> bool {
             .and_then(|info| info.workspace.as_deref())
             .map(|workspace| std::path::Path::new(workspace).join(&path))
     };
-    if absolute.as_ref().is_some_and(|path| path.is_dir()) {
-        app.composer.replace_range(start, end, &format!("@{path}"));
-        app.mention_suggestions.clear();
-        app.selection = 0;
-        return true;
-    }
     if let Some(absolute) = absolute
-        && absolute.is_file()
+        && !client.uploads_attachments()
         && crate::media::mime_for_path(&absolute).is_some()
-        && let Ok(canonical) = absolute.canonicalize()
     {
         app.composer.replace_range(start, end, "");
-        let added = app.add_attachments(vec![canonical.display().to_string()]);
+        let added = app.add_attachments(vec![absolute.display().to_string()]);
         app.mention_suggestions.clear();
         app.selection = 0;
         if added > 0 {
@@ -1549,46 +1556,23 @@ pub(crate) fn apply_mention(app: &mut App) -> bool {
 }
 
 /// Query the server for @-mention completions matching the token under the
-/// cursor. Errors and missing endpoints degrade to no suggestions.
+/// cursor, off the key path while the event loop runs (see
+/// `crate::file_search`). Errors and missing endpoints degrade to no
+/// suggestions.
 pub(crate) async fn refresh_mentions(app: &mut App, client: &ApiClient) {
     if app.shell_mode || app.composer.text().starts_with('/') {
+        app.file_search.stop();
         app.mention_suggestions.clear();
         return;
     }
     match app.composer.mention_query() {
         Some((_, query)) => {
-            let (path, range) = crate::prompt_context::range(&query);
-            let mut suggestions = app
-                .agents
-                .iter()
-                .filter(|a| {
-                    !a.hidden
-                        && matches!(a.mode.as_deref(), Some("subagent" | "all"))
-                        && a.id
-                            .to_ascii_lowercase()
-                            .contains(&query.to_ascii_lowercase())
-                })
-                .take(8)
-                .map(|a| format!("agent://{}", a.id))
-                .collect::<Vec<_>>();
-            let files = client.search_files(path, 8).await.unwrap_or_default();
-            suggestions.extend(files.into_iter().map(|file| {
-                if let Some((start, end)) = range {
-                    format!("{file}:{start}-{end}")
-                } else {
-                    file
-                }
-            }));
-            // MCP resources follow agents and files, so a server with many
-            // never pushes files down; asked for the first time `@` opens.
-            suggestions.extend(crate::resource_mentions::suggestions(app, &query));
+            // Resources are asked for the first time `@` opens.
             app.ask_resources(client);
-            app.mention_suggestions = suggestions;
-            app.list_generation += 1;
-            app.selection = 0;
-            app.select_wanted();
+            crate::file_search::search(app, client, query).await;
         }
         None => {
+            app.file_search.stop();
             app.mention_suggestions.clear();
             app.mention_resources.want = None;
         }

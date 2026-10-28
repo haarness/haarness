@@ -479,6 +479,13 @@ impl App {
         if self.autocomplete_hidden || self.shell_mode || self.composer.text().starts_with('/') {
             return;
         }
+        // While the files of the query typed are on their way, the rows
+        // wait for them (they come with them): placed now, a row would sit
+        // where a file is about to go, and could take the highlight a
+        // returned pick wants for its own row.
+        if self.file_search.is_pending() {
+            return;
+        }
         let Some((_, query)) = self.composer.mention_query() else {
             return;
         };
@@ -1348,6 +1355,40 @@ mod tests {
             rows: vec![resource("docs", "docs://setup", "setup")],
         });
         assert_eq!(app.selection, 0);
+    }
+
+    /// Resource rows that come while the files of the query typed are on
+    /// their way wait for them, so a returned pick's row is still the one
+    /// highlighted, below a file of the same name.
+    #[tokio::test]
+    async fn resource_rows_wait_for_the_files_on_their_way() {
+        let mut app = app();
+        app.file_search.background = true;
+        let capable = info(vec![RESOURCE_MENTIONS_CAPABILITY.into()]);
+        app.server_info = Some(capable.clone());
+        let client = ApiClient::new(&answering(capable).await.0, "token").unwrap();
+        let asked = Instant::now();
+        app.mention_resources.asked = Some(asked);
+        app.mention_resources.want = Some(key("docs", "docs://setup"));
+        app.composer.set_text("Explain @setup".into());
+        crate::input::refresh_mentions(&mut app, &client).await;
+        assert!(app.file_search.is_pending());
+        app.resources_arrived(Update::Rows {
+            asked,
+            rows: vec![resource("docs", "docs://setup", "setup")],
+        });
+        assert!(app.mention_suggestions.is_empty());
+        assert!(app.mention_resources.want.is_some());
+
+        let (query, files) = tokio::time::timeout(Duration::from_secs(5), app.file_search.answer())
+            .await
+            .unwrap();
+        app.files_found(&query, files);
+        assert_eq!(app.mention_suggestions[0], "setup.md");
+        assert_eq!(
+            find(&app, &app.mention_suggestions[app.selection]).map(|row| row.uri.as_str()),
+            Some("docs://setup")
+        );
     }
 
     /// An Esc that hid one prompt's list does not hide the next one's: a

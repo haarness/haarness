@@ -369,6 +369,7 @@ pub(crate) fn display(text: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub(crate) async fn apply(app: &mut App, client: &ApiClient) -> Result<bool> {
+    crate::file_search::settle(app).await;
     let Some((start, query)) = app.composer.mention_query() else {
         return Ok(false);
     };
@@ -384,7 +385,7 @@ pub(crate) async fn apply(app: &mut App, client: &ApiClient) -> Result<bool> {
         || selected.starts_with("~/")
         || std::path::Path::new(&selected).is_absolute()
     {
-        return Ok(crate::input::apply_mention(app));
+        return Ok(crate::input::apply_mention(app, client));
     }
     let end = start + 1 + query.len();
     let (label, content) = if let Some(name) = selected.strip_prefix("agent://") {

@@ -458,6 +458,13 @@ impl ApiClient {
         self
     }
 
+    /// Whether this client sends the files it attaches itself, read from
+    /// this computer; otherwise the server reads an attached path from its
+    /// own disk.
+    pub(crate) fn uploads_attachments(&self) -> bool {
+        self.upload_attachments
+    }
+
     async fn attachments(&self, sources: Vec<String>) -> Result<Vec<String>> {
         if !self.upload_attachments {
             return Ok(sources);
