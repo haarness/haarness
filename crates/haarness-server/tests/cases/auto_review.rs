@@ -3,7 +3,7 @@
 //! The deterministic reviewer of the test providers answers here, picked by
 //! a `[review:<verdict>]` marker after the scripted call.
 use super::*;
-use haarness_core::{HookDecision, HookPort, PermissionDecision as D, PermissionRule};
+use haarness_core::{HookCall, HookDecision, HookPort, PermissionDecision as D, PermissionRule};
 use haarness_protocol::{
     ApprovalModeSetting, ItemData, PendingPermissionInfo, PermissionReply,
     PermissionReplyDecision as Reply, PermissionReviewStatus as Status, SetApprovalModeRequest,
@@ -599,25 +599,25 @@ async fn requests_only_a_person_answers_are_never_reviewed() {
 struct RefusesRequests;
 #[async_trait]
 impl HookPort for RefusesRequests {
-    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
         HookDecision::default()
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -629,7 +629,7 @@ impl HookPort for RefusesRequests {
             ..HookDecision::default()
         }
     }
-    async fn stop(&self, _: ThreadId) {}
+    async fn stop(&self, _: &HookCall) {}
 }
 
 #[tokio::test]
