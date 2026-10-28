@@ -472,6 +472,107 @@ async fn separate_deadlines_and_larger_payloads_are_configurable() {
     );
 }
 
+/// An MCP server still starting: its tool is listed once a turn's wait for
+/// it ends.
+struct Later(Arc<std::sync::Mutex<Vec<ToolDefinition>>>);
+impl ToolRegistry for Later {
+    fn get(&self, _name: &str) -> Option<Arc<dyn Tool>> {
+        None
+    }
+    fn list(&self) -> Vec<ToolDefinition> {
+        self.0.lock().unwrap().clone()
+    }
+    fn starting(&self) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> {
+        let tools = self.0.clone();
+        self.list().is_empty().then(|| {
+            Box::pin(async move {
+                tools.lock().unwrap().push(ToolDefinition {
+                    name: "mcp__docs__search".into(),
+                    description: "Search".into(),
+                    input_schema: json!({"type": "object"}),
+                });
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        })
+    }
+}
+
+/// An extension rewriting the description of the `Later` tool, after
+/// `delay` milliseconds.
+fn rewriter(delay: u64) -> (tempfile::TempDir, Config) {
+    fixture(&format!(
+        r"
+export default () => ({{
+  apiVersion: 1, name: 'fixture',
+  hooks: {{ async 'tool.definition'(input) {{
+    await Bun.sleep({delay});
+    if (input.toolID === 'mcp__docs__search') return {{description: 'Search the docs'}};
+  }} }}
+}});
+"
+    ))
+}
+
+/// A tool listed after composition (an MCP server's, once it has started in
+/// the background) gets the `tool.definition` rewrites before the first turn
+/// that is offered it.
+#[tokio::test]
+async fn tools_listed_after_composition_are_rewritten_before_a_turn_gets_them() {
+    let (root, config) = rewriter(0);
+    let extensions = Extensions::load(&config, root.path()).await.unwrap();
+    let tools = extensions
+        .wrap_tools(Arc::new(Later(Arc::default())))
+        .await
+        .unwrap();
+    assert!(tools.list().is_empty());
+    tools
+        .starting()
+        .expect("a turn waits for the tool still to come")
+        .await;
+    let listed = tools.list();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].description, "Search the docs");
+    assert!(tools.starting().is_none(), "the next turn waited again");
+}
+
+/// A turn stopped while the hooks run leaves them running: the extension is
+/// not stopped for a call given up on, and the tool is rewritten all the same.
+#[tokio::test]
+async fn a_turn_stopped_during_a_late_rewrite_leaves_it_to_finish() {
+    let (root, config) = rewriter(300);
+    let extensions = Extensions::load(&config, root.path()).await.unwrap();
+    let tools = extensions
+        .wrap_tools(Arc::new(Later(Arc::default())))
+        .await
+        .unwrap();
+    let stopped = tools.starting().expect("a turn waits for the tool");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), stopped)
+            .await
+            .is_err()
+    );
+    if let Some(next) = tools.starting() {
+        next.await;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while tools.list()[0].description != "Search the docs" {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the tool was never rewritten");
+    // The extension still answers.
+    let call = extensions
+        .hosts
+        .first()
+        .unwrap()
+        .hook(
+            "tool.definition",
+            json!({"toolID": "other", "description": "x", "parameters": {"type": "object"}}),
+        )
+        .await;
+    assert!(call.is_ok(), "{call:?}");
+}
+
 const LIFECYCLE: &str = r"
 import {appendFileSync, writeFileSync} from 'node:fs';
 export default (ctx) => {
@@ -842,7 +943,8 @@ fn combined_tools_name_the_mcp_server_of_a_tool() {
             tools: BTreeMap::new(),
             workspace: PathBuf::new(),
         }),
-        overrides: BTreeMap::new(),
+        overrides: Arc::default(),
+        defined: Arc::default(),
     };
     assert_eq!(
         combined.tool_server("mcp__a__b__d").as_deref(),

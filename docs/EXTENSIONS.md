@@ -238,10 +238,12 @@ Where each hook fires:
   `AI_AGENT` it sets is kept (see
   [Permissions and execution](PERMISSIONS-AND-EXECUTION.md#configure-execution-budgets)).
 - `tool.definition` runs once per tool when the registry is composed (startup
-  and hot reload), for native, MCP and extension tools known at that time.
-  Tools that appear later, such as lazily connected MCP servers, keep their
-  own definitions. Arguments are still validated against the tool's own
-  contract, so a rewritten schema must stay compatible with it.
+  and hot reload), for native, MCP and extension tools known at that time; an
+  error there keeps that configuration from loading. A tool listed later, such
+  as one of an MCP server that was still starting, gets the hook before the
+  next turn's first request, where an error only logs a warning and the tool
+  keeps its own definition. Arguments are still validated against the tool's
+  own contract, so a rewritten schema must stay compatible with it.
 - `config` runs once per loaded generation with a summary of the effective
   configuration; credentials are never included.
 
