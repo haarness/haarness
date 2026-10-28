@@ -1620,7 +1620,7 @@ fn canonical_directory(path: &Path) -> Result<PathBuf> {
 /// that was not registered (`HAARNESS_SCHEDULE_SKIP_INSTALL`, which a test
 /// may still start natively) registers nothing either.
 fn storage_environment() -> Vec<(&'static str, String)> {
-    [
+    let storage = [
         "HAARNESS_HOME",
         "HAARNESS_DATA_DIR",
         "HAARNESS_CLOUD_CONFIG_DIR",
@@ -1628,14 +1628,17 @@ fn storage_environment() -> Vec<(&'static str, String)> {
         "XDG_DATA_HOME",
         "XDG_CACHE_HOME",
         "XDG_STATE_HOME",
-        "HAARNESS_SCHEDULE_SKIP_INSTALL",
     ]
     .into_iter()
     .filter_map(|key| {
         let value = std::env::var_os(key)?.into_string().ok()?;
         (!value.is_empty()).then_some((key, value))
-    })
-    .collect()
+    });
+    // Set at all, even empty, it skips (see `discover`); `1` survives every
+    // backend, where Task Scheduler's `set` would drop an empty value.
+    let skip = std::env::var_os("HAARNESS_SCHEDULE_SKIP_INSTALL")
+        .map(|_| ("HAARNESS_SCHEDULE_SKIP_INSTALL", "1".to_owned()));
+    storage.chain(skip).collect()
 }
 
 fn describe_trigger(trigger: &Trigger) -> String {

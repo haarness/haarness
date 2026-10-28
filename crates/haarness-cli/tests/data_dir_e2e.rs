@@ -145,35 +145,38 @@ fn the_run_of_an_unregistered_schedule_registers_nothing_either() {
         fs::create_dir_all(root.join(folder)).unwrap();
     }
     let root = root.canonicalize().unwrap();
-    let output = haarness_with(
-        &root,
-        &[
-            "schedule",
-            "add",
-            "--name",
-            "fixture",
-            "--prompt",
-            "fixture",
-            "--model",
-            "echo/echo-1",
-            "--every",
-            "1h",
-        ],
-        &[("HAARNESS_SCHEDULE_SKIP_INSTALL", "1")],
-    );
-    assert!(output.status.success(), "{output:?}");
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let id = stdout.split_whitespace().next().unwrap();
-    let definition = if cfg!(target_os = "macos") {
-        format!("data/config/scheduler/launchd/dev.haarness.schedule.{id}.plist")
-    } else {
-        format!("data/config/scheduler/systemd/haarness-schedule-{id}.service")
-    };
-    let definition = fs::read_to_string(root.join(definition)).unwrap();
-    assert!(
-        definition.contains("HAARNESS_SCHEDULE_SKIP_INSTALL"),
-        "{definition}"
-    );
+    // Set at all, even empty, the variable skips registering.
+    for (name, skip) in [("fixture", "1"), ("empty", "")] {
+        let output = haarness_with(
+            &root,
+            &[
+                "schedule",
+                "add",
+                "--name",
+                name,
+                "--prompt",
+                "fixture",
+                "--model",
+                "echo/echo-1",
+                "--every",
+                "1h",
+            ],
+            &[("HAARNESS_SCHEDULE_SKIP_INSTALL", skip)],
+        );
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let id = stdout.split_whitespace().next().unwrap();
+        let definition = if cfg!(target_os = "macos") {
+            format!("data/config/scheduler/launchd/dev.haarness.schedule.{id}.plist")
+        } else {
+            format!("data/config/scheduler/systemd/haarness-schedule-{id}.service")
+        };
+        let definition = fs::read_to_string(root.join(definition)).unwrap();
+        assert!(
+            definition.contains("HAARNESS_SCHEDULE_SKIP_INSTALL"),
+            "{name}: {definition}"
+        );
+    }
     for folder in ["home/Library/LaunchAgents", "home/.config/systemd"] {
         assert!(!root.join(folder).exists(), "{folder}");
     }

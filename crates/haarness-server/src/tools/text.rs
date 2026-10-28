@@ -523,43 +523,41 @@ fn chat_folder_above(root: &Path, chat: &Path) -> Option<std::path::PathBuf> {
 
 /// In the chat home, the ignore files of the folders from a chat's own
 /// folder down to a subfolder it names although they leave the subfolder
-/// out (see [`grep_files`]), read as a walk reads its parents': their
-/// `.ignore` files always, and their `.gitignore` and Git excludes when a
-/// repository holds them (up to the nearest repository's own folder). The
-/// subfolder's own ignore files and those below it are the walk's; no
+/// out (see [`grep_files`]), weighed as a walk weighs its parents': for each
+/// kind the nearest folder's line decides, `.ignore` files always count,
+/// and `.gitignore` files and Git excludes when a repository holds them (up
+/// to the nearest repository's own folder). The walk of the subfolder
+/// reads its own folders' files and leaves out what they leave out; a `!`
+/// line among them still takes a file back from the folders above. No
 /// folder above the chat's own counts.
 struct ChatFolderIgnores {
     /// The searched folder, canonical: walked paths are matched under it.
     root: std::path::PathBuf,
-    /// Each folder's matchers, the nearest folder first.
-    ignore: Vec<ignore::gitignore::Gitignore>,
-    git_ignore: Vec<ignore::gitignore::Gitignore>,
-    git_exclude: Vec<ignore::gitignore::Gitignore>,
+    /// The folders from the searched one's parent up to the chat's own,
+    /// the nearest first.
+    above: Vec<FolderRules>,
+    /// Whether a repository holds the searched folder (its own `.git`, or
+    /// one above it), so `.gitignore` files count.
+    in_repository: bool,
+    /// The searched folder's own and those in it, read as the walk meets
+    /// them.
+    below: std::sync::Mutex<
+        std::collections::HashMap<std::path::PathBuf, std::sync::Arc<FolderRules>>,
+    >,
 }
 
-impl ChatFolderIgnores {
-    /// Those of the folders from `chat` down to `root`, `root` itself not
-    /// included; none when `root` is `chat`, a file, or outside it.
-    fn between(chat: &Path, root: &Path) -> Option<Self> {
-        let chat = chat.canonicalize().ok()?;
-        let root = root.canonicalize().ok()?;
-        if root == chat || !root.is_dir() || !root.starts_with(&chat) {
-            return None;
-        }
-        let folders = root
-            .ancestors()
-            .skip(1)
-            .take_while(|folder| folder.starts_with(&chat))
-            .collect::<Vec<_>>();
-        // Their `.gitignore` files count when a repository above the searched
-        // folder holds it, as the walk's own below it then do; not when the
-        // searched folder is a repository of its own.
-        let in_repository = !root.join(".git").exists()
-            && root
-                .ancestors()
-                .skip(1)
-                .any(|folder| folder.join(".git").exists());
-        let matcher = |folder: &Path, file: &str| {
+/// One folder's ignore files.
+struct FolderRules {
+    ignore: Option<ignore::gitignore::Gitignore>,
+    git_ignore: Option<ignore::gitignore::Gitignore>,
+    git_exclude: Option<ignore::gitignore::Gitignore>,
+    /// Whether the folder is a repository's own (holds `.git`).
+    repository: bool,
+}
+
+impl FolderRules {
+    fn read(folder: &Path) -> Self {
+        let matcher = |file: &str| {
             let path = folder.join(file);
             path.is_file().then(|| {
                 let mut builder = ignore::gitignore::GitignoreBuilder::new(folder);
@@ -570,29 +568,53 @@ impl ChatFolderIgnores {
                     .unwrap_or_else(|_| ignore::gitignore::Gitignore::empty())
             })
         };
-        let mut found = Self {
-            ignore: Vec::new(),
-            git_ignore: Vec::new(),
-            git_exclude: Vec::new(),
-            root: root.clone(),
-        };
-        let mut past_repository = false;
-        for folder in folders {
-            found.ignore.extend(matcher(folder, ".ignore"));
-            if in_repository && !past_repository {
-                found.git_ignore.extend(matcher(folder, ".gitignore"));
-                found
-                    .git_exclude
-                    .extend(matcher(folder, ".git/info/exclude"));
-            }
-            past_repository |= folder.join(".git").exists();
+        Self {
+            ignore: matcher(".ignore"),
+            git_ignore: matcher(".gitignore"),
+            git_exclude: matcher(".git/info/exclude"),
+            repository: folder.join(".git").exists(),
         }
-        Some(found)
+    }
+}
+
+impl ChatFolderIgnores {
+    /// Those of the folders from `chat` down to `root`; none when `root` is
+    /// `chat`, a file, or outside it.
+    fn between(chat: &Path, root: &Path) -> Option<Self> {
+        let chat = chat.canonicalize().ok()?;
+        let root = root.canonicalize().ok()?;
+        if root == chat || !root.is_dir() || !root.starts_with(&chat) {
+            return None;
+        }
+        let above = root
+            .ancestors()
+            .skip(1)
+            .take_while(|folder| folder.starts_with(&chat))
+            .map(FolderRules::read)
+            .collect();
+        let in_repository = root.ancestors().any(|folder| folder.join(".git").exists());
+        Some(Self {
+            root,
+            above,
+            in_repository,
+            below: std::sync::Mutex::default(),
+        })
     }
 
-    /// Whether these leave `entry` (of a walk of `walked`) out: the nearest
-    /// folder's line decides, and `.ignore` before `.gitignore` before the
-    /// excludes, as a walk weighs them.
+    fn below(&self, folder: &Path) -> std::sync::Arc<FolderRules> {
+        let mut below = self
+            .below
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::sync::Arc::clone(
+            below
+                .entry(folder.to_path_buf())
+                .or_insert_with(|| std::sync::Arc::new(FolderRules::read(folder))),
+        )
+    }
+
+    /// Whether the folders from `entry`'s own (of a walk of `walked`) up to
+    /// the chat's leave it out.
     fn leave_out(&self, walked: &Path, entry: &ignore::DirEntry) -> bool {
         if entry.depth() == 0 {
             return false;
@@ -602,17 +624,33 @@ impl ChatFolderIgnores {
         };
         let path = self.root.join(relative);
         let folder = entry.file_type().is_some_and(|kind| kind.is_dir());
-        let first = |matchers: &[ignore::gitignore::Gitignore]| {
-            matchers
-                .iter()
-                .map(|matcher| matcher.matched(&path, folder).map(|_| ()))
-                .find(|found| !found.is_none())
-                .unwrap_or(ignore::Match::None)
+        let own = path
+            .ancestors()
+            .skip(1)
+            .take_while(|parent| parent.starts_with(&self.root))
+            .map(|parent| self.below(parent))
+            .collect::<Vec<_>>();
+        let in_repository = self.in_repository || own.iter().any(|rules| rules.repository);
+        let matched = |matcher: &Option<ignore::gitignore::Gitignore>| {
+            matcher.as_ref().map_or(ignore::Match::None, |matcher| {
+                matcher.matched(&path, folder).map(|_| ())
+            })
         };
-        first(&self.ignore)
-            .or(first(&self.git_ignore))
-            .or(first(&self.git_exclude))
-            .is_ignore()
+        let (mut ignore, mut git_ignore, mut git_exclude) = (
+            ignore::Match::None,
+            ignore::Match::None,
+            ignore::Match::None,
+        );
+        let mut past_repository = false;
+        for rules in own.iter().map(|rules| &**rules).chain(&self.above) {
+            ignore = ignore.or(matched(&rules.ignore));
+            if in_repository && !past_repository {
+                git_ignore = git_ignore.or(matched(&rules.git_ignore));
+                git_exclude = git_exclude.or(matched(&rules.git_exclude));
+            }
+            past_repository |= rules.repository;
+        }
+        ignore.or(git_ignore).or(git_exclude).is_ignore()
     }
 }
 
@@ -705,6 +743,7 @@ mod tests {
 
     /// Every match of `needle` under `root`, sorted, for a chat working in
     /// `chat` (in the chat home `chat_home`, when there is one).
+    #[cfg(unix)]
     fn chat_grep(root: &Path, chat: &Path, chat_home: Option<&Path>) -> Vec<String> {
         let secrets = super::super::SecretFilter::new(chat, ".", root, None);
         let regex = regex::Regex::new("needle").unwrap();
@@ -830,6 +869,23 @@ mod tests {
         assert_eq!(
             chat_grep(&chat.join("sub/lib"), &chat, Some(&home)),
             ["sub/lib/x.log:1:needle"]
+        );
+        // A folder named although hidden on the way down: a `!` line in it
+        // still takes a file back from the chat's `.gitignore`, and a
+        // repository nested in it reads none of the chat's lines.
+        let inner = chat.join(".hidden/inner");
+        std::fs::create_dir_all(inner.join("lib/.git")).unwrap();
+        std::fs::write(inner.join(".gitignore"), "!h3.log\n").unwrap();
+        for file in ["h3.log", "other.log", "ok.txt", "lib/y.log"] {
+            std::fs::write(inner.join(file), "needle\n").unwrap();
+        }
+        assert_eq!(
+            chat_grep(&inner, &chat, Some(&home)),
+            [
+                ".hidden/inner/h3.log:1:needle",
+                ".hidden/inner/lib/y.log:1:needle",
+                ".hidden/inner/ok.txt:1:needle",
+            ]
         );
         std::fs::remove_dir_all(root).unwrap();
     }
