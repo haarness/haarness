@@ -5,6 +5,8 @@ import { spelledOutParts, spelledOutText, turnsDirection, withoutEscapes } from 
 import { describeTool, resultText, toolInput, toolTarget, toolTitle } from "../src/renderer/transcript";
 import { findConversationMessages } from "../src/renderer/conversation-history";
 import { agentTaskError, type AgentTask } from "../src/renderer/agent-tasks";
+import { followRun } from "../src/renderer/command-result";
+import type { WorkflowRun } from "@haarness/sdk";
 
 test("colours, titles and cursor moves leave only their text", () => {
   for (const [raw, shown] of [
@@ -173,4 +175,18 @@ test("every kind of row target shows what would not show as a code", () => {
   // Ordinary targets read as before.
   assert.equal(target("grep", { pattern: "TODO", path: "src" }), "TODO in src");
   assert.equal(target("websearch", { query: "مرحبا بالعالم" }), "مرحبا بالعالم");
+});
+
+test("a failed workflow's error reads without the escape sequences its program wrote", () => {
+  const run = {
+    id: "0190-run",
+    workflowName: "nightly",
+    status: "failed",
+    error: "child stderr: \u001b[31merror:\u001b[0m lint failed\u001b]0;runner\u0007\n",
+    time: { created: "2026-10-28T00:00:00Z", updated: "2026-10-28T00:00:01Z" },
+  } as unknown as WorkflowRun;
+  assert.equal(
+    followRun({ title: "/nightly", text: "", run: run.id }, run).text,
+    "Workflow nightly failed.\nchild stderr: error: lint failed\nRun ID: 0190-run",
+  );
 });
