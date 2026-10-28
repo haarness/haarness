@@ -635,9 +635,10 @@ const REFERENCE_FILE_LIMIT: usize = 20;
 const REFERENCE_FILE_BYTES: usize = 128 * 1024;
 const REFERENCE_DIR_ENTRIES: usize = 200;
 
-/// [`expand_references`] on a blocking thread: a path it reads may be on a
-/// network mount that does not answer, or a pipe nothing writes to, and
-/// either holds the call that looks at it.
+/// [`expand_references`] on a blocking thread: a path it reads may be on an
+/// offline network volume, or a pipe nothing writes to, and either holds the
+/// call that looks at it. Stop ends the wait (`!` snippets run before, as
+/// tool calls of their own, and end as those do).
 async fn expand_references_aside(
     text: String,
     invoker: &dyn crate::ToolInvoker,
@@ -648,9 +649,14 @@ async fn expand_references_aside(
     let workspace = invoker.workspace();
     let agents = invoker.delegable_agents();
     let rules = invoker.read_rules();
-    tokio::task::spawn_blocking(move || expand_references(&text, workspace, &agents, rules))
-        .await
-        .map_err(|error| CoreError::Tool(error.to_string()))
+    let stop = invoker.stop_token().unwrap_or_default();
+    let expanding =
+        tokio::task::spawn_blocking(move || expand_references(&text, workspace, &agents, rules));
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => Err(CoreError::Cancelled),
+        expanded = expanding => expanded.map_err(|error| CoreError::Tool(error.to_string())),
+    }
 }
 
 /// `@path` tokens in a prepared template become bounded snapshots of
@@ -1527,8 +1533,8 @@ mod tests {
     }
 
     /// A `@` reference to a pipe nothing writes to holds the read that
-    /// looks at it, as a file on a network mount that does not answer does;
-    /// the turn's async worker stays free meanwhile.
+    /// looks at it, as a file on an offline network volume does; the turn's
+    /// async worker stays free meanwhile.
     #[cfg(unix)]
     #[test]
     fn a_reference_that_hangs_holds_no_async_worker() {
@@ -1586,6 +1592,68 @@ mod tests {
         preparing.join().unwrap();
         let text = text.expect("the reference held the async worker").unwrap();
         assert!(text.contains("WRITTEN_MEANWHILE"), "{text}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An invoker in a turn that `stop` stops.
+    struct InTurn {
+        workspace: PathBuf,
+        stop: tokio_util::sync::CancellationToken,
+    }
+    #[async_trait::async_trait]
+    impl crate::ToolInvoker for InTurn {
+        fn workspace(&self) -> Option<String> {
+            Some(self.workspace.display().to_string())
+        }
+        fn stop_token(&self) -> Option<tokio_util::sync::CancellationToken> {
+            Some(self.stop.clone())
+        }
+        async fn invoke(&self, _: &str, _: Value) -> CoreResult<crate::ToolOutput> {
+            Err(CoreError::Tool("unused".into()))
+        }
+        fn side_effectful_for(&self, _: &str, _: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+    }
+
+    /// Stop ends a command whose `@` reference holds its read.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_ends_a_command_whose_reference_hangs() {
+        let root = std::env::temp_dir().join(format!("haarness-refs-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pipe = root.join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&pipe)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let invoker = InTurn {
+            workspace: root.clone(),
+            stop: tokio_util::sync::CancellationToken::new(),
+        };
+        let stop = invoker.stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            stop.cancel();
+        });
+        let stopped = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            prepare(
+                "Read @pipe",
+                "",
+                &DefinitionExecution::default(),
+                "s",
+                &invoker,
+            ),
+        )
+        .await;
+        // Let the read go before checking, so a failure cannot leave it.
+        std::fs::write(&pipe, "late").unwrap();
+        let stopped = stopped.expect("Stop did not end the command");
+        assert!(matches!(stopped, Err(CoreError::Cancelled)), "{stopped:?}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
