@@ -200,6 +200,28 @@ pub struct Scheduler {
     environment: Vec<(&'static str, String)>,
 }
 
+/// Where launchd and systemd definitions are written. Ones that are never
+/// registered (`HAARNESS_SCHEDULE_SKIP_INSTALL`) stay in Haarness's own
+/// configuration folder: launchd and systemd read their own folders by
+/// themselves, at the next login or reload.
+fn native_folders(
+    install: bool,
+    config: &Path,
+    home: &Path,
+    xdg_config: Option<PathBuf>,
+) -> (PathBuf, PathBuf) {
+    if !install {
+        return (
+            config.join("scheduler/launchd"),
+            config.join("scheduler/systemd"),
+        );
+    }
+    let systemd = xdg_config
+        .unwrap_or_else(|| home.join(".config"))
+        .join("systemd/user");
+    (home.join("Library/LaunchAgents"), systemd)
+}
+
 impl Scheduler {
     pub fn discover(executable: PathBuf, data_root: Option<PathBuf>) -> Result<Self> {
         let project = ProjectDirs::from("dev", "haarness", "haarness")
@@ -218,22 +240,25 @@ impl Scheduler {
                 project.data_local_dir().to_path_buf(),
             ),
         };
-        let systemd = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| base.home_dir().join(".config"))
-            .join("systemd/user");
+        let install = std::env::var_os("HAARNESS_SCHEDULE_SKIP_INSTALL").is_none();
+        let (launchd, systemd) = native_folders(
+            install,
+            &config,
+            base.home_dir(),
+            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+        );
         Ok(Self {
             paths: SchedulerPaths {
                 windows: config.join("scheduler/tasks"),
                 config,
                 state,
-                launchd: base.home_dir().join("Library/LaunchAgents"),
+                launchd,
                 systemd,
             },
             executable,
             data_root,
             backend: Backend::current()?,
-            install: std::env::var_os("HAARNESS_SCHEDULE_SKIP_INSTALL").is_none(),
+            install,
             environment: storage_environment(),
         })
     }
@@ -1813,6 +1838,32 @@ mod tests {
                 false,
             ),
         )
+    }
+
+    /// Definitions a test writes without registering them never land where
+    /// launchd or systemd would find them by themselves.
+    #[test]
+    fn unregistered_definitions_stay_in_haarness_s_own_folder() {
+        let config = Path::new("/isolated/config");
+        let home = Path::new("/Users/person");
+        assert_eq!(
+            native_folders(false, config, home, None),
+            (
+                config.join("scheduler/launchd"),
+                config.join("scheduler/systemd")
+            )
+        );
+        assert_eq!(
+            native_folders(true, config, home, None),
+            (
+                home.join("Library/LaunchAgents"),
+                home.join(".config/systemd/user")
+            )
+        );
+        assert_eq!(
+            native_folders(true, config, home, Some(PathBuf::from("/xdg"))).1,
+            Path::new("/xdg/systemd/user")
+        );
     }
 
     #[test]
