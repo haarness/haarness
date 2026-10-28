@@ -1780,6 +1780,7 @@
   "{count} more lines": "ещё {count} строк",
   "rejected": "отклонено",
   "Approvals changed in another window · ctrl+y to switch": "Разрешения изменены в другом окне · ctrl+y для переключения",
+  "Could not keep {mode}": "Не удалось сохранить режим «{mode}»",
   "Share usage statistics": "Делиться статистикой использования",
   "Diagnostics": "Диагностика",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "Журналы Haarness с этого компьютера в zip-архиве, без известных секретов — чтобы поделиться, если что-то пошло не так.",

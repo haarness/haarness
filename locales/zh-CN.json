@@ -1780,6 +1780,7 @@
   "{count} more lines": "还有 {count} 行",
   "rejected": "已拒绝",
   "Approvals changed in another window · ctrl+y to switch": "批准方式已在另一个窗口中更改 · ctrl+y 切换",
+  "Could not keep {mode}": "无法保留“{mode}”模式",
   "Share usage statistics": "共享使用统计",
   "Diagnostics": "诊断",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "将这台电脑上的 Haarness 日志打包为 zip，已移除已知的密钥，出现问题时可以分享。",

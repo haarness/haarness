@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Real Haarness server + real OpenTUI in tmux: Auto/Review/Yolo permission
 lifecycle, the approval card at several terminal sizes, the --auto, --approvals and
---yolo flags, and the mode a chat with no setting of its own starts in (Review when
+--yolo flags, the mode a chat with no setting of its own starts in (Review when
 the person's configuration says so, whatever the project says; Auto when no file
-sets it).
+sets it), and the mode /new and /archive hand to the chat they open.
 
 HAARNESS_E2E_FRAMES names a folder for captured frames (ANSI and text);
 by default they land beside the other evidence."""
@@ -122,6 +122,14 @@ def proof(file, expected, folder=workspace):
 def check(label):
     checks.append(label)
     print('PASS '+label, flush=True)
+
+def opened_by(text):
+    """Run /new or /archive in the TUI and answer the chat it opened."""
+    before={item['id'] for item in api('/v1/threads')}
+    command(text)
+    until(lambda:{item['id'] for item in api('/v1/threads')}-before,text+' opened no chat')
+    (opened,)={item['id'] for item in api('/v1/threads')}-before
+    return opened
 
 try:
     endpoint = connect()
@@ -276,6 +284,13 @@ try:
     proof('client-yolo.txt','client-yolo-proof')
     assert api('/v1/threads/'+plain+'/approval-mode')['mode']=='review'
     check('--yolo still answers for this TUI only and leaves the chat in Review')
+    # That Review comes from the person's configuration, not from a choice, so
+    # the chat /new opens is left to follow the configuration too.
+    opened=opened_by('/new')
+    time.sleep(1)
+    mode=api('/v1/threads/'+opened+'/approval-mode')
+    assert mode['mode']=='review' and not mode['explicit'], mode
+    check('/new from a chat in the configured Review leaves the new chat to the configuration')
 
     # A long command is read in full on the card, at every size, while its
     # answers stay on screen; under 12 rows the card shrinks to one line.
@@ -376,6 +391,38 @@ try:
     assert plain.returncode==0, plain.stderr
     proof('unset-run.txt','unset-run-proof',unset)
     check('a plain haarness run there gets its ask answered by the reviewer instead of refused')
+
+    # Here the default is Auto, so a Review the person picks is the mode a
+    # chat opened in its place could lose: /new and /archive hand it on, as
+    # they hand on Yolo.
+    assert api('/v1/info')['defaultApprovalMode']=='auto'
+    command('/approvals review')
+    until(lambda:api('/v1/threads/'+fresh+'/approval-mode')['mode']=='review','/approvals review did not set Review')
+    opened=opened_by('/new')
+    until(lambda:api('/v1/threads/'+opened+'/approval-mode')['mode']=='review','/new did not keep the Review chosen for the chat it replaced')
+    assert api('/v1/threads/'+opened+'/approval-mode')['explicit']
+    until(lambda:'approvals: review' in capture().split('\n')[-2],'the TUI does not show the new chat in Review')
+    check('/new keeps a Review the person chose where the default is Auto')
+    replaced=opened
+    opened=opened_by('/archive')
+    until(lambda:api('/v1/threads/'+opened+'/approval-mode')['mode']=='review','/archive did not keep the Review of the chat it archived')
+    assert replaced not in {item['id'] for item in api('/v1/threads')}
+    command('/approvals yolo')
+    until(lambda:api('/v1/threads/'+opened+'/approval-mode')['mode']=='yolo','/approvals yolo did not set Yolo')
+    opened=opened_by('/archive')
+    until(lambda:api('/v1/threads/'+opened+'/approval-mode')['mode']=='yolo','/archive did not keep the Yolo of the chat it archived')
+    until(lambda:'approvals: yolo' in capture(),'the TUI does not show the new chat in Yolo')
+    save('archive-keeps-yolo')
+    check('/archive opens the next chat in the archived chat\'s Review or Yolo')
+    # Another client clears that chat's own setting: its Auto now comes from
+    # the default alone, so the chat /archive opens is left to the default.
+    api('/v1/threads/'+opened+'/approval-mode',{'mode':'inherit'},'PUT')
+    until(lambda:'approvals: yolo' not in capture() and ' auto ' in capture().split('\n')[-2],'the TUI did not follow the cleared setting')
+    opened=opened_by('/archive')
+    time.sleep(1)
+    mode=api('/v1/threads/'+opened+'/approval-mode')
+    assert mode['mode']=='auto' and not mode['explicit'], mode
+    check('/archive from a chat with no setting of its own leaves the new chat to the default')
     print(f'{len(checks)} real-server TUI scenarios passed.',flush=True)
     (root/'tui.txt').write_text(capture())
 finally:
