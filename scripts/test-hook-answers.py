@@ -14,7 +14,9 @@
 - Matchers: `/hooks` in the TUI marks a SessionEnd hook for `clear` as never running.
 - After a tool ran: a PostToolUse hook that exits 2 cannot undo the call; its stderr follows the
   tool's result, reaches the model in the next request (a mock server records it) and shows in the
-  TUI. A person's rejected `!` command runs PostToolUseFailure hooks, told that event's name.
+  TUI. A person's rejected `!` command runs PostToolUseFailure hooks, told that event's name. So does a
+  tool that fails in the model's turn: the hook is told the error, and its exit-2 stderr follows that
+  error, which stays an error, and reaches the model in the next request.
 Every daemon runs on isolated data under one temporary root and is stopped at the end.
 """
 import json, os, pathlib, shlex, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request, uuid
@@ -106,7 +108,8 @@ class Chat:
 
 class Mock(BaseHTTPRequestHandler):
     """An OpenAI-compatible server: `limited` answers 429; `thinker` streams its reasoning in
-    `reasoning`, then lists the folder, and answers once the listing comes back."""
+    `reasoning`, then lists the folder, and answers once the listing comes back; `linter` runs a
+    command and `reader` reads a file that is not there."""
 
     def log_message(self, *args):
         pass
@@ -120,7 +123,7 @@ class Mock(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        self.reply(200, json.dumps({'data': [{'id': 'thinker'}, {'id': 'limited'}, {'id': 'linter'}]}))
+        self.reply(200, json.dumps({'data': [{'id': 'thinker'}, {'id': 'limited'}, {'id': 'linter'}, {'id': 'reader'}]}))
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
@@ -132,6 +135,10 @@ class Mock(BaseHTTPRequestHandler):
         elif body['model'] == 'linter':
             chunks = [{'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'call_lint', 'function': {
                           'name': 'bash', 'arguments': json.dumps({'command': 'echo lint-me'})}}]}}]},
+                      {'choices': [{'delta': {}, 'finish_reason': 'tool_calls'}]}]
+        elif body['model'] == 'reader':
+            chunks = [{'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'call_read', 'function': {
+                          'name': 'read', 'arguments': json.dumps({'path': 'missing.txt'})}}]}}]},
                       {'choices': [{'delta': {}, 'finish_reason': 'tool_calls'}]}]
         else:
             chunks = [{'choices': [{'delta': {'reasoning': 'List the folder '}}]},
@@ -172,6 +179,9 @@ elif event == 'StopFailure':
 elif event == 'PostToolUse' and 'lint-me' in data['tool_input'].get('command', ''):
     print('lint: 2 warnings in notes.md', file=sys.stderr)
     sys.exit(2)
+elif event == 'PostToolUseFailure' and data['tool_name'] == 'read':
+    print('nothing at ' + data['tool_input']['path'] + ': list the folder first', file=sys.stderr)
+    sys.exit(2)
 elif event == 'PostToolUseFailure':
     print('refusal noted by ' + event, file=sys.stderr)
     sys.exit(2)
@@ -190,7 +200,7 @@ bash="ask"
 protocol="openai-chat-completions"
 name="Mock"
 base_url="http://127.0.0.1:{mock.server_address[1]}/v1"
-models=["thinker","limited","linter"]
+models=["thinker","limited","linter","reader"]
 requires_auth=false
 reasoning=true
 tools=true
@@ -198,7 +208,7 @@ tools=true
     write(ws / 'haarness.json', json.dumps({'hooks': {
         'PermissionRequest': group('*'), 'PreToolUse': group('question'),
         'StopFailure': group('rate_limit') + group('provider') + group('billing_error'),
-        'SessionEnd': group('clear'), 'PostToolUse': group('Bash'), 'PostToolUseFailure': group('Bash')}}, indent=1))
+        'SessionEnd': group('clear'), 'PostToolUse': group('Bash'), 'PostToolUseFailure': group('Bash') + group('Read')}}, indent=1))
     c = connect(ws)
     env['HAARNESS_SERVER_TOKEN'] = c.get('token', '')
     entries = lambda event: [json.loads(line) for line in log.read_text().splitlines() if line and json.loads(line)['hook_event_name'] == event] if log.exists() else []
@@ -299,6 +309,25 @@ tools=true
     check('its feedback follows the failed result', refused['output'].endswith(
         '\n\n<hook-feedback>\nrefusal noted by PostToolUseFailure\n</hook-feedback>')
           and not (ws / 'refused.txt').exists(), refused)
+    # A tool that fails in the model's turn: PostToolUseFailure hooks run, and what they say follows the error.
+    reader = Chat(c, 'Reader', 'mock', 'reader')
+    t = reader.turn('Read the missing file')
+    check('the failed read turn completes', reader.finish(t)['status'] == 'completed')
+    failed = [e for e in entries('PostToolUseFailure') if e['session_id'] == reader.thread['id']]
+    check('a tool that fails in a turn runs PostToolUseFailure hooks, told the error', len(failed) == 1
+          and failed[0]['tool_name'] == 'read' and failed[0]['tool_input'] == {'path': 'missing.txt'}
+          and failed[0]['tool_response']['is_error'] is True and failed[0]['error']
+          and failed[0]['agent'] == reader.thread['agent'], failed)
+    check('no PostToolUse hook runs for the failed read',
+          not [e for e in entries('PostToolUse') if e['session_id'] == reader.thread['id']], entries('PostToolUse'))
+    feedback = '\n\n<hook-feedback>\nnothing at missing.txt: list the folder first\n</hook-feedback>'
+    read = reader.results('read')[-1]
+    check('the failure hook\'s stderr follows the error, which stays an error',
+          read['is_error'] and read['output'] == failed[0]['error'] + feedback, read)
+    follow = [r for r in requests if r['model'] == 'reader' and any(m['role'] == 'tool' for m in r['messages'])]
+    sent = next(m for m in follow[-1]['messages'] if m['role'] == 'tool')['content']
+    sent = sent if isinstance(sent, str) else ''.join(part.get('text', '') for part in sent)
+    check('the next request carries the failure feedback to the model', sent.endswith(feedback), sent)
 
     # --- Matchers in /hooks ---------------------------------------------------------------
     tmux('send-keys', '-t', session, '/hooks', 'Enter')

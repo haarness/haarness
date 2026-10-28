@@ -12192,6 +12192,113 @@ async fn a_post_tool_use_hook_that_exits_two_reaches_the_model_after_the_result(
     assert!(sent.ends_with(feedback), "{sent}");
 }
 
+/// A tool that fails in the model's turn runs `PostToolUseFailure` hooks,
+/// not `PostToolUse` ones, as a failed call outside a turn does: what an exit
+/// 2 printed follows the error, which stays an error, and reaches the model.
+#[tokio::test]
+async fn a_call_that_fails_in_a_turn_runs_post_tool_use_failure_hooks() {
+    let workspace = std::env::temp_dir().join(format!(
+        "haarness-failed-call-hooks-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let payload = workspace.join("failure.json");
+    let succeeded = workspace.join("succeeded");
+    let provider = Capturing::default();
+    let requests = provider.requests.clone();
+    let hooks = haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(&serde_json::json!({
+            "PostToolUse": [{"hooks": [
+                {"command": format!("touch '{}'", succeeded.display())},
+            ]}],
+            "PostToolUseFailure": [{"matcher": "Read", "hooks": [
+                {"command": format!(
+                    "cat > '{}'; echo 'nothing there: list the folder first' >&2; exit 2",
+                    payload.display()
+                )},
+            ]}],
+        })),
+        workspace.clone(),
+    );
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+        EventBus::new(256),
+        workspace.clone(),
+        String::new(),
+        haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..haarness_core::RuntimeConfig::default()
+        },
+    )
+    .with_hooks(Arc::new(hooks));
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(r#"!tool read {"path":"missing.txt"}"#),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let feedback = "\n\n<hook-feedback>\nnothing there: list the folder first\n</hook-feedback>";
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let (output, is_error) = items
+        .iter()
+        .find_map(|item| match &item.data {
+            haarness_protocol::ItemData::ToolResult {
+                output, is_error, ..
+            } => Some((output.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("the read call has a result");
+    assert!(is_error, "{output}");
+    let error = output
+        .strip_suffix(feedback)
+        .unwrap_or_else(|| panic!("{output}"));
+    // The hook is told the error the model reads, under its own name.
+    let told: Value = serde_json::from_str(&std::fs::read_to_string(&payload).unwrap()).unwrap();
+    assert_eq!(told["hook_event_name"], "PostToolUseFailure");
+    assert_eq!(told["tool_name"], "read");
+    assert_eq!(
+        told["tool_input"],
+        serde_json::json!({"path": "missing.txt"})
+    );
+    assert_eq!(told["error"], error);
+    assert!(
+        !succeeded.exists(),
+        "a PostToolUse hook ran for a failed call"
+    );
+    // The next request carries it to the model.
+    let sent = requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            ProviderMessage::ToolResult { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .expect("the follow-up request carries the tool result");
+    assert!(sent.ends_with(feedback), "{sent}");
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 #[tokio::test]
 async fn workspace_rest_lifecycle_uses_real_git_and_enforces_activity_leases() {
     let root =
