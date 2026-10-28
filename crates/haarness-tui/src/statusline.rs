@@ -172,30 +172,19 @@ async fn invoke(config: &StatusLineConfig, context: &Context) -> Result<String, 
         ));
     }
     let stdout = String::from_utf8(output.stdout).map_err(|_| "output was not UTF-8".to_owned())?;
+    // The first line with something to read once its escape sequences go;
+    // a row of the band, so its tabs and carriage returns go as well.
     let line = stdout
         .lines()
+        .map(|line| {
+            crate::escapes::without_escapes(line)
+                .chars()
+                .filter(|character| !character.is_control())
+                .collect::<String>()
+        })
         .find(|line| !line.trim().is_empty())
-        .map(strip_controls)
         .unwrap_or_default();
     Ok(line.chars().take(512).collect())
-}
-
-fn strip_controls(value: &str) -> String {
-    let mut output = String::new();
-    let mut chars = value.chars().peekable();
-    while let Some(character) = chars.next() {
-        if character == '\u{1b}' && chars.peek() == Some(&'[') {
-            chars.next();
-            for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) {
-                    break;
-                }
-            }
-        } else if !character.is_control() {
-            output.push(character);
-        }
-    }
-    output
 }
 
 #[cfg(test)]
@@ -224,7 +213,7 @@ mod tests {
     async fn command_receives_context_and_strips_ansi() {
         let config = StatusLineConfig {
             command: StatusLineCommand::Shell(
-                "read payload; printf '\\033[31mcontext:%s\\033[0m\\nignored\\n' \"$payload\""
+                "read payload; printf '\\033]0;title\\007\\033[31mcontext:%s\\033[0m\\nignored\\n' \"$payload\""
                     .into(),
             ),
             refresh_ms: 250,
@@ -239,9 +228,26 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(output.starts_with("context:{"));
+        // A window title goes whole, not only its escape byte.
+        assert!(output.starts_with("context:{"), "{output}");
         assert!(output.contains("\"title\":\"demo\""));
         assert!(!output.contains('\u{1b}'));
         assert!(!output.contains("ignored"));
+    }
+
+    /// A first line that only sets the window title and the colours has
+    /// nothing to read, so the band shows the line after it.
+    #[tokio::test]
+    async fn a_line_of_only_escape_sequences_gives_way_to_the_next() {
+        let config = StatusLineConfig {
+            command: StatusLineCommand::Shell(
+                "cat >/dev/null; printf '\\033]2;branch\\007\\033[1m\\nmain \\342\\234\\223\\n'"
+                    .into(),
+            ),
+            refresh_ms: 250,
+            timeout_ms: 2_000,
+        };
+        let output = invoke(&config, &Context::default()).await.unwrap();
+        assert_eq!(output, "main ✓");
     }
 }
