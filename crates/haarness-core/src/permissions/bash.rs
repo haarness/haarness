@@ -1518,19 +1518,26 @@ impl Reader<'_> {
         if !complete || !PATH_COMMANDS.contains(&name.as_str()) {
             return;
         }
+        // A `cd` given no folder goes to the home folder.
+        let mut bare = name == "cd";
         for word in node.named_children(&mut node.walk()) {
-            if word.id() == program.id()
-                || !WORD_KINDS.contains(&word.kind())
-                || matches!(word.kind(), "command_substitution" | "process_substitution")
-            {
+            if word.id() == program.id() || !WORD_KINDS.contains(&word.kind()) {
+                continue;
+            }
+            if matches!(word.kind(), "command_substitution" | "process_substitution") {
+                bare = false;
                 continue;
             }
             let (argument, complete) = path_literal(word, source);
+            bare &= complete && argument.starts_with('-') && argument != "-";
             if names_no_path(&name, &argument) {
                 continue;
             }
             let raw = node_text(word, source);
             self.check_folder(&name, &raw, &argument, complete);
+        }
+        if bare {
+            self.check_folder(&name, "~", "~", true);
         }
     }
 
@@ -2105,6 +2112,16 @@ impl Reader<'_> {
         }
         if !complete || !PATH_COMMANDS.contains(&name.as_str()) {
             return;
+        }
+        // A `cd` given no folder (`cd`, `cd --`, `cd -P`) goes to the home
+        // folder.
+        if name == "cd"
+            && arguments.iter().all(|word| {
+                let (value, complete) = path_literal(word.node, source);
+                complete && value.starts_with('-') && value != "-"
+            })
+        {
+            self.check_folder(&name, "~", "~", true);
         }
         for word in arguments {
             // Each path of a brace list (`cat {,~/.ssh/id_rsa}`) on its own.
@@ -5396,6 +5413,47 @@ mod regression {
             assert_eq!(
                 analyze(command, &workspace).external_dirs,
                 today,
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_cd_with_no_folder_goes_to_the_home_folder() {
+        let root = std::env::temp_dir().join(format!("haarness-bare-cd-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        let home = analyze("cd ~", &workspace).external_dirs;
+        if home.is_empty() {
+            // The project is in the home folder here.
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        for command in [
+            "cd && rm -rf Documents",
+            "cd -- && ls",
+            "cd -P",
+            "cd -L && cat .zshrc",
+            "cd src && cd && rm -rf Documents",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                home,
+                "{command}"
+            );
+        }
+        // A folder, the folder before (`cd -`), or one known only when the
+        // line runs.
+        for command in [
+            "cd src && ls",
+            "cd -P src",
+            "cd -- src",
+            "cd -",
+            "cd \"$D\"",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
                 "{command}"
             );
         }
