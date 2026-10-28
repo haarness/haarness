@@ -1413,7 +1413,7 @@ async fn call(
     request: ProviderRequest,
     cancel: CancellationToken,
 ) -> CoreResult<Verdict> {
-    let mut stream = crate::wire_names::stream(provider, request, cancel.clone()).await?;
+    let mut stream = crate::wire_names::stream(provider, request, &[], cancel.clone()).await?;
     let mut text = String::new();
     loop {
         let event = tokio::select! {

@@ -3249,8 +3249,9 @@ impl AgentRuntime {
                 .map_or_else(HashSet::new, |entry| entry.value().clone());
             let selection = select_tools(
                 catalog
-                    .into_iter()
+                    .iter()
                     .filter(|tool| !engine.disables_tool(&tool.name) && !is_goal_tool(&tool.name))
+                    .cloned()
                     .collect(),
                 &components.config.tool_availability,
                 &self.tool_availability.read(),
@@ -3313,9 +3314,13 @@ impl AgentRuntime {
         // Return local refusals and allow a bounded text-only recovery; never
         // resolve a live executor or persist these synthetic exchanges.
         for attempt in 0..3 {
-            let mut stream =
-                crate::wire_names::stream(provider.as_ref(), prepared.clone(), cancel.clone())
-                    .await?;
+            let mut stream = crate::wire_names::stream(
+                provider.as_ref(),
+                prepared.clone(),
+                &catalog,
+                cancel.clone(),
+            )
+            .await?;
             // An attempt after refused tool calls answers from scratch, so
             // whatever the previous one wrote before its calls is taken back.
             if attempt > 0 {
@@ -10459,7 +10464,6 @@ impl RunnerTask {
                     })
             })
             .collect::<CoreResult<Vec<_>>>()?;
-        // A tool the model names as this round sent it is the tool it stands for.
         // A tool the model names as providers were sent it is the tool it
         // stands for (see `crate::wire_names`).
         let definitions = self.tools.list();
@@ -13140,7 +13144,7 @@ async fn generate_title(
     let cancel = CancellationToken::new();
     let _cancel = cancel.clone().drop_guard();
     let text = tokio::time::timeout(std::time::Duration::from_secs(300), async {
-        let mut stream = crate::wire_names::stream(provider.as_ref(), request, cancel).await?;
+        let mut stream = crate::wire_names::stream(provider.as_ref(), request, &[], cancel).await?;
         let mut title = String::new();
         while let Some(event) = stream.next().await {
             if let ProviderEvent::TextDelta(delta) = event? {
@@ -13559,7 +13563,7 @@ async fn summarize_context(
     let mut stream = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(CoreError::Cancelled),
-        result = crate::wire_names::stream(provider.as_ref(), request, cancel.clone()) => result?,
+        result = crate::wire_names::stream(provider.as_ref(), request, &[], cancel.clone()) => result?,
     };
     let mut text = String::new();
     let mut finished = false;

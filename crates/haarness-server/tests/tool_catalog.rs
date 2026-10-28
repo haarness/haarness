@@ -1175,3 +1175,80 @@ async fn a_strict_provider_gets_names_it_takes_and_its_calls_reach_the_tools() {
         ]
     );
 }
+
+/// A side question over a chat with calls of tools named as providers refuse
+/// (`what?`) reaches a strict provider with names it takes, and names the
+/// tools as the chat's turns do, so it reads their cached prefix: here the
+/// tool whose name `files.read`'s comes out as is turned off, so it is in
+/// the catalog but in neither request.
+#[tokio::test]
+async fn a_side_question_names_tools_as_the_turns_do() {
+    let mut fixtures = FixtureRegistry::new();
+    for name in [
+        "mcp__Docs Server__files.read",
+        "mcp__Docs_Server__files_read",
+        "mcp__srv__what?",
+    ] {
+        fixtures.tools.insert(
+            name.into(),
+            Arc::new(FixtureTool {
+                name,
+                description: "MCP fixture",
+            }) as Arc<dyn Tool>,
+        );
+    }
+    let provider = StrictNames::default();
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(fixtures),
+        EventBus::new(64),
+        PathBuf::from("."),
+        String::new(),
+        RuntimeConfig {
+            lazy_tools: LazyToolSettings {
+                mode: LazyToolMode::Off,
+                ..LazyToolSettings::default()
+            },
+            tool_availability: HashMap::from([("mcp__Docs_Server__files_read".to_owned(), false)]),
+            ..RuntimeConfig::default()
+        },
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("strict".into()),
+            model: Some("strict-1".into()),
+            ..CreateThreadRequest::default()
+        })
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the docs"))
+        .await
+        .unwrap();
+    wait_done(&runtime, turn.id).await;
+    let turn_names = provider.requests.lock().unwrap()[0].clone();
+    let docs = turn_names
+        .iter()
+        .find(|name| name.starts_with("mcp__Docs_Server__files_read_"))
+        .cloned()
+        .expect("files.read was sent under a name of its own");
+    provider.requests.lock().unwrap().clear();
+    let answer = runtime
+        .btw(
+            thread.id,
+            haarness_protocol::BtwRequest {
+                question: "what did it read?".into(),
+                request_id: RequestId::new(),
+                history: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer.answer, "done");
+    let side = provider.requests.lock().unwrap()[0].clone();
+    assert!(side.contains(&docs), "{side:?}");
+    assert!(side.contains(&"mcp__srv__what_".to_owned()), "{side:?}");
+}
