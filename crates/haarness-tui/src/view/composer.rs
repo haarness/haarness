@@ -645,7 +645,12 @@ fn badges(app: &App) -> Vec<(String, Color)> {
     let mut badges = Vec::new();
     if app.thread.ultracode {
         badges.push(("ultracode".to_owned(), theme.accent));
-    } else if let Some(effort) = &app.reasoning_effort {
+    } else if let Some(effort) = app
+        .reasoning_effort
+        .as_ref()
+        // The model's own default is an ordinary default too.
+        .filter(|effort| *effort != haarness_protocol::MODEL_DEFAULT_EFFORT)
+    {
         badges.push((effort.clone(), theme.muted));
     }
     if app.thinking == crate::state::ThinkingMode::Hide {
