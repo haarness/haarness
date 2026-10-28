@@ -378,7 +378,7 @@ impl Service {
                     }
                     // Events may have been missed: requests raised or settled
                     // meanwhile are read again from the server.
-                    SubscriptionEvent::ResyncRequired => {
+                    SubscriptionEvent::ResyncRequired(_) => {
                         let current = self.client.turn(turn.id).await.map_err(internal)?;
                         if !matches!(current.status, TurnStatus::Queued | TurnStatus::Running) {
                             break finish(current);

@@ -3340,12 +3340,16 @@ impl App {
                 "display" => self.cycle_thinking(),
                 "off" => {
                     self.thread.ultracode = false;
-                    self.reasoning_effort = None;
+                    // Over a configured level the model's own default is a
+                    // pick of its own; with none, no pick means the same.
+                    self.reasoning_effort = self
+                        .configured_reasoning()
+                        .map(|_| haarness_protocol::MODEL_DEFAULT_EFFORT.to_owned());
                     self.notice = "Reasoning effort: provider default".into();
                 }
                 effort => {
                     if !self
-                        .reasoning_efforts()
+                        .reasoning_levels()
                         .iter()
                         .any(|supported| supported == effort)
                     {
@@ -3623,7 +3627,7 @@ impl App {
     /// picker does and the efforts it does have.
     fn unsupported_effort(&self, effort: &str) -> String {
         let model = self.model_label(&format!("{}/{}", self.thread.provider, self.thread.model));
-        match self.reasoning_efforts() {
+        match self.reasoning_levels().as_slice() {
             [] => format!("{model} does not support reasoning effort"),
             [only] => format!("{model} does not support {effort} reasoning · it offers {only}"),
             [rest @ .., last] => format!(
@@ -3635,10 +3639,7 @@ impl App {
 
     async fn set_reasoning_option(&mut self, value: &str, client: &ApiClient) -> Result<()> {
         if !matches!(value, "off" | "display")
-            && !self
-                .reasoning_efforts()
-                .iter()
-                .any(|effort| effort == value)
+            && !self.reasoning_levels().iter().any(|effort| effort == value)
         {
             self.notice = self.unsupported_effort(value);
             return Ok(());
@@ -3682,7 +3683,12 @@ impl App {
             self.notice =
                 "Ultracode enabled · task orchestration · strongest compatible reasoning".into();
         } else {
-            self.notice = "Ultracode disabled · reasoning uses provider default".into();
+            // Name the level the chat goes back to: a pick, the configured
+            // level, or the model's own default.
+            self.notice = match self.reasoning_choice() {
+                "off" => "Ultracode disabled · reasoning uses provider default".into(),
+                level => format!("Ultracode disabled · reasoning uses {level}"),
+            };
         }
         Ok(())
     }
@@ -3759,7 +3765,7 @@ impl App {
                 args,
                 agent: Some(self.agent().into()),
                 model: Some(workflow_model(&self.thread.provider, &self.thread.model)),
-                variant: self.reasoning_effort.clone(),
+                variant: self.requested_effort(),
                 thread_id: Some(self.thread.id),
                 wait: false,
                 timeout_ms: None,
@@ -4038,8 +4044,8 @@ impl App {
                     agent: workflow.then(|| self.agent().to_owned()),
                     provider: workflow.then(|| self.thread.provider.clone()),
                     model: workflow.then(|| self.thread.model.clone()),
-                    variant: workflow.then(|| self.reasoning_effort.clone()).flatten(),
-                    reasoning_effort: (!workflow).then(|| self.reasoning_effort.clone()).flatten(),
+                    variant: workflow.then(|| self.requested_effort()).flatten(),
+                    reasoning_effort: (!workflow).then(|| self.requested_effort()).flatten(),
                     tools: None,
                     wait: false,
                     timeout_ms: None,
@@ -4116,7 +4122,7 @@ impl App {
             agent: Some(self.agent().into()),
             provider: None,
             model: None,
-            reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_effort: self.requested_effort(),
             // A terminal shows no file previews; saying so keeps a
             // Desktop chat's preview tool out of terminal turns.
             tools: Some(std::collections::HashMap::from([("preview".into(), false)])),
@@ -4306,7 +4312,7 @@ impl App {
         };
         let request = haarness_protocol::QueueInputRequest {
             preview: Some(false),
-            reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_effort: self.requested_effort(),
             delivery: haarness_protocol::InputDelivery::Steer,
             request_id: haarness_protocol::RequestId::new(),
             text,
@@ -5114,26 +5120,32 @@ pub(crate) fn default_goal_completion() -> haarness_protocol::GoalCompletion {
 }
 
 /// Choices for the /reasoning modal, with the active state annotated.
-fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
+pub(crate) fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
     let language = app.language;
+    let current = app.reasoning_choice();
+    // The level a configured `defaults.reasoning_effort` sets is marked, so
+    // a pick away from it can be undone; with no pick it is the active row.
+    let configured = app.configured_level();
     // The levels themselves (low, high, max) are values typed after
     // /reasoning, so they stay as typed; what they mean is translated.
-    let describe = |key: &str, active: bool| {
-        if active {
-            format!("{} · {}", language.text(key), language.text("active"))
-        } else {
-            language.text(key).to_owned()
+    let describe = |key: &str, value: &str| {
+        let mut text = language.text(key).to_owned();
+        for (marked, mark) in [
+            (configured == Some(value), "default"),
+            (current == value, "active"),
+        ] {
+            if marked {
+                text = format!("{text} · {}", language.text(mark));
+            }
         }
+        text
     };
     let mut entries = vec![OptionEntry {
         label: language.text("provider default").into(),
-        description: describe(
-            "Let the model decide",
-            app.reasoning_effort.is_none() && !app.thread.ultracode,
-        ),
+        description: describe("Let the model decide", "off"),
         value: "off".into(),
     }];
-    for effort in app.reasoning_efforts() {
+    for effort in &app.reasoning_levels() {
         let description = match effort.as_str() {
             "none" => "No extended thinking",
             "minimal" => "Minimal thinking",
@@ -5146,10 +5158,7 @@ fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
         };
         entries.push(OptionEntry {
             label: effort.clone(),
-            description: describe(
-                description,
-                !app.thread.ultracode && app.reasoning_effort.as_deref() == Some(effort.as_str()),
-            ),
+            description: describe(description, effort),
             value: effort.into(),
         });
     }

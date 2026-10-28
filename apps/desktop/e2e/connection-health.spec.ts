@@ -226,6 +226,33 @@ test("a frozen event stream is noticed and a reply sent afterwards shows up, whi
   }
 });
 
+test("a server restarted with another configured reasoning level shows it once the window reconnects", async () => {
+  test.setTimeout(120000);
+  const configured = (level: string) =>
+    `[defaults]\nprovider="echo"\nmodel="echo-1"\nreasoning_effort="${level}"\n`;
+  const remote = await endpoint("restarted", configured("high"));
+  const path = workspaces.at(-1)!;
+  await launch();
+  await addServer("Restarted server", remote.url, remote.secret);
+  // Echo lists no levels, so it is sent the configured one, which the pill shows.
+  const effort = page.locator(".composer-model .model-effort-summary");
+  await expect(effort).toHaveText("High");
+
+  // Restarted on the same address with another level: no reload event says so.
+  execFileSync(binary, ["--workspace", path, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
+  await writeFile(join(path, ".haarness/config.toml"), configured("low"));
+  await promisify(execFile)(
+    binary,
+    ["--workspace", path, "serve", "--daemon", "--port", new URL(remote.url).port],
+    {
+      env: { ...env, HAARNESS_SERVER_TOKEN: remote.secret, HAARNESS_SERVER_PASSWORD: remote.secret },
+      encoding: "utf8",
+      timeout: 30000,
+    },
+  );
+  await expect(effort).toHaveText("Low", { timeout: 60000 });
+});
+
 test("a wake ends the backoff of a notification stream that is trying again", async () => {
   test.setTimeout(150000);
   const remote = await endpoint("wake");

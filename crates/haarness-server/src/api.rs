@@ -845,6 +845,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
         default_provider,
         default_model,
         default_approval_mode: Some(state.runtime.approval_mode_default()),
+        default_reasoning_effort: state.runtime.default_reasoning_effort(),
         pid: Some(std::process::id()),
     })
 }
@@ -1662,10 +1663,12 @@ async fn start_turn(
     }
     if let Some(effort) = request.reasoning_effort.as_deref()
         && effort != "ultracode"
+        && effort != haarness_protocol::MODEL_DEFAULT_EFFORT
         && !haarness_protocol::REASONING_EFFORTS.contains(&effort)
     {
         return Err(CoreError::Invalid(format!(
-            "reasoning_effort must be {}|ultracode, got {effort}",
+            "reasoning_effort must be {}|{}|ultracode, got {effort}",
+            haarness_protocol::MODEL_DEFAULT_EFFORT,
             haarness_protocol::REASONING_EFFORTS.join("|")
         ))
         .into());

@@ -3667,6 +3667,233 @@ async fn reasoning_effort_reaches_the_provider() {
     );
 }
 
+/// A configured `defaults.reasoning_effort` runs every turn that names no
+/// effort; a turn that names the model's default runs without one, and so do
+/// the turns that keep the chat's latest effort, such as a queued prompt.
+#[tokio::test]
+async fn a_turn_naming_the_model_default_effort_skips_the_configured_one() {
+    let provider = Capturing::with_reasoning_efforts(&["low", "medium", "high"]);
+    let requests = provider.requests.clone();
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+        std::env::temp_dir(),
+        String::new(),
+        RuntimeConfig {
+            default_reasoning_effort: Some("high".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(runtime.default_reasoning_effort().as_deref(), Some("high"));
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let last_effort = || {
+        requests
+            .lock()
+            .unwrap()
+            .last()
+            .expect("a provider request")
+            .reasoning_effort
+            .clone()
+    };
+
+    let turn = runtime
+        .start_turn(thread.id, turn_request("configured"))
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    assert_eq!(last_effort().as_deref(), Some("high"));
+
+    let mut request = turn_request("model default");
+    request.reasoning_effort = Some("default".into());
+    let turn = runtime.start_turn(thread.id, request).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    assert_eq!(last_effort(), None);
+
+    runtime
+        .queue_input(
+            thread.id,
+            haarness_protocol::QueueInputRequest {
+                preview: None,
+                reasoning_effort: None,
+                delivery: haarness_protocol::InputDelivery::Queue,
+                request_id: RequestId::new(),
+                text: "queued after the model default".into(),
+                attachments: Vec::new(),
+                resources: Vec::new(),
+                synthetic: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    wait_drained(&runtime, thread.id).await;
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert_eq!(
+        last_effort(),
+        None,
+        "a queued prompt keeps the model default"
+    );
+
+    let mut request = turn_request("named level");
+    request.reasoning_effort = Some("low".into());
+    let turn = runtime.start_turn(thread.id, request).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    assert_eq!(last_effort().as_deref(), Some("low"));
+}
+
+/// `/v1/info` names the configured effort only when there is one, and a turn
+/// may name the model's default; anything else off the scale is refused.
+#[tokio::test]
+async fn info_reports_the_configured_effort_and_turns_accept_the_model_default() {
+    async fn server(
+        configured: Option<&str>,
+    ) -> (
+        haarness_server::ServerHandle,
+        String,
+        Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
+    ) {
+        let provider = Capturing::with_reasoning_efforts(&["low", "high"]);
+        let requests = provider.requests.clone();
+        let runtime = Arc::new(AgentRuntime::with_config(
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            Arc::new(StaticProviderRegistry::new(vec![
+                Arc::new(provider) as Arc<dyn ModelProvider>
+            ])),
+            Arc::new(EmptyToolRegistry),
+            EventBus::new(64),
+            std::env::temp_dir(),
+            String::new(),
+            RuntimeConfig {
+                default_reasoning_effort: configured.map(str::to_owned),
+                ..Default::default()
+            },
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let handle = serve(
+            listener,
+            "effort-token",
+            ServerState {
+                browser: None,
+                management: None,
+                runtime,
+                mcp: Arc::new(NoMcp),
+                skills: Arc::new(NoSkills),
+                plugins: None,
+                workflows: None,
+                workspaces: None,
+                workspace_id: None,
+                workspace: std::env::temp_dir(),
+                project_trusted: false,
+                language: None,
+            },
+        )
+        .await
+        .unwrap();
+        let base = format!("http://{}", handle.address);
+        (handle, base, requests)
+    }
+    let client = reqwest::Client::builder()
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                "Bearer effort-token".parse().unwrap(),
+            );
+            headers
+        })
+        .build()
+        .unwrap();
+
+    let (handle, base, _) = server(None).await;
+    let info: Value = client
+        .get(format!("{base}/v1/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        info.get("defaultReasoningEffort").is_none(),
+        "nothing configured, nothing named: {info}"
+    );
+    handle.shutdown().await.unwrap();
+
+    let (handle, base, requests) = server(Some("high")).await;
+    let info: ServerInfo = client
+        .get(format!("{base}/v1/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info.default_reasoning_effort.as_deref(), Some("high"));
+    let thread: Thread = client
+        .post(format!("{base}/v1/threads"))
+        .json(&CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let start = |effort: &str| {
+        client
+            .post(format!("{base}/v1/threads/{}/turns", thread.id))
+            .json(&serde_json::json!({
+                "requestId": RequestId::new(),
+                "text": "effort",
+                "attachments": [],
+                "reasoningEffort": effort,
+            }))
+            .send()
+    };
+    let refused = start("deepest").await.unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
+    let turn: Turn = start("default")
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let finished: Turn = client
+        .get(format!("{base}/v1/turns/{}/wait?timeout_ms=5000", turn.id))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(finished.status, TurnStatus::Completed);
+    assert_eq!(
+        requests.lock().unwrap().last().unwrap().reasoning_effort,
+        None
+    );
+    handle.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn workflow_schema_is_primary_intent_gated_and_children_require_explicit_opt_in() {
     let workspace = std::env::temp_dir();

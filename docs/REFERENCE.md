@@ -535,7 +535,7 @@ provider = "openai"          # used when a new thread does not name one
 model = "gpt-5.6"
 small_model = "openai/gpt-5.4-mini" # chat titles and, for chats on its provider, Auto's reviewer
 agent = "build"
-reasoning_effort = "medium"  # none|minimal|low|medium|high|xhigh|max
+reasoning_effort = "medium"  # none|minimal|low|medium|high|xhigh|max (see below)
 ultracode = false             # durable default for newly created sessions
 output_style = "concise"      # concise|explanatory|formal|minimal, or an output-styles/<name>.md file
 approval_mode = "auto"        # auto|review|yolo: the mode of a chat with no setting of its own; review in any file wins, a project's yolo is ignored
@@ -731,6 +731,12 @@ oauthClientId = "public-id"  # optional; otherwise discovery/DCR is used
 oauthScopes = ["mcp:tools"]  # optional; otherwise server metadata selects scopes
 enabled = true
 ```
+
+`defaults.reasoning_effort` is the level a turn that names no effort runs at, fitted to the
+nearest level the model lists. Desktop and the TUI show it as the current level, marked
+*default*; choosing **Model default** in Desktop's model picker or **provider default** in the
+TUI's `/reasoning` (`/reasoning off`) runs your next messages at the model's own default
+instead.
 
 `${NAME}` and `${NAME:-fallback}` in an MCP entry come from the server's environment.
 Environment values and headers (and the headers helper's environment) are resolved once,

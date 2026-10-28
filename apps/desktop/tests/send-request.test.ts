@@ -52,4 +52,13 @@ test("a slash command says a person can stop the turn it starts", () => {
       attended: true,
     },
   );
+  const reasoned = commandBody({
+    name: "test",
+    arguments: "",
+    mentioned: {},
+    requestId: "0190-reasoned",
+    effort: "default",
+  });
+  assert.equal(reasoned.reasoningEffort, "default");
+  assert.equal(reasoned.attended, true);
 });

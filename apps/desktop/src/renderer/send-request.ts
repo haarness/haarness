@@ -32,6 +32,7 @@ export function commandBody(command: {
   arguments: string;
   mentioned: Mentioned;
   requestId: string;
+  effort?: string;
 }) {
   return {
     name: command.name,
@@ -39,6 +40,7 @@ export function commandBody(command: {
     arguments: command.arguments,
     ...command.mentioned,
     requestId: command.requestId,
+    ...(command.effort ? { reasoningEffort: command.effort } : {}),
     attended: true,
   };
 }
