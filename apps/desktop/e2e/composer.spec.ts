@@ -754,6 +754,120 @@ test("a step opened at the end of the chat stays where it was clicked, and follo
   }
 });
 
+/** A chat long enough to scroll, at its end, with the transcript's place readable. */
+async function scrollingChat(page: Page) {
+  const input = page.getByRole("textbox", { name: "Message", exact: true });
+  const transcript = page.locator(".transcript");
+  await input.fill("::long 60");
+  await input.press("Enter");
+  await expect(transcript).toContainText("line 60 marker-60");
+  const place = () =>
+    transcript.evaluate((element) => ({
+      top: element.scrollTop,
+      gap: element.scrollHeight - element.clientHeight - element.scrollTop,
+    }));
+  await expect.poll(async () => (await place()).gap).toBeLessThan(5);
+  /** Sends a reply that streams for about two seconds and waits for its first words. */
+  const stream = async () => {
+    await expect(page.getByTestId("streaming-reply")).toHaveCount(0);
+    await input.fill("::scrollstream");
+    await input.press("Enter");
+    await expect(page.getByTestId("streaming-reply")).toContainText("STREAM_REFLOW_STAGE_ONE");
+    // The view has caught up with the first words.
+    await expect.poll(async () => (await place()).gap).toBeLessThan(5);
+    return (await page.getByTestId("streaming-reply").locator("p").first().boundingBox())!;
+  };
+  /** Notes every place the view takes from now on; the returned function reads them. */
+  const watch = async () => {
+    await transcript.evaluate((element) => {
+      const places: { top: number; gap: number }[] = [];
+      (window as unknown as { places: typeof places }).places = places;
+      element.addEventListener("scroll", () =>
+        places.push({ top: element.scrollTop, gap: element.scrollHeight - element.clientHeight - element.scrollTop }),
+      );
+    });
+    return () => page.evaluate(() => (window as unknown as { places: { top: number; gap: number }[] }).places.splice(0));
+  };
+  /** Whether the view ever went down, toward the end, among these places, starting from `from`. */
+  const wentDown = (places: { top: number }[], from: number) =>
+    places.filter((place, index) => place.top > (index ? places[index - 1].top : from) + 2);
+  return { transcript, place, stream, watch, wentDown };
+}
+
+test("a selection dragged above the chat while a reply streams keeps the view with the reader, and Jump to latest shows on release", async ({}, info) => {
+  const { page, errors, close } = await launch(info);
+  try {
+    const { transcript, place, stream, watch, wentDown } = await scrollingChat(page);
+    const words = await stream();
+    const places = await watch();
+    const top = (await transcript.boundingBox())!.y;
+    await page.mouse.move(words.x + words.width - 2, words.y + words.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(words.x + 40, top + 30, { steps: 4 });
+    // Held above the chat's top edge, the selection scrolls the chat up.
+    await page.mouse.move(words.x + 40, Math.max(2, top - 30), { steps: 4 });
+    await expect.poll(async () => (await place()).gap).toBeGreaterThan(60);
+    expect(await page.evaluate(() => window.getSelection()!.toString())).toContain("marker");
+    // The reply goes on: its link closes, its last rows come, and the saved reply takes its place.
+    await expect(transcript).toContainText("STREAM_REFLOW_DONE");
+    await expect(page.getByTestId("streaming-reply")).toHaveCount(0);
+    await page.mouse.up();
+    await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+    // Once the drag had moved the view up, it only ever went further up: never
+    // back down toward the end (the selection's own scrolling takes it up again
+    // within the same frame, so the end itself may not show in a scroll event).
+    const seen = await places();
+    const away = seen.findIndex((place) => place.gap > 60);
+    expect(away).toBeGreaterThanOrEqual(0);
+    expect(wentDown(seen.slice(away + 1), seen[away].top)).toEqual([]);
+    const after = await place();
+    await page.waitForTimeout(400);
+    expect(Math.abs((await place()).top - after.top)).toBeLessThan(2);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("a press held still in the chat keeps the view while a reply streams, and following goes on when it lifts or a right-click ends it", async ({}, info) => {
+  const { page, errors, close } = await launch(info);
+  try {
+    const { transcript, place, stream, watch, wentDown } = await scrollingChat(page);
+    const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+    // Held still on the reply's words: the view does not go after the reply as it grows below.
+    // (When the reply's link closes, the list grows shorter and may take the view up with it.)
+    let words = await stream();
+    await page.mouse.move(words.x + 8, words.y + words.height / 2);
+    const places = await watch();
+    const held = await place();
+    await page.mouse.down();
+    await expect(transcript).toContainText("STREAM_REFLOW_DONE");
+    await expect.poll(async () => (await place()).gap).toBeGreaterThan(20);
+    expect(wentDown([...(await places()), await place()], held.top)).toEqual([]);
+    await expect(jump).toHaveCount(0);
+    // Lifted, the view goes on to the newest output.
+    await page.mouse.up();
+    await expect.poll(async () => (await place()).gap).toBeLessThan(5);
+    await expect(jump).toHaveCount(0);
+
+    // A right-click while the press is held ends it, as the menu it opens would take the release.
+    words = await stream();
+    await page.mouse.move(words.x + 8, words.y + words.height / 2);
+    await page.mouse.down();
+    await expect(transcript).toContainText("STREAM_REFLOW_DONE");
+    await expect.poll(async () => (await place()).gap).toBeGreaterThan(20);
+    await page.mouse.down({ button: "right" });
+    await page.mouse.up({ button: "right" });
+    await expect.poll(async () => (await place()).gap).toBeLessThan(5);
+    await expect(jump).toHaveCount(0);
+    await page.mouse.up();
+    await expect(jump).toHaveCount(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test("a turn's reply has one footer, under its last text, with its full time; Copy takes the whole reply", async ({}, info) => {
   const { app, page, errors, close } = await launch(info, async (workspace) => {
     await writeFile(join(workspace, "README.md"), "# Fixture\n\nA README the agent reads.\n");
