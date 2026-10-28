@@ -3,9 +3,9 @@
 // selection dragged past the transcript's top edge scrolls it by itself.
 // While such a press is down, following leaves the view where it is, and an
 // upward scroll it makes counts as the reader's own (Session.tsx). This module
-// says whether one is down, and when the last one ends, by every way a press
-// can end, the ones whose release never arrives included, so a lost release
-// never leaves following held.
+// says whether one is down and reports when the last one is over, including
+// presses whose pointerup never reaches the window, so following is never
+// left frozen.
 
 /** The parts of a pointer event a press is read from. */
 export type PressPointer = Pick<PointerEvent, "pointerId" | "pointerType" | "isPrimary" | "button" | "buttons">;
@@ -25,9 +25,9 @@ export function createTranscriptPress(ended: () => void) {
     /** A pointer went down, `inside` the transcript or elsewhere. */
     press(event: PressPointer, inside: boolean) {
       update(() => {
-        // Only one primary pointer of a kind is down at a time: when a new
-        // one goes down, any other of its kind held here lost its release,
-        // and a new touch never reuses an old touch's id.
+        // Pointers of one type have a single primary at a time, so a fresh
+        // primary means the others of that type have all been lifted: drop
+        // any still recorded (touch ids are never reused, so nothing else would).
         if (event.isPrimary) for (const [id, kind] of down) if (kind === event.pointerType) down.delete(id);
         // The main or middle button only: the right one opens a menu, and
         // back, forward or a pen's eraser press nothing in the text.
@@ -35,7 +35,7 @@ export function createTranscriptPress(ended: () => void) {
         else down.delete(event.pointerId);
       });
     },
-    /** A pointer moved: with no button down, its release was lost (after a drag and drop, say). */
+    /** A pointer moved with every button up: its pointerup went elsewhere (a drag and drop takes it, for one). */
     move(event: PressPointer) {
       if (!event.buttons) update(() => down.delete(event.pointerId));
     },
@@ -43,7 +43,7 @@ export function createTranscriptPress(ended: () => void) {
     release(event: PressPointer) {
       update(() => down.delete(event.pointerId));
     },
-    /** Every press ends: a menu opened and takes the release, the window lost focus, the page hid. */
+    /** Ends every press at once: a context menu opened, the window lost focus, or the page was hidden. */
     end() {
       update(() => down.clear());
     },
@@ -73,7 +73,7 @@ export function listenForPress(
     [view, "pointermove", (event) => press.move(event as PointerEvent), true],
     [view, "pointerup", (event) => press.release(event as PointerEvent), true],
     [view, "pointercancel", (event) => press.release(event as PointerEvent), true],
-    // A Control-click on a Mac counts as a main-button press; its context menu swallows the release.
+    // On a Mac, Control with the main button opens the context menu, and the pointerup then goes to the menu.
     [view, "contextmenu", () => press.end(), true],
     // Only when the window itself loses focus.
     [view, "blur", (event) => event.target === view && press.end(), false],

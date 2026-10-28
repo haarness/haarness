@@ -107,19 +107,29 @@ click("fetch-declared", () => {
   fetch("https://live.weather.example/data").then(() => out("status", "fetched"), () => blocked === before && out("status", "fetch failed"));
 });
 // As a map library draws its tiles: a worker the page starts from a blob: URL fetches a WebAssembly
-// module the page made (a blob: URL too, declared below) and runs it; eval stays refused there.
+// module the page made (a blob: URL too, declared below) and runs it. eval stays refused there, and
+// so does a host the page did not declare: the worker has the page's policy.
 click("wasm", () => {
   const add = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 7, 1, 96, 2, 127, 127, 1, 127, 3, 2, 1, 0, 7, 7, 1, 3, 97,
     100, 100, 0, 0, 10, 9, 1, 7, 0, 32, 0, 32, 1, 106, 11]);
   const module = URL.createObjectURL(new Blob([add], { type: "application/wasm" }));
   const code = `onmessage = async (event) => {
+    // The host does not exist either, so only the policy's own report tells a refusal from a failure.
+    const undeclared = new Promise((done) => {
+      addEventListener("securitypolicyviolation", (violation) => {
+        if (violation.effectiveDirective === "connect-src") done("undeclared host refused");
+      });
+      setTimeout(() => done("undeclared host not refused"), 5000);
+    });
     let evaluated = "eval ran";
     try { eval("1"); } catch (error) { evaluated = "eval refused"; }
+    let sum;
     try {
       const bytes = await (await fetch(event.data)).arrayBuffer();
-      const { instance } = await WebAssembly.instantiate(bytes);
-      postMessage("wasm " + instance.exports.add(19, 23) + ", " + evaluated);
-    } catch (error) { postMessage("wasm " + error.name + ", " + evaluated); }
+      sum = (await WebAssembly.instantiate(bytes)).instance.exports.add(19, 23);
+    } catch (error) { sum = error.name; }
+    fetch("https://undeclared.example/worker").catch(() => {});
+    postMessage("wasm " + sum + ", " + evaluated + ", " + await undeclared);
   };`;
   try {
     const worker = new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
