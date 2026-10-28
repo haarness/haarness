@@ -467,8 +467,8 @@ impl HookPort for Rewrite {
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
     async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
         HookDecision::default()
@@ -584,8 +584,8 @@ impl HookPort for ShellEnv {
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
     async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
         HookDecision::default()
@@ -685,8 +685,8 @@ impl HookPort for RewritingAllow {
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
     async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
         HookDecision::default()
@@ -800,8 +800,8 @@ impl HookPort for EchoingAllow {
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
     async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
         HookDecision::default()
@@ -898,8 +898,8 @@ impl HookPort for FirstAllow {
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
     async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
         HookDecision::default()
@@ -1085,9 +1085,13 @@ impl HookPort for AnswersQuestions {
         _: &Value,
         output: &str,
         _: bool,
-    ) -> Option<String> {
+    ) -> HookDecision {
         // PostToolUse sees the answer, as it sees any tool's output.
-        (tool == "question").then(|| format!("after: {}", output.lines().next().unwrap_or("")))
+        HookDecision {
+            context: (tool == "question")
+                .then(|| format!("after: {}", output.lines().next().unwrap_or(""))),
+            ..HookDecision::default()
+        }
     }
     async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
         HookDecision::default()
@@ -1250,8 +1254,8 @@ impl HookPort for StopsQuestions {
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
     async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
         HookDecision::default()

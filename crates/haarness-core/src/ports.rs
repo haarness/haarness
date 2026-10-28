@@ -895,7 +895,9 @@ pub trait CredentialStore: Send + Sync {
 /// permission decision, and inject extra context.
 #[derive(Debug, Default, Clone)]
 pub struct HookDecision {
-    /// Block the action with this reason.
+    /// Block the action with this reason. After a tool already ran
+    /// ([`HookPort::post_tool_use`]) nothing is left to block: the reason is
+    /// the hook's feedback, which the model reads after the tool's result.
     pub block: Option<String>,
     /// Extra context appended to the tool result / prompt.
     pub context: Option<String>,
@@ -923,6 +925,8 @@ pub trait HookPort: Send + Sync {
         Ok(())
     }
     async fn pre_tool_use(&self, thread: ThreadId, tool: &str, arguments: &Value) -> HookDecision;
+    /// A tool finished (`is_error`: it failed). Only `context` and `block`
+    /// count: both reach the model after the tool's own result.
     async fn post_tool_use(
         &self,
         thread: ThreadId,
@@ -930,7 +934,7 @@ pub trait HookPort: Send + Sync {
         arguments: &Value,
         output: &str,
         is_error: bool,
-    ) -> Option<String>;
+    ) -> HookDecision;
     async fn user_prompt_submit(&self, thread: ThreadId, prompt: &str) -> HookDecision;
     /// A prompt is about to be shown for `permission` and the `patterns` it
     /// asks about. `detail` is the tool's arguments; when a pattern names

@@ -62,8 +62,8 @@ impl HookPort for Unmarking {
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
     async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
         HookDecision::default()

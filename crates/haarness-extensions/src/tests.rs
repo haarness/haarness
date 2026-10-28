@@ -132,6 +132,58 @@ async fn typed_tools_hooks_state_and_schema_use_real_bun() {
     assert_eq!(request.reasoning_effort.as_deref(), Some("high"));
 }
 
+/// Command hooks that object once a tool ran.
+struct Objects;
+#[async_trait]
+impl HookPort for Objects {
+    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn post_tool_use(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> HookDecision {
+        HookDecision {
+            block: Some("FORMAT_FEEDBACK".into()),
+            context: Some("COMMAND_CONTEXT".into()),
+            ..HookDecision::default()
+        }
+    }
+    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        _: Option<&[String]>,
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn stop(&self, _: ThreadId) {}
+}
+
+#[tokio::test]
+async fn command_hook_feedback_after_a_tool_passes_extensions_and_never_stops_them() {
+    let (root, config) = fixture(GOOD);
+    let extensions = Extensions::load(&config, root.path()).await.unwrap();
+    let hooks = extensions.wrap_hooks(Some(Arc::new(Objects)));
+    let decision = hooks
+        .post_tool_use(ThreadId::new(), "read", &json!({"path":"a"}), "text", false)
+        .await;
+    assert_eq!(decision.block.as_deref(), Some("FORMAT_FEEDBACK"));
+    assert_eq!(
+        decision.context.as_deref(),
+        Some("COMMAND_CONTEXT\nRESULT_CONTEXT")
+    );
+}
+
 #[tokio::test]
 async fn a_throwing_event_observer_never_skips_or_fails_the_real_hook() {
     let (root, config) = fixture(
