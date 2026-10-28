@@ -868,6 +868,35 @@ test("a press held still in the chat keeps the view while a reply streams, and f
   }
 });
 
+test("a press let go over a preview beside the chat ends there, and the chat follows its reply again", async ({}, info) => {
+  const { page, errors, close } = await launch(info, (workspace) =>
+    writeFile(join(workspace, "canvas.html"), "<!doctype html><html><body><h1>Canvas</h1></body></html>"),
+  );
+  try {
+    const { transcript, place, stream } = await scrollingChat(page);
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill('!tool preview {"filePath":"canvas.html","title":"Canvas"}');
+    await input.press("Enter");
+    await expect(transcript).toContainText("Tool preview =>");
+    const preview = page.locator(".file-preview .html-preview iframe");
+    const content = page.frameLocator(".file-preview .html-preview iframe").frameLocator("iframe").frameLocator("iframe");
+    await expect(content.getByRole("heading", { name: "Canvas" })).toBeVisible();
+    const words = await stream();
+    // From the reply's words onto the preview, let go there: the window sees no pointerup.
+    const box = (await preview.boundingBox())!;
+    await page.mouse.move(words.x + 8, words.y + words.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2, box.y + Math.min(box.height / 2, 200), { steps: 6 });
+    await page.mouse.up();
+    await expect(transcript).toContainText("STREAM_REFLOW_DONE");
+    await expect.poll(async () => (await place()).gap).toBeLessThan(5);
+    await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toHaveCount(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test("a turn's reply has one footer, under its last text, with its full time; Copy takes the whole reply", async ({}, info) => {
   const { app, page, errors, close } = await launch(info, async (workspace) => {
     await writeFile(join(workspace, "README.md"), "# Fixture\n\nA README the agent reads.\n");
