@@ -12933,6 +12933,130 @@ async fn a_queued_message_over_the_media_limit_is_refused_before_it_waits() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// A queued message was checked when it arrived. When its file has changed
+/// by the time its turn comes (grown past the limit, gone), the turn still
+/// starts: the model reads a note about the file instead, and the messages
+/// behind it run. An edit that sends its attachments back unchanged is not
+/// refused for them either.
+#[tokio::test]
+async fn a_queued_message_whose_file_changed_since_runs_with_a_note() {
+    let root =
+        std::env::temp_dir().join(format!("haarness-queued-changed-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let pdf = |name: &str, size: u64| {
+        let path = root.join(name);
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut file, b"%PDF-1.7\n").unwrap();
+        file.set_len(size).unwrap();
+        path.display().to_string()
+    };
+    let mid = pdf("mid.pdf", 12 * 1024 * 1024);
+    let gone = pdf("gone.pdf", 1024);
+    let provider = DeferredGate::default();
+    let runtime = deferred_runtime(
+        provider.clone(),
+        Arc::new(SqliteStore::in_memory().unwrap()),
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("original implementation"))
+        .await
+        .unwrap();
+    provider.wait().await;
+    let mut queued = deferred_request("read mid");
+    queued.attachments = vec![mid.clone(), gone.clone()];
+    runtime.queue_input(thread.id, queued).await.unwrap();
+    let behind = deferred_request("deferred release notes");
+    runtime.queue_input(thread.id, behind).await.unwrap();
+
+    // The files change while the message waits.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&mid)
+        .unwrap()
+        .set_len(21 * 1024 * 1024)
+        .unwrap();
+    std::fs::remove_file(&gone).unwrap();
+    let queue = runtime.input_queue(thread.id).await.unwrap();
+    let item = queue.items[0].clone();
+    assert_eq!(item.attachments, vec![mid.clone(), gone.clone()]);
+    runtime
+        .change_input_queue(
+            thread.id,
+            haarness_protocol::InputQueueAction::Edit {
+                revision: queue.revision,
+                id: item.id,
+                text: "read mid please".into(),
+                attachments: Some(item.attachments.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    // A new attachment must still fit beside those it keeps.
+    let queue = runtime.input_queue(thread.id).await.unwrap();
+    let extra = pdf("extra.pdf", 1024 * 1024);
+    let error = runtime
+        .change_input_queue(
+            thread.id,
+            haarness_protocol::InputQueueAction::Edit {
+                revision: queue.revision,
+                id: item.id,
+                text: "read mid please".into(),
+                attachments: Some(vec![mid.clone(), gone.clone(), extra]),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("over the 20 MiB limit"),
+        "{error}"
+    );
+
+    provider.next();
+    provider.wait().await;
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    provider.wait().await;
+    let sent = provider.requests.lock().unwrap()[2].clone();
+    assert!(sent.contains("read mid please"), "{sent}");
+    assert!(
+        sent.contains(&format!(
+            "[Attachment {mid} left out: it would bring this message's media to 21 MiB"
+        )),
+        "{sent}"
+    );
+    assert!(
+        sent.contains(&format!("[Attachment {gone} is no longer available]")),
+        "{sent}"
+    );
+    let changed = runtime.active_turn(thread.id).await.unwrap().unwrap();
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &changed).await.status,
+        TurnStatus::Completed
+    );
+    provider.wait().await;
+    assert!(provider.requests.lock().unwrap()[3].contains("deferred release notes"));
+    let notes = runtime.active_turn(thread.id).await.unwrap().unwrap();
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &notes).await.status,
+        TurnStatus::Completed
+    );
+    assert!(
+        runtime
+            .input_queue(thread.id)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn deferred_queue_stop_parks_work_and_send_resumes_selected_message() {
     let provider = DeferredGate::default();

@@ -100,10 +100,14 @@ pub fn admit(attachments: Vec<String>, workspace: &Path) -> CoreResult<Vec<Strin
         .into_iter()
         .map(|source| admit_one(source, workspace))
         .collect::<CoreResult<Vec<_>>>()?;
-    let total = admitted
-        .iter()
-        .filter_map(|source| media_bytes(source))
-        .fold(0_u64, u64::saturating_add);
+    within_limit(&admitted)?;
+    Ok(admitted)
+}
+
+/// Refuses admitted `sources` whose media together pass
+/// [`MAX_INLINE_MEDIA_BYTES`].
+pub fn within_limit(sources: &[String]) -> CoreResult<()> {
+    let total = admitted_media_bytes(sources);
     if total > MAX_INLINE_MEDIA_BYTES as u64 {
         return Err(CoreError::Invalid(format!(
             "The attachments come to {}, over the {} limit for media in one message",
@@ -111,7 +115,26 @@ pub fn admit(attachments: Vec<String>, workspace: &Path) -> CoreResult<Vec<Strin
             mebibytes(MAX_INLINE_MEDIA_BYTES as u64)
         )));
     }
-    Ok(admitted)
+    Ok(())
+}
+
+/// [`admit`] for a message admitted once already, when its turn comes (a
+/// queued message): each attachment on its own, and none refused. One whose
+/// file has changed since (grown past the limit, gone, no longer a PDF)
+/// stays as it was, a relative path made absolute, for the request to name
+/// in a note (see [`for_model`]) instead of holding back the queue.
+pub fn admit_each(attachments: Vec<String>, workspace: &Path) -> Vec<String> {
+    attachments
+        .into_iter()
+        .map(|source| {
+            admit_one(source.clone(), workspace).unwrap_or_else(|_| {
+                match file_path(&source).filter(|path| path.is_relative()) {
+                    Some(path) => workspace.join(path).to_string_lossy().into_owned(),
+                    None => source,
+                }
+            })
+        })
+        .collect()
 }
 
 /// [`admit`] on a blocking thread: converting an image is CPU work.
@@ -346,6 +369,16 @@ pub fn media_estimate(sources: &[String], workspace: &Path) -> u64 {
         .fold(0, u64::saturating_add)
 }
 
+/// What admitted `sources` take of [`MAX_INLINE_MEDIA_BYTES`], as [`admit`]
+/// counts them: each media data URL's payload and file's length.
+#[must_use]
+pub fn admitted_media_bytes(sources: &[String]) -> u64 {
+    sources
+        .iter()
+        .filter_map(|source| media_bytes(source))
+        .fold(0, u64::saturating_add)
+}
+
 /// The bytes a provider loads for a stored media source: a media data URL's
 /// payload or a file's length. `None` for a text file, which reaches the
 /// model as text, and for a file that is gone.
@@ -510,9 +543,12 @@ pub fn for_model<S: std::hash::BuildHasher>(
             media.push(source);
             continue;
         }
+        // Gone, or no longer readable (its permissions changed): the provider
+        // could not load it either.
         let file = local_path(&source).and_then(|path| {
             let metadata = std::fs::metadata(&path).ok()?;
-            metadata.is_file().then_some((path, metadata.len()))
+            let readable = metadata.is_file() && std::fs::File::open(&path).is_ok();
+            readable.then_some((path, metadata.len()))
         });
         let Some((path, size)) = file else {
             let _ = write!(content, "\n[Attachment {source} is no longer available]");
@@ -1074,6 +1110,48 @@ mod tests {
             "{content}"
         );
         assert!(content.contains("[Attachment old.pdf left out: it does not hold a readable PDF]"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_message_admitted_again_keeps_what_changed_since_for_the_request_to_name() {
+        let dir = std::env::temp_dir().join(format!("haarness-attach-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        sparse_pdf(&dir.join("scan.pdf"), 21 * MIB);
+        std::fs::write(dir.join("notes.md"), "# Notes\n").unwrap();
+        let kept = admit_each(
+            vec![
+                "scan.pdf".into(),
+                "gone.png".into(),
+                dir.join("gone.pdf").to_string_lossy().into_owned(),
+                "notes.md".into(),
+            ],
+            &dir,
+        );
+        assert_eq!(
+            kept[..3],
+            [
+                dir.join("scan.pdf").to_string_lossy().into_owned(),
+                dir.join("gone.png").to_string_lossy().into_owned(),
+                dir.join("gone.pdf").to_string_lossy().into_owned(),
+            ]
+        );
+        // What still admits is admitted as before.
+        assert!(kept[3].starts_with("data:text/plain;name=notes.md;base64,"));
+        let (content, media) = for_model(String::new(), kept, &HashSet::new());
+        assert!(media.is_empty());
+        assert!(
+            content.contains("scan.pdf left out: it would bring"),
+            "{content}"
+        );
+        assert!(
+            content.contains("gone.png is no longer available"),
+            "{content}"
+        );
+        assert!(
+            content.contains("<attached-file name=\"notes.md\">"),
+            "{content}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
