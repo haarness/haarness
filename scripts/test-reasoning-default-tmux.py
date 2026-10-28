@@ -66,13 +66,19 @@ class Provider(http.server.BaseHTTPRequestHandler):
 
 service = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider)
 threading.Thread(target=service.serve_forever, daemon=True).start()
-(workspace / ".haarness/config.toml").write_text(
-    '[defaults]\nprovider="effort-fixture"\nmodel="effort-model"\nreasoning_effort="high"\n'
-    'approval_mode="review"\n'
-    '[providers.effort-fixture]\nname="Effort fixture"\nprotocol="openai-chat-completions"\n'
-    f'base_url="http://127.0.0.1:{service.server_port}/v1"\nrequires_auth=false\ntools=true\n'
-    'reasoning=true\n[providers.ollama]\nenabled=false\n[providers.lmstudio]\nenabled=false\n'
-)
+
+
+def configure(level):
+    (workspace / ".haarness/config.toml").write_text(
+        f'[defaults]\nprovider="effort-fixture"\nmodel="effort-model"\nreasoning_effort="{level}"\n'
+        'approval_mode="review"\n'
+        '[providers.effort-fixture]\nname="Effort fixture"\nprotocol="openai-chat-completions"\n'
+        f'base_url="http://127.0.0.1:{service.server_port}/v1"\nrequires_auth=false\ntools=true\n'
+        'reasoning=true\n[providers.ollama]\nenabled=false\n[providers.lmstudio]\nenabled=false\n'
+    )
+
+
+configure("high")
 name = f"haarness-reasoning-default-{os.getpid()}"
 env = {
     **os.environ,
@@ -151,9 +157,8 @@ def row(screen, text):
     return next((line for line in screen.splitlines() if text in line), "")
 
 
-endpoint = None
-try:
-    endpoint = json.loads(
+def start_server():
+    return json.loads(
         run(
             [str(binary), "--workspace", str(workspace), "--trust-project", "desktop"],
             env=env,
@@ -161,6 +166,22 @@ try:
             timeout=90,
         )
     )
+
+
+def marked(level):
+    """The picker marks `level` as the configured default, and no other."""
+    command("/reasoning")
+    until(lambda: "Let the model decide" in capture(), "Reasoning picker did not open")
+    screen = capture()
+    keys("Escape")
+    until(lambda: "Let the model decide" not in capture(), "Reasoning picker did not close")
+    rows = [line for line in screen.splitlines() if "· default" in line]
+    return len(rows) == 1 and f" {level} " in rows[0]
+
+
+endpoint = None
+try:
+    endpoint = start_server()
     args = [str(binary), "--workspace", str(workspace), "--trust-project"]
     run(["tmux", "new-session", "-d", "-x", "120", "-y", "36", "-s", name, e2e_tmux.pane_command(env, args)])
     until(lambda: "effort-model" in capture() or "Effort" in capture(), "TUI did not start on the fixture model")
@@ -200,8 +221,22 @@ try:
     third = send("third-low")
     assert third.get("reasoning_effort") == "low", third
     (captures / "final.txt").write_text(capture())
+
+    # The server restarts with another level: the TUI follows it once it is
+    # back, and every reload after that too.
+    run([str(binary), "--workspace", str(workspace), "serve", "--stop"], env=env, timeout=30)
+    configure("medium")
+    endpoint = start_server()
+    until(lambda: "Reconnected" in capture(), "The TUI did not reconnect to the restarted server")
+    assert marked("medium"), capture()
+    configure("high")
+    deadline = time.monotonic() + 30
+    while not marked("high"):
+        assert time.monotonic() < deadline, "The reloaded level never reached the picker\n" + capture()
+        time.sleep(0.5)
     print(
-        "PASS real TUI: configured high shown and sent, provider default overrides it, a level picked is sent.",
+        "PASS real TUI: configured high shown and sent, provider default overrides it, a level picked is sent,"
+        " and a restart and a reload bring their level to the picker.",
         flush=True,
     )
 finally:
