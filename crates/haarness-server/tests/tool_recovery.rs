@@ -8,9 +8,9 @@ use std::{
 use async_trait::async_trait;
 use futures::stream;
 use haarness_core::{
-    AgentRuntime, CoreResult, EventBus, HookDecision, HookPort, LazyToolSettings, ModelProvider,
-    PermissionDecision, PermissionRule, ProviderEvent, ProviderMessage, ProviderRequest,
-    ProviderStream, RuntimeConfig, StaticProviderRegistry, ToolRegistry,
+    AgentRuntime, CoreResult, EventBus, HookCall, HookDecision, HookPort, LazyToolSettings,
+    ModelProvider, PermissionDecision, PermissionRule, ProviderEvent, ProviderMessage,
+    ProviderRequest, ProviderStream, RuntimeConfig, StaticProviderRegistry, ToolRegistry,
 };
 use haarness_protocol::{
     CreateThreadRequest, ItemData, LazyToolMode, ProviderInfo, RequestId, StartTurnRequest,
@@ -452,7 +452,7 @@ async fn unknown_disabled_and_deferred_errors_have_distinct_recovery_instruction
 struct Rewrite;
 #[async_trait]
 impl HookPort for Rewrite {
-    async fn pre_tool_use(&self, _: ThreadId, tool: &str, _: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, tool: &str, _: &Value) -> HookDecision {
         assert_eq!(tool, "write", "hooks must see the canonical tool name");
         HookDecision {
             updated_input: Some(json!({"path":"bad.txt","content":false})),
@@ -462,7 +462,7 @@ impl HookPort for Rewrite {
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
@@ -470,12 +470,12 @@ impl HookPort for Rewrite {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -483,7 +483,7 @@ impl HookPort for Rewrite {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: ThreadId) {}
+    async fn stop(&self, _: &HookCall) {}
 }
 
 #[tokio::test]
@@ -574,12 +574,12 @@ async fn documented_legacy_inputs_keep_their_existing_execution_semantics() {
 struct ShellEnv;
 #[async_trait]
 impl HookPort for ShellEnv {
-    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
         HookDecision::default()
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
@@ -587,12 +587,12 @@ impl HookPort for ShellEnv {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -600,7 +600,7 @@ impl HookPort for ShellEnv {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: ThreadId) {}
+    async fn stop(&self, _: &HookCall) {}
     async fn shell_env(
         &self,
         _: ThreadId,
@@ -675,12 +675,12 @@ async fn shell_env_hooks_add_variables_without_touching_bash_arguments() {
 struct RewritingAllow;
 #[async_trait]
 impl HookPort for RewritingAllow {
-    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
         HookDecision::default()
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
@@ -688,12 +688,12 @@ impl HookPort for RewritingAllow {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -705,7 +705,7 @@ impl HookPort for RewritingAllow {
             ..HookDecision::default()
         }
     }
-    async fn stop(&self, _: ThreadId) {}
+    async fn stop(&self, _: &HookCall) {}
 }
 
 #[tokio::test]
@@ -790,12 +790,12 @@ async fn a_permission_request_hook_allowing_other_input_leaves_the_prompt_to_the
 struct EchoingAllow(std::sync::Mutex<Vec<Value>>);
 #[async_trait]
 impl HookPort for EchoingAllow {
-    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
         HookDecision::default()
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
@@ -803,12 +803,12 @@ impl HookPort for EchoingAllow {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -821,7 +821,7 @@ impl HookPort for EchoingAllow {
             ..HookDecision::default()
         }
     }
-    async fn stop(&self, _: ThreadId) {}
+    async fn stop(&self, _: &HookCall) {}
 }
 
 #[cfg(unix)]
@@ -888,12 +888,12 @@ impl FirstAllow {
 }
 #[async_trait]
 impl HookPort for FirstAllow {
-    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
         HookDecision::default()
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
@@ -901,12 +901,12 @@ impl HookPort for FirstAllow {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         always: Option<&[String]>,
@@ -927,7 +927,7 @@ impl HookPort for FirstAllow {
             ..HookDecision::default()
         }
     }
-    async fn stop(&self, _: ThreadId) {}
+    async fn stop(&self, _: &HookCall) {}
 }
 
 /// Runs `echo one`, then `echo two` in a later round, under `bash:*` ask.
@@ -1066,7 +1066,7 @@ async fn a_permission_request_hook_cannot_answer_always_for_an_edit_of_haarness_
 struct AnswersQuestions(Value);
 #[async_trait]
 impl HookPort for AnswersQuestions {
-    async fn pre_tool_use(&self, _: ThreadId, tool: &str, arguments: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, tool: &str, arguments: &Value) -> HookDecision {
         if tool != "question" {
             return HookDecision::default();
         }
@@ -1080,7 +1080,7 @@ impl HookPort for AnswersQuestions {
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         tool: &str,
         _: &Value,
         output: &str,
@@ -1093,12 +1093,12 @@ impl HookPort for AnswersQuestions {
             ..HookDecision::default()
         }
     }
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -1106,7 +1106,7 @@ impl HookPort for AnswersQuestions {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: ThreadId) {}
+    async fn stop(&self, _: &HookCall) {}
 }
 
 fn question() -> ProviderEvent {
@@ -1231,7 +1231,7 @@ struct StopsQuestions {
 }
 #[async_trait]
 impl HookPort for StopsQuestions {
-    async fn pre_tool_use(&self, _: ThreadId, tool: &str, _: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, tool: &str, _: &Value) -> HookDecision {
         if tool != "question" {
             return HookDecision::default();
         }
@@ -1249,7 +1249,7 @@ impl HookPort for StopsQuestions {
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
@@ -1257,12 +1257,12 @@ impl HookPort for StopsQuestions {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -1270,7 +1270,7 @@ impl HookPort for StopsQuestions {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: ThreadId) {}
+    async fn stop(&self, _: &HookCall) {}
 }
 
 #[tokio::test]

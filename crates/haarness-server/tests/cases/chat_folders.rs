@@ -115,6 +115,114 @@ fn folder(thread: &Thread) -> PathBuf {
     PathBuf::from(thread.directory.as_deref().expect("the chat has a folder"))
 }
 
+/// A chat with a folder of its own runs its hooks there, from its start to
+/// its tools, a person's own command, the end of its turns and its archiving,
+/// and they get the folder as their project folder and `cwd`, with the agent
+/// where one acts. An ordinary chat's hooks run in the project folder, as do
+/// those of a chat whose folder is gone, which nothing makes again for them.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_chats_hooks_run_in_its_own_folder() {
+    let fixture = Fixture::new();
+    let log = fixture.root.join("hooks.log");
+    // One line per run: where it ran, the project folder it got in its
+    // environment and as a placeholder, then its payload.
+    let record = format!(
+        r#"printf '%s|%s|%s|' "$(pwd -P)" "$CLAUDE_PROJECT_DIR" "${{CLAUDE_PROJECT_DIR}}" >> '{log}'; cat >> '{log}'; echo >> '{log}'"#,
+        log = log.display()
+    );
+    let group = json!([{"hooks": [{"command": record}]}]);
+    let hooks = haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(&json!({
+            "SessionStart": group, "UserPromptSubmit": group, "PreToolUse": group,
+            "PostToolUse": group, "Stop": group, "SessionEnd": group,
+        })),
+        fixture.workspace.clone(),
+    );
+    let (runtime, _) = fixture.runtime();
+    let runtime = runtime.with_hooks(Arc::new(hooks));
+    let own = chat(&runtime, Some("2026-10-28/notes")).await.unwrap();
+    let plain = chat(&runtime, None).await.unwrap();
+    let gone = chat(&runtime, Some("2026-10-28/gone")).await.unwrap();
+    for thread in [&own, &plain] {
+        turn(&runtime, thread.id, &pwd()).await;
+    }
+    let ran = last_result(&runtime, own.id, "bash").await;
+    assert!(ran.contains(&folder(&own).display().to_string()), "{ran}");
+    runtime.run_shell(own.id, "pwd -P".into()).await.unwrap();
+    std::fs::remove_dir(folder(&gone)).unwrap();
+    for thread in [&own, &gone] {
+        runtime
+            .update_thread(
+                thread.id,
+                haarness_protocol::UpdateThreadRequest {
+                    title: None,
+                    archived: Some(true),
+                    agent: None,
+                    provider: None,
+                    model: None,
+                    ultracode: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let written = std::fs::read_to_string(&log).unwrap();
+    let (own_folder, project) = (folder(&own), fixture.workspace.clone());
+    let turn_events = [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+    ];
+    let cases = [
+        (
+            &own,
+            [
+                &turn_events[..],
+                &["PreToolUse", "PostToolUse", "SessionEnd"],
+            ]
+            .concat(),
+            vec![own_folder; 8],
+        ),
+        (&plain, turn_events.to_vec(), vec![project.clone(); 5]),
+        (
+            &gone,
+            vec!["SessionStart", "SessionEnd"],
+            vec![folder(&gone), project],
+        ),
+    ];
+    for (thread, expected_events, expected_folders) in cases {
+        let runs: Vec<(Vec<&str>, Value)> = written
+            .lines()
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.splitn(4, '|').collect();
+                let payload: Value = serde_json::from_str(parts[3]).unwrap();
+                (payload["session_id"] == json!(thread.id)).then(|| (parts[..3].to_vec(), payload))
+            })
+            .collect();
+        let events: Vec<&str> = runs
+            .iter()
+            .map(|(_, payload)| payload["hook_event_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(events, expected_events, "{}", thread.title);
+        for ((folders, payload), expected) in runs.iter().zip(&expected_folders) {
+            let expected = expected.display().to_string();
+            assert_eq!(folders, &[expected.as_str(); 3], "{payload}");
+            assert_eq!(payload["cwd"], json!(expected), "{payload}");
+            let named = matches!(
+                payload["hook_event_name"].as_str(),
+                Some("SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse")
+            );
+            assert_eq!(payload.get("agent").is_some(), named, "{payload}");
+            if named {
+                assert_eq!(payload["agent"], json!(thread.agent), "{payload}");
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_chat_folder_is_made_inside_numbered_when_taken_and_refused_outside() {
     let fixture = Fixture::new();

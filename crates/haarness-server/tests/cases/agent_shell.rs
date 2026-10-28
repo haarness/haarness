@@ -4,7 +4,7 @@
 //! own agent) is an outer marker and is kept. A stale `HAARNESS_SESSION_ID`
 //! there is covered by the shell module's tests, in a process of their own.
 use super::*;
-use haarness_core::{HookDecision, HookPort, PermissionDecision, PermissionRule};
+use haarness_core::{HookCall, HookDecision, HookPort, PermissionDecision, PermissionRule};
 use haarness_protocol::{ItemData, ThreadId};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -52,12 +52,12 @@ fn unmarked() -> String {
 struct Unmarking;
 #[async_trait]
 impl HookPort for Unmarking {
-    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
         HookDecision::default()
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
@@ -65,12 +65,12 @@ impl HookPort for Unmarking {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -78,7 +78,7 @@ impl HookPort for Unmarking {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: ThreadId) {}
+    async fn stop(&self, _: &HookCall) {}
     async fn shell_env(&self, _: ThreadId, _: &Path) -> BTreeMap<String, String> {
         [
             ("AGENT", "0"),

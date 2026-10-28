@@ -224,13 +224,13 @@ mod tests {
     use crate::NativeToolRegistry;
     use futures::stream;
     use haarness_core::{
-        AgentRuntime, EventBus, HookDecision, HookPort, ModelProvider, PermissionEngine,
+        AgentRuntime, EventBus, HookCall, HookDecision, HookPort, ModelProvider, PermissionEngine,
         PermissionRule, ProviderEvent, ProviderMessage, ProviderRequest, ProviderStream,
         RuntimeConfig, StaticProviderRegistry, ToolRegistry,
     };
     use haarness_protocol::{
         CreateThreadRequest, PermissionReply, PermissionReplyDecision, ProviderInfo, RequestId,
-        StartTurnRequest, ThreadId, TurnStatus,
+        StartTurnRequest, TurnStatus,
     };
     use haarness_store::SqliteStore;
     use std::sync::Mutex;
@@ -381,7 +381,7 @@ mod tests {
 
     #[async_trait]
     impl HookPort for ApproveAll {
-        async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+        async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
             HookDecision {
                 permission: Some(PermissionDecision::Allow),
                 ..HookDecision::default()
@@ -389,7 +389,7 @@ mod tests {
         }
         async fn post_tool_use(
             &self,
-            _: ThreadId,
+            _: &HookCall,
             _: &str,
             _: &Value,
             _: &str,
@@ -397,12 +397,12 @@ mod tests {
         ) -> HookDecision {
             HookDecision::default()
         }
-        async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+        async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
             HookDecision::default()
         }
         async fn permission_request(
             &self,
-            _: ThreadId,
+            _: &HookCall,
             _: &str,
             _: &[String],
             _: Option<&[String]>,
@@ -413,7 +413,7 @@ mod tests {
                 ..HookDecision::default()
             }
         }
-        async fn stop(&self, _: ThreadId) {}
+        async fn stop(&self, _: &HookCall) {}
     }
 
     async fn settle(runtime: &AgentRuntime, turn: haarness_protocol::TurnId) -> TurnStatus {

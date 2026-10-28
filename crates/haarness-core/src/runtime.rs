@@ -1762,6 +1762,27 @@ impl AgentRuntime {
         thread_workspace(&self.workspace, thread, access).await
     }
 
+    /// Whom hooks about chat `thread` run for outside a turn: the chat,
+    /// `agent` when one acts, and its own folder when it has one. Nothing is
+    /// made for them: a folder that is gone, or that a link stands in for, is
+    /// left out, and they run in the project folder as before.
+    async fn hook_call(&self, thread: &Thread, agent: Option<&str>) -> crate::HookCall {
+        let mut folder = None;
+        if thread.directory.is_some()
+            && let Ok(found) = self.thread_workspace(thread, FolderAccess::Read).await
+            && tokio::fs::metadata(&found)
+                .await
+                .is_ok_and(|found| found.is_dir())
+        {
+            folder = Some(found);
+        }
+        crate::HookCall {
+            thread: thread.id,
+            agent: agent.map(str::to_owned),
+            folder,
+        }
+    }
+
     /// The snapshot store of `workspace`, where chat `thread` works.
     async fn snapshots_at(
         &self,
@@ -2933,7 +2954,8 @@ impl AgentRuntime {
         if thread.parent_id.is_none()
             && let Some(hooks) = &components.hooks
         {
-            hooks.session_start(thread.id, &thread.agent).await;
+            let call = self.hook_call(&thread, Some(&thread.agent)).await;
+            hooks.session_start(&call).await;
         }
         Ok(thread)
     }
@@ -3040,7 +3062,8 @@ impl AgentRuntime {
         );
         if archiving && thread.archived {
             if let Some(hooks) = &self.components().hooks {
-                hooks.session_end(id, "archived").await;
+                let call = self.hook_call(&thread, None).await;
+                hooks.session_end(&call, "archived").await;
             }
         }
         Ok(thread)
@@ -3900,7 +3923,8 @@ impl AgentRuntime {
         let item = self.repository.compact(id, request, expected_tail).await?;
         drop(admission_guard);
         if let Some(hooks) = &self.components().hooks {
-            hooks.post_compact(id, "manual", &item).await;
+            let call = self.hook_call(&thread, None).await;
+            hooks.post_compact(&call, "manual", &item).await;
         }
         Ok(item)
     }
@@ -3998,7 +4022,8 @@ impl AgentRuntime {
         );
         drop(admission_guard);
         if let Some(hooks) = &self.components().hooks {
-            hooks.post_compact(id, "manual", &item).await;
+            let call = self.hook_call(&thread, None).await;
+            hooks.post_compact(&call, "manual", &item).await;
         }
         Ok(item)
     }
@@ -4639,11 +4664,17 @@ impl AgentRuntime {
 
         let mut hook_permission = None;
         let mut hook_context = None;
+        // The chat's agent, and its own folder when it works in one.
+        let hook_call = crate::HookCall {
+            thread: thread_id,
+            agent: Some(thread.agent.clone()),
+            folder: (workspace != self.workspace).then(|| workspace.clone()),
+        };
         if let Some(hooks) = &components.hooks {
             let decision = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Err(CoreError::Cancelled),
-                decision = hooks.pre_tool_use(thread_id, name, &arguments) => decision,
+                decision = hooks.pre_tool_use(&hook_call, name, &arguments) => decision,
             };
             if let Some(reason) = decision.block {
                 return Err(CoreError::PermissionDenied(format!(
@@ -5093,9 +5124,13 @@ impl AgentRuntime {
                 if let Some(hooks) = &components.hooks {
                     let hooks = Arc::clone(hooks);
                     let message = format!("Permission needed: {operation}");
+                    let call = crate::HookCall {
+                        agent: None,
+                        ..hook_call.clone()
+                    };
                     tokio::spawn(async move {
                         hooks
-                            .notification(thread_id, "permission_prompt", &message)
+                            .notification(&call, "permission_prompt", &message)
                             .await;
                     });
                 }
@@ -5245,7 +5280,7 @@ impl AgentRuntime {
             let decision = tokio::select! {
                 biased;
                 () = cancel.cancelled() => crate::HookDecision::default(),
-                decision = hooks.post_tool_use(thread_id, name, &arguments, &output.text, is_error) => decision,
+                decision = hooks.post_tool_use(&hook_call, name, &arguments, &output.text, is_error) => decision,
             };
             append_post_tool_hooks(&mut output.text, decision);
         }
@@ -7868,6 +7903,17 @@ struct ChatTurnSettings {
 }
 
 impl RunnerTask {
+    /// Whom this turn's hooks run for: its chat, `agent` when one acts, and
+    /// the folder its tools work in when that is not the project folder (the
+    /// chat's own, or for a child agent its parent's).
+    fn hook_call(&self, agent: Option<&str>) -> crate::HookCall {
+        crate::HookCall {
+            thread: self.thread.id,
+            agent: agent.map(str::to_owned),
+            folder: (self.workspace != self.runtime_workspace).then(|| self.workspace.clone()),
+        }
+    }
+
     /// The transcript's words for a failure of this turn, naming its provider.
     fn visible_error(&self, error: &CoreError) -> String {
         let name = self
@@ -8088,10 +8134,11 @@ impl RunnerTask {
         {
             let (category, kind) = stop_failure_categories(error);
             let detail = json!({"error":category,"error_type":kind,"error_details":self.visible_error(error),"provider_id":self.turn.provider,"model_id":self.turn.model});
+            let call = self.hook_call(None);
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => {},
-                () = hooks.stop_failure(self.thread.id, self.turn.id, &detail) => {}
+                () = hooks.stop_failure(&call, self.turn.id, &detail) => {}
             }
         }
         self.close_acceptance().await;
@@ -8428,10 +8475,11 @@ impl RunnerTask {
         );
         drop(accepting);
         if let Some(hooks) = &self.hooks {
+            let call = self.hook_call(None);
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                () = hooks.post_compact(self.thread.id, "automatic", &item) => {}
+                () = hooks.post_compact(&call, "automatic", &item) => {}
             }
         }
         self.set_status("thinking", None);
@@ -8520,10 +8568,11 @@ impl RunnerTask {
             let mut prompt_context: Option<String> = None;
             if self.depth == 0 {
                 if let Some(hooks) = &self.hooks {
+                    let call = self.hook_call(Some(agent));
                     let decision = tokio::select! {
                         biased;
                         () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                        decision = hooks.user_prompt_submit(self.thread.id, &self.request.text) => decision,
+                        decision = hooks.user_prompt_submit(&call, &self.request.text) => decision,
                     };
                     if let Some(reason) = decision.block {
                         return Err(CoreError::Invalid(format!("{PROMPT_BLOCKED}{reason}")));
@@ -8535,10 +8584,11 @@ impl RunnerTask {
                 && !self.command_started.swap(true, Ordering::SeqCst)
             {
                 if let Some(hooks) = &self.hooks {
+                    let call = self.hook_call(Some(agent));
                     let decision = tokio::select! {
                         biased;
                         () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                        decision = hooks.command_execute_before(self.thread.id, &command.name, &self.request.text) => decision,
+                        decision = hooks.command_execute_before(&call, &command.name, &self.request.text) => decision,
                     };
                     if let Some(reason) = decision.block {
                         return Err(CoreError::Invalid(format!(
@@ -8810,10 +8860,11 @@ impl RunnerTask {
                         }
                         drop(accepting);
                         if let (Some(hooks), Some(item)) = (&self.hooks, compacted) {
+                            let call = self.hook_call(None);
                             tokio::select! {
                                 biased;
                                 () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                                () = hooks.post_compact(self.thread.id, "automatic", &item) => {}
+                                () = hooks.post_compact(&call, "automatic", &item) => {}
                             }
                         }
                         self.set_status("thinking", None);
@@ -9685,10 +9736,11 @@ impl RunnerTask {
                     self.set_status("done", None);
                     if self.depth == 0 {
                         if let Some(hooks) = &self.hooks {
+                            let call = self.hook_call(None);
                             tokio::select! {
                                 biased;
                                 () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                                () = hooks.stop(self.thread.id) => {}
+                                () = hooks.stop(&call) => {}
                             }
                             let detail = json!({
                                 "turnId": self.turn.id,
@@ -9700,13 +9752,12 @@ impl RunnerTask {
                             tokio::select! {
                                 biased;
                                 () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                                () = hooks.turn_end(self.thread.id, self.turn.id, &detail) => {}
+                                () = hooks.turn_end(&call, self.turn.id, &detail) => {}
                             }
                             let hooks = Arc::clone(hooks);
-                            let thread_id = self.thread.id;
                             tokio::spawn(async move {
                                 hooks
-                                    .notification(thread_id, "turn_completed", "Session completed")
+                                    .notification(&call, "turn_completed", "Session completed")
                                     .await;
                             });
                         }
@@ -10518,7 +10569,7 @@ impl RunnerTask {
             let _ = self.promote_tools([name.to_owned()]);
         }
         if name == "question" {
-            return self.question_call(call_id, arguments).await;
+            return self.question_call(agent, call_id, arguments).await;
         }
         if name == "task" {
             let execution_gate = tool_execution_gate(&self.tool_execution_gates, name);
@@ -10573,11 +10624,12 @@ impl RunnerTask {
         // PreToolUse hooks may block outright or force a permission outcome.
         let mut hook_permission = None;
         let mut hook_context = None;
+        let hook_call = self.hook_call(Some(agent));
         if let Some(hooks) = &self.hooks {
             let decision = tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                decision = hooks.pre_tool_use(self.thread.id, name, &arguments) => decision,
+                decision = hooks.pre_tool_use(&hook_call, name, &arguments) => decision,
             };
             if let Some(reason) = decision.block {
                 return Err(CoreError::PermissionDenied(format!(
@@ -10851,7 +10903,7 @@ impl RunnerTask {
             let decision = tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => crate::HookDecision::default(),
-                decision = hooks.post_tool_use(self.thread.id, name, &arguments, &output.text, false) => decision,
+                decision = hooks.post_tool_use(&hook_call, name, &arguments, &output.text, false) => decision,
             };
             append_post_tool_hooks(&mut output.text, decision);
         }
@@ -11022,8 +11074,8 @@ impl RunnerTask {
                 && hook_may_remember(plan)
                 && !self.approval_modes.is_auto(self.thread.id).await)
                 .then_some(plan.always.as_slice());
-            match permission_hook_answer(hooks.as_ref(), self.thread.id, plan, always, detail).await
-            {
+            let call = self.hook_call(Some(agent));
+            match permission_hook_answer(hooks.as_ref(), &call, plan, always, detail).await {
                 HookAnswer::Refused(feedback) => {
                     return Ok(PermissionResolution::rejected(Some(feedback)));
                 }
@@ -11266,11 +11318,11 @@ impl RunnerTask {
             self.set_status("waiting_permission", Some(tool));
             if let Some(hooks) = &self.hooks {
                 let hooks = Arc::clone(hooks);
-                let thread_id = self.thread.id;
+                let call = self.hook_call(None);
                 let message = format!("Permission needed: {operation}");
                 tokio::spawn(async move {
                     hooks
-                        .notification(thread_id, "permission_prompt", &message)
+                        .notification(&call, "permission_prompt", &message)
                         .await;
                 });
             }
@@ -11487,18 +11539,20 @@ impl RunnerTask {
     /// after it is answered, with the answer as its output.
     async fn question_call(
         &self,
+        agent: &str,
         call_id: &str,
         mut arguments: serde_json::Value,
     ) -> CoreResult<ToolOutput> {
         use std::fmt::Write as _;
         let mut answers = None;
         let mut hook_context = None;
+        let hook_call = self.hook_call(Some(agent));
         if let Some(hooks) = &self.hooks {
             self.set_status("tool", Some(("question", call_id)));
             let decision = tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                decision = hooks.pre_tool_use(self.thread.id, "question", &arguments) => decision,
+                decision = hooks.pre_tool_use(&hook_call, "question", &arguments) => decision,
             };
             if let Some(reason) = decision.block {
                 return Err(CoreError::PermissionDenied(format!(
@@ -11558,7 +11612,7 @@ impl RunnerTask {
             let decision = tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => crate::HookDecision::default(),
-                decision = hooks.post_tool_use(self.thread.id, "question", &arguments, &output.text, false) => decision,
+                decision = hooks.post_tool_use(&hook_call, "question", &arguments, &output.text, false) => decision,
             };
             append_post_tool_hooks(&mut output.text, decision);
         }
@@ -14028,7 +14082,7 @@ enum HookAnswer {
 /// call did and `always` offered it.
 async fn permission_hook_answer(
     hooks: &dyn crate::HookPort,
-    thread: ThreadId,
+    call: &crate::HookCall,
     plan: &AskPlan,
     always: Option<&[String]>,
     detail: &serde_json::Value,
@@ -14050,7 +14104,7 @@ async fn permission_hook_answer(
     let mut remembered = always.is_some();
     for (patterns, input) in calls {
         let decision = hooks
-            .permission_request(thread, &plan.permission, &patterns, always, &input)
+            .permission_request(call, &plan.permission, &patterns, always, &input)
             .await;
         remembered &= decision.always;
         if let Some(reason) = decision.block {
@@ -14070,7 +14124,7 @@ async fn permission_hook_answer(
                     .is_some_and(|updated| updated != &input) =>
             {
                 tracing::info!(
-                    %thread,
+                    thread = %call.thread,
                     permission = %plan.permission,
                     "a PermissionRequest hook allowed a rewritten input; asking instead"
                 );
@@ -17932,7 +17986,7 @@ mod tests {
         impl crate::HookPort for DenyHome {
             async fn pre_tool_use(
                 &self,
-                _: ThreadId,
+                _: &crate::HookCall,
                 _: &str,
                 _: &serde_json::Value,
             ) -> crate::HookDecision {
@@ -17940,7 +17994,7 @@ mod tests {
             }
             async fn post_tool_use(
                 &self,
-                _: ThreadId,
+                _: &crate::HookCall,
                 _: &str,
                 _: &serde_json::Value,
                 _: &str,
@@ -17948,12 +18002,16 @@ mod tests {
             ) -> crate::HookDecision {
                 crate::HookDecision::default()
             }
-            async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> crate::HookDecision {
+            async fn user_prompt_submit(
+                &self,
+                _: &crate::HookCall,
+                _: &str,
+            ) -> crate::HookDecision {
                 crate::HookDecision::default()
             }
             async fn permission_request(
                 &self,
-                _: ThreadId,
+                _: &crate::HookCall,
                 _: &str,
                 patterns: &[String],
                 _: Option<&[String]>,
@@ -17973,7 +18031,7 @@ mod tests {
                     ..crate::HookDecision::default()
                 }
             }
-            async fn stop(&self, _: ThreadId) {}
+            async fn stop(&self, _: &crate::HookCall) {}
         }
         let root =
             std::env::temp_dir().join(format!("haarness-hook-home-{}", uuid::Uuid::now_v7()));
@@ -17984,6 +18042,7 @@ mod tests {
         let workspace = workspace.canonicalize().unwrap();
         let _home = crate::permissions::TestHome::set(&home);
         let hook = DenyHome(home.clone(), parking_lot::Mutex::new(Vec::new()));
+        let call = crate::HookCall::new(ThreadId::new());
         for (tool, arguments) in [
             ("read", json!({"path":"~/notes.txt"})),
             ("write", json!({"path":"~/notes.txt","content":"x"})),
@@ -17992,8 +18051,7 @@ mod tests {
             let plan = plans.last().unwrap();
             // The card and an Always answer keep the path as written.
             assert_eq!(plan.patterns, vec!["~/notes.txt"], "{tool}");
-            let answer =
-                super::permission_hook_answer(&hook, ThreadId::new(), plan, None, &arguments).await;
+            let answer = super::permission_hook_answer(&hook, &call, plan, None, &arguments).await;
             assert!(matches!(answer, super::HookAnswer::Refused(_)), "{tool}");
         }
         let calls = hook.1.lock().clone();
@@ -18009,7 +18067,7 @@ mod tests {
         let plans = super::ask_plans("read", &json!({"path":"src/lib.rs"}), &workspace);
         let answer = super::permission_hook_answer(
             &hook,
-            ThreadId::new(),
+            &call,
             plans.last().unwrap(),
             None,
             &json!({"path":"src/lib.rs"}),
