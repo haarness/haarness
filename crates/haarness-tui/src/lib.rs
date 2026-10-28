@@ -7,6 +7,7 @@ mod config;
 mod connect;
 mod diff;
 mod diffview;
+mod escapes;
 mod highlight;
 mod input;
 mod input_queue;

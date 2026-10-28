@@ -6,6 +6,8 @@
 //! activity reads as a status-dot row with a gutter-lined output block.
 //! Boxes for activity, open text for the conversation.
 
+use std::borrow::Cow;
+
 use haarness_opentui::{Line, Span, attr};
 use haarness_protocol::{FileDiff, FileDiffStatus, Item, ItemData};
 
@@ -575,7 +577,14 @@ fn failed_exit(name: &str, metadata: &serde_json::Value) -> Option<i64> {
 
 /// Tool output as a reader wants it. The bash tool opens with an `exit: N`
 /// line for the model; the row's status already says how the command ended.
-fn displayed_output<'a>(name: &str, output: &'a str, metadata: &serde_json::Value) -> &'a str {
+/// Colours, titles and other escape sequences a command or server wrote go
+/// whole, where the terminal would otherwise show their `[31m` remains; the
+/// model still reads the output as it was written.
+fn displayed_output<'a>(name: &str, output: &'a str, metadata: &serde_json::Value) -> Cow<'a, str> {
+    crate::escapes::without_escapes(without_exit_line(name, output, metadata))
+}
+
+fn without_exit_line<'a>(name: &str, output: &'a str, metadata: &serde_json::Value) -> &'a str {
     if name != "bash" || metadata.get("exit").is_none() {
         return output;
     }
@@ -635,7 +644,7 @@ fn folds_into_call_row(app: &App, result: &ItemData) -> bool {
         && failed_exit(name, metadata).is_none()
         && !is_user_shell(call_id)
         && !app.tool_details
-        && (empty_result_label(displayed_output(name, output, metadata)).is_none()
+        && (empty_result_label(&displayed_output(name, output, metadata)).is_none()
             || file_diff_count(metadata) > 0)
 }
 
@@ -1108,6 +1117,7 @@ fn render_tool_result(
     let failed = *is_error || failed_exit(name, metadata).is_some();
     let folds = folds_into_call_row(app, &item.data);
     let output = displayed_output(name, output, metadata);
+    let output = output.as_ref();
 
     let expanded = app.expanded.contains(&item.id);
 
@@ -2140,6 +2150,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         return String::new();
                     }
                     let output = displayed_output(name, output, metadata);
+                    let output = output.as_ref();
                     let (files, added, removed) =
                         app.cached_diff_stat(item.id, || file_diff_stat(metadata));
                     if files > 0 && compact_result.is_some() {
