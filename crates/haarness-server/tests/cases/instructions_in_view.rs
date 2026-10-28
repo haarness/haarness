@@ -167,3 +167,39 @@ async fn a_nested_instruction_file_comes_back_after_its_turn_was_undone() {
     assert_eq!(reads(&runtime, thread, "sub/b.txt").await, rules);
     assert!(reads(&runtime, thread, "sub/a.txt").await.is_empty());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_or_differently_cased_instruction_file_is_attached_once() {
+    let fixture = Fixture::new();
+    let runtime = runtime(&fixture);
+    let workspace = fixture.workspace();
+    // A common setup: the folder's AGENTS.md points at its CLAUDE.md.
+    std::fs::create_dir_all(workspace.join("linked")).unwrap();
+    std::fs::write(workspace.join("linked/CLAUDE.md"), "SUB_FOLDER_RULES").unwrap();
+    std::os::unix::fs::symlink("CLAUDE.md", workspace.join("linked/AGENTS.md")).unwrap();
+    std::fs::write(workspace.join("linked/a.txt"), "alpha").unwrap();
+    std::fs::write(workspace.join("linked/b.txt"), "beta").unwrap();
+    let thread = echo_thread(&runtime).await.id;
+
+    assert_eq!(
+        reads(&runtime, thread, "linked/a.txt").await,
+        vec![workspace.join("linked/AGENTS.md").display().to_string()]
+    );
+    assert!(reads(&runtime, thread, "linked/b.txt").await.is_empty());
+
+    // On a filesystem that ignores case (macOS by default) `agents.md` is
+    // found as `AGENTS.md`.
+    std::fs::create_dir_all(workspace.join("cased")).unwrap();
+    std::fs::write(workspace.join("cased/agents.md"), "SUB_FOLDER_RULES").unwrap();
+    std::fs::write(workspace.join("cased/a.txt"), "alpha").unwrap();
+    std::fs::write(workspace.join("cased/b.txt"), "beta").unwrap();
+    if workspace.join("cased/AGENTS.md").is_file() {
+        let thread = echo_thread(&runtime).await.id;
+        assert_eq!(
+            reads(&runtime, thread, "cased/a.txt").await,
+            vec![workspace.join("cased/AGENTS.md").display().to_string()]
+        );
+        assert!(reads(&runtime, thread, "cased/b.txt").await.is_empty());
+    }
+}

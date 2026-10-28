@@ -107,7 +107,9 @@ pub fn nested(file: &Path, workspace: &Path, claude: bool) -> Vec<PathBuf> {
 pub type InContext = std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<PathBuf>>>;
 
 /// The instruction files the tool results among `items` carried, as their
-/// `loaded` metadata names them, also for a `read` inside a batch.
+/// `loaded` metadata names them, also for a `read` inside a batch. Each is
+/// keyed as `read` keys it, by the file it resolves to, so an `AGENTS.md`
+/// that is a symlink or spelled in another case stays in view.
 #[must_use]
 pub fn attached<'a>(
     items: impl IntoIterator<Item = &'a haarness_protocol::Item>,
@@ -120,8 +122,9 @@ pub fn attached<'a>(
             .into_iter()
             .flatten()
             .filter_map(serde_json::Value::as_str)
+            .map(Path::new)
         {
-            found.insert(PathBuf::from(path));
+            found.insert(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
         }
     };
     for item in items {
