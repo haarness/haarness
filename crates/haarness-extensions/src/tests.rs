@@ -738,3 +738,38 @@ fn redefined_tools_keep_explicit_approvals_and_constraints() {
     );
     assert_eq!(tool.definition().description, "Rewritten by an extension");
 }
+
+/// With an extension's tools beside them, MCP tools still name the server
+/// that offers them (`a__b` for its `mcp__a__b__d`), for clients to show.
+#[test]
+fn combined_tools_name_the_mcp_server_of_a_tool() {
+    struct Servers;
+    impl ToolRegistry for Servers {
+        fn get(&self, _name: &str) -> Option<Arc<dyn Tool>> {
+            None
+        }
+        fn list(&self) -> Vec<ToolDefinition> {
+            Vec::new()
+        }
+        fn resource_servers(&self) -> Vec<String> {
+            vec!["a__b".into()]
+        }
+        fn tool_server(&self, name: &str) -> Option<String> {
+            (name == "mcp__a__b__d").then(|| "a__b".into())
+        }
+    }
+    let combined = CombinedTools {
+        inner: Arc::new(Servers),
+        extensions: Arc::new(Extensions {
+            hosts: Vec::new(),
+            tools: BTreeMap::new(),
+            workspace: PathBuf::new(),
+        }),
+        overrides: BTreeMap::new(),
+    };
+    assert_eq!(
+        combined.tool_server("mcp__a__b__d").as_deref(),
+        Some("a__b")
+    );
+    assert_eq!(combined.resource_servers(), ["a__b"]);
+}
