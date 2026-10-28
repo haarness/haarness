@@ -3339,7 +3339,7 @@ impl App {
                 }
                 effort => {
                     if !self
-                        .reasoning_efforts()
+                        .reasoning_levels()
                         .iter()
                         .any(|supported| supported == effort)
                     {
@@ -3617,7 +3617,7 @@ impl App {
     /// picker does and the efforts it does have.
     fn unsupported_effort(&self, effort: &str) -> String {
         let model = self.model_label(&format!("{}/{}", self.thread.provider, self.thread.model));
-        match self.reasoning_efforts() {
+        match self.reasoning_levels().as_slice() {
             [] => format!("{model} does not support reasoning effort"),
             [only] => format!("{model} does not support {effort} reasoning · it offers {only}"),
             [rest @ .., last] => format!(
@@ -3629,10 +3629,7 @@ impl App {
 
     async fn set_reasoning_option(&mut self, value: &str, client: &ApiClient) -> Result<()> {
         if !matches!(value, "off" | "display")
-            && !self
-                .reasoning_efforts()
-                .iter()
-                .any(|effort| effort == value)
+            && !self.reasoning_levels().iter().any(|effort| effort == value)
         {
             self.notice = self.unsupported_effort(value);
             return Ok(());
@@ -5131,7 +5128,7 @@ pub(crate) fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
         description: describe("Let the model decide", "off"),
         value: "off".into(),
     }];
-    for effort in app.reasoning_efforts() {
+    for effort in &app.reasoning_levels() {
         let description = match effort.as_str() {
             "none" => "No extended thinking",
             "minimal" => "Minimal thinking",
