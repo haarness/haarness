@@ -33,6 +33,8 @@ command -v jq >/dev/null
 
 export HAARNESS_DATA_DIR="$data"
 export HAARNESS_TEST_PROVIDER=1
+# Schedules are written into the test's folders, never registered with the system.
+export HAARNESS_SCHEDULE_SKIP_INSTALL=1
 export HOME="$test_home"
 
 "$binary" --workspace "$workspace" plugin install "$fixture" >/dev/null

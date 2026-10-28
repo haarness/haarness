@@ -21,7 +21,8 @@ import {
   chmod,
   rename,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -286,6 +287,10 @@ test.beforeAll(async () => {
     HAARNESS_TEST_PROVIDER: "1",
     HAARNESS_DESKTOP_TEST: "1",
     HAARNESS_VOICE_TEST_HELPER: join(temporary, "voice-fixture"),
+    // Schedules are written into this run's folder and never handed to
+    // launchd, systemd or Task Scheduler; the one test that runs a schedule
+    // natively registers it itself.
+    HAARNESS_SCHEDULE_SKIP_INSTALL: "1",
   });
   if (process.env.HAARNESS_RIPGREP_E2E === "1") {
     env.HAARNESS_HOME = join(temporary, "isolated haarness home");
@@ -6619,6 +6624,8 @@ test("schedule pickers, native execution and grouped conversations work end to e
   };
   const jobs = () => JSON.parse(command(["list", "--json"])) as Job[];
   let id = "";
+  // Takes back what this test registered with the system scheduler.
+  let unregister: (() => void) | undefined;
   try {
     await app.evaluate(({ dialog }, directory) => {
       const original = dialog.showOpenDialog;
@@ -6784,19 +6791,35 @@ test("schedule pickers, native execution and grouped conversations work end to e
     expect(jobs().find((job) => job.id === id)!.trigger.at).toBe(
       new Date(at).toISOString().replace(".000Z", "Z"),
     );
-    // Start the installed job the way its system scheduler would.
+    // The definition is in this run's own folder, not where the system
+    // scheduler would load it at the next login: register it from there for
+    // this test alone, then start it the way its system scheduler would.
+    const definitions = join(env.HAARNESS_DATA_DIR, "config", "scheduler");
     let source = "launchd";
     if (process.platform === "darwin") {
-      const label = `gui/${process.getuid!()}/dev.haarness.schedule.${id}`;
-      execFileSync("/bin/launchctl", ["print", label], { stdio: "ignore" });
-      execFileSync("/bin/launchctl", ["kickstart", label]);
+      const name = `dev.haarness.schedule.${id}`;
+      const plist = join(definitions, "launchd", `${name}.plist`);
+      expect(existsSync(plist)).toBe(true);
+      expect(existsSync(join(homedir(), "Library", "LaunchAgents", `${name}.plist`))).toBe(false);
+      const domain = `gui/${process.getuid!()}`;
+      unregister = () => execFileSync("/bin/launchctl", ["bootout", `${domain}/${name}`], { stdio: "ignore" });
+      execFileSync("/bin/launchctl", ["bootstrap", domain, plist]);
+      execFileSync("/bin/launchctl", ["kickstart", `${domain}/${name}`]);
     } else if (process.platform === "linux") {
       source = "systemd-user";
-      execFileSync("systemctl", ["--user", "is-enabled", `haarness-schedule-${id}.timer`], { stdio: "ignore" });
-      execFileSync("systemctl", ["--user", "start", "--no-block", `haarness-schedule-${id}.service`]);
+      const unit = `haarness-schedule-${id}`;
+      const units = [".service", ".timer"].map((kind) => join(definitions, "systemd", unit + kind));
+      expect(units.every((path) => existsSync(path))).toBe(true);
+      unregister = () => execFileSync("systemctl", ["--user", "disable", `${unit}.service`, `${unit}.timer`], { stdio: "ignore" });
+      execFileSync("systemctl", ["--user", "link", ...units], { stdio: "ignore" });
+      execFileSync("systemctl", ["--user", "daemon-reload"]);
+      execFileSync("systemctl", ["--user", "start", "--no-block", `${unit}.service`]);
     } else {
       source = "windows-task";
-      execFileSync("schtasks.exe", ["/Run", "/TN", `Haarness\\Schedule\\${id}`], { stdio: "ignore" });
+      const task = `Haarness\\Schedule\\${id}`;
+      unregister = () => execFileSync("schtasks.exe", ["/Delete", "/TN", task, "/F"], { stdio: "ignore" });
+      execFileSync("schtasks.exe", ["/Create", "/TN", task, "/XML", join(definitions, "tasks", `${id}.xml`), "/F"], { stdio: "ignore" });
+      execFileSync("schtasks.exe", ["/Run", "/TN", task], { stdio: "ignore" });
     }
     await expect
       .poll(() => JSON.parse(command(["history", id, "--json"])), {
@@ -6940,6 +6963,11 @@ test("schedule pickers, native execution and grouped conversations work end to e
     await expect(group.locator(".session-row")).toHaveCount(1);
     expect(errors).toEqual([]);
   } finally {
+    try {
+      unregister?.();
+    } catch {
+      // Its run already unloaded it, as a completed one-time schedule does.
+    }
     if (id && jobs().some((job) => job.id === id)) command(["remove", id]);
     await new Promise<void>((resolve) => provider.close(() => resolve()));
     if (

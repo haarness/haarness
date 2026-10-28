@@ -55,8 +55,14 @@ disable, run, history). The model's `cloud_schedule` tool is the Cloud counterpa
 `~/.local/share/haarness` on Linux); `$HAARNESS_HOME/config` and `$HAARNESS_HOME/state` when
 `HAARNESS_HOME` is set, and `config/` and `data/` under `HAARNESS_DATA_DIR` when that is set, so an
 isolated install never shares the person's schedules. The native entry carries the storage variables
-it was created with (`HAARNESS_HOME`, `HAARNESS_DATA_DIR`, the `XDG_*` folders). Setting `HAARNESS_SCHEDULE_SKIP_INSTALL=1` writes definitions without registering them
-with the operating system, which is how the end-to-end scripts test schedules.
+it was created with (`HAARNESS_HOME`, `HAARNESS_DATA_DIR`, the `XDG_*` folders). `HAARNESS_HOME` and
+`HAARNESS_DATA_DIR` do not move the launchd and systemd folders, which the operating system reads.
+Setting `HAARNESS_SCHEDULE_SKIP_INSTALL=1` writes definitions without registering them with the
+operating system, and puts the launchd and systemd ones in `<config>/scheduler/launchd/` and
+`<config>/scheduler/systemd/` instead, where neither loads them at the next login. This is how the
+end-to-end scripts and the Desktop specs test schedules (`scripts/e2e_env.py`,
+`apps/desktop/playwright.config.ts` and `apps/desktop/e2e/fixtures/isolated-env.ts` set it); a spec
+that runs one natively registers it from there itself and takes it back.
 
 ## What a run does
 

@@ -32,6 +32,8 @@ test.beforeAll(async () => {
     HAARNESS_DESKTOP_DATA: join(temporary, "desktop"),
     HAARNESS_TEST_PROVIDER: "1",
     HAARNESS_DESKTOP_TEST: "1",
+    // A schedule saved here never reaches the person's launchd or systemd.
+    HAARNESS_SCHEDULE_SKIP_INSTALL: "1",
   };
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.ELECTRON_RENDERER_URL;
