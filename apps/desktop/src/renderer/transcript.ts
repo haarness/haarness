@@ -15,7 +15,7 @@ import type {
 import { lines, type DiffLine } from "./diff";
 import { language, t } from "./i18n";
 import { reviewReason } from "./approval-mode";
-import { withoutEscapes } from "./display-text";
+import { literalText, withoutEscapes } from "./display-text";
 
 /** Provider call IDs can repeat in another turn; output belongs to one call. */
 export function toolResult(items: Item[], call?: Item, boundary = Infinity) {
@@ -386,7 +386,7 @@ export function toolInput(name: string, args: unknown) {
     const directory = record?.workdir ?? record?.cwd;
     return {
       label: "Shell",
-      text: "$ " + command.trim(),
+      text: "$ " + literalText(command.trim()),
       context: typeof directory === "string" ? directory : "",
     };
   }
@@ -636,8 +636,10 @@ function targetText(args: unknown): string {
   );
   return typeof first === "string" ? first.trim() : "";
 }
+/** A row's target on one line, with what would not show, or would reorder
+ * the row, written as its code, as on the call's approval card. */
 export function toolTarget(args: unknown): string {
-  return targetText(args).replace(/\s+/g, " ");
+  return literalText(targetText(args)).replace(/\s+/g, " ");
 }
 /**
  * A tool row's tooltip: the whole target with its line breaks, so a
@@ -646,7 +648,7 @@ export function toolTarget(args: unknown): string {
  * shown as the row shows it.
  */
 export function toolTitle(args: unknown, target: string): string {
-  const text = targetText(args);
+  const text = literalText(targetText(args));
   return text.replace(/\s+/g, " ") === target ? text : target;
 }
 /**

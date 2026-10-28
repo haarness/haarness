@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Item, ItemData } from "@haarness/sdk";
-import { withoutEscapes } from "../src/renderer/display-text";
-import { resultText } from "../src/renderer/transcript";
+import { literalParts, literalText, withoutEscapes } from "../src/renderer/display-text";
+import { resultText, toolInput, toolTarget, toolTitle } from "../src/renderer/transcript";
 import { findConversationMessages } from "../src/renderer/conversation-history";
 import { agentTaskError, type AgentTask } from "../src/renderer/agent-tasks";
 
@@ -54,7 +54,23 @@ test("what people write reads exactly as before", () => {
     "",
   ]) {
     assert.equal(withoutEscapes(text), text);
+    assert.equal(literalText(text), text);
+    assert.deepEqual(literalParts(text), [{ text, code: false }]);
   }
+});
+
+test("an approval shows what is invisible in it as quiet codes", () => {
+  assert.deepEqual(literalParts("cat report‮fdp.sh"), [
+    { text: "cat report", code: false },
+    { text: "\\u{202E}", code: true },
+    { text: "fdp.sh", code: false },
+  ]);
+  assert.equal(literalText("cd dist\r\nrm -r *"), "cd dist\\u{D}\nrm -r *");
+  assert.equal(literalText("x\u001b[1Ay"), "x\\u{1B}[1Ay");
+  assert.equal(literalText("p​q⁧r﻿s\u{e0070}"), "p\\u{200B}q\\u{2067}r\\u{FEFF}s\\u{E0070}");
+  assert.equal(literalText("a b­c"), "a\\u{2029}b\\u{AD}c");
+  // Tags that spell no flag show.
+  assert.equal(literalText("🏴\u{e0061}\u{e007f}"), "🏴\\u{E0061}\\u{E007F}");
 });
 
 test("a row shows a command's and a server's text without their escapes", () => {
@@ -72,6 +88,18 @@ test("a row shows a command's and a server's text without their escapes", () => 
     resultText("mcp__wiki__lookup", { output: JSON.stringify({ note: "\u001b[1mbold\u001b[0m" }), is_error: false }),
     "Note: bold",
   );
+});
+
+test("a row and its Shell panel show a command's invisible characters as codes, on one line", () => {
+  const args = { command: "cat report‮fdp.sh​ && cd dist\r\nrm -r cache" };
+  const target = toolTarget(args);
+  assert.equal(target, "cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D} rm -r cache");
+  assert.equal(toolTitle(args, target), "cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D}\nrm -r cache");
+  assert.equal(toolInput("bash", args).text, "$ cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D}\nrm -r cache");
+  // An ordinary command is unchanged.
+  const plain = { command: "npm test -- --grep \"日本\"\n  && git status" };
+  assert.equal(toolTarget(plain), "npm test -- --grep \"日本\" && git status");
+  assert.equal(toolTitle(plain, toolTarget(plain)), plain.command);
 });
 
 test("find in chat reads a command's output as its row shows it", () => {
