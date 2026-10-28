@@ -173,13 +173,20 @@ pub(crate) async fn run(
         .join("\n");
     let stdout_lines = stdout_text.lines().count();
     let mut metadata = json!({"exit":exit,"truncated":truncated,"stdout": if stdout_lines > 2000 { stdout_preview.as_str() } else { stdout_text.as_ref() }});
-    // `stdout` holds only its end: a definition's snippet says so.
-    if stdout_total > stdout_tail.len() || stdout_lines > 2000 {
+    // `stdout` holds only its end: a definition's snippet says so and names
+    // the file, kept for it even when the output itself fits (2001 lines
+    // with no final newline).
+    let stdout_cut = stdout_total > stdout_tail.len() || stdout_lines > 2000;
+    if stdout_cut {
         metadata["stdoutCut"] = json!(true);
     }
-    let notice = if truncated {
+    let notice = if truncated || stdout_cut {
         metadata["outputPath"] = json!(path);
-        format!("Full output saved to: {}\n", path.display())
+        if truncated {
+            format!("Full output saved to: {}\n", path.display())
+        } else {
+            String::new()
+        }
     } else {
         drop(file);
         let _ = tokio::fs::remove_file(&path).await;
@@ -355,6 +362,14 @@ mod tests {
             "{kept:.20}"
         );
         assert_eq!(lines["stdoutCut"], true);
+        // 2001 lines with no final newline fit the output's limits, which
+        // count newlines, yet stdout keeps 2000 of them: the file that holds
+        // all of it stays for the note to name.
+        let unended = stdout("seq 2000; printf 2001").await;
+        assert_eq!(unended["stdoutCut"], true);
+        assert_eq!(unended["truncated"], false);
+        let saved = std::fs::read_to_string(unended["outputPath"].as_str().unwrap()).unwrap();
+        assert!(saved.starts_with("1\n2\n") && saved.ends_with("\n2001"));
         // Over the byte limit on a line of two-byte characters, cut at an odd
         // byte: the kept text starts on a whole character.
         let bytes =
