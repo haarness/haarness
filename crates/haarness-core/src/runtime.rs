@@ -15132,6 +15132,21 @@ mod shell_reading_tests {
             asks("read", json!({ "path": "auth.json" }), &project),
             Vec::new()
         );
+        // A program that only looks at it decides as any line does (here,
+        // from the project that holds it); one that changes it still asks a
+        // person.
+        for command in [
+            "ls -l auth.json",
+            "stat auth.json",
+            "test -f auth.json && echo yes",
+            "[ -s auth.json ]",
+            "du -h auth.json; file auth.json",
+        ] {
+            assert_eq!(bash(command, &root), Vec::new(), "{command}");
+        }
+        for command in ["chmod 644 auth.json", "ls -l auth.json && head auth.json"] {
+            assert!(bash(command, &root).contains(&(Ask, true)), "{command}");
+        }
         std::fs::remove_dir_all(&root).unwrap();
     }
 
