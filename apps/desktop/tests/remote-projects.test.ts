@@ -9,6 +9,7 @@ import { once } from "node:events";
 import {
   browseRemote,
   openRemote,
+  responseFailure,
 } from "../src/main/remote-projects";
 
 async function withServer(
@@ -92,4 +93,16 @@ test("older servers explain the upgrade and upstream redirects are never followe
     browseRemote("http://remote.example", "private"),
     /HTTPS/,
   );
+});
+
+test("a refusal in plain text keeps the server's sentence; a 401, a 5xx or a page keeps only its status", async () => {
+  const failure = (status: number, body: string) => responseFailure(new Response(body, { status }));
+  const path = await failure(400, "\n Path must be relative to the workspace\n");
+  assert.deepEqual([path.status, path.code, path.message], [400, "http_error", "Path must be relative to the workspace"]);
+  assert.equal((await failure(401, "Authentication required")).message, "HTTP 401");
+  assert.equal((await failure(502, "upstream connect error")).message, "HTTP 502");
+  assert.equal((await failure(404, "")).message, "HTTP 404");
+  // The server's structured error wins over its text.
+  const coded = await failure(409, JSON.stringify({ error: { code: "conflict", message: "The file changed", retryable: true } }));
+  assert.deepEqual([coded.code, coded.message, coded.retryable], ["conflict", "The file changed", true]);
 });

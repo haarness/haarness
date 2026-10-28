@@ -1878,6 +1878,7 @@
   "You don't have access to this.": "Vous n’avez pas accès à cet élément.",
   "This is no longer available. It may have been removed.": "Cet élément n’est plus disponible. Il a peut-être été supprimé.",
   "This is too large to send.": "C’est trop volumineux pour être envoyé.",
+  "The server refused the token or password. Check it, then try again.": "Le serveur a refusé le jeton ou le mot de passe. Vérifiez-le, puis réessayez.",
   "That didn't go through. Try again.": "L’opération n’a pas abouti. Réessayez.",
   "Sign-in could not start. Another sign-in is still waiting on this computer. Finish or close it, then try again.": "La connexion n’a pas pu démarrer. Une autre connexion est encore en attente sur cet ordinateur. Terminez-la ou fermez-la, puis réessayez.",
   "A port is busy. Something else on this computer is using a port Haarness needs. Close it, then try again.": "Un port est occupé. Un autre programme de cet ordinateur utilise un port dont Haarness a besoin. Fermez-le, puis réessayez.",

@@ -84,6 +84,14 @@ def keys(*pressed, window=0):
     run(['tmux', 'send-keys', '-t', f'{name}:{window}.0', *pressed])
 
 
+def command(text):
+    keys('C-u')
+    run(['tmux', 'send-keys', '-l', '-t', f'{name}:0.0', text])
+    # Enter before the last keys are drawn can complete a shorter command.
+    until(lambda: text in capture(), 'typed command not shown: ' + text)
+    keys('Enter')
+
+
 def save(label, window=0):
     """Keep what the pane shows, colours included, for a person to look at."""
     (frames / (label + '.ansi')).write_text(run(['tmux', 'capture-pane', '-p', '-e', '-t', f'{name}:{window}.0']))
@@ -206,7 +214,8 @@ try:
     start(thread, 'printf switched > switched.txt', 'stall')
     time.sleep(1)
     assert not pending(), 'a request under review is not shown'
-    keys('C-y')
+    # Ctrl+Y from Auto goes on to Yolo, which approves; Review is one command away.
+    command('/approvals review')
     until(lambda: len(pending()) == 1, 'switching to Review did not show the prompt', seconds=5)
     assert pending()[0].get('review') is None
     until(lambda: 'approvals: review' in capture() and 'printf switched' in card(capture()), 'the TUI did not show the prompt')

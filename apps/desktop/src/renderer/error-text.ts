@@ -44,6 +44,7 @@ const sentences = {
   forbidden: "You don't have access to this.",
   gone: "This is no longer available. It may have been removed.",
   tooLarge: "This is too large to send.",
+  signInRefused: "The server refused the token or password. Check it, then try again.",
   refused: "That didn't go through. Try again.",
 } as const;
 /** A titled failure on one line, as the window gets it from main and a
@@ -158,6 +159,8 @@ function statusText(status: number, relay: boolean): readonly [string, string] |
   if (status === 502 || status === 503 || status === 504) return relay ? copy.computer : copy.unavailable;
   if (status >= 500) return sentences.server;
   if (status === 408) return sentences.slow;
+  // Through Cloud's relay a 401 is Cloud's sign-in, not the server's.
+  if (status === 401 && !relay) return sentences.signInRefused;
   if (status === 429) return sentences.busy;
   if (status === 403) return sentences.forbidden;
   if (status === 404 || status === 410) return sentences.gone;
