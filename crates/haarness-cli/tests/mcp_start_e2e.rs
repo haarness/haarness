@@ -34,13 +34,21 @@ impl TestDirectory {
     fn workspace(&self) -> PathBuf {
         self.0.join("workspace")
     }
-    /// A local server answering `initialize` after `delay` seconds.
+    /// A local server answering `initialize` after `delay` seconds, logging
+    /// each launch to `launches`.
     fn slow_server(&self, delay: &str) -> Value {
         json!({
             "command": "python3",
             "args": [FIXTURE],
-            "env": {"INIT_DELAY": delay, "CALL_LOG": self.0.join("calls")}
+            "env": {
+                "INIT_DELAY": delay,
+                "CALL_LOG": self.0.join("calls"),
+                "LAUNCH_LOG": self.0.join("launches")
+            }
         })
+    }
+    fn launches(&self) -> usize {
+        std::fs::read_to_string(self.0.join("launches")).map_or(0, |text| text.lines().count())
     }
     fn configure(&self, servers: &Value) {
         std::fs::write(
@@ -340,4 +348,113 @@ async fn a_request_to_a_server_still_starting_waits_for_it() {
     let ping = post_json(&client, address, "/mcp/slow/tools/ping", &json!({})).await;
     assert_eq!(ping["text"], "pong", "{ping}");
     shut_down(&client, address, child).await;
+}
+
+/// A start runs on its own: a client that gives up on a Reconnect or on
+/// configuring a server (an editor's session, at 15 s) leaves it running to
+/// the end, and a Reconnect during a start waits for it instead of starting
+/// the server again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_start_outlives_a_client_that_gave_up_on_it() {
+    let directory = TestDirectory::new();
+    directory.configure(&json!({"slow": directory.slow_server("3")}));
+    let address = unused_address().await;
+    let child = server_command(&directory, address)
+        .spawn()
+        .expect("launch Haarness server");
+    let client = Client::new();
+    wait_until_answering(&client, address).await;
+    let reconnect = client
+        .post(format!("http://{address}/v1/mcp/slow/reconnect"))
+        .bearer_auth(TOKEN)
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await;
+    assert!(reconnect.is_err_and(|error| error.is_timeout()));
+    let mut added = directory.slow_server("2");
+    added["transport"] = json!("stdio");
+    let configure = client
+        .post(format!("http://{address}/v1/mcp/added"))
+        .bearer_auth(TOKEN)
+        .json(&added)
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await;
+    assert!(configure.is_err_and(|error| error.is_timeout()));
+    wait_for_mcp_status(&client, address, "slow", "connected").await;
+    wait_for_mcp_status(&client, address, "added", "connected").await;
+    assert_eq!(directory.launches(), 2, "a server was started twice");
+    let ping = post_json(&client, address, "/mcp/added/tools/ping", &json!({})).await;
+    assert_eq!(ping["text"], "pong", "{ping}");
+    shut_down(&client, address, child).await;
+}
+
+/// Stopping Haarness stops a server still starting and answers the
+/// requests waiting for it, so it does not wait for that start to end.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stopping_stops_a_server_still_starting_and_the_waits_for_it() {
+    let directory = TestDirectory::new();
+    let pids = directory.0.join("pids");
+    directory.configure(&json!({"tree": {
+        "command": "python3",
+        "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/../haarness-mcp/tests/fixtures/process_tree.py")],
+        "env": {"TREE_LOG": pids, "INIT_DELAY": "60"},
+        "timeoutMs": 90_000
+    }}));
+    let address = unused_address().await;
+    let child = server_command(&directory, address)
+        .spawn()
+        .expect("launch Haarness server");
+    let client = Client::new();
+    wait_until_answering(&client, address).await;
+    for _ in 0..200 {
+        if std::fs::read_to_string(&pids).is_ok_and(|text| text.lines().count() == 3) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let waiting = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            client
+                .get(format!("http://{address}/v1/mcp/tree/tools"))
+                .bearer_auth(TOKEN)
+                .send()
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let started = Instant::now();
+    shut_down(&client, address, child).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "stopping waited for the start ({:?})",
+        started.elapsed()
+    );
+    let _ = timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the waiting request never ended");
+    let alive = |pid: &str| {
+        std::process::Command::new("ps")
+            .args(["-p", pid, "-o", "stat="])
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && !String::from_utf8_lossy(&output.stdout)
+                        .trim_start()
+                        .starts_with('Z')
+            })
+    };
+    let log = std::fs::read_to_string(&pids).expect("the fixture's processes");
+    for _ in 0..100 {
+        if !log.lines().any(alive) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !log.lines().any(alive),
+        "the starting server outlived Haarness"
+    );
 }

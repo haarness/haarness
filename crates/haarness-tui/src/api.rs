@@ -78,6 +78,11 @@ const WORKSPACE_MUTATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// nothing about what had gone wrong.
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// A request to an MCP server waits while the server is on its first start,
+/// which may take 2 minutes for a local server (a first `npx -y` download),
+/// before it gets its own answer: past the ordinary 15 s deadline.
+const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(150);
+
 #[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerAuth {
@@ -536,6 +541,18 @@ impl ApiClient {
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         Ok(
             checked_response(self.request(reqwest::Method::GET, path).sent().await?)
+                .await?
+                .json()
+                .await?,
+        )
+    }
+    /// A request to an MCP server, given [`MCP_REQUEST_TIMEOUT`].
+    fn mcp_request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        self.request(method, path).timeout(MCP_REQUEST_TIMEOUT)
+    }
+    async fn get_mcp<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        Ok(
+            checked_response(self.mcp_request(reqwest::Method::GET, path).sent().await?)
                 .await?
                 .json()
                 .await?,
@@ -1081,7 +1098,7 @@ impl ApiClient {
     }
     pub async fn reconnect_mcp(&self, name: &str) -> Result<McpServerInfo> {
         Ok(self
-            .request(
+            .mcp_request(
                 reqwest::Method::POST,
                 &format!("/v1/mcp/{}/reconnect", encode_url_component(name)),
             )
@@ -1106,7 +1123,7 @@ impl ApiClient {
             .await?)
     }
     pub async fn mcp_tools(&self, name: &str) -> Result<Vec<serde_json::Value>> {
-        self.get(&format!("/v1/mcp/{}/tools", encode_url_component(name)))
+        self.get_mcp(&format!("/v1/mcp/{}/tools", encode_url_component(name)))
             .await
     }
     pub async fn tool_catalog(
@@ -1158,7 +1175,7 @@ impl ApiClient {
         arguments: &serde_json::Value,
     ) -> Result<serde_json::Value> {
         Ok(self
-            .request(
+            .mcp_request(
                 reqwest::Method::POST,
                 &format!(
                     "/v1/mcp/{}/tools/{}",
@@ -1175,11 +1192,11 @@ impl ApiClient {
             .await?)
     }
     pub async fn mcp_resources(&self, name: &str) -> Result<Vec<serde_json::Value>> {
-        self.get(&format!("/v1/mcp/{}/resources", encode_url_component(name)))
+        self.get_mcp(&format!("/v1/mcp/{}/resources", encode_url_component(name)))
             .await
     }
     pub async fn mcp_resource_templates(&self, name: &str) -> Result<Vec<serde_json::Value>> {
-        self.get(&format!(
+        self.get_mcp(&format!(
             "/v1/mcp/{}/resource-templates",
             encode_url_component(name)
         ))
@@ -1187,7 +1204,7 @@ impl ApiClient {
     }
     pub async fn read_mcp_resource(&self, name: &str, uri: &str) -> Result<serde_json::Value> {
         Ok(self
-            .request(
+            .mcp_request(
                 reqwest::Method::POST,
                 &format!("/v1/mcp/{}/resources/read", encode_url_component(name)),
             )
@@ -1200,7 +1217,7 @@ impl ApiClient {
             .await?)
     }
     pub async fn mcp_prompts(&self, name: &str) -> Result<Vec<serde_json::Value>> {
-        self.get(&format!("/v1/mcp/{}/prompts", encode_url_component(name)))
+        self.get_mcp(&format!("/v1/mcp/{}/prompts", encode_url_component(name)))
             .await
     }
     pub async fn get_mcp_prompt(
@@ -1210,7 +1227,7 @@ impl ApiClient {
         arguments: &serde_json::Value,
     ) -> Result<serde_json::Value> {
         Ok(self
-            .request(
+            .mcp_request(
                 reqwest::Method::POST,
                 &format!(
                     "/v1/mcp/{}/prompts/{}",
