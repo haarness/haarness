@@ -3103,6 +3103,15 @@ impl Tool for BuiltinTool {
                 let before = string(&args, "old")?;
                 let after = string(&args, "new")?;
                 let text = text::read_utf8(&path, "edit").await?;
+                // An empty old is found between every two characters; said
+                // plainly rather than as a count of those places. An empty
+                // file still takes its first text this way.
+                if before.is_empty() && !text.is_empty() {
+                    return Err(CoreError::Invalid(
+                        "old is empty: give the exact text to replace, or use write to replace the whole file"
+                            .into(),
+                    ));
+                }
                 let (before, after) = text::crlf_edit(&text, before, after);
                 let (before, after) = (before.as_ref(), after.as_ref());
                 let count = text.matches(before).count();
@@ -7845,6 +7854,33 @@ export default workflow({
     }
 
     #[tokio::test]
+    async fn a_read_past_the_end_says_how_long_the_file_is() {
+        let (root, _) = read_fixture("f.txt", b"one\ntwo\nthree\n");
+        let past = |offset: usize| {
+            let root = root.clone();
+            async move {
+                read_text_of(&root, json!({"path":"f.txt","offset":offset}))
+                    .await
+                    .unwrap()
+                    .text
+            }
+        };
+        assert_eq!(past(2).await, "three");
+        assert_eq!(
+            past(3).await,
+            "(the file has 3 lines, so offset 3 is past its end)"
+        );
+        assert_eq!(
+            past(40).await,
+            "(the file has 3 lines, so offset 40 is past its end)"
+        );
+        // An empty file read from its start is still just empty.
+        std::fs::write(root.join("f.txt"), b"").unwrap();
+        assert_eq!(past(0).await, "");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn read_splits_lines_as_it_always_did() {
         for body in [
             "one\ntwo\nthree\n",
@@ -7866,11 +7902,20 @@ export default workflow({
                     .take(limit)
                     .collect::<Vec<_>>()
                     .join("\n");
-                if body.lines().count() > offset + limit {
+                let count = body.lines().count();
+                if count > offset + limit {
                     expected = format!(
                         "{expected}\n\n(more lines follow; read on with offset={})",
                         offset + shown
                     );
+                } else if shown == 0 && offset > 0 {
+                    // Past the end, the result says so rather than nothing.
+                    let length = match count {
+                        0 => "is empty".to_owned(),
+                        1 => "has 1 line".to_owned(),
+                        count => format!("has {count} lines"),
+                    };
+                    expected = format!("(the file {length}, so offset {offset} is past its end)");
                 }
                 assert_eq!(result.text, expected, "{body:?} {offset} {limit}");
             }
@@ -8045,6 +8090,29 @@ export default workflow({
             .unwrap()
             .execute(args, tool_context(root))
             .await
+    }
+
+    #[tokio::test]
+    async fn an_edit_with_an_empty_old_says_what_to_do_instead() {
+        let (root, file) = read_fixture("notes.md", b"# Notes\n");
+        let refused = edit_in(&root, "edit", json!({"path":"notes.md","old":"","new":"x"})).await;
+        assert!(
+            matches!(&refused, Err(CoreError::Invalid(message))
+                if message.contains("old is empty") && message.contains("use write")),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"# Notes\n");
+        // An empty file takes its first text.
+        std::fs::write(&file, b"").unwrap();
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"notes.md","old":"","new":"# Notes\n"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"# Notes\n");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
