@@ -532,10 +532,30 @@ fn plain_tool_output(text: String) -> ToolOutput {
 fn append_post_tool_hooks(output: &mut String, decision: crate::HookDecision) {
     use std::fmt::Write as _;
     if let Some(context) = decision.context {
+        let context = clip_hook_text(&context);
         let _ = write!(output, "\n\n<hook-context>\n{context}\n</hook-context>");
     }
     if let Some(feedback) = decision.block {
+        let feedback = clip_hook_text(&feedback);
         let _ = write!(output, "\n\n<hook-feedback>\n{feedback}\n</hook-feedback>");
+    }
+}
+
+/// The most of each hook block a tool's result takes. Many programs exit 2
+/// on a usage error, so a hook wrapping every tool would otherwise add all
+/// they print to every result.
+const HOOK_TEXT_CHARS: usize = 16_000;
+
+/// `text` kept to [`HOOK_TEXT_CHARS`] characters, saying how many were cut.
+fn clip_hook_text(text: &str) -> std::borrow::Cow<'_, str> {
+    match text.char_indices().nth(HOOK_TEXT_CHARS) {
+        Some((at, _)) => format!(
+            "{}… ({} more characters not shown)",
+            &text[..at],
+            text[at..].chars().count()
+        )
+        .into(),
+        None => text.into(),
     }
 }
 
@@ -15403,6 +15423,24 @@ mod tests {
         ProviderMessage, hook_question_answer, parse_goal_criteria_selection, provider_messages,
         question_request, resolve_pending_question, subagent_title,
     };
+
+    #[test]
+    fn what_hooks_add_after_a_tool_is_kept_to_a_bound_that_says_so() {
+        let mut output = "exit: 2\n".to_owned();
+        super::append_post_tool_hooks(
+            &mut output,
+            crate::HookDecision {
+                context: Some("formatted".into()),
+                block: Some(format!("{}é", "x".repeat(super::HOOK_TEXT_CHARS + 41))),
+                ..crate::HookDecision::default()
+            },
+        );
+        let expected = format!(
+            "exit: 2\n\n\n<hook-context>\nformatted\n</hook-context>\n\n<hook-feedback>\n{}… (42 more characters not shown)\n</hook-feedback>",
+            "x".repeat(super::HOOK_TEXT_CHARS)
+        );
+        assert_eq!(output, expected);
+    }
 
     #[test]
     fn goal_criteria_selection_handles_headless_multi_custom_and_cancel() {
