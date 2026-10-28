@@ -4,7 +4,7 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
 1. toml_order: `[permissions]` rules in `config.toml` apply in the order written, a `"*"` catch-all
    first, kept as TOML and once migrated to `haarness.json`: a deny written after a broader allow
    refuses, and a catch-all written last never overrides a deny before it.
-2. cd_link: a `cd` through a link that the shell takes out of the project by name
+2. cd_link: a `cd` or `pushd` through a link that the shell takes out of the project by name
    (`cd a/l/../../..` with `a/l` leading deeper in) asks, so a headless run stops before it writes.
 3. resource_alias: a deny written in `opencode.json` under upstream OpenCode's name for the resource
    read tool refuses `mcp_resource_read`.
@@ -130,14 +130,15 @@ def case_cd_link():
     (folder / 'a' / 'l').symlink_to('../deep/er/x')
     escaped = folder.parent / 'escaped.txt'
     try:
-        output = bash(env, folder, 'cd a/l/../../.. && touch escaped.txt', code=1)
-        assert 'Stopped:' in output and str(folder.parent) in output, output
-        assert not escaped.exists(), 'the line ran outside the project without asking'
+        for line in ['cd a/l/../../.. && touch escaped.txt', 'pushd a/l/../../.. && touch escaped.txt']:
+            output = bash(env, folder, line, code=1)
+            assert 'Stopped:' in output and str(folder.parent) in output, output
+            assert not escaped.exists(), f'{line} ran outside the project without asking'
         output = bash(env, folder, 'cd a/l/.. && pwd', code=0)
         assert str(folder / 'a') in output, output
     finally:
         stop(env, folder)
-    passed('a cd out of the project through a link asks; one that stays inside runs')
+    passed('a cd or pushd out of the project through a link asks; one that stays inside runs')
 
 
 def case_resource_alias():

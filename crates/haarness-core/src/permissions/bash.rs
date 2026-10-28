@@ -149,8 +149,9 @@ pub struct Derived {
 }
 
 /// Commands whose non-flag arguments are filesystem paths worth resolving.
+/// `pushd` enters its folder like `cd`.
 const PATH_COMMANDS: &[&str] = &[
-    "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
+    "cd", "pushd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
 ];
 
 /// Programs that only look at the files they are given (their names, sizes,
@@ -1498,7 +1499,7 @@ impl Reader<'_> {
                 continue;
             }
             let (argument, complete) = path_literal(word, source);
-            if argument.starts_with('-') || (name == "chmod" && argument.starts_with('+')) {
+            if names_no_path(&name, &argument) {
                 continue;
             }
             let raw = node_text(word, source);
@@ -1511,14 +1512,15 @@ impl Reader<'_> {
     /// out of the path as written (`cd -L`, its default), not of where a link
     /// in it leads, so a `cd` is also judged that way: with `a/l` leading
     /// deeper into the project, `cd a/l/../../..` reaches the project's
-    /// parent, though followed it is the project itself.
+    /// parent, though followed it is the project itself. `pushd` enters its
+    /// folder the same way.
     fn check_folder(&mut self, name: &str, raw: &str, value: &str, complete: bool) {
         let outside = external_dir(self.workspace, raw, value, complete);
         self.name_path(raw, value, complete, outside.as_deref());
         if let Some(dir) = outside {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
         }
-        if name == "cd"
+        if matches!(name, "cd" | "pushd")
             && let Some(dir) = cd_dir(self.workspace, raw, value, complete)
         {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
@@ -2075,13 +2077,27 @@ impl Reader<'_> {
         for word in arguments {
             // Each path of a brace list (`cat {,~/.ssh/id_rsa}`) on its own.
             for path in expanded(word, source) {
-                if path.value.starts_with('-') || (name == "chmod" && path.value.starts_with('+')) {
+                if names_no_path(&name, &path.value) {
                     continue;
                 }
                 self.check_folder(&name, &path.raw, &path.value, path.complete);
             }
         }
     }
+}
+
+/// Whether an argument of a command in [`PATH_COMMANDS`] names no path: an
+/// option (`-x`, `chmod`'s `+x`), or a place in `pushd`'s folder stack
+/// (`+1`; `-1` reads as an option), which only turns to a folder the stack
+/// already holds. Any other `pushd +…` word is read as a folder, as zsh takes
+/// it.
+fn names_no_path(name: &str, value: &str) -> bool {
+    value.starts_with('-')
+        || (name == "chmod" && value.starts_with('+'))
+        || (name == "pushd"
+            && value.strip_prefix('+').is_some_and(|place| {
+                !place.is_empty() && place.bytes().all(|b| b.is_ascii_digit())
+            }))
 }
 
 /// The name [`Reader::check_deletions`] reads a program nobody can name by.
@@ -5078,6 +5094,55 @@ mod regression {
             "cd deep/er/x/.. && ls",
             "touch a/l/../../x",
             "cat a/l/../../../project/README.md",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pushd_is_judged_like_a_cd() {
+        let root = std::env::temp_dir().join(format!("haarness-pushd-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("deep/er/x")).unwrap();
+        std::fs::create_dir_all(workspace.join("a")).unwrap();
+        std::fs::create_dir_all(workspace.join("sub")).unwrap();
+        std::os::unix::fs::symlink("../deep/er/x", workspace.join("a/l")).unwrap();
+        let parent = root.canonicalize().unwrap();
+        let tmp = analyze("cd /tmp && cat notes.txt", &workspace).external_dirs;
+        assert!(!tmp.is_empty());
+        for command in [
+            "pushd /tmp && cat notes.txt",
+            "pushd /tmp > /dev/null && cat notes.txt",
+            "pushd -n /tmp",
+            "builtin pushd /tmp",
+        ] {
+            assert_eq!(analyze(command, &workspace).external_dirs, tmp, "{command}");
+        }
+        // Taken by name out of the project, though followed it is the
+        // project itself; a `+` word that is no place in the stack is a
+        // folder.
+        for command in [
+            "pushd a/l/../../.. && touch escaped.txt",
+            "pushd +../../../x",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                vec![glob(&parent)],
+                "{command}"
+            );
+        }
+        // A folder in the project, a place in the folder stack, and `popd`.
+        for command in [
+            "pushd sub && cargo test && popd",
+            "pushd a/l/.. && ls",
+            "pushd +1",
+            "pushd -0",
+            "popd",
         ] {
             assert!(
                 analyze(command, &workspace).external_dirs.is_empty(),
