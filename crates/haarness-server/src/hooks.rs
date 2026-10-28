@@ -2647,31 +2647,36 @@ mod tests {
         }
     }
 
-    /// Windows reads a verbatim `\\?\` path as a different spelling; a hook
-    /// gets every folder without it.
-    #[cfg(windows)]
+    /// A hook is told its chat's folder or the server's as their canonical
+    /// form gives them, minus the verbatim `\\?\` prefix std puts on Windows,
+    /// which a hook would read as a different spelling.
     #[test]
-    fn hooks_get_their_folders_without_the_verbatim_prefix() {
+    fn hooks_are_told_their_folders_without_the_verbatim_prefix() {
         let made =
             std::env::temp_dir().join(format!("haarness-hook-verbatim-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(made.join("2026-10-28").join("notes")).unwrap();
-        // std's canonical form, as the chat folders are kept, is verbatim.
+        // std's canonical form, as the chat folders are kept.
         let project = made.canonicalize().unwrap();
         let folder = project.join("2026-10-28").join("notes");
-        assert!(folder.to_string_lossy().starts_with(r"\\?\"), "{folder:?}");
+        if cfg!(windows) {
+            assert!(folder.to_string_lossy().starts_with(r"\\?\"), "{folder:?}");
+        }
         let hooks = ConfiguredHooks::new(Vec::new(), project.clone());
         let mut call = HookCall {
             folder: Some(folder.clone()),
             ..HookCall::new(ThreadId::new())
         };
         let plain = |path: &Path| dunce::simplified(path).to_path_buf();
-        let folders = hooks.folders(Some(&call));
-        assert_eq!(folders.cwd, plain(&folder));
-        assert_eq!(folders.project, plain(&project));
+        let told = |call: &HookCall| {
+            let folders = hooks.folders(Some(call));
+            (folders.cwd.to_path_buf(), folders.project.to_path_buf())
+        };
+        let (cwd, told_project) = told(&call);
+        assert_eq!((&cwd, &told_project), (&plain(&folder), &plain(&project)));
         call.folder_is_project = true;
-        assert_eq!(hooks.folders(Some(&call)).project, plain(&folder));
+        assert_eq!(told(&call), (plain(&folder), plain(&folder)));
         assert_eq!(hooks.folders(None).cwd, plain(&project));
-        for path in [folders.cwd, folders.project] {
+        for path in [cwd, told_project] {
             assert!(!path.to_string_lossy().starts_with(r"\\?\"), "{path:?}");
         }
         std::fs::remove_dir_all(&made).unwrap();
