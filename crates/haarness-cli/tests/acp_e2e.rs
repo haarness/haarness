@@ -1015,8 +1015,10 @@ fn python3() -> PathBuf {
 /// An editor's session with an MCP server slow to start (a first `npx -y`
 /// download) is set up at once rather than failing when the editor stops
 /// waiting: the server goes on starting and the first prompt waits for it.
-/// One that cannot start fails the session and is left stopped, so an editor
-/// retrying it does not leave a server behind for every chat.
+/// One that fails once the session is set up is told to the editor at the
+/// next prompt, which goes on without it. One that cannot start fails the
+/// session; either is left stopped, so an editor retrying does not leave a
+/// server behind for every chat.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_session_with_a_server_slow_to_start_is_set_up_at_once() {
     let directory = TestDirectory::new();
@@ -1031,16 +1033,20 @@ async fn a_session_with_a_server_slow_to_start_is_set_up_at_once() {
                "env": [{"name": "INIT_DELAY", "value": delay},
                        {"name": "CALL_LOG", "value": directory.0.join("calls")}]})
     };
+    // Ends without answering, 3 s in: after session/new has returned.
+    let late =
+        json!({"name": "late", "command": "/bin/sh", "args": ["-c", "sleep 3; exit 1"], "env": []});
     let started = std::time::Instant::now();
     send(
         &mut stdin,
         json!({"jsonrpc":"2.0", "id":10, "method":"session/new",
-               "params":{"cwd":workspace, "mcpServers":[server("slow", python3(), "6")]}}),
+               "params":{"cwd":workspace, "mcpServers":[server("slow", python3(), "6"), late]}}),
     )
     .await;
     let mut messages = Vec::new();
     let created = receive_response(&mut lines, &mut stdin, 10, &mut messages).await;
     let waited = started.elapsed();
+    // Two servers, at most 2 s each.
     assert!(
         waited < Duration::from_secs(5),
         "session/new took {waited:?}"
@@ -1067,6 +1073,13 @@ async fn a_session_with_a_server_slow_to_start_is_set_up_at_once() {
             .any(|text| text == format!("Tool {tool} => pong")),
         "the first prompt did not get the server's tool: {messages:?}"
     );
+    assert!(
+        messages
+            .iter()
+            .filter_map(|message| update_text(message, "agent_message_chunk"))
+            .any(|text| text.starts_with("MCP server late did not start (")),
+        "the editor was not told a server failed: {messages:?}"
+    );
 
     send(
         &mut stdin,
@@ -1084,11 +1097,13 @@ async fn a_session_with_a_server_slow_to_start_is_set_up_at_once() {
         .await
         .expect("list MCP servers");
     let listed = String::from_utf8_lossy(&listed.stdout);
-    let broken = listed
-        .lines()
-        .find(|line| line.contains("-broken\t"))
-        .unwrap_or_else(|| panic!("{listed}"));
-    assert!(broken.contains("\tdisconnected"), "{broken}");
+    for name in ["-broken\t", "-late\t"] {
+        let line = listed
+            .lines()
+            .find(|line| line.contains(name))
+            .unwrap_or_else(|| panic!("{listed}"));
+        assert!(line.contains("\tdisconnected"), "{line}");
+    }
 
     drop(stdin);
     let status = timeout(Duration::from_secs(20), child.wait())

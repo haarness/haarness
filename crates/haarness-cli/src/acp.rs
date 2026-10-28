@@ -38,6 +38,9 @@ use haarness_tui::api::{ApiClient, SubscriptionEvent};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+/// An MCP server of a session: Haarness's name for it, and the editor's.
+type SessionServer = (String, String);
+
 /// How long setting a session up waits for one of its MCP servers to start
 /// before leaving the rest of that start to the server (see
 /// `Service::start_mcp`).
@@ -62,6 +65,12 @@ struct Service {
     auto_approve: bool,
     active: Arc<Mutex<HashMap<String, TurnId>>>,
     mcp: Arc<Mutex<HashSet<String>>>,
+    /// Each session's MCP servers still starting when it was set up, by
+    /// session: Haarness's name and the editor's. Its next prompt waits for
+    /// them (see `Service::await_mcp`).
+    starting: Arc<Mutex<HashMap<String, Vec<SessionServer>>>>,
+    /// A prompt's wait for its session's servers, which Cancel ends.
+    waits: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
 }
 
 impl Service {
@@ -76,6 +85,8 @@ impl Service {
             auto_approve: config.auto_approve,
             active: Arc::new(Mutex::new(HashMap::new())),
             mcp: Arc::new(Mutex::new(HashSet::new())),
+            starting: Arc::new(Mutex::new(HashMap::new())),
+            waits: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -231,6 +242,9 @@ impl Service {
         let (text, attachments) = prompt_content(request.prompt)?;
         if text.trim().is_empty() && attachments.is_empty() {
             return Err(invalid("prompt must contain text or supported media"));
+        }
+        if self.await_mcp(&request.session_id, connection).await? {
+            return Ok(PromptResponse::new(StopReason::Cancelled));
         }
 
         let (mut events, event_task) = self.client.subscribe(None);
@@ -412,6 +426,14 @@ impl Service {
     }
 
     async fn cancel(&self, session: &SessionId) -> AcpResult<()> {
+        if let Some(wait) = self
+            .waits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session.to_string())
+        {
+            wait.cancel();
+        }
         let turn = self
             .active
             .lock()
@@ -453,42 +475,145 @@ impl Service {
         cwd: &Path,
     ) -> AcpResult<()> {
         for server in servers {
-            let (name, config) = mcp_config(server, cwd)?;
-            let name = format!("acp-{}-{name}", &thread.to_string()[..8]);
+            let (shown, config) = mcp_config(server, cwd)?;
+            let name = format!("acp-{}-{shown}", &thread.to_string()[..8]);
             let fresh = self
                 .mcp
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(name.clone());
-            if fresh && let Err(error) = self.start_mcp(&name, &config).await {
-                self.mcp
+            if !fresh {
+                continue;
+            }
+            match self.start_mcp(&name, &config).await {
+                Ok(true) => self
+                    .starting
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&name);
-                // A server that did not start stays stopped: an editor
-                // retrying the session configures it again under the new
-                // chat's name, and this one would serve every chat.
-                let _ = self.client.disconnect_mcp(&name).await;
-                return Err(internal(error));
+                    .entry(thread.to_string())
+                    .or_default()
+                    .push((name, shown)),
+                Ok(false) => {}
+                Err(error) => {
+                    self.forget_mcp(&name).await;
+                    return Err(internal(error));
+                }
             }
         }
         Ok(())
     }
 
-    /// Configure `name` and wait for its start for a moment at most. A
-    /// server still starting then (a first `npx -y` download) is configured
-    /// as far as the session is concerned: its start goes on on the server,
-    /// and the session's first prompt waits for it.
-    async fn start_mcp(&self, name: &str, config: &McpConfigureRequest) -> Result<()> {
+    /// Forget `name`, so the session's next load configures it again, and
+    /// leave it stopped: an editor retrying the session configures it again
+    /// under the new chat's name, and this one would serve every chat.
+    async fn forget_mcp(&self, name: &str) {
+        self.mcp
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(name);
+        let _ = self.client.disconnect_mcp(name).await;
+    }
+
+    /// Before a prompt, wait for the session's MCP servers still starting
+    /// when it was set up, as a turn waits for the servers Haarness starts
+    /// itself: a start an editor asked for holds up no other chat. Cancel
+    /// ends the wait (`true`) and the next prompt waits again. A server that
+    /// did not start is told to the editor, logged and left stopped; the
+    /// prompt goes on without it.
+    async fn await_mcp(
+        &self,
+        session: &SessionId,
+        connection: &ConnectionTo<Client>,
+    ) -> AcpResult<bool> {
+        let key = session.to_string();
+        let servers = self
+            .starting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key)
+            .unwrap_or_default();
+        if servers.is_empty() {
+            return Ok(false);
+        }
+        let stop = tokio_util::sync::CancellationToken::new();
+        self.waits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone(), stop.clone());
+        let mut still = Vec::new();
+        let mut servers = servers.into_iter();
+        let mut cancelled = false;
+        while let Some((name, shown)) = servers.next() {
+            // The server's tools are answered once its start has ended
+            // (150 s at most, then it is waited for again next time).
+            let waited = tokio::select! {
+                () = stop.cancelled() => None,
+                _ = self.client.mcp_tools(&name) => Some(()),
+            };
+            if waited.is_none() {
+                cancelled = true;
+                still.push((name, shown));
+                still.extend(servers.by_ref());
+                break;
+            }
+            let status = self
+                .client
+                .mcp()
+                .await
+                .ok()
+                .and_then(|listed| listed.into_iter().find(|server| server.name == name));
+            match status {
+                Some(server) if matches!(server.status.as_str(), "connected" | "needs_auth") => {}
+                Some(server) if server.status == "connecting" => still.push((name, shown)),
+                server => {
+                    let why = server
+                        .and_then(|server| server.detail.or(Some(server.status)))
+                        .unwrap_or_else(|| "it is no longer configured".into());
+                    tracing::warn!(server = %name, reason = %why, "an editor's MCP server did not start");
+                    notify(
+                        connection,
+                        session,
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new(format!(
+                                "MCP server {shown} did not start ({why}), so this prompt runs without its tools.\n\n"
+                            )),
+                        ))),
+                    )?;
+                    self.forget_mcp(&name).await;
+                }
+            }
+        }
+        self.waits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
+        if !still.is_empty() {
+            self.starting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(key)
+                .or_default()
+                .extend(still);
+        }
+        Ok(cancelled)
+    }
+
+    /// Configure `name` and wait for its start for a moment at most: `true`
+    /// when it is still starting then (a first `npx -y` download), which
+    /// counts as configured for the session. Its start goes on on the
+    /// server, and the session's next prompt waits for it. A server that
+    /// needs authorization is configured too.
+    async fn start_mcp(&self, name: &str, config: &McpConfigureRequest) -> Result<bool> {
         match tokio::time::timeout(MCP_START_WAIT, self.client.configure_mcp(name, config)).await {
-            Ok(configured) => configured.map(drop),
+            Ok(configured) => configured.map(|_| false),
             Err(_) => {
                 let servers = self.client.mcp().await?;
                 match servers.iter().find(|server| server.name == name) {
+                    Some(server) if server.status == "connecting" => Ok(true),
                     Some(server)
-                        if matches!(server.status.as_str(), "connecting" | "connected") =>
+                        if matches!(server.status.as_str(), "connected" | "needs_auth") =>
                     {
-                        Ok(())
+                        Ok(false)
                     }
                     Some(server) => anyhow::bail!(
                         "MCP server {name} did not start ({}{})",

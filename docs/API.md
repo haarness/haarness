@@ -265,32 +265,43 @@ effective configuration (with `${VAR}` references resolved) is unchanged,
 instead of starting it again. Servers connect concurrently at startup and on
 reload, in the background: the server answers at once, lists each as
 `connecting` until it has connected, failed or needs authorization, and then
-publishes `assets.updated` with `resource: "mcp"` and the server's `name`,
-as it does for every start that comes to an answer, whoever began it
-(`configure`, `reconnect`, a recovery). Sixteen start at a time and the rest wait for a free place; each start, once
-begun, has the server's start limit (see `timeoutMs` below). A turn begun
-while a server is still on that start waits for it before its first request,
+publishes `assets.updated` with `resource: "mcp"` and the server's `name`.
+Every start that comes to an answer is announced so, whoever began it
+(`configure`, `reconnect`), except a start that got a connection back after
+its transport closed and connected again: a server that keeps crashing does
+not have clients read their catalogs each time. Sixteen start at a time and
+the rest wait for a free place; each start, once begun, has the server's
+start limit (see `timeoutMs` below). A turn begun while a server from the
+configuration is still on that start waits for it before its first request,
 so a script's first message is offered the tools a later one would be; Stop
 ends the wait, and a turn begun once those starts ended never waits. A
-request to such a server (its tools, a tool call, a resource or prompt
-request) waits for it too. A server configured through `POST /v1/mcp/{name}`
-(as an editor's ACP session does) is on such a start as well; ACP takes a
-server still starting after 2 seconds as configured, so the session is set
-up at once and its first prompt waits for the server, and leaves one that
-failed disconnected. Every start runs on its own: a client that gives up on
-`configure` or `reconnect` leaves it running. A `reconnect` during a start
-that has run less than 30 seconds waits for that start instead of beginning
-another; one that has run longer may be hung, so `reconnect` stops it and
-starts the server again, and turns waiting for the first start wait for the
-new one (`haarness mcp reconnect` and Desktop's Reconnect do the same).
+request to a server that is starting (its tools, a tool call, a resource or
+prompt request) waits for that start too.
+
+A server configured through `POST /v1/mcp/{name}` (as an editor's ACP
+session does) holds up no turn while it starts: its client waits for it. ACP
+takes a server still starting (or needing authorization) after 2 seconds as
+configured, so the session is set up at once, and waits for its servers
+still starting before the session's next prompt (Cancel ends that wait). One
+that did not start is told to the editor in that prompt's reply and logged;
+the prompt goes on without it, and the server is left disconnected for the
+session's next load to configure again. One that fails within the 2
+seconds fails the session and is left disconnected too.
+
+Every start runs on its own: a client that gives up on `configure` or
+`reconnect` leaves it running. A `reconnect` during a start that has run
+less than 30 seconds waits for that start instead of beginning another; one
+that has run longer may be hung, so `reconnect` stops it and starts the
+server again, and turns waiting for the first start wait for the new one
+(`haarness mcp reconnect` and Desktop's Reconnect do the same).
 `disconnect` stops a start on its way, its process included, and ends the
 waits for it at once; so does the server being configured again or removed
-by a reload, and Haarness stopping. A server that
-failed holds up nothing: a reload tries it again in the background without
-making turns wait, and its tools then reach a turn already running from its
-next request, as after a `reconnect`, with an extension's `tool.definition`
-rewrite from the next turn. A reload while a server is still starting keeps
-that start.
+by a reload, and Haarness stopping. A server that failed holds up nothing: a
+reload tries it again in the background without making turns wait, and its
+tools then reach a turn already running from its next request, as after a
+`reconnect`, with an extension's `tool.definition` rewrite from the next
+turn. A reload while a server is still starting keeps that start.
+
 An edit that changes only agent definition files (markdown in an `agents` or
 `agent` folder) does not wait for active turns: once the files load, new
 turns use the new definitions and `assets.updated` (`resource: "agent"`) is

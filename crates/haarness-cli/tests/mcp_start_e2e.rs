@@ -101,7 +101,8 @@ fn server_command(directory: &TestDirectory, address: SocketAddr) -> Command {
 /// How long the server took to answer its first request.
 async fn wait_until_answering(client: &Client, address: SocketAddr) -> Duration {
     let started = Instant::now();
-    for _ in 0..600 {
+    // Up to 30 s: other work on a loaded machine can slow a start.
+    for _ in 0..1200 {
         if client
             .get(format!("http://{address}/v1/mcp"))
             .bearer_auth(TOKEN)
@@ -457,4 +458,41 @@ async fn stopping_stops_a_server_still_starting_and_the_waits_for_it() {
         !log.lines().any(alive),
         "the starting server outlived Haarness"
     );
+}
+
+/// A server a client configured (an editor's session does) holds up no
+/// other chat's turn while it starts: only the servers Haarness starts
+/// itself, from its settings, do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_server_a_client_configured_holds_up_no_other_chat() {
+    let directory = TestDirectory::new();
+    directory.configure(&json!({}));
+    let address = unused_address().await;
+    let child = server_command(&directory, address)
+        .spawn()
+        .expect("launch Haarness server");
+    let client = Client::new();
+    wait_until_answering(&client, address).await;
+    let mut added = directory.slow_server("5");
+    added["transport"] = json!("stdio");
+    let configure = client
+        .post(format!("http://{address}/v1/mcp/editor"))
+        .bearer_auth(TOKEN)
+        .json(&added)
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await;
+    assert!(configure.is_err_and(|error| error.is_timeout()));
+    let thread = new_chat(&client, address).await;
+    start_turn(&client, address, &thread, "hello").await;
+    let waited = wait_until_idle(&client, address, &thread).await;
+    assert!(
+        waited < Duration::from_secs(3),
+        "the turn waited {waited:?}"
+    );
+    assert_eq!(
+        mcp_status(&get_json(&client, address, "/mcp").await, "editor").as_deref(),
+        Some("connecting")
+    );
+    shut_down(&client, address, child).await;
 }
