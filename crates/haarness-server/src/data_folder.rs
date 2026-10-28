@@ -48,7 +48,9 @@ pub fn data_folder() -> Option<PathBuf> {
 
 /// Names a data folder holds once Haarness has kept its files there: what
 /// tells one of its own from a folder of the person's that only has the
-/// same name (`--data-dir ~` makes `~/data` the data folder).
+/// same name (`--data-dir ~` makes `~/data` the data folder). Only Unix
+/// narrows a folder.
+#[cfg(unix)]
 const KEPT: [&str; 4] = [
     ".layout-v1",
     "workspaces.json",
