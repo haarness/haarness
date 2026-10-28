@@ -68,6 +68,7 @@ import {
 } from "../chrome";
 import { chatTitle } from "./chat-title";
 import { parseModel, selectModel } from "./model-selection";
+import { carriedReasoning } from "./reasoning";
 import { AgentTask } from "./AgentTask";
 import { Shimmer } from "./Shimmer";
 import { agentTasks, taskKey, type AgentTask as Task } from "./agent-tasks";
@@ -2195,7 +2196,12 @@ export function Session() {
       ?.models.find((m) => m.id === selectedModel()?.model)?.reasoningEfforts ??
     [];
   createEffect(() => {
-    if (state.ready && effort() && !efforts().includes(effort())) setEffort("");
+    const kept = carriedReasoning(
+      effort(),
+      efforts(),
+      state.connection?.info.defaultReasoningEffort,
+    );
+    if (state.ready && effort() && kept !== effort()) setEffort("");
   });
   const thought = createMemo(() =>
     state.preferences.thinking === "compact" && !stream()?.text
@@ -3073,6 +3079,7 @@ export function Session() {
                         onChange={(value) => app.run(() => model(value))}
                         options={modelOptions()}
                         effort={effort()}
+                        configured={state.connection?.info.defaultReasoningEffort}
                         onEffortChange={setEffort}
                         onOpen={() => void app.run(() => app.catalogs(true))}
                       />

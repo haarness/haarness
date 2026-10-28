@@ -1,9 +1,14 @@
 import { t } from "./i18n";
-import { createSignal, For, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import { Select } from "./Select";
 import { Icon } from "./icons";
 import type { ModelOption } from "./provider-model-options";
-import { reasoningLabel, reasoningLevels, validReasoning } from "./reasoning";
+import {
+  carriedReasoning,
+  reasoningChoice,
+  reasoningLabel,
+  reasoningLevels,
+} from "./reasoning";
 import "./model-picker.css";
 
 /** Model selection and model-specific reasoning share one accessible popover. */
@@ -11,6 +16,10 @@ export function ModelPicker(props: {
   value: string;
   options: ModelOption[];
   effort?: string;
+  /** The level the server's `defaults.reasoning_effort` sets, which a turn
+   * with no effort chosen runs at; the model's default is then a choice of
+   * its own (`MODEL_DEFAULT_EFFORT`). */
+  configured?: string | null;
   onChange: (value: string) => unknown;
   onEffortChange?: (value: string) => void;
   onOpen?: () => void;
@@ -22,11 +31,14 @@ export function ModelPicker(props: {
   const selected = () =>
     props.options.find((option) => String(option.value) === props.value);
   const levels = () => reasoningLevels(selected()?.reasoningEfforts);
-  const steps = () => ["", ...levels()];
   const effort = () => props.effort ?? "";
-  const valid = () => validReasoning(effort(), levels());
-  const index = () => Math.max(0, steps().indexOf(valid()));
-  const unavailable = () => !!effort() && valid() !== effort();
+  const choice = createMemo(() =>
+    reasoningChoice(effort(), levels(), props.configured),
+  );
+  const steps = () => choice().steps;
+  const valid = () => choice().current;
+  const index = () => choice().index;
+  const unavailable = () => choice().unavailable;
   async function choose(value: string) {
     if (busy() || props.disabled) return;
     const next = props.options.find(
@@ -38,7 +50,9 @@ export function ModelPicker(props: {
       await props.onChange(value);
       // A failed asynchronous model change must not mutate the old model's effort.
       if (props.value === value && props.onEffortChange)
-        props.onEffortChange(validReasoning(effort(), next.reasoningEfforts));
+        props.onEffortChange(
+          carriedReasoning(effort(), next.reasoningEfforts, props.configured),
+        );
     } finally {
       setBusy(false);
     }
@@ -73,6 +87,9 @@ export function ModelPicker(props: {
                   {unavailable()
                     ? t("{name} (unavailable)", { name: t(reasoningLabel(effort())) })
                     : t(reasoningLabel(valid()))}
+                  <Show when={choice().configured}>
+                    <span class="reasoning-default">{t("default")}</span>
+                  </Show>
                 </strong>
                 <small>{selected()?.label ?? props.value}</small>
               </div>
@@ -81,8 +98,8 @@ export function ModelPicker(props: {
                 class="icon-button"
                 aria-label={t("Reset reasoning to model default")}
                 title={t("Use model default")}
-                disabled={!effort() || busy() || props.disabled}
-                onClick={() => props.onEffortChange?.("")}
+                disabled={(!valid() && !unavailable()) || busy() || props.disabled}
+                onClick={() => props.onEffortChange?.(choice().modelDefault)}
               >
                 <Icon name="refresh" size="md" />
               </button>
@@ -122,14 +139,14 @@ export function ModelPicker(props: {
                   aria-valuetext={t(reasoningLabel(valid()))}
                   onInput={(event) =>
                     props.onEffortChange?.(
-                      steps()[Number(event.currentTarget.value)] ?? "",
+                      steps()[Number(event.currentTarget.value)] ?? choice().modelDefault,
                     )
                   }
                 />
                 <span class="reasoning-thumb" aria-hidden="true" />
               </div>
               <div class="reasoning-scale" aria-hidden="true">
-                <span>{t("Default")}</span>
+                <span>{t(props.configured ? "Model default" : "Default")}</span>
                 <span>{t(reasoningLabel(levels().at(-1) ?? ""))}</span>
               </div>
             </Show>
