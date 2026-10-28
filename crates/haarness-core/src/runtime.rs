@@ -3049,7 +3049,7 @@ impl AgentRuntime {
             items.retain(|item| item.sequence <= revert.sequence);
         }
         let models = self.components().providers.models(&thread.provider);
-        let window = model_metadata(&models, &thread.model).and_then(|info| info.context_window);
+        let window = stated_window(model_metadata(&models, &thread.model));
         Ok(ContextUsage {
             estimate: tokens::context(&items, Tokenizer::for_model(&thread.model)),
             window,
@@ -3827,9 +3827,7 @@ impl AgentRuntime {
         let metadata = model_metadata(&models, model);
         compaction_input_limit(
             &components.config.compaction,
-            metadata
-                .and_then(|info| info.context_window)
-                .unwrap_or(128_000),
+            stated_window(metadata).unwrap_or(128_000),
             metadata.and_then(|info| info.max_output_tokens),
         )
     }
@@ -8384,9 +8382,7 @@ impl RunnerTask {
         let metadata = model_metadata(&models, model);
         let input_limit = compaction_input_limit(
             &self.config.compaction,
-            metadata
-                .and_then(|info| info.context_window)
-                .unwrap_or(128_000),
+            stated_window(metadata).unwrap_or(128_000),
             metadata.and_then(|info| info.max_output_tokens),
         );
         let item = self
@@ -8723,9 +8719,7 @@ impl RunnerTask {
                 {
                     let provider_models = self.providers.models(provider_id);
                     let model_info = model_metadata(&provider_models, &model);
-                    let context_window = model_info
-                        .and_then(|info| info.context_window)
-                        .unwrap_or(128_000);
+                    let context_window = stated_window(model_info).unwrap_or(128_000);
                     let budget = compaction_input_limit(
                         &self.config.compaction,
                         context_window,
@@ -13627,6 +13621,14 @@ fn model_metadata<'a>(
             })
             .max_by_key(|info| info.id.len())
     })
+}
+
+/// A model's context window when its metadata states one. A catalog that
+/// lists 0 says nothing about the model; taken as the limit, it would
+/// compact every round and fill the context meter at once.
+fn stated_window(info: Option<&haarness_protocol::ModelInfo>) -> Option<u64> {
+    info.and_then(|info| info.context_window)
+        .filter(|window| *window > 0)
 }
 
 /// Match Haarness's ordinary OpenAI GPT-5 default: ask for balanced reasoning
