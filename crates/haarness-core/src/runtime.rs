@@ -548,15 +548,12 @@ const HOOK_TEXT_CHARS: usize = 16_000;
 
 /// `text` kept to [`HOOK_TEXT_CHARS`] characters, saying how many were cut.
 fn clip_hook_text(text: &str) -> std::borrow::Cow<'_, str> {
-    match text.char_indices().nth(HOOK_TEXT_CHARS) {
-        Some((at, _)) => format!(
-            "{}… ({} more characters not shown)",
-            &text[..at],
-            text[at..].chars().count()
-        )
-        .into(),
-        None => text.into(),
-    }
+    let Some((at, _)) = text.char_indices().nth(HOOK_TEXT_CHARS) else {
+        return text.into();
+    };
+    let more = text[at..].chars().count();
+    let unit = if more == 1 { "character" } else { "characters" };
+    format!("{}… ({more} more {unit} not shown)", &text[..at]).into()
 }
 
 fn tool_output_attachments(metadata: &serde_json::Value) -> Vec<String> {
@@ -15436,6 +15433,16 @@ mod tests {
             "x".repeat(super::HOOK_TEXT_CHARS)
         );
         assert_eq!(output, expected);
+        let one_over = "y".repeat(super::HOOK_TEXT_CHARS + 1);
+        assert_eq!(
+            super::clip_hook_text(&one_over),
+            format!(
+                "{}… (1 more character not shown)",
+                "y".repeat(super::HOOK_TEXT_CHARS)
+            )
+        );
+        let at_the_bound = "z".repeat(super::HOOK_TEXT_CHARS);
+        assert_eq!(super::clip_hook_text(&at_the_bound), at_the_bound);
     }
 
     #[test]
