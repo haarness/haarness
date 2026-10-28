@@ -528,8 +528,11 @@ inline. Since a stored message is sent again with every later request of its
 chat, turn and queued-input requests refuse more with `400` naming the size and
 the limit ("scan.pdf is 21 MiB, over the 20 MiB limit for media in one
 message"). That includes a message queued to run later (`delivery: "queue"`)
-and the attachments a queue edit gives one: they are checked when they arrive,
-so a message that could never start never waits at the head of the queue. A
+and the attachments a queue edit adds to one: they are checked when they
+arrive, so a message that could never start never waits at the head of the
+queue. When its turn comes it is not refused for them again: a file that
+changed meanwhile reaches the model as one of the notes below, and the queue
+moves on. A
 file named `.pdf`, or sent as `application/pdf`, is a PDF only when `%PDF-`
 appears in its first kilobyte; otherwise it is taken as an untyped file is:
 text when it reads as text, an image when its bytes are one, and refused

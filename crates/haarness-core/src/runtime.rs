@@ -2516,6 +2516,13 @@ impl AgentRuntime {
             .await
     }
 
+    /// Where chat `id` reads a message's relative attachment paths from: the
+    /// folder it works in.
+    pub async fn attachment_folder(&self, id: ThreadId) -> CoreResult<PathBuf> {
+        self.thread_workspace(&self.reading_thread(id).await?, FolderAccess::Read)
+            .await
+    }
+
     /// A message's attachments as [`crate::attachments::admit`] keeps them, a
     /// relative path read from where the chat works.
     async fn admitted_attachments(
@@ -2526,10 +2533,25 @@ impl AgentRuntime {
         if attachments.is_empty() {
             return Ok(attachments);
         }
-        let workspace = self
-            .thread_workspace(&self.reading_thread(id).await?, FolderAccess::Read)
-            .await?;
+        let workspace = self.attachment_folder(id).await?;
         crate::attachments::admit_off_executor(attachments, workspace).await
+    }
+
+    /// A queued message's attachments when its turn comes, as
+    /// [`crate::attachments::admit_each`] keeps them: checked when they
+    /// arrived, they are never refused now. One whose file changed since
+    /// reaches the model as a note, and the queue moves on.
+    async fn admitted_again(&self, id: ThreadId, attachments: Vec<String>) -> Vec<String> {
+        if attachments.is_empty() {
+            return attachments;
+        }
+        let Ok(workspace) = self.attachment_folder(id).await else {
+            return attachments;
+        };
+        let kept = attachments.clone();
+        tokio::task::spawn_blocking(move || crate::attachments::admit_each(attachments, &workspace))
+            .await
+            .unwrap_or(kept)
     }
 
     pub async fn input_queue(&self, id: ThreadId) -> CoreResult<haarness_protocol::InputQueue> {
@@ -2704,14 +2726,37 @@ impl AgentRuntime {
     ) -> CoreResult<haarness_protocol::InputQueue> {
         self.repository.get_thread(id).await?;
         // An edit's new attachments are checked as a queued message's are.
+        // Those the message has already were checked when it arrived: a
+        // client sends them back with every edit, and one whose file has
+        // changed since must not keep its text from being edited.
         if let haarness_protocol::InputQueueAction::Edit {
+            id: key,
             attachments: Some(attachments),
             ..
         } = &mut action
         {
-            *attachments = self
-                .admitted_attachments(id, std::mem::take(attachments))
-                .await?;
+            let queue = self.repository.input_queue(id).await?;
+            let had = queue
+                .items
+                .iter()
+                .find(|item| item.id == *key)
+                .map(|item| item.attachments.clone())
+                .unwrap_or_default();
+            let (kept, new): (Vec<_>, Vec<_>) = std::mem::take(attachments)
+                .into_iter()
+                .enumerate()
+                .partition(|(_, source)| had.contains(source));
+            let (places, sources): (Vec<_>, Vec<_>) = new.into_iter().unzip();
+            let added = !sources.is_empty();
+            let admitted = self.admitted_attachments(id, sources).await?;
+            let mut merged = kept;
+            merged.extend(places.into_iter().zip(admitted));
+            merged.sort_by_key(|(place, _)| *place);
+            *attachments = merged.into_iter().map(|(_, source)| source).collect();
+            // What it adds must fit beside what it keeps.
+            if added {
+                crate::attachments::within_limit(attachments)?;
+            }
         }
         if let haarness_protocol::InputQueueAction::Steer { revision, id: key } = action {
             loop {
@@ -6128,9 +6173,13 @@ impl AgentRuntime {
             ));
         }
         let _reload = self.reload_gate.read().await;
-        request.attachments = self
-            .admitted_attachments(thread_id, std::mem::take(&mut request.attachments))
-            .await?;
+        let attachments = std::mem::take(&mut request.attachments);
+        request.attachments = if queue_revision.is_some() {
+            // A queued message, checked when it arrived.
+            self.admitted_again(thread_id, attachments).await
+        } else {
+            self.admitted_attachments(thread_id, attachments).await?
+        };
         self.apply_chat_turn_settings(thread_id, &mut request).await;
         let components = self.components();
         // A standalone `ultracode` in the user's current request is a one-turn
