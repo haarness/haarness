@@ -152,6 +152,10 @@ settings.write_text(json.dumps({
         'api.internal': names('api.internal', ['charge']),
         'billing_internal': names('billing_internal', ['charge']),
         'notes': names('notes', ['files_read', 'bulk.delete', 'bulk_delete']),
+        # `Google Drive`'s `search` goes to providers as `mcp__Google_Drive__search`, which differs from
+        # `google_drive`'s own name only in letter case.
+        'Google Drive': names('Google Drive', ['search']),
+        'google_drive': names('google_drive', ['search']),
     },
 }, indent=2) + '\n')
 (workspace/'.haarness/config.toml').write_text('[tool_availability]\n"mcp__Docs_Server__plain" = false\n')
@@ -215,7 +219,7 @@ try:
     check('`haarness mcp secret set` stores a piped secret without showing it')
 
     connection = desktop({'action': 'connect'})
-    until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'hidden', 'app', 'keyed', 'missing', 'silent', 'a', 'a__b', 'Docs Server', 'Docs_Server', 'api.internal', 'billing_internal', 'notes'}
+    until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'hidden', 'app', 'keyed', 'missing', 'silent', 'a', 'a__b', 'Docs Server', 'Docs_Server', 'api.internal', 'billing_internal', 'notes', 'Google Drive', 'google_drive'}
           and all(item['status'] in ('connected', 'failed') for item in servers().values()), 'servers did not settle', 60)
     port = connection['url'].rsplit(':', 1)[1].strip('/')
     daemon = int(subprocess.run(['lsof', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN', '-t'], text=True, capture_output=True).stdout.split()[0])
@@ -283,6 +287,25 @@ try:
     assert run_state['status'] == 'completed', run_state
     result = run_state.get('result')
     assert '"tool": "what?"' in (result if isinstance(result, str) else json.dumps(result)), result
+
+    # --- names the model writes as providers were sent them
+    def workflow(source):
+        run_state = api('/workflows/run', {'source': source, 'model': 'echo/echo-1'})
+        deadline = time.monotonic() + 60
+        while run_state['status'] == 'running' and time.monotonic() < deadline:
+            time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
+        assert run_state['status'] == 'completed', run_state
+        result = run_state.get('result')
+        return result if isinstance(result, str) else json.dumps(result)
+    wire_name = 'mcp__Google_Drive__search'
+    batched = call_named(thread, 'batch', {'tool_calls': [{'tool': wire_name, 'parameters': {}}]})
+    coded = call_named(thread, 'execute', {'code': f"return await tool('{wire_name}', {{}});"})
+    scripted = workflow("export const meta = { name: 'wire-name', phases: ['call'] };\nphase('call');\n"
+                        f"const result = await tool('{wire_name}', {{}});\nreturn result.output;\n")
+    for label, text in [('batch', batched['output']), ('execute', coded['output']), ('workflow', scripted)]:
+        assert 'Google Drive' in text and 'google_drive' not in text, (label, text)
+    check('a name the model writes as providers were sent it reaches that tool in a batch step, Code Mode and a workflow, not another whose name differs in letter case')
+
     check('MCP tools keep their own names in Haarness: rules written for them (`mcp__*.internal__*`, `mcp__*__files.read`, `mcp__notes__*.delete`), tool_availability, a hook matcher and a workflow apply to exactly the tools they name')
 
     # --- interactive apps switch
