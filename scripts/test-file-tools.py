@@ -16,7 +16,8 @@
    in the log.
 6. instructions: a folder's AGENTS.md that read attached comes back with the next read there once
    compaction summarized the result that carried it, or an undo removed it, and not while it is
-   still in the chat.
+   still in the chat, also when it is a symlink (to the folder's CLAUDE.md) or, on a filesystem
+   that ignores case, named agents.md.
 7. read_end, edit_empty: a read past the last line says how long the file is; an edit with an empty
    old says to use write.
 
@@ -300,6 +301,21 @@ def case_instructions():
     api(f'/threads/{thread}/revert', {})
     assert reads(thread, 'sub/b.txt') == rules, 'not attached after the undo'
     passed('a folder\'s AGENTS.md comes back after the turn that brought it was undone')
+    (folder / 'linked').mkdir(exist_ok=True)
+    (folder / 'linked' / 'CLAUDE.md').write_text('SUB_FOLDER_RULES\n')
+    os.symlink('CLAUDE.md', folder / 'linked' / 'AGENTS.md')
+    (folder / 'cased').mkdir(exist_ok=True)
+    (folder / 'cased' / 'agents.md').write_text('SUB_FOLDER_RULES\n')
+    for sub in ('linked', 'cased'):
+        for name in 'ab':
+            (folder / sub / f'{name}.txt').write_text(f'{name} text\n')
+    shapes = ['linked'] + (['cased'] if (folder / 'cased' / 'AGENTS.md').is_file() else [])
+    for sub in shapes:
+        thread = chat()
+        assert reads(thread, f'{sub}/a.txt') == [str(folder.resolve() / sub / 'AGENTS.md')]
+        assert reads(thread, f'{sub}/b.txt') == [], f'{sub}: attached again while still in the chat'
+    passed(f'a folder\'s AGENTS.md that is a symlink{" or named agents.md" if "cased" in shapes else ""} '
+           'is attached once while it is in the chat')
 
 
 def case_read_end():
