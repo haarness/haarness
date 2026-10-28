@@ -22926,6 +22926,37 @@ fn undo_fixture() -> (App, Thread) {
     (app, thread)
 }
 
+/// An undo whose history read fails still puts the undone prompt back in
+/// the composer, and the transcript catches up on the next refresh.
+#[tokio::test]
+async fn an_undo_whose_history_cannot_be_read_keeps_the_undone_prompt() {
+    let (mut app, thread) = undo_fixture();
+    let mut reverted = thread.clone();
+    reverted.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+    });
+    let error = serde_json::json!({
+        "code": "storage",
+        "message": "database is locked",
+        "retryable": true,
+    })
+    .to_string();
+    let (client, server) = workspace_http_status_client(
+        vec![
+            (200, serde_json::to_string(&reverted).unwrap()),
+            (500, error),
+        ],
+        false,
+    )
+    .await;
+    assert!(app.execute_command("/undo", &client).await.is_err());
+    server.await.unwrap();
+    assert_eq!(app.composer.text(), "write the file");
+    assert!(app.refresh_needed);
+}
+
 #[tokio::test]
 async fn undo_restores_the_prompt_and_slash_starts_a_command_over_it() {
     let (mut app, thread) = undo_fixture();
@@ -23109,6 +23140,60 @@ async fn leaving_over_a_set_aside_undone_prompt_keeps_it_as_the_draft() {
     assert_eq!(
         app.drafts.get(&thread.id).map(|draft| draft.text.as_str()),
         Some("write the file")
+    );
+}
+
+/// Opening a chat whose history cannot be read leaves both drafts where they
+/// were: the chat that stays open keeps what is typed in it, and the other
+/// chat's draft is there once it does open.
+#[tokio::test]
+async fn a_chat_whose_history_cannot_be_read_keeps_its_draft_for_the_next_switch() {
+    let thread = fixture_thread();
+    let other = Thread {
+        title: "Another thread".into(),
+        ..fixture_thread()
+    };
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone(), other.clone()],
+        vec![],
+        vec![],
+        vec![],
+    );
+    app.composer.set_text("typed here".into());
+    app.drafts.insert(
+        other.id,
+        crate::servers::Draft {
+            text: "waiting there".into(),
+            attachments: vec!["/tmp/plan.png".into()],
+            shell: false,
+        },
+    );
+    let error = serde_json::json!({
+        "code": "storage",
+        "message": "database is locked",
+        "retryable": true,
+    })
+    .to_string();
+    let (client, server) = workspace_http_status_client(vec![(500, error)], false).await;
+    assert!(app.switch_thread(other.clone(), &client).await.is_err());
+    server.await.unwrap();
+    assert_eq!(app.thread.id, thread.id);
+    assert_eq!(app.composer.text(), "typed here");
+    assert_eq!(
+        app.drafts.get(&other.id).map(|draft| draft.text.as_str()),
+        Some("waiting there")
+    );
+
+    let (client, server) = navigation_client().await;
+    app.switch_thread(other.clone(), &client).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(app.thread.id, other.id);
+    assert_eq!(app.composer.text(), "waiting there");
+    assert_eq!(app.attachments, ["/tmp/plan.png"]);
+    assert_eq!(
+        app.drafts.get(&thread.id).map(|draft| draft.text.as_str()),
+        Some("typed here")
     );
 }
 
