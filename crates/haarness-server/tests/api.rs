@@ -13045,6 +13045,9 @@ mod chat_folders;
 #[path = "cases/instructions_in_view.rs"]
 mod instructions_in_view;
 
+#[path = "cases/definition_snippets.rs"]
+mod definition_snippets;
+
 #[tokio::test]
 async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     let workspace =

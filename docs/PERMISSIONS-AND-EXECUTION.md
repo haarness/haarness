@@ -51,7 +51,7 @@ This example permits longer tools and two levels of task delegation:
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| `shell_timeout_ms` | 120000 | Default shell deadline in milliseconds; `0` disables it. A bash call can override it with `timeout`. The former 600000 ms maximum is removed. |
+| `shell_timeout_ms` | 120000 | Default shell deadline in milliseconds; `0` disables it. A bash call can override it with `timeout`. A command's or skill's `` !`…` `` snippet has no deadline in a turn you can stop, only in a scheduled run. The former 600000 ms maximum is removed. |
 | `subagent_concurrency` | 4 | Running child agents per delegation depth. Must be positive. |
 | `subagent_depth` | 1 | Root → child by default; `2` enables grandchildren; `0` disables task delegation. |
 | `read_parallelism` | 8 | Consecutive native observations run together up to this count. Must be positive. |
