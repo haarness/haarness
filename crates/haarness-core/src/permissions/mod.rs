@@ -50,6 +50,161 @@ pub struct Evaluation {
 /// [`Evaluation::matched`] names it.
 pub const CONFIG_EDIT_RULE: &str = "edit:<haarness configuration>";
 
+/// The rule a read of a file where Haarness keeps sign-ins is asked under,
+/// as [`Evaluation::matched`] names it (see [`is_credential_store_path`]).
+pub const CREDENTIAL_READ_RULE: &str = "read:<haarness sign-ins>";
+
+/// The rule a change of such a file through the file tools is asked under.
+pub const CREDENTIAL_EDIT_RULE: &str = "edit:<haarness sign-ins>";
+
+/// What a place [`record_credential_store`] names holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Store {
+    /// The file itself.
+    File,
+    /// Every file in the folder.
+    Folder,
+    /// Every file of its name in its folder or any folder below.
+    Below,
+}
+
+/// Where this process keeps sign-ins and tokens: see
+/// [`record_credential_store`].
+static CREDENTIAL_STORES: std::sync::LazyLock<parking_lot::RwLock<Vec<(PathBuf, Store)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn record(path: &Path, kind: Store) {
+    let path = normalize_absolute(path);
+    let mut stores = CREDENTIAL_STORES.write();
+    if !stores.iter().any(|(known, _)| *known == path) {
+        stores.push((path, kind));
+    }
+}
+
+/// Record a file where this process keeps sign-ins (provider keys in
+/// `auth.json`, the Cloud sign-in in `credentials.json`), or a `folder` of
+/// them (MCP sign-in tokens), so [`is_credential_store_path`] knows it.
+pub fn record_credential_store(path: PathBuf, folder: bool) {
+    record(&path, if folder { Store::Folder } else { Store::File });
+}
+
+/// Record that every file named `name` in `folder`, or in any folder below
+/// it, holds a token (the address and token of the server of each project,
+/// `runtime.json` in the cache folder), so [`is_credential_store_path`]
+/// knows them.
+pub fn record_credential_files_below(folder: &Path, name: &str) {
+    record(&folder.join(name), Store::Below);
+}
+
+/// Whether `path` is where Haarness keeps sign-ins or tokens: a file
+/// [`record_credential_store`] named, a temporary copy written while saving
+/// it (`auth.tmp-…`, `auth.json.tmp-…` or `.auth.json-…`), its lock
+/// (`auth.json.lock`), anything in a folder of them, or a file of a name
+/// [`record_credential_files_below`] gave below its folder. Compared as full
+/// paths, after `.` and `..`, as written and through links in the folders
+/// (letter case aside), never by name alone: a project's own `auth.json` is
+/// an ordinary file. A path whose own names are none of those is not one,
+/// with no look at the disk, so the many files a search judges cost
+/// nothing: callers also judge where a link leads (a read's resolved path,
+/// the shell's placed arguments, a search's link targets). A model-run read
+/// of one asks a person every time, and searches leave it out.
+#[must_use]
+pub fn is_credential_store_path(path: &Path) -> bool {
+    let stores = CREDENTIAL_STORES.read();
+    if stores.is_empty() || !path.is_absolute() {
+        return false;
+    }
+    let written = normalize_absolute(path);
+    if !names_a_store(&stores, &written) {
+        return false;
+    }
+    let key = |path: &Path| path.to_string_lossy().to_lowercase();
+    let spellings = |path: &Path| {
+        let mut spellings = vec![key(path)];
+        if let Ok(real) = path.canonicalize() {
+            spellings.push(key(&real));
+        }
+        spellings
+    };
+    // Whether `inner` is `outer` or (with `below`) inside it, by any
+    // spelling of each.
+    let within = |inner: &Path, outer: &Path, below: bool| {
+        let outer = spellings(outer);
+        spellings(inner).iter().any(|inner| {
+            outer.iter().any(|outer| {
+                inner == outer
+                    || below
+                        && inner
+                            .strip_prefix(outer.as_str())
+                            .is_some_and(|rest| rest.starts_with(['/', '\\']))
+            })
+        })
+    };
+    let real = path.canonicalize().ok();
+    [Some(written), real]
+        .into_iter()
+        .flatten()
+        .any(|candidate| {
+            stores.iter().any(|(store, kind)| match kind {
+                Store::Folder => candidate
+                    .parent()
+                    .is_some_and(|folder| within(folder, store, true)),
+                Store::File | Store::Below => {
+                    store_file_name(store, &candidate)
+                        && match (candidate.parent(), store.parent()) {
+                            (Some(folder), Some(home)) => {
+                                within(folder, home, *kind == Store::Below)
+                            }
+                            _ => false,
+                        }
+                }
+            })
+        })
+}
+
+/// Whether a path, as a command line writes it, may name where Haarness
+/// keeps sign-ins by its names alone; [`is_credential_store_path`] decides
+/// once it is placed. The shell reading places only such paths among the
+/// arguments it would not place otherwise.
+pub(crate) fn may_name_credential_store(value: &str) -> bool {
+    let stores = CREDENTIAL_STORES.read();
+    !stores.is_empty() && names_a_store(&stores, Path::new(value))
+}
+
+/// Whether `candidate`'s names are those of a store: its file name is a
+/// store file's (see [`store_file_name`]), or one of its folders is named as
+/// a folder of them is.
+fn names_a_store(stores: &[(PathBuf, Store)], candidate: &Path) -> bool {
+    stores.iter().any(|(store, kind)| {
+        if *kind == Store::Folder {
+            return store.file_name().is_some_and(|name| {
+                candidate
+                    .components()
+                    .any(|part| part.as_os_str().eq_ignore_ascii_case(name))
+            });
+        }
+        store_file_name(store, candidate)
+    })
+}
+
+/// Whether `candidate`'s name is the store file's, its temporary copy's or
+/// its lock's.
+fn store_file_name(store: &Path, candidate: &Path) -> bool {
+    let (Some(store), Some(name)) = (store.file_name(), candidate.file_name()) else {
+        return false;
+    };
+    let store = file_name_key(&store.to_string_lossy());
+    let name = file_name_key(&name.to_string_lossy());
+    let stem = store
+        .rsplit_once('.')
+        .map_or(store.as_str(), |(stem, _)| stem);
+    name == store
+        || name == format!("{store}.lock")
+        || name.starts_with(&format!("{store}.tmp-"))
+        || name.starts_with(&format!("{stem}.tmp-"))
+        || name.starts_with(&format!(".{store}-"))
+}
+
 /// Whether `path` (after `.` and `..`, at any depth) is a file Haarness, or a
 /// tool it reads settings from, takes permissions, hooks, MCP servers,
 /// extensions or providers from: `haarness.json{,c}`, `opencode.json{,c}`,
@@ -291,6 +446,16 @@ pub struct PermissionEngine {
     /// differ between sessions of one agent, so they refuse calls but never
     /// take a tool out of the list the model sees.
     inherited: Vec<Vec<PermissionRule>>,
+    /// Haarness's defaults followed by the rules of the system folder and
+    /// the person's global files (and, for an agent they define, its own),
+    /// evaluated on their own like an inherited boundary: what they deny
+    /// stays denied whatever a project's files or a project's agent add
+    /// after them. Their own later allow still lifts their own deny, as in
+    /// one list, and their asks are not held, so a project's allow still
+    /// answers one. Empty when no one set it (see [`Self::set_floor`]).
+    floor: Vec<PermissionRule>,
+    /// How many of `floor`, from the start, are Haarness's defaults.
+    floor_builtin: usize,
     /// Each configured `external_directory` rule whose folder is a link, in
     /// the form the asks use (the folder it leads to), from the
     /// process-wide [`configured_real_folder`]: never resolved on a check.
@@ -343,6 +508,8 @@ impl PermissionEngine {
             repository_grants: Vec::new(),
             ceilings: Vec::new(),
             inherited: Vec::new(),
+            floor: Vec::new(),
+            floor_builtin: 0,
             real_folders: std::collections::BTreeMap::new(),
             workspace: None,
         };
@@ -436,6 +603,24 @@ impl PermissionEngine {
         self.learn(std::slice::from_ref(&rule));
         self.rules.push(rule);
     }
+    /// Hold the denies of `rules`, the system folder's and the person's
+    /// global rules in their order, after Haarness's defaults: see `floor`.
+    /// They still have to be added as rules too.
+    pub fn set_floor(&mut self, rules: impl IntoIterator<Item = PermissionRule>) {
+        self.floor = self.rules[..self.builtin].to_vec();
+        self.floor_builtin = self.builtin;
+        for rule in rules {
+            self.add_floor_rule(rule);
+        }
+    }
+    /// One more rule of the floor, after those set: an agent's own rule when
+    /// the person or the system folder defines the agent. It still has to
+    /// be added as a rule too.
+    pub fn add_floor_rule(&mut self, rule: PermissionRule) {
+        let rule = normalize_rule_aliases(rule);
+        self.learn(std::slice::from_ref(&rule));
+        self.floor.push(rule);
+    }
     pub fn add_repository_grant(&mut self, rule: PermissionRule) {
         self.repository_grants.push(normalize_rule_aliases(rule));
     }
@@ -488,6 +673,9 @@ impl PermissionEngine {
         let mut boundary = vec![self.flattened_rules()];
         if !self.ceilings.is_empty() {
             boundary.push(self.ceilings.clone());
+        }
+        if self.floor.len() > self.floor_builtin {
+            boundary.push(self.floor.clone());
         }
         boundary.extend(self.inherited.iter().cloned());
         boundary
@@ -568,6 +756,53 @@ impl PermissionEngine {
                 };
             }
         }
+        // Then the floor, on its own: a project's rules never reopen what
+        // the person's or the system folder's rules deny.
+        if let Some(at) = self.floor.iter().rposition(|rule| names(&rule))
+            && self.floor[at].decision == PermissionDecision::Deny
+        {
+            return Evaluation {
+                decision: PermissionDecision::Deny,
+                matched: Some(self.floor[at].pattern.clone()),
+                protected: false,
+                configured: at >= self.floor_builtin,
+            };
+        }
+        // A read or a change of a file where Haarness keeps sign-ins asks a
+        // person every time unless a deny refuses it: no rule, Always
+        // answer, Auto, `--yolo` or hook answers it.
+        if let Some((permission, target)) = operation
+            .split_once(':')
+            .filter(|(permission, _)| matches!(*permission, "read" | "edit"))
+            && self.names_credential_store(target)
+        {
+            if let Some(rule) = self
+                .rules
+                .iter()
+                .rfind(names)
+                .filter(|rule| rule.decision == PermissionDecision::Deny)
+            {
+                return Evaluation {
+                    decision: PermissionDecision::Deny,
+                    matched: Some(rule.pattern.clone()),
+                    protected: false,
+                    configured: true,
+                };
+            }
+            return Evaluation {
+                decision: PermissionDecision::Ask,
+                matched: Some(
+                    if permission == "edit" {
+                        CREDENTIAL_EDIT_RULE
+                    } else {
+                        CREDENTIAL_READ_RULE
+                    }
+                    .into(),
+                ),
+                protected: true,
+                configured: false,
+            };
+        }
         let configured_at = self.rules.iter().rposition(|rule| names(&rule));
         let configured = configured_at.map(|index| &self.rules[index]);
         let grant = self.session_rules.iter().rfind(names);
@@ -644,6 +879,22 @@ impl PermissionEngine {
         }
     }
 
+    /// Whether a `read` or `edit` target is where Haarness keeps sign-ins,
+    /// read from the project folder when it is relative.
+    fn names_credential_store(&self, target: &str) -> bool {
+        if target.is_empty() || target == "*" {
+            return false;
+        }
+        let expanded = expand_home(target);
+        let path = Path::new(expanded.as_ref());
+        if path.is_absolute() {
+            return is_credential_store_path(path);
+        }
+        self.workspace
+            .as_ref()
+            .is_some_and(|workspace| is_credential_store_path(&workspace.join(path)))
+    }
+
     /// The other ways to write a path operation's file, each with whether it
     /// is absolute: the project-relative path of an absolute one inside the
     /// project (also through a link such as macOS's `/tmp` for
@@ -716,8 +967,9 @@ impl PermissionEngine {
 
     /// Whether a tool is categorically unavailable to this agent and should
     /// therefore be omitted from the model-facing tool schema. Local/session
-    /// rules are one ordered ruleset, the agent's own ceiling is checked
-    /// independently, and only a final `*` deny hides the complete tool.
+    /// rules are one ordered ruleset, the agent's own ceiling and the floor
+    /// are checked independently, and only a final `*` deny hides the
+    /// complete tool.
     /// Scoped denies remain visible because a valid argument can still be
     /// allowed at execution time. Inherited boundaries never hide a tool:
     /// sessions of one agent started from different chats then send one
@@ -726,6 +978,7 @@ impl PermissionEngine {
     pub fn hides_tool(&self, tool: &str) -> bool {
         tool_denial(self.rules.iter().chain(&self.session_rules), tool).is_some()
             || tool_denial(self.ceilings.iter(), tool).is_some()
+            || tool_denial(self.floor.iter(), tool).is_some()
     }
 
     /// The rule of an inherited boundary (a chat above this agent) that
@@ -1570,6 +1823,118 @@ mod tests {
         assert_eq!(workflow.evaluate("bash:ls"), PermissionDecision::Allow);
     }
 
+    /// The defaults, the person's `global` rules held as the floor, then a
+    /// project's `project` rules, as the runtime puts them together.
+    fn layered(
+        global: &[(&str, PermissionDecision)],
+        project: &[(&str, PermissionDecision)],
+    ) -> PermissionEngine {
+        let global: Vec<PermissionRule> = global
+            .iter()
+            .map(|(pattern, decision)| rule(pattern, *decision))
+            .collect();
+        let mut engine = PermissionEngine::build_defaults();
+        engine.set_floor(global.iter().cloned());
+        for rule in global {
+            engine.add_rule(rule);
+        }
+        for (pattern, decision) in project {
+            engine.add_rule(rule(pattern, *decision));
+        }
+        engine
+    }
+
+    #[test]
+    fn a_project_rule_never_reopens_a_deny_of_the_persons_rules() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let engine = layered(
+            &[
+                ("bash:rm *", Deny),
+                ("bash:git push *", Ask),
+                ("read:*.pem", Deny),
+            ],
+            &[
+                ("*", Allow),
+                ("bash:*", Allow),
+                ("bash:rm -rf build", Allow),
+                ("read:*", Allow),
+            ],
+        );
+        let refused = engine.evaluate_detailed("bash:rm -rf build");
+        assert_eq!(refused.decision, Deny);
+        assert_eq!(refused.matched.as_deref(), Some("bash:rm *"));
+        assert!(refused.configured);
+        assert_eq!(engine.evaluate("read:certs/server.pem"), Deny);
+        // Its asks are not held: the project's allow answers them.
+        assert_eq!(engine.evaluate("bash:git push origin"), Allow);
+        assert_eq!(engine.evaluate("bash:ls"), Allow);
+        // Nor does an answer or a repository grant reopen it.
+        let mut answered = engine.clone();
+        answered.approve_always("bash:rm *");
+        answered.add_repository_grant(rule("bash:rm -rf build", Allow));
+        assert_eq!(answered.evaluate("bash:rm -rf build"), Deny);
+        // Nor a reading of it inside another command.
+        assert_eq!(
+            engine
+                .evaluate_reading("bash:rm -rf build", &|rule| rule == "bash:*" || rule == "*")
+                .decision,
+            Deny
+        );
+        // The project still tightens.
+        let tighter = layered(
+            &[("bash:*", Allow)],
+            &[("bash:ls *", Ask), ("bash:cat *", Deny)],
+        );
+        assert_eq!(tighter.evaluate("bash:ls -la"), Ask);
+        assert_eq!(tighter.evaluate("bash:cat x"), Deny);
+        assert_eq!(tighter.evaluate("bash:pwd"), Allow);
+    }
+
+    #[test]
+    fn the_persons_own_later_allow_still_lifts_their_own_deny() {
+        use PermissionDecision::{Allow, Deny};
+        let global = [("bash:*", Deny), ("bash:git *", Allow)];
+        let engine = layered(&global, &[("bash:*", Allow)]);
+        assert_eq!(engine.evaluate("bash:git status"), Allow);
+        assert_eq!(engine.evaluate("bash:ls"), Deny);
+        // An agent of theirs adds to the floor; a project's agent does not.
+        let mut own = engine.clone();
+        own.add_floor_rule(rule("bash:ls *", Allow));
+        own.add_rule(rule("bash:ls *", Allow));
+        assert_eq!(own.evaluate("bash:ls"), Allow);
+        let mut project = engine.clone();
+        project.add_rule(rule("bash:ls *", Allow));
+        assert_eq!(project.evaluate("bash:ls"), Deny);
+        // No floor set: one list, as before.
+        let mut plain = PermissionEngine::build_defaults();
+        for (pattern, decision) in global.into_iter().chain([("bash:*", Allow)]) {
+            plain.add_rule(rule(pattern, decision));
+        }
+        assert_eq!(plain.evaluate("bash:ls"), Allow);
+    }
+
+    #[test]
+    fn a_tool_the_person_turned_off_stays_off_for_the_project_and_its_children() {
+        use PermissionDecision::{Allow, Deny};
+        let engine = layered(
+            &[("webfetch:*", Deny)],
+            &[("webfetch:*", Allow), ("bash:*", Allow)],
+        );
+        assert!(engine.hides_tool("webfetch"));
+        assert!(!engine.hides_tool("bash"));
+        assert_eq!(engine.evaluate("webfetch:https://example.test"), Deny);
+        // A child agent inherits it as a boundary.
+        let mut child = PermissionEngine::build_defaults();
+        child.add_rule(rule("webfetch:*", Allow));
+        child.add_inherited_ceiling(engine.boundary());
+        assert_eq!(child.evaluate("webfetch:https://example.test"), Deny);
+        // Without global rules the boundary is what it was.
+        assert_eq!(
+            layered(&[], &[("bash:*", Allow)]).boundary().len(),
+            PermissionEngine::build_defaults().boundary().len()
+        );
+    }
+
     #[test]
     fn an_inherited_whole_tool_deny_refuses_the_tool_but_keeps_it_listed() {
         let mut parent = PermissionEngine::build_defaults();
@@ -2252,6 +2617,99 @@ mod tests {
         }
         let beside = format!("edit:{}-other/notes.txt", base.display());
         assert_eq!(engine.evaluate(&beside), PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn a_read_of_where_sign_ins_are_kept_asks_a_person_every_time() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let root = std::env::temp_dir()
+            .join(format!("haarness-sign-ins-{}", uuid::Uuid::now_v7()))
+            .join("Data Folder");
+        let project = root.parent().unwrap().join("project");
+        std::fs::create_dir_all(root.join("mcp-oauth")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(root.join("auth.json"), "{}").unwrap();
+        std::fs::write(project.join("auth.json"), "{}").unwrap();
+        record_credential_store(root.join("auth.json"), false);
+        record_credential_store(root.join("mcp-oauth"), true);
+        record_credential_files_below(&root.join("cache"), "runtime.json");
+        let store = root.join("auth.json");
+        // The store, its temporary copies and lock, a file in a folder of
+        // them, by any spelling of the path.
+        for path in [
+            store.clone(),
+            root.join("auth.tmp-41-x2Yz"),
+            root.join(".auth.json-01a1"),
+            root.join("auth.json.lock"),
+            root.join("cache/runtime.json"),
+            root.join("cache/workspaces/01a1/runtime.json"),
+            root.join("cache/workspaces/01a1/runtime.tmp-42"),
+            root.join("mcp-oauth/server.json"),
+            root.join("sub/../AUTH.JSON"),
+            PathBuf::from(store.to_string_lossy().to_uppercase()),
+        ] {
+            assert!(is_credential_store_path(&path), "{}", path.display());
+        }
+        // Never by name alone: the project's own `auth.json` is a file.
+        for path in [
+            project.join("auth.json"),
+            root.join("auth.json.bak"),
+            root.join("mcp-oauth"),
+            root.join("runtime.json"),
+            project.join("runtime.json"),
+            root.join("cache/workspaces/01a1/notes.json"),
+            PathBuf::from("auth.json"),
+        ] {
+            assert!(!is_credential_store_path(&path), "{}", path.display());
+        }
+        // Through a folder link, too. A link of another name is judged where
+        // it leads, which the callers place (a read's resolved path): its
+        // own name costs no look at the disk.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&root, project.join("data")).unwrap();
+            std::os::unix::fs::symlink(&store, project.join("notes.txt")).unwrap();
+            assert!(is_credential_store_path(&project.join("data/auth.json")));
+            assert!(!is_credential_store_path(&project.join("notes.txt")));
+            assert!(is_credential_store_path(
+                &project.join("notes.txt").canonicalize().unwrap()
+            ));
+        }
+        let mut engine = PermissionEngine::build_defaults();
+        engine.set_workspace(&project);
+        engine.add_rule(rule("read:*", Allow));
+        engine.add_rule(rule("*", Allow));
+        engine.approve_always(format!("read:{}", store.display()));
+        let mut asked = vec![
+            format!("read:{}", store.display()),
+            format!("read:../Data Folder/auth.json"),
+        ];
+        if cfg!(unix) {
+            asked.push("read:data/auth.json".into());
+        }
+        for operation in asked {
+            let evaluation = engine.evaluate_detailed(&operation);
+            assert_eq!(evaluation.decision, Ask, "{operation}");
+            assert!(evaluation.protected, "{operation}");
+            assert_eq!(evaluation.matched.as_deref(), Some(CREDENTIAL_READ_RULE));
+        }
+        assert_eq!(engine.evaluate("read:auth.json"), Allow);
+        // A change through the file tools asks the same way.
+        engine.add_rule(rule("edit:*", Allow));
+        for operation in [
+            format!("edit:{}", store.display()),
+            format!("write:{}", store.display()),
+        ] {
+            let evaluation = engine.evaluate_detailed(&operation);
+            assert_eq!(evaluation.decision, Ask, "{operation}");
+            assert!(evaluation.protected, "{operation}");
+            assert_eq!(evaluation.matched.as_deref(), Some(CREDENTIAL_EDIT_RULE));
+        }
+        assert_eq!(engine.evaluate("edit:auth.json"), Allow);
+        // A deny still refuses it.
+        engine.add_rule(rule("read:*auth.json", Deny));
+        assert_eq!(engine.evaluate(&format!("read:{}", store.display())), Deny);
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
     #[test]

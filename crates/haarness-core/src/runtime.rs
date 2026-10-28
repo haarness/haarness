@@ -2086,9 +2086,7 @@ impl AgentRuntime {
         }
         let custom = self.custom_agent(&agent);
         if let Some(custom) = &custom {
-            for rule in custom.permissions.iter().cloned() {
-                engine.add_rule(rule);
-            }
+            custom.apply_permissions(&mut engine);
         }
         if let Some(parent_id) = thread.and_then(|thread| thread.parent_id) {
             engine.add_inherited_ceiling(self.permission_boundary_for_lineage(parent_id).await?);
@@ -3295,9 +3293,7 @@ impl AgentRuntime {
                 engine.add_grant(rule);
             }
             if let Some(custom) = custom {
-                for rule in custom.permissions {
-                    engine.add_rule(rule);
-                }
+                custom.apply_permissions(&mut engine);
             }
             let mut lazy = components.config.lazy_tools.clone();
             if let Some(mode) = *self.lazy_tool_mode.read() {
@@ -4676,9 +4672,7 @@ impl AgentRuntime {
                     "tool {name} is disabled by agent tools"
                 )));
             }
-            for rule in custom.permissions {
-                engine.add_rule(rule);
-            }
+            custom.apply_permissions(&mut engine);
         }
         if let Some(parent_id) = thread.parent_id {
             engine.add_inherited_ceiling(self.permission_boundary_for_lineage(parent_id).await?);
@@ -6602,9 +6596,7 @@ impl AgentRuntime {
             engine.add_grant(rule);
         }
         if let Some(custom) = &agent.custom {
-            for rule in custom.permissions.iter().cloned() {
-                engine.add_rule(rule);
-            }
+            custom.apply_permissions(&mut engine);
         }
         engine.boundary()
     }
@@ -11058,9 +11050,7 @@ impl RunnerTask {
             engine.add_grant(rule);
         }
         if let Some(custom) = self.custom_agent(agent) {
-            for rule in custom.permissions {
-                engine.add_rule(rule);
-            }
+            custom.apply_permissions(&mut engine);
         }
         engine.add_inherited_ceiling(self.inherited_ceilings.iter().cloned());
         engine
@@ -13924,6 +13914,9 @@ struct ShellReadings {
     limited: Mutex<HashMap<String, String>>,
     /// The line is too large to read: see [`AskPlan::evaluate`].
     unreadable: bool,
+    /// The line names a file where Haarness keeps sign-ins (a literal path
+    /// a command is given, or a redirect): see [`AskPlan::evaluate`].
+    credentials: bool,
 }
 
 impl ShellReadings {
@@ -13956,6 +13949,9 @@ impl ShellReadings {
             covered: Mutex::new(HashMap::new()),
             limited: Mutex::new(HashMap::new()),
             unreadable: analysis.unreadable,
+            credentials: analysis.paths.iter().any(|named| {
+                named.file && crate::permissions::is_credential_store_path(&named.path)
+            }),
         }
     }
 
@@ -14049,6 +14045,19 @@ impl AskPlan {
                 matched: Some(rule),
                 protected: decision == PermissionDecision::Ask,
                 configured: true,
+            };
+        }
+        // A line that names a file where Haarness keeps sign-ins asks a
+        // person every time unless a rule refuses it, as a read of one does.
+        if shell.credentials
+            && evaluation.decision != PermissionDecision::Deny
+            && shell.index.contains_key(pattern)
+        {
+            return crate::permissions::Evaluation {
+                decision: PermissionDecision::Ask,
+                matched: Some(crate::permissions::CREDENTIAL_READ_RULE.into()),
+                protected: true,
+                configured: false,
             };
         }
         evaluation
@@ -14660,6 +14669,39 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         }
         let mut plans = Vec::new();
         if !external_patterns.is_empty() {
+            // A folder that holds the project is asked about by the paths
+            // the line names in it.
+            let mut asked = Vec::new();
+            for folder in &external_patterns {
+                let named: Vec<_> = analysis
+                    .paths
+                    .iter()
+                    .filter(|named| named.outside.as_ref() == Some(folder))
+                    .collect();
+                let patterns = if named.is_empty() {
+                    vec![outside_pattern(workspace, folder, None)]
+                } else {
+                    named
+                        .iter()
+                        .map(|named| {
+                            let kind = if named.file {
+                                Named::File
+                            } else if named.literal {
+                                Named::Folder
+                            } else {
+                                Named::Any
+                            };
+                            outside_pattern(workspace, folder, Some((&named.path, kind)))
+                        })
+                        .collect()
+                };
+                for pattern in patterns {
+                    if !asked.contains(&pattern) {
+                        asked.push(pattern);
+                    }
+                }
+            }
+            let external_patterns = asked;
             plans.push(AskPlan {
                 permission: "external_directory".into(),
                 patterns: external_patterns.clone(),
@@ -14697,6 +14739,15 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         let leads_outside =
             file_target.is_some_and(|target| crate::permissions::names_inside(workspace, target));
         for (pattern, path) in external_requests {
+            // A request names a file unless it asks about the path's own
+            // folder (a listing or a search of it).
+            let own = format!("{}/*", path.to_string_lossy().trim_end_matches(['/', '\\']));
+            let kind = if pattern == own {
+                Named::Folder
+            } else {
+                Named::File
+            };
+            let pattern = outside_pattern(workspace, &pattern, Some((&path, kind)));
             if leads_outside {
                 resolved.push((pattern.clone(), path.to_string_lossy().into_owned()));
             }
@@ -15170,6 +15221,256 @@ mod shell_reading_tests {
     }
 
     #[test]
+    fn a_line_that_names_where_sign_ins_are_kept_asks_a_person_every_time() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let root =
+            std::env::temp_dir().join(format!("haarness-shell-sign-ins-{}", uuid::Uuid::now_v7()));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(root.join("auth.json"), "{}").unwrap();
+        crate::permissions::record_credential_store(root.join("auth.json"), false);
+        let store = root.join("auth.json");
+        let allowed = engine(&[("bash:*", Allow), ("*", Allow)]);
+        // The verdicts of a tool call's patterns other than allow, each with
+        // whether only a person answers it.
+        let asks = |name: &str, arguments: serde_json::Value, workspace: &Path| {
+            let mut asks = Vec::new();
+            for plan in ask_plans(name, &arguments, workspace) {
+                for pattern in &plan.patterns {
+                    let evaluation = plan.evaluate(&allowed, pattern);
+                    if evaluation.decision != Allow {
+                        asks.push((evaluation.decision, evaluation.protected));
+                    }
+                }
+            }
+            asks
+        };
+        let bash = |command: &str, workspace: &Path| {
+            asks("bash", json!({ "command": command }), workspace)
+        };
+        for command in [
+            format!("cat {}", store.display()),
+            format!("git status && cat < '{}'", store.display()),
+            "cp ../auth.json /tmp/keys && echo done".to_owned(),
+            format!("echo x > {}", root.join("auth.json.lock").display()),
+            // Any program given its path.
+            format!("jq . {}", store.display()),
+            format!("head -3 '{}' | base64", store.display()),
+        ] {
+            let found = bash(&command, &project);
+            assert!(found.contains(&(Ask, true)), "{command}: {found:?}");
+            assert!(!found.contains(&(Ask, false)), "{command}: {found:?}");
+        }
+        // Where the project holds it (a project at the home folder).
+        assert!(bash("cat auth.json", &root).contains(&(Ask, true)));
+        // A read of it, also through a link of another name.
+        assert!(
+            asks(
+                "read",
+                json!({ "path": store.display().to_string() }),
+                &project
+            )
+            .contains(&(Ask, true))
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&store, project.join("notes.txt")).unwrap();
+            assert!(asks("read", json!({ "path": "notes.txt" }), &project).contains(&(Ask, true)));
+            assert!(bash("cat notes.txt", &project).contains(&(Ask, true)));
+        }
+        // A deny still refuses it; other lines, and a project's own
+        // `auth.json`, are unchanged.
+        let plan = ask_plans(
+            "bash",
+            &json!({ "command": format!("cat {}", store.display()) }),
+            &project,
+        )
+        .into_iter()
+        .find(|plan| plan.permission == "bash")
+        .unwrap();
+        let denied = engine(&[("bash:cat *", Deny)]);
+        assert_eq!(plan.evaluate(&denied, &plan.patterns[0]).decision, Deny);
+        std::fs::write(project.join("auth.json"), "{}").unwrap();
+        for command in [
+            "cat auth.json",
+            "jq . auth.json",
+            "cat README.md",
+            "cat \"$KEYS\"",
+        ] {
+            assert_eq!(bash(command, &project), Vec::new(), "{command}");
+        }
+        assert_eq!(
+            asks("read", json!({ "path": "auth.json" }), &project),
+            Vec::new()
+        );
+        // A program that only looks at it decides as any line does (here,
+        // from the project that holds it); one that changes it still asks a
+        // person.
+        for command in [
+            "ls -l auth.json",
+            "stat auth.json",
+            "test -f auth.json && echo yes",
+            "[ -s auth.json ]",
+            "readlink auth.json; realpath auth.json",
+        ] {
+            assert_eq!(bash(command, &root), Vec::new(), "{command}");
+        }
+        // `file` and `du` can be told to read a file they are given.
+        for command in [
+            "chmod 644 auth.json",
+            "ls -l auth.json && head auth.json",
+            "file -f auth.json",
+            "file -m auth.json /dev/null",
+            "du --files0-from=auth.json",
+            "du -h auth.json",
+        ] {
+            assert!(bash(command, &root).contains(&(Ask, true)), "{command}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn always_on_a_folder_that_holds_the_project_remembers_only_the_files_asked_about() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let made = std::env::temp_dir().join(format!("haarness-holding-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(made.join("home/work/app")).unwrap();
+        std::fs::create_dir_all(made.join("home/.ssh")).unwrap();
+        std::fs::create_dir_all(made.join("home/other")).unwrap();
+        std::fs::write(made.join("home/.gitconfig"), "[user]\n").unwrap();
+        let home = made.join("home").canonicalize().unwrap();
+        let project = home.join("work/app");
+        let file = |name: &str| home.join(name).display().to_string();
+        let folder = |name: &str| format!("{}/*", home.join(name).display());
+        let outside = |name: &str, arguments: serde_json::Value| {
+            ask_plans(name, &arguments, &project)
+                .into_iter()
+                .find(|plan| plan.permission == "external_directory")
+                .unwrap()
+        };
+        let bash = |command: &str| outside("bash", json!({ "command": command }));
+        // A file in a folder that holds the project is asked about, and
+        // remembered, by itself.
+        for plan in [
+            bash("cat ../../.gitconfig"),
+            bash("echo x >> ../../.gitconfig"),
+            outside("read", json!({ "path": file(".gitconfig") })),
+            outside("edit", json!({ "path": "../../.gitconfig" })),
+        ] {
+            assert_eq!(plan.patterns, vec![file(".gitconfig")]);
+            assert_eq!(
+                plan.always_rules(),
+                vec![format!("external_directory:{}", file(".gitconfig"))]
+            );
+        }
+        let two = bash("cp ../../.gitconfig ../../.zshrc ../../other/");
+        assert_eq!(
+            two.patterns,
+            vec![file(".gitconfig"), file(".zshrc"), folder("other")]
+        );
+        assert_eq!(two.always, two.patterns);
+        // What it remembers opens that file and nothing else beside the
+        // project: not `.ssh`, not another file.
+        let mut remembered = PermissionEngine::build_defaults();
+        for rule in bash("cat ../../.gitconfig").always_rules() {
+            remembered.add_grant(PermissionRule {
+                pattern: rule,
+                decision: Allow,
+            });
+        }
+        let verdict = |engine: &PermissionEngine, plan: &AskPlan| {
+            plan.patterns
+                .iter()
+                .map(|pattern| plan.evaluate(engine, pattern).decision)
+                .max_by_key(|decision| match decision {
+                    Allow => 0,
+                    Ask => 1,
+                    Deny => 2,
+                })
+                .unwrap()
+        };
+        assert_eq!(verdict(&remembered, &bash("cat ../../.gitconfig")), Allow);
+        for plan in [
+            bash("cat ../../.ssh/id_ed25519"),
+            bash("cat ../../.netrc"),
+            outside("read", json!({ "path": file(".ssh/id_ed25519") })),
+        ] {
+            assert_eq!(verdict(&remembered, &plan), Ask, "{:?}", plan.patterns);
+        }
+        // A folder that does not hold the project is remembered whole, as
+        // before.
+        let other = bash("cat ../../other/notes.txt");
+        assert_eq!(other.patterns, vec![folder("other")]);
+        assert_eq!(other.always, other.patterns);
+        // Named as a folder, it is the folder alone: remembered, that opens
+        // no file in it.
+        let itself = format!("{}/", home.display());
+        for plan in [
+            bash("cd ../.. && ls"),
+            outside("list", json!({ "path": home.display().to_string() })),
+            outside("grep", json!({ "pattern": "x", "path": "../.." })),
+        ] {
+            assert_eq!(plan.patterns, vec![itself.clone()]);
+            assert_eq!(plan.always, plan.patterns);
+        }
+        // A path that may be any file in it (a dynamic part, a wildcard) is
+        // asked about as the whole folder, as before.
+        let any = [
+            bash("cat ../../$NAME"),
+            bash("F=.netrc; cat ../../$F"),
+            bash("cat ../../.n*"),
+            bash("cat ../../.netr?"),
+            bash("cat '../../a*b'"),
+            outside("read", json!({ "path": "../../.n*" })),
+        ];
+        for plan in &any {
+            assert_eq!(
+                plan.patterns,
+                vec![format!("{}/*", home.display())],
+                "{:?}",
+                plan.patterns
+            );
+        }
+        let mut folder_only = PermissionEngine::build_defaults();
+        folder_only.add_grant(PermissionRule {
+            pattern: format!("external_directory:{itself}"),
+            decision: Allow,
+        });
+        assert_eq!(verdict(&folder_only, &bash("cd ../.. && pwd")), Allow);
+        for plan in [
+            bash("cat ../../.gitconfig"),
+            bash("cat ../../.ssh/id_ed25519"),
+        ]
+        .iter()
+        .chain(&any)
+        {
+            assert_eq!(verdict(&folder_only, plan), Ask, "{:?}", plan.patterns);
+        }
+        // A rule about the folder, or an Always an earlier version saved
+        // for it, still decides its files.
+        let whole = format!("external_directory:{}", home.join("*").display());
+        for decision in [Allow, Deny] {
+            let mut configured = PermissionEngine::build_defaults();
+            configured.add_rule(PermissionRule {
+                pattern: whole.clone(),
+                decision,
+            });
+            assert_eq!(
+                verdict(&configured, &bash("cat ../../.gitconfig")),
+                decision
+            );
+        }
+        let mut saved = PermissionEngine::build_defaults();
+        saved.add_grant(PermissionRule {
+            pattern: whole,
+            decision: Allow,
+        });
+        for plan in [bash("cat ../../.netrc"), bash("cd ../.. && ls")] {
+            assert_eq!(verdict(&saved, &plan), Allow, "{:?}", plan.patterns);
+        }
+        std::fs::remove_dir_all(&made).unwrap();
+    }
+
+    #[test]
     fn a_command_a_limit_stopped_reading_is_refused_by_a_deny_and_asked_by_an_ask() {
         use PermissionDecision::{Allow, Ask, Deny};
         let padded = format!("bash -c '{}rm x'", "true; ".repeat(300 * 1024 / 6));
@@ -15346,6 +15647,67 @@ fn external_path_request(
         directory.to_string_lossy().trim_end_matches(['/', '\\'])
     );
     Some((pattern, path))
+}
+
+/// What a path a call names outside the project is, for
+/// [`outside_pattern`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Named {
+    /// A file, written in full.
+    File,
+    /// The folder itself, written in full.
+    Folder,
+    /// A path with a dynamic part (`~/$f`) or a wildcard (`~/.n*`): it may
+    /// be any file in the folder.
+    Any,
+}
+
+/// The pattern an `external_directory` ask about `folder` (a glob such as
+/// `/home/me/*`) evaluates and Always remembers, for the path the call names
+/// there, when known. A folder that holds the project (`~` for
+/// `~/work/app`) is asked about by that path instead: remembering the folder
+/// would open everything in it, the project's neighbours (`~/.ssh`)
+/// included, for every later chat. A file is its own path, and the folder
+/// itself is the folder alone (`/home/me/`), which a rule for the folder
+/// still meets but which reaches no file in it. A path that may be any file
+/// there stays the whole folder, as before: only a rule or an Always for
+/// all of it answers that, and the card says so.
+fn outside_pattern(workspace: &Path, folder: &str, named: Option<(&Path, Named)>) -> String {
+    let Some(path) = folder
+        .strip_suffix("/*")
+        .map(|path| if path.is_empty() { "/" } else { path })
+        .map(Path::new)
+        .filter(|path| holds_project(workspace, path))
+    else {
+        return folder.to_owned();
+    };
+    let alone = || format!("{}/", path.to_string_lossy().trim_end_matches(['/', '\\']));
+    match named {
+        Some((file, Named::File)) => {
+            let file = file.to_string_lossy().into_owned();
+            if file.contains(['*', '?', '[']) {
+                folder.to_owned()
+            } else {
+                file
+            }
+        }
+        Some((_, Named::Any)) => folder.to_owned(),
+        Some((_, Named::Folder)) | None => alone(),
+    }
+}
+
+/// Whether `folder`, outside the project, holds it: the project folder, as
+/// written or where it really is, lies inside `folder`, as written or where
+/// it really is.
+fn holds_project(workspace: &Path, folder: &Path) -> bool {
+    let folders = [Some(folder.to_path_buf()), folder.canonicalize().ok()];
+    let projects = [Some(workspace.to_path_buf()), workspace.canonicalize().ok()];
+    folders.iter().flatten().any(|folder| {
+        projects
+            .iter()
+            .flatten()
+            .any(|project| project != folder && project.starts_with(folder))
+    })
 }
 
 fn external_path_requests(

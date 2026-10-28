@@ -639,7 +639,10 @@ const REFERENCE_DIR_ENTRIES: usize = 200;
 /// workspace files, one-level directory listings, or delegation hints for
 /// subagent-mode agents, appended after the text. Tokens inside code stay
 /// literal; paths outside the
-/// workspace are ignored unless written with an explicit `~/`.
+/// workspace are ignored unless written with an explicit `~/`. A file
+/// [`crate::instructions::left_out`] keeps out (a secret, where Haarness
+/// keeps sign-ins, one the agent's `read` rules deny), judged where it
+/// really is, is named with a note instead of its text.
 fn expand_references(text: &str, invoker: &dyn crate::ToolInvoker) -> String {
     let references = crate::instructions::references(text);
     if references.is_empty() {
@@ -651,6 +654,7 @@ fn expand_references(text: &str, invoker: &dyn crate::ToolInvoker) -> String {
         .and_then(|path| path.canonicalize().ok());
     let home = haarness_protocol::home_dir();
     let agents = invoker.delegable_agents();
+    let rules = invoker.read_rules();
     let mut seen = std::collections::HashSet::new();
     let mut blocks = Vec::new();
     let mut files = 0;
@@ -672,6 +676,24 @@ fn expand_references(text: &str, invoker: &dyn crate::ToolInvoker) -> String {
         files += 1;
         if target.is_dir() {
             blocks.push(directory_listing(&name, &target));
+            continue;
+        }
+        if let Some(reason) = target.canonicalize().ok().and_then(|real| {
+            crate::instructions::left_out(&real, workspace.as_deref(), &|file| {
+                rules.as_ref().and_then(|rules| {
+                    (rules.evaluate(&format!("read:{}", file.display()))
+                        == crate::PermissionDecision::Deny)
+                        .then_some("a read rule denies it")
+                })
+            })
+            // A template of settings a skill names (`.env.sample`) reads as
+            // before; only `.env.example` is no secret to the read rules.
+            .filter(|reason| {
+                *reason != crate::instructions::SECRET_FILE
+                    || !crate::instructions::is_template(&real)
+            })
+        }) {
+            blocks.push(format!("[File context omitted: {name} ({reason})]"));
             continue;
         }
         let size = std::fs::metadata(&target)
@@ -1405,6 +1427,83 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(text, "Project: /work/w !`printf SNIPPET`");
+    }
+
+    /// [`StubInvoker`] with the agent's `read` rules.
+    struct RulesInvoker {
+        workspace: PathBuf,
+        rules: crate::PermissionEngine,
+    }
+    #[async_trait::async_trait]
+    impl crate::ToolInvoker for RulesInvoker {
+        fn workspace(&self) -> Option<String> {
+            Some(self.workspace.display().to_string())
+        }
+        fn read_rules(&self) -> Option<crate::PermissionEngine> {
+            Some(self.rules.clone())
+        }
+        async fn invoke(&self, _: &str, _: Value) -> CoreResult<crate::ToolOutput> {
+            Err(CoreError::Tool("unused".into()))
+        }
+        fn side_effectful_for(&self, _: &str, _: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn template_references_leave_out_secrets_sign_ins_and_denied_files() {
+        // A project at the home folder, which holds the data folder.
+        let root = std::env::temp_dir().join(format!("haarness-refs-out-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join(".st/data")).unwrap();
+        std::fs::create_dir_all(root.join("private")).unwrap();
+        let store = root.join(".st/data/auth.json");
+        std::fs::write(&store, "SIGN_IN_SECRET").unwrap();
+        std::fs::write(root.join(".env"), "ENV_SECRET").unwrap();
+        std::fs::write(root.join(".env.sample"), "SAMPLE_BODY").unwrap();
+        std::fs::write(root.join(".env.template"), "TEMPLATE_BODY").unwrap();
+        std::fs::write(root.join("private/notes.md"), "PRIVATE_BODY").unwrap();
+        std::fs::write(root.join("auth.json"), "OWN_FILE_BODY").unwrap();
+        crate::record_credential_store(store.clone(), false);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&store, root.join("notes.txt")).unwrap();
+        let mut rules = crate::PermissionEngine::build_defaults();
+        rules.set_workspace(&root);
+        rules.add_rule(crate::PermissionRule {
+            pattern: "read:private/*".into(),
+            decision: crate::PermissionDecision::Deny,
+        });
+        let invoker = RulesInvoker {
+            workspace: root.clone(),
+            rules,
+        };
+        let text = prepare(
+            "Read @.st/data/auth.json @.env @private/notes.md @notes.txt @auth.json @.env.sample @.env.template",
+            "",
+            &DefinitionExecution::default(),
+            "session",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        for hidden in ["SIGN_IN_SECRET", "ENV_SECRET", "PRIVATE_BODY"] {
+            assert!(!text.contains(hidden), "{text}");
+        }
+        // Templates of settings read as before.
+        for shown in ["OWN_FILE_BODY", "SAMPLE_BODY", "TEMPLATE_BODY"] {
+            assert!(text.contains(shown), "{text}");
+        }
+        let mut notes = vec![
+            "[File context omitted: .st/data/auth.json (Haarness keeps sign-ins there)]",
+            "[File context omitted: .env (it is a secret file)]",
+            "[File context omitted: private/notes.md (a read rule denies it)]",
+        ];
+        if cfg!(unix) {
+            notes.push("[File context omitted: notes.txt (Haarness keeps sign-ins there)]");
+        }
+        for note in notes {
+            assert!(text.contains(note), "{note}\n{text}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

@@ -346,9 +346,14 @@ pub type ImportFilter<'a> = &'a dyn Fn(&Path) -> Option<&'static str>;
 /// ≤ 20 files, 40 KiB per file, 200 KiB total). Imported bodies follow the
 /// line that referenced them. Targets outside the workspace are only
 /// followed when `trusted` (global configuration); references that do not
-/// name an existing file are left as written. A secret-named file (`.env`),
-/// or one `omit` refuses, is never read: an `[Instruction import omitted: …]`
-/// line takes its place, as nothing asks before instructions load.
+/// name an existing file are left as written. An import [`left_out`] keeps
+/// out is never read: an `[Instruction import omitted: …]` line takes its
+/// place, as nothing asks before instructions load. The file itself is
+/// judged too, where it really is (a link `AGENTS.md -> …/auth.json`), and
+/// only an `[Instruction file omitted: …]` line is returned for it then; a
+/// read rule that denies it counts only for a file outside the project
+/// that is not `trusted` (one a project's `instructions` names), so the
+/// project's and the person's own instruction files load as before.
 #[must_use]
 pub fn read_with_imports(
     path: &Path,
@@ -364,7 +369,72 @@ pub fn read_with_imports(
         trusted,
         omit,
     };
+    if let Some(reason) = file_left_out(path, workspace, trusted, omit) {
+        return Some(format!(
+            "[Instruction file omitted: {} ({reason})]\n",
+            path.display()
+        ));
+    }
     resolve(path, &scope, budget, 0)
+}
+
+/// Why [`read_with_imports`] leaves the instruction file itself out, if it
+/// does, for a notice to the person as well.
+#[must_use]
+pub fn file_left_out(
+    path: &Path,
+    workspace: &Path,
+    trusted: bool,
+    omit: ImportFilter<'_>,
+) -> Option<&'static str> {
+    let canonical = path.canonicalize().ok()?;
+    let root = workspace.canonicalize().ok();
+    let inside = root
+        .as_deref()
+        .is_some_and(|root| canonical.starts_with(root));
+    let rules: ImportFilter<'_> = if trusted || inside { &|_| None } else { omit };
+    left_out(&canonical, root.as_deref(), rules)
+}
+
+/// Why [`left_out`] leaves out a secret-named file.
+pub const SECRET_FILE: &str = "it is a secret file";
+
+/// Whether a file's name says it is a template of settings rather than the
+/// settings (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`).
+#[must_use]
+pub fn is_template(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy().to_ascii_lowercase();
+        [".example", ".sample", ".template", ".dist"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+    })
+}
+
+/// Why Haarness leaves a file out of a prompt it builds by itself (an
+/// instruction file, an `@` import in one, a file a skill or command names
+/// with `@`), if it does: a secret-named file (`.env`), a file where
+/// Haarness keeps sign-ins, or one `omit` refuses (a `read` rule that
+/// denies it). `canonical` is where the file really is, and `workspace` the
+/// project folder, also as it really is. Nothing asks before such a prompt
+/// is sent, so the file is left out with a note instead.
+#[must_use]
+pub fn left_out(
+    canonical: &Path,
+    workspace: Option<&Path>,
+    omit: ImportFilter<'_>,
+) -> Option<&'static str> {
+    let relative = workspace
+        .and_then(|workspace| canonical.strip_prefix(workspace).ok())
+        .unwrap_or(canonical);
+    if crate::is_secret_path(relative) {
+        return Some(SECRET_FILE);
+    }
+    // A read of one asks a person, and nobody is asked here.
+    if crate::is_credential_store_path(canonical) {
+        return Some("Haarness keeps sign-ins there");
+    }
+    omit(canonical)
 }
 
 /// What stays the same across one file's imports.
@@ -377,13 +447,7 @@ struct Scope<'a> {
 
 /// Why an import of `canonical` is left out, if it is.
 fn omitted(canonical: &Path, workspace: Option<&Path>, scope: &Scope<'_>) -> Option<&'static str> {
-    let relative = workspace
-        .and_then(|workspace| canonical.strip_prefix(workspace).ok())
-        .unwrap_or(canonical);
-    if crate::is_secret_path(relative) {
-        return Some("it is a secret file");
-    }
-    (scope.omit)(canonical)
+    left_out(canonical, workspace, scope.omit)
 }
 
 fn resolve(
