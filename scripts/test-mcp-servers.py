@@ -11,6 +11,13 @@
   later request to that server, a tool call included) and the server is told to stop getting the prompt.
 - `${keychain:NAME}` resolves when a server starts, from `haarness mcp secret set` or Desktop's request; a missing
   entry fails that server naming the reference; the setting stays as written and no log holds the secret.
+- An MCP tool keeps its own name in Haarness (`mcp__Docs Server__files.read`): rules written for those names
+  (`mcp__*.internal__*`, `mcp__*__files.read`, `mcp__notes__*.delete`), `tool_availability`, hook matchers and workflows
+  apply exactly to the tools they name. Only requests to a model provider carry names in the characters providers
+  accept: through local stand-ins for the Anthropic and OpenAI APIs, which refuse a request over one tool name outside
+  `[A-Za-z0-9_-]{1,64}` in its tools or its history as those APIs do, a turn with `Docs Server` and `Docs_Server` (whose
+  tool names come out alike) completes, a stored call of a tool named `what?` goes back with it, and each of the
+  model's calls reaches the tool it stands for.
 - A tool reaches the server that lists it, with its own name: a server named `a__b` gets its tools' calls, and of two
   tools of the very same name (`a`'s `b__c` and `a__b`'s `c`) the first server's by name is offered.
 - A server started with `--workspace` from another folder starts its local MCP servers in the project folder, and a
@@ -22,7 +29,7 @@ touches the system's keychain, and it fails if a secret reaches anything else.
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-servers.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
-import json, os, pathlib, socket, subprocess, sys, tempfile, time, urllib.error, urllib.request, uuid
+import http.server, json, os, pathlib, re, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request, uuid
 import e2e_scratch, e2e_tmux
 from e2e_env import clean_env
 
@@ -30,7 +37,7 @@ repo = pathlib.Path(__file__).resolve().parents[1]
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 fixtures = repo/'crates/haarness-mcp/tests/fixtures'
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-mcp-servers-', dir=os.environ.get('HAARNESS_E2E_DIR'))).resolve()
-workspace = root/'project'; (workspace/'.haarness').mkdir(parents=True)
+workspace = root/'project'; (workspace/'.haarness').mkdir(parents=True); (workspace/'tools/mcp').mkdir(parents=True)
 keychain = root/'keychain.json'
 SECRET = 'ghp_e2e-' + uuid.uuid4().hex
 # Quotes, backslashes and length the old `security -i` path split or mangled.
@@ -42,10 +49,90 @@ def server(fixture, **extra):
     return {'command': python, 'args': [str(fixtures/fixture)], **extra}
 
 
+def names(label, tools, **extra):
+    return server('names.py', env={'LABEL': label, 'TOOLS': json.dumps(tools)}, **extra)
+
+
+VALID_NAME = re.compile(r'[A-Za-z0-9_-]{1,64}')
+WIRE = []
+
+
+class ProviderStandIn(http.server.BaseHTTPRequestHandler):
+    """The Anthropic Messages and OpenAI Responses APIs, as far as a turn needs them: a request with a tool name outside
+    [A-Za-z0-9_-]{1,64}, among its tools or the calls of its history, is refused whole with the API's 400, as the real
+    ones do. Otherwise the first round calls `files.read` of `Docs Server` and `plain` of both `Docs Server` and
+    `Docs_Server` by the names it was sent, and `what?` of `Docs Server` through `batch`; the next one says WIRE_DONE."""
+    def log_message(self, *args):
+        pass
+
+    def answer(self, status, body):
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(data)))
+        self.end_headers(); self.wfile.write(data)
+
+    def do_GET(self):
+        self.answer(200, {'data': [{'id': 'gpt-5.4-mini'}, {'id': 'claude-sonnet-4-6'}]})
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        openai = self.path.endswith('/responses')
+        tools = [tool.get('name') or tool.get('function', {}).get('name') or '' for tool in body.get('tools') or []]
+        history = []
+        for entry in body.get('input', body.get('messages', [])):
+            if entry.get('type') == 'function_call':
+                history.append(entry.get('name', ''))
+            for block in entry.get('content') if isinstance(entry.get('content'), list) else []:
+                if block.get('type') == 'tool_use':
+                    history.append(block.get('name', ''))
+        bad = next((name for name in tools + history if not VALID_NAME.fullmatch(name)), None)
+        WIRE.append({'tools': tools, 'history': history, 'refused': bad})
+        if bad is not None:
+            if openai:
+                return self.answer(400, {'error': {'message': f"Invalid tool name {bad!r}: string does not match pattern. Expected a string that matches the pattern '^[a-zA-Z0-9_-]+$'.",
+                                                   'type': 'invalid_request_error', 'code': 'invalid_value'}})
+            return self.answer(400, {'type': 'error', 'error': {'type': 'invalid_request_error',
+                                                                'message': f"tool name {bad!r}: String should match pattern '^[a-zA-Z0-9_-]{{1,64}}$'"}})
+        serialized = json.dumps(body.get('input', body.get('messages', [])))
+        calls = []
+        if 'WIRE_ROUND' in serialized and 'files.read' not in serialized:
+            what = next(name for name in tools if name.startswith('mcp__Docs_Server__what'))
+            calls = [(next(name for name in tools if name.startswith('mcp__Docs_Server__files_read')), '{}'),
+                     ('mcp__Docs_Server__plain', '{}'),
+                     (next(name for name in tools if name.startswith('mcp__Docs_Server__plain_')), '{}'),
+                     ('batch', json.dumps({'tool_calls': [{'tool': what, 'parameters': {}}]}))]
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.end_headers()
+        if openai:
+            events = ([{'type': 'response.output_item.done', 'item': {'type': 'function_call', 'id': f'item-{index}', 'call_id': f'wire-{index}', 'name': name, 'arguments': arguments}}]
+                      for index, (name, arguments) in enumerate(calls))
+            events = [event for group in events for event in group] or [{'type': 'response.output_text.delta', 'delta': 'WIRE_DONE'}]
+            events.append({'type': 'response.completed', 'response': {'usage': {'input_tokens': 21, 'output_tokens': 5}}})
+        else:
+            events = [{'type': 'message_start', 'message': {'usage': {'input_tokens': 21, 'output_tokens': 0}}}]
+            for index, (name, arguments) in enumerate(calls):
+                events += [{'type': 'content_block_start', 'index': index, 'content_block': {'type': 'tool_use', 'id': f'wire-{index}', 'name': name, 'input': {}}},
+                           {'type': 'content_block_delta', 'index': index, 'delta': {'type': 'input_json_delta', 'partial_json': arguments}},
+                           {'type': 'content_block_stop', 'index': index}]
+            if not calls:
+                events += [{'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}},
+                           {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': 'WIRE_DONE'}},
+                           {'type': 'content_block_stop', 'index': 0}]
+            events += [{'type': 'message_delta', 'delta': {'stop_reason': 'tool_use' if calls else 'end_turn'}, 'usage': {'output_tokens': 5}}, {'type': 'message_stop'}]
+        for event in events:
+            self.wfile.write(('data: ' + json.dumps(event) + '\n\n').encode())
+        self.wfile.flush()
+
+
 settings = workspace/'.haarness/haarness.json'
 settings.write_text(json.dumps({
     'model': 'echo/echo-1',
-    'permission': {'mcp_resource_read': {'docs:docs://private*': 'deny'}, 'mcp__hidden__*': 'deny'},
+    # Rules as they were written before: each covers the tools whose own names it matches, and no other.
+    'permission': {'mcp_resource_read': {'docs:docs://private*': 'deny'}, 'mcp__hidden__*': 'deny',
+                   'mcp__*.internal__*': 'deny', 'mcp__*__files.read': 'deny', 'mcp__notes__*.delete': 'deny'},
+    'hooks': {'PreToolUse': [{'matcher': 'mcp__Docs Server__blocked\\..*',
+                              'hooks': [{'type': 'command', 'command': "echo 'kept out by a hook' >&2; exit 2"}]}]},
     'mcp': {
         'flood': server('flood.py', env={'FLOOD_MIB': '400', 'PID_LOG': str(root/'flood-pids')}),
         'docs': server('resources.py'),
@@ -59,13 +146,20 @@ settings.write_text(json.dumps({
         # `__` in a server's name: `a`'s `b__c` and `a__b`'s `c` are both `mcp__a__b__c`.
         'a': server('names.py', env={'LABEL': 'a', 'TOOLS': json.dumps(['b__c'])}),
         'a__b': server('names.py', env={'LABEL': 'a__b', 'TOOLS': json.dumps(['c', 'd'])}),
+        # Named as providers refuse tool names: a space, dots, a `?`.
+        'Docs Server': names('Docs Server', ['files.read', 'plain', 'what?', 'blocked.one'], cwd='tools/mcp'),
+        'Docs_Server': names('Docs_Server', ['plain']),
+        'api.internal': names('api.internal', ['charge']),
+        'billing_internal': names('billing_internal', ['charge']),
+        'notes': names('notes', ['files_read', 'bulk.delete', 'bulk_delete']),
     },
 }, indent=2) + '\n')
+(workspace/'.haarness/config.toml').write_text('[tool_availability]\n"mcp__Docs_Server__plain" = false\n')
 env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(root/'data'), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_TEST_KEYCHAIN_FILE=str(keychain), LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8')
 session = f'haarness-mcp-servers-{os.getpid()}'
-connection = None; foreground = None; checks = []
+connection = None; foreground = None; stand_in = None; checks = []
 
 
 def run(args, **kwargs):
@@ -93,6 +187,13 @@ def call(thread, tool, arguments):
     result = until(lambda: (values[before] if len(values := results(thread)) > before else None), f'{tool}: no result', 60)
     until(lambda: not api('/turns/active'), 'turn still active')
     return result
+def call_named(thread, tool, arguments):
+    """`call` for a tool name with a space, through the echo provider's `!multi`."""
+    before = len(results(thread))
+    api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': '!multi ' + json.dumps([{'name': tool, 'arguments': arguments}])})
+    result = until(lambda: (values[before] if len(values := results(thread)) > before else None), f'{tool}: no result', 60)
+    until(lambda: not api('/turns/active'), 'turn still active')
+    return result
 def check(label):
     checks.append(label); print('PASS ' + label, flush=True)
 def pane(): return subprocess.run(['tmux', 'capture-pane', '-p', '-J', '-t', session], check=True, text=True, capture_output=True).stdout
@@ -114,7 +215,7 @@ try:
     check('`haarness mcp secret set` stores a piped secret without showing it')
 
     connection = desktop({'action': 'connect'})
-    until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'hidden', 'app', 'keyed', 'missing', 'silent', 'a', 'a__b'}
+    until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'hidden', 'app', 'keyed', 'missing', 'silent', 'a', 'a__b', 'Docs Server', 'Docs_Server', 'api.internal', 'billing_internal', 'notes'}
           and all(item['status'] in ('connected', 'failed') for item in servers().values()), 'servers did not settle', 60)
     port = connection['url'].rsplit(':', 1)[1].strip('/')
     daemon = int(subprocess.run(['lsof', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN', '-t'], text=True, capture_output=True).stdout.split()[0])
@@ -151,6 +252,38 @@ try:
         answer = json.loads(result['output'])
         assert not result['is_error'] and (answer['server'], answer['tool']) == (own_server, own_tool), (tool, result)
     check('a tool reaches the server that lists it, `a__b`\'s included, and is listed under it; of two of the very same name the first server\'s is offered')
+
+    # --- tools keep their own names in Haarness
+    catalog = {tool['id']: tool['source'] for tool in api(f'/tools?threadId={thread}')['tools']}
+    for name, source in [('mcp__Docs Server__files.read', 'mcp:Docs Server'), ('mcp__Docs Server__what?', 'mcp:Docs Server'),
+                         ('mcp__Docs_Server__plain', 'mcp:Docs_Server'), ('mcp__api.internal__charge', 'mcp:api.internal')]:
+        assert catalog.get(name) == source, (name, catalog)
+    for tool, ran in [('mcp__api.internal__charge', False), ('mcp__billing_internal__charge', True),
+                      ('mcp__Docs Server__files.read', False), ('mcp__notes__files_read', True),
+                      ('mcp__notes__bulk.delete', False), ('mcp__notes__bulk_delete', True),
+                      ('mcp__Docs Server__plain', True), ('mcp__Docs_Server__plain', False),
+                      ('mcp__Docs Server__what?', True), ('mcp__Docs Server__blocked.one', False)]:
+        result = call_named(thread, tool, {})
+        assert result['is_error'] != ran, (tool, result)
+        if ran:
+            server_name, own = tool[len('mcp__'):].split('__', 1)
+            answer = json.loads(result['output'])
+            assert (answer['server'], answer['tool']) == (server_name, own), (tool, result)
+            if server_name == 'Docs Server':
+                assert pathlib.Path(answer['cwd']).resolve() == (workspace/'tools/mcp').resolve(), answer
+    assert 'kept out by a hook' in call_named(thread, 'mcp__Docs Server__blocked.one', {})['output']
+    source = ("export const meta = { name: 'own-names', phases: ['call'] };\n"
+              "phase('call');\n"
+              "const result = await tool('mcp__Docs Server__what?', {});\n"
+              "return result.output;\n")
+    run_state = api('/workflows/run', {'source': source, 'model': 'echo/echo-1'})
+    deadline = time.monotonic() + 60
+    while run_state['status'] == 'running' and time.monotonic() < deadline:
+        time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
+    assert run_state['status'] == 'completed', run_state
+    result = run_state.get('result')
+    assert '"tool": "what?"' in (result if isinstance(result, str) else json.dumps(result)), result
+    check('MCP tools keep their own names in Haarness: rules written for them (`mcp__*.internal__*`, `mcp__*__files.read`, `mcp__notes__*.delete`), tool_availability, a hook matcher and a workflow apply to exactly the tools they name')
 
     # --- interactive apps switch
     app = servers()['app']
@@ -285,32 +418,69 @@ try:
     (other/'.haarness/haarness.json').write_text(json.dumps({'model': 'echo/echo-1', 'mcp': {
         'here': server('names.py', env={'LABEL': 'here', 'TOOLS': '["where"]'}),
         'inside': server('names.py', cwd='sub', env={'LABEL': 'inside', 'TOOLS': '["where"]'}),
+        'Docs Server': names('Docs Server', ['files.read', 'plain', 'what?']),
+        'Docs_Server': names('Docs_Server', ['plain']),
     }}, indent=2) + '\n')
+    # Every tool schema in each request, so the stand-ins see the MCP tools' names.
+    (other/'.haarness/config.toml').write_text('[lazy_tools]\nmode = "off"\n')
+    stand_in = http.server.ThreadingHTTPServer(('127.0.0.1', 0), ProviderStandIn)
+    threading.Thread(target=stand_in.serve_forever, daemon=True).start()
+    provider_url = f'http://127.0.0.1:{stand_in.server_port}/v1'
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0)); free = probe.getsockname()[1]
     token = uuid.uuid4().hex
     with open(root/'foreground.log', 'w') as log:
         foreground = subprocess.Popen([str(binary), '--workspace', str(other), '--trust-project', 'serve', '--port', str(free)],
-                                      cwd=elsewhere, env={**env, 'HAARNESS_SERVER_TOKEN': token}, stdout=log, stderr=log)
+                                      cwd=elsewhere, stdout=log, stderr=log,
+                                      env={**env, 'HAARNESS_SERVER_TOKEN': token, 'ANTHROPIC_API_KEY': 'fixture-key',
+                                           'ANTHROPIC_BASE_URL': provider_url, 'OPENAI_API_KEY': 'fixture-key',
+                                           'OPENAI_BASE_URL': provider_url})
     at = (f'http://127.0.0.1:{free}', token)
     def settled_elsewhere():
         try:
             listed = {item['name']: item['status'] for item in api('/mcp', at=at)}
         except (urllib.error.URLError, ConnectionError):
             return None
-        return listed if set(listed) == {'here', 'inside'} and 'connecting' not in listed.values() else None
+        return listed if set(listed) == {'here', 'inside', 'Docs Server', 'Docs_Server'} and 'connecting' not in listed.values() else None
     listed = until(settled_elsewhere, 'the server started elsewhere did not list its MCP servers', 60)
     assert set(listed.values()) == {'connected'}, listed
     for name, expected in [('here', other), ('inside', other/'sub')]:
         answer = json.loads(api(f'/mcp/{name}/tools/mcp__{name}__where', {}, at=at)['text'])
         assert pathlib.Path(answer['cwd']).resolve() == expected.resolve(), (name, answer)
     check('a server started with --workspace from another folder starts its MCP servers in the project folder, and a relative cwd inside it')
+
+    # --- the providers' own wire formats
+    for provider, model in [('anthropic', 'claude-sonnet-4-6'), ('openai', 'gpt-5.4-mini')]:
+        wire_thread = api('/threads', {'title': f'Wire {provider}', 'provider': provider, 'model': model}, at=at)['id']
+        def wire_results():
+            return [item['data'] for item in api(f'/threads/{wire_thread}/items', at=at) if item['data']['type'] == 'tool_result']
+        # A call of `what?` stored in the chat first, through the echo provider.
+        api(f'/threads/{wire_thread}/turns', {'requestId': str(uuid.uuid4()), 'provider': 'echo', 'model': 'echo-1',
+                                              'text': '!multi ' + json.dumps([{'name': 'mcp__Docs Server__what?', 'arguments': {}}])}, at=at)
+        until(lambda: len(wire_results()) == 1 and not api('/turns/active', at=at), f'{provider}: the stored call did not end', 60)
+        before = len(WIRE)
+        api(f'/threads/{wire_thread}/turns', {'requestId': str(uuid.uuid4()), 'text': 'WIRE_ROUND read the setup notes.'}, at=at)
+        until(lambda: len(WIRE) > before and not api('/turns/active', at=at), f'{provider}: the turn did not end', 60)
+        seen = WIRE[before:]
+        assert not [request for request in seen if request['refused']], (provider, seen)
+        assert any('mcp__Docs_Server__files_read' in name for request in seen for name in request['history']), seen
+        assert any(name.startswith('mcp__Docs_Server__what') for request in seen for name in request['history']), seen
+        reached = [(item['name'], json.loads(item['output'])) for item in wire_results()[1:] if item['name'] != 'batch']
+        batched = [item for item in wire_results() if item['name'] == 'batch']
+        assert len(batched) == 1 and not batched[0]['is_error'] and 'what?' in batched[0]['output'] and 'Docs Server' in batched[0]['output'], (provider, batched)
+        assert sorted((name, answer['server'], answer['tool']) for name, answer in reached) == sorted([
+            ('mcp__Docs Server__files.read', 'Docs Server', 'files.read'), ('mcp__Docs_Server__plain', 'Docs_Server', 'plain'),
+            ('mcp__Docs Server__plain', 'Docs Server', 'plain')]), (provider, reached)
+        assert 'WIRE_DONE' in json.dumps(api(f'/threads/{wire_thread}/items', at=at)), provider
+    check('through stand-ins that refuse tool names as the Anthropic and OpenAI APIs do, a turn with `Docs Server` and `Docs_Server` completes, a stored call of `what?` goes back with it, and each call, a `batch` step included, reaches the tool it stands for under its own name')
     foreground.terminate(); foreground.wait(timeout=30); foreground = None
 
     (root/'result.json').write_text(json.dumps({'passed': True, 'checks': checks}, indent=2))
     print(f'PASS {len(checks)} MCP server scenarios.', flush=True)
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)
+    if stand_in:
+        stand_in.shutdown()
     if foreground:
         foreground.terminate()
         try:
