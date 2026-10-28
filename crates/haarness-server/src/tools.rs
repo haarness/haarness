@@ -3855,9 +3855,9 @@ fn ensure_within(path: PathBuf, context: &ToolContext) -> CoreResult<PathBuf> {
 
 /// `list`: the entries of one folder, sorted. Each entry's type comes from
 /// the listing itself; only a link is looked at, through `follow` (whether
-/// it leads to a folder), and following one into a network mount that does
-/// not answer can take minutes. So the listing runs off the async workers
-/// and Stop ends the call at once, as glob's and grep's walks do.
+/// it leads to a folder), and following one into an offline network volume
+/// can take minutes. So the listing runs off the async workers and Stop ends
+/// the call at once, as glob's and grep's walks do.
 async fn list(
     requested: &str,
     context: &ToolContext,
@@ -8210,8 +8210,8 @@ export default workflow({
         std::sync::atomic::AtomicBool::new(false);
 
     /// Follows a link as `list` does, except that one named `hung` hangs
-    /// until the test lets it go, as a link into a network mount that went
-    /// away can.
+    /// until the test lets it go, as a link into an offline network volume
+    /// can.
     #[cfg(unix)]
     fn follow_hangs(link: &Path) -> bool {
         if link.file_name().is_some_and(|name| name == "hung") {

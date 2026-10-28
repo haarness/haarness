@@ -2115,9 +2115,9 @@ async fn search_files(
 }
 
 /// How explicit path completion looks at the disk. A folder on a network
-/// mount that cannot be reached right now, or a link into one, can hold a
-/// lookup for minutes, so each gets so long and no longer; tests stand in
-/// lookups that never answer.
+/// volume that went offline, or a link into one, can hold a lookup for
+/// minutes, so each gets so long and no longer; tests stand in lookups that
+/// never return.
 #[derive(Clone, Copy)]
 struct PathLookups {
     /// A folder's entries, each with its type as the listing gives it, so
@@ -2140,6 +2140,25 @@ const PATH_LOOKUPS: PathLookups = PathLookups {
 
 /// How many of a folder's links are resolved at once.
 const LINKS_AT_ONCE: usize = 4;
+
+/// How long completion in a folder whose links ran out of time starts no
+/// new link lookups there, so a folder of links into an offline volume holds
+/// a few blocking threads, not a few more with every keystroke. Meanwhile its
+/// links show as they answered then, or as they answered since.
+const SLOW_LINKS_REST: Duration = Duration::from_secs(30);
+
+/// Folders whose links ran out of time: when, and whether each link that
+/// answered in time leads to a folder.
+type SlowLinkFolders = std::collections::HashMap<
+    std::path::PathBuf,
+    (
+        tokio::time::Instant,
+        Arc<std::collections::HashMap<String, bool>>,
+    ),
+>;
+
+static SLOW_LINK_FOLDERS: std::sync::LazyLock<parking_lot::Mutex<SlowLinkFolders>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// An entry's type, as a folder listing gives it.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2177,8 +2196,9 @@ fn list_folder(folder: &std::path::Path) -> Option<Listing> {
 /// notation in every result. Normal read/media permission checks still run
 /// when the selection is actually used. A folder that does not list within
 /// `lookups.folder` completes to nothing, and a link that has not resolved
-/// within `lookups.links` after that is listed by its name, without the `/`
-/// of a folder.
+/// within `lookups.links` after that shows as a plain entry, without a
+/// folder's `/`. A late answer is used by the next request (see
+/// `crate::lookups`).
 async fn explicit_path_suggestions(
     workspace: &std::path::Path,
     query: &str,
@@ -2261,21 +2281,50 @@ async fn explicit_path_suggestions(
         .filter(|(_, kind, _)| *kind == EntryKind::Link)
         .map(|(name, _, _)| name.clone())
         .collect::<Vec<_>>();
-    let linked_folders = futures::stream::iter(links)
+    let resting = {
+        let mut slow = SLOW_LINK_FOLDERS.lock();
+        slow.retain(|_, (since, _)| since.elapsed() < SLOW_LINKS_REST);
+        slow.get(&directory)
+            .map(|(_, answered)| Arc::clone(answered))
+    };
+    let resolved = futures::stream::iter(links)
         .map(|name| {
             let link = directory.join(&name);
+            let resting = resting.clone();
             async move {
-                let path = link.clone();
-                crate::lookups::within("link", &link, deadline, move || (lookups.follow)(&path))
-                    .await
-                    .unwrap_or(false)
-                    .then_some(name)
+                let folder = match resting {
+                    Some(answered) => answered
+                        .get(&name)
+                        .copied()
+                        .or_else(|| crate::lookups::kept("link", &link)),
+                    None => {
+                        let path = link.clone();
+                        crate::lookups::within("link", &link, deadline, move || {
+                            (lookups.follow)(&path)
+                        })
+                        .await
+                    }
+                };
+                (name, folder)
             }
         })
         .buffer_unordered(LINKS_AT_ONCE)
-        .filter_map(std::future::ready)
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<Vec<_>>()
         .await;
+    if resting.is_none() && resolved.iter().any(|(_, folder)| folder.is_none()) {
+        let answered = resolved
+            .iter()
+            .filter_map(|(name, folder)| folder.map(|folder| (name.clone(), folder)))
+            .collect();
+        SLOW_LINK_FOLDERS.lock().insert(
+            directory.clone(),
+            (tokio::time::Instant::now(), Arc::new(answered)),
+        );
+    }
+    let linked_folders = resolved
+        .into_iter()
+        .filter_map(|(name, folder)| folder.unwrap_or(false).then_some(name))
+        .collect::<std::collections::HashSet<_>>();
     let mut matches = matches
         .into_iter()
         .map(|(name, kind, score)| {
@@ -2343,10 +2392,11 @@ fn fuzzy_score(path: &str, query: &str) -> Option<i64> {
 #[cfg(test)]
 mod file_search_tests {
     use super::{
-        Listing, PATH_LOOKUPS, PathLookups, explicit_path_suggestions, fuzzy_score, list_folder,
+        LINKS_AT_ONCE, Listing, PATH_LOOKUPS, PathLookups, explicit_path_suggestions, fuzzy_score,
+        list_folder,
     };
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     /// The scores Desktop's port is pinned to as well.
@@ -2434,6 +2484,10 @@ mod file_search_tests {
     #[cfg(unix)]
     static LINK_RELEASED: AtomicBool = AtomicBool::new(false);
     static FOLDER_RELEASED: AtomicBool = AtomicBool::new(false);
+    #[cfg(unix)]
+    static OFFLINE_RELEASED: AtomicBool = AtomicBool::new(false);
+    #[cfg(unix)]
+    static OFFLINE_STARTED: AtomicUsize = AtomicUsize::new(0);
 
     fn wait_for(released: &AtomicBool) {
         while !released.load(Ordering::SeqCst) {
@@ -2442,12 +2496,27 @@ mod file_search_tests {
     }
 
     /// Follows a link as the server does, except that one named `hung`
-    /// hangs until the test lets it go, as a link into a network mount that
-    /// went away can.
+    /// hangs until the test lets it go, as a link into an offline network
+    /// volume can.
     #[cfg(unix)]
     fn follow_hangs(link: &Path) -> bool {
         if link.file_name().is_some_and(|name| name == "hung") {
             wait_for(&LINK_RELEASED);
+        }
+        link.is_dir()
+    }
+
+    /// Follows a link as the server does, except that every one whose name
+    /// starts with `offline-` hangs until the test lets it go; counts those
+    /// it started.
+    #[cfg(unix)]
+    fn follow_offline(link: &Path) -> bool {
+        if link
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("offline-"))
+        {
+            OFFLINE_STARTED.fetch_add(1, Ordering::SeqCst);
+            wait_for(&OFFLINE_RELEASED);
         }
         link.is_dir()
     }
@@ -2457,6 +2526,15 @@ mod file_search_tests {
     fn list_hangs(folder: &Path) -> Option<Listing> {
         if folder.file_name().is_some_and(|name| name == "hung-folder") {
             wait_for(&FOLDER_RELEASED);
+        }
+        list_folder(folder)
+    }
+
+    /// Lists a folder as the server does, a little slowly when it is named
+    /// `slow-folder`.
+    fn list_slowly(folder: &Path) -> Option<Listing> {
+        if folder.file_name().is_some_and(|name| name == "slow-folder") {
+            std::thread::sleep(Duration::from_millis(400));
         }
         list_folder(folder)
     }
@@ -2495,7 +2573,7 @@ mod file_search_tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_link_that_does_not_resolve_in_time_is_listed_by_its_name() {
+    fn a_stuck_link_shows_without_its_slash_and_holds_up_no_later_completion() {
         let tree = TestTree(
             std::env::temp_dir().join(format!("haarness-hung-link-{}", uuid::Uuid::now_v7())),
         );
@@ -2509,7 +2587,8 @@ mod file_search_tests {
             ..PATH_LOOKUPS
         };
         // Asked twice while the link hangs: the first answer waits for it as
-        // long as links may take, the second not at all.
+        // long as links may take, the second not at all, and the linked
+        // folder that answered keeps its `/`.
         let answers = complete(tree.0.clone(), "./", lookups, 2, &LINK_RELEASED);
         assert_eq!(answers.len(), 2, "completion waited on a link that hangs");
         let (first, took) = &answers[0];
@@ -2523,8 +2602,35 @@ mod file_search_tests {
         assert!(*took < Duration::from_millis(150), "{took:?}");
     }
 
+    /// A folder of links into an offline volume holds the few lookups the
+    /// first completion started; the completions after it start no more.
+    #[cfg(unix)]
     #[test]
-    fn a_folder_that_does_not_answer_completes_to_nothing_in_time() {
+    fn a_folder_of_offline_links_starts_no_new_lookups_for_a_while() {
+        let tree = TestTree(
+            std::env::temp_dir().join(format!("haarness-offline-{}", uuid::Uuid::now_v7())),
+        );
+        std::fs::create_dir_all(tree.0.join("target")).unwrap();
+        for index in 0..6 {
+            std::os::unix::fs::symlink("target", tree.0.join(format!("offline-{index}"))).unwrap();
+        }
+        let lookups = PathLookups {
+            follow: follow_offline,
+            links: Duration::from_millis(200),
+            ..PATH_LOOKUPS
+        };
+        let answers = complete(tree.0.clone(), "./off", lookups, 3, &OFFLINE_RELEASED);
+        assert_eq!(answers.len(), 3, "completion waited on links that hang");
+        assert!(
+            answers
+                .iter()
+                .all(|(found, _)| found.len() == 6 && found.iter().all(|row| !row.ends_with('/')))
+        );
+        assert_eq!(OFFLINE_STARTED.load(Ordering::SeqCst), LINKS_AT_ONCE);
+    }
+
+    #[test]
+    fn a_stuck_folder_completes_to_nothing_once_its_time_is_up() {
         let tree = TestTree(
             std::env::temp_dir().join(format!("haarness-hung-folder-{}", uuid::Uuid::now_v7())),
         );
@@ -2546,6 +2652,31 @@ mod file_search_tests {
         };
         assert!(found.is_empty(), "{found:?}");
         assert!(*took < Duration::from_secs(2), "{took:?}");
+    }
+
+    /// A folder slower than completion waits for still completes: the next
+    /// completion after it has listed uses that listing.
+    #[tokio::test]
+    async fn a_slow_folder_completes_on_the_next_ask_after_it_has_listed() {
+        let tree = TestTree(
+            std::env::temp_dir().join(format!("haarness-slow-folder-{}", uuid::Uuid::now_v7())),
+        );
+        std::fs::create_dir_all(tree.0.join("slow-folder/inside")).unwrap();
+        let lookups = PathLookups {
+            list: list_slowly,
+            folder: Duration::from_millis(100),
+            ..PATH_LOOKUPS
+        };
+        let first = explicit_path_suggestions(&tree.0, "./slow-folder/", 20, lookups).await;
+        assert_eq!(first, Some(Vec::new()));
+        let folder = tree.0.join("./slow-folder/");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while crate::lookups::kept::<Option<Listing>>("folder", &folder).is_none() {
+            assert!(Instant::now() < deadline, "the slow folder never listed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let next = explicit_path_suggestions(&tree.0, "./slow-folder/", 20, lookups).await;
+        assert_eq!(next, Some(vec!["./slow-folder/inside/".to_owned()]));
     }
 }
 
