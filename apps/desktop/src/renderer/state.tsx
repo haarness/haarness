@@ -100,6 +100,7 @@ import {
 import { chatFolderPath, newChatFolder } from "./chat-folder";
 import { createProjectOverview } from "./project-overview";
 import { carryDraft } from "./draft-carry";
+import { commandBody, messageBody } from "./send-request";
 import { checkAttachments, fileAttachments, type Attachment } from "./media";
 import type { SearchEntry } from "./search";
 import {
@@ -2357,27 +2358,24 @@ function createApp(saved?: Preferences) {
     await window.haarness.storage(key, pending);
     const noteKey = sessionKey(connection, thread.id);
     set("commandNotes", noteKey, undefined);
-    const input = {
+    const input = messageBody({
       delivery,
-      preview: true,
-      tools: { preview: true },
       text: promptWithContext(text, context),
       attachments,
-      ...mentioned,
+      mentioned,
       requestId: pending.requestId,
-      ...(effort ? { reasoningEffort: effort } : {}),
-    };
+      effort,
+    });
     if (pending.method === "executeCommand" && command) {
       const response = await targetApi<T.CommandExecutionResponse>(
         "executeCommand",
         thread.id,
-        {
+        commandBody({
           name: command[1],
-          tools: { preview: true },
           arguments: promptWithContext(command[2], context),
-          ...mentioned,
+          mentioned,
           requestId: pending.requestId,
-        },
+        }),
       );
       const note = commandNote(
         text,

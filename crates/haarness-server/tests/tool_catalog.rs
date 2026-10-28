@@ -294,6 +294,7 @@ fn turn_request(text: &str) -> StartTurnRequest {
         reasoning_effort: None,
         tools: None,
         command: None,
+        ..Default::default()
     }
 }
 

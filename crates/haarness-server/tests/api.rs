@@ -2336,6 +2336,7 @@ fn turn_request(text: &str) -> StartTurnRequest {
         reasoning_effort: None,
         tools: None,
         command: None,
+        ..Default::default()
     }
 }
 
@@ -3218,6 +3219,7 @@ async fn authenticated_rest_turn_runs_end_to_end() {
             reasoning_effort: None,
             tools: None,
             command: None,
+            ..Default::default()
         })
         .send()
         .await
@@ -5151,6 +5153,7 @@ async fn queued_input_during_summarization_cancels_compaction_until_exact_delive
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -5490,6 +5493,7 @@ async fn rest_compaction_rejects_active_turn_and_preserves_queued_steering() {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -6392,6 +6396,7 @@ async fn duplicate_request_id_is_not_replayed() {
         reasoning_effort: None,
         tools: None,
         command: None,
+        ..Default::default()
     };
     let first = runtime
         .start_turn(thread.id, request.clone())
@@ -9477,6 +9482,7 @@ async fn queued_message_during_text_stream_runs_in_a_follow_up_round() {
                 attachments: vec![],
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -9546,6 +9552,7 @@ async fn queued_message_steers_into_running_turn() {
                 attachments: vec![],
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -9638,6 +9645,7 @@ async fn queue_input_on_idle_thread_starts_a_turn() {
                 attachments: vec![],
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -10897,6 +10905,7 @@ async fn queued_goal_steering_tool_followup_keeps_current_doctrine() {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -11588,6 +11597,7 @@ async fn replacing_a_goal_mid_turn_resets_the_goal_boundary() {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -12322,6 +12332,7 @@ fn deferred_request(text: &str) -> haarness_protocol::QueueInputRequest {
         attachments: vec![],
         resources: Vec::new(),
         synthetic: false,
+        ..Default::default()
     }
 }
 fn deferred_runtime(provider: DeferredGate, store: Arc<SqliteStore>) -> AgentRuntime {
@@ -13042,6 +13053,15 @@ mod permission_script;
 #[path = "cases/chat_folders.rs"]
 mod chat_folders;
 
+#[path = "cases/instructions_in_view.rs"]
+mod instructions_in_view;
+
+#[path = "cases/definition_snippets.rs"]
+mod definition_snippets;
+
+#[path = "cases/zero_window.rs"]
+mod zero_window;
+
 #[tokio::test]
 async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     let workspace =
@@ -13733,6 +13753,7 @@ fn queued(text: &str, effort: Option<&str>) -> haarness_protocol::QueueInputRequ
         attachments: Vec::new(),
         resources: Vec::new(),
         synthetic: false,
+        ..Default::default()
     }
 }
 

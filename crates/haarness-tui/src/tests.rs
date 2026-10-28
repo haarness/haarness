@@ -18775,6 +18775,7 @@ async fn a_yolo_client_flags_the_turns_it_starts_and_a_plain_one_does_not() {
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await;
@@ -18785,6 +18786,49 @@ async fn a_yolo_client_flags_the_turns_it_starts_and_a_plain_one_does_not() {
             "{}",
             requests[0]
         );
+    }
+}
+
+#[tokio::test]
+async fn an_attended_client_says_a_person_can_stop_what_it_starts() {
+    for attended in [true, false] {
+        let (client, server) =
+            workspace_http_status_client(vec![(200, "{}".into()); 3], false).await;
+        let client = if attended { client.attended() } else { client };
+        let thread = ThreadId::new();
+        // `{}` is no answer; only the requests matter here.
+        let _ = client
+            .start_turn(
+                thread,
+                haarness_protocol::StartTurnRequest {
+                    text: "hi".into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let _ = client
+            .queue_input(
+                thread,
+                haarness_protocol::QueueInputRequest {
+                    text: "hi".into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let _ = client
+            .execute_command(
+                thread,
+                haarness_protocol::ExecuteCommandRequest {
+                    name: "review".into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in requests {
+            assert_eq!(request.contains("\"attended\":true"), attended, "{request}");
+        }
     }
 }
 
@@ -19428,6 +19472,7 @@ fn queued_input(text: &str, attachments: &[&str]) -> haarness_protocol::PendingI
         id: haarness_protocol::RequestId::new(),
         text: text.into(),
         attachments: attachments.iter().map(|path| (*path).to_owned()).collect(),
+        ..Default::default()
     }
 }
 

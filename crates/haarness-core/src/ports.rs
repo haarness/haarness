@@ -708,6 +708,12 @@ pub trait ToolInvoker: Send + Sync {
     fn read_rules(&self) -> Option<crate::PermissionEngine> {
         None
     }
+    /// The nested instruction files this call's model can already see, for
+    /// `read` to attach each one only while it is out of view. `None`
+    /// outside an agent's turn, where the tool keeps its own record.
+    fn instructions_in_context(&self) -> Option<crate::instructions::InContext> {
+        None
+    }
     async fn invoke(&self, name: &str, arguments: Value) -> CoreResult<ToolOutput>;
     /// A batch step refused before it starts still takes its number, so the
     /// call ids of the steps after it (`<batch call id>:N`) stay their place

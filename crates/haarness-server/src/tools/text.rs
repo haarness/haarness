@@ -248,6 +248,18 @@ pub(super) fn read_text(
         );
     }
     let next = offset + shown_lines.len();
+    // Every line was passed over: an empty result would read as an empty
+    // file.
+    if shown_lines.is_empty() && offset > 0 && stop.is_none() {
+        let length = match index {
+            0 => "is empty".to_owned(),
+            1 => "has 1 line".to_owned(),
+            count => format!("has {count} lines"),
+        };
+        notes.push(format!(
+            "(the file {length}, so offset {offset} is past its end)"
+        ));
+    }
     if let Some(stop) = stop {
         notes.push(format!("(stopped at {stop}; read on with offset={next})"));
     } else if more {

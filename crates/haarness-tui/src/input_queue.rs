@@ -40,6 +40,7 @@ impl App {
             attachments: self.attachments.clone(),
             resources,
             synthetic: false,
+            ..Default::default()
         };
         if !request.resources.is_empty() {
             let mentions = request.resources.clone();

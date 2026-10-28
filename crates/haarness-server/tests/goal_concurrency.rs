@@ -427,6 +427,7 @@ async fn start_criteria_prompt(runtime: &AgentRuntime, thread: ThreadId) -> (Tur
                 reasoning_effort: None,
                 tools: None,
                 command: None,
+                ..Default::default()
             },
         )
         .await
@@ -495,6 +496,7 @@ async fn interrupt_cancels_before_a_provider_returns_its_stream_handle() {
                 reasoning_effort: None,
                 tools: None,
                 command: None,
+                ..Default::default()
             },
         )
         .await
@@ -692,6 +694,7 @@ async fn queued_user_steering_does_not_consume_goal_continuation_budget() {
                 reasoning_effort: None,
                 tools: None,
                 command: None,
+                ..Default::default()
             },
         )
         .await
@@ -709,6 +712,7 @@ async fn queued_user_steering_does_not_consume_goal_continuation_budget() {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -1020,6 +1024,7 @@ fn blocking_turn_request(text: &str) -> StartTurnRequest {
         reasoning_effort: None,
         tools: None,
         command: None,
+        ..Default::default()
     }
 }
 
@@ -1037,6 +1042,7 @@ fn fail_once_turn_request(text: &str) -> StartTurnRequest {
         reasoning_effort: None,
         tools: None,
         command: None,
+        ..Default::default()
     }
 }
 
@@ -1318,6 +1324,7 @@ async fn queue_input_retries_the_start_admission_race_without_dropping_text() {
                     attachments: Vec::new(),
                     resources: Vec::new(),
                     synthetic: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -1540,6 +1547,7 @@ async fn input_at_the_closing_boundary_starts_fresh_after_terminal_removal() {
                     attachments: Vec::new(),
                     resources: Vec::new(),
                     synthetic: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -1612,6 +1620,7 @@ async fn queued_input_is_retried_after_an_inflight_provider_error() {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -1711,6 +1720,7 @@ async fn input_at_error_cleanup_waits_until_goal_and_turn_are_terminal() {
                     attachments: Vec::new(),
                     resources: Vec::new(),
                     synthetic: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -1801,6 +1811,7 @@ async fn child_failure_recovers_queued_input_before_releasing_turn_admission() {
                 reasoning_effort: None,
                 tools: None,
                 command: None,
+                ..Default::default()
             },
         )
         .await
@@ -1840,6 +1851,7 @@ async fn child_failure_recovers_queued_input_before_releasing_turn_admission() {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -1885,6 +1897,7 @@ async fn child_failure_recovers_queued_input_before_releasing_turn_admission() {
                     attachments: Vec::new(),
                     resources: Vec::new(),
                     synthetic: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -2020,6 +2033,7 @@ async fn child_start_event_exposes_the_active_cancellation_token() {
                 reasoning_effort: None,
                 tools: None,
                 command: None,
+                ..Default::default()
             },
         )
         .await

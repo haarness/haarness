@@ -412,6 +412,7 @@ async fn reliability_input_arriving_during_failure_hook_starts_a_fresh_turn() {
                         attachments: vec![],
                         resources: Vec::new(),
                         synthetic: false,
+                        ..Default::default()
                     },
                 )
                 .await

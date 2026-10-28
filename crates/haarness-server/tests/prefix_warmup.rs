@@ -226,6 +226,7 @@ async fn start(runtime: &AgentRuntime, thread: ThreadId, text: &str) -> Turn {
                 reasoning_effort: None,
                 tools: None,
                 command: None,
+                ..Default::default()
             },
         )
         .await

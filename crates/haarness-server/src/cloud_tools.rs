@@ -491,6 +491,7 @@ mod tests {
             reasoning_effort: None,
             tools: None,
             command: None,
+            ..Default::default()
         };
         let workspace = "00000000-0000-4000-8000-000000000001";
         let arguments = |tool: &str, action: &str| match tool {

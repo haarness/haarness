@@ -306,7 +306,10 @@ impl NativeToolRegistry {
 /// workspace subdirectory, every `AGENTS.md` (and, under Claude Code
 /// compatibility, `CLAUDE.md`-family file) between that directory and the
 /// workspace root that the system prompt does not already carry is appended
-/// to the result, once per thread.
+/// to the result, once while the model can see it: in an agent's turn the
+/// turn says what is in view, so a file compaction or an undo took out of
+/// the conversation comes back with the next read; elsewhere, once per
+/// thread.
 #[derive(Default)]
 struct InstructionDiscovery {
     claude: std::sync::atomic::AtomicBool,
@@ -315,7 +318,7 @@ struct InstructionDiscovery {
     >,
 }
 
-/// Nested instruction files attached per thread before discovery stops.
+/// Nested instruction files in view at once before discovery stops.
 const NESTED_INSTRUCTION_LIMIT: usize = 20;
 
 impl InstructionDiscovery {
@@ -325,15 +328,24 @@ impl InstructionDiscovery {
         file: &Path,
         workspace: &Path,
         thread: haarness_protocol::ThreadId,
+        in_context: Option<haarness_core::instructions::InContext>,
     ) {
         let claude = self.claude.load(std::sync::atomic::Ordering::Relaxed);
         let candidates = haarness_core::instructions::nested(file, workspace, claude);
         if candidates.is_empty() {
             return;
         }
-        let mut loaded = self.loaded.lock();
-        let seen = loaded.entry(thread).or_default();
+        let mut turn_view;
+        let mut loaded;
+        let seen = if let Some(view) = &in_context {
+            turn_view = view.lock();
+            &mut *turn_view
+        } else {
+            loaded = self.loaded.lock();
+            loaded.entry(thread).or_default()
+        };
         let mut attached = Vec::new();
+        let mut resolved = Vec::new();
         for candidate in candidates {
             if seen.len() >= NESTED_INSTRUCTION_LIMIT {
                 break;
@@ -344,7 +356,7 @@ impl InstructionDiscovery {
             if seen.contains(&key) {
                 continue;
             }
-            seen.insert(key);
+            seen.insert(key.clone());
             let Ok(content) = std::fs::read_to_string(&candidate) else {
                 continue;
             };
@@ -360,15 +372,19 @@ impl InstructionDiscovery {
                 .text
                 .push_str(&haarness_core::instructions::segment(&source, &content));
             attached.push(source);
+            resolved.push(key.display().to_string());
         }
         if attached.is_empty() {
             return;
         }
+        // With the files they resolve to, as `seen` keys them, so a later
+        // round tells what is in view without touching the disk.
         match output.metadata.as_object_mut() {
             Some(metadata) => {
                 metadata.insert("loaded".into(), json!(attached));
+                metadata.insert("loadedResolved".into(), json!(resolved));
             }
-            None => output.metadata = json!({ "loaded": attached }),
+            None => output.metadata = json!({ "loaded": attached, "loadedResolved": resolved }),
         }
     }
 }
@@ -2898,8 +2914,17 @@ impl Tool for BuiltinTool {
                     () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
                     read = read => read.map_err(tool_error)??,
                 });
-                self.instructions
-                    .attach(&mut output, &path, &context.workspace, context.thread_id);
+                let in_context = context
+                    .invoker
+                    .as_ref()
+                    .and_then(|invoker| invoker.instructions_in_context());
+                self.instructions.attach(
+                    &mut output,
+                    &path,
+                    &context.workspace,
+                    context.thread_id,
+                    in_context,
+                );
                 Ok(output)
             }
             Kind::ImageGenerate => {
@@ -3083,6 +3108,15 @@ impl Tool for BuiltinTool {
                 let before = string(&args, "old")?;
                 let after = string(&args, "new")?;
                 let text = text::read_utf8(&path, "edit").await?;
+                // An empty old is found between every two characters; said
+                // plainly rather than as a count of those places. An empty
+                // file still takes its first text this way.
+                if before.is_empty() && !text.is_empty() {
+                    return Err(CoreError::Invalid(
+                        "old is empty: give the exact text to replace, or use write to replace the whole file"
+                            .into(),
+                    ));
+                }
                 let (before, after) = text::crlf_edit(&text, before, after);
                 let (before, after) = (before.as_ref(), after.as_ref());
                 let count = text.matches(before).count();
@@ -4971,6 +5005,61 @@ mod tests {
                 .ends_with("crates/api/CLAUDE.md"),
             "nearest first"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The turn's view of its context, as the runtime hands it to a tool.
+    struct InView(haarness_core::instructions::InContext);
+
+    #[async_trait]
+    impl haarness_core::ToolInvoker for InView {
+        fn instructions_in_context(&self) -> Option<haarness_core::instructions::InContext> {
+            Some(Arc::clone(&self.0))
+        }
+        async fn invoke(&self, name: &str, _arguments: Value) -> CoreResult<ToolOutput> {
+            panic!("read invoked {name}");
+        }
+        fn side_effectful_for(&self, _name: &str, _arguments: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn read_attaches_a_nested_instruction_file_again_once_it_is_out_of_view() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-read-in-view-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join("crates/api/src")).unwrap();
+        std::fs::write(root.join("crates/AGENTS.md"), "CRATE_RULES").unwrap();
+        std::fs::write(root.join("crates/api/src/lib.rs"), "fn api() {}").unwrap();
+        std::fs::write(root.join("crates/api/src/main.rs"), "fn main() {}").unwrap();
+        let workspace = root.canonicalize().unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let read = registry.get("read").unwrap();
+        let view = haarness_core::instructions::InContext::default();
+        let mut context = tool_context(&workspace);
+        context.invoker = Some(Arc::new(InView(Arc::clone(&view))));
+
+        let first = read
+            .execute(json!({"path":"crates/api/src/lib.rs"}), context.clone())
+            .await
+            .unwrap();
+        assert!(first.text.contains("CRATE_RULES"), "{}", first.text);
+        assert_eq!(view.lock().len(), 1, "the turn sees what was attached");
+        // Still in view: another read in that folder does not repeat it.
+        let second = read
+            .execute(json!({"path":"crates/api/src/main.rs"}), context.clone())
+            .await
+            .unwrap();
+        assert!(!second.text.contains("CRATE_RULES"), "{}", second.text);
+        // Compaction took the first result out of the conversation: the
+        // next round's view no longer holds it, and a read brings it back.
+        view.lock().clear();
+        let third = read
+            .execute(json!({"path":"crates/api/src/main.rs"}), context.clone())
+            .await
+            .unwrap();
+        assert!(third.text.contains("CRATE_RULES"), "{}", third.text);
+        assert_eq!(third.metadata["loaded"].as_array().unwrap().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -7770,6 +7859,33 @@ export default workflow({
     }
 
     #[tokio::test]
+    async fn a_read_past_the_end_says_how_long_the_file_is() {
+        let (root, _) = read_fixture("f.txt", b"one\ntwo\nthree\n");
+        let past = |offset: usize| {
+            let root = root.clone();
+            async move {
+                read_text_of(&root, json!({"path":"f.txt","offset":offset}))
+                    .await
+                    .unwrap()
+                    .text
+            }
+        };
+        assert_eq!(past(2).await, "three");
+        assert_eq!(
+            past(3).await,
+            "(the file has 3 lines, so offset 3 is past its end)"
+        );
+        assert_eq!(
+            past(40).await,
+            "(the file has 3 lines, so offset 40 is past its end)"
+        );
+        // An empty file read from its start is still just empty.
+        std::fs::write(root.join("f.txt"), b"").unwrap();
+        assert_eq!(past(0).await, "");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn read_splits_lines_as_it_always_did() {
         for body in [
             "one\ntwo\nthree\n",
@@ -7791,11 +7907,20 @@ export default workflow({
                     .take(limit)
                     .collect::<Vec<_>>()
                     .join("\n");
-                if body.lines().count() > offset + limit {
+                let count = body.lines().count();
+                if count > offset + limit {
                     expected = format!(
                         "{expected}\n\n(more lines follow; read on with offset={})",
                         offset + shown
                     );
+                } else if shown == 0 && offset > 0 {
+                    // Past the end, the result says so rather than nothing.
+                    let length = match count {
+                        0 => "is empty".to_owned(),
+                        1 => "has 1 line".to_owned(),
+                        count => format!("has {count} lines"),
+                    };
+                    expected = format!("(the file {length}, so offset {offset} is past its end)");
                 }
                 assert_eq!(result.text, expected, "{body:?} {offset} {limit}");
             }
@@ -7970,6 +8095,29 @@ export default workflow({
             .unwrap()
             .execute(args, tool_context(root))
             .await
+    }
+
+    #[tokio::test]
+    async fn an_edit_with_an_empty_old_says_what_to_do_instead() {
+        let (root, file) = read_fixture("notes.md", b"# Notes\n");
+        let refused = edit_in(&root, "edit", json!({"path":"notes.md","old":"","new":"x"})).await;
+        assert!(
+            matches!(&refused, Err(CoreError::Invalid(message))
+                if message.contains("old is empty") && message.contains("use write")),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"# Notes\n");
+        // An empty file takes its first text.
+        std::fs::write(&file, b"").unwrap();
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"notes.md","old":"","new":"# Notes\n"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"# Notes\n");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -8994,6 +9142,7 @@ mod agent_shell_tests {
                     tools: None,
                     command: None,
                     resources: Vec::new(),
+                    ..Default::default()
                 },
             )
             .await

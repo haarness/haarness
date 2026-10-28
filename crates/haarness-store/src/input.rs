@@ -324,6 +324,7 @@ mod tests {
             id: RequestId::new(),
             text: text.into(),
             attachments: vec!["data:text/plain;base64,dGVzdA==".into()],
+            ..Default::default()
         }
     }
     #[tokio::test]
@@ -500,6 +501,7 @@ mod tests {
             reasoning_effort: None,
             tools: None,
             command: None,
+            ..Default::default()
         }
     }
 

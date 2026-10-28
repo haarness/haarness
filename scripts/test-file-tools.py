@@ -14,10 +14,17 @@
 4. edit: an old text of several lines changes a file with CRLF line ends, which keeps them.
 5. rg: a cache folder the bundled rg cannot be put in leaves shell calls running, with one line
    in the log.
+6. instructions: a folder's AGENTS.md that read attached comes back with the next read there once
+   compaction summarized the result that carried it, or an undo removed it, and not while it is
+   still in the chat, also when it is a symlink (to the folder's CLAUDE.md) or, on a filesystem
+   that ignores case, named agents.md.
+7. read_end, edit_empty: a read past the last line says how long the file is; an edit with an empty
+   old says to use write.
 
 Usage: python3 scripts/test-file-tools.py   (HAARNESS_BIN picks the binary, HAARNESS_E2E_ROOT a
 folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of read_line,
-read_budget, read_text, read_pipe, grep_line, grep_limit, home, edit_crlf and rg). No model is
+read_budget, read_text, read_pipe, grep_line, grep_limit, home, edit_crlf, rg, instructions,
+read_end and edit_empty). No model is
 called.
 """
 import json
@@ -26,6 +33,8 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.request
+import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -236,8 +245,97 @@ def case_rg():
     passed('shell calls run when the bundled rg cannot be extracted, said once in the log')
 
 
+def case_instructions():
+    folder = project('instructions')
+    (folder / 'sub').mkdir(exist_ok=True)
+    (folder / 'sub' / 'AGENTS.md').write_text('SUB_FOLDER_RULES\n')
+    for name in 'ab':
+        (folder / 'sub' / f'{name}.txt').write_text(f'{name} text\n')
+    servers.append((folder, env))
+    connection = json.loads(subprocess.run(
+        [str(BINARY), '--workspace', str(folder), '--trust-project', 'desktop'], input='{"action":"connect"}',
+        env=env, capture_output=True, text=True, timeout=90, check=True).stdout)
+
+    def api(path, body=None):
+        request = urllib.request.Request(
+            connection['url'] + '/v1' + path, data=None if body is None else json.dumps(body).encode(),
+            headers={'Authorization': 'Bearer ' + connection['token'], 'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else None
+
+    def turn(thread, text):
+        api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': text})
+        for _ in range(600):
+            if not any(active.get('threadId') == thread for active in api('/turns/active')):
+                return
+            time.sleep(.05)
+        raise AssertionError('the turn did not finish')
+
+    def reads(thread, path):
+        """What the model's read of `path` attached."""
+        turn(thread, '!tool read ' + json.dumps({'path': path}))
+        result = [item['data'] for item in api(f'/threads/{thread}/items')
+                  if item['data']['type'] == 'tool_result' and item['data']['name'] == 'read'][-1]
+        loaded = (result.get('metadata') or {}).get('loaded') or []
+        assert ('SUB_FOLDER_RULES' in result['output']) == bool(loaded), result['output']
+        return loaded
+
+    def chat():
+        return api('/threads', {'title': 'Nested instructions', 'provider': 'echo', 'model': 'echo-1'})['id']
+
+    rules = [str((folder / 'sub' / 'AGENTS.md').resolve())]
+    thread = chat()
+    assert reads(thread, 'sub/a.txt') == rules
+    assert reads(thread, 'sub/b.txt') == [], 'attached again while still in the chat'
+    for text in ['First other question', 'Second other question']:
+        turn(thread, text)
+    # The two most recent turns stay behind the summary; both reads are summarized.
+    api(f'/threads/{thread}/compact', {'summary': 'Earlier work, summarized.'})
+    assert reads(thread, 'sub/b.txt') == rules, 'not attached after compaction'
+    assert reads(thread, 'sub/a.txt') == []
+    passed('a folder\'s AGENTS.md comes back after compaction, and only once while it is in the chat')
+    thread = chat()
+    turn(thread, 'Hello')
+    assert reads(thread, 'sub/a.txt') == rules
+    api(f'/threads/{thread}/revert', {})
+    assert reads(thread, 'sub/b.txt') == rules, 'not attached after the undo'
+    passed('a folder\'s AGENTS.md comes back after the turn that brought it was undone')
+    (folder / 'linked').mkdir(exist_ok=True)
+    (folder / 'linked' / 'CLAUDE.md').write_text('SUB_FOLDER_RULES\n')
+    os.symlink('CLAUDE.md', folder / 'linked' / 'AGENTS.md')
+    (folder / 'cased').mkdir(exist_ok=True)
+    (folder / 'cased' / 'agents.md').write_text('SUB_FOLDER_RULES\n')
+    for sub in ('linked', 'cased'):
+        for name in 'ab':
+            (folder / sub / f'{name}.txt').write_text(f'{name} text\n')
+    shapes = ['linked'] + (['cased'] if (folder / 'cased' / 'AGENTS.md').is_file() else [])
+    for sub in shapes:
+        thread = chat()
+        assert reads(thread, f'{sub}/a.txt') == [str(folder.resolve() / sub / 'AGENTS.md')]
+        assert reads(thread, f'{sub}/b.txt') == [], f'{sub}: attached again while still in the chat'
+    passed(f'a folder\'s AGENTS.md that is a symlink{" or named agents.md" if "cased" in shapes else ""} '
+           'is attached once while it is in the chat')
+
+
+def case_read_end():
+    (files / 'three.txt').write_text('one\ntwo\nthree\n')
+    output = tool(files, 'read', {'path': 'three.txt', 'offset': 7})
+    assert '(the file has 3 lines, so offset 7 is past its end)' in output, output
+    passed('a read past the last line says how many lines the file has')
+
+
+def case_edit_empty():
+    (files / 'notes.md').write_text('# Notes\n')
+    output = tool(files, 'edit', {'path': 'notes.md', 'old': '', 'new': 'x'})
+    assert 'old is empty: give the exact text to replace, or use write' in output, output
+    assert (files / 'notes.md').read_text() == '# Notes\n'
+    passed('an edit with an empty old says to use write and leaves the file alone')
+
+
 CASES = {name: globals()['case_' + name] for name in ['read_line', 'read_budget', 'read_text', 'read_pipe',
-                                                       'grep_line', 'grep_limit', 'home', 'edit_crlf', 'rg']}
+                                                       'grep_line', 'grep_limit', 'home', 'edit_crlf', 'rg',
+                                                       'instructions', 'read_end', 'edit_empty']}
 selected = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
 try:
     for name in selected:

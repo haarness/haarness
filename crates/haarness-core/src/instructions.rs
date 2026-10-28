@@ -99,6 +99,52 @@ pub fn nested(file: &Path, workspace: &Path, claude: bool) -> Vec<PathBuf> {
     out
 }
 
+/// The nested instruction files one turn's model can see: those attached to
+/// a `read` result still in its context. The turn sets it from the history
+/// each provider round sends and that round's reads add to it, so a file is
+/// attached once while it stays in view, and again after compaction or an
+/// undo removed the result that carried it.
+pub type InContext = std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<PathBuf>>>;
+
+/// The instruction files the tool results among `items` carried, also for a
+/// `read` inside a batch, keyed as `read` keys them: by the file each
+/// resolves to (`loadedResolved`), so an `AGENTS.md` that is a symlink or
+/// spelled in another case stays in view. A result stored before reads
+/// recorded that names them as `loaded` does. Nothing here touches the disk.
+#[must_use]
+pub fn attached<'a>(
+    items: impl IntoIterator<Item = &'a haarness_protocol::Item>,
+) -> std::collections::HashSet<PathBuf> {
+    let mut found = std::collections::HashSet::new();
+    let mut add = |metadata: &serde_json::Value| {
+        for path in metadata
+            .get("loadedResolved")
+            .or_else(|| metadata.get("loaded"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            found.insert(PathBuf::from(path));
+        }
+    };
+    for item in items {
+        let haarness_protocol::ItemData::ToolResult { metadata, .. } = &item.data else {
+            continue;
+        };
+        add(metadata);
+        for step in metadata
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            add(&step["metadata"]);
+        }
+    }
+    found
+}
+
 /// Wrap one instruction body for the system prompt or a tool result.
 #[must_use]
 pub fn segment(source: &str, content: &str) -> String {
@@ -446,6 +492,55 @@ mod tests {
         fs::write(root.join(".claude/CLAUDE.md"), "nested").unwrap();
         assert_eq!(find_in(&root, true), vec![root.join(".claude/CLAUDE.md")]);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn attached_names_what_read_results_carried_also_inside_a_batch() {
+        let result = |name: &str, metadata: serde_json::Value| haarness_protocol::Item {
+            id: haarness_protocol::ItemId::new(),
+            thread_id: haarness_protocol::ThreadId::new(),
+            turn_id: None,
+            sequence: 1,
+            data: haarness_protocol::ItemData::ToolResult {
+                call_id: "call".into(),
+                name: name.into(),
+                output: String::new(),
+                is_error: false,
+                metadata,
+            },
+            created_at: chrono::Utc::now(),
+        };
+        let items = [
+            result("read", serde_json::json!({"loaded": ["/w/a/AGENTS.md"]})),
+            // A symlink, named as read showed it and keyed by its target.
+            result(
+                "read",
+                serde_json::json!({
+                    "loaded": ["/w/link/AGENTS.md"],
+                    "loadedResolved": ["/w/link/CLAUDE.md"],
+                }),
+            ),
+            result(
+                "batch",
+                serde_json::json!({"results": [
+                    {"tool": "read", "metadata": {"loaded": ["/w/b/AGENTS.md"]}},
+                    {"tool": "read", "error": "denied"},
+                ]}),
+            ),
+            result("bash", serde_json::json!({"exit": 0})),
+            result("read", serde_json::Value::Null),
+        ];
+        let found = attached(&items);
+        assert_eq!(
+            found,
+            [
+                PathBuf::from("/w/a/AGENTS.md"),
+                PathBuf::from("/w/link/CLAUDE.md"),
+                PathBuf::from("/w/b/AGENTS.md")
+            ]
+            .into_iter()
+            .collect()
+        );
     }
 
     #[test]
