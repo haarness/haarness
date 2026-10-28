@@ -2072,7 +2072,7 @@ impl Reader<'_> {
                     let (value, complete) = path_literal(word.node, source);
                     (complete
                         && !value.is_empty()
-                        && !value.starts_with('-')
+                        && !names_no_path(&name, &value)
                         && !brace_list(&word.raw)
                         && !searched(&value))
                     .then(|| (word.raw.clone(), value))
@@ -5297,6 +5297,17 @@ mod regression {
                 "{command}"
             );
         }
+        // Auto places a deletion after `pushd sub`, but `pushd +1` turns
+        // back to the project, not into a folder named `+1`.
+        assert!(outside_deletions("pushd sub && rm -rf ../x", &workspace, None).is_empty());
+        assert_eq!(
+            outside_deletions("pushd sub && pushd +1 && rm -rf ../x", &workspace, None),
+            vec![OutsideDeletion {
+                path: "../x".into(),
+                placed: false,
+                effect: Effect::Deletes,
+            }]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
