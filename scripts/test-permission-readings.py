@@ -5,7 +5,9 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    first, kept as TOML and once migrated to `haarness.json`: a deny written after a broader allow
    refuses, and a catch-all written last never overrides a deny before it.
 2. cd_link: a `cd` or `pushd` through a link that the shell takes out of the project by name
-   (`cd a/l/../../..` with `a/l` leading deeper in) asks, so a headless run stops before it writes.
+   (`cd a/l/../../..` with `a/l` leading deeper in) asks, so a headless run stops before it writes,
+   while a path after a plain `cd` is read from where it went: `cd sub && cat ../README.md` and
+   `cd sub && echo x > ../out.txt` run without asking.
 3. resource_alias: a deny written in `opencode.json` under upstream OpenCode's name for the resource
    read tool refuses `mcp_resource_read`.
 4. backslash: a line that starts with a backslash is a command of its own (an `rm *` deny refuses
@@ -128,6 +130,8 @@ def case_cd_link():
     (folder / 'deep' / 'er' / 'x').mkdir(parents=True)
     (folder / 'a').mkdir()
     (folder / 'a' / 'l').symlink_to('../deep/er/x')
+    (folder / 'sub').mkdir()
+    (folder / 'README.md').write_text('# chained read\n')
     escaped = folder.parent / 'escaped.txt'
     try:
         for line in ['cd a/l/../../.. && touch escaped.txt', 'pushd a/l/../../.. && touch escaped.txt']:
@@ -136,9 +140,14 @@ def case_cd_link():
             assert not escaped.exists(), f'{line} ran outside the project without asking'
         output = bash(env, folder, 'cd a/l/.. && pwd', code=0)
         assert str(folder / 'a') in output, output
+        output = bash(env, folder, 'cd sub && cat ../README.md', code=0)
+        assert '# chained read' in output and 'Stopped' not in output, output
+        output = bash(env, folder, 'cd sub && echo chained > ../out.txt', code=0)
+        assert (folder / 'out.txt').read_text() == 'chained\n', output
     finally:
         stop(env, folder)
-    passed('a cd or pushd out of the project through a link asks; one that stays inside runs')
+    passed('a cd or pushd out of the project through a link asks; one that stays inside runs, and so does a '
+           'path after a cd that stays in the project')
 
 
 def case_resource_alias():
