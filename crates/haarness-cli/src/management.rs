@@ -447,12 +447,7 @@ impl ManagementService {
             return input.clone();
         }
         let mut input = input.clone();
-        input["tools"] = Value::Object(
-            tools
-                .iter()
-                .map(|(name, enabled)| (names.own(name).to_owned(), enabled.clone()))
-                .collect(),
-        );
+        input["tools"] = Value::Object(names.own_keys(tools.clone()).into_iter().collect());
         input
     }
 
@@ -2992,11 +2987,12 @@ mod tests {
         );
         let written = service.with_own_tool_names(&json!({
             "action": "create",
-            "tools": {"mcp__Docs_Server__files_read": false, "read": true}
+            "tools": {"mcp__Docs_Server__files_read": false, "read": true, "mcp__Docs_Server__*": false}
         }));
+        // A pattern matches the tools' own names, as everywhere else.
         assert_eq!(
             written["tools"],
-            json!({"mcp__Docs Server__files.read": false, "read": true})
+            json!({"mcp__Docs Server__files.read": false, "read": true, "mcp__Docs_Server__*": false})
         );
         mcp.disconnect("Docs Server").await.unwrap();
         fs::remove_dir_all(root).unwrap();

@@ -151,7 +151,7 @@ settings.write_text(json.dumps({
         'Docs_Server': names('Docs_Server', ['plain']),
         'api.internal': names('api.internal', ['charge']),
         'billing_internal': names('billing_internal', ['charge']),
-        'notes': names('notes', ['files_read', 'bulk.delete', 'bulk_delete']),
+        'notes': names('notes', ['files_read', 'bulk.delete', 'bulk_delete', 'pick.one']),
         # `Google Drive`'s `search` goes to providers as `mcp__Google_Drive__search`, which differs from
         # `google_drive`'s own name only in letter case.
         'Google Drive': names('Google Drive', ['search']),
@@ -304,7 +304,11 @@ try:
                         f"const result = await tool('{wire_name}', {{}});\nreturn result.output;\n")
     for label, text in [('batch', batched['output']), ('execute', coded['output']), ('workflow', scripted)]:
         assert 'Google Drive' in text and 'google_drive' not in text, (label, text)
-    check('a name the model writes as providers were sent it reaches that tool in a batch step, Code Mode and a workflow, not another whose name differs in letter case')
+    # A workflow agent's tools turned off by the name providers are sent: the tool stays off for it.
+    masked = workflow("export const meta = { name: 'wire-mask', phases: ['call'] };\nphase('call');\n"
+                      "return await agent('!tool mcp__notes__pick.one {}', { tools: { 'mcp__notes__pick_one': false } });\n")
+    assert '"server": "notes"' not in masked and 'disabled' in masked, masked
+    check('a name the model writes as providers were sent it reaches that tool in a batch step, Code Mode and a workflow (not another whose name differs in letter case), and turns it off in a workflow agent\'s tools')
 
     check('MCP tools keep their own names in Haarness: rules written for them (`mcp__*.internal__*`, `mcp__*__files.read`, `mcp__notes__*.delete`), tool_availability, a hook matcher and a workflow apply to exactly the tools they name')
 
