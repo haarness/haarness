@@ -494,6 +494,9 @@ try:
         assert any(name.startswith('mcp__Docs_Server__what') for request in seen for name in request['history']), seen
         reached = [(item['name'], json.loads(item['output'])) for item in wire_results()[1:] if item['name'] != 'batch']
         batched = [item for item in wire_results() if item['name'] == 'batch']
+        steps = [item['data']['arguments'] for item in api(f'/threads/{wire_thread}/items', at=at)
+                 if item['data']['type'] == 'tool_call' and item['data']['name'] == 'batch']
+        assert steps and steps[0]['tool_calls'][0]['tool'] == 'mcp__Docs Server__what?', steps
         assert len(batched) == 1 and not batched[0]['is_error'] and 'what?' in batched[0]['output'] and 'Docs Server' in batched[0]['output'], (provider, batched)
         assert sorted((name, answer['server'], answer['tool']) for name, answer in reached) == sorted([
             ('mcp__Docs Server__files.read', 'Docs Server', 'files.read'), ('mcp__Docs_Server__plain', 'Docs_Server', 'plain'),
