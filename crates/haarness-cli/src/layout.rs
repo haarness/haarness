@@ -52,7 +52,7 @@ impl Layout {
         for dir in [&self.config, &self.cache, &self.state] {
             fs::create_dir_all(dir)?;
         }
-        create_private_dir(&self.data)?;
+        haarness_server::private_data_folder(&self.data)?;
         let marker = self.config.join(".layout-v1");
         if !marker.exists() {
             if let Some(legacy) = legacy {
@@ -186,32 +186,6 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Makes the data folder `dir` for this user alone (0700 on Unix): it holds
-/// chats, saved tool output, previews and worktrees. One an older build made
-/// open to others is narrowed (one of another user's is left as it is). The
-/// folders above it, perhaps of the person's own choosing, are made as any
-/// folder is and never changed.
-pub fn create_private_dir(dir: &Path) -> io::Result<()> {
-    if let Some(parent) = dir.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-        match fs::DirBuilder::new().mode(0o700).create(dir) {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => {}
-            Err(error) => return Err(error),
-        }
-        if fs::metadata(dir)?.permissions().mode() & 0o077 != 0 {
-            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    fs::create_dir_all(dir)
 }
 
 fn adopt_directory(target: &Path, source: &Path) -> Result<()> {
@@ -499,8 +473,10 @@ mod tests {
         assert_eq!(isolated.state, Path::new("/isolated/state"));
         assert!(Layout::resolve(home, Some(Path::new("relative")), |_| None).is_err());
     }
-    /// The data folder is the person's alone, made so or narrowed when an
-    /// older build left it open; the folders above it are never changed.
+    /// The data folder is the person's alone: made so, or narrowed at every
+    /// start once it holds Haarness's files (an older build left it open).
+    /// A folder of the person's that only has its name, and the folders
+    /// above it, are never changed.
     #[cfg(unix)]
     #[test]
     fn the_data_folder_is_for_its_owner_alone_and_its_parents_stay_as_they_are() {
@@ -517,7 +493,8 @@ mod tests {
         layout.initialize(None).unwrap();
         assert_eq!(mode(&layout.data), 0o700);
         assert_eq!(mode(&xdg), 0o755, "a chosen folder above it is unchanged");
-        // Made by an older build, open to everyone.
+        // Made by an older build, open to everyone, with Haarness's files.
+        fs::write(layout.data.join("workspaces.json"), "{}").unwrap();
         fs::set_permissions(&layout.data, fs::Permissions::from_mode(0o755)).unwrap();
         layout.initialize(None).unwrap();
         assert_eq!(mode(&layout.data), 0o700);
@@ -530,8 +507,14 @@ mod tests {
         isolated.initialize(None).unwrap();
         assert_eq!(mode(&isolated.data), 0o700);
         assert_eq!(mode(&chosen), 0o751);
-        create_private_dir(&root.join("missing/data")).unwrap();
-        assert_eq!(mode(&root.join("missing/data")), 0o700);
+        // A root whose `data` is a folder of the person's (`--data-dir ~`).
+        let theirs = root.join("theirs");
+        fs::create_dir_all(theirs.join("data")).unwrap();
+        fs::write(theirs.join("data/photo.jpg"), "").unwrap();
+        fs::set_permissions(theirs.join("data"), fs::Permissions::from_mode(0o755)).unwrap();
+        let isolated = Layout::resolve(&root.join("home"), Some(&theirs), |_| None).unwrap();
+        isolated.initialize(None).unwrap();
+        assert_eq!(mode(&theirs.join("data")), 0o755);
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

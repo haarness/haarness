@@ -1495,6 +1495,9 @@ async fn cli_main() -> Result<()> {
         haarness_server::use_data_folder(base_paths.data.clone());
         haarness_workflows::use_cache_folder(base_paths.cache.clone());
     }
+    // Without `--data-dir` the server's folder need not be the data folder
+    // made private above.
+    haarness_server::keep_data_folder_private();
     // An edit of the global configuration or the system folder asks a person;
     // tell the permission engine which folders those are in this process.
     haarness_core::set_global_config_dir(base_paths.config_dir().to_path_buf());
@@ -11509,7 +11512,7 @@ impl Paths {
             let data = root.join("data");
             let config = root.join("config");
             let cache = root.join("cache");
-            layout::create_private_dir(&data)?;
+            haarness_server::private_data_folder(&data)?;
             fs::create_dir_all(&config)?;
             fs::create_dir_all(&cache)?;
             if !data.join(".layout-v1").exists() {
