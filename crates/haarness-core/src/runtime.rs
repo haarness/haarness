@@ -1780,6 +1780,7 @@ impl AgentRuntime {
             thread: thread.id,
             agent: agent.map(str::to_owned),
             folder,
+            folder_is_project: self.chat_home,
         }
     }
 
@@ -4669,6 +4670,7 @@ impl AgentRuntime {
             thread: thread_id,
             agent: Some(thread.agent.clone()),
             folder: (workspace != self.workspace).then(|| workspace.clone()),
+            folder_is_project: self.chat_home,
         };
         if let Some(hooks) = &components.hooks {
             let decision = tokio::select! {
@@ -7911,6 +7913,7 @@ impl RunnerTask {
             thread: self.thread.id,
             agent: agent.map(str::to_owned),
             folder: (self.workspace != self.runtime_workspace).then(|| self.workspace.clone()),
+            folder_is_project: self.chat_home,
         }
     }
 
