@@ -1,6 +1,7 @@
 //! A command's `!` snippet in a turn a person can stop runs until it ends,
 //! as the command waits for its output; a scheduled run and the model's own
-//! shell calls keep the shell deadline.
+//! shell calls keep the shell deadline. A snippet whose output was cut says
+//! so in the prompt.
 use super::*;
 use haarness_core::{PermissionDecision, PermissionRule};
 use haarness_protocol::{ItemData, ThreadId};
@@ -49,6 +50,7 @@ fn runtime(fixture: &Fixture) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<Provide
     config.commands.extend([
         command("slow", "Slow: !`sleep 1; printf finished` end"),
         command("forever", "Never: !`sleep 30; printf never`"),
+        command("numbers", "Numbers: !`seq 3000` end"),
     ]);
     let provider = Capturing::default();
     let requests = provider.requests.clone();
@@ -194,4 +196,32 @@ async fn a_scheduled_run_keeps_the_shell_deadline_for_a_snippet() {
         done.error
     );
     assert!(sent(&requests, "Slow:").is_none());
+}
+
+#[tokio::test]
+async fn a_snippet_whose_output_was_cut_says_so_in_the_prompt() {
+    let fixture = Fixture::new();
+    let (runtime, requests) = runtime(&fixture);
+    let thread = echo_thread(&runtime).await.id;
+
+    let turn = runtime
+        .start_turn(thread, run_command("numbers"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let prompt = sent(&requests, "Numbers:").expect("the command's prompt");
+    assert!(
+        prompt.starts_with("Numbers: 1001\n1002\n"),
+        "{}",
+        &prompt[..40]
+    );
+    assert!(
+        prompt.contains("3000\n(only the last 2000 lines or 50 KB of this output are shown; everything it printed is saved in "),
+        "{}",
+        &prompt[prompt.len() - 300..]
+    );
+    assert!(prompt.ends_with(") end"));
 }

@@ -601,6 +601,13 @@ pub async fn prepare(
                 .unwrap_or(&result.text)
                 .trim_end(),
         );
+        // Only the end of a long output is kept: the model is told, so it
+        // does not take the part it reads for the whole.
+        if result.metadata.get("stdoutCut").and_then(Value::as_bool) == Some(true) {
+            prepared.push_str(&snippet_cut_note(
+                result.metadata.get("outputPath").and_then(Value::as_str),
+            ));
+        }
         last = whole.end();
     }
     prepared.push_str(&substitutions(&template[last..], &context, false, false));
@@ -775,6 +782,14 @@ fn placeholder_values<'a>(
     .into_iter()
     .filter_map(|(name, value)| Some((name, value?)))
     .collect()
+}
+
+/// Follows a `!` snippet's output when the shell kept only its end.
+fn snippet_cut_note(saved: Option<&str>) -> String {
+    let rest = saved.map_or_else(String::new, |path| {
+        format!("; everything it printed is saved in {path}")
+    });
+    format!("\n(only the last 2000 lines or 50 KB of this output are shown{rest})")
 }
 
 /// The environment a `!` snippet runs with, where its shell reads the
@@ -1227,6 +1242,60 @@ mod tests {
         fn side_effectful_for(&self, _: &str, _: &Value) -> CoreResult<bool> {
             Ok(false)
         }
+    }
+
+    /// Answers each `!` snippet with `metadata`, as the shell tool would.
+    struct Answers(Value);
+    #[async_trait::async_trait]
+    impl crate::ToolInvoker for Answers {
+        async fn definition_shell(
+            &self,
+            _shown: String,
+            _run: String,
+            _env: std::collections::BTreeMap<String, String>,
+        ) -> CoreResult<crate::ToolOutput> {
+            Ok(crate::ToolOutput {
+                text: String::new(),
+                metadata: self.0.clone(),
+            })
+        }
+        async fn invoke(&self, _: &str, _: Value) -> CoreResult<crate::ToolOutput> {
+            Err(CoreError::Tool("unused".into()))
+        }
+        fn side_effectful_for(&self, _: &str, _: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_snippet_whose_output_was_cut_says_so() {
+        let prepared = |metadata: Value| async move {
+            prepare(
+                "Log: !`cat build.log` Review it.",
+                "",
+                &DefinitionExecution::default(),
+                "session",
+                &Answers(metadata),
+            )
+            .await
+            .unwrap()
+        };
+        assert_eq!(
+            prepared(serde_json::json!({"exit": 0, "stdout": "ok\n"})).await,
+            "Log: ok Review it."
+        );
+        assert_eq!(
+            prepared(serde_json::json!({
+                "exit": 0, "stdout": "line 9000\n", "stdoutCut": true,
+                "outputPath": "/data/tool-output/tool_1.txt",
+            }))
+            .await,
+            "Log: line 9000\n(only the last 2000 lines or 50 KB of this output are shown; everything it printed is saved in /data/tool-output/tool_1.txt) Review it."
+        );
+        assert_eq!(
+            prepared(serde_json::json!({"exit": 0, "stdout": "tail", "stdoutCut": true})).await,
+            "Log: tail\n(only the last 2000 lines or 50 KB of this output are shown) Review it."
+        );
     }
 
     /// A folder name in a `!` snippet is plain text wherever it stands, and a
