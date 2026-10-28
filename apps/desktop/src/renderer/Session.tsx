@@ -2190,15 +2190,17 @@ export function Session() {
         await app.choose(value.id);
     }
   }
-  const efforts = () =>
+  const chatModel = () =>
     state.providers
       .find((p) => p.id === selectedModel()?.provider)
-      ?.models.find((m) => m.id === selectedModel()?.model)?.reasoningEfforts ??
-    [];
+      ?.models.find((m) => m.id === selectedModel()?.model);
   createEffect(() => {
+    const model = chatModel();
+    // A model missing from a list still loading keeps the choice.
+    if (!model) return;
     const kept = carriedReasoning(
       effort(),
-      efforts(),
+      model.reasoningEfforts,
       state.connection?.info.defaultReasoningEffort,
     );
     if (state.ready && effort() && kept !== effort()) setEffort("");

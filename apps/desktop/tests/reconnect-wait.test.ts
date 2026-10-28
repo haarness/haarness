@@ -76,10 +76,8 @@ test("only Desktop's wake notice counts as a wake", () => {
 });
 
 test("a reconnect to another run of the server reads what the window knows of it again", () => {
-  const opened = { serverInstanceId: "first" };
-  assert.equal(serverRestarted(opened, { serverInstanceId: "first" }), false);
-  assert.equal(serverRestarted(opened, { serverInstanceId: "second" }), true);
+  assert.equal(serverRestarted("first", "first"), false);
+  assert.equal(serverRestarted("first", "second"), true);
   // A project that has not opened yet has nothing to read again.
-  assert.equal(serverRestarted(undefined, { serverInstanceId: "second" }), false);
-  assert.equal(serverRestarted(null, { serverInstanceId: "second" }), false);
+  assert.equal(serverRestarted(undefined, "second"), false);
 });

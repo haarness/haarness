@@ -55,11 +55,8 @@ export function createReconnectWait(now: () => number = Date.now) {
  * window read when the project opened: it restarted, and read its
  * configuration (the configured reasoning level among it) afresh, so what the
  * window knows of it is read again. */
-export function serverRestarted(
-  known: { serverInstanceId: string } | null | undefined,
-  fresh: { serverInstanceId: string },
-) {
-  return !!known && known.serverInstanceId !== fresh.serverInstanceId;
+export function serverRestarted(known: string | undefined, fresh: string) {
+  return !!known && known !== fresh;
 }
 
 /** Signals that arrive together (a wake brings the network and the window

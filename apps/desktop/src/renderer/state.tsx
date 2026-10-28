@@ -645,11 +645,14 @@ function createApp(saved?: Preferences) {
       knownInfo ?? api<T.ServerInfo>("info"),
     ]);
     if (current !== generation || request !== catalogRequest) return;
-    set("providers", values[0]);
-    set("agents", values[1]);
-    set("commands", values[2]);
-    if (state.connection) set("connection", "info", values[3]);
-    set("catalogVersion", (n) => n + 1);
+    // One change: nothing sees new models with the old configured level.
+    batch(() => {
+      set("providers", values[0]);
+      set("agents", values[1]);
+      set("commands", values[2]);
+      if (state.connection) set("connection", "info", values[3]);
+      set("catalogVersion", (n) => n + 1);
+    });
   }
   async function refresh() {
     const current = generation;
@@ -939,6 +942,9 @@ function createApp(saved?: Preferences) {
     const previous = subscription;
     subscription = "";
     if (previous) await window.haarness.unsubscribe(previous);
+    // Which run of the server the window read before, by value: a reconnect
+    // below updates the connection's info in place.
+    const known = state.connection?.info.serverInstanceId;
     let info: T.ServerInfo;
     try {
       info = knownInfo ?? (await api<T.ServerInfo>("info"));
@@ -959,8 +965,11 @@ function createApp(saved?: Preferences) {
     if (!valid()) return;
     // The window's models, commands and the server's configured reasoning
     // level came from the run that answered when the project opened.
-    if (serverRestarted(state.connection?.info, info))
-      void catalogs(false, info).catch(showError);
+    if (serverRestarted(known, info.serverInstanceId))
+      void catalogs(false, info).catch((error) => {
+        // An attempt a newer one replaced says nothing.
+        if (valid()) showError(error);
+      });
     await refresh();
     if (!valid()) return;
     const selected = state.selected;
