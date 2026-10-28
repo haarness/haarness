@@ -98,6 +98,14 @@ pub(crate) async fn run(
     let mut stdout_total = 0usize;
     let mut total = 0usize;
     let mut lines = 0usize;
+    // A command with no deadline can print until it is stopped (`npm run
+    // dev`, `tail -f`): its saved output keeps only its start.
+    let save_limit = if timeout_ms == 0 {
+        SAVED_WITHOUT_DEADLINE
+    } else {
+        usize::MAX
+    };
+    let mut saved = 0usize;
     let execution = async {
         // Heap buffers keep this future small enough to await unboxed.
         let mut out = vec![0u8; 8192];
@@ -121,7 +129,11 @@ pub(crate) async fn run(
             };
             total += bytes.len();
             lines += newlines(bytes);
-            file.write_all(bytes).await.map_err(error)?;
+            let room = save_limit.saturating_sub(saved).min(bytes.len());
+            if room > 0 {
+                file.write_all(&bytes[..room]).await.map_err(error)?;
+                saved += room;
+            }
             tail.extend_from_slice(bytes);
             if tail.len() > 50 * 1024 {
                 tail.drain(..tail.len() - 50 * 1024);
@@ -182,10 +194,19 @@ pub(crate) async fn run(
     }
     let notice = if truncated || stdout_cut {
         metadata["outputPath"] = json!(path);
-        if truncated {
-            format!("Full output saved to: {}\n", path.display())
-        } else {
+        if saved < total {
+            metadata["outputSavedBytes"] = json!(saved);
+        }
+        if !truncated {
             String::new()
+        } else if saved < total {
+            format!(
+                "First {} MiB of the output saved to: {}\n",
+                SAVED_WITHOUT_DEADLINE / (1024 * 1024),
+                path.display()
+            )
+        } else {
+            format!("Full output saved to: {}\n", path.display())
         }
     } else {
         drop(file);
@@ -204,6 +225,10 @@ pub(crate) async fn run(
         metadata,
     })
 }
+
+/// What a command without a deadline saves of its output, from the start;
+/// the end it shows is kept apart. 64 MiB, as much as a request body.
+pub(crate) const SAVED_WITHOUT_DEADLINE: usize = 64 * 1024 * 1024;
 
 /// `bytes` without the continuation bytes of a character cut off before it.
 fn whole_characters(bytes: &[u8]) -> &[u8] {
@@ -385,6 +410,39 @@ mod tests {
         assert!(errors.get("stdoutCut").is_none(), "{errors}");
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn a_command_without_a_deadline_saves_only_the_start_of_its_output() {
+        let root = fixture();
+        let past = SAVED_WITHOUT_DEADLINE + 1024 * 1024;
+        let output = run(
+            &format!("yes 0123456789 | head -c {past}"),
+            &root,
+            0,
+            &CancellationToken::new(),
+            &root,
+            &BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let path = output.metadata["outputPath"].as_str().unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().len(),
+            SAVED_WITHOUT_DEADLINE as u64
+        );
+        assert_eq!(output.metadata["outputSavedBytes"], SAVED_WITHOUT_DEADLINE);
+        assert!(
+            output
+                .text
+                .contains(&format!("First 64 MiB of the output saved to: {path}")),
+            "{:.200}",
+            output.text
+        );
+        // Its end is still what the command shows.
+        assert!(output.text.ends_with("0123456789"), "{:.200}", output.text);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn a_command_reads_multibyte_text_as_characters_without_a_locale() {
         let root = fixture();
