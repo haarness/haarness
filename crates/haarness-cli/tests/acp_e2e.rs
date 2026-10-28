@@ -1144,7 +1144,8 @@ async fn prompts_sent_while_a_server_starts_keep_their_order() {
         .as_str()
         .unwrap_or_else(|| panic!("{created}"))
         .to_owned();
-    for (id, text) in [(21, "first"), (22, "second")] {
+    // An empty prompt among them fails at once rather than waiting its turn.
+    for (id, text) in [(21, "first"), (22, "second"), (25, "  ")] {
         send(
             &mut stdin,
             json!({"jsonrpc":"2.0", "id":id, "method":"session/prompt",
@@ -1155,19 +1156,27 @@ async fn prompts_sent_while_a_server_starts_keep_their_order() {
     }
     let mut answered = Vec::new();
     let mut texts = Vec::new();
-    while answered.len() < 2 {
+    while answered.len() < 3 {
         let message = receive(&mut lines).await;
         if let Some(id) = message["id"]
             .as_u64()
             .filter(|_| message.get("method").is_none())
         {
-            assert_eq!(message["result"]["stopReason"], "end_turn", "{message}");
+            if id == 25 {
+                assert!(message.get("error").is_some(), "{message}");
+            } else {
+                assert_eq!(message["result"]["stopReason"], "end_turn", "{message}");
+            }
             answered.push(id);
         } else if let Some(text) = update_text(&message, "agent_message_chunk") {
             texts.push(text.to_owned());
         }
     }
-    assert_eq!(answered, [21, 22], "the prompts were answered out of order");
+    assert_eq!(
+        answered,
+        [25, 21, 22],
+        "the prompts were answered out of order"
+    );
     assert_eq!(texts, ["Echo: first", "Echo: second"], "{texts:?}");
 
     // A Cancel while a prompt waits for the server ends that prompt. (Another
