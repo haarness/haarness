@@ -4,6 +4,7 @@ import {
   createReconnectWait,
   isWake,
   onReconnectHint,
+  serverRestarted,
 } from "./reconnect-wait";
 import { shareOrder, type RemoteAction, type RemoteShare } from "./remote-control";
 import { createAttachmentDrafts } from "./attachment-drafts";
@@ -956,6 +957,10 @@ function createApp(saved?: Preferences) {
       info = view.info;
     }
     if (!valid()) return;
+    // The window's models, commands and the server's configured reasoning
+    // level came from the run that answered when the project opened.
+    if (serverRestarted(state.connection?.info, info))
+      void catalogs(false, info).catch(showError);
     await refresh();
     if (!valid()) return;
     const selected = state.selected;
