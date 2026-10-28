@@ -7346,7 +7346,13 @@ impl HotReloadController {
             }
         }
         let providers: Arc<dyn ProviderRegistry> = Arc::new(registry);
-        let candidate_mcp = compose_mcp(&self.paths, &sources.file_config, Some(&self.mcp)).await;
+        let candidate_mcp = compose_mcp(
+            &self.paths,
+            &self.workspace,
+            &sources.file_config,
+            Some(&self.mcp),
+        )
+        .await;
         let candidate_skills = FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone());
         let disabled_skills =
             capability_state::disabled(&self.paths, &self.workspace, self.trust, "skill")?;
@@ -8086,7 +8092,7 @@ async fn application_at(
         .with_stream_limits(&stream_limits(&file_config)),
     );
     let provider_definitions = provider_fingerprints(&file_config, &auth, providers.as_ref());
-    let mcp = mcp_from_config(paths, &file_config).await;
+    let mcp = mcp_from_config(paths, workspace, &file_config).await;
     let skills = Arc::new(FilesystemSkillRegistry::new_scoped(skill_roots));
     skills.set_disabled(capability_state::disabled(
         paths, workspace, trust, "skill",
@@ -8310,7 +8316,7 @@ async fn configured_mcp(
     workspace: &Path,
     trust: bool,
 ) -> Result<Arc<NativeMcpRegistry>> {
-    Ok(mcp_from_config(paths, &load_config(paths, workspace, trust)?).await)
+    Ok(mcp_from_config(paths, workspace, &load_config(paths, workspace, trust)?).await)
 }
 
 /// Servers connecting at once while an MCP generation is composed. Each may
@@ -8318,8 +8324,12 @@ async fn configured_mcp(
 /// rest behind them one timeout at a time.
 const MCP_CONNECT_CONCURRENCY: usize = 16;
 
-async fn mcp_from_config(paths: &Paths, config: &FileConfig) -> Arc<NativeMcpRegistry> {
-    compose_mcp(paths, config, None).await
+async fn mcp_from_config(
+    paths: &Paths,
+    workspace: &Path,
+    config: &FileConfig,
+) -> Arc<NativeMcpRegistry> {
+    compose_mcp(paths, workspace, config, None).await
 }
 
 /// Compose an MCP generation from configuration. A hot reload passes the
@@ -8327,13 +8337,14 @@ async fn mcp_from_config(paths: &Paths, config: &FileConfig) -> Arc<NativeMcpReg
 /// connection instead of respawning.
 async fn compose_mcp(
     paths: &Paths,
+    workspace: &Path,
     config: &FileConfig,
     live: Option<&NativeMcpRegistry>,
 ) -> Arc<NativeMcpRegistry> {
     use futures::StreamExt as _;
-    let registry = Arc::new(NativeMcpRegistry::with_auth_dir(
-        paths.data.join("mcp-oauth"),
-    ));
+    let registry = Arc::new(
+        NativeMcpRegistry::with_auth_dir(paths.data.join("mcp-oauth")).in_folder(workspace),
+    );
     let servers = config
         .mcp
         .iter()
@@ -8671,7 +8682,7 @@ async fn mcp_command(
         } => {
             let (target, entry) = mcp_entry_or_system(paths, workspace, project, &name)?;
             let entry = loaded_mcp_entry(&target, entry);
-            let registry = oauth_registry(paths, &name, &entry, true).await?;
+            let registry = oauth_registry(paths, workspace, &name, &entry, true).await?;
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, callback_port))
                 .await
                 .context("cannot bind the MCP OAuth loopback callback")?;
@@ -8701,7 +8712,7 @@ async fn mcp_command(
         McpCommand::Logout { name, project } => {
             let (target, entry) = mcp_entry_or_system(paths, workspace, project, &name)?;
             let entry = loaded_mcp_entry(&target, entry);
-            let registry = oauth_registry(paths, &name, &entry, false).await?;
+            let registry = oauth_registry(paths, workspace, &name, &entry, false).await?;
             registry.clear_oauth(&name).await?;
             let server = client.configure_mcp(&name, &entry).await?;
             println!(
@@ -8906,11 +8917,13 @@ fn read_mcp_secret(name: &str) -> Result<String> {
 
 async fn oauth_registry(
     paths: &Paths,
+    workspace: &Path,
     name: &str,
     entry: &McpConfigureRequest,
     probe: bool,
 ) -> Result<NativeMcpRegistry> {
-    let registry = NativeMcpRegistry::with_auth_dir(paths.data.join("mcp-oauth"));
+    let registry =
+        NativeMcpRegistry::with_auth_dir(paths.data.join("mcp-oauth")).in_folder(workspace);
     let mut staged = entry.clone();
     staged.enabled = probe;
     registry.configure(name, staged).await?;

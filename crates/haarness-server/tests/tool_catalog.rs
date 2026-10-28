@@ -794,6 +794,10 @@ impl ToolRegistry for ResourceFixtures {
     fn resource_servers(&self) -> Vec<String> {
         vec!["docs".into(), "hidden".into()]
     }
+
+    fn tool_server(&self, name: &str) -> Option<String> {
+        (name == "mcp__a__b__d").then(|| "a__b".into())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -965,4 +969,287 @@ async fn a_server_whose_tools_are_all_denied_keeps_its_resources_from_the_model(
         "{offered:?}"
     );
     assert!(offered.contains(&"read".to_owned()), "{offered:?}");
+}
+
+/// A server whose own name holds `__` (`a__b`) offers `mcp__a__b__d`:
+/// clients see the tool under that server, not under `a`.
+#[tokio::test]
+async fn a_tool_is_listed_under_the_server_that_offers_it() {
+    let mut fixtures = ResourceFixtures::new();
+    fixtures.tools.insert(
+        "mcp__a__b__d".into(),
+        Arc::new(ScopedResourceTool("mcp__a__b__d")) as Arc<dyn Tool>,
+    );
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(Vec::new())),
+        Arc::new(fixtures),
+        EventBus::new(64),
+        PathBuf::from("."),
+        String::new(),
+        RuntimeConfig::default(),
+    );
+    let catalog = runtime.tool_catalog(None).await.unwrap();
+    let tool = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.id == "mcp__a__b__d")
+        .unwrap();
+    assert_eq!(tool.source, "mcp:a__b");
+}
+
+/// A provider that, as the Anthropic and OpenAI APIs do, refuses a whole
+/// request over one tool name outside `[A-Za-z0-9_-]{1,64}`, in its tools or
+/// in its history. Its first response calls two tools by the names it was
+/// sent; its next one is text.
+#[derive(Clone, Default)]
+struct StrictNames {
+    requests: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait]
+impl ModelProvider for StrictNames {
+    fn id(&self) -> &str {
+        "strict"
+    }
+
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            id: "strict".into(),
+            name: "Strict names".into(),
+            authenticated: true,
+            models: vec![ModelInfo {
+                id: "strict-1".into(),
+                display_name: "Strict names".into(),
+                reasoning: false,
+                reasoning_efforts: Vec::new(),
+                images: false,
+                video: false,
+                tools: true,
+                context_window: Some(128_000),
+                max_output_tokens: Some(2_000),
+                pricing: None,
+            }],
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        let tools: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
+        let mut names = tools.clone();
+        let mut answered = false;
+        for message in &request.messages {
+            match message {
+                ProviderMessage::ToolCall { name, .. } => names.push(name.clone()),
+                ProviderMessage::ToolResult { name, .. } => {
+                    names.push(name.clone());
+                    answered = true;
+                }
+                _ => {}
+            }
+        }
+        self.requests.lock().unwrap().push(names.clone());
+        if let Some(name) = names.iter().find(|name| {
+            name.is_empty()
+                || name.len() > 64
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        }) {
+            return Err(haarness_core::CoreError::Provider(format!(
+                "400 invalid_request_error: tool name {name:?} does not match ^[a-zA-Z0-9_-]{{1,64}}$"
+            )));
+        }
+        if answered {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderEvent::TextDelta("done".into())),
+                Ok(ProviderEvent::Finished {
+                    reason: "stop".into(),
+                }),
+            ])));
+        }
+        // `Docs Server`'s `files.read` comes out as `Docs_Server`'s
+        // `files_read` does, which keeps its name: the other has a hash.
+        let docs = tools
+            .iter()
+            .find(|name| name.starts_with("mcp__Docs_Server__files_read_"))
+            .cloned()
+            .unwrap_or_default();
+        let calls = [docs, "mcp__srv__what_".to_owned()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                Ok(ProviderEvent::ToolCall {
+                    call_id: format!("call-{index}"),
+                    name,
+                    arguments: json!({}),
+                    provider_metadata: Value::Null,
+                })
+            });
+        Ok(Box::pin(stream::iter(calls.chain([Ok(
+            ProviderEvent::Finished {
+                reason: "tool_use".into(),
+            },
+        )]))))
+    }
+}
+
+/// Tools named as providers refuse (a space, a dot, a `?`) reach a strict
+/// provider under names it takes, beside a tool whose name comes out alike,
+/// and its calls of them run the tools they stand for under their own names,
+/// which the chat keeps; the next request sends that history the same way.
+#[tokio::test]
+async fn a_strict_provider_gets_names_it_takes_and_its_calls_reach_the_tools() {
+    let mut fixtures = FixtureRegistry::new();
+    for name in [
+        "mcp__Docs Server__files.read",
+        "mcp__Docs_Server__files_read",
+        "mcp__srv__what?",
+    ] {
+        fixtures.tools.insert(
+            name.into(),
+            Arc::new(FixtureTool {
+                name,
+                description: "MCP fixture",
+            }) as Arc<dyn Tool>,
+        );
+    }
+    let provider = StrictNames::default();
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(fixtures),
+        EventBus::new(64),
+        PathBuf::from("."),
+        String::new(),
+        RuntimeConfig {
+            lazy_tools: LazyToolSettings {
+                mode: LazyToolMode::Off,
+                ..LazyToolSettings::default()
+            },
+            ..RuntimeConfig::default()
+        },
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("strict".into()),
+            model: Some("strict-1".into()),
+            ..CreateThreadRequest::default()
+        })
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the docs"))
+        .await
+        .unwrap();
+    wait_done(&runtime, turn.id).await;
+    let requests = provider.requests.lock().unwrap().clone();
+    // The turn's two requests (a title request may follow).
+    assert!(requests.len() >= 2, "{requests:?}");
+    assert!(requests[0].contains(&"mcp__Docs_Server__files_read".to_owned()));
+    let results: Vec<(String, String)> = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            haarness_protocol::ItemData::ToolResult { name, output, .. } => Some((name, output)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [
+            (
+                "mcp__Docs Server__files.read".to_owned(),
+                "mcp__Docs Server__files.read executed with {}".to_owned()
+            ),
+            (
+                "mcp__srv__what?".to_owned(),
+                "mcp__srv__what? executed with {}".to_owned()
+            ),
+        ]
+    );
+}
+
+/// A side question over a chat with calls of tools named as providers refuse
+/// (`what?`) reaches a strict provider with names it takes, and names the
+/// tools as the chat's turns do, so it reads their cached prefix: here the
+/// tool whose name `files.read`'s comes out as is turned off, so it is in
+/// the catalog but in neither request.
+#[tokio::test]
+async fn a_side_question_names_tools_as_the_turns_do() {
+    let mut fixtures = FixtureRegistry::new();
+    for name in [
+        "mcp__Docs Server__files.read",
+        "mcp__Docs_Server__files_read",
+        "mcp__srv__what?",
+    ] {
+        fixtures.tools.insert(
+            name.into(),
+            Arc::new(FixtureTool {
+                name,
+                description: "MCP fixture",
+            }) as Arc<dyn Tool>,
+        );
+    }
+    let provider = StrictNames::default();
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(fixtures),
+        EventBus::new(64),
+        PathBuf::from("."),
+        String::new(),
+        RuntimeConfig {
+            lazy_tools: LazyToolSettings {
+                mode: LazyToolMode::Off,
+                ..LazyToolSettings::default()
+            },
+            tool_availability: HashMap::from([("mcp__Docs_Server__files_read".to_owned(), false)]),
+            ..RuntimeConfig::default()
+        },
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("strict".into()),
+            model: Some("strict-1".into()),
+            ..CreateThreadRequest::default()
+        })
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the docs"))
+        .await
+        .unwrap();
+    wait_done(&runtime, turn.id).await;
+    let turn_names = provider.requests.lock().unwrap()[0].clone();
+    let docs = turn_names
+        .iter()
+        .find(|name| name.starts_with("mcp__Docs_Server__files_read_"))
+        .cloned()
+        .expect("files.read was sent under a name of its own");
+    provider.requests.lock().unwrap().clear();
+    let answer = runtime
+        .btw(
+            thread.id,
+            haarness_protocol::BtwRequest {
+                question: "what did it read?".into(),
+                request_id: RequestId::new(),
+                history: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer.answer, "done");
+    let side = provider.requests.lock().unwrap()[0].clone();
+    assert!(side.contains(&docs), "{side:?}");
+    assert!(side.contains(&"mcp__srv__what_".to_owned()), "{side:?}");
 }
