@@ -13042,6 +13042,9 @@ mod permission_script;
 #[path = "cases/chat_folders.rs"]
 mod chat_folders;
 
+#[path = "cases/instructions_in_view.rs"]
+mod instructions_in_view;
+
 #[tokio::test]
 async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     let workspace =

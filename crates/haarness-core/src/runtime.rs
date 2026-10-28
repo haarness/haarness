@@ -6300,6 +6300,7 @@ impl AgentRuntime {
             command: prepared_command,
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(Vec::new()),
+            instructions_in_context: crate::instructions::InContext::default(),
             cancel,
             workspace,
             runtime_workspace: self.workspace.clone(),
@@ -6794,6 +6795,9 @@ struct RunnerTask {
     /// run`, ACP) still has a person to ask, and so does anyone who later
     /// types in that chat or a fork of it.
     unattended: bool,
+    /// The nested instruction files this turn's model can see, set from the
+    /// history each provider round sends.
+    instructions_in_context: crate::instructions::InContext,
 }
 
 struct TurnToolInvoker {
@@ -6829,6 +6833,9 @@ impl crate::ToolInvoker for TurnToolInvoker {
     }
     fn read_rules(&self) -> Option<PermissionEngine> {
         Some(self.runner.permission_engine_for_tool(&self.agent, "read"))
+    }
+    fn instructions_in_context(&self) -> Option<crate::instructions::InContext> {
+        Some(Arc::clone(&self.runner.instructions_in_context))
     }
     fn delegable_agents(&self) -> Vec<String> {
         self.runner
@@ -8822,6 +8829,11 @@ impl RunnerTask {
                 }
                 let current_attachments =
                     crate::image_budget::turn_attachments(&items, Some(self.turn.id));
+                // A nested instruction file whose read result compaction or
+                // an undo removed is no longer in view: the next read below
+                // its folder attaches it again.
+                *self.instructions_in_context.lock() =
+                    crate::instructions::attached(provider_visible_items(&items));
                 let (mut messages, origins) = provider_messages_with_origins(items);
                 let source_messages = messages.clone();
                 let image_limits = provider.image_limits(&model);
@@ -11968,6 +11980,7 @@ impl RunnerTask {
             command: None,
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(self.skill_rules.lock().clone()),
+            instructions_in_context: crate::instructions::InContext::default(),
             cancel: cancel.clone(),
             // The child's folder is its parent's.
             workspace: self.workspace.clone(),

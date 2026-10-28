@@ -306,7 +306,10 @@ impl NativeToolRegistry {
 /// workspace subdirectory, every `AGENTS.md` (and, under Claude Code
 /// compatibility, `CLAUDE.md`-family file) between that directory and the
 /// workspace root that the system prompt does not already carry is appended
-/// to the result, once per thread.
+/// to the result, once while the model can see it: in an agent's turn the
+/// turn says what is in view, so a file compaction or an undo took out of
+/// the conversation comes back with the next read; elsewhere, once per
+/// thread.
 #[derive(Default)]
 struct InstructionDiscovery {
     claude: std::sync::atomic::AtomicBool,
@@ -315,7 +318,7 @@ struct InstructionDiscovery {
     >,
 }
 
-/// Nested instruction files attached per thread before discovery stops.
+/// Nested instruction files in view at once before discovery stops.
 const NESTED_INSTRUCTION_LIMIT: usize = 20;
 
 impl InstructionDiscovery {
@@ -325,14 +328,22 @@ impl InstructionDiscovery {
         file: &Path,
         workspace: &Path,
         thread: haarness_protocol::ThreadId,
+        in_context: Option<haarness_core::instructions::InContext>,
     ) {
         let claude = self.claude.load(std::sync::atomic::Ordering::Relaxed);
         let candidates = haarness_core::instructions::nested(file, workspace, claude);
         if candidates.is_empty() {
             return;
         }
-        let mut loaded = self.loaded.lock();
-        let seen = loaded.entry(thread).or_default();
+        let mut turn_view;
+        let mut loaded;
+        let seen = if let Some(view) = &in_context {
+            turn_view = view.lock();
+            &mut *turn_view
+        } else {
+            loaded = self.loaded.lock();
+            loaded.entry(thread).or_default()
+        };
         let mut attached = Vec::new();
         for candidate in candidates {
             if seen.len() >= NESTED_INSTRUCTION_LIMIT {
@@ -2898,8 +2909,17 @@ impl Tool for BuiltinTool {
                     () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
                     read = read => read.map_err(tool_error)??,
                 });
-                self.instructions
-                    .attach(&mut output, &path, &context.workspace, context.thread_id);
+                let in_context = context
+                    .invoker
+                    .as_ref()
+                    .and_then(|invoker| invoker.instructions_in_context());
+                self.instructions.attach(
+                    &mut output,
+                    &path,
+                    &context.workspace,
+                    context.thread_id,
+                    in_context,
+                );
                 Ok(output)
             }
             Kind::ImageGenerate => {
@@ -4971,6 +4991,61 @@ mod tests {
                 .ends_with("crates/api/CLAUDE.md"),
             "nearest first"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The turn's view of its context, as the runtime hands it to a tool.
+    struct InView(haarness_core::instructions::InContext);
+
+    #[async_trait]
+    impl haarness_core::ToolInvoker for InView {
+        fn instructions_in_context(&self) -> Option<haarness_core::instructions::InContext> {
+            Some(Arc::clone(&self.0))
+        }
+        async fn invoke(&self, name: &str, _arguments: Value) -> CoreResult<ToolOutput> {
+            panic!("read invoked {name}");
+        }
+        fn side_effectful_for(&self, _name: &str, _arguments: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn read_attaches_a_nested_instruction_file_again_once_it_is_out_of_view() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-read-in-view-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join("crates/api/src")).unwrap();
+        std::fs::write(root.join("crates/AGENTS.md"), "CRATE_RULES").unwrap();
+        std::fs::write(root.join("crates/api/src/lib.rs"), "fn api() {}").unwrap();
+        std::fs::write(root.join("crates/api/src/main.rs"), "fn main() {}").unwrap();
+        let workspace = root.canonicalize().unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let read = registry.get("read").unwrap();
+        let view = haarness_core::instructions::InContext::default();
+        let mut context = tool_context(&workspace);
+        context.invoker = Some(Arc::new(InView(Arc::clone(&view))));
+
+        let first = read
+            .execute(json!({"path":"crates/api/src/lib.rs"}), context.clone())
+            .await
+            .unwrap();
+        assert!(first.text.contains("CRATE_RULES"), "{}", first.text);
+        assert_eq!(view.lock().len(), 1, "the turn sees what was attached");
+        // Still in view: another read in that folder does not repeat it.
+        let second = read
+            .execute(json!({"path":"crates/api/src/main.rs"}), context.clone())
+            .await
+            .unwrap();
+        assert!(!second.text.contains("CRATE_RULES"), "{}", second.text);
+        // Compaction took the first result out of the conversation: the
+        // next round's view no longer holds it, and a read brings it back.
+        view.lock().clear();
+        let third = read
+            .execute(json!({"path":"crates/api/src/main.rs"}), context.clone())
+            .await
+            .unwrap();
+        assert!(third.text.contains("CRATE_RULES"), "{}", third.text);
+        assert_eq!(third.metadata["loaded"].as_array().unwrap().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
