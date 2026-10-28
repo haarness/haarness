@@ -2031,9 +2031,7 @@ impl AgentRuntime {
         }
         let custom = self.custom_agent(&agent);
         if let Some(custom) = &custom {
-            for rule in custom.permissions.iter().cloned() {
-                engine.add_rule(rule);
-            }
+            custom.apply_permissions(&mut engine);
         }
         if let Some(parent_id) = thread.and_then(|thread| thread.parent_id) {
             engine.add_inherited_ceiling(self.permission_boundary_for_lineage(parent_id).await?);
@@ -3205,9 +3203,7 @@ impl AgentRuntime {
                 engine.add_grant(rule);
             }
             if let Some(custom) = custom {
-                for rule in custom.permissions {
-                    engine.add_rule(rule);
-                }
+                custom.apply_permissions(&mut engine);
             }
             let mut lazy = components.config.lazy_tools.clone();
             if let Some(mode) = *self.lazy_tool_mode.read() {
@@ -4577,9 +4573,7 @@ impl AgentRuntime {
                     "tool {name} is disabled by agent tools"
                 )));
             }
-            for rule in custom.permissions {
-                engine.add_rule(rule);
-            }
+            custom.apply_permissions(&mut engine);
         }
         if let Some(parent_id) = thread.parent_id {
             engine.add_inherited_ceiling(self.permission_boundary_for_lineage(parent_id).await?);
@@ -6495,9 +6489,7 @@ impl AgentRuntime {
             engine.add_grant(rule);
         }
         if let Some(custom) = &agent.custom {
-            for rule in custom.permissions.iter().cloned() {
-                engine.add_rule(rule);
-            }
+            custom.apply_permissions(&mut engine);
         }
         engine.boundary()
     }
@@ -10908,9 +10900,7 @@ impl RunnerTask {
             engine.add_grant(rule);
         }
         if let Some(custom) = self.custom_agent(agent) {
-            for rule in custom.permissions {
-                engine.add_rule(rule);
-            }
+            custom.apply_permissions(&mut engine);
         }
         engine.add_inherited_ceiling(self.inherited_ceilings.iter().cloned());
         engine
