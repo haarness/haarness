@@ -60,7 +60,7 @@ fn primary_argument(
             .get(key)
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .map(crate::escapes::literal)
+            .map(crate::escapes::spelled_out)
     };
     // A resource row names the resource it read, or the server it listed.
     if same_tool(name, "mcp_resource_read") {
@@ -519,10 +519,10 @@ fn patch_argument(arguments: &serde_json::Value) -> Option<String> {
     // As the patch names them, with what would not show written as its code.
     match files.as_slice() {
         [] => None,
-        [only] => Some(crate::escapes::literal(only)),
+        [only] => Some(crate::escapes::spelled_out(only)),
         [first, rest @ ..] => Some(format!(
             "{} and {} more",
-            crate::escapes::literal(first),
+            crate::escapes::spelled_out(first),
             rest.len()
         )),
     }

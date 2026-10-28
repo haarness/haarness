@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Item, ItemData } from "@haarness/sdk";
-import { literalParts, literalText, turnsDirection, withoutEscapes } from "../src/renderer/display-text";
+import { spelledOutParts, spelledOutText, turnsDirection, withoutEscapes } from "../src/renderer/display-text";
 import { describeTool, resultText, toolInput, toolTarget, toolTitle } from "../src/renderer/transcript";
 import { findConversationMessages } from "../src/renderer/conversation-history";
 import { agentTaskError, type AgentTask } from "../src/renderer/agent-tasks";
@@ -63,23 +63,23 @@ test("what people write reads exactly as before", () => {
     "",
   ]) {
     assert.equal(withoutEscapes(text), text);
-    assert.equal(literalText(text), text);
-    assert.deepEqual(literalParts(text), [{ text, code: false }]);
+    assert.equal(spelledOutText(text), text);
+    assert.deepEqual(spelledOutParts(text), [{ text, code: false }]);
   }
 });
 
 test("an approval shows what is invisible in it as quiet codes", () => {
-  assert.deepEqual(literalParts("cat report‮fdp.sh"), [
+  assert.deepEqual(spelledOutParts("cat report‮fdp.sh"), [
     { text: "cat report", code: false },
     { text: "\\u{202E}", code: true },
     { text: "fdp.sh", code: false },
   ]);
-  assert.equal(literalText("cd dist\r\nrm -r *"), "cd dist\\u{D}\nrm -r *");
-  assert.equal(literalText("x\u001b[1Ay"), "x\\u{1B}[1Ay");
-  assert.equal(literalText("p​q⁧r﻿s\u{e0070}"), "p\\u{200B}q\\u{2067}r\\u{FEFF}s\\u{E0070}");
-  assert.equal(literalText("a b­c"), "a\\u{2029}b\\u{AD}c");
+  assert.equal(spelledOutText("cd dist\r\nrm -r *"), "cd dist\\u{D}\nrm -r *");
+  assert.equal(spelledOutText("x\u001b[1Ay"), "x\\u{1B}[1Ay");
+  assert.equal(spelledOutText("p​q⁧r﻿s\u{e0070}"), "p\\u{200B}q\\u{2067}r\\u{FEFF}s\\u{E0070}");
+  assert.equal(spelledOutText("a b­c"), "a\\u{2029}b\\u{AD}c");
   // Tags that spell no flag show.
-  assert.equal(literalText("🏴\u{e0061}\u{e007f}"), "🏴\\u{E0061}\\u{E007F}");
+  assert.equal(spelledOutText("🏴\u{e0061}\u{e007f}"), "🏴\\u{E0061}\\u{E007F}");
 });
 
 test("a row shows a command's and a server's text without their escapes", () => {
@@ -151,11 +151,11 @@ test("a failed agent's error reads without its escape sequences", () => {
 test("an edit on its card shows only what turns a line's direction as a code", () => {
   const line = 'if (role != "user\u202e \u2066// admin\u2069 \u2066") {';
   assert.equal(
-    literalParts(line, turnsDirection).map((part) => part.text).join(""),
+    spelledOutParts(line, turnsDirection).map((part) => part.text).join(""),
     'if (role != "user\\u{202E} \\u{2066}// admin\\u{2069} \\u{2066}") {',
   );
   for (const text of ["مرحبا\u200f بالعالم", "a\u200bb\tc", "שלום"])
-    assert.deepEqual(literalParts(text, turnsDirection), [{ text, code: false }]);
+    assert.deepEqual(spelledOutParts(text, turnsDirection), [{ text, code: false }]);
 });
 
 test("every kind of row target shows what would not show as a code", () => {

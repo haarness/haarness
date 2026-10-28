@@ -6,7 +6,7 @@
 //! `[31m` or `]0;title` fragments, so output loses its sequences whole
 //! ([`without_escapes`]). An approval card is read for what will run, so
 //! nothing on it may be hidden or reordered: there the invisible characters
-//! show as codes such as `\u{1B}` instead ([`literal`], [`marked`]).
+//! show as codes such as `\u{1B}` instead ([`spelled_out`], [`marked`]).
 //! Neither changes the text itself: what is stored, and what the model
 //! reads, stay as written.
 
@@ -260,7 +260,7 @@ fn push_code(shown: &mut String, character: char) {
 /// `text` with each character [`shows_as_code`] names written as its code,
 /// for a line of plain text such as the status band's.
 #[must_use]
-pub(crate) fn literal(text: &str) -> String {
+pub(crate) fn spelled_out(text: &str) -> String {
     with_codes(text, shows_as_code, push_code)
 }
 
@@ -270,7 +270,7 @@ pub(crate) fn literal(text: &str) -> String {
 const CODE_START: char = '\u{2061}';
 const CODE_END: char = '\u{2062}';
 
-/// [`literal`] with each code between two markers, so every row the text
+/// [`spelled_out`] with each code between two markers, so every row the text
 /// wraps onto can draw the codes quieter than the text around them
 /// ([`marked_spans`]).
 #[must_use]
@@ -421,7 +421,7 @@ mod tests {
             "a\tb\nc",
         ] {
             assert_eq!(without_escapes(text), text);
-            assert_eq!(literal(text), text);
+            assert_eq!(spelled_out(text), text);
             assert_eq!(marked(text), text);
         }
     }
@@ -429,18 +429,21 @@ mod tests {
     #[test]
     fn approval_text_shows_what_is_invisible_as_a_code() {
         assert_eq!(
-            literal("cat report\u{202e}fdp.sh"),
+            spelled_out("cat report\u{202e}fdp.sh"),
             "cat report\\u{202E}fdp.sh"
         );
-        assert_eq!(literal("cd dist\r\nrm -r *"), "cd dist\\u{D}\nrm -r *");
-        assert_eq!(literal("x\u{1b}[1Ay"), "x\\u{1B}[1Ay");
+        assert_eq!(spelled_out("cd dist\r\nrm -r *"), "cd dist\\u{D}\nrm -r *");
+        assert_eq!(spelled_out("x\u{1b}[1Ay"), "x\\u{1B}[1Ay");
         assert_eq!(
-            literal("p\u{200b}q\u{2067}r\u{feff}s\u{e0070}"),
+            spelled_out("p\u{200b}q\u{2067}r\u{feff}s\u{e0070}"),
             "p\\u{200B}q\\u{2067}r\\u{FEFF}s\\u{E0070}"
         );
-        assert_eq!(literal("a\u{2029}b\u{ad}c"), "a\\u{2029}b\\u{AD}c");
+        assert_eq!(spelled_out("a\u{2029}b\u{ad}c"), "a\\u{2029}b\\u{AD}c");
         // Tags that spell no flag, or more than one, show.
-        assert_eq!(literal("🏴\u{e0061}\u{e007f}"), "🏴\\u{E0061}\\u{E007F}");
+        assert_eq!(
+            spelled_out("🏴\u{e0061}\u{e007f}"),
+            "🏴\\u{E0061}\\u{E007F}"
+        );
     }
 
     /// In an edit's lines only direction overrides and isolates are codes;
@@ -461,7 +464,7 @@ mod tests {
     fn marked_codes_draw_quieter_also_across_a_wrap() {
         let text = marked("ls\u{2066}x");
         // The markers take no cell, so the card wraps the codes as shown.
-        let shown = literal("ls\u{2066}x");
+        let shown = spelled_out("ls\u{2066}x");
         assert_eq!(text.width(), shown.width());
         assert_eq!(
             textwrap::core::display_width(&text),

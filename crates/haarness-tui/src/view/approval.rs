@@ -17,7 +17,7 @@ use haarness_opentui::{Line, Span, attr};
 use haarness_protocol::{PendingPermissionInfo, PermissionScript, ScriptWithheld};
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::escapes::{code_open_after, literal, marked, marked_directions, marked_spans};
+use crate::escapes::{code_open_after, marked, marked_directions, marked_spans, spelled_out};
 use crate::locale::Language;
 use crate::state::{App, PermissionChoice, SubjectFit};
 use crate::theme::Theme;
@@ -200,7 +200,7 @@ fn chrome_subject(
 
 /// How a card writes text the request carries (a command, a path, a rule,
 /// an agent's name), as against its own words: as sent, or with what is
-/// invisible in it shown as codes ([`literal`], [`marked`]).
+/// invisible in it shown as codes ([`spelled_out`], [`marked`]).
 type Show<'a> = &'a dyn Fn(&str) -> String;
 
 /// The text as sent, for comparing it with other text the request carries.
@@ -371,7 +371,7 @@ fn always_rules(
 /// Never the wire's `kind:subject` rule.
 pub fn summary(pending: &PendingPermissionInfo, language: Language) -> String {
     let headline = language.text(headline(pending));
-    match subject(pending, language, &literal) {
+    match subject(pending, language, &spelled_out) {
         Some(subject) => format!("{headline}: {}", subject.lines().next().unwrap_or_default()),
         None => headline.to_owned(),
     }

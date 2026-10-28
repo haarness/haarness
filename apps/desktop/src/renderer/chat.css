@@ -2106,13 +2106,13 @@ html[dir="rtl"] .tool-target {
 /* A character a request carries that would not show, or would reorder the
    text around it (a direction override, a zero-width space, a carriage
    return), written as its code: quieter than what runs. */
-.literal-code {
+.spelled-code {
   color: var(--muted);
 }
 /* Where the text is muted already (a Shell panel's command, a request's
    detail), its codes stay a step quieter still. */
-.tool-input .literal-code,
-.prompt-detail .literal-code {
+.tool-input .spelled-code,
+.prompt-detail .spelled-code {
   color: var(--faint);
 }
 /* An explicit Chrome request names each site it asks for, one per line. */

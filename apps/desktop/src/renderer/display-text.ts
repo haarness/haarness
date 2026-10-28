@@ -6,7 +6,7 @@
  * `[31m` or `]0;title` fragments, so output loses its sequences whole
  * (`withoutEscapes`). An approval card is read for what will run, so nothing
  * on it may be hidden or reordered: there the invisible characters show as
- * codes such as `\u{1B}` instead (`literalParts`, `literalText`). Neither
+ * codes such as `\u{1B}` instead (`spelledOutParts`, `spelledOutText`). Neither
  * changes the text itself: what is stored, and what the model reads, stay as
  * written. The TUI reads such text the same way.
  */
@@ -207,7 +207,7 @@ export const turnsDirection = (code: number) =>
 /** `text` cut into what shows as written and the codes `shows` names
  * (`showsAsCode` unless said), for a card that draws the codes quieter than
  * the text around them. */
-export function literalParts(
+export function spelledOutParts(
   text: string,
   shows: (code: number) => boolean = showsAsCode,
 ): { text: string; code: boolean }[] {
@@ -241,8 +241,8 @@ export function literalParts(
 
 /** `text` with each character `showsAsCode` names written as its code, for
  * places that take plain text (a row's target, a menu's detail line). */
-export function literalText(text: string): string {
-  return literalParts(text)
+export function spelledOutText(text: string): string {
+  return spelledOutParts(text)
     .map((part) => part.text)
     .join("");
 }
