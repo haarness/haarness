@@ -5,13 +5,15 @@
 //! Config shape (in Haarness JSON and Haarness-managed plugin `hooks/hooks.json`):
 //! ```json
 //! { "hooks": { "PreToolUse": [ { "matcher": "Bash|Edit",
-//!     "hooks": [{ "type": "command", "command": "./check.sh", "timeout": 10 }] } ] } }
+//!     "hooks": [{ "type": "command", "command": "\"${CLAUDE_PROJECT_DIR}\"/check.sh",
+//!                 "timeout": 10 }] } ] } }
 //! ```
 //!
 //! Stdin payload: `{"hook_event_name", "session_id", "cwd", "agent",
 //! "tool_name", "tool_input", "prompt", "tool_response"}` (fields per event).
 //! A hook runs in the folder its chat works in (its own, or the project
-//! folder), which `cwd` and the project folder variables name. Stdout may
+//! folder), which `cwd` names; the project folder variables name the
+//! server's project folder, or on the chat home the chat's. Stdout may
 //! carry `{"decision": "block", "reason", "additionalContext",
 //! "hookSpecificOutput": {"permissionDecision": "allow"|"deny"|"ask"}}`; a
 //! `PermissionRequest` hook answers with `hookSpecificOutput.decision`
@@ -168,26 +170,43 @@ impl ConfiguredHooks {
             .collect()
     }
 
-    /// Where the hooks of `call` run, and which folder they get as the
-    /// project's: the chat's own folder, else the project folder.
-    fn folder<'a>(&'a self, call: &'a HookCall) -> &'a Path {
-        call.folder.as_deref().unwrap_or(&self.workspace)
+    /// Where the hooks of `call` run and which project folder they are told
+    /// about. They run in the chat's own folder, else in the project folder,
+    /// and get the server's project folder, where its hook scripts are,
+    /// except on the chat home, where a chat's folder is its only project.
+    /// Neither keeps Windows' `\\?\` prefix, which a hook would read as part
+    /// of the path.
+    fn folders<'a>(&'a self, call: Option<&'a HookCall>) -> Folders<'a> {
+        let project = dunce::simplified(&self.workspace);
+        match call.and_then(|call| Some((call.folder.as_deref()?, call.folder_is_project))) {
+            Some((folder, folder_is_project)) => {
+                let cwd = dunce::simplified(folder);
+                Folders {
+                    cwd,
+                    project: if folder_is_project { cwd } else { project },
+                }
+            }
+            None => Folders {
+                cwd: project,
+                project,
+            },
+        }
     }
 
-    async fn run(&self, entry: &HookEntry, payload: &Value, folder: &Path) -> HookOutcome {
+    async fn run(&self, entry: &HookEntry, payload: &Value, folders: Folders<'_>) -> HookOutcome {
         use tokio::io::AsyncWriteExt as _;
         use tokio::process::Command;
-        let (program, arguments) = hook_invocation(entry, folder);
+        let (program, arguments) = hook_invocation(entry, folders.project);
         let mut command = Command::new(program);
         command.args(arguments);
         for name in haarness_core::private_env_names() {
             command.env_remove(name);
         }
         command
-            .current_dir(dunce::simplified(folder))
-            .env("HAARNESS_PROJECT_DIR", folder)
-            .env("OPENCODE_PROJECT_DIR", folder)
-            .env("CLAUDE_PROJECT_DIR", folder)
+            .current_dir(folders.cwd)
+            .env("HAARNESS_PROJECT_DIR", folders.project)
+            .env("OPENCODE_PROJECT_DIR", folders.project)
+            .env("CLAUDE_PROJECT_DIR", folders.project)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -381,9 +400,9 @@ impl ConfiguredHooks {
         event: &str,
         tool: Option<&str>,
         payload: &Value,
-        folder: &Path,
+        folders: Folders<'_>,
     ) -> HookOutcome {
-        self.run_matching(event, tool.as_slice(), payload, folder)
+        self.run_matching(event, tool.as_slice(), payload, folders)
             .await
     }
 
@@ -392,13 +411,13 @@ impl ConfiguredHooks {
         event: &str,
         values: &[&str],
         payload: &Value,
-        folder: &Path,
+        folders: Folders<'_>,
     ) -> HookOutcome {
         let mut combined = HookOutcome::default();
         // Always holds only when every hook that allowed answered Always.
         let mut always = None;
         for entry in self.matching(event, values) {
-            let outcome = self.run(entry, payload, folder).await;
+            let outcome = self.run(entry, payload, folders).await;
             // The first block stops an action; after a tool ran, every
             // hook's feedback reaches the model.
             if let Some(block) = outcome.block {
@@ -608,6 +627,13 @@ fn expand_hook_value(value: &str, entry: &HookEntry, workspace: &std::path::Path
 /// it: the hook's reason is feedback for the model instead.
 fn is_after_tool(event: &str) -> bool {
     matches!(event, "PostToolUse" | "PostToolUseFailure")
+}
+
+/// Where a hook runs (its `cwd`), and the project folder it is told about.
+#[derive(Clone, Copy)]
+struct Folders<'a> {
+    cwd: &'a Path,
+    project: &'a Path,
 }
 
 #[derive(Default)]
@@ -1171,12 +1197,12 @@ impl HookPort for ConfiguredHooks {
             &json!({
                 "hook_event_name": "PreToolUse",
                 "session_id": call.thread,
-                "cwd": self.folder(call),
+                "cwd": self.folders(Some(call)).cwd,
                 "agent": call.agent,
                 "tool_name": tool,
                 "tool_input": arguments,
             }),
-            self.folder(call),
+            self.folders(Some(call)),
         )
         .await
         .into()
@@ -1202,14 +1228,14 @@ impl HookPort for ConfiguredHooks {
                 &json!({
                     "hook_event_name": event,
                     "session_id": call.thread,
-                    "cwd": self.folder(call),
+                    "cwd": self.folders(Some(call)).cwd,
                     "agent": call.agent,
                     "tool_name": tool,
                     "tool_input": arguments,
                     "tool_response": {"output": output, "is_error": is_error},
                     "error": is_error.then_some(output),
                 }),
-                self.folder(call),
+                self.folders(Some(call)),
             )
             .await;
         if !is_error && let Some(file_path) = changed_file(tool, arguments) {
@@ -1220,13 +1246,13 @@ impl HookPort for ConfiguredHooks {
                     &json!({
                         "hook_event_name": "FileChanged",
                         "session_id": call.thread,
-                        "cwd": self.folder(call),
+                        "cwd": self.folders(Some(call)).cwd,
                         "agent": call.agent,
                         "tool_name": tool,
                         "tool_input": arguments,
                         "file_path": file_path,
                     }),
-                    self.folder(call),
+                    self.folders(Some(call)),
                 )
                 .await;
         }
@@ -1245,11 +1271,11 @@ impl HookPort for ConfiguredHooks {
             &json!({
                 "hook_event_name": "UserPromptSubmit",
                 "session_id": call.thread,
-                "cwd": self.folder(call),
+                "cwd": self.folders(Some(call)).cwd,
                 "agent": call.agent,
                 "prompt": prompt,
             }),
-            self.folder(call),
+            self.folders(Some(call)),
         )
         .await
         .into()
@@ -1266,7 +1292,7 @@ impl HookPort for ConfiguredHooks {
         let mut payload = json!({
             "hook_event_name": "PermissionRequest",
             "session_id": call.thread,
-            "cwd": self.folder(call),
+            "cwd": self.folders(Some(call)).cwd,
             "agent": call.agent,
             "tool_name": permission,
             "tool_input": detail,
@@ -1292,7 +1318,7 @@ impl HookPort for ConfiguredHooks {
             "PermissionRequest",
             Some(permission),
             &payload,
-            self.folder(call),
+            self.folders(Some(call)),
         )
         .await
         .into()
@@ -1304,10 +1330,10 @@ impl HookPort for ConfiguredHooks {
                 "PostCompact",
                 Some(trigger),
                 &json!({
-                    "hook_event_name":"PostCompact", "session_id":call.thread, "cwd":self.folder(call),
+                    "hook_event_name":"PostCompact", "session_id":call.thread, "cwd":self.folders(Some(call)).cwd,
                     "trigger":trigger, "compaction":item,
                 }),
-                self.folder(call),
+                self.folders(Some(call)),
             )
             .await;
     }
@@ -1316,13 +1342,13 @@ impl HookPort for ConfiguredHooks {
         payload["hook_event_name"] = json!("StopFailure");
         payload["session_id"] = json!(call.thread);
         payload["turn_id"] = json!(turn);
-        payload["cwd"] = json!(self.folder(call));
+        payload["cwd"] = json!(self.folders(Some(call)).cwd);
         let _ = self
             .run_matching(
                 "StopFailure",
                 &failure_names(detail),
                 &payload,
-                self.folder(call),
+                self.folders(Some(call)),
             )
             .await;
     }
@@ -1335,9 +1361,9 @@ impl HookPort for ConfiguredHooks {
                 &json!({
                     "hook_event_name": "Stop",
                     "session_id": call.thread,
-                    "cwd": self.folder(call),
+                    "cwd": self.folders(Some(call)).cwd,
                 }),
-                self.folder(call),
+                self.folders(Some(call)),
             )
             .await;
     }
@@ -1350,11 +1376,11 @@ impl HookPort for ConfiguredHooks {
                 &json!({
                     "hook_event_name": "SessionStart",
                     "session_id": call.thread,
-                    "cwd": self.folder(call),
+                    "cwd": self.folders(Some(call)).cwd,
                     "source": "startup",
                     "agent": call.agent,
                 }),
-                self.folder(call),
+                self.folders(Some(call)),
             )
             .await;
     }
@@ -1367,10 +1393,10 @@ impl HookPort for ConfiguredHooks {
                 &json!({
                     "hook_event_name": "SessionEnd",
                     "session_id": call.thread,
-                    "cwd": self.folder(call),
+                    "cwd": self.folders(Some(call)).cwd,
                     "reason": reason,
                 }),
-                self.folder(call),
+                self.folders(Some(call)),
             )
             .await;
     }
@@ -1379,7 +1405,7 @@ impl HookPort for ConfiguredHooks {
         let mut payload = json!({
             "hook_event_name": "TurnEnd",
             "session_id": call.thread,
-            "cwd": self.folder(call),
+            "cwd": self.folders(Some(call)).cwd,
             "turn_id": turn,
             "agent": detail.get("agent"),
             "provider": detail.get("provider"),
@@ -1392,7 +1418,7 @@ impl HookPort for ConfiguredHooks {
             }
         }
         let _ = self
-            .run_event("TurnEnd", None, &payload, self.folder(call))
+            .run_event("TurnEnd", None, &payload, self.folders(Some(call)))
             .await;
     }
 
@@ -1404,11 +1430,11 @@ impl HookPort for ConfiguredHooks {
                 &json!({
                     "hook_event_name": "Notification",
                     "session_id": call.thread,
-                    "cwd": self.folder(call),
+                    "cwd": self.folders(Some(call)).cwd,
                     "notification_type": kind,
                     "message": message,
                 }),
-                self.folder(call),
+                self.folders(Some(call)),
             )
             .await;
     }
@@ -1416,7 +1442,7 @@ impl HookPort for ConfiguredHooks {
     async fn config_change(&self, detail: &Value) {
         let mut payload = json!({
             "hook_event_name": "ConfigChange",
-            "cwd": self.workspace,
+            "cwd": self.folders(None).cwd,
             "source": detail.get("source").cloned().unwrap_or_else(|| json!("reload")),
         });
         if let (Some(target), Some(extra)) = (payload.as_object_mut(), detail.as_object()) {
@@ -1425,7 +1451,7 @@ impl HookPort for ConfiguredHooks {
             }
         }
         let _ = self
-            .run_event("ConfigChange", None, &payload, &self.workspace)
+            .run_event("ConfigChange", None, &payload, self.folders(None))
             .await;
     }
 }
@@ -2391,10 +2417,12 @@ mod tests {
             project.clone(),
         );
         let thread = ThreadId::new();
+        // A chat with a folder of its own on a project's server.
         let chat = HookCall {
             thread,
             agent: Some("build".into()),
             folder: Some(folder.clone()),
+            folder_is_project: false,
         };
         let write = json!({"path": "notes.md", "content": "x"});
         let _ = hooks.user_prompt_submit(&chat, "tidy up").await;
@@ -2408,6 +2436,14 @@ mod tests {
         hooks
             .stop(&HookCall {
                 agent: None,
+                ..chat.clone()
+            })
+            .await;
+        // On the chat home the chat's folder is its project too.
+        hooks
+            .stop(&HookCall {
+                agent: None,
+                folder_is_project: true,
                 ..chat.clone()
             })
             .await;
@@ -2440,16 +2476,22 @@ mod tests {
                 "PostToolUse",
                 "FileChanged",
                 "Stop",
+                "Stop",
                 "Stop"
             ]
         );
         let (folder, project) = (folder.display().to_string(), project.display().to_string());
         for (index, (ran_in, env, placeholder, payload)) in runs.iter().enumerate() {
-            let expected = if index < 6 { &folder } else { &project };
-            assert_eq!(ran_in, expected, "{payload}");
-            assert_eq!(env, expected, "{payload}");
-            assert_eq!(placeholder, expected, "{payload}");
-            assert_eq!(payload["cwd"], json!(expected), "{payload}");
+            // Where it ran (its `cwd`), and the project folder it was told.
+            let (cwd, told) = match index {
+                0..6 => (&folder, &project),
+                6 => (&folder, &folder),
+                _ => (&project, &project),
+            };
+            assert_eq!(ran_in, cwd, "{payload}");
+            assert_eq!(payload["cwd"], json!(cwd), "{payload}");
+            assert_eq!(env, told, "{payload}");
+            assert_eq!(placeholder, told, "{payload}");
             assert_eq!(payload["session_id"], json!(thread));
             // The agent is named where one acts: prompts, tools, permissions.
             if index < 5 {
@@ -2527,6 +2569,27 @@ mod tests {
                 .matching("hook block ignored: this event cannot be blocked")
                 .is_empty()
         );
+    }
+
+    /// Windows reads a verbatim `\\?\` path as a different spelling; a hook
+    /// gets every folder without it.
+    #[cfg(windows)]
+    #[test]
+    fn hooks_get_their_folders_without_the_verbatim_prefix() {
+        let hooks = ConfiguredHooks::new(Vec::new(), PathBuf::from(r"\\?\C:\Chat folders"));
+        let mut call = HookCall {
+            folder: Some(PathBuf::from(r"\\?\C:\Chat folders\2026-10-28\notes")),
+            ..HookCall::new(ThreadId::new())
+        };
+        let folders = hooks.folders(Some(&call));
+        assert_eq!(folders.cwd, Path::new(r"C:\Chat folders\2026-10-28\notes"));
+        assert_eq!(folders.project, Path::new(r"C:\Chat folders"));
+        call.folder_is_project = true;
+        assert_eq!(
+            hooks.folders(Some(&call)).project,
+            Path::new(r"C:\Chat folders\2026-10-28\notes")
+        );
+        assert_eq!(hooks.folders(None).cwd, Path::new(r"C:\Chat folders"));
     }
 
     fn entry(command: &str, args: &[&str], shell: Option<&str>) -> HookEntry {

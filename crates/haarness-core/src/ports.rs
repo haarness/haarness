@@ -921,8 +921,13 @@ pub struct HookCall {
     pub agent: Option<String>,
     /// The chat's own folder (a chat created with a `directory`, as every
     /// chat of the chat home is): its hooks run there and get it as their
-    /// project folder. `None` for a chat of the project folder.
+    /// `cwd`. `None` for a chat of the project folder.
     pub folder: Option<PathBuf>,
+    /// Whether `folder` is also the project folder the hooks are told about
+    /// (`CLAUDE_PROJECT_DIR` and its spellings): on the chat home, where a
+    /// chat's folder is the only project it has. Elsewhere they get the
+    /// server's project folder, where its hook scripts are.
+    pub folder_is_project: bool,
 }
 
 impl HookCall {
@@ -933,6 +938,7 @@ impl HookCall {
             thread,
             agent: None,
             folder: None,
+            folder_is_project: false,
         }
     }
 }
