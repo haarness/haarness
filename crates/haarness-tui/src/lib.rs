@@ -373,12 +373,14 @@ pub async fn run_with_thread_and_resolver_fork_switching(
 }
 
 async fn run_with_client(
-    mut client: ApiClient,
+    client: ApiClient,
     initial_thread: Option<uuid::Uuid>,
     continue_last: bool,
     fork: bool,
     open_in: Option<haarness_protocol::ApprovalMode>,
 ) -> Result<Option<PathBuf>> {
+    // A person at the terminal can stop every turn this UI starts.
+    let mut client = client.attended();
     let initial_info = client.info().await.ok();
     // The server waits for a signed-in provider's list while it has no
     // model to show (up to 10 s on a stalled network): the first frame does
@@ -702,7 +704,7 @@ async fn run_with_client(
                 Ok(()) => {
                     event_task.abort();
                     client.disconnect_all_ptys();
-                    client = connection.client;
+                    client = connection.client.attended();
                     let update_available = app.update_available.take();
                     app = connection.app;
                     app.update_available = update_available;

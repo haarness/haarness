@@ -160,6 +160,7 @@ async fn turn(runtime: &AgentRuntime, thread: ThreadId, agent: Option<&str>) {
                 // The client shows previews, so the preview tool is on.
                 tools: Some([("preview".to_owned(), true)].into()),
                 command: None,
+                ..Default::default()
             },
         )
         .await

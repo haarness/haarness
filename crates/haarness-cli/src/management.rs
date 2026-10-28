@@ -1377,6 +1377,7 @@ impl ManagementService {
                         attachments: Vec::new(),
                         resources: Vec::new(),
                         synthetic: false,
+                        ..Default::default()
                     },
                 )
                 .await
@@ -1402,6 +1403,7 @@ impl ManagementService {
                         attachments: Vec::new(),
                         resources: Vec::new(),
                         synthetic: false,
+                        ..Default::default()
                     },
                 )
                 .await
@@ -1425,6 +1427,7 @@ impl ManagementService {
                         reasoning_effort: None,
                         tools: None,
                         command: None,
+                        ..Default::default()
                     },
                 )
                 .await
@@ -1592,6 +1595,7 @@ impl ManagementService {
                         reasoning_effort: None,
                         tools: None,
                         command: None,
+                        ..Default::default()
                     },
                 )
                 .await;

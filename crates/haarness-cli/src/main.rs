@@ -3940,6 +3940,7 @@ async fn execute_schedule(
                     reasoning_effort: schedule.variant.clone(),
                     tools: Some(HashMap::from([("question".into(), false)])),
                     command: None,
+                    ..Default::default()
                 },
             )
             .await?;
@@ -4096,6 +4097,7 @@ async fn arm_loop(
             reasoning_effort: runtime.chat_reasoning_effort(thread_id).await,
             tools: None,
             command: None,
+            ..Default::default()
         };
         match runtime.start_turn(thread_id, request).await {
             Ok(_) => tracing::info!(thread = %thread_id, "loop prompt submitted"),
@@ -4911,6 +4913,7 @@ async fn run_command(
                         command: args
                             .command
                             .map(|command| command.trim_start_matches('/').to_owned()),
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -15424,6 +15427,7 @@ request_timeout = 0
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -15799,6 +15803,7 @@ request_timeout = 0
                     reasoning_effort: None,
                     tools: None,
                     command: Some("nope".into()),
+                    ..Default::default()
                 },
             )
             .await;
@@ -15912,6 +15917,7 @@ request_timeout = 0
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -16004,6 +16010,7 @@ request_timeout = 0
                             reasoning_effort: None,
                             tools: None,
                             command: None,
+                            ..Default::default()
                         },
                     )
                     .await
@@ -16145,6 +16152,7 @@ request_timeout = 0
                     tools: None,
                     command: None,
                     resources: Vec::new(),
+                    ..Default::default()
                 },
             )
             .await
@@ -16908,6 +16916,7 @@ request_timeout = 0
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await

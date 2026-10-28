@@ -13,7 +13,7 @@ pub enum InputDelivery {
     Queue,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingInput {
     /// The submitting client's preview support. `None` keeps the chat's
@@ -28,6 +28,10 @@ pub struct PendingInput {
     pub text: String,
     #[serde(default)]
     pub attachments: Vec<String>,
+    /// Queued by a person who can stop the turn it starts (see
+    /// `StartTurnRequest::attended`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attended: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]

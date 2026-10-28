@@ -1378,6 +1378,10 @@
             },
             "type": "array"
           },
+          "attended": {
+            "description": "A person can stop the turn a prompt command starts (see\n[`StartTurnRequest::attended`]).",
+            "type": "boolean"
+          },
           "model": {
             "type": [
               "string",
@@ -3684,6 +3688,10 @@
             },
             "type": "array"
           },
+          "attended": {
+            "description": "Queued by a person who can stop the turn it starts (see\n`StartTurnRequest::attended`).",
+            "type": "boolean"
+          },
           "id": {
             "$ref": "#/components/schemas/RequestId"
           },
@@ -4429,6 +4437,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "attended": {
+            "description": "A person can stop the turn this input starts, now or once it leaves\nthe queue (see [`StartTurnRequest::attended`]).",
+            "type": "boolean"
           },
           "delivery": {
             "$ref": "#/components/schemas/InputDelivery",
@@ -5237,6 +5249,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "attended": {
+            "description": "A person is in this conversation and can stop the turn: Desktop, the\nterminal UI and an editor over ACP send it with every message and\ncommand. A command's or skill's `` !`\u2026` `` snippet in such a turn, and\nin the subagents it starts, runs until it ends or the turn is stopped.\nWithout it (a script, Haarness Cloud, an older client) a snippet keeps\nthe `execution.shell_timeout_ms` deadline, as a scheduled run's always\ndoes. Nothing else depends on it.",
+            "type": "boolean"
           },
           "autoApprove": {
             "description": "Non-interactive caller explicitly authorizes permission prompts for\nthis turn. Scheduled runs set this after the schedule itself has been\napproved; ordinary REST/TUI clients leave it false.",

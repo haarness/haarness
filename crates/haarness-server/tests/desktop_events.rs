@@ -66,6 +66,7 @@ async fn terminal_failure_is_published_live_before_completion_and_replayed_once(
                 reasoning_effort: None,
                 tools: None,
                 command: None,
+                ..Default::default()
             },
         )
         .await

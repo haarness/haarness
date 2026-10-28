@@ -9137,6 +9137,7 @@ mod agent_shell_tests {
                     tools: None,
                     command: None,
                     resources: Vec::new(),
+                    ..Default::default()
                 },
             )
             .await

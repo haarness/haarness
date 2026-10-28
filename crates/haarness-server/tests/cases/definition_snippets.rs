@@ -1,10 +1,11 @@
-//! A command's `!` snippet in a turn a person can stop runs until it ends,
-//! as the command waits for its output; a scheduled run and the model's own
-//! shell calls keep the shell deadline. A snippet whose output was cut says
-//! so in the prompt.
+//! A command's or skill's `!` snippet in a turn a person can stop (its client
+//! says `attended`) runs until it ends, as the command waits for its output,
+//! on every path a person's message takes; a turn nobody says that of, a
+//! scheduled run and the model's own shell calls keep the shell deadline. A
+//! snippet whose output was cut says so in the prompt.
 use super::*;
 use haarness_core::{PermissionDecision, PermissionRule};
-use haarness_protocol::{ItemData, ThreadId};
+use haarness_protocol::{InputDelivery, ItemData, QueueInputRequest, ThreadId};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -59,7 +60,7 @@ fn runtime(fixture: &Fixture) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<Provide
         Arc::new(StaticProviderRegistry::new(vec![
             Arc::new(provider) as Arc<dyn ModelProvider>
         ])),
-        Arc::new(NativeToolRegistry::new(fixture.0.clone())),
+        Arc::new(WithSkill(NativeToolRegistry::new(fixture.0.clone()))),
         EventBus::new(2048),
         fixture.0.clone(),
         String::new(),
@@ -68,10 +69,90 @@ fn runtime(fixture: &Fixture) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<Provide
     (runtime, requests)
 }
 
+/// A skill whose body runs a snippet slower than the deadline, as the
+/// `skill` tool runs one.
+struct SlowSkill;
+#[async_trait]
+impl Tool for SlowSkill {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "slowskill".into(),
+            description: "Fixture skill with a slow snippet".into(),
+            input_schema: json!({"type":"object"}),
+        }
+    }
+    fn side_effectful(&self) -> bool {
+        false
+    }
+    async fn execute(&self, _args: Value, context: ToolContext) -> CoreResult<ToolOutput> {
+        let snippet = "sleep 1; printf finished".to_owned();
+        let output = context
+            .invoker
+            .expect("a turn's invoker")
+            .definition_shell(snippet.clone(), snippet, std::collections::BTreeMap::new())
+            .await?;
+        Ok(ToolOutput {
+            text: format!("SKILL {}", output.metadata["stdout"].as_str().unwrap_or("")),
+            metadata: Value::Null,
+        })
+    }
+}
+struct WithSkill(NativeToolRegistry);
+impl ToolRegistry for WithSkill {
+    fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        if name == "slowskill" {
+            Some(Arc::new(SlowSkill))
+        } else {
+            self.0.get(name)
+        }
+    }
+    fn list(&self) -> Vec<ToolDefinition> {
+        let mut tools = self.0.list();
+        tools.push(SlowSkill.definition());
+        tools
+    }
+}
+
 fn run_command(name: &str) -> StartTurnRequest {
     let mut request = turn_request("");
     request.command = Some(name.into());
     request
+}
+
+/// As Desktop, the terminal UI and an editor over ACP send it.
+fn attended(mut request: StartTurnRequest) -> StartTurnRequest {
+    request.attended = true;
+    request
+}
+
+const LOAD_SKILL: &str = "!tool slowskill {}";
+
+/// What the last `slowskill` call in `thread` returned, and whether it failed.
+async fn skill_result(runtime: &AgentRuntime, thread: ThreadId) -> (String, bool) {
+    runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find_map(|item| match item.data {
+            ItemData::ToolResult {
+                name,
+                output,
+                is_error,
+                ..
+            } if name == "slowskill" => Some((output, is_error)),
+            _ => None,
+        })
+        .expect("the skill's result")
+}
+
+fn finished(result: &(String, bool)) -> bool {
+    !result.1 && result.0 == "SKILL finished"
+}
+
+fn timed_out(result: &(String, bool)) -> bool {
+    result.1 && result.0.contains("timed out after 300 ms")
 }
 
 /// The prompt the model received that starts with `prefix`.
@@ -95,7 +176,7 @@ async fn a_person_s_command_waits_for_a_snippet_past_the_shell_deadline() {
     let thread = echo_thread(&runtime).await.id;
 
     let turn = runtime
-        .start_turn(thread, run_command("slow"))
+        .start_turn(thread, attended(run_command("slow")))
         .await
         .unwrap();
     let done = wait_done(&runtime, &turn).await;
@@ -109,7 +190,10 @@ async fn a_person_s_command_waits_for_a_snippet_past_the_shell_deadline() {
     let turn = runtime
         .start_turn(
             thread,
-            turn_request(&format!("!tool bash {}", json!({"command": "sleep 1"}))),
+            attended(turn_request(&format!(
+                "!tool bash {}",
+                json!({"command": "sleep 1"})
+            ))),
         )
         .await
         .unwrap();
@@ -146,7 +230,7 @@ async fn stop_ends_a_snippet_that_does_not_end() {
     let thread = echo_thread(&runtime).await.id;
 
     let turn = runtime
-        .start_turn(thread, run_command("forever"))
+        .start_turn(thread, attended(run_command("forever")))
         .await
         .unwrap();
     // Well past the deadline a model's call would have.
@@ -183,7 +267,8 @@ async fn a_scheduled_run_keeps_the_shell_deadline_for_a_snippet() {
         .await
         .unwrap()
         .id;
-    let mut request = run_command("slow");
+    // Whatever its client says.
+    let mut request = attended(run_command("slow"));
     request.auto_approve = true;
     let turn = runtime.start_turn(thread, request).await.unwrap();
     let done = wait_done(&runtime, &turn).await;
@@ -196,6 +281,110 @@ async fn a_scheduled_run_keeps_the_shell_deadline_for_a_snippet() {
         done.error
     );
     assert!(sent(&requests, "Slow:").is_none());
+}
+
+#[tokio::test]
+async fn a_turn_no_client_says_a_person_can_stop_keeps_the_shell_deadline() {
+    let fixture = Fixture::new();
+    let (runtime, requests) = runtime(&fixture);
+    let thread = echo_thread(&runtime).await.id;
+    // A script, Haarness Cloud's schedules, an older client: a plain turn.
+    let turn = runtime
+        .start_turn(thread, run_command("slow"))
+        .await
+        .unwrap();
+    let done = wait_done(&runtime, &turn).await;
+    assert_eq!(done.status, TurnStatus::Failed);
+    assert!(
+        done.error
+            .as_deref()
+            .is_some_and(|error| error.contains("timed out after 300 ms")),
+        "{:?}",
+        done.error
+    );
+    assert!(sent(&requests, "Slow:").is_none());
+    let turn = runtime
+        .start_turn(thread, turn_request(LOAD_SKILL))
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    let result = skill_result(&runtime, thread).await;
+    assert!(timed_out(&result), "{result:?}");
+    // A message steered into an idle chat without the flag.
+    let response = runtime
+        .queue_input(
+            thread,
+            QueueInputRequest {
+                text: LOAD_SKILL.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    wait_done(&runtime, &response.turn.expect("a turn")).await;
+    let result = skill_result(&runtime, thread).await;
+    assert!(timed_out(&result), "{result:?}");
+}
+
+#[tokio::test]
+async fn a_person_s_message_runs_a_skill_s_snippet_past_the_deadline_on_every_path() {
+    let fixture = Fixture::new();
+    let (runtime, _) = runtime(&fixture);
+    let thread = echo_thread(&runtime).await.id;
+
+    // A new turn.
+    let turn = runtime
+        .start_turn(thread, attended(turn_request(LOAD_SKILL)))
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    let result = skill_result(&runtime, thread).await;
+    assert!(finished(&result), "{result:?}");
+
+    // A message steered into an idle chat, and one queued there.
+    for delivery in [InputDelivery::Steer, InputDelivery::Queue] {
+        let response = runtime
+            .queue_input(
+                thread,
+                QueueInputRequest {
+                    delivery,
+                    text: LOAD_SKILL.into(),
+                    attended: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        wait_done(&runtime, &response.turn.expect("a turn")).await;
+        let result = skill_result(&runtime, thread).await;
+        assert!(finished(&result), "{delivery:?}: {result:?}");
+    }
+
+    // A subagent the person's turn starts.
+    let task = json!({"agent": "general", "prompt": LOAD_SKILL});
+    let turn = runtime
+        .start_turn(
+            thread,
+            attended(turn_request(&format!("!tool task {task}"))),
+        )
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    let child = runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find_map(|item| match item.data {
+            ItemData::TaskLink {
+                child_thread_id, ..
+            } => Some(child_thread_id),
+            _ => None,
+        })
+        .expect("the subagent's chat");
+    let result = skill_result(&runtime, child).await;
+    assert!(finished(&result), "{result:?}");
 }
 
 #[tokio::test]

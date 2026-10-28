@@ -613,7 +613,7 @@ pub struct UpdateThreadRequest {
     pub ultracode: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StartTurnRequest {
     pub request_id: RequestId,
@@ -650,6 +650,15 @@ pub struct StartTurnRequest {
     /// frontmatter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// A person is in this conversation and can stop the turn: Desktop, the
+    /// terminal UI and an editor over ACP send it with every message and
+    /// command. A command's or skill's `` !`…` `` snippet in such a turn, and
+    /// in the subagents it starts, runs until it ends or the turn is stopped.
+    /// Without it (a script, Haarness Cloud, an older client) a snippet keeps
+    /// the `execution.shell_timeout_ms` deadline, as a scheduled run's always
+    /// does. Nothing else depends on it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attended: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -963,7 +972,7 @@ pub struct CommandInfo {
 /// `StartTurnRequest::command`, this contract can dispatch both configured
 /// prompt templates and durable workflows without overloading the stable turn
 /// endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecuteCommandRequest {
     #[serde(default)]
@@ -997,6 +1006,10 @@ pub struct ExecuteCommandRequest {
     pub wait: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// A person can stop the turn a prompt command starts (see
+    /// [`StartTurnRequest::attended`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attended: bool,
 }
 
 /// Tagged result of the shared command dispatcher. Prompt commands create a
@@ -1291,7 +1304,7 @@ pub struct ThreadActivity {
 /// User input against a thread that may already have a running turn. When a
 /// turn is active the text is persisted immediately and steered into that
 /// turn's next provider round; otherwise a normal turn starts.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueInputRequest {
     /// Whether the submitting client can show sandboxed file previews. Text
@@ -1318,6 +1331,10 @@ pub struct QueueInputRequest {
     /// surfaces but still delivered to the provider.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub synthetic: bool,
+    /// A person can stop the turn this input starts, now or once it leaves
+    /// the queue (see [`StartTurnRequest::attended`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attended: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

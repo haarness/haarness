@@ -204,7 +204,11 @@ refuses it and stops, naming what was asked: allow it with a permission rule,
 or pass `--yolo`. `haarness run --auto` without a terminal instead refuses each
 request that still needs a person and goes on, stopping after five refusals in
 a row; it exits with status 3 when it finished but refused any (see
-[Auto approvals](AUTO-APPROVALS.md)). After an ungraceful server/process failure,
+[Auto approvals](AUTO-APPROVALS.md)). A command's or skill's `` !`…` ``
+snippet in a run keeps the `execution.shell_timeout_ms` deadline, so one that
+hangs fails the run instead of holding it until the job is cancelled; in the
+terminal UI, Desktop and an editor over ACP, where you can stop it, a snippet
+runs until it finishes. After an ungraceful server/process failure,
 Haarness preserves recorded transcript work and marks orphaned effects
 interrupted; it never blindly replays shell, edit, or other side-effecting tools.
 Any active goal is restored as paused—not falsely pursuing—until new user input
