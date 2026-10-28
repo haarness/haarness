@@ -32,7 +32,7 @@ fn config(log: &Path, delay: &str) -> McpConfigureRequest {
     serde_json::from_value(serde_json::json!({
         "transport":"stdio", "command":"python3",
         "args":[concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/process_tree.py")],
-        "env":{"TREE_LOG":log, "INIT_DELAY":delay}, "timeout_ms":500, "enabled":true,
+        "env":{"TREE_LOG":log, "INIT_DELAY":delay}, "timeoutMs":5000, "enabled":true,
     }))
     .unwrap()
 }

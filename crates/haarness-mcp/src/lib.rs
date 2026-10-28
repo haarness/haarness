@@ -47,6 +47,11 @@ use tokio::{
 /// Connection, discovery and header-helper deadline for a server that sets
 /// no `timeout_ms`.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+/// How long a local server that sets no `timeout_ms` has to start: spawn,
+/// initialize and list its tools. Its first start often installs it
+/// (`npx -y`, `uvx`), which takes longer than 30 s on a cold cache. Its other
+/// requests keep [`DEFAULT_TIMEOUT_MS`].
+const LOCAL_START_TIMEOUT_MS: u64 = 120_000;
 /// Character budget for an MCP tool description. Descriptions reach the
 /// model with every request and some servers ship whole manuals in them.
 const DEFAULT_DESCRIPTION_LIMIT: usize = 2048;
@@ -1159,7 +1164,7 @@ impl McpStart {
         };
         // One deadline bounds initialization and discovery. Tool calls on
         // the connection are not bounded by it.
-        let timeout = connection_timeout(&config);
+        let timeout = start_timeout(&config);
         let activated = tokio::time::timeout(timeout, activation)
             .await
             .unwrap_or_else(|_| {
@@ -1607,6 +1612,18 @@ fn connection_timeout(config: &McpConfigureRequest) -> Duration {
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .clamp(1, 600_000),
     )
+}
+
+/// How long a start (spawning or reaching the server, initializing it and
+/// listing its tools) may take: its `timeout_ms` when set; otherwise 2
+/// minutes for a local server, which a launcher may still be fetching, and
+/// 30 s for a remote one.
+fn start_timeout(config: &McpConfigureRequest) -> Duration {
+    if config.timeout_ms.is_none() && config.transport == "stdio" {
+        Duration::from_millis(LOCAL_START_TIMEOUT_MS)
+    } else {
+        connection_timeout(config)
+    }
 }
 
 /// `config` as its server starts in the project in `folder`: a relative
@@ -4875,6 +4892,27 @@ mod recovery_tests {
         let (_, changed) = candidate.prepare_reusing(&live, "fixture", broken).unwrap();
         assert!(changed.is_some() && candidate.starting().is_some());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Without `timeout_ms`, a local server's start gets 2 minutes and
+    /// everything else (its later requests, a remote server's start) 30 s;
+    /// a `timeout_ms` that is set is used for each of them.
+    #[test]
+    fn a_local_server_without_a_timeout_has_two_minutes_to_start() {
+        let mut local = config(Path::new("/nonexistent"), "0");
+        local.timeout_ms = None;
+        assert_eq!(start_timeout(&local), Duration::from_secs(120));
+        assert_eq!(connection_timeout(&local), Duration::from_secs(30));
+        local.timeout_ms = Some(5_000);
+        assert_eq!(start_timeout(&local), Duration::from_secs(5));
+        let remote = McpConfigureRequest {
+            transport: "streamable_http".into(),
+            url: Some("http://127.0.0.1:9/mcp".into()),
+            command: None,
+            timeout_ms: None,
+            ..local
+        };
+        assert_eq!(start_timeout(&remote), Duration::from_secs(30));
     }
 
     #[tokio::test]
