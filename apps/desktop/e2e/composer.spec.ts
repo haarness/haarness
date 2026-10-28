@@ -910,12 +910,14 @@ test("a configured reasoning level is the one in use until Model default overrid
   await new Promise<void>((done) => provider.listen(0, "127.0.0.1", done));
   const address = provider.address();
   if (!address || typeof address === "string") throw Error("Provider fixture did not bind");
-  const { page, errors, close } = await launch(info, (workspace) =>
-    writeFile(
+  const { page, errors, close } = await launch(info, async (workspace) => {
+    await writeFile(
       join(workspace, ".haarness/config.toml"),
       `[defaults]\nprovider="effort-fixture"\nmodel="effort-model"\nreasoning_effort="high"\n[providers.effort-fixture]\nname="Effort fixture"\nprotocol="openai-chat-completions"\nbase_url="http://127.0.0.1:${address.port}/v1"\nrequires_auth=false\ntools=true\nreasoning=true\n`,
-    ),
-  );
+    );
+    await mkdir(join(workspace, ".haarness/commands"), { recursive: true });
+    await writeFile(join(workspace, ".haarness/commands/review-code.md"), "---\ndescription: Review code\n---\nReview $ARGUMENTS.\n");
+  });
   try {
     const model = page.getByRole("combobox", { name: "Model", exact: true });
     const slider = page.getByRole("slider", { name: "Reasoning effort", exact: true });
@@ -938,7 +940,7 @@ test("a configured reasoning level is the one in use until Model default overrid
     await expect(model.locator(".model-effort-summary")).toHaveText("High");
     await model.click();
     await expect(slider).toHaveAttribute("aria-valuetext", "High");
-    await expect(heading).toHaveText("Highdefault");
+    await expect(heading).toHaveText("High default");
     await expect(page.locator(".reasoning-scale span").first()).toHaveText("Model default");
     const picker = page.locator(".select-popover");
     for (const value of ["light", "dark"] as const) {
@@ -966,13 +968,15 @@ test("a configured reasoning level is the one in use until Model default overrid
     await expect(page.locator("html")).not.toHaveAttribute("dir", "rtl");
     expect((await ask("first at the configured level", 1)).reasoning_effort).toBe("high");
 
-    // Model default is a choice of its own: the request names no effort.
+    // Model default is a choice of its own: the request names no effort, and
+    // a slash command runs at it too.
+    const reset = page.getByRole("button", { name: "Reset to default", exact: true });
     await model.click();
     await slider.focus();
     await slider.press("Home");
     await expect(slider).toHaveAttribute("aria-valuetext", "Model default");
     await expect(heading).toHaveText("Model default");
-    await expect(page.getByRole("button", { name: "Reset reasoning to model default", exact: true })).toBeDisabled();
+    await expect(reset).toBeEnabled();
     for (const value of ["light", "dark"] as const) {
       await theme(page, value);
       await shot(page, [picker, model], info.outputPath(`model-default-${value}.png`));
@@ -980,19 +984,64 @@ test("a configured reasoning level is the one in use until Model default overrid
     await done.click();
     await expect(model.locator(".model-effort-summary")).toHaveCount(0);
     expect(await ask("second at the model default", 2)).not.toHaveProperty("reasoning_effort");
+    expect(await ask("/review-code at the model default", 3)).not.toHaveProperty("reasoning_effort");
 
-    // Reset from a level goes to the model default too; a level goes out as it is.
+    // Reset follows the configuration again: nothing is named, and the turn
+    // runs at the configured level.
+    await model.click();
+    await reset.click();
+    await expect(slider).toHaveAttribute("aria-valuetext", "High");
+    await expect(heading).toHaveText("High default");
+    await expect(reset).toBeDisabled();
+    await done.click();
+    expect((await ask("fourth back on the configured level", 4)).reasoning_effort).toBe("high");
+
+    // A level picked goes out as it is, for a message and a slash command.
     await model.click();
     await slider.focus();
-    await slider.press("End");
-    await expect(heading).toHaveText("Highdefault");
-    await page.getByRole("button", { name: "Reset reasoning to model default", exact: true }).click();
-    await expect(slider).toHaveAttribute("aria-valuetext", "Model default");
+    await slider.press("Home");
     await slider.press("ArrowRight");
     await expect(slider).toHaveAttribute("aria-valuetext", "Low");
     await expect(heading).toHaveText("Low");
     await done.click();
-    expect((await ask("third at low", 3)).reasoning_effort).toBe("low");
+    expect((await ask("fifth at low", 5)).reasoning_effort).toBe("low");
+    expect((await ask("/review-code at low", 6)).reasoning_effort).toBe("low");
+
+    // A model that lists no levels is sent the configured one as written, so
+    // the picker shows it, with Model default to override it.
+    await model.click();
+    await picker.locator('[role="option"][data-value="echo/echo-1"]').click();
+    await expect(model).toHaveAttribute("data-value", "echo/echo-1");
+    await expect(slider).toHaveAttribute("max", "1");
+    await expect(slider).toHaveAttribute("aria-valuetext", "High");
+    await expect(heading).toHaveText("High default");
+    await expect(reset).toBeDisabled();
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await shot(page, [picker, model], info.outputPath(`no-levels-${value}.png`));
+    }
+    await done.click();
+    await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    await pill.click();
+    await expect(page.locator(".reasoning-default")).toHaveText("افتراضي");
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await shot(page, [picker, pill], info.outputPath(`no-levels-ar-${value}.png`));
+    }
+    // The slider's own name is Arabic too.
+    const range = page.locator(".reasoning-slider input");
+    await range.focus();
+    await range.press("Home");
+    await expect(page.locator(".reasoning-default")).toHaveCount(0);
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await shot(page, [picker, pill], info.outputPath(`model-default-ar-${value}.png`));
+    }
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+    await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+    await expect(page.locator("html")).not.toHaveAttribute("dir", "rtl");
     expect(errors).toEqual([]);
   } finally {
     await close();
