@@ -4523,6 +4523,219 @@ async fn reasoning_commands_use_each_models_advertised_domain() {
     assert!(app.reasoning_effort.is_none());
 }
 
+/// The Reasoning picker's rows as their descriptions read, by value.
+fn reasoning_rows(app: &App) -> Vec<(String, String)> {
+    super::commands::reasoning_entries(app)
+        .into_iter()
+        .filter(|entry| entry.value != "display")
+        .map(|entry| (entry.value, entry.description))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_configured_effort_reads_as_the_current_level_and_provider_default_overrides_it() {
+    let mut app = selector_fixture();
+    let mut info = side_server_info(Vec::new());
+    info.default_reasoning_effort = Some("high".into());
+    app.server_info = Some(info);
+
+    // No pick: the configured level is the one in use, marked as the default.
+    assert_eq!(app.reasoning_choice(), "high");
+    // A level picked shows in the band; the configured one, a default, does not.
+    assert!(!side_frame(&app).contains("high"));
+    app.reasoning_effort = Some("medium".into());
+    assert!(side_frame(&app).contains("medium"));
+    app.reasoning_effort = None;
+    assert_eq!(
+        reasoning_rows(&app),
+        [
+            ("off".to_owned(), "Let the model decide".to_owned()),
+            ("low".to_owned(), "Brief thinking".to_owned()),
+            ("medium".to_owned(), "Balanced thinking".to_owned()),
+            (
+                "high".to_owned(),
+                "Deep thinking · default · active".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(app.requested_effort(), None, "no pick names nothing");
+
+    // Provider default is a pick of its own, sent by name; no badge says so.
+    app.execute_command("/reasoning off", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_effort.as_deref(), Some("default"));
+    assert_eq!(app.requested_effort().as_deref(), Some("default"));
+    assert_eq!(app.notice, "Reasoning effort: provider default");
+    assert_eq!(app.reasoning_choice(), "off");
+    let rows = reasoning_rows(&app);
+    assert_eq!(rows[0].1, "Let the model decide · active");
+    assert_eq!(rows[3].1, "Deep thinking · default");
+    app.notice.clear();
+    let frame = side_frame(&app);
+    assert!(!frame.contains("default"), "{frame}");
+    // Every model has a default of its own, so a model switch keeps it.
+    app.thread.model = "gpt-5.4-mini".into();
+    app.normalize_reasoning();
+    assert_eq!(app.reasoning_effort.as_deref(), Some("default"));
+
+    // A level the model lacks is marked where the model runs it.
+    app.providers[0].models[1].reasoning_efforts = vec!["low".into(), "medium".into()];
+    app.server_info.as_mut().unwrap().default_reasoning_effort = Some("max".into());
+    app.reasoning_effort = None;
+    assert_eq!(app.reasoning_choice(), "medium");
+
+    // A server with nothing configured is never sent the name.
+    app.reasoning_effort = Some("default".into());
+    app.server_info.as_mut().unwrap().default_reasoning_effort = None;
+    assert_eq!(app.requested_effort(), None);
+    assert_eq!(app.reasoning_choice(), "off");
+}
+
+#[tokio::test]
+async fn without_a_configured_effort_provider_default_is_no_pick() {
+    let mut app = selector_fixture();
+    app.server_info = Some(side_server_info(Vec::new()));
+    app.reasoning_effort = Some("high".into());
+    app.execute_command("/reasoning off", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_effort, None);
+    assert_eq!(app.requested_effort(), None);
+    let rows = reasoning_rows(&app);
+    assert_eq!(rows[0].1, "Let the model decide · active");
+    assert!(
+        rows.iter().all(|(_, text)| !text.contains("· default")),
+        "{rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn ultracode_off_names_the_configured_level_it_returns_to() {
+    // The chat goes back to the configured level, to a level picked before
+    // Ultracode came on (the chat's own setting, or another client's), or to
+    // the model's own default.
+    for (configured, picked, returns_to) in [
+        (Some("medium"), None, "medium"),
+        (Some("medium"), Some("low"), "low"),
+        (Some("medium"), Some("default"), "provider default"),
+        (None, Some("high"), "high"),
+        (None, None, "provider default"),
+    ] {
+        let mut app = selector_fixture();
+        let mut info = side_server_info(Vec::new());
+        info.default_reasoning_effort = configured.map(str::to_owned);
+        app.server_info = Some(info);
+        app.thread.ultracode = true;
+        app.reasoning_effort = picked.map(str::to_owned);
+        assert_eq!(app.reasoning_choice(), "ultracode");
+        let thread = app.thread.clone();
+        let mut updated = thread.clone();
+        updated.ultracode = false;
+        let (address, server) =
+            side_chat_server(vec![Some(serde_json::to_string(&updated).unwrap())]).await;
+        let client =
+            crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+        app.execute_command("/ultracode off", &client)
+            .await
+            .unwrap();
+        assert!(!app.thread.ultracode);
+        assert_eq!(
+            app.notice,
+            format!("Ultracode disabled · reasoning uses {returns_to}")
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_prompt_command_names_the_model_default_only_to_a_server_that_configures_a_level() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    for configured in [Some("high"), None] {
+        let thread = fixture_thread();
+        let turn = haarness_protocol::Turn {
+            id: haarness_protocol::TurnId::new(),
+            thread_id: thread.id,
+            request_id: haarness_protocol::RequestId::new(),
+            status: haarness_protocol::TurnStatus::Running,
+            agent: "build".into(),
+            provider: thread.provider.clone(),
+            model: thread.model.clone(),
+            ultracode: false,
+            error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let response_body =
+            serde_json::to_string(&haarness_protocol::CommandExecutionResponse::Turn { turn })
+                .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = socket.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 202 Accepted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let client =
+            crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        let mut info = side_server_info(Vec::new());
+        info.default_reasoning_effort = configured.map(str::to_owned);
+        app.server_info = Some(info);
+        app.server_commands = vec![haarness_protocol::CommandInfo {
+            execution: haarness_protocol::DefinitionExecution::default(),
+            name: "review-code".into(),
+            description: "configured review".into(),
+            source: Some("configured".into()),
+            agent: None,
+            model: None,
+            argument_hint: None,
+            template: "hidden on client".into(),
+            plugin: None,
+        }];
+        app.reasoning_effort = Some("default".into());
+
+        app.execute_command("/review-code focus", &client)
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        match configured {
+            Some(_) => assert_eq!(body["reasoningEffort"], "default"),
+            None => assert!(body.get("reasoningEffort").is_none(), "{body}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn interactive_agent_selection_excludes_hidden_and_subagent_profiles() {
     let mut app = selector_fixture();
@@ -20607,6 +20820,7 @@ fn home_names_the_missing_provider_and_the_agent_mention() {
         default_provider: None,
         default_model: None,
         default_approval_mode: None,
+        default_reasoning_effort: None,
         default_agent: None,
         project_trusted: Some(false),
         pid: None,
@@ -20805,7 +21019,6 @@ fn search_rows_name_the_pattern_and_where_it_looked() {
     assert!(english.contains("grep TODO in src"), "{english}");
     assert!(english.contains("glob **/*.md"), "{english}");
     // Tools that name their file or query differently still show it.
-        default_reasoning_effort: None,
     assert!(
         english.contains("mcp__files__read docs/TUI.md"),
         "{english}"
@@ -22279,6 +22492,7 @@ async fn the_band_cuts_a_notice_to_the_room_left_after_the_folder() {
         default_provider: None,
         default_model: None,
         default_approval_mode: None,
+        default_reasoning_effort: None,
         default_agent: None,
         project_trusted: Some(true),
         pid: None,
@@ -22477,7 +22691,6 @@ async fn an_undone_prompt_with_a_reference_keeps_its_chip_under_a_slash_command(
     crate::input::handle_key(&mut app, press(KeyCode::Char('/')), &client)
         .await
         .unwrap();
-        default_reasoning_effort: None,
     assert_eq!(app.composer.text(), "/");
     crate::input::handle_key(&mut app, press(KeyCode::Backspace), &client)
         .await
