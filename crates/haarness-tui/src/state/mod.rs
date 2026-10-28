@@ -2703,10 +2703,36 @@ impl App {
         }
         let text = self.composer.text();
         let query = text.strip_prefix('/')?;
-        if query.contains(char::is_whitespace) {
+        // A path (a file dropped into the prompt) is a message, never a
+        // command: no command name holds a slash.
+        if query.contains(char::is_whitespace) || query.contains('/') {
             return None;
         }
         Some(self.filtered_slash_entries(query))
+    }
+
+    /// A bracketed paste or terminal file drop into the prompt: dropped
+    /// media becomes attachments, anything else is text.
+    pub fn paste_into_prompt(&mut self, text: &str) {
+        // A shell command reads only the prompt's text, so in shell mode a
+        // dropped file stays its path.
+        let paths = if self.shell_mode {
+            Ok(None)
+        } else {
+            crate::media::paths_from_paste(text, &self.attachments)
+        };
+        match paths {
+            Ok(Some(paths)) => {
+                let added = self.add_attachments(paths);
+                self.notice = format!(
+                    "Attached {added} file{} · backspace removes",
+                    if added == 1 { "" } else { "s" }
+                );
+            }
+            Ok(None) => self.composer.paste(text),
+            Err(error) => self.notice = error,
+        }
+        self.selection = 0;
     }
 
     /// Add canonical attachment paths without duplicating an existing chip.

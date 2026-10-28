@@ -906,18 +906,7 @@ async fn run_with_client(
                         if app.permission_focus {
                             app.release_permission_focus(true);
                         }
-                        match crate::media::paths_from_paste(&text, &app.attachments) {
-                            Ok(Some(paths)) => {
-                                let added = app.add_attachments(paths);
-                                app.notice = format!(
-                                    "Attached {added} file{} · backspace removes",
-                                    if added == 1 { "" } else { "s" }
-                                );
-                            }
-                            Ok(None) => app.composer.paste(&text),
-                            Err(error) => app.notice = error,
-                        }
-                        app.selection = 0;
+                        app.paste_into_prompt(&text);
                     }
                     TerminalEvent::Mouse(mouse) => {
                         if let Some(terminal) = &mut app.terminal {
