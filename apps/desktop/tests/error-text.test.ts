@@ -68,6 +68,16 @@ test("a status without a sentence reads as what to do, in the same words as the 
   for (const status of [404, 410]) assert.equal(errorText(bare(status)).message, "This is no longer available. It may have been removed.");
   assert.equal(errorText(bare(413)).message, "This is too large to send.");
   assert.equal(errorText(bare(400)).message, "That didn't go through. Try again.");
+  // A wrong token or password says it was refused; through Cloud's relay a
+  // 401 is Cloud's sign-in.
+  assert.equal(errorText(bare(401)).message, "The server refused the token or password. Check it, then try again.");
+  assert.equal(errorText("Unauthorized").message, "The server refused the token or password. Check it, then try again.");
+  assert.equal(errorText(bare(401), { relay: true }).message, "That didn't go through. Try again.");
+  // A refusal the server words for people is its own, whatever its status.
+  assert.deepEqual(errorText(new ApiError(400, "http_error", "Path must be relative to the workspace", false, "Path must be relative to the workspace")), {
+    message: "Path must be relative to the workspace",
+    known: false,
+  });
   // A reason phrase, a status line or a proxy's page is no sentence either.
   for (const said of ["Bad Gateway", "502 Bad Gateway", "bad gateway", "HTTP/1.1 502 Bad Gateway", "<html><body><h1>502 Bad Gateway</h1></body></html>"])
     assert.equal(errorText(new ApiError(502, "http_error", said, false, said)).title, "Haarness isn't answering", said);

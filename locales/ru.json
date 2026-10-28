@@ -1878,6 +1878,7 @@
   "You don't have access to this.": "У вас нет доступа к этому.",
   "This is no longer available. It may have been removed.": "Это больше недоступно. Возможно, оно было удалено.",
   "This is too large to send.": "Слишком большой объём для отправки.",
+  "The server refused the token or password. Check it, then try again.": "Сервер отклонил токен или пароль. Проверьте их и повторите попытку.",
   "That didn't go through. Try again.": "Не удалось выполнить. Повторите попытку.",
   "Sign-in could not start. Another sign-in is still waiting on this computer. Finish or close it, then try again.": "Не удалось начать вход. На этом компьютере ещё ждёт другой вход. Завершите или закройте его и повторите попытку.",
   "A port is busy. Something else on this computer is using a port Haarness needs. Close it, then try again.": "Порт занят. Другая программа на этом компьютере занимает порт, нужный Haarness. Закройте её и повторите попытку.",

@@ -141,7 +141,12 @@ wrong=$(env HAARNESS_DATA_DIR="$data" HAARNESS_SERVER_TOKEN='wrong-token' HAARNE
 wrong_status=$?
 set -e
 test "$wrong_status" -ne 0
-printf '%s\n' "$wrong" | grep -F 'HTTP 401 Unauthorized' >/dev/null
+# A wrong token says it was refused, in plain words, never as a status line.
+printf '%s\n' "$wrong" | grep -F 'The server refused the token or password.' >/dev/null
+if printf '%s\n' "$wrong" | grep -F 'HTTP 401' >/dev/null; then
+    echo 'Attach authentication error showed a status line' >&2
+    exit 1
+fi
 if printf '%s\n' "$wrong" | grep -F 'wrong-token' >/dev/null; then
     echo 'Attach authentication error leaked the provided token' >&2
     exit 1

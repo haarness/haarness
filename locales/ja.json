@@ -1878,6 +1878,7 @@
   "You don't have access to this.": "これにアクセスする権限がありません。",
   "This is no longer available. It may have been removed.": "これはもう利用できません。削除された可能性があります。",
   "This is too large to send.": "大きすぎるため送信できません。",
+  "The server refused the token or password. Check it, then try again.": "サーバーがトークンまたはパスワードを拒否しました。確認してから、もう一度お試しください。",
   "That didn't go through. Try again.": "完了できませんでした。もう一度お試しください。",
   "Sign-in could not start. Another sign-in is still waiting on this computer. Finish or close it, then try again.": "サインインを開始できませんでした。このコンピューターで別のサインインがまだ待機中です。完了するか閉じてから、もう一度お試しください。",
   "A port is busy. Something else on this computer is using a port Haarness needs. Close it, then try again.": "ポートが使用中です。このコンピューターの別のプログラムが Haarness に必要なポートを使用しています。それを閉じてから、もう一度お試しください。",
