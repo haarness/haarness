@@ -90,7 +90,7 @@ try:
     read = api('/mcp/app/resources/read', {'uri': 'ui://weather/view.html'})
     content = read['contents'][0]
     assert content['mimeType'] == 'text/html;profile=mcp-app' and 'Weather fixture' in content['text'], content['mimeType']
-    assert content['_meta']['ui']['csp']['connectDomains'] == ['https://api.weather.example', 'live.weather.example'], content['_meta']
+    assert content['_meta']['ui']['csp']['connectDomains'] == ['https://api.weather.example', 'live.weather.example', 'blob:'], content['_meta']
     check('the page and its declared policy are served from the tool\'s server')
 
     command = shlex.join(['env', *[f'{key}={value}' for key, value in env.items() if key.startswith(('HAARNESS_', 'LANG', 'LC_'))],

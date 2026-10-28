@@ -786,6 +786,7 @@ fn stop_failure_categories(error: &CoreError) -> (&'static str, &'static str) {
     } else if status.is_some_and(|status| (500..600).contains(&status)) {
         "server_error"
     } else if is_provider_context_overflow(error)
+        || is_provider_oversized_request(error)
         || status.is_some_and(|status| (400..500).contains(&status))
     {
         "invalid_request"
@@ -922,22 +923,22 @@ fn advised_wait(text: &str) -> Option<std::time::Duration> {
     parsed.then(|| std::time::Duration::from_secs_f64(seconds))
 }
 
+/// How a rate limit or quota is worded. Such a refusal can also speak of too
+/// many tokens or a request too large; compacting cannot answer it.
+const RATE_LIMITED: [&str; 5] = [
+    "rate limit",
+    "too many requests",
+    "throttl",
+    "per minute",
+    "quota",
+];
+
 fn is_provider_context_overflow(error: &CoreError) -> bool {
     let CoreError::Provider(message) = error else {
         return false;
     };
     let message = message.to_ascii_lowercase();
-    // Rate limits also speak of too many tokens; compacting cannot fix them.
-    if [
-        "rate limit",
-        "too many requests",
-        "throttl",
-        "per minute",
-        "quota",
-    ]
-    .iter()
-    .any(|marker| message.contains(marker))
-    {
+    if RATE_LIMITED.iter().any(|marker| message.contains(marker)) {
         return false;
     }
     // Phrasings collected across providers and local servers (after
@@ -1014,9 +1015,21 @@ fn is_provider_image_rejection(error: &CoreError, request_has_images: bool) -> b
             && ["media type", "media_type", "mime type"]
                 .iter()
                 .any(|marker| message.contains(marker)));
-    // Too many bytes, unless the provider says it is the context that is
-    // too long: compaction answers that one.
-    let oversized = OVERSIZED_REQUEST
+    named || is_provider_oversized_request(error)
+}
+
+/// A provider that refused the request for its size in bytes (an HTTP 413,
+/// which Bedrock words "413 Payload Too Large", or Gemini's "Request payload
+/// size exceeds the limit: N bytes"), not for a context too long in tokens.
+/// Its bytes are mostly attachments: compacting leaves out the person's from
+/// the turns it keeps, but not the files the model read there, so it is
+/// tried once.
+fn is_provider_oversized_request(error: &CoreError) -> bool {
+    let CoreError::Provider(message) = error else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    OVERSIZED_REQUEST
         .iter()
         .any(|marker| message.contains(marker))
         && ![
@@ -1026,8 +1039,20 @@ fn is_provider_image_rejection(error: &CoreError, request_has_images: bool) -> b
             "input is too long",
         ]
         .iter()
-        .any(|marker| message.contains(marker));
-    named || oversized
+        .chain(&RATE_LIMITED)
+        .any(|marker| message.contains(marker))
+}
+
+/// How a turn ends whose request the provider still refused as too large in
+/// bytes after the chat was compacted for it: the refusal follows, for the
+/// log. The transcript says what to do instead (see `describe_failure`).
+const STILL_TOO_LARGE: &str = "request still too large after compacting: ";
+
+fn still_too_large(error: CoreError) -> CoreError {
+    match error {
+        CoreError::Provider(message) => CoreError::Provider(format!("{STILL_TOO_LARGE}{message}")),
+        error => error,
+    }
 }
 
 /// An image attachment in a sent request, where an Anthropic-shaped error
@@ -1233,7 +1258,7 @@ fn image_volume_refusal(message: &str) -> Option<ImageVolume> {
 /// actionable failure. Providers use several JSON shapes for the same error;
 /// extract their human message/code before falling back to bounded plain text.
 fn user_facing_error(error: &CoreError) -> String {
-    describe_error(error, None)
+    describe_failure(error, None, false)
 }
 
 /// How a turn whose prompt a `UserPromptSubmit` hook blocked fails:
@@ -1261,6 +1286,42 @@ pub fn refusal_reason(error: &CoreError) -> String {
         | CoreError::PermissionDenied(reason) => reason.clone(),
         other => user_facing_error(other),
     }
+}
+
+/// `describe_error`, except that a request the provider refused for its size
+/// in bytes is said plainly instead of repeating the 413. With `advice`, for
+/// the person, it also says what to do: the chat as a whole is what is too
+/// large (its files, the ones the model read among them, or its text behind
+/// a small limit), which compacting does not always make smaller. Without,
+/// for a model that started the work, it only says what happened.
+fn describe_failure(error: &CoreError, provider: Option<&str>, advice: bool) -> String {
+    if let CoreError::Provider(raw) = error
+        && is_provider_oversized_request(error)
+    {
+        let compacted = raw.starts_with(STILL_TOO_LARGE);
+        return if advice {
+            format!(
+                "This chat is too large for {} to take in one request{}: continue in a new chat, or attach smaller files.",
+                provider.unwrap_or("the provider"),
+                if compacted {
+                    ", even after compacting"
+                } else {
+                    ""
+                }
+            )
+        } else {
+            format!(
+                "{} refused this request as too large{}.",
+                provider.unwrap_or("The provider"),
+                if compacted {
+                    ", even after the chat was compacted"
+                } else {
+                    ""
+                }
+            )
+        };
+    }
+    describe_error(error, provider)
 }
 
 /// `user_facing_error`, naming the provider (when known) that has no
@@ -2516,6 +2577,27 @@ impl AgentRuntime {
             .await
     }
 
+    /// Where chat `id` reads a message's relative attachment paths from: the
+    /// folder it works in.
+    pub async fn attachment_folder(&self, id: ThreadId) -> CoreResult<PathBuf> {
+        self.thread_workspace(&self.reading_thread(id).await?, FolderAccess::Read)
+            .await
+    }
+
+    /// A message's attachments as [`crate::attachments::admit`] keeps them, a
+    /// relative path read from where the chat works.
+    async fn admitted_attachments(
+        &self,
+        id: ThreadId,
+        attachments: Vec<String>,
+    ) -> CoreResult<Vec<String>> {
+        if attachments.is_empty() {
+            return Ok(attachments);
+        }
+        let workspace = self.attachment_folder(id).await?;
+        crate::attachments::admit_off_executor(attachments, workspace).await
+    }
+
     pub async fn input_queue(&self, id: ThreadId) -> CoreResult<haarness_protocol::InputQueue> {
         self.repository.get_thread(id).await?;
         self.repository.input_queue(id).await
@@ -2531,7 +2613,7 @@ impl AgentRuntime {
     async fn defer_input(
         &self,
         id: ThreadId,
-        request: QueueInputRequest,
+        mut request: QueueInputRequest,
     ) -> CoreResult<QueueInputResponse> {
         if request.synthetic {
             return Err(CoreError::Invalid(
@@ -2539,6 +2621,10 @@ impl AgentRuntime {
             ));
         }
         self.repository.get_thread(id).await?;
+        // Checked before it waits, as a message sent at once is: one the
+        // turn would refuse when its time came would sit at the head of the
+        // queue and hold back every message behind it.
+        request.attachments = self.admitted_attachments(id, request.attachments).await?;
         loop {
             let active = self.active.get(&id).map(|entry| Arc::clone(entry.value()));
             if let Some(active) = active {
@@ -2680,9 +2766,41 @@ impl AgentRuntime {
     pub async fn change_input_queue(
         &self,
         id: ThreadId,
-        action: haarness_protocol::InputQueueAction,
+        mut action: haarness_protocol::InputQueueAction,
     ) -> CoreResult<haarness_protocol::InputQueue> {
         self.repository.get_thread(id).await?;
+        // An edit's new attachments are checked as a queued message's are.
+        // Those the message has already were checked when it arrived: a
+        // client sends them back with every edit, and one whose file has
+        // changed since must not keep its text from being edited.
+        if let haarness_protocol::InputQueueAction::Edit {
+            id: key,
+            attachments: Some(attachments),
+            ..
+        } = &mut action
+        {
+            let queue = self.repository.input_queue(id).await?;
+            let had = queue
+                .items
+                .iter()
+                .find(|item| item.id == *key)
+                .map(|item| item.attachments.clone())
+                .unwrap_or_default();
+            let (kept, new): (Vec<_>, Vec<_>) = std::mem::take(attachments)
+                .into_iter()
+                .enumerate()
+                .partition(|(_, source)| had.contains(source));
+            let (places, sources): (Vec<_>, Vec<_>) = new.into_iter().unzip();
+            let admitted = self.admitted_attachments(id, sources).await?;
+            let mut merged = kept;
+            merged.extend(places.into_iter().zip(admitted));
+            merged.sort_by_key(|(place, _)| *place);
+            *attachments = merged.into_iter().map(|(_, source)| source).collect();
+            // Unless it keeps them exactly, they must fit together.
+            if *attachments != had {
+                crate::attachments::within_limit(attachments)?;
+            }
+        }
         if let haarness_protocol::InputQueueAction::Steer { revision, id: key } = action {
             loop {
                 let active = self.active.get(&id).map(|entry| Arc::clone(entry.value()));
@@ -2749,17 +2867,9 @@ impl AgentRuntime {
                 "text or an attachment is required".into(),
             ));
         }
-        if !request.attachments.is_empty() {
-            // A relative attachment is read from where the chat works.
-            let workspace = self
-                .thread_workspace(&self.reading_thread(thread_id).await?, FolderAccess::Read)
-                .await?;
-            request.attachments = crate::attachments::admit_off_executor(
-                std::mem::take(&mut request.attachments),
-                workspace,
-            )
+        request.attachments = self
+            .admitted_attachments(thread_id, std::mem::take(&mut request.attachments))
             .await?;
-        }
         loop {
             let thread = self.repository.get_thread(thread_id).await?;
             let active_turn = self
@@ -6106,16 +6216,15 @@ impl AgentRuntime {
             ));
         }
         let _reload = self.reload_gate.read().await;
-        if !request.attachments.is_empty() {
-            // A relative attachment is read from where the chat works.
-            let workspace = self
-                .thread_workspace(&self.reading_thread(thread_id).await?, FolderAccess::Read)
+        // A queued message was checked when it arrived, and its turn takes
+        // the message as the queue holds it. It is not refused now: a file
+        // that changed meanwhile, or one an older server queued unchecked,
+        // reaches the model as a note (see `attachments::for_model`), and the
+        // queue moves on.
+        if queue_revision.is_none() {
+            request.attachments = self
+                .admitted_attachments(thread_id, std::mem::take(&mut request.attachments))
                 .await?;
-            request.attachments = crate::attachments::admit_off_executor(
-                std::mem::take(&mut request.attachments),
-                workspace,
-            )
-            .await?;
         }
         self.apply_chat_turn_settings(thread_id, &mut request).await;
         let components = self.components();
@@ -6948,6 +7057,9 @@ pub(crate) struct DefinitionShell<'a> {
 
 #[async_trait::async_trait]
 impl crate::ToolInvoker for TurnToolInvoker {
+    fn stop_token(&self) -> Option<CancellationToken> {
+        Some(self.runner.cancel.clone())
+    }
     fn parallel_safe(&self, name: &str, arguments: &serde_json::Value) -> bool {
         self.runner
             .tools
@@ -8016,7 +8128,8 @@ impl RunnerTask {
             .providers
             .get(&self.turn.provider)
             .map(|provider| provider.info().name);
-        describe_error(error, name.as_deref())
+        // A child agent's failure is read by the model that started it.
+        describe_failure(error, name.as_deref(), self.depth == 0)
     }
 
     /// An agent's definition: this turn's own from its snapshot, any other
@@ -8457,7 +8570,8 @@ impl RunnerTask {
             %error,
             "provider refused an image; leaving it out"
         );
-        let reason = user_facing_error(error).chars().take(500).collect();
+        // The provider's own words: the notice says what Haarness did about it.
+        let reason = describe_error(error, None).chars().take(500).collect();
         self.publish_item(ItemData::MediaOmitted {
             fingerprints,
             names,
@@ -8649,6 +8763,11 @@ impl RunnerTask {
                 .filter(|turns| *turns > 0)
                 .unwrap_or(crate::goal::MAX_GOAL_TURNS);
             let mut compactions_this_turn = 0_u8;
+            // A refusal of the request's bytes compacts once until the
+            // provider takes a request again: when the summary leaves the
+            // request too large, more summaries would only summarize the
+            // last one.
+            let mut compacted_for_size = false;
             let mut recoveries = 0_u8;
             // Corrective rounds after a structured-output turn answered in the
             // wrong shape: without a forced tool choice a model can reply in
@@ -8777,6 +8896,17 @@ impl RunnerTask {
                         );
                         return Ok(());
                     }
+                }
+            }
+            // Haarness answers before its MCP servers have started: a turn
+            // begun while one is still on its first start waits for it, so
+            // it is offered the tools (and the prompt prefix) a turn begun a
+            // moment later would be. Stop ends the wait.
+            if let Some(starting) = self.tools.starting() {
+                tokio::select! {
+                    biased;
+                    () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+                    () = starting => {}
                 }
             }
             // A changed date or memory index and this prompt's hook context
@@ -8986,11 +9116,11 @@ impl RunnerTask {
                     info!(
                         thread = %self.thread.id,
                         turn = %self.turn.id,
-                        images = cut.images,
+                        media = cut.media,
                         removed = cut.removed,
                         bytes = cut.bytes,
                         kept = cut.kept,
-                        "oldest images left out to fit the provider's request limits"
+                        "oldest attachments left out to fit the provider's request limits"
                     );
                 }
                 if recovering {
@@ -9284,11 +9414,16 @@ impl RunnerTask {
                             }
                             return Err(error_value);
                         }
+                        let oversized = is_provider_oversized_request(&error_value);
+                        if oversized && compacted_for_size {
+                            return Err(still_too_large(error_value));
+                        }
                         if compactions_this_turn < MAX_COMPACTIONS_PER_TURN
-                            && is_provider_context_overflow(&error_value)
+                            && (oversized || is_provider_context_overflow(&error_value))
                             && self.recover_context_overflow(&provider, &model).await?
                         {
                             compactions_this_turn = compactions_this_turn.saturating_add(1);
+                            compacted_for_size |= oversized;
                             continue 'provider_round;
                         }
                         if transient_retries < TRANSIENT_RETRIES
@@ -9351,12 +9486,19 @@ impl RunnerTask {
                                 blocked = Some(error_value);
                                 break;
                             }
+                            let oversized =
+                                !saw_provider_event && is_provider_oversized_request(&error_value);
+                            if oversized && compacted_for_size {
+                                blocked = Some(still_too_large(error_value));
+                                break;
+                            }
                             if !saw_provider_event
                                 && compactions_this_turn < MAX_COMPACTIONS_PER_TURN
-                                && is_provider_context_overflow(&error_value)
+                                && (oversized || is_provider_context_overflow(&error_value))
                                 && self.recover_context_overflow(&provider, &model).await?
                             {
                                 compactions_this_turn = compactions_this_turn.saturating_add(1);
+                                compacted_for_size |= oversized;
                                 continue 'provider_round;
                             }
                             // Providers report an HTTP failure as the stream's
@@ -9405,6 +9547,9 @@ impl RunnerTask {
                         continue;
                     }
                     saw_provider_event = true;
+                    // The provider took this request: a later one refused
+                    // for its size may compact again.
+                    compacted_for_size = false;
                     match event {
                         ProviderEvent::TextDelta(delta) => {
                             if delta.is_empty() {
@@ -13444,7 +13589,7 @@ fn provider_messages_with_origins(
                     (content, attachments)
                 } else {
                     let (content, attachments) =
-                        crate::attachments::for_model(content, attachments);
+                        crate::attachments::for_model(content, attachments, &omitted);
                     without_omitted(content, attachments, &omitted)
                 };
                 let message = if attachments.is_empty() || replayed_after_compaction {
@@ -13528,8 +13673,11 @@ fn provider_messages_with_origins(
             } => valid_calls.get(&call_id).cloned().map(|name| {
                 // A tool's image is a file it saw; one deleted since is named
                 // instead of failing every later request.
-                let (output, attachments) =
-                    crate::attachments::for_model(output, tool_output_attachments(&metadata));
+                let (output, attachments) = crate::attachments::for_model(
+                    output,
+                    tool_output_attachments(&metadata),
+                    &omitted,
+                );
                 let (output, attachments) = without_omitted(output, attachments, &omitted);
                 ProviderMessage::ToolResult {
                     call_id,
@@ -14724,7 +14872,16 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             .get("command")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        let analysis = crate::permissions::bash::analyze(command, workspace);
+        // Relative paths start where the shell tool runs the line.
+        let workdir = arguments
+            .get("workdir")
+            .and_then(serde_json::Value::as_str)
+            .map(|dir| crate::permissions::resolve_permission_path(workspace, dir));
+        let mut analysis = crate::permissions::bash::analyze_in(
+            command,
+            workspace,
+            workdir.as_deref().unwrap_or(workspace),
+        );
         let mut external_patterns = analysis.external_dirs.clone();
         let mut external_paths = analysis
             .external_dirs
@@ -14737,8 +14894,16 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 external_path_request(workspace, workdir, ExternalPathKind::Directory)
         {
             if !external_patterns.contains(&pattern) {
-                external_patterns.push(pattern);
+                external_patterns.push(pattern.clone());
             }
+            // The line runs in that folder, so it is asked about itself
+            // beside any file the line names there, as after a `cd` to it.
+            analysis.paths.push(crate::permissions::bash::NamedPath {
+                path: path.clone(),
+                file: false,
+                literal: true,
+                outside: Some(pattern),
+            });
             external_paths.push(path);
         }
         let mut plans = Vec::new();
@@ -15403,6 +15568,44 @@ mod shell_reading_tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_bash_workdir_is_where_the_line_s_relative_paths_start() {
+        let root = std::env::temp_dir().join(format!("haarness-workdir-{}", uuid::Uuid::now_v7()));
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir_all(project.join("vendor")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(project.join("README.md"), "# x\n").unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), project.join("vendor/lib")).unwrap();
+        let outside = root.join("outside").canonicalize().unwrap();
+        let asked = |arguments: serde_json::Value| {
+            ask_plans("bash", &arguments, &project)
+                .into_iter()
+                .find(|plan| plan.permission == "external_directory")
+                .map(|plan| plan.patterns)
+                .unwrap_or_default()
+        };
+        // From the project `../README.md` is outside; from `src` it is the
+        // project's own.
+        assert!(!asked(json!({ "command": "cat ../README.md" })).is_empty());
+        assert_eq!(
+            asked(json!({ "workdir": "src", "command": "cat ../README.md" })),
+            Vec::<String>::new()
+        );
+        assert!(!asked(json!({ "workdir": "src", "command": "cat ../../x" })).is_empty());
+        // `cd lib` from `vendor` enters the link, and `../x` is next to
+        // where it leads.
+        let found = asked(json!({ "workdir": "vendor", "command": "cd lib && rm -rf ../x" }));
+        assert!(
+            found
+                .iter()
+                .any(|pattern| pattern.starts_with(&outside.display().to_string())),
+            "{found:?}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn always_on_a_folder_that_holds_the_project_remembers_only_the_files_asked_about() {
         use PermissionDecision::{Allow, Ask, Deny};
@@ -15541,6 +15744,22 @@ mod shell_reading_tests {
         for plan in [bash("cat ../../.netrc"), bash("cd ../.. && ls")] {
             assert_eq!(verdict(&saved, &plan), Allow, "{:?}", plan.patterns);
         }
+        // A line run in that folder (its `workdir`) is asked about the folder
+        // too, beside the files it names there, so Always on one of those
+        // files does not let the line run there.
+        let workdir = |command: &str| {
+            outside(
+                "bash",
+                json!({ "workdir": home.display().to_string(), "command": command }),
+            )
+        };
+        let there = workdir("cat .gitconfig && tar cf probe.tar .gitconfig");
+        assert_eq!(there.patterns, vec![file(".gitconfig"), itself.clone()]);
+        assert_eq!(verdict(&remembered, &there), Ask);
+        assert_eq!(workdir("ls").patterns, vec![itself.clone()]);
+        let entered = bash(&format!("cd {} && cat .gitconfig", home.display()));
+        assert_eq!(entered.patterns, vec![itself.clone(), file(".gitconfig")]);
+        assert_eq!(verdict(&remembered, &entered), Ask);
         std::fs::remove_dir_all(&made).unwrap();
     }
 
@@ -17291,6 +17510,93 @@ mod tests {
         ] {
             assert!(!overflow(message), "{message}");
         }
+    }
+
+    #[test]
+    fn a_refusal_of_the_requests_bytes_is_told_apart_from_a_context_too_long() {
+        let oversized = |message: &str| {
+            super::is_provider_oversized_request(&CoreError::Provider(message.into()))
+        };
+        for message in [
+            "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes.",
+            "HTTP 413 Request Entity Too Large",
+            r#"HTTP 413: {"type":"error","error":{"type":"request_too_large","message":"Request too large"}}"#,
+            "HTTP 400 Bad Request: Request payload size exceeds the limit: 20971520 bytes.",
+        ] {
+            assert!(oversized(message), "{message}");
+        }
+        for message in [
+            "prompt is too long: 210000 tokens > 200000 maximum",
+            "HTTP 413 Payload Too Large: maximum context length exceeded",
+            "Request too large for gpt-4o on tokens per min (TPM): Limit 30000, Requested 50000.",
+            "HTTP 400 Bad Request: messages: text content blocks must be non-empty",
+            // A gateway's request rate, worded as a request too large.
+            "HTTP 413 Payload Too Large: rate limit exceeded, retry later",
+            "HTTP 413 Request Entity Too Large: daily quota used up",
+            "Payload too large: more than 60 requests per minute",
+        ] {
+            assert!(!oversized(message), "{message}");
+        }
+        assert!(!super::is_provider_oversized_request(&CoreError::Tool(
+            "HTTP 413".into()
+        )));
+        // Bedrock's adapter words its 413 by the status line alone.
+        assert!(oversized(
+            r#"Bedrock returned 413 Payload Too Large: {"message":"Request Entity Too Large"}"#
+        ));
+        // Where the turn could not compact (compaction off, input queued),
+        // the refusal says what to do rather than repeat the 413.
+        let refusal = CoreError::Provider(
+            "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes."
+                .into(),
+        );
+        assert_eq!(
+            super::describe_failure(&refusal, Some("Anthropic"), true),
+            "This chat is too large for Anthropic to take in one request: continue in a new chat, or attach smaller files."
+        );
+        // The model that started a child agent reads only what happened.
+        assert_eq!(
+            super::describe_failure(&refusal, Some("Anthropic"), false),
+            "Anthropic refused this request as too large."
+        );
+        // A notice of left-out images keeps the provider's own words.
+        assert_eq!(
+            super::describe_error(&refusal, None),
+            "Provider error: HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes."
+        );
+        // Refused again after compacting, it says so.
+        let ended = super::still_too_large(refusal);
+        assert!(
+            ended
+                .to_string()
+                .contains("Request exceeds the maximum allowed number of bytes")
+        );
+        assert_eq!(
+            super::describe_failure(&ended, None, true),
+            "This chat is too large for the provider to take in one request, even after compacting: continue in a new chat, or attach smaller files."
+        );
+        assert_eq!(
+            super::user_facing_error(&ended),
+            "The provider refused this request as too large, even after the chat was compacted."
+        );
+        for error in [
+            ended,
+            CoreError::Provider("Bedrock returned 413 Payload Too Large: too big".into()),
+        ] {
+            assert_eq!(
+                super::stop_failure_categories(&error),
+                ("provider", "invalid_request")
+            );
+        }
+        // A token overflow keeps the provider's words.
+        assert_eq!(
+            super::describe_failure(
+                &CoreError::Provider("prompt is too long: 210000 tokens > 200000 maximum".into()),
+                None,
+                true
+            ),
+            "Provider error: prompt is too long: 210000 tokens > 200000 maximum"
+        );
     }
 
     #[test]

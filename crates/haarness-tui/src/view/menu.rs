@@ -104,6 +104,14 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                 let Some((_, query)) = app.composer.mention_query() else {
                     return TaggedLines::default();
                 };
+                // Nothing yet while the first files for this `@` are on their
+                // way: "No matches" would be wrong for that moment.
+                if app
+                    .file_search
+                    .waiting_for_first_answer(app.mention_suggestions.len())
+                {
+                    return TaggedLines::default();
+                }
                 let dot_path = query == "."
                     || query == ".."
                     || query.starts_with("./")

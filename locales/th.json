@@ -1780,6 +1780,7 @@
   "{count} more lines": "อีก {count} บรรทัด",
   "rejected": "ถูกปฏิเสธ",
   "Approvals changed in another window · ctrl+y to switch": "การอนุมัติถูกเปลี่ยนในหน้าต่างอื่น · ctrl+y เพื่อสลับ",
+  "Could not keep {mode}": "คงโหมด {mode} ไว้ไม่ได้",
   "Share usage statistics": "แชร์สถิติการใช้งาน",
   "Diagnostics": "การวินิจฉัย",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "บันทึกของ Haarness ในคอมพิวเตอร์เครื่องนี้เป็นไฟล์ zip โดยนำข้อมูลลับที่รู้จักออกแล้ว เพื่อแชร์เมื่อเกิดปัญหา",
@@ -2938,5 +2939,8 @@
   "Ends {date}": "สิ้นสุด {date}",
   "On hold": "ถูกระงับ",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "ปิดการใช้เกินอยู่ จึงไม่ใช้เครดิตที่ซื้อ เปิดได้ในการเรียกเก็บเงิน",
-  "Your free trial didn't start: that card was already used for a trial.": "การทดลองใช้ฟรีไม่ได้เริ่ม: บัตรนี้เคยใช้ทดลองใช้แล้ว"
+  "Your free trial didn't start: that card was already used for a trial.": "การทดลองใช้ฟรีไม่ได้เริ่ม: บัตรนี้เคยใช้ทดลองใช้แล้ว",
+  "The attachments come to {size}, over the {limit} limit for media in one message": "ไฟล์แนบรวมกันมีขนาด {size} เกินขีดจำกัดสื่อ {limit} ต่อหนึ่งข้อความ",
+  "its images and PDFs would take the message over the 20 MiB limit for media": "รูปภาพและ PDF ของรายการนี้จะทำให้ข้อความเกินขีดจำกัดสื่อ 20 MiB",
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} มีขนาด {size} เกินขีดจำกัดสื่อ {limit} ต่อหนึ่งข้อความ"
 }

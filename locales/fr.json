@@ -1780,6 +1780,7 @@
   "{count} more lines": "{count} lignes de plus",
   "rejected": "refusé",
   "Approvals changed in another window · ctrl+y to switch": "Approbations modifiées dans une autre fenêtre · ctrl+y pour basculer",
+  "Could not keep {mode}": "Impossible de conserver le mode {mode}",
   "Share usage statistics": "Partager les statistiques d’utilisation",
   "Diagnostics": "Diagnostic",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "Les journaux Haarness de cet ordinateur dans un zip, sans les secrets connus, à partager quand quelque chose ne va pas.",
@@ -2938,5 +2939,8 @@
   "Ends {date}": "Se termine le {date}",
   "On hold": "Bloqués",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Le dépassement est désactivé : les crédits achetés ne sont pas dépensés. Activez-le dans Facturation.",
-  "Your free trial didn't start: that card was already used for a trial.": "Votre essai gratuit n’a pas démarré : cette carte a déjà servi pour un essai."
+  "Your free trial didn't start: that card was already used for a trial.": "Votre essai gratuit n’a pas démarré : cette carte a déjà servi pour un essai.",
+  "The attachments come to {size}, over the {limit} limit for media in one message": "Les pièces jointes totalisent {size}, au-delà de la limite de {limit} de médias par message",
+  "its images and PDFs would take the message over the 20 MiB limit for media": "ses images et PDF feraient dépasser au message la limite de 20 MiB de médias",
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} fait {size}, au-delà de la limite de {limit} de médias par message"
 }

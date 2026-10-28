@@ -1780,6 +1780,7 @@
   "{count} more lines": "{count} more lines",
   "rejected": "rejected",
   "Approvals changed in another window · ctrl+y to switch": "Approvals changed in another window · ctrl+y to switch",
+  "Could not keep {mode}": "Could not keep {mode}",
   "Share usage statistics": "Share usage statistics",
   "Diagnostics": "Diagnostics",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.",
@@ -2938,5 +2939,8 @@
   "Ends {date}": "Ends {date}",
   "On hold": "On hold",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Overage is off, so purchased credits are not spent. Turn it on in Billing.",
-  "Your free trial didn't start: that card was already used for a trial.": "Your free trial didn't start: that card was already used for a trial."
+  "Your free trial didn't start: that card was already used for a trial.": "Your free trial didn't start: that card was already used for a trial.",
+  "The attachments come to {size}, over the {limit} limit for media in one message": "The attachments come to {size}, over the {limit} limit for media in one message",
+  "its images and PDFs would take the message over the 20 MiB limit for media": "its images and PDFs would take the message over the 20 MiB limit for media",
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} is {size}, over the {limit} limit for media in one message"
 }

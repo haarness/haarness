@@ -81,6 +81,8 @@ function chipTitle(item: PromptContext) {
  * as they are). */
 export function unreadReason(reason: string) {
   if (reason === "a rule keeps this resource from the model") return t("a rule keeps this resource from the model");
+  if (reason === "its images and PDFs would take the message over the 20 MiB limit for media")
+    return t("its images and PDFs would take the message over the 20 MiB limit for media");
   const late = /^did not answer within (\d+) s$/.exec(reason);
   return late ? t("did not answer within {seconds} s", { seconds: late[1] }) : reason;
 }

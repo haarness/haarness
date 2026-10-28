@@ -1904,6 +1904,9 @@ impl ToolRegistry for NativeToolRegistry {
     fn tool_server(&self, name: &str) -> Option<String> {
         self.mcp.as_ref()?.tool_server(name)
     }
+    fn starting(&self) -> Option<futures::future::BoxFuture<'static, ()>> {
+        self.mcp.as_ref()?.starting()
+    }
     fn list(&self) -> Vec<ToolDefinition> {
         let mut values: Vec<_> = self.tools.values().map(|tool| tool.definition()).collect();
         if let Some(mcp) = &self.mcp {
@@ -2952,32 +2955,7 @@ impl Tool for BuiltinTool {
                 )
                 .await
             }
-            Kind::List => {
-                let requested = string(&args, "path")?;
-                let path = resolve_existing(requested, &context)?;
-                let secrets = SecretFilter::new(&context.workspace, requested, &path, None);
-                let mut entries = tokio::fs::read_dir(&path).await.map_err(tool_error)?;
-                let mut names = Vec::new();
-                let mut skipped = Skipped::default();
-                while let Some(entry) = entries.next_entry().await.map_err(tool_error)? {
-                    let full = entry.path();
-                    // Folders stay listed; a secret-named file, or a link to
-                    // one, is left out and only counted.
-                    if !full.is_dir()
-                        && let Some(hidden) = secrets.hides(&full)
-                    {
-                        skipped.count(hidden);
-                        continue;
-                    }
-                    names.push(entry.file_name().to_string_lossy().into_owned());
-                }
-                names.sort();
-                Ok(with_skipped(
-                    truncate_output(names.join("\n")).await?,
-                    skipped,
-                    false,
-                ))
-            }
+            Kind::List => list(string(&args, "path")?, &context, Path::is_dir).await,
             Kind::Glob => {
                 let requested = args.get("path").and_then(Value::as_str).unwrap_or(".");
                 let root = resolve_existing(requested, &context)?;
@@ -3876,6 +3854,62 @@ fn ensure_within(path: PathBuf, context: &ToolContext) -> CoreResult<PathBuf> {
         )));
     }
     Ok(path)
+}
+
+/// `list`: the entries of one folder, sorted. Each entry's type comes from
+/// the listing itself; only a link is looked at, through `follow` (whether
+/// it leads to a folder), and following one into an offline network volume
+/// can take minutes. So the listing runs off the async workers and Stop ends
+/// the call at once, as glob's and grep's walks do.
+async fn list(
+    requested: &str,
+    context: &ToolContext,
+    follow: fn(&Path) -> bool,
+) -> CoreResult<ToolOutput> {
+    let requested = requested.to_owned();
+    let call = context.clone();
+    let listing = tokio::task::spawn_blocking(move || list_folder(&requested, &call, follow));
+    let (names, skipped) = tokio::select! {
+        () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
+        listed = listing => listed.map_err(tool_error)??,
+    };
+    Ok(with_skipped(
+        truncate_output(names.join("\n")).await?,
+        skipped,
+        false,
+    ))
+}
+
+/// [`list`]'s listing, run synchronously.
+fn list_folder(
+    requested: &str,
+    context: &ToolContext,
+    follow: fn(&Path) -> bool,
+) -> CoreResult<(Vec<String>, Skipped)> {
+    let path = resolve_existing(requested, context)?;
+    let secrets = SecretFilter::new(&context.workspace, requested, &path, None);
+    let mut names = Vec::new();
+    let mut skipped = Skipped::default();
+    for entry in std::fs::read_dir(&path).map_err(tool_error)? {
+        if context.cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        let entry = entry.map_err(tool_error)?;
+        let full = entry.path();
+        let folder = match entry.file_type() {
+            Ok(kind) if !kind.is_symlink() => kind.is_dir(),
+            _ => follow(&full),
+        };
+        // Folders stay listed; a secret-named file, or a link to one, is
+        // left out and only counted.
+        if !folder && let Some(hidden) = secrets.hides(&full) {
+            skipped.count(hidden);
+            continue;
+        }
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    Ok((names, skipped))
 }
 
 /// Which files `grep`, `glob` and `list` leave out: those the built-in read
@@ -8171,6 +8205,69 @@ export default workflow({
             "{}",
             &found.text[found.text.len() - 200..]
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    static LIST_LINK_RELEASED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// Follows a link as `list` does, except that one named `hung` hangs
+    /// until the test lets it go, as a link into an offline network volume
+    /// can.
+    #[cfg(unix)]
+    fn follow_hangs(link: &Path) -> bool {
+        if link.file_name().is_some_and(|name| name == "hung") {
+            while !LIST_LINK_RELEASED.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        link.is_dir()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_leaves_the_async_workers_free_and_stop_ends_it() {
+        let root = std::env::temp_dir().join(format!("haarness-list-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join("folder")).unwrap();
+        std::fs::write(root.join("notes.txt"), "notes").unwrap();
+        std::os::unix::fs::symlink("folder", root.join("hung")).unwrap();
+        // On a runtime of one thread, waited for from another, so a listing
+        // that holds the thread fails the test instead of hanging it.
+        let (sender, answer) = std::sync::mpsc::channel();
+        let listing = std::thread::spawn({
+            let root = root.clone();
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let stopped = runtime.block_on(async {
+                    let context = tool_context(&root);
+                    let cancel = context.cancel.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        cancel.cancel();
+                    });
+                    list(".", &context, follow_hangs).await
+                });
+                let _ = sender.send(stopped);
+            }
+        });
+        let stopped = answer.recv_timeout(Duration::from_secs(5));
+        LIST_LINK_RELEASED.store(true, std::sync::atomic::Ordering::SeqCst);
+        listing.join().unwrap();
+        assert!(
+            matches!(stopped, Ok(Err(CoreError::Cancelled))),
+            "Stop did not end a list that hangs: {stopped:?}"
+        );
+
+        // A link that answers lists as before.
+        let listed = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(list(".", &tool_context(&root), follow_hangs))
+            .unwrap();
+        assert_eq!(listed.text, "folder\nhung\nnotes.txt");
         std::fs::remove_dir_all(root).unwrap();
     }
 

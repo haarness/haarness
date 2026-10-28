@@ -7,7 +7,7 @@ use haarness_core::{CoreError, CoreResult};
 
 /// Shared inline media cap. Adapters with a smaller request envelope (Gemini)
 /// retain their own aggregate budget for base64, JSON and conversation text.
-pub const MAX_INLINE_MEDIA_BYTES: usize = 20 * 1024 * 1024;
+pub use haarness_protocol::MAX_INLINE_MEDIA_BYTES;
 
 #[derive(Debug, Clone)]
 pub struct LoadedMedia {
@@ -97,12 +97,23 @@ fn load(source: &str) -> CoreResult<LoadedMedia> {
             MAX_INLINE_MEDIA_BYTES / 1024 / 1024
         )));
     }
-    let bytes = std::fs::read(&path).map_err(|error| {
-        CoreError::Provider(format!(
-            "cannot read attachment {}: {error}",
-            path.display()
-        ))
-    })?;
+    // Read at most one byte past the limit, so a file that grew since it was
+    // measured is refused rather than read whole.
+    let bytes = haarness_core::attachments::read_at_most(&path, MAX_INLINE_MEDIA_BYTES).map_err(
+        |error| {
+            CoreError::Provider(format!(
+                "cannot read attachment {}: {error}",
+                path.display()
+            ))
+        },
+    )?;
+    if bytes.len() > MAX_INLINE_MEDIA_BYTES {
+        return Err(CoreError::Provider(format!(
+            "attachment {} is larger than the {} MiB inline media limit",
+            path.display(),
+            MAX_INLINE_MEDIA_BYTES / 1024 / 1024
+        )));
+    }
     // A screenshot saved without an extension is still an image.
     let mime_type = actual_mime(named.unwrap_or_default(), &bytes).ok_or_else(|| {
         CoreError::Provider(format!(

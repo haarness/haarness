@@ -911,6 +911,8 @@ pub struct App {
     pub terminal: Option<crate::pty_view::TerminalWorkspace>,
     /// Live @-mention completion results from the server.
     pub mention_suggestions: Vec<String>,
+    /// The `@` list's file search on its way.
+    pub(crate) file_search: crate::file_search::FileSearch,
     /// The attached server's MCP resources for the `@` list.
     pub(crate) mention_resources: crate::resource_mentions::Listing,
     /// Where a resource listing read off the event loop goes (see
@@ -1229,6 +1231,7 @@ impl App {
             shell_mode: false,
             terminal: None,
             mention_suggestions: Vec::new(),
+            file_search: crate::file_search::FileSearch::default(),
             mention_resources: crate::resource_mentions::Listing::default(),
             resources_tx: None,
             sends_tx: None,
@@ -2703,10 +2706,37 @@ impl App {
         }
         let text = self.composer.text();
         let query = text.strip_prefix('/')?;
-        if query.contains(char::is_whitespace) {
+        // A path (a file dropped into the prompt) is a message, never a
+        // command: no command name holds a slash.
+        if query.contains(char::is_whitespace) || query.contains('/') {
             return None;
         }
         Some(self.filtered_slash_entries(query))
+    }
+
+    /// A bracketed paste or terminal file drop into the prompt: dropped
+    /// media becomes attachments, anything else is text. `uploads` says the
+    /// client sends files to the server whole (an attached server).
+    pub fn paste_into_prompt(&mut self, text: &str, uploads: bool) {
+        // A shell command reads only the prompt's text, so in shell mode a
+        // dropped file stays its path.
+        let paths = if self.shell_mode {
+            Ok(None)
+        } else {
+            crate::media::paths_from_paste(text, &self.attachments, self.language, uploads)
+        };
+        match paths {
+            Ok(Some(paths)) => {
+                let added = self.add_attachments(paths);
+                self.notice = format!(
+                    "Attached {added} file{} · backspace removes",
+                    if added == 1 { "" } else { "s" }
+                );
+            }
+            Ok(None) => self.composer.paste(text),
+            Err(error) => self.notice = error,
+        }
+        self.selection = 0;
     }
 
     /// Add canonical attachment paths without duplicating an existing chip.

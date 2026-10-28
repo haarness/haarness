@@ -152,6 +152,7 @@ impl ModelProvider for BedrockProvider {
         haarness_core::ImageLimits {
             bytes: 15 * 1024 * 1024,
             count,
+            request: Some(20_000_000 - haarness_core::REQUEST_ALLOWANCE),
         }
     }
 
@@ -679,6 +680,7 @@ mod tests {
             haarness_core::ImageLimits {
                 bytes: 15 * 1024 * 1024,
                 count: Some(100),
+                request: Some(20_000_000 - haarness_core::REQUEST_ALLOWANCE),
             }
         );
         assert_eq!(provider.image_limits("amazon.nova-pro-v1:0").count, None);
