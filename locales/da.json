@@ -2939,5 +2939,8 @@
   "Ends {date}": "Slutter {date}",
   "On hold": "Tilbageholdt",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Overforbrug er slået fra, så købte kreditter bruges ikke. Slå det til under Fakturering.",
-  "Your free trial didn't start: that card was already used for a trial.": "Din gratis prøveperiode startede ikke: kortet er allerede brugt til en prøveperiode."
+  "Your free trial didn't start: that card was already used for a trial.": "Din gratis prøveperiode startede ikke: kortet er allerede brugt til en prøveperiode.",
+  "The attachments come to {size}, over the {limit} limit for media in one message": "Vedhæftningerne fylder {size}, over grænsen på {limit} for medier i én besked",
+  "its images and PDFs would take the message over the 20 MiB limit for media": "dens billeder og PDF'er ville bringe beskeden over grænsen på 20 MiB for medier",
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} fylder {size}, over grænsen på {limit} for medier i én besked"
 }

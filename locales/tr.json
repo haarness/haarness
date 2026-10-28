@@ -2939,5 +2939,8 @@
   "Ends {date}": "{date} tarihinde biter",
   "On hold": "Bekletiliyor",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Aşım kapalı, bu yüzden satın alınan krediler harcanmaz. Faturalandırmadan açın.",
-  "Your free trial didn't start: that card was already used for a trial.": "Ücretsiz denemeniz başlamadı: bu kart daha önce bir denemede kullanıldı."
+  "Your free trial didn't start: that card was already used for a trial.": "Ücretsiz denemeniz başlamadı: bu kart daha önce bir denemede kullanıldı.",
+  "The attachments come to {size}, over the {limit} limit for media in one message": "Ekler toplam {size}; bu, tek bir mesajdaki medya için {limit} sınırını aşıyor",
+  "its images and PDFs would take the message over the 20 MiB limit for media": "görselleri ve PDF'leri mesajı 20 MiB medya sınırının üzerine çıkarır",
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} {size}; bu, tek bir mesajdaki medya için {limit} sınırını aşıyor"
 }
