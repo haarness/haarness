@@ -72,6 +72,27 @@ fn a_run_with_a_data_dir_saves_long_tool_output_inside_it() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// `--data-dir ~` makes the person's own `~/data` the data folder: a run
+/// leaves it open as it was until Haarness's files are kept there.
+#[cfg(unix)]
+#[test]
+fn a_folder_of_the_person_s_named_as_the_data_folder_is_left_as_it_is() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = std::env::temp_dir().join(format!("haarness-theirs-{}", uuid::Uuid::now_v7()));
+    // `haarness` names `<root>/data` as the root, so its data folder is
+    // `<root>/data/data`.
+    let theirs = root.join("data/data");
+    for folder in [root.join("home"), root.join("workspace"), theirs.clone()] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    fs::write(theirs.join("photo.jpg"), "").unwrap();
+    fs::set_permissions(&theirs, fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = haarness(&root, &["logs"]);
+    let mode = fs::metadata(&theirs).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755);
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// Without `--data-dir`, a Mac's server keeps saved output and previews in
 /// the app's Application Support folder, which need not be the data folder
 /// (`~/.local/share/haarness`): one an older build left open, with
