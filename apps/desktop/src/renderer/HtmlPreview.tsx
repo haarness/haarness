@@ -8,6 +8,7 @@ import {
   onMount,
 } from "solid-js";
 import { Preview } from "./preview";
+import { LIFTED_IN_FRAME } from "./transcript-press";
 
 /** A separate trusted document owns the opaque content frames. The app keeps its strict CSP. */
 export function HtmlPreview(props: {
@@ -57,6 +58,7 @@ export function HtmlPreview(props: {
         );
       if (message?.type === "navigation")
         setError(t("External navigation is disabled in previews."));
+      if (message?.type === "lift") window.dispatchEvent(new Event(LIFTED_IN_FRAME));
     };
     window.addEventListener("message", listen);
     const observer = new ResizeObserver(() => setWidth(host.clientWidth));

@@ -72,3 +72,17 @@ test("preview document policy precedes untrusted content and bridge messages are
     "preview",
   );
 });
+test("a button let go over the page is reported, through the outer frame, with the preview id", () => {
+  // In the page and in the frame around it: whichever is under the pointer.
+  const page = Preview.document("<p>page</p>", { id: "v3" }).html;
+  const frame = Preview.frame("<p>page</p>", { id: "v3" }).html;
+  for (const html of [page, frame]) {
+    assert.match(html, /function lift\(event\) \{ if \(event\.isTrusted\) (report|up)\(\{ type: "lift" \}\); \}/);
+    assert.ok(html.includes('addEventListener("pointerup", lift, true);'));
+    assert.ok(html.includes('addEventListener("pointercancel", lift, true);'));
+  }
+  // The outer frame passes the page's report on.
+  assert.ok(frame.includes('"navigation", "lift"]'));
+  assert.deepEqual(Preview.message({ preview: "v3", type: "lift" }, "v3"), { type: "lift" });
+  assert.equal(Preview.message({ preview: "v2", type: "lift" }, "v3"), undefined);
+});
