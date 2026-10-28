@@ -28,7 +28,9 @@ export namespace Preview {
     | { type: "navigation" }
     | { type: "size"; height: number; width: number }
     | { type: "error"; message: string }
-    | { type: "blocked"; url: string; directive: string };
+    | { type: "blocked"; url: string; directive: string }
+    /** A button was let go over the page; the app's window is not told. */
+    | { type: "lift" };
 
   const KINDS = new Map<string, Kind>([
     ["html", "html"],
@@ -146,7 +148,9 @@ export namespace Preview {
   // loaded, its errors and the requests the policy refused, each tagged with
   // the preview id; it keeps in-page links working and turns every other link
   // into a "navigation" report. The outer frame's policy is what actually stops
-  // navigation by script or meta refresh; this only makes clicks behave.
+  // navigation by script or meta refresh; this only makes clicks behave. It
+  // also reports a button let go over the page, which ends a press held in the
+  // conversation (transcript-press.ts) that the app's window never sees end.
   function reporter(previewId: string) {
     const body = `
 var previewId = ${JSON.stringify(previewId).replace(/</g, "\\u003c")};
@@ -187,7 +191,10 @@ addEventListener("unhandledrejection", function (event) {
 });
 addEventListener("securitypolicyviolation", function (event) {
   report({ type: "blocked", url: String(event.blockedURI), directive: String(event.violatedDirective) });
-});`;
+});
+function lift(event) { if (event.isTrusted) report({ type: "lift" }); }
+addEventListener("pointerup", lift, true);
+addEventListener("pointercancel", lift, true);`;
     return `<script data-haarness-preview>(function () {${body}\n})();</script>`;
   }
 
@@ -226,7 +233,7 @@ addEventListener("securitypolicyviolation", function (event) {
     const previewId = JSON.stringify(options.id).replace(/</g, "\\u003c");
     const relay = `<script>(function () {
 var previewId = ${previewId};
-var kinds = ["ready", "size", "error", "blocked", "navigation"];
+var kinds = ["ready", "size", "error", "blocked", "navigation", "lift"];
 function up(message) { if (parent === window) return; message.preview = previewId; parent.postMessage(message, "*"); }
 addEventListener("message", function (event) {
   var inner = document.getElementById("page"), data = event.data;
@@ -237,6 +244,9 @@ addEventListener("securitypolicyviolation", function (event) {
   up({ type: "blocked", url: String(event.blockedURI), directive: String(event.violatedDirective) });
   if (event.violatedDirective === "frame-src") up({ type: "navigation" });
 });
+function lift(event) { if (event.isTrusted) up({ type: "lift" }); }
+addEventListener("pointerup", lift, true);
+addEventListener("pointercancel", lift, true);
 })();</script>`;
     const style = "html,body,iframe{margin:0;border:0;width:100%;height:100%;display:block}html,body{overflow:hidden}";
     const html =
@@ -255,6 +265,7 @@ addEventListener("securitypolicyviolation", function (event) {
     switch (value.type) {
       case "ready":
       case "navigation":
+      case "lift":
         return { type: value.type };
       case "size":
         if (typeof value.height !== "number") return undefined;
