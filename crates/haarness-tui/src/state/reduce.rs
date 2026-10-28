@@ -268,6 +268,24 @@ impl App {
         self.follow_permission_head();
     }
 
+    /// Read the server's `/v1/info` again after it reloaded its configuration
+    /// or restarted, so the configured reasoning level (and the rest) is the
+    /// current one; a pick that is no longer offered is dropped. With
+    /// `instance`, only an answer from that run of the server counts. A failed
+    /// read keeps what there is.
+    pub(crate) async fn refresh_server_info(
+        &mut self,
+        client: &ApiClient,
+        instance: Option<uuid::Uuid>,
+    ) {
+        if let Ok(info) = client.info().await
+            && instance.is_none_or(|instance| instance == info.server_instance_id)
+        {
+            self.server_info = Some(info);
+            self.normalize_reasoning();
+        }
+    }
+
     pub async fn reduce(&mut self, event: EventEnvelope, client: &ApiClient) -> Result<()> {
         // An event can reorder the session list under its cursor: the cursor
         // keeps its chat.
@@ -407,12 +425,8 @@ impl App {
                 }
                 // The configured reasoning level may have changed with it:
                 // /reasoning shows it, and provider default is named over it.
-                if let Ok(info) = client.info().await
-                    && let Some(current) = self.server_info.as_mut()
-                    && current.server_instance_id == info.server_instance_id
-                {
-                    current.default_reasoning_effort = info.default_reasoning_effort;
-                }
+                self.refresh_server_info(client, Some(event.server_instance_id))
+                    .await;
             }
             "configuration.reload_queued" => {
                 self.notice =

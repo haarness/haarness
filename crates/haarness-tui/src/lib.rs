@@ -1011,6 +1011,8 @@ async fn run_with_client(
                         // Replace REST-backed snapshots after replay loss or a
                         // server restart. Clearing deltas avoids duplicating a
                         // partial stream against the authoritative transcript.
+                        // A restarted server read its configuration afresh.
+                        app.refresh_server_info(&client, None).await;
                         app.input_queue = client.input_queue(app.thread.id).await.unwrap_or_default();
                         if let Ok(items) = client.items(app.thread.id).await {
                             app.items = items;
