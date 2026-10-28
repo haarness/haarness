@@ -698,7 +698,7 @@ fn discovered_model_info(
     {
         name.clone_into(&mut info.display_name);
     }
-    info.context_window = first_u64(
+    info.context_window = first_window(
         entry,
         &[
             "context_length",
@@ -710,7 +710,7 @@ fn discovered_model_info(
     .or_else(|| {
         entry
             .get("metadata")
-            .and_then(|metadata| first_u64(metadata, &["context_length"]))
+            .and_then(|metadata| first_window(metadata, &["context_length"]))
     })
     .or(info.context_window);
     info.max_output_tokens = first_u64(
@@ -1095,6 +1095,13 @@ fn first_u64(entry: &Value, keys: &[&str]) -> Option<u64> {
                 .or_else(|| value.as_str()?.parse::<u64>().ok())
         })
     })
+}
+
+/// The first context window `keys` list. A gateway that lists 0 says
+/// nothing about the model, so the model's own window still applies.
+fn first_window(entry: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| first_u64(entry, &[key]).filter(|window| *window > 0))
 }
 
 fn json_number(value: &Value) -> Option<f64> {
@@ -2072,6 +2079,29 @@ mod tests {
             assert!((price.output - 0.4).abs() < 1e-12, "{provider}");
             assert!((price.cache_read - 0.025).abs() < 1e-12, "{provider}");
         }
+    }
+
+    #[test]
+    fn a_listed_window_of_0_leaves_the_model_s_own_window() {
+        let listed = |entry: Value| {
+            discovered_model_info("router", &entry, CompatibleModelDefaults::default())
+                .unwrap()
+                .context_window
+        };
+        let known = listed(json!({"id": "openai/gpt-4.1-nano"}));
+        assert!(known.is_some_and(|window| window > 0), "{known:?}");
+        assert_eq!(
+            listed(json!({"id": "openai/gpt-4.1-nano", "context_length": 0})),
+            known
+        );
+        assert_eq!(
+            listed(json!({"id": "future-model", "context_length": 0, "max_model_len": 65_536})),
+            Some(65_536)
+        );
+        assert_eq!(
+            listed(json!({"id": "future-model", "context_length": "0"})),
+            None
+        );
     }
 
     #[test]
