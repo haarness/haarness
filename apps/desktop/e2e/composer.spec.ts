@@ -47,6 +47,10 @@ async function launch(
     app,
     page,
     errors,
+    workspace,
+    /** Stops the project's server, as an update or another client may. */
+    stopServer: () =>
+      execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }),
     async close() {
       await app.close().catch(() => {});
       try {
@@ -883,6 +887,35 @@ test("the new-chat heading holds still as the box grows, @ lists as wide as the 
     await expect(boxes.nth(1)).toBeDisabled();
     await expect(reply.locator("th").first()).toHaveCSS("text-transform", "none");
     await expect(reply.locator("th").first()).toHaveText("Name");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("a project whose server started again with another configuration offers its new level and commands", async ({}, info) => {
+  const configured = (level: string) => `[defaults]\nprovider="echo"\nmodel="echo-1"\nreasoning_effort="${level}"\n`;
+  const { page, errors, close, workspace, stopServer } = await launch(info, (folder) =>
+    writeFile(join(folder, ".haarness/config.toml"), configured("high")),
+  );
+  try {
+    // Echo lists no levels, so the pill shows the configured one.
+    const effort = page.locator(".composer-model .model-effort-summary");
+    await expect(effort).toHaveText("High");
+    // A configuration the server cannot read keeps it down after it stops,
+    // so what changes next reaches no reload: the window starts the server
+    // again itself once it can.
+    await writeFile(join(workspace, ".haarness/config.toml"), "[defaults\n");
+    stopServer();
+    await page.waitForTimeout(1500);
+    await mkdir(join(workspace, ".haarness/commands"), { recursive: true });
+    await writeFile(join(workspace, ".haarness/commands/fresh-review.md"), "---\ndescription: Review again\n---\nReview $ARGUMENTS.\n");
+    await writeFile(join(workspace, ".haarness/config.toml"), configured("low"));
+    await expect(effort).toHaveText("Low", { timeout: 60000 });
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill("/fresh");
+    await expect(page.locator("#slash-commands").getByRole("option")).toContainText(["fresh-review"]);
+    await input.press("Escape");
     expect(errors).toEqual([]);
   } finally {
     await close();
