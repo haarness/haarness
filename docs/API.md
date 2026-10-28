@@ -433,7 +433,10 @@ with the server's and tool's names as written); only requests to a model
 provider carry names in the characters providers accept (see
 [Plugins, skills and tools](REFERENCE.md#plugins-skills-and-tools)).
 `timeoutMs` (default 30 s) bounds the socket connect, initialization, and tool
-discovery as one deadline, plus a `headersHelper` run. In a JSON file a
+discovery as one deadline, plus a `headersHelper` run. A local (stdio) server
+without it has 2 minutes for that start (spawning it, initializing it and
+listing its tools), time enough for a first `npx -y` or `uvx` download; its
+other requests keep 30 s. In a JSON file a
 `timeout` key counts too, in its ecosystem's unit: milliseconds in an opencode
 entry (`type: "local"` or `"remote"`), seconds in a Claude Code or plugin
 entry; edits leave the key and its unit as written. It does not bound tool
