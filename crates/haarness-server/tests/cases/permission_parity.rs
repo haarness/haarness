@@ -1314,6 +1314,99 @@ async fn answer(runtime: &AgentRuntime, id: &str, decision: Reply) {
 }
 
 #[tokio::test]
+async fn parity_always_on_a_folder_that_holds_the_project_remembers_only_the_files_asked_about() {
+    let fixture = Fixture::new();
+    let home = fixture.0.join("home");
+    let project = home.join("work/app");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(home.join(".gitconfig"), "[user]\n\tname = Fixture\n").unwrap();
+    std::fs::write(home.join(".netrc"), "machine example.test\n").unwrap();
+    let runtime = runtime(
+        &project,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+        None,
+    );
+    let thread = echo_thread(&runtime).await;
+    let gitconfig = home.join(".gitconfig").display().to_string();
+    // The file is asked about by itself, and Always offers to remember it
+    // alone.
+    let turn = send(
+        &runtime,
+        &thread,
+        "!tool bash {\"command\":\"cat ../../.gitconfig\"}",
+    )
+    .await;
+    let asked = pending(&runtime).await;
+    assert_eq!(asked.permission, "external_directory");
+    assert_eq!(asked.patterns, vec![gitconfig.clone()]);
+    assert_eq!(
+        asked.always_patterns,
+        vec![format!("external_directory:{gitconfig}")]
+    );
+    assert_eq!(asked.allow_always, None);
+    answer(&runtime, &asked.permission_id, Reply::AlwaysWorkspace).await;
+    assert_success(&runtime, &thread, &turn).await;
+    // The same file again runs without a question; another file beside the
+    // project still asks.
+    let turn = send(
+        &runtime,
+        &thread,
+        "!tool bash {\"command\":\"cat ../../.gitconfig\"}",
+    )
+    .await;
+    assert_success(&runtime, &thread, &turn).await;
+    let turn = send(
+        &runtime,
+        &thread,
+        "!tool bash {\"command\":\"cat ../../.netrc\"}",
+    )
+    .await;
+    let asked = pending(&runtime).await;
+    assert_eq!(
+        asked.patterns,
+        vec![home.join(".netrc").display().to_string()]
+    );
+    answer(&runtime, &asked.permission_id, Reply::Once).await;
+    assert_success(&runtime, &thread, &turn).await;
+    // The folder named as a folder is asked about, and remembered, alone:
+    // that runs again without a question, and opens no file in it.
+    let itself = format!("{}/", home.display());
+    let list = "!tool bash {\"command\":\"cd ../.. && ls -a\"}";
+    let turn = send(&runtime, &thread, list).await;
+    let asked = pending(&runtime).await;
+    assert_eq!(asked.patterns, vec![itself.clone()]);
+    assert_eq!(
+        asked.always_patterns,
+        vec![format!("external_directory:{itself}")]
+    );
+    assert_eq!(asked.allow_always, None);
+    answer(&runtime, &asked.permission_id, Reply::AlwaysWorkspace).await;
+    assert_success(&runtime, &thread, &turn).await;
+    let turn = send(&runtime, &thread, list).await;
+    assert_success(&runtime, &thread, &turn).await;
+    let turn = send(
+        &runtime,
+        &thread,
+        "!tool bash {\"command\":\"cat ../../.netrc\"}",
+    )
+    .await;
+    let asked = pending(&runtime).await;
+    assert_eq!(
+        asked.patterns,
+        vec![home.join(".netrc").display().to_string()]
+    );
+    answer(&runtime, &asked.permission_id, Reply::Once).await;
+    assert_success(&runtime, &thread, &turn).await;
+    let outputs = tool_outputs(&runtime, &thread).await;
+    assert!(outputs[0].0.contains("name = Fixture"), "{outputs:?}");
+    assert!(outputs[3].0.contains(".netrc"), "{outputs:?}");
+    assert!(outputs[5].0.contains("example.test"), "{outputs:?}");
+}
+
+#[tokio::test]
 async fn parity_a_read_of_where_sign_ins_are_kept_asks_a_person_even_in_yolo() {
     let fixture = Fixture::new();
     let data = fixture.0.join("data");

@@ -246,10 +246,11 @@ export function describeAlwaysRule(
       : rule;
   if (permission === "agent_switch") return t("Only this agent, in this chat");
   if (permission === "external_directory") {
-    const folder = pattern.replace(/[/\\]\*$/, "");
-    return folder === "*"
-      ? t("Any folder outside the project")
-      : t("Anything in {folder}", { folder: words.shortPath(folder) });
+    if (pattern === "*") return t("Any folder outside the project");
+    // An outside folder that holds the project is remembered by the path
+    // asked about: a file in it, or the folder alone (`/home/me/`).
+    if (!/[/\\]\*$/.test(pattern)) return words.shortPath(pattern.replace(/[/\\]+$/, "") || "/");
+    return t("Anything in {folder}", { folder: words.shortPath(pattern.replace(/[/\\]\*$/, "")) });
   }
   if (pattern === "*")
     return everyRequest[permission]
