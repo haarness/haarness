@@ -13754,6 +13754,9 @@ struct ShellReadings {
     limited: Mutex<HashMap<String, String>>,
     /// The line is too large to read: see [`AskPlan::evaluate`].
     unreadable: bool,
+    /// The line names a file where Haarness keeps sign-ins (a literal path
+    /// a command is given, or a redirect): see [`AskPlan::evaluate`].
+    credentials: bool,
 }
 
 impl ShellReadings {
@@ -13786,6 +13789,9 @@ impl ShellReadings {
             covered: Mutex::new(HashMap::new()),
             limited: Mutex::new(HashMap::new()),
             unreadable: analysis.unreadable,
+            credentials: analysis.paths.iter().any(|named| {
+                named.file && crate::permissions::is_credential_store_path(&named.path)
+            }),
         }
     }
 
@@ -13879,6 +13885,19 @@ impl AskPlan {
                 matched: Some(rule),
                 protected: decision == PermissionDecision::Ask,
                 configured: true,
+            };
+        }
+        // A line that names a file where Haarness keeps sign-ins asks a
+        // person every time unless a rule refuses it, as a read of one does.
+        if shell.credentials
+            && evaluation.decision != PermissionDecision::Deny
+            && shell.index.contains_key(pattern)
+        {
+            return crate::permissions::Evaluation {
+                decision: PermissionDecision::Ask,
+                matched: Some(crate::permissions::CREDENTIAL_READ_RULE.into()),
+                protected: true,
+                configured: false,
             };
         }
         evaluation
@@ -14997,6 +15016,92 @@ mod shell_reading_tests {
         // reading too.
         let skill = PermissionEngine::new(vec![rule("bash:rm *", Deny)]);
         assert!(verdicts(&skill, "sudo rm x").contains(&("rm x".to_owned(), Deny)));
+    }
+
+    #[test]
+    fn a_line_that_names_where_sign_ins_are_kept_asks_a_person_every_time() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let root =
+            std::env::temp_dir().join(format!("haarness-shell-sign-ins-{}", uuid::Uuid::now_v7()));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(root.join("auth.json"), "{}").unwrap();
+        crate::permissions::record_credential_store(root.join("auth.json"), false);
+        let store = root.join("auth.json");
+        let allowed = engine(&[("bash:*", Allow), ("*", Allow)]);
+        // The verdicts of a tool call's patterns other than allow, each with
+        // whether only a person answers it.
+        let asks = |name: &str, arguments: serde_json::Value, workspace: &Path| {
+            let mut asks = Vec::new();
+            for plan in ask_plans(name, &arguments, workspace) {
+                for pattern in &plan.patterns {
+                    let evaluation = plan.evaluate(&allowed, pattern);
+                    if evaluation.decision != Allow {
+                        asks.push((evaluation.decision, evaluation.protected));
+                    }
+                }
+            }
+            asks
+        };
+        let bash = |command: &str, workspace: &Path| {
+            asks("bash", json!({ "command": command }), workspace)
+        };
+        for command in [
+            format!("cat {}", store.display()),
+            format!("git status && cat < '{}'", store.display()),
+            "cp ../auth.json /tmp/keys && echo done".to_owned(),
+            format!("echo x > {}", root.join("auth.json.lock").display()),
+            // Any program given its path.
+            format!("jq . {}", store.display()),
+            format!("head -3 '{}' | base64", store.display()),
+        ] {
+            let found = bash(&command, &project);
+            assert!(found.contains(&(Ask, true)), "{command}: {found:?}");
+            assert!(!found.contains(&(Ask, false)), "{command}: {found:?}");
+        }
+        // Where the project holds it (a project at the home folder).
+        assert!(bash("cat auth.json", &root).contains(&(Ask, true)));
+        // A read of it, also through a link of another name.
+        assert!(
+            asks(
+                "read",
+                json!({ "path": store.display().to_string() }),
+                &project
+            )
+            .contains(&(Ask, true))
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&store, project.join("notes.txt")).unwrap();
+            assert!(asks("read", json!({ "path": "notes.txt" }), &project).contains(&(Ask, true)));
+            assert!(bash("cat notes.txt", &project).contains(&(Ask, true)));
+        }
+        // A deny still refuses it; other lines, and a project's own
+        // `auth.json`, are unchanged.
+        let plan = ask_plans(
+            "bash",
+            &json!({ "command": format!("cat {}", store.display()) }),
+            &project,
+        )
+        .into_iter()
+        .find(|plan| plan.permission == "bash")
+        .unwrap();
+        let denied = engine(&[("bash:cat *", Deny)]);
+        assert_eq!(plan.evaluate(&denied, &plan.patterns[0]).decision, Deny);
+        std::fs::write(project.join("auth.json"), "{}").unwrap();
+        for command in [
+            "cat auth.json",
+            "jq . auth.json",
+            "cat README.md",
+            "cat \"$KEYS\"",
+        ] {
+            assert_eq!(bash(command, &project), Vec::new(), "{command}");
+        }
+        assert_eq!(
+            asks("read", json!({ "path": "auth.json" }), &project),
+            Vec::new()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

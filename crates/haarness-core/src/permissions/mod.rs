@@ -50,6 +50,126 @@ pub struct Evaluation {
 /// [`Evaluation::matched`] names it.
 pub const CONFIG_EDIT_RULE: &str = "edit:<haarness configuration>";
 
+/// The rule a read of a file where Haarness keeps sign-ins is asked under,
+/// as [`Evaluation::matched`] names it (see [`is_credential_store_path`]).
+pub const CREDENTIAL_READ_RULE: &str = "read:<haarness sign-ins>";
+
+/// Where this process keeps sign-ins, each with whether it is a folder of
+/// them: see [`record_credential_store`].
+static CREDENTIAL_STORES: std::sync::LazyLock<parking_lot::RwLock<Vec<(PathBuf, bool)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Record a file where this process keeps sign-ins (provider keys in
+/// `auth.json`, the Cloud sign-in in `credentials.json`), or a `folder` of
+/// them (MCP sign-in tokens), so [`is_credential_store_path`] knows it.
+pub fn record_credential_store(path: PathBuf, folder: bool) {
+    let path = normalize_absolute(&path);
+    let mut stores = CREDENTIAL_STORES.write();
+    if !stores.iter().any(|(known, _)| *known == path) {
+        stores.push((path, folder));
+    }
+}
+
+/// Whether `path` is where Haarness keeps sign-ins: a file
+/// [`record_credential_store`] named, a temporary copy written while saving
+/// it (`auth.tmp-…` or `auth.json.tmp-…`), its lock (`auth.json.lock`), or
+/// anything in a folder of them. Compared as full paths, after `.` and `..`,
+/// as written and through links in the folders (letter case aside), never
+/// by name alone: a project's own `auth.json` is an ordinary file. A path
+/// whose own names are none of those is not one, with no look at the disk,
+/// so the many files a search judges cost nothing: callers also judge where
+/// a link leads (a read's resolved path, the shell's placed arguments, a
+/// search's link targets). A model-run read of one asks a person every
+/// time, and searches leave it out.
+#[must_use]
+pub fn is_credential_store_path(path: &Path) -> bool {
+    let stores = CREDENTIAL_STORES.read();
+    if stores.is_empty() || !path.is_absolute() {
+        return false;
+    }
+    let written = normalize_absolute(path);
+    if !names_a_store(&stores, &written) {
+        return false;
+    }
+    let key = |path: &Path| path.to_string_lossy().to_lowercase();
+    let spellings = |path: &Path| {
+        let mut spellings = vec![key(path)];
+        if let Ok(real) = path.canonicalize() {
+            spellings.push(key(&real));
+        }
+        spellings
+    };
+    let real = path.canonicalize().ok();
+    [Some(written), real]
+        .into_iter()
+        .flatten()
+        .any(|candidate| {
+            stores.iter().any(|(store, folder)| {
+                if *folder {
+                    let inside = spellings(store);
+                    let candidate = key(&candidate);
+                    return inside.iter().any(|root| {
+                        candidate
+                            .strip_prefix(root.as_str())
+                            .is_some_and(|rest| rest.starts_with(['/', '\\']))
+                    });
+                }
+                store_file_name(store, &candidate)
+                    && match (candidate.parent(), store.parent()) {
+                        (Some(folder), Some(home)) => {
+                            let homes = spellings(home);
+                            spellings(folder)
+                                .iter()
+                                .any(|folder| homes.contains(folder))
+                        }
+                        _ => false,
+                    }
+            })
+        })
+}
+
+/// Whether a path, as a command line writes it, may name where Haarness
+/// keeps sign-ins by its names alone; [`is_credential_store_path`] decides
+/// once it is placed. The shell reading places only such paths among the
+/// arguments it would not place otherwise.
+pub(crate) fn may_name_credential_store(value: &str) -> bool {
+    let stores = CREDENTIAL_STORES.read();
+    !stores.is_empty() && names_a_store(&stores, Path::new(value))
+}
+
+/// Whether `candidate`'s names are those of a store: its file name is a
+/// store file's (see [`store_file_name`]), or one of its folders is named as
+/// a folder of them is.
+fn names_a_store(stores: &[(PathBuf, bool)], candidate: &Path) -> bool {
+    stores.iter().any(|(store, folder)| {
+        if *folder {
+            return store.file_name().is_some_and(|name| {
+                candidate
+                    .components()
+                    .any(|part| part.as_os_str().eq_ignore_ascii_case(name))
+            });
+        }
+        store_file_name(store, candidate)
+    })
+}
+
+/// Whether `candidate`'s name is the store file's, its temporary copy's or
+/// its lock's.
+fn store_file_name(store: &Path, candidate: &Path) -> bool {
+    let (Some(store), Some(name)) = (store.file_name(), candidate.file_name()) else {
+        return false;
+    };
+    let store = file_name_key(&store.to_string_lossy());
+    let name = file_name_key(&name.to_string_lossy());
+    let stem = store
+        .rsplit_once('.')
+        .map_or(store.as_str(), |(stem, _)| stem);
+    name == store
+        || name == format!("{store}.lock")
+        || name.starts_with(&format!("{store}.tmp-"))
+        || name.starts_with(&format!("{stem}.tmp-"))
+}
+
 /// Whether `path` (after `.` and `..`, at any depth) is a file Haarness, or a
 /// tool it reads settings from, takes permissions, hooks, MCP servers,
 /// extensions or providers from: `haarness.json{,c}`, `opencode.json{,c}`,
@@ -613,6 +733,35 @@ impl PermissionEngine {
                 configured: at >= self.floor_builtin,
             };
         }
+        // A read of a file where Haarness keeps sign-ins asks a person every
+        // time unless a deny refuses it: no rule, Always answer, Auto,
+        // `--yolo` or hook answers it.
+        if let Some(target) = operation
+            .split_once(':')
+            .filter(|(permission, _)| *permission == "read")
+            .map(|(_, target)| target)
+            && self.names_credential_store(target)
+        {
+            if let Some(rule) = self
+                .rules
+                .iter()
+                .rfind(names)
+                .filter(|rule| rule.decision == PermissionDecision::Deny)
+            {
+                return Evaluation {
+                    decision: PermissionDecision::Deny,
+                    matched: Some(rule.pattern.clone()),
+                    protected: false,
+                    configured: true,
+                };
+            }
+            return Evaluation {
+                decision: PermissionDecision::Ask,
+                matched: Some(CREDENTIAL_READ_RULE.into()),
+                protected: true,
+                configured: false,
+            };
+        }
         let configured_at = self.rules.iter().rposition(|rule| names(&rule));
         let configured = configured_at.map(|index| &self.rules[index]);
         let grant = self.session_rules.iter().rfind(names);
@@ -687,6 +836,22 @@ impl PermissionEngine {
             protected: false,
             configured: from_rules && configured_at.is_some_and(|index| index >= self.builtin),
         }
+    }
+
+    /// Whether a `read` target is where Haarness keeps sign-ins, read from
+    /// the project folder when it is relative.
+    fn names_credential_store(&self, target: &str) -> bool {
+        if target.is_empty() || target == "*" {
+            return false;
+        }
+        let expanded = expand_home(target);
+        let path = Path::new(expanded.as_ref());
+        if path.is_absolute() {
+            return is_credential_store_path(path);
+        }
+        self.workspace
+            .as_ref()
+            .is_some_and(|workspace| is_credential_store_path(&workspace.join(path)))
     }
 
     /// The other ways to write a path operation's file, each with whether it
@@ -2411,6 +2576,79 @@ mod tests {
         }
         let beside = format!("edit:{}-other/notes.txt", base.display());
         assert_eq!(engine.evaluate(&beside), PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn a_read_of_where_sign_ins_are_kept_asks_a_person_every_time() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let root = std::env::temp_dir()
+            .join(format!("haarness-sign-ins-{}", uuid::Uuid::now_v7()))
+            .join("Data Folder");
+        let project = root.parent().unwrap().join("project");
+        std::fs::create_dir_all(root.join("mcp-oauth")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(root.join("auth.json"), "{}").unwrap();
+        std::fs::write(project.join("auth.json"), "{}").unwrap();
+        record_credential_store(root.join("auth.json"), false);
+        record_credential_store(root.join("mcp-oauth"), true);
+        let store = root.join("auth.json");
+        // The store, its temporary copies and lock, a file in a folder of
+        // them, by any spelling of the path.
+        for path in [
+            store.clone(),
+            root.join("auth.tmp-41-x2Yz"),
+            root.join("auth.json.lock"),
+            root.join("mcp-oauth/server.json"),
+            root.join("sub/../AUTH.JSON"),
+            PathBuf::from(store.to_string_lossy().to_uppercase()),
+        ] {
+            assert!(is_credential_store_path(&path), "{}", path.display());
+        }
+        // Never by name alone: the project's own `auth.json` is a file.
+        for path in [
+            project.join("auth.json"),
+            root.join("auth.json.bak"),
+            root.join("mcp-oauth"),
+            PathBuf::from("auth.json"),
+        ] {
+            assert!(!is_credential_store_path(&path), "{}", path.display());
+        }
+        // Through a folder link, too. A link of another name is judged where
+        // it leads, which the callers place (a read's resolved path): its
+        // own name costs no look at the disk.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&root, project.join("data")).unwrap();
+            std::os::unix::fs::symlink(&store, project.join("notes.txt")).unwrap();
+            assert!(is_credential_store_path(&project.join("data/auth.json")));
+            assert!(!is_credential_store_path(&project.join("notes.txt")));
+            assert!(is_credential_store_path(
+                &project.join("notes.txt").canonicalize().unwrap()
+            ));
+        }
+        let mut engine = PermissionEngine::build_defaults();
+        engine.set_workspace(&project);
+        engine.add_rule(rule("read:*", Allow));
+        engine.add_rule(rule("*", Allow));
+        engine.approve_always(format!("read:{}", store.display()));
+        let mut asked = vec![
+            format!("read:{}", store.display()),
+            format!("read:../Data Folder/auth.json"),
+        ];
+        if cfg!(unix) {
+            asked.push("read:data/auth.json".into());
+        }
+        for operation in asked {
+            let evaluation = engine.evaluate_detailed(&operation);
+            assert_eq!(evaluation.decision, Ask, "{operation}");
+            assert!(evaluation.protected, "{operation}");
+            assert_eq!(evaluation.matched.as_deref(), Some(CREDENTIAL_READ_RULE));
+        }
+        assert_eq!(engine.evaluate("read:auth.json"), Allow);
+        // A deny still refuses it.
+        engine.add_rule(rule("read:*auth.json", Deny));
+        assert_eq!(engine.evaluate(&format!("read:{}", store.display())), Deny);
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
     #[test]

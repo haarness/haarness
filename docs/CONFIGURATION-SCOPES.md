@@ -16,7 +16,7 @@ Haarness separates user configuration, project overrides, persistent runtime dat
 | Local plugin bundles | `~/.config/haarness/plugins/local/` | `.haarness/plugins/local/` |
 | Extension registration and enablement | `~/.config/haarness/extensions.json` | `.haarness/extensions.json` |
 | Discoverable extension source | `~/.config/haarness/extensions/` | `.haarness/extensions/` |
-| Provider credentials | `~/.local/share/haarness/auth.json` | Never stored in project configuration by credential management |
+| Provider credentials | `~/.local/share/haarness/auth.json` | Never stored in project configuration by credential management; a model-run read asks a person every time ([sign-ins](PERMISSIONS-AND-EXECUTION.md#where-haarness-keeps-sign-ins)) |
 | Conversations, project registrations, memory, schedules, plugin install records | `~/.local/share/haarness/` | Runtime records are keyed by workspace identity |
 | Daemon discovery, leases and other disposable caches | `~/.cache/haarness/` | Workspace-specific subdirectories |
 | Application state plane | `~/.local/state/haarness/` | Presentation state remains separate from agent configuration |

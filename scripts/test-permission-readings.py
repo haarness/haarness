@@ -18,11 +18,14 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    `/dev/null`, `/dev/stderr` and the other stream devices ask nothing.
 7. action_case: `"Deny"` in haarness.json denies, and a value that is no action is ignored with one
    warning in the log that names the file and the key.
+8. sign_ins: a `cat`, `jq` or `read` of the data folder's `auth.json` asks a person every time, with no
+   Always, also with `--yolo` and from a project that holds the data folder; a search of the folder
+   leaves the file out, and a project's own `auth.json` reads as before.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
-toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case). No model is called; nothing outside the fixture is
-touched.
+toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins). No model is called; nothing outside the
+fixture is touched.
 """
 import json
 import os
@@ -65,10 +68,10 @@ def bash(env, folder, command, timeout=120, code=None):
     return call(env, folder, 'bash', {'command': command}, timeout, code)
 
 
-def call(env, folder, name, arguments, timeout=120, code=None):
+def call(env, folder, name, arguments, timeout=120, code=None, flags=()):
     """`haarness run` of one tool call: what the run printed. `code` checks how it exited."""
     line = f'!tool {name} ' + json.dumps(arguments)
-    result = subprocess.run([str(BINARY), '--workspace', str(folder), '--trust-project', 'run', line],
+    result = subprocess.run([str(BINARY), '--workspace', str(folder), '--trust-project', 'run', *flags, line],
                             env=env, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     output = result.stdout + result.stderr
     if code is not None:
@@ -235,9 +238,45 @@ def case_action_case():
     passed('"Deny" denies; "dney" is ignored and the log names the file and the key')
 
 
+def case_sign_ins():
+    """A model-run read of where Haarness keeps sign-ins asks a person every time."""
+    _, env = environment('sign-ins')
+    data = root / 'sign-ins' / 'data'
+    # The data folder `HAARNESS_DATA_DIR` names keeps its files in `data/` within it.
+    store = data / 'data' / 'auth.json'
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps({'fixture': {'type': 'api', 'key': 'sk-fixture-not-a-real-key'}}))
+    (data / 'notes.md').write_text('sk-fixture-not-a-real-key is mentioned here only\n')
+    folder = project('sign-ins', REVIEW)
+    (folder / 'auth.json').write_text('{"project": "own file"}\n')
+    try:
+        for name, arguments, flags in [('bash', {'command': f"cat '{store}'"}, ()),
+                                       ('bash', {'command': f"jq . '{store}'"}, ('--yolo',)),
+                                       ('read', {'path': str(store)}, ('--yolo',))]:
+            output = call(env, folder, name, arguments, code=1, flags=flags)
+            assert 'Stopped:' in output and 'sk-fixture-not-a-real-key' not in output, (name, flags, output)
+        output = call(env, folder, 'grep', {'pattern': 'sk-fixture', 'path': str(data)}, code=0, flags=('--yolo',))
+        assert 'notes.md' in output and 'where Haarness keeps sign-ins' in output, output
+        assert 'not-a-real-key"' not in output, output
+        output = bash(env, folder, 'cat auth.json', code=0)
+        assert 'own file' in output, output
+    finally:
+        stop(env, folder)
+    # A project that holds the data folder (as a project at the home folder does).
+    holder = root / 'sign-ins'
+    (holder / 'haarness.json').write_text(json.dumps({'model': 'echo/echo-1', **REVIEW}))
+    try:
+        output = bash(env, holder, 'cat data/data/auth.json', code=1)
+        assert 'Stopped:' in output and 'sk-fixture-not-a-real-key' not in output, output
+    finally:
+        stop(env, holder)
+    passed('cat, jq and read of auth.json in the data folder stop for a person (also with --yolo and from a '
+           'project holding it); a search leaves it out; the project\'s own auth.json reads as before')
+
+
 CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
          'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev,
-         'action_case': case_action_case}
+         'action_case': case_action_case, 'sign_ins': case_sign_ins}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]

@@ -1283,3 +1283,100 @@ async fn parity_a_snippet_is_judged_with_its_folders_filled_in() {
         |message| matches!(message, ProviderMessage::Text { content, .. } if content.contains("OUTSIDE_SECRET"))
     )));
 }
+
+/// What the turn's tool calls returned, in order.
+async fn tool_outputs(runtime: &AgentRuntime, thread: &Thread) -> Vec<(String, bool)> {
+    runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            ItemData::ToolResult {
+                output, is_error, ..
+            } => Some((output, is_error)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn answer(runtime: &AgentRuntime, id: &str, decision: Reply) {
+    runtime
+        .reply_permission(
+            id,
+            PermissionReply {
+                decision,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn parity_a_read_of_where_sign_ins_are_kept_asks_a_person_even_in_yolo() {
+    let fixture = Fixture::new();
+    let data = fixture.0.join("data");
+    let project = fixture.0.join("project");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let store = data.join("auth.json");
+    std::fs::write(&store, "{\"fixture\":{\"key\":\"sk-fixture-secret\"}}\n").unwrap();
+    std::fs::write(data.join("notes.md"), "sk-fixture-secret is not here\n").unwrap();
+    haarness_core::record_credential_store(store.clone(), false);
+    let runtime = runtime(
+        &project,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Yolo,
+            ..RuntimeConfig::default()
+        },
+        None,
+    );
+    let thread = echo_thread(&runtime).await;
+    let read = format!(
+        "!tool read {}",
+        json!({ "path": store.display().to_string() })
+    );
+    let cat = format!(
+        "!tool bash {}",
+        json!({ "command": format!("cat '{}'", store.display()) })
+    );
+    for script in [&read, &cat] {
+        let turn = send(&runtime, &thread, script).await;
+        let asked = pending(&runtime).await;
+        assert_eq!(asked.allow_always, Some(false), "{script}");
+        answer(&runtime, &asked.permission_id, Reply::Reject).await;
+        assert_eq!(
+            wait_done(&runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+    }
+    // A search of its folder runs, and leaves it out.
+    let turn = send(
+        &runtime,
+        &thread,
+        &format!(
+            "!tool grep {}",
+            json!({ "pattern": "sk-fixture-secret", "path": data.display().to_string() })
+        ),
+    )
+    .await;
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let outputs = tool_outputs(&runtime, &thread).await;
+    let (searched, failed) = outputs.last().unwrap();
+    assert!(!failed, "{searched}");
+    assert!(searched.contains("notes.md"), "{searched}");
+    assert!(
+        searched.contains("where Haarness keeps sign-ins"),
+        "{searched}"
+    );
+    assert!(
+        !outputs
+            .iter()
+            .any(|(output, _)| output.contains("\"key\":\"sk-fixture-secret\"")),
+        "{outputs:?}"
+    );
+}
