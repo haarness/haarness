@@ -472,6 +472,58 @@ async fn separate_deadlines_and_larger_payloads_are_configurable() {
     );
 }
 
+/// A tool listed after composition (an MCP server's, once it has started in
+/// the background) gets the `tool.definition` rewrites before the first turn
+/// that is offered it.
+#[tokio::test]
+async fn tools_listed_after_composition_are_rewritten_before_a_turn_gets_them() {
+    /// An MCP server still starting: its tool is listed once a turn's wait
+    /// for it ends.
+    struct Later(Arc<std::sync::Mutex<Vec<ToolDefinition>>>);
+    impl ToolRegistry for Later {
+        fn get(&self, _name: &str) -> Option<Arc<dyn Tool>> {
+            None
+        }
+        fn list(&self) -> Vec<ToolDefinition> {
+            self.0.lock().unwrap().clone()
+        }
+        fn starting(&self) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> {
+            let tools = self.0.clone();
+            self.list().is_empty().then(|| {
+                Box::pin(async move {
+                    tools.lock().unwrap().push(ToolDefinition {
+                        name: "mcp__docs__search".into(),
+                        description: "Search".into(),
+                        input_schema: json!({"type": "object"}),
+                    });
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            })
+        }
+    }
+    let (root, config) = fixture(
+        r"
+export default () => ({
+  apiVersion: 1, name: 'fixture',
+  hooks: { 'tool.definition'(input) { if (input.toolID === 'mcp__docs__search') return {description: 'Search the docs'}; } }
+});
+",
+    );
+    let extensions = Extensions::load(&config, root.path()).await.unwrap();
+    let tools = extensions
+        .wrap_tools(Arc::new(Later(Arc::default())))
+        .await
+        .unwrap();
+    assert!(tools.list().is_empty());
+    tools
+        .starting()
+        .expect("a turn waits for the tool still to come")
+        .await;
+    let listed = tools.list();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].description, "Search the docs");
+    assert!(tools.starting().is_none(), "the next turn waited again");
+}
+
 const LIFECYCLE: &str = r"
 import {appendFileSync, writeFileSync} from 'node:fs';
 export default (ctx) => {
@@ -842,7 +894,8 @@ fn combined_tools_name_the_mcp_server_of_a_tool() {
             tools: BTreeMap::new(),
             workspace: PathBuf::new(),
         }),
-        overrides: BTreeMap::new(),
+        overrides: Arc::default(),
+        defined: Arc::default(),
     };
     assert_eq!(
         combined.tool_server("mcp__a__b__d").as_deref(),
