@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Item, ItemData } from "@haarness/sdk";
-import { literalParts, literalText, withoutEscapes } from "../src/renderer/display-text";
+import { literalParts, literalText, turnsDirection, withoutEscapes } from "../src/renderer/display-text";
 import { describeTool, resultText, toolInput, toolTarget, toolTitle } from "../src/renderer/transcript";
 import { findConversationMessages } from "../src/renderer/conversation-history";
 import { agentTaskError, type AgentTask } from "../src/renderer/agent-tasks";
@@ -146,6 +146,16 @@ test("a failed agent's error reads without its escape sequences", () => {
     }) as unknown as AgentTask;
   assert.equal(agentTaskError(task("\u001b[31merror:\u001b[0m the model refused", true)), "error: the model refused");
   assert.equal(agentTaskError(task("\u001b[1mdone\u001b[0m", false)), "");
+});
+
+test("an edit on its card shows only what turns a line's direction as a code", () => {
+  const line = 'if (role != "user\u202e \u2066// admin\u2069 \u2066") {';
+  assert.equal(
+    literalParts(line, turnsDirection).map((part) => part.text).join(""),
+    'if (role != "user\\u{202E} \\u{2066}// admin\\u{2069} \\u{2066}") {',
+  );
+  for (const text of ["مرحبا\u200f بالعالم", "a\u200bb\tc", "שלום"])
+    assert.deepEqual(literalParts(text, turnsDirection), [{ text, code: false }]);
 });
 
 test("every kind of row target shows what would not show as a code", () => {
