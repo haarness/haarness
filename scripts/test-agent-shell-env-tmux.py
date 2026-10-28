@@ -10,6 +10,9 @@ command, a terminal, an MCP server, a language server and a formatter get no cha
 The server logs one `agent shell environment set` line per agent command, with no outer marker kept.
 Then `haarness run` under an outer agent (AI_AGENT=outer-agent, AGENT=1) keeps that agent's
 AI_AGENT, in its commands and in the person's own, and logs that it did.
+With the shell deadline set to 1.5 s, a slash command's block that takes 3 s still completes in the
+person's turn, while the model's own 3 s command times out; a block that prints 3000 lines puts its
+last 2000 in the prompt with a line saying so.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-agent-shell-env-tmux.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -39,7 +42,14 @@ UNMARKED = 'unset|unset|unset|unset'
     'export const meta = { name: "shellmarks", description: "Show the agent markers" }\n\n'
     f'await shell({json.dumps(show(project/"workflow.txt"))})\nreturn "marked"\n')
 record = lambda file: f"{show(file)}; exec python3 \"$@\""
+(project/'.haarness/commands/slowblock.md').write_text(
+    "---\ndescription: A block slower than the shell deadline\n---\nSLOW !`sleep 3; printf SLOW_BLOCK_DONE`\n")
+(project/'.haarness/commands/manylines.md').write_text(
+    "---\ndescription: A block that prints 3000 lines\n---\nLINES !`seq 3000`\n")
 (project/'.haarness/config.toml').write_text(f'''
+[execution]
+shell_timeout_ms = 1500
+
 [mcp.envdump]
 transport = "stdio"
 command = "sh"
@@ -139,6 +149,30 @@ try:
     until(lambda: f'Echo: MARKS 1|1|haarness|{chat}' in capture(), 'the slash command reply did not show the markers')
     check("a slash command's !`…` block is marked and names the chat")
 
+    def prompts():
+        return [item['data']['text'].strip() for item in call(f'/threads/{chat}/items')
+                if item['data']['type'] == 'user_message']
+    run(['tmux', 'send-keys', '-l', '-t', session, '/slowblock']); keys('Enter')
+    until(lambda: 'Echo: SLOW SLOW_BLOCK_DONE' in capture(), 'the slow block did not finish', seconds=30)
+    assert 'SLOW SLOW_BLOCK_DONE' in prompts(), prompts()[-1]
+    paste('!tool bash ' + json.dumps({'command': 'sleep 3; printf MODEL_DONE'}))
+    def model_timeout():
+        results = [item['data'] for item in call(f'/threads/{chat}/items')
+                   if item['data']['type'] == 'tool_result' and item['data']['name'] == 'bash']
+        return results and results[-1]['is_error'] and 'timed out after 1500 ms' in results[-1]['output']
+    until(model_timeout, "the model's slow command did not time out", seconds=30)
+    until(lambda: 'Tool bash => tool error: command timed out' in capture(), 'the turn did not end')
+    check("a slash command's 3 s block outlasts the 1.5 s shell deadline; the model's own 3 s command does not")
+
+    run(['tmux', 'send-keys', '-l', '-t', session, '/manylines']); keys('Enter')
+    lines = until(lambda: next((text for text in prompts() if text.startswith('LINES ')), None), 'the long block did not run')
+    shown, note = lines.removeprefix('LINES ').rsplit('\n', 1)
+    assert shown.splitlines() == [str(number) for number in range(1001, 3001)], shown[:40]
+    saved = re.fullmatch(r'\(only the last 2000 lines or 50 KB of this output are shown; everything it printed is saved in (.+)\)', note)
+    assert saved and pathlib.Path(saved.group(1)).read_text().splitlines() == [str(n) for n in range(1, 3001)], note
+    until(lambda: 'everything it printed is saved in' in capture(), 'the echo did not end with the note')
+    check('a block that prints 3000 lines puts its last 2000 in the prompt and says where all of it is')
+
     task = {'agent': 'general', 'background': True,
             'prompt': '!tool bash ' + json.dumps({'command': show(project/'background.txt')})}
     paste('!tool task ' + json.dumps(task))
@@ -173,12 +207,13 @@ try:
     # Model, slash command block, background child and workflow: one line each, none with an outer
     # marker (the TUI's AI_AGENT=haarness was Haarness's own) or a stale id; the person's command and
     # the write tool log none.
-    lines = until(lambda: len(logged()) >= 4 and logged(), 'the server did not log the agent commands')
+    lines = until(lambda: len(logged()) >= 7 and logged(), 'the server did not log the agent commands')
     time.sleep(1)
     lines = logged()
-    assert len(lines) == 4, lines
+    # The model's two commands and the three slash command blocks name the chat.
+    assert len(lines) == 7, lines
     named = sorted(re.search(r'thread_id=(\S+)', line).group(1) for line in lines)
-    assert named == sorted([chat, chat, children[0], runs[0]]), (named, lines)
+    assert named == sorted([chat] * 5 + [children[0], runs[0]]), (named, lines)
     assert all('outer_marker_kept=false stale_id_replaced=false' in line and ' INFO ' in line for line in lines), lines
     assert not any(STALE in line for line in lines), lines
     check('the server logs one line per agent command with its chat id, no outer marker and no stale id')
