@@ -338,6 +338,21 @@ pub fn read_with_imports(
     resolve(path, &scope, budget, 0)
 }
 
+/// Why [`left_out`] leaves out a secret-named file.
+pub const SECRET_FILE: &str = "it is a secret file";
+
+/// Whether a file's name says it is a template of settings rather than the
+/// settings (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`).
+#[must_use]
+pub fn is_template(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy().to_ascii_lowercase();
+        [".example", ".sample", ".template", ".dist"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+    })
+}
+
 /// Why Haarness leaves a file out of a prompt it builds by itself (an
 /// instruction file, an `@` import in one, a file a skill or command names
 /// with `@`), if it does: a secret-named file (`.env`), a file where
@@ -355,7 +370,7 @@ pub fn left_out(
         .and_then(|workspace| canonical.strip_prefix(workspace).ok())
         .unwrap_or(canonical);
     if crate::is_secret_path(relative) {
-        return Some("it is a secret file");
+        return Some(SECRET_FILE);
     }
     // A read of one asks a person, and nobody is asked here.
     if crate::is_credential_store_path(canonical) {

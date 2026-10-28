@@ -675,6 +675,12 @@ fn expand_references(text: &str, invoker: &dyn crate::ToolInvoker) -> String {
                         .then_some("a read rule denies it")
                 })
             })
+            // A template of settings a skill names (`.env.sample`) reads as
+            // before; only `.env.example` is no secret to the read rules.
+            .filter(|reason| {
+                *reason != crate::instructions::SECRET_FILE
+                    || !crate::instructions::is_template(&real)
+            })
         }) {
             blocks.push(format!("[File context omitted: {name} ({reason})]"));
             continue;
@@ -1357,6 +1363,8 @@ mod tests {
         let store = root.join(".st/data/auth.json");
         std::fs::write(&store, "SIGN_IN_SECRET").unwrap();
         std::fs::write(root.join(".env"), "ENV_SECRET").unwrap();
+        std::fs::write(root.join(".env.sample"), "SAMPLE_BODY").unwrap();
+        std::fs::write(root.join(".env.template"), "TEMPLATE_BODY").unwrap();
         std::fs::write(root.join("private/notes.md"), "PRIVATE_BODY").unwrap();
         std::fs::write(root.join("auth.json"), "OWN_FILE_BODY").unwrap();
         crate::record_credential_store(store.clone(), false);
@@ -1373,7 +1381,7 @@ mod tests {
             rules,
         };
         let text = prepare(
-            "Read @.st/data/auth.json @.env @private/notes.md @notes.txt @auth.json",
+            "Read @.st/data/auth.json @.env @private/notes.md @notes.txt @auth.json @.env.sample @.env.template",
             "",
             &DefinitionExecution::default(),
             "session",
@@ -1384,7 +1392,10 @@ mod tests {
         for hidden in ["SIGN_IN_SECRET", "ENV_SECRET", "PRIVATE_BODY"] {
             assert!(!text.contains(hidden), "{text}");
         }
-        assert!(text.contains("OWN_FILE_BODY"), "{text}");
+        // Templates of settings read as before.
+        for shown in ["OWN_FILE_BODY", "SAMPLE_BODY", "TEMPLATE_BODY"] {
+            assert!(text.contains(shown), "{text}");
+        }
         let mut notes = vec![
             "[File context omitted: .st/data/auth.json (Haarness keeps sign-ins there)]",
             "[File context omitted: .env (it is a secret file)]",
