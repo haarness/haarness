@@ -1878,6 +1878,7 @@
   "You don't have access to this.": "이 항목에 접근할 권한이 없습니다.",
   "This is no longer available. It may have been removed.": "더 이상 사용할 수 없습니다. 삭제되었을 수 있습니다.",
   "This is too large to send.": "너무 커서 보낼 수 없습니다.",
+  "The server refused the token or password. Check it, then try again.": "서버가 토큰 또는 비밀번호를 거부했습니다. 확인한 뒤 다시 시도하세요.",
   "That didn't go through. Try again.": "처리되지 않았습니다. 다시 시도하세요.",
   "Sign-in could not start. Another sign-in is still waiting on this computer. Finish or close it, then try again.": "로그인을 시작할 수 없습니다. 이 컴퓨터에서 다른 로그인이 아직 대기 중입니다. 그 로그인을 끝내거나 닫은 뒤 다시 시도하세요.",
   "A port is busy. Something else on this computer is using a port Haarness needs. Close it, then try again.": "포트가 사용 중입니다. 이 컴퓨터의 다른 프로그램이 Haarness에 필요한 포트를 사용 중입니다. 그 프로그램을 닫은 뒤 다시 시도하세요.",

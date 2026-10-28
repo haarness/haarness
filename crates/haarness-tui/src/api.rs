@@ -2182,10 +2182,12 @@ pub fn refusal_status(error: &anyhow::Error) -> Option<reqwest::StatusCode> {
 }
 
 /// Preserve the server's structured error instead of reducing every failure
-/// to reqwest's generic "HTTP status client error". A body without a sentence
-/// (an older gateway, a proxy: nothing, a reason phrase, an HTML page) reads
-/// as its status in plain words; the status, path and body go to the log.
-/// Query strings and authorization headers are deliberately excluded.
+/// to reqwest's generic "HTTP status client error". A request the server
+/// refused in plain text (its file routes: "Path must be relative to the
+/// workspace") keeps that sentence. A body without one (an older gateway, a
+/// proxy: nothing, a reason phrase, an HTML page, any 5xx in plain text)
+/// reads as its status in plain words; the status, path and body go to the
+/// log. Query strings and authorization headers are deliberately excluded.
 async fn checked_response(response: reqwest::Response) -> Result<reqwest::Response> {
     let status = response.status();
     if status.is_success() {
@@ -2210,7 +2212,18 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
             .and_then(serde_json::Value::as_str)
     };
     let code = field("code").map(str::to_owned);
-    let said = field("message").or_else(|| field("error"));
+    // The sign-in check answers every refused credential with the same
+    // "Authentication required", which never says that what was sent was
+    // refused: a 401 in plain text reads as its status.
+    let plain = (value.is_none()
+        && status.is_client_error()
+        && status != reqwest::StatusCode::UNAUTHORIZED)
+        .then(|| body.trim())
+        .filter(|text| !text.is_empty())
+        .map(|text| text.chars().take(300).collect::<String>());
+    let said = field("message")
+        .or_else(|| field("error"))
+        .or(plain.as_deref());
     let relayed = path.contains("/remote-hosts/") || path.contains("/remote-sessions/");
     let message = match refusal_words(status, code.as_deref(), said, relayed) {
         Some(words) => {
@@ -2240,6 +2253,7 @@ const TOO_MANY: &str = "Too many requests. Wait a moment, then try again.";
 const NO_ACCESS: &str = "You don't have access to this.";
 const GONE: &str = "This is no longer available. It may have been removed.";
 const TOO_LARGE: &str = "This is too large to send.";
+const SIGN_IN_REFUSED: &str = "The server refused the token or password. Check it, then try again.";
 const NOT_THROUGH: &str = "That didn't go through. Try again.";
 pub(crate) const CANNOT_CONNECT: &str =
     "Can't connect. Check your internet connection and try again.";
@@ -2271,6 +2285,8 @@ fn refusal_words(
         502..=504 if relayed => COMPUTER_UNANSWERED,
         502..=504 => NOT_ANSWERING,
         500..=599 => SERVER_FAILED,
+        // Through Cloud's relay a 401 is Cloud's sign-in, not this server's.
+        401 if !relayed => SIGN_IN_REFUSED,
         408 => TOO_SLOW,
         429 => TOO_MANY,
         403 => NO_ACCESS,
@@ -2780,6 +2796,12 @@ mod tests {
                     "409 Conflict",
                     r#"{"error":{"code":"conflict","message":"Remote host is offline or its connection changed. Reconnect and check the current state before retrying.","retryable":false}}"#,
                 ),
+                (
+                    "400 Bad Request",
+                    "\n  Path must be relative to the workspace\n",
+                ),
+                ("401 Unauthorized", "Authentication required"),
+                ("500 Internal Server Error", "thread 'main' panicked"),
             ] {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
@@ -2856,6 +2878,24 @@ mod tests {
         assert_eq!(
             relayed.agents().await.unwrap_err().to_string(),
             super::COMPUTER_UNREACHABLE
+        );
+        // A refusal the server wrote in plain text is its sentence; a wrong
+        // token says it was refused; a 5xx in plain text is no sentence.
+        let error = client.agents().await.unwrap_err();
+        assert_eq!(error.to_string(), "Path must be relative to the workspace");
+        assert_eq!(
+            super::refusal_status(&error),
+            Some(reqwest::StatusCode::BAD_REQUEST)
+        );
+        let error = client.agents().await.unwrap_err();
+        assert_eq!(error.to_string(), super::SIGN_IN_REFUSED);
+        assert_eq!(
+            super::refusal_status(&error),
+            Some(reqwest::StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            client.agents().await.unwrap_err().to_string(),
+            super::SERVER_FAILED
         );
         let requests = server.await.unwrap();
         assert!(requests[0].starts_with("GET /v1/vcs/diff?mode=working "));
@@ -2939,6 +2979,21 @@ mod tests {
         );
         assert_eq!(words(410, None, None, false), Some(super::GONE));
         assert_eq!(words(400, None, None, false), Some(super::NOT_THROUGH));
+        assert_eq!(
+            words(401, None, Some("Unauthorized"), false),
+            Some(super::SIGN_IN_REFUSED)
+        );
+        // Through Cloud's relay a bare 401 is Cloud's sign-in.
+        assert_eq!(words(401, None, None, true), Some(super::NOT_THROUGH));
+        assert_eq!(
+            words(
+                401,
+                Some("unauthorized"),
+                Some("Sign in to Haarness again."),
+                true
+            ),
+            None
+        );
         // The server's own sentence is the server's, whatever its status.
         assert_eq!(
             words(

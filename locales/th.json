@@ -1878,6 +1878,7 @@
   "You don't have access to this.": "คุณไม่มีสิทธิ์เข้าถึงรายการนี้",
   "This is no longer available. It may have been removed.": "รายการนี้ไม่มีแล้ว อาจถูกลบไป",
   "This is too large to send.": "รายการนี้ใหญ่เกินกว่าจะส่งได้",
+  "The server refused the token or password. Check it, then try again.": "เซิร์ฟเวอร์ปฏิเสธโทเค็นหรือรหัสผ่าน ตรวจสอบแล้วลองอีกครั้ง",
   "That didn't go through. Try again.": "ดำเนินการไม่สำเร็จ ลองอีกครั้ง",
   "Sign-in could not start. Another sign-in is still waiting on this computer. Finish or close it, then try again.": "เริ่มการลงชื่อเข้าใช้ไม่ได้ ยังมีการลงชื่อเข้าใช้อื่นรออยู่บนคอมพิวเตอร์เครื่องนี้ ทำให้เสร็จหรือปิดก่อน แล้วลองอีกครั้ง",
   "A port is busy. Something else on this computer is using a port Haarness needs. Close it, then try again.": "พอร์ตไม่ว่าง มีโปรแกรมอื่นบนคอมพิวเตอร์เครื่องนี้ใช้พอร์ตที่ Haarness ต้องการ ปิดโปรแกรมนั้น แล้วลองอีกครั้ง",

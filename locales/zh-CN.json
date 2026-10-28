@@ -1878,6 +1878,7 @@
   "You don't have access to this.": "你没有访问权限。",
   "This is no longer available. It may have been removed.": "此内容已不可用。它可能已被移除。",
   "This is too large to send.": "内容太大，无法发送。",
+  "The server refused the token or password. Check it, then try again.": "服务器拒绝了令牌或密码。请检查后重试。",
   "That didn't go through. Try again.": "操作未完成。请重试。",
   "Sign-in could not start. Another sign-in is still waiting on this computer. Finish or close it, then try again.": "无法开始登录。这台电脑上还有另一个登录在等待。请完成或关闭它，然后重试。",
   "A port is busy. Something else on this computer is using a port Haarness needs. Close it, then try again.": "端口被占用。这台电脑上的其他程序正在使用 Haarness 需要的端口。请关闭它，然后重试。",

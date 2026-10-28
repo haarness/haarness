@@ -1878,6 +1878,7 @@
   "You don't have access to this.": "Buna erişiminiz yok.",
   "This is no longer available. It may have been removed.": "Bu artık kullanılamıyor. Kaldırılmış olabilir.",
   "This is too large to send.": "Bu, gönderilemeyecek kadar büyük.",
+  "The server refused the token or password. Check it, then try again.": "Sunucu belirteci veya parolayı reddetti. Denetleyin, sonra yeniden deneyin.",
   "That didn't go through. Try again.": "Bu işlem tamamlanamadı. Yeniden deneyin.",
   "Sign-in could not start. Another sign-in is still waiting on this computer. Finish or close it, then try again.": "Oturum açma başlatılamadı. Bu bilgisayarda başka bir oturum açma hâlâ bekliyor. Onu tamamlayın veya kapatın, sonra yeniden deneyin.",
   "A port is busy. Something else on this computer is using a port Haarness needs. Close it, then try again.": "Bir bağlantı noktası meşgul. Bu bilgisayardaki başka bir program Haarness'in ihtiyaç duyduğu bir bağlantı noktasını kullanıyor. Onu kapatın, sonra yeniden deneyin.",
