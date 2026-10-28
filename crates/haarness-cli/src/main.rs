@@ -8189,8 +8189,13 @@ async fn application_at(
     if folder_snapshots_enabled(file_config.snapshots.as_ref()) {
         // Opened when a chat's folder first is: a server none of whose chats
         // has a folder opens nothing more.
-        let folders = folders
-            .get_or_insert_with(|| haarness_store::SqliteSnapshotFolders::open(&paths.database));
+        let folders = folders.get_or_insert_with(|| {
+            if registered_workspace.chat_home {
+                haarness_store::SqliteSnapshotFolders::open_in_chat_home(&paths.database)
+            } else {
+                haarness_store::SqliteSnapshotFolders::open(&paths.database)
+            }
+        });
         runtime = runtime.with_folder_snapshots(Arc::new(folders.clone()));
     }
     if let Some(folders) = folders {

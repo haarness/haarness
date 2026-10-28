@@ -1743,6 +1743,12 @@ impl AgentRuntime {
         self
     }
 
+    /// Whether this runtime is the chat home ([`Self::as_chat_home`]).
+    #[must_use]
+    pub const fn is_chat_home(&self) -> bool {
+        self.chat_home
+    }
+
     /// Where chat `thread` works: its own folder, or the project folder.
     async fn thread_workspace(&self, thread: &Thread, access: FolderAccess) -> CoreResult<PathBuf> {
         thread_workspace(&self.workspace, thread, access).await
@@ -5166,6 +5172,7 @@ impl AgentRuntime {
         }
         let mut execution = components.config.execution.clone();
         execution.person_shell = !agent_work;
+        execution.chat_home = self.chat_home.then(|| self.workspace.clone());
         if name == "bash"
             && allowed.is_ok()
             && let Some(hooks) = &components.hooks
@@ -10770,6 +10777,7 @@ impl RunnerTask {
             self.capture_snapshot().await?;
         }
         let mut execution = self.config.execution.clone();
+        execution.chat_home = self.chat_home.then(|| self.runtime_workspace.clone());
         if name == "bash"
             && let Some(hooks) = &self.hooks
         {

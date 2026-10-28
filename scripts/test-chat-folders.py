@@ -11,8 +11,9 @@ chat runs in its folder and no other chat sees it, odd folder names are refused,
 replaced by a link refuses the chat's work, a review
 never makes a deleted folder again, and the chat home appears in no project list (`desktop
 projects`, `worktree list`), survives an older build rewriting the registry, never takes the
-pre-workspace database, and is refused for a project. Echo provider, isolated HAARNESS_HOME and
-HAARNESS_DATA_DIR; stdlib only.
+pre-workspace database, and is refused for a project, and a Git repository around it whose
+.gitignore leaves everything out hides nothing from its chats. Echo provider, isolated HAARNESS_HOME
+and HAARNESS_DATA_DIR; stdlib only.
 """
 import json, os, pathlib, sqlite3, subprocess, sys, tempfile, time, urllib.error, urllib.request, uuid
 import e2e_scratch
@@ -337,6 +338,21 @@ try:
                                  input='{"action":"connect"}', env=env, text=True, capture_output=True, timeout=60)
         assert refused.returncode != 0 and 'chat home must be a folder of its own' in refused.stderr, refused
     passed('--chat-home refuses a project or a Git repository')
+
+    # The chat home inside a Git repository whose .gitignore leaves everything out (a home folder
+    # kept in Git): what a chat writes is still in its Undo checkpoints, its searches and @ mentions.
+    subprocess.run(['git', 'init', '-q', str(root / 'app')], check=True, capture_output=True, env=env)
+    (root / 'app' / '.gitignore').write_text('*\n')
+    kept = api('POST', '/threads', {'title': 'Kept', 'directory': '2026-10-24/kept'})
+    tool(kept, 'write', {'path': 'plan.md', 'content': 'needle\n'})
+    diff = api('GET', f'/threads/{kept["id"]}/diff')
+    assert [file['file'] for file in diff] == ['plan.md'], diff
+    tool(kept, 'grep', {'pattern': 'needle'})
+    found = last_result(kept, 'grep')['output']
+    assert 'plan.md' in found, found
+    found = api('GET', f'/files/search?q=plan&threadId={kept["id"]}')
+    assert found == ['plan.md'], found
+    passed('ignore files above the chat home hide nothing from its chats\' Undo, search or mentions')
 finally:
     if started_home:
         subprocess.run([binary, '--workspace', str(home), 'serve', '--stop'], env=env,
