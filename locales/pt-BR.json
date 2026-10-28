@@ -1780,6 +1780,7 @@
   "{count} more lines": "mais {count} linhas",
   "rejected": "rejeitado",
   "Approvals changed in another window · ctrl+y to switch": "As aprovações mudaram em outra janela · ctrl+y para alternar",
+  "Could not keep {mode}": "Não foi possível manter o modo {mode}",
   "Share usage statistics": "Compartilhar estatísticas de uso",
   "Diagnostics": "Diagnóstico",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "Os logs do Haarness deste computador em um zip, sem os segredos conhecidos, para compartilhar quando algo der errado.",

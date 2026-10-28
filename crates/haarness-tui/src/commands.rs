@@ -2359,33 +2359,7 @@ impl App {
                 self.notice = "This session is already new · type to start".into();
             }
             "new" => {
-                let request = CreateThreadRequest {
-                    id: None,
-                    schedule: None,
-                    title: None,
-                    parent_id: None,
-                    agent: Some(self.agent().into()),
-                    provider: Some(self.thread.provider.clone()),
-                    model: Some(self.thread.model.clone()),
-                    ultracode: None,
-                    directory: None,
-                };
-                let thread = client.create_thread(request).await?;
-                // A new chat starts in the open chat's Auto or Yolo, as it
-                // would have when Auto belonged to the TUI rather than the
-                // chat.
-                let mode = self.chat_approval_mode();
-                if self.approval_server && mode != haarness_protocol::ApprovalMode::Review {
-                    let request = haarness_protocol::SetApprovalModeRequest {
-                        mode: mode.setting(),
-                        revision: None,
-                    };
-                    if let Err(error) = client.set_approval_mode(thread.id, &request).await {
-                        tracing::warn!(%error, ?mode, "could not start the new chat in the open chat's mode");
-                    }
-                }
-                self.refresh_threads(client).await?;
-                self.switch_thread(thread, client).await?;
+                self.open_chat_in_place(client).await?;
             }
             "sessions" => {
                 self.open_sessions(arguments, client).await?;
@@ -4860,6 +4834,13 @@ impl App {
                 },
             )
             .await?;
+        self.open_chat_in_place(client).await
+    }
+
+    /// Open a new chat in place of this one (`/new`, `/archive`), on the
+    /// same agent and model and in the mode this one hands on.
+    async fn open_chat_in_place(&mut self, client: &ApiClient) -> Result<()> {
+        let carried = self.carried_approval_mode();
         let thread = client
             .create_thread(CreateThreadRequest {
                 id: None,
@@ -4873,9 +4854,55 @@ impl App {
                 directory: None,
             })
             .await?;
+        let mut lost = None;
+        if let Some(mode) = carried {
+            let request = haarness_protocol::SetApprovalModeRequest {
+                mode: mode.setting(),
+                revision: None,
+            };
+            if let Err(error) = client.set_approval_mode(thread.id, &request).await {
+                tracing::warn!(%error, ?mode, "could not start the new chat in the open chat's mode");
+                lost = Some(mode);
+            }
+        }
         self.refresh_threads(client).await?;
         self.switch_thread(thread, client).await?;
+        // The new chat runs in the default, which may ask less than the mode
+        // it should have kept: name that mode over the switch's "Ready",
+        // unless the server reads the new chat in it anyway. The band shows
+        // the mode the chat got.
+        if let Some(mode) = lost.filter(|mode| {
+            !self
+                .approval_mode
+                .as_ref()
+                .is_some_and(|info| info.thread_id == self.thread.id && info.mode == *mode)
+        }) {
+            let name = match mode {
+                haarness_protocol::ApprovalMode::Review => "Review",
+                haarness_protocol::ApprovalMode::Auto => "Auto",
+                haarness_protocol::ApprovalMode::Yolo => "Yolo",
+            };
+            self.notice = self.language.format(
+                "Could not keep {mode}",
+                &[("mode", self.language.text(name))],
+            );
+        }
         Ok(())
+    }
+
+    /// The mode a chat opened in place of this one starts in: the mode
+    /// someone chose for this chat (or for the agent that delegated to it).
+    /// A mode that only comes from `defaults.approval_mode` is not written,
+    /// so the new chat keeps following the configuration, and neither is
+    /// one not read yet. Nothing on a server that keeps no modes, where this
+    /// launch's own switch already covers every chat.
+    fn carried_approval_mode(&self) -> Option<haarness_protocol::ApprovalMode> {
+        self.approval_mode
+            .as_ref()
+            .filter(|info| {
+                self.approval_server && info.thread_id == self.thread.id && info.explicit
+            })
+            .map(|info| info.mode)
     }
 
     fn upsert_thread(&mut self, thread: Thread) {
