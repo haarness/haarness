@@ -2938,5 +2938,6 @@
   "Ends {date}": "Kończy się {date}",
   "On hold": "Wstrzymane",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Nadwyżka jest wyłączona, więc zakupione kredyty nie są wydawane. Włącz ją w rozliczeniach.",
-  "Your free trial didn't start: that card was already used for a trial.": "Bezpłatny okres próbny się nie rozpoczął: ta karta była już użyta do okresu próbnego."
+  "Your free trial didn't start: that card was already used for a trial.": "Bezpłatny okres próbny się nie rozpoczął: ta karta była już użyta do okresu próbnego.",
+  "The attachments come to {size}, over the {limit} limit for media in one message": "Załączniki zajmują {size}, więcej niż limit {limit} multimediów w jednej wiadomości"
 }

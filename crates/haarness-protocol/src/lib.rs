@@ -65,6 +65,18 @@ pub const THREAD_DIRECTORY_CAPABILITY: &str = "thread-directory.v1";
 /// and a chat sends its stored attachments with every later request, so the
 /// server refuses a message over it and clients check it before sending.
 pub const MAX_INLINE_MEDIA_BYTES: usize = 20 * 1024 * 1024;
+
+/// A size in MiB as a person reads it: whole ones bare ("20 MiB"), others to
+/// a tenth rounded up, so a file just over a limit never reads as at it.
+#[must_use]
+pub fn mebibytes(bytes: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    if bytes.is_multiple_of(MIB) {
+        return format!("{} MiB", bytes / MIB);
+    }
+    let tenths = bytes.saturating_mul(10).div_ceil(MIB);
+    format!("{}.{} MiB", tenths / 10, tenths % 10)
+}
 /// Reasoning-effort names Haarness can send to a provider, lightest first.
 /// Model catalogs advertise a per-model subset of this scale; a tier outside
 /// it is a provider-app setting the public request APIs reject, so it never

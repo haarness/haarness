@@ -237,7 +237,20 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
         screen("drop-pdf-attached")
         keys("BSpace")
         until(lambda: "report.pdf" not in composer(), "Backspace did not remove the PDF")
-        checks.append("Drops: README.md and a .pdf that is not a PDF stay their paths, no command list; a real PDF is attached")
+        # Two screenshots of 12 MiB each: the server shrinks images, so the
+        # prompt takes both.
+        for name in ("one.png", "two.png"):
+            with open(drops / name, "wb") as handle:
+                handle.write(b"\x89PNG\r\n\x1a\n")
+                handle.truncate(12 * 1024 * 1024)
+            drop(drops / name)
+            until(lambda: name in composer(), f"the 12 MiB screenshot {name} was not attached")
+        assert "limit for media" not in pane(), pane()
+        screen("drop-two-screenshots")
+        keys("BSpace")
+        keys("BSpace")
+        until(lambda: "one.png" not in composer(), "Backspace did not remove the screenshots")
+        checks.append("Drops: README.md and a .pdf that is not a PDF stay their paths, no command list; a real PDF and two 12 MiB screenshots are attached")
 
         text("!")
         until(lambda: "shell — Enter runs the command" in pane(), "shell mode did not open")
