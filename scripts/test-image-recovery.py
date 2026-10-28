@@ -13,7 +13,7 @@ newest after one refusal, and the TUI says the oldest are left out. Media
 past the 20 MiB a message carries (a PDF alone or two together, by path or
 inline) is refused before it is stored and the chat goes on; one stored
 that is over it now reaches the model as a note instead of failing every
-turn.
+turn; a file named .pdf that is not one is sent as what it holds.
 """
 import base64
 import http.server
@@ -433,8 +433,14 @@ try:
     assert f'[Attachment {first} left out' in note and 'over the 20 MiB limit for one message' in note, note[:2000]
     state, sent = turn(media, 'Thanks')
     assert state['status'] == 'completed' and len(sent) == 1, state
-    results.append({'check': 'a stored PDF over the limit becomes a note and the chat recovers'})
-    print('PASS broken chat recovers: a note instead of the PDF', flush=True)
+    # A file named .pdf that is not one (a Git LFS pointer) is sent as text.
+    pointer = workspace / 'design.pdf'
+    pointer.write_text('version https://git-lfs.github.com/spec/v1\noid sha256:4d7a\nsize 1048576\n')
+    state, sent = turn(media, 'What is this file?', [str(pointer)])
+    assert state['status'] == 'completed' and documents(sent[0]) == 0, state
+    assert 'git-lfs.github.com/spec/v1' in json.dumps(sent[0]['messages'][-1]), sent[0]['messages'][-1]
+    results.append({'check': 'a stored PDF over the limit becomes a note and the chat recovers; a fake PDF is text'})
+    print('PASS broken chat recovers: a note instead of the PDF; a fake PDF goes as text', flush=True)
 
     # 9. The TUI shows both notices in the transcript.
     def pane(name):

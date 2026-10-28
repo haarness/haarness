@@ -24,6 +24,9 @@ pub const MAX_TEXT_ATTACHMENT_BYTES: usize = 512 * 1024;
 /// The largest image file read for conversion; what is kept is far smaller.
 const MAX_IMAGE_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// How far into a file PDF readers look for its `%PDF-` header.
+const PDF_HEADER_WINDOW: usize = 1024;
+
 /// The media type a provider receives for a file, by its extension.
 pub fn media_mime_for_path(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
@@ -137,7 +140,14 @@ fn admit_one(source: String, workspace: &Path) -> CoreResult<String> {
             if size > MAX_INLINE_MEDIA_BYTES as u64 {
                 return Err(over_limit(&url.name(), size));
             }
-            return Ok(source);
+            if url.mime_type != "application/pdf" {
+                return Ok(source);
+            }
+            let bytes = url.bytes()?;
+            if starts_like_pdf(&bytes) {
+                return Ok(source);
+            }
+            return admit_mislabelled_pdf(bytes, url.file_name());
         }
         let bytes = url.bytes()?;
         if text(&bytes, url.mime_type).is_none() {
@@ -192,6 +202,17 @@ fn admit_one(source: String, workspace: &Path) -> CoreResult<String> {
         let bytes = read(&path, &name)?;
         return admit_image(bytes, Some(name), keep_path);
     }
+    if mime_type == Some("application/pdf") {
+        let head = read_at_most(&path, PDF_HEADER_WINDOW).map_err(|error| {
+            CoreError::Invalid(format!("cannot read attachment {name}: {error}"))
+        })?;
+        if !starts_like_pdf(&head) {
+            if metadata.len() > MAX_TEXT_ATTACHMENT_BYTES as u64 {
+                return Err(not_a_pdf(&name));
+            }
+            return admit_mislabelled_pdf(read(&path, &name)?, Some(name));
+        }
+    }
     if mime_type.is_some() {
         if metadata.len() > MAX_INLINE_MEDIA_BYTES as u64 {
             return Err(over_limit(&name, metadata.len()));
@@ -208,11 +229,46 @@ fn admit_one(source: String, workspace: &Path) -> CoreResult<String> {
         }
         return Err(unsupported(&name));
     }
-    Ok(format!(
-        "data:text/plain;name={};base64,{}",
-        url::form_urlencoded::byte_serialize(name.as_bytes()).collect::<String>(),
-        STANDARD.encode(bytes)
-    ))
+    Ok(text_data_url(Some(&name), &bytes))
+}
+
+/// A file named or labelled a PDF whose bytes do not start like one (a Git
+/// LFS pointer, an error page saved under the name) is taken for what it
+/// holds, as an untyped file would be: text, or an image, or refused. Sent as
+/// a PDF, the provider would refuse it on every later turn of the chat.
+fn admit_mislabelled_pdf(bytes: Vec<u8>, name: Option<String>) -> CoreResult<String> {
+    let label = name.clone().unwrap_or_else(|| "attachment.pdf".into());
+    if text(&bytes, "").is_some() {
+        if bytes.len() > MAX_TEXT_ATTACHMENT_BYTES {
+            return Err(too_large(&label));
+        }
+        return Ok(text_data_url(name.as_deref(), &bytes));
+    }
+    // Kept inline, typed by its bytes: by path its name would say PDF again.
+    if crate::images::sniff(&bytes).is_some() {
+        return admit_image(bytes, name, |_| None);
+    }
+    Err(not_a_pdf(&label))
+}
+
+fn text_data_url(name: Option<&str>, bytes: &[u8]) -> String {
+    let name = name
+        .map(|name| {
+            format!(
+                ";name={}",
+                url::form_urlencoded::byte_serialize(name.as_bytes()).collect::<String>()
+            )
+        })
+        .unwrap_or_default();
+    format!("data:text/plain{name};base64,{}", STANDARD.encode(bytes))
+}
+
+/// Whether bytes hold a PDF: readers take one whose `%PDF-` header lies
+/// within its first kilobyte, after any junk a mail or web gateway added.
+fn starts_like_pdf(bytes: &[u8]) -> bool {
+    bytes[..bytes.len().min(PDF_HEADER_WINDOW)]
+        .windows(5)
+        .any(|part| part == b"%PDF-")
 }
 
 /// An image as every provider reads it. One that already is may stay as it
@@ -533,6 +589,12 @@ fn over_limit(name: &str, size: u64) -> CoreError {
     ))
 }
 
+fn not_a_pdf(name: &str) -> CoreError {
+    CoreError::Invalid(format!(
+        "{name} cannot be attached: it is named as a PDF but does not hold one"
+    ))
+}
+
 /// A size in MiB as a person reads it: whole ones bare ("20 MiB"), others to
 /// a tenth rounded up, so a file just over a limit never reads as at it.
 fn mebibytes(bytes: u64) -> String {
@@ -804,6 +866,62 @@ mod tests {
         let notes = data_url("text/plain", Some("notes.txt"), b"plain notes\n");
         assert!(admit(vec!["one.pdf".into(), notes.clone()], &dir).is_ok());
         assert!(admit(vec!["one.pdf".into(), inline, notes], &dir).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_named_pdf_that_is_not_one_is_taken_for_what_it_holds() {
+        let dir = std::env::temp_dir().join(format!("haarness-attach-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pointer = "version https://git-lfs.github.com/spec/v1\noid sha256:4d7a\nsize 1048576\n";
+        std::fs::write(dir.join("design.pdf"), pointer).unwrap();
+        std::fs::write(dir.join("blob.pdf"), b"\0\x01\x02\x03binary").unwrap();
+        std::fs::write(dir.join("late.pdf"), b"\r\n%PDF-1.4\n%%EOF\n").unwrap();
+
+        // By path: text is carried as text, binary refused, a header after a
+        // little junk is still a PDF.
+        let admitted = admit(vec!["design.pdf".into(), "late.pdf".into()], &dir).unwrap();
+        assert!(admitted[0].starts_with("data:text/plain;name=design.pdf;base64,"));
+        assert_eq!(admitted[1], dir.join("late.pdf").to_string_lossy());
+        let (content, media) = for_model("What is this?".into(), admitted);
+        assert!(content.contains("<attached-file name=\"design.pdf\">\nversion https://git-lfs"));
+        assert_eq!(media.len(), 1);
+        let error = admit(vec!["blob.pdf".into()], &dir).unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "blob.pdf cannot be attached: it is named as a PDF but does not hold one"
+            ),
+            "{error}"
+        );
+
+        // As a data URL (Desktop, an SDK): the same.
+        let typed = data_url("application/pdf", Some("design.pdf"), pointer.as_bytes());
+        assert_eq!(
+            admit(vec![typed], &dir).unwrap(),
+            vec![data_url(
+                "text/plain",
+                Some("design.pdf"),
+                pointer.as_bytes()
+            )]
+        );
+        let png = image(4, 4, image::ImageFormat::Png);
+        let admitted = admit(vec![data_url("application/pdf", None, &png)], &dir).unwrap();
+        assert!(
+            admitted[0].starts_with("data:image/png;base64,"),
+            "{}",
+            &admitted[0][..40]
+        );
+        let error = admit(
+            vec![data_url("application/pdf", None, b"\0\x01binary")],
+            &dir,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("attachment.pdf cannot be attached"),
+            "{error}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
