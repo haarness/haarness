@@ -12836,6 +12836,103 @@ async fn deferred_queue_waits_for_idle_steers_first_and_delivers_one_at_a_time()
     assert_eq!(provider.requests.lock().unwrap().len(), 4);
 }
 
+/// A queued message is checked when it arrives, as one sent at once is. One
+/// with more media than a message carries is refused, idle or mid-turn, and
+/// never parked: at the head of the queue it could never start, and every
+/// message behind it would wait for it. A queue edit's attachments too.
+#[tokio::test]
+async fn a_queued_message_over_the_media_limit_is_refused_before_it_waits() {
+    let root = std::env::temp_dir().join(format!("haarness-queued-media-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let scan = root.join("scan.pdf");
+    {
+        let mut file = std::fs::File::create(&scan).unwrap();
+        std::io::Write::write_all(&mut file, b"%PDF-1.7\n").unwrap();
+        file.set_len(21 * 1024 * 1024).unwrap();
+    }
+    let with_scan = |text: &str| {
+        let mut request = deferred_request(text);
+        request.attachments = vec![scan.display().to_string()];
+        request
+    };
+    let provider = DeferredGate::default();
+    let runtime = deferred_runtime(
+        provider.clone(),
+        Arc::new(SqliteStore::in_memory().unwrap()),
+    );
+    let thread = echo_thread(&runtime).await;
+
+    let error = runtime
+        .queue_input(thread.id, with_scan("read this scan"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("scan.pdf is 21 MiB"), "{error}");
+    assert!(
+        runtime
+            .input_queue(thread.id)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(runtime.active_turn(thread.id).await.unwrap().is_none());
+
+    let turn = runtime
+        .start_turn(thread.id, turn_request("original implementation"))
+        .await
+        .unwrap();
+    provider.wait().await;
+    let error = runtime
+        .queue_input(thread.id, with_scan("read this scan"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("scan.pdf is 21 MiB"), "{error}");
+    let behind = deferred_request("deferred release notes");
+    runtime
+        .queue_input(thread.id, behind.clone())
+        .await
+        .unwrap();
+    let queue = runtime.input_queue(thread.id).await.unwrap();
+    assert_eq!(
+        queue.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+        vec![behind.request_id]
+    );
+    let error = runtime
+        .change_input_queue(
+            thread.id,
+            haarness_protocol::InputQueueAction::Edit {
+                revision: queue.revision,
+                id: behind.request_id,
+                text: "deferred release notes with the scan".into(),
+                attachments: Some(vec![scan.display().to_string()]),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("scan.pdf is 21 MiB"), "{error}");
+    let queue = runtime.input_queue(thread.id).await.unwrap();
+    assert_eq!(queue.items[0].text, "deferred release notes");
+    assert!(queue.items[0].attachments.is_empty());
+
+    // The message behind runs once the turn ends.
+    provider.next();
+    provider.wait().await;
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    provider.wait().await;
+    assert!(provider.requests.lock().unwrap()[2].contains("deferred release notes"));
+    let notes = runtime.active_turn(thread.id).await.unwrap().unwrap();
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &notes).await.status,
+        TurnStatus::Completed
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn deferred_queue_stop_parks_work_and_send_resumes_selected_message() {
     let provider = DeferredGate::default();

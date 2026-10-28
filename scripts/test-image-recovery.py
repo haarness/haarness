@@ -395,9 +395,9 @@ try:
 
     # 7. Media past the 20 MiB a message carries is refused before it is
     # stored, so it never reaches the provider, and the chat goes on.
-    def refused(thread, text, attachments):
+    def refused(thread, text, attachments, path='turns', **fields):
         try:
-            api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': text, 'attachments': attachments})
+            api(f'/threads/{thread}/{path}', {'requestId': str(uuid.uuid4()), 'text': text, 'attachments': attachments, **fields})
         except urllib.error.HTTPError as error:
             return error.code, json.loads(error.read())['message']
         raise AssertionError(f'{text!r} was admitted')
@@ -415,10 +415,15 @@ try:
     sparse_pdf(second, 12 * MIB)
     status, message = refused(media, 'Compare these', [str(first), str(second)])
     assert status == 400 and message.endswith('The attachments come to 24 MiB, over the 20 MiB limit for media in one message'), message
+    # A message queued to run later is checked as it arrives, not left to
+    # hold back the queue when its turn would refuse it.
+    status, message = refused(media, 'Summarise this scan later', [str(scan)], path='input', delivery='queue')
+    assert status == 400 and 'scan.pdf is 21 MiB' in message, message
+    assert api(f'/threads/{media}/input/queue')['items'] == [], 'a refused message was queued'
     assert len(REQUESTS) == offset, 'a refused message reached the provider'
     state, sent = turn(media, 'Compare these', [str(first)])
     assert state['status'] == 'completed' and len(sent) == 1 and documents(sent[0]) == 1, (state, len(sent))
-    results.append({'check': 'media over 20 MiB refused before it is stored, by path, inline and together',
+    results.append({'check': 'media over 20 MiB refused before it is stored, by path, inline, together and queued',
                     'refusal': message})
     print('PASS large media: refused before it is stored, the chat goes on', flush=True)
 

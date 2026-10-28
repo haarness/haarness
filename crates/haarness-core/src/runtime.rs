@@ -2516,6 +2516,22 @@ impl AgentRuntime {
             .await
     }
 
+    /// A message's attachments as [`crate::attachments::admit`] keeps them, a
+    /// relative path read from where the chat works.
+    async fn admitted_attachments(
+        &self,
+        id: ThreadId,
+        attachments: Vec<String>,
+    ) -> CoreResult<Vec<String>> {
+        if attachments.is_empty() {
+            return Ok(attachments);
+        }
+        let workspace = self
+            .thread_workspace(&self.reading_thread(id).await?, FolderAccess::Read)
+            .await?;
+        crate::attachments::admit_off_executor(attachments, workspace).await
+    }
+
     pub async fn input_queue(&self, id: ThreadId) -> CoreResult<haarness_protocol::InputQueue> {
         self.repository.get_thread(id).await?;
         self.repository.input_queue(id).await
@@ -2531,7 +2547,7 @@ impl AgentRuntime {
     async fn defer_input(
         &self,
         id: ThreadId,
-        request: QueueInputRequest,
+        mut request: QueueInputRequest,
     ) -> CoreResult<QueueInputResponse> {
         if request.synthetic {
             return Err(CoreError::Invalid(
@@ -2539,6 +2555,10 @@ impl AgentRuntime {
             ));
         }
         self.repository.get_thread(id).await?;
+        // Checked before it waits, as a message sent at once is: one the
+        // turn would refuse when its time came would sit at the head of the
+        // queue and hold back every message behind it.
+        request.attachments = self.admitted_attachments(id, request.attachments).await?;
         loop {
             let active = self.active.get(&id).map(|entry| Arc::clone(entry.value()));
             if let Some(active) = active {
@@ -2680,9 +2700,19 @@ impl AgentRuntime {
     pub async fn change_input_queue(
         &self,
         id: ThreadId,
-        action: haarness_protocol::InputQueueAction,
+        mut action: haarness_protocol::InputQueueAction,
     ) -> CoreResult<haarness_protocol::InputQueue> {
         self.repository.get_thread(id).await?;
+        // An edit's new attachments are checked as a queued message's are.
+        if let haarness_protocol::InputQueueAction::Edit {
+            attachments: Some(attachments),
+            ..
+        } = &mut action
+        {
+            *attachments = self
+                .admitted_attachments(id, std::mem::take(attachments))
+                .await?;
+        }
         if let haarness_protocol::InputQueueAction::Steer { revision, id: key } = action {
             loop {
                 let active = self.active.get(&id).map(|entry| Arc::clone(entry.value()));
@@ -2749,17 +2779,9 @@ impl AgentRuntime {
                 "text or an attachment is required".into(),
             ));
         }
-        if !request.attachments.is_empty() {
-            // A relative attachment is read from where the chat works.
-            let workspace = self
-                .thread_workspace(&self.reading_thread(thread_id).await?, FolderAccess::Read)
-                .await?;
-            request.attachments = crate::attachments::admit_off_executor(
-                std::mem::take(&mut request.attachments),
-                workspace,
-            )
+        request.attachments = self
+            .admitted_attachments(thread_id, std::mem::take(&mut request.attachments))
             .await?;
-        }
         loop {
             let thread = self.repository.get_thread(thread_id).await?;
             let active_turn = self
@@ -6106,17 +6128,9 @@ impl AgentRuntime {
             ));
         }
         let _reload = self.reload_gate.read().await;
-        if !request.attachments.is_empty() {
-            // A relative attachment is read from where the chat works.
-            let workspace = self
-                .thread_workspace(&self.reading_thread(thread_id).await?, FolderAccess::Read)
-                .await?;
-            request.attachments = crate::attachments::admit_off_executor(
-                std::mem::take(&mut request.attachments),
-                workspace,
-            )
+        request.attachments = self
+            .admitted_attachments(thread_id, std::mem::take(&mut request.attachments))
             .await?;
-        }
         self.apply_chat_turn_settings(thread_id, &mut request).await;
         let components = self.components();
         // A standalone `ultracode` in the user's current request is a one-turn
