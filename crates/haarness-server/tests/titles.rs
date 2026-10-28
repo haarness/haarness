@@ -412,7 +412,11 @@ struct BlockPrompt;
 
 #[async_trait]
 impl haarness_core::HookPort for BlockPrompt {
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> haarness_core::HookDecision {
+    async fn user_prompt_submit(
+        &self,
+        _: &haarness_core::HookCall,
+        _: &str,
+    ) -> haarness_core::HookDecision {
         haarness_core::HookDecision {
             block: Some("Blocked fixture".into()),
             ..Default::default()
@@ -420,7 +424,7 @@ impl haarness_core::HookPort for BlockPrompt {
     }
     async fn pre_tool_use(
         &self,
-        _: ThreadId,
+        _: &haarness_core::HookCall,
         _: &str,
         _: &serde_json::Value,
     ) -> haarness_core::HookDecision {
@@ -428,17 +432,17 @@ impl haarness_core::HookPort for BlockPrompt {
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &haarness_core::HookCall,
         _: &str,
         _: &serde_json::Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> haarness_core::HookDecision {
+        haarness_core::HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &haarness_core::HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -446,7 +450,7 @@ impl haarness_core::HookPort for BlockPrompt {
     ) -> haarness_core::HookDecision {
         haarness_core::HookDecision::default()
     }
-    async fn stop(&self, _: ThreadId) {}
+    async fn stop(&self, _: &haarness_core::HookCall) {}
 }
 
 #[tokio::test]

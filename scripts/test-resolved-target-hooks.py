@@ -13,6 +13,11 @@
   prompt; the person is asked and the command as written never runs on the hook's word.
 - Background results: a subagent's result whose chat lost its agent meanwhile is kept in the
   chat as a hidden message with a notice, not dropped.
+- Chat folders: on a project's server, a chat created with a folder of its own runs the project's
+  hooks in that folder, and they find their script through `$CLAUDE_PROJECT_DIR`, the project. On
+  a `--chat-home` server started as Desktop starts it, global PreToolUse and PostToolUse hooks of
+  a chat with a folder of its own run in that folder and get it as `$CLAUDE_PROJECT_DIR` and
+  `cwd`, with the agent named; a chat given no folder gets one and its hooks run there too.
 Every daemon runs on isolated data under one temporary root and is stopped at the end.
 """
 import json, os, pathlib, shlex, subprocess, tempfile, time, urllib.error, urllib.request, uuid
@@ -28,6 +33,7 @@ env.update(HAARNESS_HOME=str(root / 'home'), HAARNESS_DATA_DIR=str(root / 'data'
 CANARY = 'SECRET_CANARY_' + uuid.uuid4().hex[:8]
 name = 'haarness-resolved-' + uuid.uuid4().hex[:8]
 connections, checks = [], []
+home_env = None
 
 
 def write(path, content):
@@ -253,6 +259,63 @@ print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
                   'the refused result is kept', 30)
     check('a result its chat cannot take is kept with a notice',
           'state=\\"completed\\"' in items and 'Unknown agent: helper' in items, items[-2000:])
+    # --- Chat folders -----------------------------------------------------------------------
+    # On a project's server, a chat created with a folder of its own runs the project's hooks in
+    # that folder, and they still find their script through $CLAUDE_PROJECT_DIR, the project.
+    project_log = root / 'project-folder-hooks.log'
+    by_project = [{'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': '"$CLAUDE_PROJECT_DIR"/.haarness/hooks/record.sh'}]}]
+    project_ws = workspace('folder-project', {'hooks': {'PreToolUse': by_project, 'PostToolUse': by_project}})
+    log_path = shlex.quote(str(project_log))
+    write(project_ws / '.haarness/hooks/record.sh',
+          f'#!/bin/sh\nprintf "%s|%s|" "$(pwd -P)" "$CLAUDE_PROJECT_DIR" >> {log_path}\ncat >> {log_path}\necho >> {log_path}\n')
+    (project_ws / '.haarness/hooks/record.sh').chmod(0o755)
+    pc = connect(project_ws)
+    in_project = Chat.__new__(Chat)
+    in_project.c = pc
+    in_project.thread = api(pc, '/threads', {'title': 'Folder in a project', 'provider': 'echo', 'model': 'echo-1',
+                                             'directory': '2026-10-28/notes'})
+    t = in_project.turn('!tool bash ' + json.dumps({'command': 'pwd -P'}))
+    check('a project chat with a folder of its own runs its shell there', in_project.finish(t)['status'] == 'completed'
+          and in_project.thread['directory'] in in_project.transcript(), in_project.thread)
+    project_runs = [(line.split('|', 2)[0], line.split('|', 2)[1], json.loads(line.split('|', 2)[2]))
+                    for line in project_log.read_text().splitlines()] if project_log.exists() else []
+    check('its project hooks found their script, ran in its folder and were told the project folder',
+          [run[2]['hook_event_name'] for run in project_runs] == ['PreToolUse', 'PostToolUse']
+          and all(run[0] == run[2]['cwd'] == in_project.thread['directory'] and run[1] == str(project_ws)
+                  for run in project_runs), project_runs)
+    # Its own data folder: the global hooks here must not reach the workspaces above.
+    home_env = dict(env, HAARNESS_DATA_DIR=str(root / 'home-data'), HAARNESS_SERVER_TOKEN='')
+    chat_home = root / 'app' / 'Chat folders'
+    chat_home.mkdir(parents=True)
+    folder_log = root / 'folder-hooks.log'
+    record = shlex.join(['sh', '-c', 'printf "%s|%s|" "$(pwd -P)" "$CLAUDE_PROJECT_DIR" >> "$1"; cat >> "$1"; echo >> "$1"',
+                         'record', str(folder_log)])
+    recorder = [{'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': record}]}]
+    write(root / 'home-data/config/config.toml', '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n')
+    write(root / 'home-data/config/haarness.json', json.dumps({'hooks': {'PreToolUse': recorder, 'PostToolUse': recorder}}))
+    hc = json.loads(subprocess.run([binary, '--workspace', str(chat_home), '--chat-home', 'desktop'], input='{"action":"connect"}',
+                                   env=home_env, text=True, capture_output=True, check=True, timeout=120).stdout)
+    named = api(hc, '/threads', {'title': 'Named folder', 'directory': '2026-10-28/notes'})
+    fresh = api(hc, '/threads', {'title': 'No folder named'})
+    for thread in (named, fresh):
+        folder_chat = Chat.__new__(Chat)
+        folder_chat.c, folder_chat.thread = hc, thread
+        t = folder_chat.turn('!tool bash ' + json.dumps({'command': 'pwd -P'}))
+        check(f'{thread["title"]}: the shell runs in its folder', folder_chat.finish(t)['status'] == 'completed'
+              and thread['directory'] in folder_chat.transcript(), thread)
+    runs = []
+    for line in folder_log.read_text().splitlines():
+        ran_in, project_dir, payload = line.split('|', 2)
+        runs.append((ran_in, project_dir, json.loads(payload)))
+    (root / 'folder-hooks.json').write_text(json.dumps(runs, indent=1))
+    for thread in (named, fresh):
+        mine = [run for run in runs if run[2]['session_id'] == thread['id']]
+        check(f'{thread["title"]}: PreToolUse and PostToolUse ran in the chat folder, not the chat home',
+              [run[2]['hook_event_name'] for run in mine] == ['PreToolUse', 'PostToolUse']
+              and all(run[0] == run[1] == run[2]['cwd'] == thread['directory'] for run in mine), mine)
+        check(f'{thread["title"]}: the payloads name the agent',
+              all(run[2]['agent'] == thread['agent'] and run[2]['tool_name'] == 'bash' for run in mine), mine)
+    check('the chat given no folder got one in the chat home', fresh['directory'].startswith(str(chat_home.resolve())), fresh)
     print('PASS', len(checks), 'checks.', flush=True)
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', name], capture_output=True)
@@ -261,4 +324,7 @@ finally:
             cli(ws, 'serve', '--stop')
         except Exception as error:
             print('stop failed', ws, error, flush=True)
+    if home_env is not None:
+        subprocess.run([binary, '--workspace', str(root / 'app' / 'Chat folders'), 'serve', '--stop'], env=home_env,
+                       capture_output=True, timeout=35)
     e2e_scratch.settle(root)
