@@ -323,19 +323,31 @@ pub fn read_with_imports(
         trusted,
         omit,
     };
-    let canonical = path.canonicalize().ok()?;
-    let root = workspace.canonicalize().ok();
-    let inside = root
-        .as_deref()
-        .is_some_and(|root| canonical.starts_with(root));
-    let rules: ImportFilter<'_> = if trusted || inside { &|_| None } else { omit };
-    if let Some(reason) = left_out(&canonical, root.as_deref(), rules) {
+    if let Some(reason) = file_left_out(path, workspace, trusted, omit) {
         return Some(format!(
             "[Instruction file omitted: {} ({reason})]\n",
             path.display()
         ));
     }
     resolve(path, &scope, budget, 0)
+}
+
+/// Why [`read_with_imports`] leaves the instruction file itself out, if it
+/// does, for a notice to the person as well.
+#[must_use]
+pub fn file_left_out(
+    path: &Path,
+    workspace: &Path,
+    trusted: bool,
+    omit: ImportFilter<'_>,
+) -> Option<&'static str> {
+    let canonical = path.canonicalize().ok()?;
+    let root = workspace.canonicalize().ok();
+    let inside = root
+        .as_deref()
+        .is_some_and(|root| canonical.starts_with(root));
+    let rules: ImportFilter<'_> = if trusted || inside { &|_| None } else { omit };
+    left_out(&canonical, root.as_deref(), rules)
 }
 
 /// Why [`left_out`] leaves out a secret-named file.
