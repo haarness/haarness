@@ -10803,6 +10803,15 @@ impl RunnerTask {
             if executed.get("command").and_then(serde_json::Value::as_str) == Some(snippet.shown) {
                 executed["command"] = json!(snippet.run);
             }
+            // The command waits for its snippet's whole output, so a person's
+            // turn waits as long as it runs (a test suite, a long build);
+            // Stop still ends it. A run nobody can stop keeps the deadline.
+            if !self.unattended
+                && executed.get("timeout").is_none()
+                && executed.get("timeout_ms").is_none()
+            {
+                execution.shell_timeout_ms = 0;
+            }
         }
         let result = if matches!(name, "todo" | "todowrite") {
             self.record_todo(&arguments).await.map(plain_tool_output)
