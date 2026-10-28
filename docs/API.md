@@ -534,10 +534,16 @@ alone are held to 25 MiB (Anthropic and Haarness Cloud take 32 MB in a request;
 OpenAI, the Gemini API and Gemini on Vertex AI take more), 15 MiB on Bedrock,
 and for Claude models, directly, on Bedrock or through Haarness Cloud, also to
 100 images in a request to a model with a 200K-token context window and 600 to a
-larger one; only images are replaced for these. Every attachment (images, PDFs,
-audio and video) and the text of the messages together are held to the whole
-request the provider takes, less 1 MiB for the system prompt and tools: 32 MB,
-or 20 MB on Bedrock. Where a message takes a total past its limit, the
+larger one; only images are replaced for these. Where the provider states what
+it takes in one request (Anthropic 32 MB, Bedrock 20 MB, Haarness Cloud 32 MiB,
+and 32 MB for Anthropic's models through it), every attachment (images, PDFs,
+audio and video) and the text of the messages together are held to that too,
+less 1 MiB for the system prompt and tools. That measure is close, not exact:
+the text after the last attachment, JSON escaping, and the system prompt and
+tools are estimated by that 1 MiB rather than counted. Other providers (OpenAI,
+the Gemini API, Gemini on Vertex AI and OpenAI-compatible servers, which take
+more or do not say) get no such cut; a refusal of the request's size is
+compacted for instead. Where a message takes a total past its limit, the
 attachments before it are replaced by a one-line note, oldest first, until the
 rest fit in three fifths of the limit (the person's own attachments in that
 message's turn stay, and what cannot be reached that way stays too). The
