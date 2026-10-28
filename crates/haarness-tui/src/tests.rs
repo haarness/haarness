@@ -4656,29 +4656,79 @@ async fn a_model_that_lists_no_levels_shows_the_configured_one_and_provider_defa
 #[tokio::test]
 async fn a_reloaded_configuration_brings_its_reasoning_level_to_the_picker() {
     let mut app = selector_fixture();
+    // A model that lists no levels, so a pick of the configured one stands
+    // only while it is configured.
+    app.providers[0].models[0].reasoning_efforts.clear();
+    app.thread.model = "gpt-5.4".into();
     let before = side_server_info(Vec::new());
-    let mut after = before.clone();
-    after.default_reasoning_effort = Some("high".into());
-    app.server_info = Some(before);
+    app.server_info = Some(before.clone());
     assert_eq!(app.reasoning_choice(), "off");
-    let (address, server) =
-        side_chat_server(vec![Some(serde_json::to_string(&after).unwrap())]).await;
+    // The server restarted since this client read its info, then reloaded.
+    let mut restarted = before.clone();
+    restarted.server_instance_id = uuid::Uuid::now_v7();
+    restarted.default_reasoning_effort = Some("high".into());
+    let mut removed = restarted.clone();
+    removed.default_reasoning_effort = None;
+    let mut other = restarted.clone();
+    other.server_instance_id = uuid::Uuid::now_v7();
+    let (address, server) = side_chat_server(
+        [&restarted, &removed, &other, &restarted]
+            .into_iter()
+            .map(|info| Some(serde_json::to_string(info).unwrap()))
+            .collect(),
+    )
+    .await;
     let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
     let thread = app.thread.id;
-    app.reduce(
-        fixture_event(
+    let reload = |instance| {
+        let mut event = fixture_event(
             "configuration.reloaded",
             thread,
             thread,
             serde_json::json!({}),
-        ),
-        &client,
-    )
-    .await
-    .unwrap();
+        );
+        event.server_instance_id = instance;
+        event
+    };
+    app.reduce(reload(restarted.server_instance_id), &client)
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_choice(), "high");
+    assert_eq!(
+        app.server_info.as_ref().unwrap().server_instance_id,
+        restarted.server_instance_id
+    );
+    app.execute_command("/reasoning high", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_effort.as_deref(), Some("high"));
+
+    // The level is no longer configured: a pick of it is no longer offered.
+    app.reduce(reload(restarted.server_instance_id), &client)
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_effort, None);
+    assert_eq!(app.reasoning_choice(), "off");
+
+    // An answer from another run of the server than the event's is not taken.
+    app.reduce(reload(restarted.server_instance_id), &client)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.server_info.as_ref().unwrap().server_instance_id,
+        restarted.server_instance_id
+    );
+
+    // After a restart the TUI takes whatever answers.
+    app.refresh_server_info(&client, None).await;
     assert_eq!(app.reasoning_choice(), "high");
     let requests = server.await.unwrap();
-    assert!(requests[0].starts_with("GET /v1/info"), "{requests:?}");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.starts_with("GET /v1/info")),
+        "{requests:?}"
+    );
     // Provider default is now named over it.
     app.execute_command("/reasoning off", &offline_client())
         .await
