@@ -1499,6 +1499,10 @@ async fn cli_main() -> Result<()> {
     // tell the permission engine which folders those are in this process.
     haarness_core::set_global_config_dir(base_paths.config_dir().to_path_buf());
     haarness_core::set_system_config_dir(crate::layout::system_config_dir());
+    // A model-run read of where sign-ins are kept asks a person every time.
+    for (store, folder) in base_paths.credential_stores() {
+        haarness_core::record_credential_store(store, folder);
+    }
     if let Some(problem) = haarness_protocol::system_config_dir_problem() {
         tracing::warn!("{problem}");
         // A server started in the background has only its log.
@@ -11563,6 +11567,27 @@ impl Paths {
 
     fn config_dir(&self) -> &Path {
         self.config.parent().expect("config file has parent")
+    }
+
+    /// Where this process keeps sign-ins, each with whether it is a folder
+    /// of them: provider keys (`auth.json`, and the copy an older layout
+    /// left in the configuration folder), MCP sign-in tokens, and the Cloud
+    /// sign-in.
+    fn credential_stores(&self) -> Vec<(PathBuf, bool)> {
+        let mut stores = vec![
+            (self.auth.clone(), false),
+            (self.config_dir().join("auth.json"), false),
+            (self.data.join("mcp-oauth"), true),
+        ];
+        if self.root.is_none()
+            && let Some(legacy) = directories::ProjectDirs::from("dev", "haarness", "haarness")
+        {
+            stores.push((legacy.config_dir().join("auth.json"), false));
+        }
+        if let Ok(cloud) = haarness_account::Config::from_env() {
+            stores.push((cloud.path(), false));
+        }
+        stores
     }
 
     /// The file that lists the registered workspaces.

@@ -3854,6 +3854,8 @@ enum Hidden {
     Secret,
     /// A configured, agent or inherited `read` rule denies it.
     Denied,
+    /// Haarness keeps sign-ins in it (`haarness_core::is_credential_store_path`).
+    SignIns,
 }
 
 /// How many files a search left out, by why.
@@ -3861,6 +3863,7 @@ enum Hidden {
 struct Skipped {
     secret: usize,
     denied: usize,
+    sign_ins: usize,
     /// Glob matches in a linked folder that leads out of the project.
     outside: usize,
 }
@@ -3876,6 +3879,7 @@ impl Skipped {
         match hidden {
             Hidden::Secret => self.secret += 1,
             Hidden::Denied => self.denied += 1,
+            Hidden::SignIns => self.sign_ins += 1,
         }
     }
 }
@@ -3913,6 +3917,9 @@ impl SecretFilter {
         let relative = self.relative(path);
         if haarness_core::is_secret_path(relative) {
             return Some(Hidden::Secret);
+        }
+        if haarness_core::is_credential_store_path(path) {
+            return Some(Hidden::SignIns);
         }
         self.rules
             .as_ref()
@@ -4136,6 +4143,13 @@ fn with_skipped(mut output: ToolOutput, skipped: Skipped, partial: bool) -> Tool
             plural(skipped.denied)
         ));
     }
+    if skipped.sign_ins > 0 {
+        reasons.push(format!(
+            "{at_least}{} file{} where Haarness keeps sign-ins",
+            skipped.sign_ins,
+            plural(skipped.sign_ins)
+        ));
+    }
     // Said so the model does not take those files for absent.
     if skipped.outside > 0 {
         reasons.push(format!(
@@ -4162,6 +4176,9 @@ fn with_skipped(mut output: ToolOutput, skipped: Skipped, partial: bool) -> Tool
         }
         if skipped.denied > 0 {
             metadata.insert("denied".into(), json!(skipped.denied));
+        }
+        if skipped.sign_ins > 0 {
+            metadata.insert("signIns".into(), json!(skipped.sign_ins));
         }
         if skipped.outside > 0 {
             metadata.insert("outside".into(), json!(skipped.outside));
@@ -7426,6 +7443,73 @@ export default workflow({
             "{}",
             plain.text
         );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn searches_and_listings_leave_out_where_sign_ins_are_kept() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-search-sign-ins-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("data")).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        for file in [
+            "data/auth.json",
+            "data/auth.json.lock",
+            "data/notes.md",
+            "auth.json",
+        ] {
+            std::fs::write(workspace.join(file), format!("needle {file}\n")).unwrap();
+        }
+        haarness_core::record_credential_store(workspace.join("data/auth.json"), false);
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |tool: &'static str, args: Value| {
+            let registry = &registry;
+            let context = tool_context(&workspace);
+            async move {
+                registry
+                    .get(tool)
+                    .unwrap()
+                    .execute(args, context)
+                    .await
+                    .unwrap()
+            }
+        };
+        let grep = run("grep", json!({"pattern":"needle","path":"."})).await;
+        assert!(
+            grep.text.contains("data/notes.md:1:needle"),
+            "{}",
+            grep.text
+        );
+        // The project's own `auth.json` is an ordinary file.
+        assert!(
+            grep.text.contains("auth.json:1:needle auth.json"),
+            "{}",
+            grep.text
+        );
+        assert!(
+            !grep.text.contains("needle data/auth.json"),
+            "{}",
+            grep.text
+        );
+        assert!(
+            grep.text
+                .ends_with("(skipped 2 files where Haarness keeps sign-ins)"),
+            "{}",
+            grep.text
+        );
+        assert_eq!(grep.metadata["signIns"], 2);
+        let direct = run("grep", json!({"pattern":"needle","path":"data/auth.json"})).await;
+        assert_eq!(
+            direct.text,
+            "No files found\n\n(skipped 1 file where Haarness keeps sign-ins)"
+        );
+        let list = run("list", json!({"path":"data"})).await;
+        assert_eq!(
+            list.text,
+            "notes.md\n\n(skipped 2 files where Haarness keeps sign-ins)"
+        );
+        let glob = run("glob", json!({"pattern":"data/*"})).await;
+        assert!(!glob.text.contains("auth.json"), "{}", glob.text);
         std::fs::remove_dir_all(workspace).unwrap();
     }
 

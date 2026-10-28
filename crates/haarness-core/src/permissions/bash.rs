@@ -61,6 +61,26 @@ pub struct BashAnalysis {
     /// `None` for one in text run again. A path deleted after a link may lead
     /// through it, so nobody can place it.
     pub links: Vec<Option<usize>>,
+    /// The paths commands are given and redirects name that lead outside
+    /// the project (the arguments of the commands in [`PATH_COMMANDS`]) or
+    /// may name where Haarness keeps sign-ins (any command's literal
+    /// arguments), each placed as [`Self::external_dirs`] places it.
+    pub paths: Vec<NamedPath>,
+}
+
+/// A path a command is given or a redirect names: see
+/// [`BashAnalysis::paths`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedPath {
+    /// Where it leads from the project folder, `~` and links followed; for
+    /// a path with a dynamic part (`/tmp/$name`), the folder its literal
+    /// start names.
+    pub path: PathBuf,
+    /// It is a file written in full: no dynamic part, and not a folder.
+    pub file: bool,
+    /// The folder of [`BashAnalysis::external_dirs`] it asks about, when
+    /// it is outside the project.
+    pub outside: Option<String>,
 }
 
 /// A directory change in an `&&` chain: where it starts in the line, and
@@ -994,9 +1014,14 @@ impl Reader<'_> {
                     moved: false,
                 });
             }
-            if let Some(dir) =
-                external_dir(self.workspace, &node_text(dest, command), &value, complete)
-            {
+            let outside = external_dir(self.workspace, &node_text(dest, command), &value, complete);
+            self.name_path(
+                &node_text(dest, command),
+                &value,
+                complete,
+                outside.as_deref(),
+            );
+            if let Some(dir) = outside {
                 push_unique(&mut self.analysis.external_dirs, glob(&dir));
             }
         }
@@ -1478,7 +1503,9 @@ impl Reader<'_> {
     /// deeper into the project, `cd a/l/../../..` reaches the project's
     /// parent, though followed it is the project itself.
     fn check_folder(&mut self, name: &str, raw: &str, value: &str, complete: bool) {
-        if let Some(dir) = external_dir(self.workspace, raw, value, complete) {
+        let outside = external_dir(self.workspace, raw, value, complete);
+        self.name_path(raw, value, complete, outside.as_deref());
+        if let Some(dir) = outside {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
         }
         if name == "cd"
@@ -1486,6 +1513,33 @@ impl Reader<'_> {
         {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
         }
+    }
+
+    /// Record a path a command is given or a redirect names when it leads
+    /// outside the project (`outside`, the folder [`external_dir`] found) or
+    /// may name where Haarness keeps sign-ins: see [`BashAnalysis::paths`].
+    fn name_path(&mut self, raw: &str, value: &str, complete: bool, outside: Option<&Path>) {
+        if outside.is_none() && !(complete && crate::permissions::may_name_credential_store(value))
+        {
+            return;
+        }
+        let target = if complete {
+            value
+        } else {
+            value.rfind('/').map_or("", |end| &value[..=end])
+        };
+        if target.is_empty() {
+            return;
+        }
+        let path = match home_expansion(raw, target) {
+            Some(expanded) => resolve(self.workspace, &expanded),
+            None => resolve(self.workspace, Path::new(target)),
+        };
+        self.analysis.paths.push(NamedPath {
+            file: complete && !path.is_dir(),
+            path,
+            outside: outside.map(glob),
+        });
     }
 
     /// What `name` deletes or overwrites among `arguments`: see
@@ -1986,6 +2040,14 @@ impl Reader<'_> {
         }
         if complete {
             self.check_deletions(&name, arguments, source);
+        }
+        // Any other program given where Haarness keeps sign-ins, by a
+        // literal path (`jq . <data>/auth.json`).
+        if complete && !PATH_COMMANDS.contains(&name.as_str()) {
+            for word in arguments {
+                let (value, complete) = path_literal(word.node, source);
+                self.name_path(&word.raw, &value, complete, None);
+            }
         }
         if !complete || !PATH_COMMANDS.contains(&name.as_str()) {
             return;
