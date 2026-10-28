@@ -60,10 +60,10 @@ test("tabs, line breaks and the text after a broken escape stay", () => {
 
 test("what people write reads exactly as before", () => {
   for (const text of [
-    "👩‍🔬 ❤️ 🇯🇵 👍🏽 🏴\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}",
+    "👩\u200d🔬 ❤️ 🇯🇵 👍🏽 🏴\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}",
     "日本語のテキスト 中文 한국어",
     "שלום עולם مرحبا بالعالم",
-    "ن‌ه é̂ 葛\u{e0100}",
+    "ن\u200cه é̂ 葛\u{e0100}",
     "۝١٢ ؀١٠",
     "a\tb\nc",
     "",
@@ -75,15 +75,15 @@ test("what people write reads exactly as before", () => {
 });
 
 test("an approval shows what is invisible in it as quiet codes", () => {
-  assert.deepEqual(spelledOutParts("cat report‮fdp.sh"), [
+  assert.deepEqual(spelledOutParts("cat report\u202efdp.sh"), [
     { text: "cat report", code: false },
     { text: "\\u{202E}", code: true },
     { text: "fdp.sh", code: false },
   ]);
   assert.equal(spelledOutText("cd dist\r\nrm -r *"), isolated("cd dist\\u{D}\nrm -r *"));
   assert.equal(spelledOutText("x\u001b[1Ay"), isolated("x\\u{1B}[1Ay"));
-  assert.equal(spelledOutText("p​q⁧r﻿s\u{e0070}"), isolated("p\\u{200B}q\\u{2067}r\\u{FEFF}s\\u{E0070}"));
-  assert.equal(spelledOutText("a b­c"), isolated("a\\u{2029}b\\u{AD}c"));
+  assert.equal(spelledOutText("p\u200bq\u2067r\ufeffs\u{e0070}"), isolated("p\\u{200B}q\\u{2067}r\\u{FEFF}s\\u{E0070}"));
+  assert.equal(spelledOutText("a\u2029b\u00adc"), isolated("a\\u{2029}b\\u{AD}c"));
   // Tags that spell no flag show.
   assert.equal(spelledOutText("🏴\u{e0061}\u{e007f}"), isolated("🏴\\u{E0061}\\u{E007F}"));
 });
@@ -106,7 +106,7 @@ test("a row shows a command's and a server's text without their escapes", () => 
 });
 
 test("a row and its Shell panel show a command's invisible characters as codes, on one line", () => {
-  const args = { command: "cat report‮fdp.sh​ && cd dist\r\nrm -r cache" };
+  const args = { command: "cat report\u202efdp.sh\u200b && cd dist\r\nrm -r cache" };
   const target = toolTarget(args);
   assert.equal(target, isolated("cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D} rm -r cache"));
   assert.equal(toolTitle(args, target), isolated("cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D}\nrm -r cache"));
@@ -197,7 +197,7 @@ test("a failed workflow's error reads without the escape sequences its program w
 
 test("a code in plain text stays one left-to-right piece beside right-to-left words", () => {
   // Without the isolate, `ملف\u{200F}` in a right-to-left line reads `u{200F}\ملف`.
-  assert.equal(spelledOutText("ملف‏.txt"), "ملف⁦\\u{200F}⁩.txt");
+  assert.equal(spelledOutText("ملف\u200f.txt"), "ملف\u2066\\u{200F}\u2069.txt");
   // Text with nothing to spell out gains nothing.
   assert.equal(spelledOutText("ملف.txt"), "ملف.txt");
 });

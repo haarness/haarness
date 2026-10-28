@@ -254,7 +254,7 @@ test("a right-to-left name keeps its code in one piece on its row and in its pan
 });
 
 test("a script a command runs, and each file of a patch, are named with their codes on the card", async () => {
-  const script = "run​.sh";
+  const script = "run\u200b.sh";
   await writeFile(join(project, script), "echo hi\n");
   await send("!tool bash " + JSON.stringify({ command: "sh " + script }));
   const card = page.locator(".prompt-dock.approval");
@@ -264,7 +264,7 @@ test("a script a command runs, and each file of a patch, are named with their co
   expect(await chip(path)).toEqual(CHIP);
   await page.getByRole("button", { name: "Deny", exact: true }).click();
   await idle();
-  const patch = "*** Begin Patch\n*** Add File: a​.txt\n+one\n*** Add File: b.txt\n+two\n*** End Patch\n";
+  const patch = "*** Begin Patch\n*** Add File: a\u200b.txt\n+one\n*** Add File: b.txt\n+two\n*** End Patch\n";
   await send("!tool apply_patch " + JSON.stringify({ input: patch }));
   const headers = card.locator(".approval-changes .change-path");
   await expect(headers).toHaveText(["a\\u{200B}.txt", "b.txt"]);
