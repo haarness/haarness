@@ -24497,14 +24497,14 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
 
     app.shell_mode = true;
     app.composer.set_text("open ".into());
-    app.paste_into_prompt(&dropped);
+    app.paste_into_prompt(&dropped, false);
     assert!(app.attachments.is_empty());
     assert_eq!(app.composer.text(), format!("open {dropped}"));
 
     // Out of shell mode the same drop is an attachment.
     app.shell_mode = false;
     app.composer.clear();
-    app.paste_into_prompt(&dropped);
+    app.paste_into_prompt(&dropped, false);
     assert_eq!(
         app.attachments,
         vec![image.canonicalize().unwrap().display().to_string()]
@@ -24516,7 +24516,7 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
     let readme = root.join("README.md");
     std::fs::write(&readme, "# Notes\n").unwrap();
     app.notice.clear();
-    app.paste_into_prompt(&readme.display().to_string());
+    app.paste_into_prompt(&readme.display().to_string(), false);
     assert_eq!(app.composer.text(), readme.display().to_string());
     assert!(app.notice.is_empty(), "{}", app.notice);
     assert_eq!(app.attachments.len(), 1);

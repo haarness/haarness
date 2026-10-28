@@ -458,6 +458,13 @@ impl ApiClient {
         self
     }
 
+    /// Whether this client sends attached files to the server whole, as
+    /// data URLs, rather than their paths.
+    #[must_use]
+    pub fn uploads_attachments(&self) -> bool {
+        self.upload_attachments
+    }
+
     async fn attachments(&self, sources: Vec<String>) -> Result<Vec<String>> {
         if !self.upload_attachments {
             return Ok(sources);

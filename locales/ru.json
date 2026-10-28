@@ -2940,5 +2940,6 @@
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Перерасход выключен, поэтому купленные кредиты не тратятся. Включите его в разделе оплаты.",
   "Your free trial didn't start: that card was already used for a trial.": "Бесплатный пробный период не начался: эта карта уже использовалась для пробного периода.",
   "The attachments come to {size}, over the {limit} limit for media in one message": "Вложения занимают {size} — больше лимита {limit} на медиафайлы в одном сообщении",
-  "its images and PDFs would take the message over the 20 MiB limit for media": "его изображения и PDF превысили бы лимит сообщения на медиафайлы в 20 MiB"
+  "its images and PDFs would take the message over the 20 MiB limit for media": "его изображения и PDF превысили бы лимит сообщения на медиафайлы в 20 MiB",
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} занимает {size} — больше лимита {limit} на медиафайлы в одном сообщении"
 }

@@ -2633,9 +2633,12 @@ async fn read_mentions(
                 .await?,
         );
     }
+    // The person's own attachments count toward the message's media; a
+    // relative one is read where the chat works, as its admission reads it.
+    let folder = state.runtime.attachment_folder(id).await?;
     crate::mcp_resources::read_mentions(
         state.mcp.as_ref(),
-        &state.workspace,
+        &folder,
         resources,
         &|server, uri| policies.iter().any(|policy| policy.denies(server, uri)),
         crate::mcp_resources::MENTION_BUDGET,
