@@ -68,7 +68,7 @@ CORPUS = [
     'cd src && ls', 'cd .. && ls', 'cd /tmp && rm -rf build', 'cd a/l/../../.. && touch escaped.txt',
     'cd build && cmake .. && make -j8', 'pushd src && cargo build && popd', 'cd "$HOME" && ls',
     'cd ~/work && ls', 'cd deep/er/x/.. && ls', 'cd a/l/.. && ls', 'pushd a/l/../../.. && touch escaped.txt',
-    'cd a/l && ls',
+    'cd a/l && ls', 'pushd /tmp && cat notes.txt', 'pushd -n /tmp', 'pushd +1', 'popd',
     # Quoting and nested shells
     'echo "hello world"', "echo 'single $x'", "printf '%s\\n' \"$PATH\"", 'grep -E "a|b" README.md',
     "sh -c 'echo $0' x", 'bash -c "npm run build && npm test"', 'node -e "console.log(1)"',
