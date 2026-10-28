@@ -1,7 +1,7 @@
 /**
- * Text a command, a tool or a server wrote, as Desktop shows it.
+ * Text a command, a tool or a server wrote, as Desktop draws it.
  *
- * Such text can carry terminal escape sequences (colours, cursor moves, a
+ * Such text may hold terminal escape sequences (colours, cursor moves, a
  * window title) and other control characters, which a page shows as
  * `[31m` or `]0;title` fragments, so output loses its sequences whole
  * (`withoutEscapes`). An approval card is read for what will run, so nothing
@@ -13,10 +13,6 @@
 
 const ESC = 0x1b;
 const BEL = 0x07;
-const C1_CSI = 0x9b;
-const C1_ST = 0x9c;
-/** The C1 introducers of OSC, DCS, SOS, PM and APC strings. */
-const C1_STRINGS = new Set([0x9d, 0x90, 0x98, 0x9e, 0x9f]);
 
 type Waiting = "introducer" | "intermediate" | "csi" | "text" | "text-escape";
 type Pending = { start: number; waiting: Waiting };
@@ -27,16 +23,19 @@ const control = (code: number) => code < 0x20 || (code >= 0x7f && code <= 0x9f);
 const kept = (code: number) => code === 0x09 || code === 0x0a || code === 0x0d;
 
 /**
- * `text` without its escape sequences and stray control characters: CSI
- * (`ESC [ … m`), OSC (`ESC ] … BEL`), DCS, SOS, PM and APC strings, the two-
- * and three-character escapes (`ESC 7`, `ESC ( B`) and the C1 forms of all
- * of them. Tab, line feed and carriage return stay.
+ * `text` with every escape sequence and every other control character taken
+ * out: CSI (`ESC [ … m`), OSC (`ESC ] … BEL`), DCS, SOS, PM and APC
+ * strings, and the two- and three-character escapes (`ESC 7`, `ESC ( B`).
+ * Tab, line feed and carriage return stay. A C1 control (U+0080–U+009F) starts nothing and goes
+ * on its own: a program's 8-bit control bytes reach Desktop as U+FFFD, so a
+ * C1 code point here is almost always text decoded twice (`â\u{80}\u{9c}`
+ * for an opening quote), and the line around it shows.
  *
  * Removing a sequence can complete another around it (`ESC ESC[22m[32m`), and
  * that one goes too, as removing them over and over until none is left
  * would: an unfinished sequence waits on a stack while the ones inside it
- * complete. A string that never ends stops at the end of its line, so the
- * lines after it still show. Linear in the length of `text`.
+ * complete. A string that never ends stops where its line does, and the
+ * lines below it still show. Linear in the length of `text`.
  */
 export function withoutEscapes(text: string): string {
   let found = false;
@@ -67,8 +66,6 @@ export function withoutEscapes(text: string): string {
       const open = pending.at(-1);
       if (!open) {
         if (code === ESC) begin("introducer", code);
-        else if (code === C1_CSI) begin("csi", code);
-        else if (C1_STRINGS.has(code)) begin("text", code);
         else out.push(code);
         break;
       }
@@ -114,7 +111,7 @@ export function withoutEscapes(text: string): string {
         begin("introducer", ESC);
         continue;
       } else {
-        if (code === BEL || code === C1_ST) {
+        if (code === BEL) {
           finish();
           break;
         }
@@ -142,17 +139,18 @@ export function withoutEscapes(text: string): string {
 }
 
 /**
- * Whether an approval card shows the character at `code` as a code: a
- * control character but tab and line feed (a carriage return always, also
- * at the end of a line, where a shell keeps it in the word before it: `cd
- * dist` then CR LF goes into a folder named `dist` and a carriage return),
- * an invisible format character or another default-ignorable one, such as
- * the direction marks, overrides and isolates that reorder what is shown
- * and the zero-width spaces that hide a difference, and the line and
- * paragraph separators. The zero-width joiner and non-joiner and the
- * variation selectors of emoji and ideographs (U+FE00–U+FE0F,
- * U+E0100–U+E01EF) stay, and so do the format characters that draw a
- * visible sign (U+0600–U+0605, U+06DD): emoji and scripts need them.
+ * Whether an approval card shows the character at `code` as a code. That is
+ * any control character other than tab and line feed (a carriage return
+ * always, also at the end of a line, where a shell keeps it in the word
+ * before it: `cd dist` then CR LF goes into a folder named `dist` and a
+ * carriage return), an invisible format character or another
+ * default-ignorable one, such as the direction marks, overrides and isolates
+ * that reorder what is shown and the zero-width spaces that hide a
+ * difference, and the line and paragraph separators. Left as they are: the
+ * joiners U+200C and U+200D and the variation selectors U+FE00–U+FE0F and
+ * U+E0100–U+E01EF, without which emoji sequences and many writing
+ * systems would not join or pick their glyphs, and the format characters
+ * that draw a visible sign (U+0600–U+0605, U+06DD).
  */
 export function showsAsCode(code: number): boolean {
   if (code < 0xad) return control(code) && code !== 0x09 && code !== 0x0a;
