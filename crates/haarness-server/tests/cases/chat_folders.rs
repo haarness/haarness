@@ -290,6 +290,48 @@ async fn a_chat_home_chats_hooks_take_its_folder_as_their_project() {
     );
 }
 
+/// A chat's folder deleted while a turn runs (here by the turn's own
+/// `UserPromptSubmit` hook, after the turn made it again) cannot hold the
+/// turn's later hooks: they run in the project folder, so a `PreToolUse`
+/// guard still refuses the write it guards against.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_guard_still_refuses_after_the_chats_folder_goes_mid_turn() {
+    let fixture = Fixture::new();
+    let (doomed, log) = (
+        fixture.workspace.join("2026-10-28/doomed"),
+        fixture.root.join("guard.log"),
+    );
+    let remove = format!("rmdir '{}'", doomed.display());
+    let guard = format!(
+        "pwd -P >> '{log}'; echo 'guard: no writes' >&2; exit 2",
+        log = log.display()
+    );
+    let hooks = haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(&json!({
+            "UserPromptSubmit": [{"hooks": [{"command": remove}]}],
+            "PreToolUse": [{"matcher": "write", "hooks": [{"command": guard}]}],
+        })),
+        fixture.workspace.clone(),
+    );
+    let (runtime, _) = fixture.runtime();
+    let runtime = runtime.with_hooks(Arc::new(hooks));
+    let thread = chat(&runtime, Some("2026-10-28/doomed")).await.unwrap();
+    assert_eq!(folder(&thread), doomed);
+    let write = json!({"path": "notes.md", "content": "x"});
+    turn(&runtime, thread.id, &format!("!tool write {write}")).await;
+    assert!(!doomed.exists(), "the folder went during the turn");
+    let refused = last_result(&runtime, thread.id, "write").await;
+    assert!(refused.contains("guard: no writes"), "{refused}");
+    let ran_in = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        ran_in.trim_end(),
+        fixture.workspace.display().to_string(),
+        "the guard ran in the project folder"
+    );
+    assert!(!fixture.workspace.join("notes.md").exists());
+}
+
 #[tokio::test]
 async fn a_chat_folder_is_made_inside_numbered_when_taken_and_refused_outside() {
     let fixture = Fixture::new();
