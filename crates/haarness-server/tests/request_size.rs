@@ -1,6 +1,7 @@
 //! A request too large in bytes for its provider must not loop. PDFs and
-//! other media count toward the request's budget the way images do, so the
-//! earlier ones are noted before the request is sent; a refusal for the
+//! other media count toward what the request carries, so earlier turns'
+//! are noted before it is sent, while nothing the model read in the turn is,
+//! and what fit in one request before still goes whole. A refusal for the
 //! request's bytes compacts the chat once, and then the turn ends with an
 //! error that says what to do.
 
@@ -34,16 +35,56 @@ const MIB: u64 = 1024 * 1024;
 const TOO_LARGE: &str =
     "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes.";
 
-/// Refuses a request whose media pass 32 MB, as Anthropic does, or every
-/// request once `refusing` holds an error: as the stream's first item, or
-/// with `early` before any stream. It reads a file the person names as
-/// `read <name>` with the read tool, then answers.
+/// Refuses a request whose media pass 32 MB, as Anthropic does, every
+/// request once `refusing` holds an error, and the requests `refused` names
+/// by their place: as the stream's first item, or with `early` before any
+/// stream. It reads each file the person names as `read <name>` with the
+/// read tool, in turn, then answers. Told that a file it read was left out,
+/// it reads it again, as a model follows the note.
 #[derive(Default)]
 struct Sized {
     refusing: Mutex<Option<String>>,
+    refused: Mutex<Vec<usize>>,
     early: AtomicBool,
     requests: Mutex<Vec<ProviderRequest>>,
     summaries: Mutex<usize>,
+    reads: Mutex<usize>,
+}
+
+const NOTE: &str = "omitted to keep the request within the provider's limits";
+
+/// What the model does next: read a file, or answer.
+fn next_read(messages: &[ProviderMessage]) -> Option<String> {
+    // A file it read was left out: it reads it again.
+    if let Some(ProviderMessage::ToolResult {
+        call_id, output, ..
+    }) = messages.last()
+        && output.contains(NOTE)
+    {
+        return call_id
+            .strip_prefix("read-")
+            .and_then(|rest| rest.split('#').next())
+            .map(str::to_owned);
+    }
+    let asked = messages.iter().rposition(|message| {
+        matches!(message,
+            ProviderMessage::Text { role, content } | ProviderMessage::Media { role, content, .. }
+                if role == "user" && content.lines().any(|line| line.starts_with("read ")))
+    })?;
+    let (ProviderMessage::Text { content, .. } | ProviderMessage::Media { content, .. }) =
+        &messages[asked]
+    else {
+        return None;
+    };
+    let done = messages[asked..]
+        .iter()
+        .filter(|message| matches!(message, ProviderMessage::ToolResult { .. }))
+        .count();
+    content
+        .lines()
+        .filter_map(|line| line.strip_prefix("read "))
+        .nth(done)
+        .map(str::to_owned)
 }
 
 fn attachments(message: &ProviderMessage) -> &[String] {
@@ -113,13 +154,12 @@ impl ModelProvider for Sized {
                 "What happened".into(),
             )]));
         }
-        let refusal = self
-            .refusing
-            .lock()
-            .unwrap()
-            .clone()
-            .or_else(|| (media_bytes(&request) > 32_000_000).then(|| TOO_LARGE.to_owned()));
-        let last = request.messages.last().cloned();
+        let place = self.requests.lock().unwrap().len();
+        let refusal = self.refusing.lock().unwrap().clone().or_else(|| {
+            (media_bytes(&request) > 32_000_000 || self.refused.lock().unwrap().contains(&place))
+                .then(|| TOO_LARGE.to_owned())
+        });
+        let wanted = next_read(&request.messages);
         self.requests.lock().unwrap().push(request);
         if let Some(refusal) = refusal {
             if self.early.load(Ordering::SeqCst) {
@@ -129,16 +169,17 @@ impl ModelProvider for Sized {
                 refusal,
             ))])));
         }
-        let wanted = match &last {
-            Some(ProviderMessage::Text { role, content }) if role == "user" => content
-                .lines()
-                .find_map(|line| line.strip_prefix("read "))
-                .map(str::to_owned),
-            _ => None,
-        };
-        Ok(match wanted {
-            Some(path) => events(vec![ProviderEvent::ToolCall {
-                call_id: format!("read-{path}"),
+        // At most six reads, so a loop shows as a count rather than a hang.
+        let read = wanted.and_then(|path| {
+            let mut reads = self.reads.lock().unwrap();
+            (*reads < 6).then(|| {
+                *reads += 1;
+                (path, *reads)
+            })
+        });
+        Ok(match read {
+            Some((path, serial)) => events(vec![ProviderEvent::ToolCall {
+                call_id: format!("read-{path}#{serial}"),
                 name: "read".into(),
                 arguments: json!({ "path": path }),
                 provider_metadata: serde_json::Value::Null,
@@ -156,6 +197,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with(RuntimeConfig::default())
+    }
+
+    fn with(config: RuntimeConfig) -> Self {
         let root =
             std::env::temp_dir().join(format!("haarness-request-size-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
@@ -169,7 +214,7 @@ impl Fixture {
             EventBus::new(256),
             root.clone(),
             String::new(),
-            RuntimeConfig::default(),
+            config,
         );
         Self {
             root,
@@ -290,7 +335,7 @@ async fn two_large_pdfs_the_model_read_in_consecutive_turns_fit_in_one_request()
         .find_map(|message| match message {
             ProviderMessage::ToolResult {
                 call_id, output, ..
-            } if call_id == "read-first.pdf" => Some(output),
+            } if call_id.starts_with("read-first.pdf#") => Some(output),
             _ => None,
         })
         .unwrap();
@@ -364,7 +409,7 @@ async fn a_request_still_too_large_after_compacting_ends_the_turn_with_one_summa
         let error = done.error.unwrap();
         assert_eq!(
             error,
-            "Size fixture refused this request as too large, even after the chat was compacted. Send smaller or fewer files, or continue in a new chat."
+            "Size fixture refused this request as too large, even after the chat was compacted. The files in this chat are too large to send together: continue in a new chat, or with smaller files."
         );
         let items = fixture.runtime.items(thread, None).await.unwrap();
         let errors = items
@@ -396,5 +441,150 @@ async fn a_context_too_long_in_tokens_still_compacts_up_to_four_times() {
     assert!(
         done.error.unwrap().contains("prompt is too long"),
         "the provider's own words"
+    );
+}
+
+/// The PDFs in each request, with the notes of any left out.
+fn pdfs_and_notes(requests: &[ProviderRequest]) -> Vec<(Vec<String>, usize)> {
+    requests
+        .iter()
+        .map(|request| {
+            let notes = serde_json::to_string(&request.messages)
+                .unwrap()
+                .matches(NOTE)
+                .count();
+            (sent(request), notes)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn what_fit_in_one_request_before_is_sent_whole_without_reading_twice() {
+    // The person attaches a 10 MiB PDF and the model reads another: 28 MB.
+    let fixture = Fixture::new();
+    let thread = fixture.thread().await;
+    let a = fixture.pdf("a.pdf", 10);
+    fixture.pdf("b.pdf", 10);
+    let done = fixture
+        .turn(thread, "Compare this with b.pdf.\nread b.pdf", vec![a])
+        .await;
+    assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    assert_eq!(
+        pdfs_and_notes(&fixture.requests()),
+        [
+            (vec!["a.pdf".to_owned()], 0),
+            (vec!["a.pdf".to_owned(), "b.pdf".to_owned()], 0)
+        ]
+    );
+    assert_eq!(*fixture.provider.reads.lock().unwrap(), 1);
+
+    // One 19 MiB PDF the model reads: 26.6 MB.
+    let fixture = Fixture::new();
+    let thread = fixture.thread().await;
+    fixture.pdf("b.pdf", 19);
+    let done = fixture.turn(thread, "read b.pdf", Vec::new()).await;
+    assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    assert_eq!(
+        pdfs_and_notes(&fixture.requests()),
+        [(vec![], 0), (vec!["b.pdf".to_owned()], 0)]
+    );
+    assert_eq!(*fixture.provider.reads.lock().unwrap(), 1);
+
+    // Two 10 MiB PDFs the model reads one after the other in one turn.
+    let fixture = Fixture::new();
+    let thread = fixture.thread().await;
+    fixture.pdf("a.pdf", 10);
+    fixture.pdf("b.pdf", 10);
+    let done = fixture
+        .turn(thread, "read a.pdf\nread b.pdf", Vec::new())
+        .await;
+    assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    assert_eq!(
+        pdfs_and_notes(&fixture.requests()),
+        [
+            (vec![], 0),
+            (vec!["a.pdf".to_owned()], 0),
+            (vec!["a.pdf".to_owned(), "b.pdf".to_owned()], 0)
+        ]
+    );
+    assert_eq!(*fixture.provider.reads.lock().unwrap(), 2);
+    assert_eq!(fixture.summaries(), 0);
+}
+
+#[tokio::test]
+async fn two_pdfs_read_in_one_turn_that_no_request_carries_end_it_without_rereading() {
+    // 2 × 20 MiB of base64 read in one turn: nothing of this turn is noted,
+    // so the model never reads them again; the refusal compacts once, and
+    // the turn ends with the plain error.
+    let fixture = Fixture::new();
+    let thread = fixture.thread().await;
+    fixture.pdf("a.pdf", 15);
+    fixture.pdf("b.pdf", 15);
+    let done = fixture
+        .turn(thread, "read a.pdf\nread b.pdf", Vec::new())
+        .await;
+    assert_eq!(done.status, TurnStatus::Failed);
+    assert!(
+        done.error
+            .unwrap()
+            .ends_with("even after the chat was compacted. The files in this chat are too large to send together: continue in a new chat, or with smaller files.")
+    );
+    assert_eq!(*fixture.provider.reads.lock().unwrap(), 2);
+    assert_eq!(fixture.summaries(), 1);
+    assert!(
+        pdfs_and_notes(&fixture.requests())
+            .iter()
+            .all(|(_, notes)| *notes == 0)
+    );
+}
+
+#[tokio::test]
+async fn a_request_taken_after_compacting_lets_a_later_refusal_compact_again() {
+    // The first request is refused for its size and compacted for; the
+    // next is taken; the one after is refused too, later in the same turn.
+    let fixture = Fixture::new();
+    let thread = fixture.thread().await;
+    fixture.pdf("a.pdf", 1);
+    *fixture.provider.refused.lock().unwrap() = vec![0, 2];
+    let done = fixture.turn(thread, "read a.pdf", Vec::new()).await;
+    assert_eq!(done.status, TurnStatus::Completed, "{:?}", done.error);
+    assert_eq!(fixture.summaries(), 2);
+    assert_eq!(fixture.requests().len(), 4);
+}
+
+#[tokio::test]
+async fn bedrock_and_gemini_refusals_of_the_requests_bytes_compact_once_too() {
+    // How the Bedrock adapter words a 413, and Gemini's 400 for a request
+    // over its bytes.
+    for refusal in [
+        r#"Bedrock returned 413 Payload Too Large: {"message":"Request Entity Too Large"}"#,
+        "HTTP 400 Bad Request: Request payload size exceeds the limit: 20971520 bytes.",
+    ] {
+        let fixture = Fixture::new();
+        let thread = fixture.thread().await;
+        *fixture.provider.refusing.lock().unwrap() = Some(refusal.into());
+        let done = fixture.turn(thread, "Hello", Vec::new()).await;
+        assert_eq!(done.status, TurnStatus::Failed);
+        assert_eq!(fixture.summaries(), 1, "{refusal}");
+        assert_eq!(
+            done.error.unwrap(),
+            "Size fixture refused this request as too large, even after the chat was compacted. The files in this chat are too large to send together: continue in a new chat, or with smaller files."
+        );
+    }
+}
+
+#[tokio::test]
+async fn where_the_chat_cannot_compact_a_refusal_of_its_bytes_still_says_what_to_do() {
+    let mut config = RuntimeConfig::default();
+    config.compaction.enabled = false;
+    let fixture = Fixture::with(config);
+    let thread = fixture.thread().await;
+    *fixture.provider.refusing.lock().unwrap() = Some(TOO_LARGE.into());
+    let done = fixture.turn(thread, "Hello", Vec::new()).await;
+    assert_eq!(done.status, TurnStatus::Failed);
+    assert_eq!(fixture.summaries(), 0);
+    assert_eq!(
+        done.error.unwrap(),
+        "Size fixture refused this request as too large. The files in this chat are too large to send together: continue in a new chat, or with smaller files."
     );
 }

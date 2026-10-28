@@ -4,7 +4,8 @@
 Proves, end to end: two 15 MiB PDFs a person attaches in consecutive turns no
 longer make a 40 MB request the provider refuses: the earlier one is noted and
 the one just attached reaches the model, with no compaction. The same holds for
-two PDFs the model reads with the read tool, and for the turn after them. A
+two PDFs the model reads with the read tool, and for the turn after them. A PDF
+attached and another read in the same turn still go together, read once. A
 provider that keeps refusing the request as too large compacts the chat once,
 then the turn fails with one error that says what to do, and the TUI shows it;
 a context too long in tokens still compacts up to four times.
@@ -36,8 +37,10 @@ MIB = 1024 * 1024
 TOO_LARGE = 'ALWAYS_TOO_LARGE'
 TOO_LONG = 'ALWAYS_TOO_LONG'
 SUMMARY = 'Summarize this conversation for continuation:'
-PLAIN = ('refused this request as too large, even after the chat was compacted. '
-         'Send smaller or fewer files, or continue in a new chat.')
+PLAIN = ('refused this request as too large, even after the chat was compacted. The files in this chat '
+         'are too large to send together: continue in a new chat, or with smaller files.')
+NOTE = 'omitted to keep the request within the provider'
+READS = []
 
 
 def run(args, **kwargs):
@@ -149,8 +152,14 @@ class Provider(http.server.BaseHTTPRequestHandler):
             return self.refuse(400, 'invalid_request_error', 'prompt is too long: 210000 tokens > 200000 maximum')
         last = body['messages'][-1]
         wanted = [line[len('read '):] for text in texts(last) for line in text.splitlines() if line.startswith('read ')]
-        if last.get('role') == 'user' and wanted and not any(
-                block.get('type') == 'tool_result' for block in last.get('content') or [] if isinstance(block, dict)):
+        results = [block for block in last.get('content') or [] if isinstance(block, dict) and block.get('type') == 'tool_result']
+        if results and NOTE in json.dumps(results[-1]) and len(READS) < 4:
+            # A model told that the file it read was left out reads it again.
+            wanted = [READS[-1]]
+        elif results or last.get('role') != 'user':
+            wanted = []
+        if wanted:
+            READS.append(wanted[-1])
             return self.stream([({'type': 'tool_use', 'id': 'toolu_' + uuid.uuid4().hex[:12], 'name': 'read', 'input': {}},
                                  {'type': 'input_json_delta', 'partial_json': json.dumps({'path': wanted[-1]})})],
                                'tool_use')
@@ -253,7 +262,24 @@ try:
                     'requestBytes': [body['bytes'] for body in sent + after]})
     print('PASS read PDFs: the earlier read is noted, no refusal, the next turn fits too', flush=True)
 
-    # 3. A provider that refuses every request as too large: one compaction,
+    # 3. The person attaches a 10 MiB PDF and the model reads another in the
+    # same turn: 28 MB, which one request carried before. Both go, once.
+    pdf(workspace / 'a10.pdf', 10)
+    pdf(workspace / 'b10.pdf', 10)
+    together = new_thread('Attached and read')
+    del READS[:]
+    state, sent = turn(together, 'Compare this with b10.pdf.\nread b10.pdf', [str(workspace / 'a10.pdf')])
+    assert state['status'] == 'completed', state
+    ten = (10 * MIB + 2) // 3 * 4
+    assert [documents(body) for body in sent] == [[ten], [ten, ten]], [documents(body) for body in sent]
+    assert READS == ['b10.pdf'], READS
+    assert all(NOTE not in json.dumps(body['messages']) for body in sent)
+    assert not items_of(together, 'compaction') and not items_of(together, 'error')
+    results.append({'check': 'a PDF attached and one read in one turn: both sent whole, read once',
+                    'requestBytes': [body['bytes'] for body in sent]})
+    print(f'PASS attached and read in one turn: {sent[-1]["bytes"]} bytes, both PDFs, one read', flush=True)
+
+    # 4. A provider that refuses every request as too large: one compaction,
     # then one plain error.
     large = new_thread('Always too large')
     state, sent = turn(large, f'{TOO_LARGE}: hello')
@@ -269,7 +295,7 @@ try:
                     'error': errors[0]['message']})
     print(f'PASS still too large: one summary, then "{errors[0]["message"]}"', flush=True)
 
-    # 4. A prompt too long in tokens still compacts up to four times.
+    # 5. A prompt too long in tokens still compacts up to four times.
     long = new_thread('Always too long')
     state, sent = turn(long, f'{TOO_LONG}: hello')
     assert state['status'] == 'failed', state
@@ -278,13 +304,13 @@ try:
     results.append({'check': 'context too long in tokens: four compactions as before', 'error': state.get('error')})
     print('PASS too long in tokens: four compactions as before', flush=True)
 
-    # 5. The TUI shows the plain error in the transcript.
+    # 6. The TUI shows the plain error in the transcript.
     def pane(name):
         return run(['tmux', '-L', socket, 'capture-pane', '-p', '-J', '-S', '-200', '-t', name])
 
     run(['tmux', '-L', socket, 'new-session', '-d', '-x', '140', '-y', '45', '-s', session,
          e2e_tmux.pane_command(env, args + ['--thread', large])])
-    screen = until(lambda: (lambda text: text if 'continue in a new chat.' in text else None)(pane(session)),
+    screen = until(lambda: (lambda text: text if 'or with smaller files.' in text else None)(pane(session)),
                    'TUI did not show the error', timeout=60)
     (EVIDENCE / 'tui.txt').write_text(screen)
     # The error wraps beside the side panel.

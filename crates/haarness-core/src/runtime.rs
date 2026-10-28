@@ -786,6 +786,7 @@ fn stop_failure_categories(error: &CoreError) -> (&'static str, &'static str) {
     } else if status.is_some_and(|status| (500..600).contains(&status)) {
         "server_error"
     } else if is_provider_context_overflow(error)
+        || is_provider_oversized_request(error)
         || status.is_some_and(|status| (400..500).contains(&status))
     {
         "invalid_request"
@@ -1017,9 +1018,12 @@ fn is_provider_image_rejection(error: &CoreError, request_has_images: bool) -> b
     named || is_provider_oversized_request(error)
 }
 
-/// A provider that refused the request for its size in bytes, not for a
-/// context too long in tokens: compacting answers the latter, and makes
-/// little difference to the former, whose bytes are mostly attachments.
+/// A provider that refused the request for its size in bytes (an HTTP 413,
+/// which Bedrock words "413 Payload Too Large", or Gemini's "Request payload
+/// size exceeds the limit: N bytes"), not for a context too long in tokens.
+/// Its bytes are mostly attachments: compacting leaves out the person's from
+/// the turns it keeps, but not the files the model read there, so it is
+/// tried once.
 fn is_provider_oversized_request(error: &CoreError) -> bool {
     let CoreError::Provider(message) = error else {
         return false;
@@ -1040,7 +1044,7 @@ fn is_provider_oversized_request(error: &CoreError) -> bool {
 
 /// How a turn ends whose request the provider still refused as too large in
 /// bytes after the chat was compacted for it: the refusal follows, for the
-/// log. The transcript says what to do instead (see `describe_error`).
+/// log. The transcript says what to do instead (see `describe_failure`).
 const STILL_TOO_LARGE: &str = "request still too large after compacting: ";
 
 fn still_too_large(error: CoreError) -> CoreError {
@@ -1253,7 +1257,7 @@ fn image_volume_refusal(message: &str) -> Option<ImageVolume> {
 /// actionable failure. Providers use several JSON shapes for the same error;
 /// extract their human message/code before falling back to bounded plain text.
 fn user_facing_error(error: &CoreError) -> String {
-    describe_error(error, None)
+    describe_failure(error, None)
 }
 
 /// How a turn whose prompt a `UserPromptSubmit` hook blocked fails:
@@ -1283,18 +1287,33 @@ pub fn refusal_reason(error: &CoreError) -> String {
     }
 }
 
+/// `describe_error`, except that a request the provider refused for its size
+/// in bytes says what to do instead of repeating the 413: what makes a
+/// request that large is the files in the chat, which compacting does not
+/// always take out (a file the model read stays in the turns it keeps).
+fn describe_failure(error: &CoreError, provider: Option<&str>) -> String {
+    if let CoreError::Provider(raw) = error
+        && is_provider_oversized_request(error)
+    {
+        let compacted = if raw.starts_with(STILL_TOO_LARGE) {
+            ", even after the chat was compacted"
+        } else {
+            ""
+        };
+        return format!(
+            "{} refused this request as too large{compacted}. The files in this chat are too large to send together: continue in a new chat, or with smaller files.",
+            provider.unwrap_or("The provider")
+        );
+    }
+    describe_error(error, provider)
+}
+
 /// `user_facing_error`, naming the provider (when known) that has no
 /// credentials or refused them, so the fix is clear: connect it again.
 fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     let CoreError::Provider(raw) = error else {
         return error.to_string();
     };
-    if raw.starts_with(STILL_TOO_LARGE) {
-        return format!(
-            "{} refused this request as too large, even after the chat was compacted. Send smaller or fewer files, or continue in a new chat.",
-            provider.unwrap_or("The provider")
-        );
-    }
     if is_region_unavailable(raw) {
         return format!(
             "{} is not available in your country or region. Choose a model from another provider.",
@@ -8042,7 +8061,7 @@ impl RunnerTask {
             .providers
             .get(&self.turn.provider)
             .map(|provider| provider.info().name);
-        describe_error(error, name.as_deref())
+        describe_failure(error, name.as_deref())
     }
 
     /// An agent's definition: this turn's own from its snapshot, any other
@@ -8483,7 +8502,8 @@ impl RunnerTask {
             %error,
             "provider refused an image; leaving it out"
         );
-        let reason = user_facing_error(error).chars().take(500).collect();
+        // The provider's own words: the notice says what Haarness did about it.
+        let reason = describe_error(error, None).chars().take(500).collect();
         self.publish_item(ItemData::MediaOmitted {
             fingerprints,
             names,
@@ -8675,9 +8695,10 @@ impl RunnerTask {
                 .filter(|turns| *turns > 0)
                 .unwrap_or(crate::goal::MAX_GOAL_TURNS);
             let mut compactions_this_turn = 0_u8;
-            // A refusal of the request's bytes compacts once: when the
-            // summary leaves the request too large, more summaries would only
-            // summarize the last one.
+            // A refusal of the request's bytes compacts once until the
+            // provider takes a request again: when the summary leaves the
+            // request too large, more summaries would only summarize the
+            // last one.
             let mut compacted_for_size = false;
             let mut recoveries = 0_u8;
             // Corrective rounds after a structured-output turn answered in the
@@ -9319,7 +9340,7 @@ impl RunnerTask {
                             return Err(still_too_large(error_value));
                         }
                         if compactions_this_turn < MAX_COMPACTIONS_PER_TURN
-                            && is_provider_context_overflow(&error_value)
+                            && (oversized || is_provider_context_overflow(&error_value))
                             && self.recover_context_overflow(&provider, &model).await?
                         {
                             compactions_this_turn = compactions_this_turn.saturating_add(1);
@@ -9394,7 +9415,7 @@ impl RunnerTask {
                             }
                             if !saw_provider_event
                                 && compactions_this_turn < MAX_COMPACTIONS_PER_TURN
-                                && is_provider_context_overflow(&error_value)
+                                && (oversized || is_provider_context_overflow(&error_value))
                                 && self.recover_context_overflow(&provider, &model).await?
                             {
                                 compactions_this_turn = compactions_this_turn.saturating_add(1);
@@ -9447,6 +9468,9 @@ impl RunnerTask {
                         continue;
                     }
                     saw_provider_event = true;
+                    // The provider took this request: a later one refused
+                    // for its size may compact again.
+                    compacted_for_size = false;
                     match event {
                         ProviderEvent::TextDelta(delta) => {
                             if delta.is_empty() {
@@ -17359,11 +17383,27 @@ mod tests {
         assert!(!super::is_provider_oversized_request(&CoreError::Tool(
             "HTTP 413".into()
         )));
-        // Refused again after compacting, the turn says what to do.
+        // Bedrock's adapter words its 413 by the status line alone.
+        assert!(oversized(
+            r#"Bedrock returned 413 Payload Too Large: {"message":"Request Entity Too Large"}"#
+        ));
+        // Where the turn could not compact (a child agent, compaction off),
+        // the refusal says what to do rather than repeat the 413.
         let refusal = CoreError::Provider(
             "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes."
                 .into(),
         );
+        let advice = "The files in this chat are too large to send together: continue in a new chat, or with smaller files.";
+        assert_eq!(
+            super::describe_failure(&refusal, Some("Anthropic")),
+            format!("Anthropic refused this request as too large. {advice}")
+        );
+        // A notice of left-out images keeps the provider's own words.
+        assert_eq!(
+            super::describe_error(&refusal, None),
+            "Provider error: HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes."
+        );
+        // Refused again after compacting, it says so.
         let ended = super::still_too_large(refusal);
         assert!(
             ended
@@ -17371,16 +17411,33 @@ mod tests {
                 .contains("Request exceeds the maximum allowed number of bytes")
         );
         assert_eq!(
-            super::describe_error(&ended, Some("Anthropic")),
-            "Anthropic refused this request as too large, even after the chat was compacted. Send smaller or fewer files, or continue in a new chat."
+            super::describe_failure(&ended, Some("Anthropic")),
+            format!(
+                "Anthropic refused this request as too large, even after the chat was compacted. {advice}"
+            )
         );
         assert_eq!(
             super::user_facing_error(&ended),
-            "The provider refused this request as too large, even after the chat was compacted. Send smaller or fewer files, or continue in a new chat."
+            format!(
+                "The provider refused this request as too large, even after the chat was compacted. {advice}"
+            )
         );
+        for error in [
+            ended,
+            CoreError::Provider("Bedrock returned 413 Payload Too Large: too big".into()),
+        ] {
+            assert_eq!(
+                super::stop_failure_categories(&error),
+                ("provider", "invalid_request")
+            );
+        }
+        // A token overflow keeps the provider's words.
         assert_eq!(
-            super::stop_failure_categories(&ended),
-            ("provider", "invalid_request")
+            super::describe_failure(
+                &CoreError::Provider("prompt is too long: 210000 tokens > 200000 maximum".into()),
+                None
+            ),
+            "Provider error: prompt is too long: 210000 tokens > 200000 maximum"
         );
     }
 
