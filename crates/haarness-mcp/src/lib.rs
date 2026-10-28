@@ -74,6 +74,9 @@ const RESERVED_METADATA: [&str; 3] = ["attachments", "diffs", "mcp_app"];
 pub struct NativeMcpRegistry {
     servers: Arc<RwLock<BTreeMap<String, Entry>>>,
     auth_dir: Option<PathBuf>,
+    /// The project folder: local servers start in it, and read a relative
+    /// `cwd` from it (see [`launch_config`]).
+    folder: Option<PathBuf>,
 }
 /// The registry a connection reports catalog changes to. A hot reload
 /// connects servers in a candidate registry and then moves their entries into
@@ -528,14 +531,16 @@ impl NativeMcpRegistry {
                 config.apps != Some(false),
             );
             let oversized = (config.transport == "stdio").then(Arc::<AtomicBool>::default);
+            let launch = launch_config(&config, self.folder.as_deref());
             let activation = async {
+                let config = &launch;
                 match config.transport.as_str() {
                     "stdio" => {
                         let result = async {
                             let program = config.command.as_deref().ok_or_else(|| {
                                 CoreError::Invalid("stdio MCP requires command".into())
                             })?;
-                            let resolved = executable::resolve(program, &config);
+                            let resolved = executable::resolve(program, config);
                             let mut command =
                                 tokio::process::Command::new(resolved.as_ref().map_or_else(
                                     || std::ffi::OsStr::new(program),
@@ -548,9 +553,8 @@ impl NativeMcpRegistry {
                             for name in haarness_core::private_env_names() {
                                 command.env_remove(name);
                             }
-                            command.envs(
-                                resolve_references(&config.env, lookup_limit(&config)).await?,
-                            );
+                            command
+                                .envs(resolve_references(&config.env, lookup_limit(config)).await?);
                             if let Some((_, path)) = resolved {
                                 command.env("PATH", path);
                             }
@@ -574,9 +578,9 @@ impl NativeMcpRegistry {
                         result.map_err(ActivationError::Core)
                     }
                     "streamable_http" => {
-                        activate_remote(name, &config, credential.clone(), handler.clone()).await
+                        activate_remote(name, config, credential.clone(), handler.clone()).await
                     }
-                    "sse" => activate_legacy_sse(name, &config, handler.clone())
+                    "sse" => activate_legacy_sse(name, config, handler.clone())
                         .await
                         .map(|(tools, worker)| (tools, worker, None))
                         .map_err(ActivationError::Core),
@@ -673,6 +677,14 @@ impl NativeMcpRegistry {
             auth_dir: Some(path.into()),
             ..Self::default()
         }
+    }
+
+    /// The registry for the project in `folder`: its local servers start
+    /// there, and a relative `cwd` names a folder inside it.
+    #[must_use]
+    pub fn in_folder(mut self, folder: impl Into<PathBuf>) -> Self {
+        self.folder = Some(folder.into());
+        self
     }
 
     /// Record where `name`'s configuration comes from, for clients to show
@@ -939,6 +951,7 @@ impl NativeMcpRegistry {
     fn watch(&self, name: &str, generation: uuid::Uuid) {
         let weak = Arc::downgrade(&self.servers);
         let auth_dir = self.auth_dir.clone();
+        let folder = self.folder.clone();
         let name = name.to_owned();
         tokio::spawn(async move {
             loop {
@@ -993,7 +1006,11 @@ impl NativeMcpRegistry {
                 }
                 // Restore the connection for subsequent calls, never replay a
                 // call whose side effects may already have reached the server.
-                let registry = Self { servers, auth_dir };
+                let registry = Self {
+                    servers,
+                    auth_dir,
+                    folder,
+                };
                 let _ = registry.connect(&name, Some(generation)).await;
                 return;
             }
@@ -1334,6 +1351,31 @@ fn connection_timeout(config: &McpConfigureRequest) -> Duration {
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .clamp(1, 600_000),
     )
+}
+
+/// `config` as its server starts in the project in `folder`: a relative
+/// `cwd` (`tools/mcp`) is read from that folder and no `cwd` means the folder
+/// itself, rather than whatever folder the Haarness process runs in (a server
+/// started with `--workspace` from elsewhere). `~` names the home folder. An
+/// absolute `cwd` is kept, and without a folder nothing changes.
+fn launch_config(config: &McpConfigureRequest, folder: Option<&Path>) -> McpConfigureRequest {
+    let mut launch = config.clone();
+    let Some(folder) = folder else {
+        return launch;
+    };
+    let resolved = match config.cwd.as_deref() {
+        None | Some("") => folder.to_path_buf(),
+        Some(cwd) => {
+            let home = haarness_protocol::home_dir();
+            match (cwd.strip_prefix('~'), home) {
+                (Some(""), Some(home)) => home,
+                (Some(rest), Some(home)) if rest.starts_with(['/', '\\']) => home.join(&rest[1..]),
+                _ => folder.join(cwd),
+            }
+        }
+    };
+    launch.cwd = Some(resolved.to_string_lossy().into_owned());
+    launch
 }
 
 fn describe_timeout(timeout: Duration) -> String {
@@ -4145,6 +4187,126 @@ mod recovery_tests {
         .await
         .unwrap();
         registry.disconnect("catalog").await.unwrap();
+    }
+
+    /// A server of the `names.py` fixture offering `tools`, which answers
+    /// each call with `label`, the tool name it got and the folder it runs in.
+    fn names_config(label: &str, tools: &[&str]) -> McpConfigureRequest {
+        serde_json::from_value(serde_json::json!({
+            "transport": "stdio", "command": "python3",
+            "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/names.py")],
+            "env": {"LABEL": label, "TOOLS": serde_json::to_string(tools).unwrap()},
+            "enabled": true
+        }))
+        .unwrap()
+    }
+
+    /// What `server` says tool `tool` was called with.
+    async fn called(registry: &NativeMcpRegistry, server: &str, tool: &str) -> Value {
+        let output = registry
+            .call(server, tool, serde_json::json!({}))
+            .await
+            .unwrap();
+        serde_json::from_str(&output.text).unwrap()
+    }
+
+    /// A local server starts in the project folder, and a relative `cwd` is
+    /// a folder inside it, whatever folder this process runs in.
+    #[tokio::test]
+    async fn local_servers_start_in_the_project_folder_or_a_folder_inside_it() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-mcp-folder-{}", uuid::Uuid::now_v7()));
+        let project = root.join("project");
+        let elsewhere = root.join("elsewhere");
+        for folder in [project.join("tools/mcp"), elsewhere.clone()] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let project = std::fs::canonicalize(&project).unwrap();
+        let elsewhere = std::fs::canonicalize(&elsewhere).unwrap();
+        assert_ne!(std::env::current_dir().unwrap(), project);
+        let registry = NativeMcpRegistry::default().in_folder(&project);
+        for (server, cwd, expected) in [
+            ("default", None, project.clone()),
+            ("relative", Some("tools/mcp"), project.join("tools/mcp")),
+            (
+                "absolute",
+                Some(elsewhere.to_str().unwrap()),
+                elsewhere.clone(),
+            ),
+        ] {
+            let mut config = names_config(server, &["where"]);
+            config.cwd = cwd.map(str::to_owned);
+            let info = registry.configure(server, config).await.unwrap();
+            assert_eq!(info.status, "connected", "{server}: {:?}", info.detail);
+            let answer = called(&registry, server, &format!("mcp__{server}__where")).await;
+            assert_eq!(
+                std::fs::canonicalize(answer["cwd"].as_str().unwrap()).unwrap(),
+                expected,
+                "{server}"
+            );
+            registry.disconnect(server).await.unwrap();
+        }
+        // The settings keep the `cwd` as written.
+        assert_eq!(
+            registry.servers.read()["relative"].config.cwd.as_deref(),
+            Some("tools/mcp")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_cwd_that_starts_with_a_tilde_is_in_the_home_folder() {
+        let Some(home) = haarness_protocol::home_dir() else {
+            return;
+        };
+        let project = Path::new("/work/project");
+        let cwd = |written: Option<&str>, folder: Option<&Path>| {
+            let mut config = names_config("x", &[]);
+            config.cwd = written.map(str::to_owned);
+            launch_config(&config, folder).cwd
+        };
+        let home_text = |path: PathBuf| Some(path.to_string_lossy().into_owned());
+        assert_eq!(cwd(Some("~"), Some(project)), home_text(home.clone()));
+        assert_eq!(
+            cwd(Some("~/servers/docs"), Some(project)),
+            home_text(home.join("servers/docs"))
+        );
+        // Only the person's own home: `~docs` is a folder of that name.
+        assert_eq!(
+            cwd(Some("~docs"), Some(project)),
+            home_text(project.join("~docs"))
+        );
+        // Without a project folder the `cwd` stays as written.
+        assert_eq!(cwd(Some("tools"), None).as_deref(), Some("tools"));
+        assert_eq!(cwd(None, None), None);
+    }
+
+    /// A remote server's headers helper runs where a local server would.
+    #[tokio::test]
+    async fn a_headers_helper_runs_in_the_project_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-mcp-helper-folder-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(root.join("auth")).unwrap();
+        let project = std::fs::canonicalize(&root).unwrap();
+        let marker = project.join("ran-in.txt");
+        let registry = NativeMcpRegistry::default().in_folder(&project);
+        let config: McpConfigureRequest = serde_json::from_value(serde_json::json!({
+            "transport": "streamable_http",
+            "url": "http://127.0.0.1:9/mcp",
+            "cwd": "auth",
+            "headersHelper": format!("pwd -P > '{}'; printf '{{}}'", marker.display()),
+            "timeoutMs": 2000,
+            "enabled": true
+        }))
+        .unwrap();
+        let _ = registry.configure("remote", config).await;
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap().trim(),
+            project.join("auth").display().to_string()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// A hot reload connects servers in a candidate registry and then moves

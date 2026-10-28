@@ -403,6 +403,10 @@ server reports `needs_auth` with a non-secret detail until the CLI completes
 the public OAuth authorization-code + PKCE flow. `disconnect` drops the live
 worker and advertised tools without deleting configuration; `reconnect`
 performs initialization and capability discovery again.
+A local server, and a remote server's `headersHelper`, run in the server's
+project folder (the chat home's own folder there); a relative `cwd` is read
+from the project folder, `~/…` from the home folder, and the settings keep
+`cwd` as written.
 `timeoutMs` (default 30 s) bounds the socket connect, initialization, and tool
 discovery as one deadline, plus a `headersHelper` run. In a JSON file a
 `timeout` key counts too, in its ecosystem's unit: milliseconds in an opencode

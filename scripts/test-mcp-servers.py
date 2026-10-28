@@ -11,6 +11,8 @@
   later request to that server, a tool call included) and the server is told to stop getting the prompt.
 - `${keychain:NAME}` resolves when a server starts, from `haarness mcp secret set` or Desktop's request; a missing
   entry fails that server naming the reference; the setting stays as written and no log holds the secret.
+- A server started with `--workspace` from another folder starts its local MCP servers in the project folder, and a
+  relative `cwd` is read from it.
 
 The keychain is a test file (HAARNESS_TEST_KEYCHAIN_FILE, honoured by debug builds only), so the script never
 touches the system's keychain, and it fails if a secret reaches anything else.
@@ -18,7 +20,7 @@ touches the system's keychain, and it fails if a secret reaches anything else.
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-servers.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
-import json, os, pathlib, subprocess, sys, tempfile, time, urllib.error, urllib.request, uuid
+import json, os, pathlib, socket, subprocess, sys, tempfile, time, urllib.error, urllib.request, uuid
 import e2e_scratch, e2e_tmux
 from e2e_env import clean_env
 
@@ -58,17 +60,18 @@ env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(root/'data'), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_TEST_KEYCHAIN_FILE=str(keychain), LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8')
 session = f'haarness-mcp-servers-{os.getpid()}'
-connection = None; checks = []
+connection = None; foreground = None; checks = []
 
 
 def run(args, **kwargs):
     return subprocess.run(args, check=True, text=True, capture_output=True, timeout=120, env=env, **kwargs).stdout
 def cli(*args, **kwargs): return run([str(binary), '--workspace', str(workspace), '--trust-project', *args], **kwargs)
 def desktop(request): return json.loads(cli('desktop', input=json.dumps(request)))
-def api(path, body=None, method=None):
-    request = urllib.request.Request(connection['url'].rstrip('/') + '/v1' + path, method=method,
+def api(path, body=None, method=None, at=None):
+    url, token = at or (connection['url'], connection['token'])
+    request = urllib.request.Request(url.rstrip('/') + '/v1' + path, method=method,
                                      data=None if body is None else json.dumps(body).encode(),
-                                     headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + connection['token']})
+                                     headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
     with urllib.request.urlopen(request, timeout=30) as reply:
         data = reply.read(); return json.loads(data) if data else None
 def until(predicate, label, seconds=30):
@@ -262,10 +265,44 @@ try:
         assert SECRET.encode() not in path.read_bytes(), f'the secret is in {path}'
     check('no log or setting holds the secret')
 
+    # --- a server started from another folder
+    other = root/'other'; (other/'.haarness').mkdir(parents=True); (other/'sub').mkdir()
+    elsewhere = root/'elsewhere'; elsewhere.mkdir()
+    (other/'.haarness/haarness.json').write_text(json.dumps({'model': 'echo/echo-1', 'mcp': {
+        'here': server('names.py', env={'LABEL': 'here', 'TOOLS': '["where"]'}),
+        'inside': server('names.py', cwd='sub', env={'LABEL': 'inside', 'TOOLS': '["where"]'}),
+    }}, indent=2) + '\n')
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0)); free = probe.getsockname()[1]
+    token = uuid.uuid4().hex
+    with open(root/'foreground.log', 'w') as log:
+        foreground = subprocess.Popen([str(binary), '--workspace', str(other), '--trust-project', 'serve', '--port', str(free)],
+                                      cwd=elsewhere, env={**env, 'HAARNESS_SERVER_TOKEN': token}, stdout=log, stderr=log)
+    at = (f'http://127.0.0.1:{free}', token)
+    def settled_elsewhere():
+        try:
+            listed = {item['name']: item['status'] for item in api('/mcp', at=at)}
+        except (urllib.error.URLError, ConnectionError):
+            return None
+        return listed if set(listed) == {'here', 'inside'} and 'connecting' not in listed.values() else None
+    listed = until(settled_elsewhere, 'the server started elsewhere did not list its MCP servers', 60)
+    assert set(listed.values()) == {'connected'}, listed
+    for name, expected in [('here', other), ('inside', other/'sub')]:
+        answer = json.loads(api(f'/mcp/{name}/tools/mcp__{name}__where', {}, at=at)['text'])
+        assert pathlib.Path(answer['cwd']).resolve() == expected.resolve(), (name, answer)
+    check('a server started with --workspace from another folder starts its MCP servers in the project folder, and a relative cwd inside it')
+    foreground.terminate(); foreground.wait(timeout=30); foreground = None
+
     (root/'result.json').write_text(json.dumps({'passed': True, 'checks': checks}, indent=2))
     print(f'PASS {len(checks)} MCP server scenarios.', flush=True)
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)
+    if foreground:
+        foreground.terminate()
+        try:
+            foreground.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            foreground.kill()
     if connection:
         subprocess.run([str(binary), '--workspace', str(workspace), '--trust-project', 'serve', '--stop'], env=env, capture_output=True, timeout=35)
     e2e_scratch.settle(root)
