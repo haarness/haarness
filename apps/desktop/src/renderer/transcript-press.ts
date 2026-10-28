@@ -7,6 +7,12 @@
 // presses whose pointerup never reaches the window, so following is never
 // left frozen.
 
+/**
+ * What an app frame's host (McpAppView) dispatches on the window when a
+ * button is let go over its page, which the window itself is not told.
+ */
+export const LIFTED_IN_FRAME = "haarness-frame-lift";
+
 /** The parts of a pointer event a press is read from. */
 export type PressPointer = Pick<PointerEvent, "pointerId" | "pointerType" | "isPrimary" | "button" | "buttons">;
 
@@ -43,7 +49,7 @@ export function createTranscriptPress(ended: () => void) {
     release(event: PressPointer) {
       update(() => down.delete(event.pointerId));
     },
-    /** Ends every press at once: a context menu opened, the window lost focus, or the page was hidden. */
+    /** Ends every press at once: a context menu opened, a button was let go over an app's frame, the window lost focus, or the page was hidden. */
     end() {
       update(() => down.clear());
     },
@@ -75,6 +81,8 @@ export function listenForPress(
     [view, "pointercancel", (event) => press.release(event as PointerEvent), true],
     // On a Mac, Control with the main button opens the context menu, and the pointerup then goes to the menu.
     [view, "contextmenu", () => press.end(), true],
+    // A press that began here and was let go over an app's frame.
+    [view, LIFTED_IN_FRAME, () => press.end(), false],
     // Only when the window itself loses focus.
     [view, "blur", (event) => event.target === view && press.end(), false],
     [page, "visibilitychange", () => page.hidden && press.end(), false],

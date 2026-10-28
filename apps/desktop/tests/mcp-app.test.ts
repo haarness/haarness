@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import {
   INPUT,
   LEFT,
+  LIFT,
   REFUSED,
   STYLE_VARIABLES,
   themeTokens,
@@ -282,6 +283,9 @@ test("the page document starts with its policy and the host script, after its do
   // The pointer coming into the page and leaving it is reported once each way, with the token, for the page's options.
   assert.ok(html.includes(HOVER) && html.includes("if(!e.relatedTarget)hover(0)"));
   assert.ok(html.includes(`p.postMessage({${HOVER}:[v,s]},"*")`));
+  // A button let go over the page is reported with the token, for a press the conversation holds.
+  assert.ok(html.includes('addEventListener("pointerup",lift,true);addEventListener("pointercancel",lift,true)'));
+  assert.ok(html.includes(`function lift(e){if(e.isTrusted)p.postMessage({${LIFT}:s},"*")}`));
   assert.ok(html.includes("document.currentScript.remove()"));
   // Neither a declared domain nor the token can end the tags they are written into.
   assert.ok(!html.includes('"><script>alert(1)'));
