@@ -24485,14 +24485,24 @@ async fn yolo_is_offered_only_where_the_server_keeps_it() {
     assert!(requests[1].contains("\"mode\":\"yolo\""), "{}", requests[1]);
 }
 
+/// How [`chat_replacing_server`] answers mode requests.
+#[derive(Clone, Copy)]
+enum ModeServer {
+    /// A write is kept.
+    Keeps,
+    /// A write fails; a read says the chat is in this default mode, or fails
+    /// when there is none.
+    Refuses(Option<&'static str>),
+}
+
 /// A server for `/new` and `/archive` that answers each request by its route
 /// and keeps every request's line and body: a chat of its own for `POST
-/// /v1/threads` (the ids it made are kept too), the asked mode for `PUT
-/// …/approval-mode` (a 500 when `refuse_mode`), the chat for `PATCH`, empty
-/// lists otherwise.
+/// /v1/threads` (the ids it made are kept too), `PUT` and `GET
+/// …/approval-mode` as `modes` says, the chat for `PATCH`, empty lists
+/// otherwise.
 async fn chat_replacing_server(
     template: Thread,
-    refuse_mode: bool,
+    modes: ModeServer,
 ) -> (
     crate::api::ApiClient,
     std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
@@ -24546,11 +24556,32 @@ async fn chat_replacing_server(
                 ("200 OK", serde_json::to_string(&thread).unwrap())
             } else if line.starts_with("PATCH /v1/threads/") {
                 ("200 OK", serde_json::to_string(&template).unwrap())
-            } else if line.starts_with("PUT ") && path.ends_with("/approval-mode") && refuse_mode {
+            } else if line.starts_with("PUT ")
+                && path.ends_with("/approval-mode")
+                && matches!(modes, ModeServer::Refuses(_))
+            {
                 (
                     "500 Internal Server Error",
                     serde_json::json!({"code": "internal", "message": "storage unavailable", "retryable": true})
                         .to_string(),
+                )
+            } else if line.starts_with("GET ")
+                && path.ends_with("/approval-mode")
+                && let ModeServer::Refuses(Some(default)) = modes
+            {
+                let id = path
+                    .trim_start_matches("/v1/threads/")
+                    .trim_end_matches("/approval-mode");
+                (
+                    "200 OK",
+                    serde_json::json!({
+                        "threadId": id,
+                        "mode": default,
+                        "sourceThreadId": id,
+                        "explicit": false,
+                        "revision": "r0",
+                    })
+                    .to_string(),
                 )
             } else if line.starts_with("PUT ") && path.ends_with("/approval-mode") {
                 let id = path
@@ -24586,8 +24617,6 @@ async fn chat_replacing_server(
     )
 }
 
-const MODE_NOT_KEPT: &str = "Could not keep approvals · ctrl+y to switch";
-
 /// A chat replaced by `/new`, `/archive` or the like: the TUI after it,
 /// every request it sent, the chat it left and the one it opened.
 struct Replaced {
@@ -24602,9 +24631,20 @@ struct Replaced {
 /// command (`/new`, `/archive`), or with `archive`, the session picker's
 /// action on the open chat. Checks that the TUI moved to the one chat
 /// opened.
-async fn replace_chat(how: &str, mode: Option<(&str, bool)>, refuse_mode: bool) -> Replaced {
+async fn replace_chat(how: &str, mode: Option<(&str, bool)>, modes: ModeServer) -> Replaced {
+    replace_chat_in("en", how, mode, modes).await
+}
+
+/// [`replace_chat`] in the interface language `language`.
+async fn replace_chat_in(
+    language: &str,
+    how: &str,
+    mode: Option<(&str, bool)>,
+    modes: ModeServer,
+) -> Replaced {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.language = crate::locale::Language::parse(language).unwrap();
     app.approval_server = true;
     app.approval_yolo = true;
     if let Some((mode, explicit)) = mode {
@@ -24620,7 +24660,7 @@ async fn replace_chat(how: &str, mode: Option<(&str, bool)>, refuse_mode: bool) 
         );
         app.auto_permissions = mode != "review";
     }
-    let (client, seen, created) = chat_replacing_server(thread.clone(), refuse_mode).await;
+    let (client, seen, created) = chat_replacing_server(thread.clone(), modes).await;
     if how.starts_with('/') {
         app.composer.set_text(how.into());
         Box::pin(crate::input::handle_key(
@@ -24670,8 +24710,12 @@ async fn mode_handed_on(
     how: &str,
     mode: Option<(&str, bool)>,
 ) -> Option<haarness_protocol::ApprovalModeSetting> {
-    let replaced = replace_chat(how, mode, false).await;
-    assert_ne!(replaced.app.notice, MODE_NOT_KEPT, "{how}");
+    let replaced = replace_chat(how, mode, ModeServer::Keeps).await;
+    assert!(
+        !replaced.app.notice.starts_with("Could not keep"),
+        "{how}: {}",
+        replaced.app.notice
+    );
     let writes = replaced.mode_writes();
     assert!(writes.len() <= 1, "{how}: {writes:#?}");
     writes.first().map(|(line, body)| {
@@ -24759,7 +24803,7 @@ async fn archive_opens_the_next_chat_in_the_archived_chats_mode() {
 #[tokio::test]
 async fn archiving_the_open_chat_from_sessions_keeps_its_mode() {
     use haarness_protocol::ApprovalModeSetting;
-    let replaced = replace_chat("archive", Some(("yolo", true)), false).await;
+    let replaced = replace_chat("archive", Some(("yolo", true)), ModeServer::Keeps).await;
     let archive = replaced
         .requests
         .iter()
@@ -24782,15 +24826,48 @@ async fn archiving_the_open_chat_from_sessions_keeps_its_mode() {
     );
 }
 
-/// When the mode cannot be written, the new chat still opens, and the
-/// notice says it runs in the default instead of reading "Ready".
+/// When the mode cannot be written, the new chat still opens, in the
+/// default, and the notice names the mode it could not keep instead of
+/// reading "Ready", unless the server reads the new chat in that mode
+/// anyway: then nothing was lost.
 #[tokio::test]
-async fn a_mode_the_new_chat_could_not_keep_is_said() {
+async fn a_mode_the_new_chat_could_not_keep_is_named() {
     for command in ["/new", "/archive"] {
-        let replaced = replace_chat(command, Some(("review", true)), true).await;
-        assert_eq!(replaced.mode_writes().len(), 1, "{command}");
-        assert_eq!(replaced.app.notice, MODE_NOT_KEPT, "{command}");
+        for (mode, default, notice) in [
+            ("review", Some("auto"), Some("Could not keep Review")),
+            ("yolo", Some("auto"), Some("Could not keep Yolo")),
+            ("auto", Some("review"), Some("Could not keep Auto")),
+            // The server cannot say which mode the new chat is in.
+            ("review", None, Some("Could not keep Review")),
+            ("review", Some("review"), None),
+            ("auto", Some("auto"), None),
+        ] {
+            let replaced =
+                replace_chat(command, Some((mode, true)), ModeServer::Refuses(default)).await;
+            let label = format!("{command} from {mode} over a default {default:?}");
+            assert_eq!(replaced.mode_writes().len(), 1, "{label}");
+            match notice {
+                Some(notice) => assert_eq!(replaced.app.notice, notice, "{label}"),
+                None => assert!(
+                    !replaced.app.notice.starts_with("Could not keep"),
+                    "{label}: {}",
+                    replaced.app.notice
+                ),
+            }
+        }
     }
+    // The mode is named as the interface language names it.
+    let replaced = replace_chat_in(
+        "de",
+        "/new",
+        Some(("review", true)),
+        ModeServer::Refuses(Some("auto")),
+    )
+    .await;
+    assert_eq!(
+        replaced.app.notice,
+        "Überprüfung konnte nicht beibehalten werden"
+    );
 }
 
 /// A server that keeps no modes gets no mode request: this launch's own
@@ -24801,7 +24878,8 @@ async fn new_chat_writes_no_mode_on_a_server_without_shared_modes() {
     for command in ["/new", "/archive"] {
         let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
         app.auto_permissions = true;
-        let (client, seen, created) = chat_replacing_server(thread.clone(), false).await;
+        let (client, seen, created) =
+            chat_replacing_server(thread.clone(), ModeServer::Keeps).await;
         app.composer.set_text(command.into());
         Box::pin(crate::input::handle_key(
             &mut app,

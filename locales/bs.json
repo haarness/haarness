@@ -1780,7 +1780,7 @@
   "{count} more lines": "još {count} redova",
   "rejected": "odbijeno",
   "Approvals changed in another window · ctrl+y to switch": "Odobrenja su promijenjena u drugom prozoru · ctrl+y za prebacivanje",
-  "Could not keep approvals · ctrl+y to switch": "Odobrenja nije bilo moguće zadržati · ctrl+y za prebacivanje",
+  "Could not keep {mode}": "Način {mode} nije bilo moguće zadržati",
   "Share usage statistics": "Dijeli statistiku korištenja",
   "Diagnostics": "Dijagnostika",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "Haarness zapisnici s ovog računara kao zip, bez poznatih tajni, za dijeljenje kada nešto pođe po zlu.",

@@ -1780,7 +1780,7 @@
   "{count} more lines": "{count} أسطر أخرى",
   "rejected": "مرفوض",
   "Approvals changed in another window · ctrl+y to switch": "تغيّرت الموافقات في نافذة أخرى · ctrl+y للتبديل",
-  "Could not keep approvals · ctrl+y to switch": "تعذّر الإبقاء على الموافقات · ctrl+y للتبديل",
+  "Could not keep {mode}": "تعذّر الإبقاء على وضع {mode}",
   "Share usage statistics": "مشاركة إحصاءات الاستخدام",
   "Diagnostics": "التشخيص",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "سجلات Haarness على هذا الكمبيوتر في ملف zip بعد إزالة الأسرار المعروفة، لمشاركتها عند حدوث مشكلة.",

@@ -1780,7 +1780,7 @@
   "{count} more lines": "{count}줄 더",
   "rejected": "거부됨",
   "Approvals changed in another window · ctrl+y to switch": "다른 창에서 승인 방식이 바뀌었습니다 · ctrl+y로 전환",
-  "Could not keep approvals · ctrl+y to switch": "승인 방식을 유지하지 못했습니다 · ctrl+y로 전환",
+  "Could not keep {mode}": "{mode} 모드를 유지하지 못했습니다",
   "Share usage statistics": "사용 통계 공유",
   "Diagnostics": "진단",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "이 컴퓨터의 Haarness 로그를 알려진 비밀 정보를 제거한 zip으로 저장해, 문제가 생겼을 때 공유할 수 있습니다.",

@@ -4854,7 +4854,7 @@ impl App {
                 directory: None,
             })
             .await?;
-        let mut kept = true;
+        let mut lost = None;
         if let Some(mode) = carried {
             let request = haarness_protocol::SetApprovalModeRequest {
                 mode: mode.setting(),
@@ -4862,16 +4862,30 @@ impl App {
             };
             if let Err(error) = client.set_approval_mode(thread.id, &request).await {
                 tracing::warn!(%error, ?mode, "could not start the new chat in the open chat's mode");
-                kept = false;
+                lost = Some(mode);
             }
         }
         self.refresh_threads(client).await?;
         self.switch_thread(thread, client).await?;
-        // The new chat runs in the default, which may ask less than the
-        // mode it should have kept: say so over the switch's "Ready". The
-        // band beside it shows the mode the chat is in.
-        if !kept {
-            self.notice = "Could not keep approvals · ctrl+y to switch".into();
+        // The new chat runs in the default, which may ask less than the mode
+        // it should have kept: name that mode over the switch's "Ready",
+        // unless the server reads the new chat in it anyway. The band shows
+        // the mode the chat got.
+        if let Some(mode) = lost.filter(|mode| {
+            !self
+                .approval_mode
+                .as_ref()
+                .is_some_and(|info| info.thread_id == self.thread.id && info.mode == *mode)
+        }) {
+            let name = match mode {
+                haarness_protocol::ApprovalMode::Review => "Review",
+                haarness_protocol::ApprovalMode::Auto => "Auto",
+                haarness_protocol::ApprovalMode::Yolo => "Yolo",
+            };
+            self.notice = self.language.format(
+                "Could not keep {mode}",
+                &[("mode", self.language.text(name))],
+            );
         }
         Ok(())
     }
