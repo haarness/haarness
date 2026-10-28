@@ -606,6 +606,10 @@ pub async fn prepare(
         if result.metadata.get("stdoutCut").and_then(Value::as_bool) == Some(true) {
             prepared.push_str(&snippet_cut_note(
                 result.metadata.get("outputPath").and_then(Value::as_str),
+                result
+                    .metadata
+                    .get("outputSavedBytes")
+                    .and_then(Value::as_u64),
             ));
         }
         last = whole.end();
@@ -785,11 +789,25 @@ fn placeholder_values<'a>(
 }
 
 /// Follows a `!` snippet's output when the shell kept only its end.
-fn snippet_cut_note(saved: Option<&str>) -> String {
-    let rest = saved.map_or_else(String::new, |path| {
-        format!("; everything it printed is saved in {path}")
-    });
+fn snippet_cut_note(saved: Option<&str>, saved_bytes: Option<u64>) -> String {
+    let rest = match (saved, saved_bytes) {
+        (Some(path), Some(bytes)) => format!(
+            "; only the first {} of what it printed is saved, in {path}",
+            byte_size(bytes)
+        ),
+        (Some(path), None) => format!("; everything it printed is saved in {path}"),
+        (None, _) => String::new(),
+    };
     format!("\n(only the last 2000 lines or 50 KB of this output are shown{rest})")
+}
+
+/// `bytes` in whole MiB, or KiB below one MiB.
+fn byte_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{} MiB", bytes / (1024 * 1024))
+    } else {
+        format!("{} KiB", bytes / 1024)
+    }
 }
 
 /// The environment a `!` snippet runs with, where its shell reads the
@@ -1295,6 +1313,15 @@ mod tests {
         assert_eq!(
             prepared(serde_json::json!({"exit": 0, "stdout": "tail", "stdoutCut": true})).await,
             "Log: tail\n(only the last 2000 lines or 50 KB of this output are shown) Review it."
+        );
+        // A snippet with no deadline saved only the start of what it printed.
+        assert_eq!(
+            prepared(serde_json::json!({
+                "exit": 0, "stdout": "line 9000\n", "stdoutCut": true,
+                "outputPath": "/data/tool-output/tool_2.txt", "outputSavedBytes": 67_108_864,
+            }))
+            .await,
+            "Log: line 9000\n(only the last 2000 lines or 50 KB of this output are shown; only the first 64 MiB of what it printed is saved, in /data/tool-output/tool_2.txt) Review it."
         );
     }
 
