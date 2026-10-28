@@ -95,6 +95,7 @@ pub(crate) async fn run(
     let mut stderr = child.stderr.take().expect("piped stderr");
     let mut tail = Vec::new();
     let mut stdout_tail = Vec::new();
+    let mut stdout_total = 0usize;
     let mut total = 0usize;
     let mut lines = 0usize;
     let execution = async {
@@ -109,6 +110,7 @@ pub(crate) async fn run(
                 value = stdout.read(&mut out), if !out_done => {
                     let n = value.map_err(error)?; out_done = n == 0;
                     stdout_tail.extend_from_slice(&out[..n]);
+                    stdout_total += n;
                     if stdout_tail.len() > 50 * 1024 { stdout_tail.drain(..stdout_tail.len() - 50 * 1024); }
                     &out[..n]
                 },
@@ -153,7 +155,13 @@ pub(crate) async fn run(
         .rev()
         .collect::<Vec<_>>()
         .join("\n");
-    let stdout_text = String::from_utf8_lossy(&stdout_tail);
+    // Cut by bytes, the kept stdout can start inside a character.
+    let stdout_kept = if stdout_total > stdout_tail.len() {
+        whole_characters(&stdout_tail)
+    } else {
+        &stdout_tail
+    };
+    let stdout_text = String::from_utf8_lossy(stdout_kept);
     let stdout_preview = stdout_text
         .lines()
         .rev()
@@ -163,7 +171,12 @@ pub(crate) async fn run(
         .rev()
         .collect::<Vec<_>>()
         .join("\n");
-    let mut metadata = json!({"exit":exit,"truncated":truncated,"stdout": if stdout_text.lines().count() > 2000 { stdout_preview.as_str() } else { stdout_text.as_ref() }});
+    let stdout_lines = stdout_text.lines().count();
+    let mut metadata = json!({"exit":exit,"truncated":truncated,"stdout": if stdout_lines > 2000 { stdout_preview.as_str() } else { stdout_text.as_ref() }});
+    // `stdout` holds only its end: a definition's snippet says so.
+    if stdout_total > stdout_tail.len() || stdout_lines > 2000 {
+        metadata["stdoutCut"] = json!(true);
+    }
     let notice = if truncated {
         metadata["outputPath"] = json!(path);
         format!("Full output saved to: {}\n", path.display())
@@ -183,6 +196,16 @@ pub(crate) async fn run(
         ),
         metadata,
     })
+}
+
+/// `bytes` without the continuation bytes of a character cut off before it.
+fn whole_characters(bytes: &[u8]) -> &[u8] {
+    let partial = bytes
+        .iter()
+        .take(3)
+        .take_while(|byte| **byte & 0xC0 == 0x80)
+        .count();
+    &bytes[partial..]
 }
 
 /// Marks a command the agent runs as an agent's (`AGENT`, `AI_AGENT`, and
@@ -298,6 +321,53 @@ mod tests {
             std::fs::read_to_string(saved).unwrap().lines().count(),
             50000
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn stdout_says_when_only_its_end_was_kept() {
+        let root = fixture();
+        let stdout = |command: &'static str| {
+            let root = root.clone();
+            async move {
+                run(
+                    command,
+                    &root,
+                    0,
+                    &CancellationToken::new(),
+                    &root,
+                    &BTreeMap::new(),
+                    None,
+                )
+                .await
+                .unwrap()
+                .metadata
+            }
+        };
+        // Within both limits: as it was, with no flag.
+        let whole = stdout("seq 2000").await;
+        assert_eq!(whole["stdout"].as_str().unwrap().lines().count(), 2000);
+        assert!(whole.get("stdoutCut").is_none(), "{whole}");
+        // Over the line limit: its last 2000 lines.
+        let lines = stdout("seq 3000").await;
+        let kept = lines["stdout"].as_str().unwrap();
+        assert!(
+            kept.starts_with("1001\n") && kept.ends_with("\n3000"),
+            "{kept:.20}"
+        );
+        assert_eq!(lines["stdoutCut"], true);
+        // Over the byte limit on a line of two-byte characters, cut at an odd
+        // byte: the kept text starts on a whole character.
+        let bytes =
+            stdout("i=0; while [ $i -lt 30001 ]; do printf 'é'; i=$((i+1)); done; printf x").await;
+        let kept = bytes["stdout"].as_str().unwrap();
+        assert_eq!(bytes["stdoutCut"], true);
+        let head = kept.chars().take(4).collect::<String>();
+        assert!(kept.starts_with('é') && kept.ends_with('x'), "{head:?}");
+        assert!(!kept.contains('\u{fffd}'));
+        // Errors alone past the limit leave stdout whole.
+        let errors = stdout("seq 3000 >&2; printf done").await;
+        assert_eq!(errors["stdout"], "done");
+        assert!(errors.get("stdoutCut").is_none(), "{errors}");
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
