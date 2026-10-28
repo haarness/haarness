@@ -89,6 +89,10 @@ struct Entry {
     config: McpConfigureRequest,
     tools: Vec<ToolDefinition>,
     remembered: Vec<ToolDefinition>,
+    /// The server's own name of each tool in `remembered`, by its name in
+    /// Haarness (`mcp__<server>__<tool>`), so a call reaches that tool
+    /// without reading the server and tool back out of the name.
+    names: HashMap<String, String>,
     identity: Option<[u8; 32]>,
     credential: Option<FileCredentialStore>,
     worker: Option<mpsc::Sender<WorkerCommand>>,
@@ -101,6 +105,36 @@ struct Entry {
     oversized: Option<Arc<AtomicBool>>,
     /// The server declared the resources capability when it last connected.
     resources: bool,
+}
+impl Entry {
+    /// Offer `tools`, as the server `name` listed them, under their names
+    /// in Haarness.
+    fn set_catalog(&mut self, name: &str, tools: Vec<ToolDefinition>) {
+        self.names.clear();
+        self.tools = tools
+            .into_iter()
+            .map(|mut tool| {
+                let called = format!("mcp__{name}__{}", tool.name);
+                self.names
+                    .insert(called.clone(), std::mem::take(&mut tool.name));
+                tool.name = called;
+                tool
+            })
+            .collect();
+        self.remembered = self.tools.clone();
+    }
+    fn forget_catalog(&mut self) {
+        self.tools.clear();
+        self.remembered.clear();
+        self.names.clear();
+    }
+}
+/// Tool names two servers' tools both have. Every request lists the tools
+/// again, so each such name is logged once per process.
+static CLASHES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+fn first_clash(name: &str) -> bool {
+    CLASHES.lock().insert(name.to_owned())
 }
 #[derive(Clone)]
 struct CatalogClient {
@@ -183,8 +217,7 @@ impl rmcp::ClientHandler for CatalogClient {
             if entry.generation != self.generation || !credential_valid(self.credential.as_ref()) {
                 return;
             }
-            entry.tools.clear();
-            entry.remembered.clear();
+            entry.forget_catalog();
         }
         let Ok(tools) = context.peer.list_all_tools().await else {
             return;
@@ -202,15 +235,7 @@ impl rmcp::ClientHandler for CatalogClient {
         {
             return;
         }
-        entry.tools = self
-            .catalog(&tools)
-            .into_iter()
-            .map(|mut tool| {
-                tool.name = format!("mcp__{}__{}", self.name, tool.name);
-                tool
-            })
-            .collect();
-        entry.remembered = entry.tools.clone();
+        entry.set_catalog(&self.name, self.catalog(&tools));
         entry.info.detail = Some(format!("{} tools discovered", entry.tools.len()));
         entry.info.app_tools = self.app_tools();
     }
@@ -272,19 +297,36 @@ impl From<CoreError> for ActivationError {
 impl McpRegistry for NativeMcpRegistry {
     fn tool_snapshot(&self) -> Vec<ToolDefinition> {
         self.revoke_stale();
+        let servers = self.servers.read();
+        let mut seen = std::collections::HashSet::new();
+        let mut tools = Vec::new();
+        // Servers in name order: of two whose tools have the very same name
+        // (`a` offering `b__c` and `a__b` offering `c`), the first has it, in
+        // the list and in calls (see `tool_server`).
+        for (name, entry) in servers.iter() {
+            for tool in self.offered(name, entry) {
+                if seen.insert(tool.name.as_str()) {
+                    tools.push(tool.clone());
+                } else if first_clash(&tool.name) {
+                    tracing::warn!(
+                        server = %name,
+                        tool = %tool.name,
+                        "two MCP servers offer a tool of the same name; the first server's is offered"
+                    );
+                }
+            }
+        }
+        tools
+    }
+    fn tool_server(&self, tool: &str) -> Option<String> {
+        self.revoke_stale();
         self.servers
             .read()
             .iter()
-            .flat_map(|(name, entry)| {
-                if entry.info.status == "connected" {
-                    return entry.tools.clone();
-                }
-                if self.recovering(name, entry) {
-                    return entry.remembered.clone();
-                }
-                Vec::new()
+            .find(|(name, entry)| {
+                entry.names.contains_key(tool) && !self.offered(name, entry).is_empty()
             })
-            .collect()
+            .map(|(name, _)| name.clone())
     }
     fn resource_servers(&self) -> Vec<String> {
         self.revoke_stale();
@@ -344,6 +386,7 @@ impl McpRegistry for NativeMcpRegistry {
                 config: config.clone(),
                 tools: Vec::new(),
                 remembered: Vec::new(),
+                names: HashMap::new(),
                 identity: None,
                 credential: None,
                 worker: None,
@@ -372,8 +415,7 @@ impl McpRegistry for NativeMcpRegistry {
         entry.worker = None;
         entry.oversized = None;
         entry.resources = false;
-        entry.tools.clear();
-        entry.remembered.clear();
+        entry.forget_catalog();
         entry.identity = None;
         entry.auth_challenge = None;
         entry.info.status = if entry.config.enabled {
@@ -471,6 +513,17 @@ impl McpRegistry for NativeMcpRegistry {
     }
 }
 impl NativeMcpRegistry {
+    /// The tools `entry` offers the model: those of its connection, or, while
+    /// it gets that connection back, the ones it had.
+    fn offered<'a>(&self, name: &str, entry: &'a Entry) -> &'a [ToolDefinition] {
+        if entry.info.status == "connected" {
+            &entry.tools
+        } else if self.recovering(name, entry) {
+            &entry.remembered
+        } else {
+            &[]
+        }
+    }
     /// Whether `entry` is getting its connection back with the same
     /// configuration and credentials: the model keeps the tools it had
     /// meanwhile, so its tool list (and the prompt cache that starts with
@@ -611,8 +664,7 @@ impl NativeMcpRegistry {
             let activated = match activated {
                 Ok(activated) => activated,
                 Err(ActivationError::AuthorizationRequired(challenge)) => {
-                    entry.tools.clear();
-                    entry.remembered.clear();
+                    entry.forget_catalog();
                     entry.identity = None;
                     entry.worker = None;
                     entry.auth_challenge = challenge;
@@ -641,21 +693,17 @@ impl NativeMcpRegistry {
                     return Err(error);
                 }
             };
-            let (mut definitions, worker, credential) = activated;
+            let (definitions, worker, credential) = activated;
             if !credential_valid(credential.as_ref()) {
                 revoke_entry(entry);
                 return Err(CoreError::Conflict(format!(
                     "MCP server {name} credentials changed while connecting"
                 )));
             }
-            for tool in &mut definitions {
-                tool.name = format!("mcp__{name}__{}", tool.name);
-            }
-            let count = definitions.len();
-            entry.remembered = definitions.clone();
+            entry.set_catalog(name, definitions);
+            let count = entry.tools.len();
             entry.identity = schema_identity(name, &config, self.auth_dir.as_deref()).or(identity);
             entry.credential = credential;
-            entry.tools = definitions;
             entry.worker = Some(worker);
             entry.auth_challenge = None;
             entry.home = Some(home);
@@ -848,8 +896,7 @@ impl NativeMcpRegistry {
             // failed clear also leaves the old account's catalog unavailable.
             entry.generation = uuid::Uuid::now_v7();
             entry.worker = None;
-            entry.tools.clear();
-            entry.remembered.clear();
+            entry.forget_catalog();
             entry.identity = None;
             entry.auth_challenge = None;
             entry.info.status = if entry.config.enabled {
@@ -867,10 +914,18 @@ impl NativeMcpRegistry {
     }
 
     async fn call_once(&self, name: &str, tool: &str, arguments: Value) -> CoreResult<ToolOutput> {
-        let raw = tool
-            .strip_prefix(&format!("mcp__{name}__"))
-            .unwrap_or(tool)
-            .to_owned();
+        // The tool by its name in Haarness, or by the server's own name (also
+        // as `mcp__<server>__<tool>`, as clients have sent it).
+        let own = self
+            .servers
+            .read()
+            .get(name)
+            .and_then(|entry| entry.names.get(tool).cloned());
+        let raw = own.unwrap_or_else(|| {
+            tool.strip_prefix(&format!("mcp__{name}__"))
+                .unwrap_or(tool)
+                .to_owned()
+        });
         self.worker_request(name, |reply| WorkerCommand::Call {
             tool: raw,
             arguments,
@@ -1067,8 +1122,7 @@ fn credential_valid(credential: Option<&FileCredentialStore>) -> bool {
 fn revoke_entry(entry: &mut Entry) {
     entry.generation = uuid::Uuid::now_v7();
     entry.worker = None;
-    entry.tools.clear();
-    entry.remembered.clear();
+    entry.forget_catalog();
     entry.identity = None;
     entry.credential = None;
     entry.auth_challenge = None;
@@ -4208,6 +4262,68 @@ mod recovery_tests {
             .await
             .unwrap();
         serde_json::from_str(&output.text).unwrap()
+    }
+
+    /// What the server offering `tool` says it was called with.
+    async fn reached(registry: &NativeMcpRegistry, tool: &str) -> Value {
+        let server = registry
+            .tool_server(tool)
+            .unwrap_or_else(|| panic!("no server offers {tool}"));
+        called(registry, &server, tool).await
+    }
+
+    /// A tool reaches the server that listed it with its own name, read from
+    /// the registry rather than from its name: `a__b`'s tools read
+    /// `mcp__a__b__…` and used to go to server `a`. Of two tools with the
+    /// very same name, the first server by name has it, as before.
+    #[tokio::test]
+    async fn each_tool_reaches_the_server_that_lists_it() {
+        let registry = NativeMcpRegistry::default();
+        for (server, tools) in [
+            ("a", &["b__c"][..]),
+            ("a__b", &["c", "d"][..]),
+            ("Docs Server", &["files.read"][..]),
+            ("github", &["create_issue"][..]),
+        ] {
+            let info = registry
+                .configure(server, names_config(server, tools))
+                .await
+                .unwrap();
+            assert_eq!(info.status, "connected", "{server}: {:?}", info.detail);
+        }
+        let mut names: Vec<_> = registry
+            .tool_snapshot()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "mcp__Docs Server__files.read",
+                "mcp__a__b__c",
+                "mcp__a__b__d",
+                "mcp__github__create_issue",
+            ]
+        );
+        for (tool, server, own) in [
+            ("mcp__a__b__c", "a", "b__c"),
+            ("mcp__a__b__d", "a__b", "d"),
+            ("mcp__Docs Server__files.read", "Docs Server", "files.read"),
+            ("mcp__github__create_issue", "github", "create_issue"),
+        ] {
+            let answer = reached(&registry, tool).await;
+            assert_eq!(answer["server"], server, "{tool}");
+            assert_eq!(answer["tool"], own, "{tool}");
+        }
+        // A client may still name a tool by the server's own name.
+        assert_eq!(
+            called(&registry, "Docs Server", "files.read").await["tool"],
+            "files.read"
+        );
+        for server in ["a", "a__b", "Docs Server", "github"] {
+            registry.disconnect(server).await.unwrap();
+        }
     }
 
     /// A local server starts in the project folder, and a relative `cwd` is
