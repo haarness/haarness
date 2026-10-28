@@ -456,7 +456,8 @@ line longer than 2000 characters shows its first 2000 and ends in
 50 KB, whatever `limit` asks, and then ends with `(stopped at 50 KB; read on
 with offset=N)` (or `2000 lines`); a read whose `limit` (2000 when none is
 given) ends before the file does ends with `(more lines follow; read on with
-offset=N)`. Text that is not UTF-8 (a
+offset=N)`. An offset at or past the end returns `(the file has N lines, so
+offset M is past its end)` instead of nothing. Text that is not UTF-8 (a
 Latin-1 file) shows `�` for what does not decode, with a note that `edit`
 cannot change it and `write` would replace those bytes (`edit` and `multiedit`
 refuse it as not UTF-8 text). A file with a NUL byte in its first 8 KiB counts
@@ -466,7 +467,9 @@ meets one that is not is refused (`… holds binary data, not text`). A folder, 
 `edit` and `multiedit` give an `old` of several lines those ends when it does
 not occur as written (one that does, a stretch of LF lines, keeps its own), and
 the lines `new` adds end as the line `old` is found in does: CRLF there, LF in
-an LF stretch or a CSV cell holding bare LF; two matches still refuse the edit. Direct prompt attachments use a 20 MiB aggregate limit; Gemini retains
+an LF stretch or a CSV cell holding bare LF; two matches still refuse the edit.
+An `edit` whose `old` is empty is refused with a pointer to `write` (an empty
+file still takes its first text that way). Direct prompt attachments use a 20 MiB aggregate limit; Gemini retains
 its 10 MiB aggregate adapter budget for inline request overhead. OpenAI,
 Anthropic, and Bedrock accept PDF/images; Gemini accepts PDF/image/audio/video.
 OpenAI-compatible Chat endpoints receive their native file, image, or MP3/WAV
