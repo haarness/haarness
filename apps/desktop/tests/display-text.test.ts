@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Item, ItemData } from "@haarness/sdk";
 import { literalParts, literalText, withoutEscapes } from "../src/renderer/display-text";
-import { resultText, toolInput, toolTarget, toolTitle } from "../src/renderer/transcript";
+import { describeTool, resultText, toolInput, toolTarget, toolTitle } from "../src/renderer/transcript";
 import { findConversationMessages } from "../src/renderer/conversation-history";
 import { agentTaskError, type AgentTask } from "../src/renderer/agent-tasks";
 
@@ -104,7 +104,8 @@ test("a row and its Shell panel show a command's invisible characters as codes, 
   const target = toolTarget(args);
   assert.equal(target, "cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D} rm -r cache");
   assert.equal(toolTitle(args, target), "cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D}\nrm -r cache");
-  assert.equal(toolInput("bash", args).text, "$ cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D}\nrm -r cache");
+  // The Shell panel draws the command as written, through its quiet codes.
+  assert.deepEqual(toolInput("bash", args), { label: "Shell", text: "$ " + args.command, context: "" });
   // An ordinary command is unchanged.
   const plain = { command: "npm test -- --grep \"日本\"\n  && git status" };
   assert.equal(toolTarget(plain), "npm test -- --grep \"日本\" && git status");
@@ -145,4 +146,21 @@ test("a failed agent's error reads without its escape sequences", () => {
     }) as unknown as AgentTask;
   assert.equal(agentTaskError(task("\u001b[31merror:\u001b[0m the model refused", true)), "error: the model refused");
   assert.equal(agentTaskError(task("\u001b[1mdone\u001b[0m", false)), "");
+});
+
+test("every kind of row target shows what would not show as a code", () => {
+  const target = (name: string, args: unknown) => describeTool(name, args).target;
+  assert.equal(target("grep", { pattern: "todo\u202e", path: "src\u200b" }), "todo\\u{202E} in src\\u{200B}");
+  assert.equal(target("glob", { pattern: "*.js\u2066" }), "*.js\\u{2066}");
+  assert.equal(
+    target("apply_patch", { input: "*** Begin Patch\n*** Update File: src/notes\u202etxt.js\n@@\n-a\n+b\n*** End Patch" }),
+    "src/notes\\u{202E}txt.js",
+  );
+  assert.equal(target("mcp_resource_read", { uri: "file:///a\u202eb" }), "file:///a\\u{202E}b");
+  assert.equal(target("mcp_resource_list", { server: "docs\u200b" }), "docs\\u{200B}");
+  assert.equal(target("websearch", { query: "news\u202e today" }), "news\\u{202E} today");
+  assert.equal(target("load_tool", { queries: ["a\u2067"] }), "a\\u{2067}");
+  // Ordinary targets read as before.
+  assert.equal(target("grep", { pattern: "TODO", path: "src" }), "TODO in src");
+  assert.equal(target("websearch", { query: "مرحبا بالعالم" }), "مرحبا بالعالم");
 });

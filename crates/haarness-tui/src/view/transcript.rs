@@ -516,10 +516,15 @@ fn patch_argument(arguments: &serde_json::Value) -> Option<String> {
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .collect();
+    // As the patch names them, with what would not show written as its code.
     match files.as_slice() {
         [] => None,
-        [only] => Some((*only).to_owned()),
-        [first, rest @ ..] => Some(format!("{first} and {} more", rest.len())),
+        [only] => Some(crate::escapes::literal(only)),
+        [first, rest @ ..] => Some(format!(
+            "{} and {} more",
+            crate::escapes::literal(first),
+            rest.len()
+        )),
     }
 }
 

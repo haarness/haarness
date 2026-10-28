@@ -271,3 +271,27 @@ async fn an_ordinary_command_reads_on_its_card_as_written() {
         "{row:#?}"
     );
 }
+
+/// A patch's row names its file with what would not show as a code, as
+/// the other rows do.
+#[test]
+fn a_patch_row_names_its_file_with_codes() {
+    let thread = fixture_thread();
+    let patch =
+        "*** Begin Patch\n*** Update File: src/notes\u{202e}txt.js\n@@\n-a\n+b\n*** End Patch\n";
+    let items = vec![tool_call(
+        1,
+        &thread,
+        "patch-1",
+        "apply_patch",
+        serde_json::json!({"input": patch}),
+    )];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = false;
+    let text = frame_text(&app, (100, 20));
+    assert!(
+        text.contains("apply_patch src/notes\\u{202E}txt.js"),
+        "{text}"
+    );
+    assert!(!text.contains('\u{202e}'), "{text:?}");
+}
