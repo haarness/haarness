@@ -1133,6 +1133,38 @@ async fn ignore_files_above_the_chat_home_hide_nothing_from_its_chats() {
         .output
         .text;
     assert!(found.contains("plan.md"), "{found}");
+    // A search of a subfolder leaves out what the chat's folder leaves out,
+    // the model's and a person's alike.
+    std::fs::create_dir_all(folder(&a).join("sub")).unwrap();
+    std::fs::write(folder(&a).join(".ignore"), "*.log\n").unwrap();
+    std::fs::write(folder(&a).join("sub/a.log"), "needle").unwrap();
+    std::fs::write(folder(&a).join("sub/b.txt"), "needle").unwrap();
+    turn(
+        &runtime,
+        a.id,
+        r#"!tool grep {"pattern":"needle","path":"sub"}"#,
+    )
+    .await;
+    let found = last_result(&runtime, a.id, "grep").await;
+    assert!(
+        found.contains("sub/b.txt") && !found.contains("a.log"),
+        "{found}"
+    );
+    let found = runtime
+        .run_direct_tool(
+            a.id,
+            "grep",
+            json!({"pattern": "needle", "path": "sub"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .output
+        .text;
+    assert!(
+        found.contains("sub/b.txt") && !found.contains("a.log"),
+        "{found}"
+    );
 
     std::fs::create_dir_all(folder(&a).join("node_modules/dep")).unwrap();
     std::fs::write(folder(&a).join("node_modules/dep/plan.js"), "").unwrap();
