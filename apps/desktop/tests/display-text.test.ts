@@ -1,8 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Item, ItemData } from "@haarness/sdk";
-import { spelledOutParts, spelledOutPlain, spelledOutText, turnsDirection, withoutEscapes } from "../src/renderer/display-text";
-import { describeTool, resultText, toolInput, toolTarget, toolTitle } from "../src/renderer/transcript";
+import {
+  shortenSpelled,
+  spelledOutParts,
+  spelledOutPlain,
+  spelledOutText,
+  spelledTextParts,
+  turnsDirection,
+  withoutEscapes,
+} from "../src/renderer/display-text";
+import { describeTool, imageName, resultText, toolInput, toolTarget, toolTitle } from "../src/renderer/transcript";
 import { findConversationMessages } from "../src/renderer/conversation-history";
 import { agentTaskError, type AgentTask } from "../src/renderer/agent-tasks";
 import { followRun } from "../src/renderer/command-result";
@@ -208,6 +216,38 @@ test("a browser step names what it typed, chose or opened with its codes, as the
   assert.equal(target("navigate", { url: "https://example.org/\u200bpay" }), isolated("https://example.org/\\u{200B}pay"));
   assert.equal(target("select", { values: ["a\u2066b"] }), "“" + isolated("a\\u{2066}b") + "”");
   assert.equal(target("fill", { text: "  جواب  نهائي " }), "“جواب نهائي”");
+});
+
+test("a row draws its target's codes without adding characters to a copy", () => {
+  const spelled = toolTarget({ command: "cat ملف\u200f.txt\u202e" });
+  const parts = spelledTextParts(spelled);
+  assert.deepEqual(parts, [
+    { text: "cat ملف", code: false },
+    { text: "\\u{200F}", code: true },
+    { text: ".txt", code: false },
+    { text: "\\u{202E}", code: true },
+  ]);
+  assert.ok(parts.every((part) => !/[\u2066-\u2069]/.test(part.text)));
+  // Text with no codes is one plain part, as written.
+  assert.deepEqual(spelledTextParts("git status"), [{ text: "git status", code: false }]);
+});
+
+test("a read image is named by its file, whose codes are never taken for a folder", () => {
+  assert.equal(imageName({ path: "shots/ملف\u200f.png" }), "ملف\\u{200F}.png");
+  assert.equal(imageName({ path: "shots/plain.png" }), "plain.png");
+});
+
+test("a shortened rule never cuts a code in half", () => {
+  // Each end would otherwise stop inside a code.
+  for (const rule of [spelledOutText("ab\u202ecdefghijklmnopqrstuvwxyz"), spelledOutText("abcdefghijklmnopqrstuvwx\u202eyz")]) {
+    const short = shortenSpelled(rule, 10);
+    assert.ok(short.includes("…"), short);
+    assert.equal(short.split("\u2066").length, short.split("\u2069").length, short);
+    for (const piece of short.split("\u2066").slice(1)) assert.match(piece, /^\\u\{[0-9A-F]+\}\u2069/);
+  }
+  // Plain text is cut where it always was.
+  assert.equal(shortenSpelled("abcdefghijklmnopqrstuvwxyz0123456789", 10), "abcde…6789");
+  assert.equal(shortenSpelled("short", 10), "short");
 });
 
 test("find in chat previews a call's arguments with their codes and finds a code by its text", () => {
