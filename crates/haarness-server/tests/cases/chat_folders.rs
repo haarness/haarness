@@ -1139,6 +1139,11 @@ async fn ignore_files_above_the_chat_home_hide_nothing_from_its_chats() {
     std::fs::write(folder(&a).join(".ignore"), "*.log\n").unwrap();
     std::fs::write(folder(&a).join("sub/a.log"), "needle").unwrap();
     std::fs::write(folder(&a).join("sub/b.txt"), "needle").unwrap();
+    // As grep writes it on this system.
+    let kept = std::path::Path::new("sub")
+        .join("b.txt")
+        .display()
+        .to_string();
     turn(
         &runtime,
         a.id,
@@ -1146,10 +1151,7 @@ async fn ignore_files_above_the_chat_home_hide_nothing_from_its_chats() {
     )
     .await;
     let found = last_result(&runtime, a.id, "grep").await;
-    assert!(
-        found.contains("sub/b.txt") && !found.contains("a.log"),
-        "{found}"
-    );
+    assert!(found.contains(&kept) && !found.contains("a.log"), "{found}");
     let found = runtime
         .run_direct_tool(
             a.id,
@@ -1161,10 +1163,7 @@ async fn ignore_files_above_the_chat_home_hide_nothing_from_its_chats() {
         .unwrap()
         .output
         .text;
-    assert!(
-        found.contains("sub/b.txt") && !found.contains("a.log"),
-        "{found}"
-    );
+    assert!(found.contains(&kept) && !found.contains("a.log"), "{found}");
 
     std::fs::create_dir_all(folder(&a).join("node_modules/dep")).unwrap();
     std::fs::write(folder(&a).join("node_modules/dep/plan.js"), "").unwrap();
