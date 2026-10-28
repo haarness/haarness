@@ -178,7 +178,17 @@ the summary, exact todo JSON as data, then the retained turns. Media from the
 pre-compaction tail is represented by a textual attachment note rather than
 re-uploaded. Automatic compaction uses the selected model's context and output
 limits and retries pre-output context-overflow/HTTP-413 failures after safe
-compaction, under a bounded per-turn recovery ceiling.
+compaction, under a bounded per-turn recovery ceiling. A refusal of the request
+for its size in bytes (an HTTP 413, Bedrock's "413 Payload Too Large" or
+Gemini's "Request payload size exceeds the limit", rather than a context too
+long in tokens or a rate limit) compacts once until the provider takes a
+request again: when it refuses the compacted request as well, the turn fails
+with one error saying the chat is too large for the provider to take in one
+request, and to continue in a new chat or attach smaller files, instead of
+summarizing the summary. Where the chat cannot compact (compaction turned off,
+input queued meanwhile) such a refusal fails the turn with the same advice; a
+child agent's failure only says the provider refused the request as too large,
+for the model that started it.
 
 Workspace create accepts `{name, fromRef?, branch?, path?}` and always creates
 a unique, non-tracking Git branch. `GET /v1/workspaces/refs` discovers local
@@ -519,31 +529,44 @@ with the reason.
 An attachment or tool image whose file is deleted later is named in the message
 ("no longer available") instead of failing every later request.
 
-A long chat can hold more images than a provider takes in one request. Before
-each request the runtime counts the images it would send, as the base64 the
-provider receives. Where a message takes them past the provider's limit, the
-images before it are replaced by a one-line note, oldest first, until the rest
-fit in three fifths of the limit (the person's own images in that message's
-turn stay, and what cannot be reached that way stays too). The images of the
-message that passed the limit go only when they and the person's images
-together still pass the limit itself, oldest first and only until the request
-fits, so the newest image reaches the model whenever it fits beside the
-person's. The note names the image (a file by its path), says it is no longer
-visible and must not be described from memory, and says to read the file again,
-or for an attached image to ask the person to attach it again, if it is needed.
-The limit is 25 MiB of images (Anthropic and Haarness Cloud take 32 MB in a
-request; OpenAI, the Gemini API and Gemini on Vertex AI take more), 15 MiB on
-Bedrock, which takes 20 MB, and for Claude models, directly, on Bedrock or
-through Haarness Cloud, also 100 images in a request to a model with a
-200K-token context window and 600 to a larger one. The cut moves only when the
-images kept pass the limit again, not with each new image, so the requests
-between two cuts carry the same history and the provider's prompt cache holds.
-The person's own images are those they attached to their messages (steers
-included, not what Haarness adds); when those alone pass the limit the request
-is sent as it is. Which turn an image belongs to is read from the history, not
-from the turn now running, so a new turn's first request repeats every earlier
-cut and reads the cache too. PDFs, audio and video are neither counted nor
-replaced. Stored messages do not change, and the transcript shows nothing: a
+A long chat can hold more media than a provider takes in one request: many
+screenshots, or a few large PDFs. Before each request the runtime counts what it
+would send, as the base64 the provider receives, against two limits. The images
+alone are held to 25 MiB (Anthropic and Haarness Cloud take 32 MB in a request;
+OpenAI, the Gemini API and Gemini on Vertex AI take more), 15 MiB on Bedrock,
+and for Claude models, directly, on Bedrock or through Haarness Cloud, also to
+100 images in a request to a model with a 200K-token context window and 600 to a
+larger one; only images are replaced for these. Where the provider states what
+it takes in one request (Anthropic 32 MB, Bedrock 20 MB, Haarness Cloud 32 MiB,
+and 32 MB for Anthropic's models through it), every attachment (images, PDFs,
+audio and video) and the text of the messages together are held to that too,
+less 1 MiB for the system prompt and tools. That measure is close, not exact:
+the text after the last attachment, JSON escaping, and the system prompt and
+tools are estimated by that 1 MiB rather than counted. Other providers (OpenAI,
+the Gemini API, Gemini on Vertex AI and OpenAI-compatible servers, which take
+more or do not say) get no such cut; a refusal of the request's size is
+compacted for instead. Where a message takes a total past its limit, the
+attachments before it are replaced by a one-line note, oldest first, until the
+rest fit in three fifths of the limit (the person's own attachments in that
+message's turn stay, and what cannot be reached that way stays too). The
+attachments of the message that passed the limit go only when they and the
+person's together still pass the limit itself, oldest first and only until the
+request fits, so the newest attachment reaches the model whenever it fits beside
+the person's. For the whole request, a PDF, audio or video file of the turn
+that passed it is never replaced, whoever added it, or the note would send the
+model to read again what it just read; a request too large all the same is
+refused, and compaction answers that. The note names the attachment by its kind
+and name (a file by its path), says it is no longer visible (audible, for audio)
+and must not be described from memory, and says to read the file again, or for
+an attachment the person sent to ask them to attach it again, if it is needed.
+The cut moves only when the attachments kept pass a limit again, not with each
+new one, so the requests between two cuts carry the same history and the
+provider's prompt cache holds. The person's own attachments are those they
+attached to their messages (steers included, not what Haarness adds or a tool
+read); when those alone pass the limit the request is sent as it is. Which turn
+an attachment belongs to is read from the history, not from the turn now
+running, so a new turn's first request repeats every earlier cut and reads the
+cache too. Stored messages do not change, and the transcript shows nothing: a
 cut is logged as one `INFO` line of counts.
 
 When a provider still refuses an image (its type, size, pixels or count, or a
