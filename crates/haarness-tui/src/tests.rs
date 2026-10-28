@@ -387,6 +387,7 @@ fn side_server_info(capabilities: Vec<String>) -> haarness_protocol::ServerInfo 
         default_provider: None,
         default_model: None,
         default_approval_mode: None,
+        default_reasoning_effort: None,
         default_agent: None,
         project_trusted: None,
         pid: None,
@@ -3926,6 +3927,7 @@ fn home_is_a_launch_masthead_settled_onto_the_composer() {
         default_provider: None,
         default_model: None,
         default_approval_mode: None,
+        default_reasoning_effort: None,
         default_agent: None,
         project_trusted: Some(false),
         pid: None,
@@ -4213,6 +4215,7 @@ fn masthead_names_the_session_without_repeating_its_id() {
         default_provider: None,
         default_model: None,
         default_approval_mode: None,
+        default_reasoning_effort: None,
         default_agent: None,
         project_trusted: Some(true),
         pid: None,
@@ -20802,6 +20805,7 @@ fn search_rows_name_the_pattern_and_where_it_looked() {
     assert!(english.contains("grep TODO in src"), "{english}");
     assert!(english.contains("glob **/*.md"), "{english}");
     // Tools that name their file or query differently still show it.
+        default_reasoning_effort: None,
     assert!(
         english.contains("mcp__files__read docs/TUI.md"),
         "{english}"
@@ -22473,6 +22477,7 @@ async fn an_undone_prompt_with_a_reference_keeps_its_chip_under_a_slash_command(
     crate::input::handle_key(&mut app, press(KeyCode::Char('/')), &client)
         .await
         .unwrap();
+        default_reasoning_effort: None,
     assert_eq!(app.composer.text(), "/");
     crate::input::handle_key(&mut app, press(KeyCode::Backspace), &client)
         .await
