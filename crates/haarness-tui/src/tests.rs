@@ -21582,7 +21582,8 @@ async fn at_mentions_complete_subagents_and_attach_a_delegation() {
     );
     let client = offline_client();
     app.composer.set_text("@ex".into());
-    crate::input::refresh_mentions(&mut app, &client).await;
+    crate::input::refresh_mentions(&mut app, &client);
+    crate::file_search::answered(&mut app, &client).await;
     assert_eq!(
         app.mention_suggestions,
         vec!["agent://explore".to_owned(), "agent://expert".to_owned()],
@@ -24483,4 +24484,463 @@ async fn yolo_is_offered_only_where_the_server_keeps_it() {
     let requests = server.await.unwrap();
     assert_eq!(requests.len(), 2, "{requests:#?}");
     assert!(requests[1].contains("\"mode\":\"yolo\""), "{}", requests[1]);
+}
+
+/// How [`chat_replacing_server`] answers mode requests.
+#[derive(Clone, Copy)]
+enum ModeServer {
+    /// A write is kept.
+    Keeps,
+    /// A write fails; a read says the chat is in this default mode, or fails
+    /// when there is none.
+    Refuses(Option<&'static str>),
+}
+
+/// A server for `/new` and `/archive` that answers each request by its route
+/// and keeps every request's line and body: a chat of its own for `POST
+/// /v1/threads` (the ids it made are kept too), `PUT` and `GET
+/// …/approval-mode` as `modes` says, the chat for `PATCH`, empty lists
+/// otherwise.
+async fn chat_replacing_server(
+    template: Thread,
+    modes: ModeServer,
+) -> (
+    crate::api::ApiClient,
+    std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<ThreadId>>>,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let created = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (log, ids) = (seen.clone(), created.clone());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let mut expected = None;
+            while expected.is_none_or(|length| request.len() < length) {
+                let read = socket.read(&mut chunk).await.unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if expected.is_none()
+                    && let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    expected = Some(end + 4 + length);
+                }
+            }
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let line = text.lines().next().unwrap_or_default().to_owned();
+            let body = text
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body.to_owned())
+                .unwrap_or_default();
+            log.lock().unwrap().push((line.clone(), body.clone()));
+            let path = line.split(' ').nth(1).unwrap_or_default();
+            let (status, reply) = if line.starts_with("POST /v1/threads ") {
+                let mut thread = template.clone();
+                thread.id = ThreadId::new();
+                thread.title = haarness_protocol::UNTITLED_CHAT_TITLE.into();
+                ids.lock().unwrap().push(thread.id);
+                ("200 OK", serde_json::to_string(&thread).unwrap())
+            } else if line.starts_with("PATCH /v1/threads/") {
+                ("200 OK", serde_json::to_string(&template).unwrap())
+            } else if line.starts_with("PUT ")
+                && path.ends_with("/approval-mode")
+                && matches!(modes, ModeServer::Refuses(_))
+            {
+                (
+                    "500 Internal Server Error",
+                    serde_json::json!({"code": "internal", "message": "storage unavailable", "retryable": true})
+                        .to_string(),
+                )
+            } else if line.starts_with("GET ")
+                && path.ends_with("/approval-mode")
+                && let ModeServer::Refuses(Some(default)) = modes
+            {
+                let id = path
+                    .trim_start_matches("/v1/threads/")
+                    .trim_end_matches("/approval-mode");
+                (
+                    "200 OK",
+                    serde_json::json!({
+                        "threadId": id,
+                        "mode": default,
+                        "sourceThreadId": id,
+                        "explicit": false,
+                        "revision": "r0",
+                    })
+                    .to_string(),
+                )
+            } else if line.starts_with("PUT ") && path.ends_with("/approval-mode") {
+                let id = path
+                    .trim_start_matches("/v1/threads/")
+                    .trim_end_matches("/approval-mode");
+                let mode =
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap()["mode"].clone();
+                (
+                    "200 OK",
+                    serde_json::json!({
+                        "threadId": id,
+                        "mode": mode,
+                        "sourceThreadId": id,
+                        "explicit": true,
+                        "revision": "r1",
+                    })
+                    .to_string(),
+                )
+            } else {
+                ("200 OK", "[]".to_owned())
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (
+        crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap(),
+        seen,
+        created,
+    )
+}
+
+/// A chat replaced by `/new`, `/archive` or the like: the TUI after it,
+/// every request it sent, the chat it left and the one it opened.
+struct Replaced {
+    app: App,
+    requests: Vec<(String, String)>,
+    left: ThreadId,
+    opened: ThreadId,
+}
+
+/// Leave a chat whose mode is `mode` (`explicit` when someone chose it,
+/// `None` when it was never read) on a server that keeps modes: with a typed
+/// command (`/new`, `/archive`), or with `archive`, the session picker's
+/// action on the open chat. Checks that the TUI moved to the one chat
+/// opened.
+async fn replace_chat(how: &str, mode: Option<(&str, bool)>, modes: ModeServer) -> Replaced {
+    replace_chat_in("en", how, mode, modes).await
+}
+
+/// [`replace_chat`] in the interface language `language`.
+async fn replace_chat_in(
+    language: &str,
+    how: &str,
+    mode: Option<(&str, bool)>,
+    modes: ModeServer,
+) -> Replaced {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.language = crate::locale::Language::parse(language).unwrap();
+    app.approval_server = true;
+    app.approval_yolo = true;
+    if let Some((mode, explicit)) = mode {
+        app.approval_mode = Some(
+            serde_json::from_value(serde_json::json!({
+                "threadId": thread.id,
+                "mode": mode,
+                "sourceThreadId": thread.id,
+                "explicit": explicit,
+                "revision": "r0",
+            }))
+            .unwrap(),
+        );
+        app.auto_permissions = mode != "review";
+    }
+    let (client, seen, created) = chat_replacing_server(thread.clone(), modes).await;
+    if how.starts_with('/') {
+        app.composer.set_text(how.into());
+        Box::pin(crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &client,
+        ))
+        .await
+        .unwrap();
+    } else {
+        Box::pin(app.execute_choice(
+            crate::state::OverlayChoice::Option(
+                crate::state::OptionsKind::SessionActions,
+                format!("{how}:{}", thread.id),
+            ),
+            &client,
+        ))
+        .await
+        .unwrap();
+    }
+    let created = created.lock().unwrap().clone();
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(created.len(), 1, "{how}: {requests:#?}");
+    assert_eq!(app.thread.id, created[0], "{how}: {}", app.notice);
+    Replaced {
+        app,
+        requests,
+        left: thread.id,
+        opened: created[0],
+    }
+}
+
+impl Replaced {
+    /// The mode requests sent, as (chat, body).
+    fn mode_writes(&self) -> Vec<(String, String)> {
+        self.requests
+            .iter()
+            .filter(|(line, _)| line.starts_with("PUT ") && line.contains("/approval-mode"))
+            .cloned()
+            .collect()
+    }
+}
+
+/// The mode the chat `how` opened was put in, if any, after checking that
+/// only that chat was written and nothing warned.
+async fn mode_handed_on(
+    how: &str,
+    mode: Option<(&str, bool)>,
+) -> Option<haarness_protocol::ApprovalModeSetting> {
+    let replaced = replace_chat(how, mode, ModeServer::Keeps).await;
+    assert!(
+        !replaced.app.notice.starts_with("Could not keep"),
+        "{how}: {}",
+        replaced.app.notice
+    );
+    let writes = replaced.mode_writes();
+    assert!(writes.len() <= 1, "{how}: {writes:#?}");
+    writes.first().map(|(line, body)| {
+        assert!(
+            line.starts_with(&format!(
+                "PUT /v1/threads/{}/approval-mode ",
+                replaced.opened
+            )),
+            "{how}: only the new chat is written: {line}"
+        );
+        let request: haarness_protocol::SetApprovalModeRequest =
+            serde_json::from_str(body).unwrap();
+        assert_eq!(request.revision, None, "{how}: {body}");
+        request.mode
+    })
+}
+
+/// Since Auto became the default, a Review someone chose is what a new chat
+/// must not lose: `/new` (and `/clear`) start the next chat in it.
+#[tokio::test]
+async fn new_chat_keeps_a_review_someone_chose() {
+    use haarness_protocol::ApprovalModeSetting;
+    for command in ["/new", "/clear"] {
+        assert_eq!(
+            mode_handed_on(command, Some(("review", true))).await,
+            Some(ApprovalModeSetting::Review),
+            "{command}"
+        );
+    }
+}
+
+/// A mode the chat only has from `defaults.approval_mode`, or one never
+/// read, is not written: the new chat keeps following the configuration,
+/// so a default changed later still reaches it.
+#[tokio::test]
+async fn new_chat_leaves_a_default_mode_to_the_configuration() {
+    for command in ["/new", "/archive"] {
+        for mode in ["review", "auto", "yolo"] {
+            assert_eq!(
+                mode_handed_on(command, Some((mode, false))).await,
+                None,
+                "{command} from a default {mode}"
+            );
+        }
+        assert_eq!(mode_handed_on(command, None).await, None, "{command}");
+    }
+}
+
+/// `/new` carries an Auto or Yolo someone chose, as it did before.
+#[tokio::test]
+async fn new_chat_keeps_auto_and_yolo() {
+    use haarness_protocol::ApprovalModeSetting;
+    for (mode, expected) in [
+        ("auto", ApprovalModeSetting::Auto),
+        ("yolo", ApprovalModeSetting::Yolo),
+    ] {
+        assert_eq!(
+            mode_handed_on("/new", Some((mode, true))).await,
+            Some(expected),
+            "{mode}"
+        );
+    }
+}
+
+/// `/archive` opens the next chat in the archived chat's mode, as `/new`
+/// does, rather than in the default.
+#[tokio::test]
+async fn archive_opens_the_next_chat_in_the_archived_chats_mode() {
+    use haarness_protocol::ApprovalModeSetting;
+    for (mode, expected) in [
+        ("yolo", ApprovalModeSetting::Yolo),
+        ("auto", ApprovalModeSetting::Auto),
+        ("review", ApprovalModeSetting::Review),
+    ] {
+        assert_eq!(
+            mode_handed_on("/archive", Some((mode, true))).await,
+            Some(expected),
+            "{mode}"
+        );
+    }
+}
+
+/// Archiving the open chat from the session picker opens its replacement
+/// the same way: the archived chat is the one left, and its mode goes on.
+#[tokio::test]
+async fn archiving_the_open_chat_from_sessions_keeps_its_mode() {
+    use haarness_protocol::ApprovalModeSetting;
+    let replaced = replace_chat("archive", Some(("yolo", true)), ModeServer::Keeps).await;
+    let archive = replaced
+        .requests
+        .iter()
+        .find(|(line, _)| line.starts_with("PATCH "))
+        .expect("the open chat was archived");
+    assert!(
+        archive
+            .0
+            .starts_with(&format!("PATCH /v1/threads/{} ", replaced.left)),
+        "{archive:?}"
+    );
+    assert!(archive.1.contains("\"archived\":true"), "{archive:?}");
+    assert_eq!(
+        mode_handed_on("archive", Some(("yolo", true))).await,
+        Some(ApprovalModeSetting::Yolo)
+    );
+    assert_eq!(
+        mode_handed_on("archive", Some(("review", false))).await,
+        None
+    );
+}
+
+/// When the mode cannot be written, the new chat still opens, in the
+/// default, and the notice names the mode it could not keep instead of
+/// reading "Ready", unless the server reads the new chat in that mode
+/// anyway: then nothing was lost.
+#[tokio::test]
+async fn a_mode_the_new_chat_could_not_keep_is_named() {
+    for command in ["/new", "/archive"] {
+        for (mode, default, notice) in [
+            ("review", Some("auto"), Some("Could not keep Review")),
+            ("yolo", Some("auto"), Some("Could not keep Yolo")),
+            ("auto", Some("review"), Some("Could not keep Auto")),
+            // The server cannot say which mode the new chat is in.
+            ("review", None, Some("Could not keep Review")),
+            ("review", Some("review"), None),
+            ("auto", Some("auto"), None),
+        ] {
+            let replaced =
+                replace_chat(command, Some((mode, true)), ModeServer::Refuses(default)).await;
+            let label = format!("{command} from {mode} over a default {default:?}");
+            assert_eq!(replaced.mode_writes().len(), 1, "{label}");
+            match notice {
+                Some(notice) => assert_eq!(replaced.app.notice, notice, "{label}"),
+                None => assert!(
+                    !replaced.app.notice.starts_with("Could not keep"),
+                    "{label}: {}",
+                    replaced.app.notice
+                ),
+            }
+        }
+    }
+    // The mode is named as the interface language names it.
+    let replaced = replace_chat_in(
+        "de",
+        "/new",
+        Some(("review", true)),
+        ModeServer::Refuses(Some("auto")),
+    )
+    .await;
+    assert_eq!(
+        replaced.app.notice,
+        "Überprüfung konnte nicht beibehalten werden"
+    );
+}
+
+/// A server that keeps no modes gets no mode request: this launch's own
+/// switch covers the new chat already.
+#[tokio::test]
+async fn new_chat_writes_no_mode_on_a_server_without_shared_modes() {
+    let thread = fixture_thread();
+    for command in ["/new", "/archive"] {
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        app.auto_permissions = true;
+        let (client, seen, created) =
+            chat_replacing_server(thread.clone(), ModeServer::Keeps).await;
+        app.composer.set_text(command.into());
+        Box::pin(crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &client,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(created.lock().unwrap().len(), 1, "{command}");
+        assert!(
+            !seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(line, _)| line.contains("/approval-mode")),
+            "{command}: {:#?}",
+            seen.lock().unwrap()
+        );
+        assert!(app.auto_permissions, "{command}");
+    }
+}
+
+#[test]
+fn a_file_dropped_into_shell_mode_stays_its_path() {
+    let root = std::env::temp_dir().join(format!("haarness-drop-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let image = root.join("screen shot.png");
+    std::fs::write(&image, b"png fixture").unwrap();
+    let dropped = image.display().to_string().replace(' ', "\\ ");
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+
+    app.shell_mode = true;
+    app.composer.set_text("open ".into());
+    app.paste_into_prompt(&dropped, false);
+    assert!(app.attachments.is_empty());
+    assert_eq!(app.composer.text(), format!("open {dropped}"));
+
+    // Out of shell mode the same drop is an attachment.
+    app.shell_mode = false;
+    app.composer.clear();
+    app.paste_into_prompt(&dropped, false);
+    assert_eq!(
+        app.attachments,
+        vec![image.canonicalize().unwrap().display().to_string()]
+    );
+    assert!(app.composer.is_empty());
+
+    // A path to a file that is not media is text, not a refusal, and no
+    // command list opens over it.
+    let readme = root.join("README.md");
+    std::fs::write(&readme, "# Notes\n").unwrap();
+    app.notice.clear();
+    app.paste_into_prompt(&readme.display().to_string(), false);
+    assert_eq!(app.composer.text(), readme.display().to_string());
+    assert!(app.notice.is_empty(), "{}", app.notice);
+    assert_eq!(app.attachments.len(), 1);
+    assert!(app.slash_suggestions().is_none());
+    app.composer.set_text("/mod".into());
+    assert!(app.slash_suggestions().is_some());
+
+    let _ = std::fs::remove_dir_all(root);
 }

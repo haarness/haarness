@@ -10,10 +10,12 @@ use haarness_protocol::ThreadId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, PoisonError, RwLock},
     time::Duration,
 };
 use tokio::{
@@ -461,7 +463,8 @@ impl Extensions {
     }
     /// Combine extension tools with the native registry and apply
     /// `tool.definition` rewrites to every tool known at composition time.
-    /// Tools that appear later (lazy MCP servers) keep their own definitions.
+    /// Tools that appear later (MCP servers that start after it) are
+    /// rewritten before the first turn that is offered them.
     pub async fn wrap_tools(
         self: &Arc<Self>,
         inner: Arc<dyn ToolRegistry>,
@@ -471,61 +474,35 @@ impl Extensions {
                 bail!("extension tool collision: {name}");
             }
         }
-        let definers: Vec<&Arc<Host>> = self
-            .hosts
-            .iter()
-            .filter(|host| host.registered("tool.definition"))
-            .collect();
         let mut overrides = BTreeMap::new();
+        let mut defined = BTreeSet::new();
+        let definers = self.definers();
         if !definers.is_empty() {
             let mut definitions = inner.list();
             definitions.extend(self.tools.values().map(|tool| tool.definition()));
             for definition in definitions {
-                let mut current = definition.clone();
-                for host in &definers {
-                    let value = host
-                        .hook(
-                            "tool.definition",
-                            json!({"toolID": current.name, "description": current.description, "parameters": current.input_schema}),
-                        )
-                        .await
-                        .map_err(|error| anyhow::anyhow!("{error}"))?;
-                    if let Some(description) = value["description"].as_str() {
-                        description.clone_into(&mut current.description);
-                    }
-                    if let Some(parameters) =
-                        value.get("parameters").filter(|value| value.is_object())
-                    {
-                        current.input_schema = parameters.clone();
-                    }
+                defined.insert(definition.name.clone());
+                if let Some(current) = redefine(&definers, &definition).await? {
+                    overrides.insert(definition.name.clone(), current);
                 }
-                if current.description == definition.description
-                    && current.input_schema == definition.input_schema
-                {
-                    continue;
-                }
-                if current.description.is_empty()
-                    || current.input_schema.get("type") != Some(&json!("object"))
-                {
-                    bail!(
-                        "tool.definition must keep a description and an object JSON Schema for {}",
-                        definition.name
-                    );
-                }
-                jsonschema::validator_for(&current.input_schema).with_context(|| {
-                    format!("invalid tool.definition schema for {}", definition.name)
-                })?;
-                overrides.insert(definition.name.clone(), current);
             }
         }
-        if self.tools.is_empty() && overrides.is_empty() {
+        if self.tools.is_empty() && definers.is_empty() {
             return Ok(inner);
         }
         Ok(Arc::new(CombinedTools {
             inner,
             extensions: self.clone(),
-            overrides,
+            overrides: Arc::new(RwLock::new(overrides)),
+            defined: Arc::new(Mutex::new(defined)),
         }))
+    }
+    /// The extensions that rewrite tool definitions (`tool.definition`).
+    fn definers(&self) -> Vec<&Arc<Host>> {
+        self.hosts
+            .iter()
+            .filter(|host| host.registered("tool.definition"))
+            .collect()
     }
     /// Deliver the effective configuration summary to `config` hooks. Called
     /// once per loaded generation by the composition root.
@@ -567,11 +544,60 @@ pub fn validate_name(name: &str) -> Result<()> {
     }
     Ok(())
 }
+/// What `tool.definition` hooks make of `definition`, or `None` when they
+/// leave it as it is.
+async fn redefine(
+    definers: &[&Arc<Host>],
+    definition: &ToolDefinition,
+) -> Result<Option<ToolDefinition>> {
+    let mut current = definition.clone();
+    for host in definers {
+        let value = host
+            .hook(
+                "tool.definition",
+                json!({"toolID": current.name, "description": current.description, "parameters": current.input_schema}),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        if let Some(description) = value["description"].as_str() {
+            description.clone_into(&mut current.description);
+        }
+        if let Some(parameters) = value.get("parameters").filter(|value| value.is_object()) {
+            current.input_schema = parameters.clone();
+        }
+    }
+    if current.description == definition.description
+        && current.input_schema == definition.input_schema
+    {
+        return Ok(None);
+    }
+    if current.description.is_empty() || current.input_schema.get("type") != Some(&json!("object"))
+    {
+        bail!(
+            "tool.definition must keep a description and an object JSON Schema for {}",
+            definition.name
+        );
+    }
+    jsonschema::validator_for(&current.input_schema)
+        .with_context(|| format!("invalid tool.definition schema for {}", definition.name))?;
+    Ok(Some(current))
+}
 struct CombinedTools {
     inner: Arc<dyn ToolRegistry>,
     extensions: Arc<Extensions>,
     /// Model-facing definitions rewritten by `tool.definition` hooks.
-    overrides: BTreeMap<String, ToolDefinition>,
+    overrides: Arc<RwLock<BTreeMap<String, ToolDefinition>>>,
+    /// The tools `tool.definition` hooks have seen: those listed when this
+    /// was composed, then each listed later (an MCP server's, once it has
+    /// started), before the next turn's first request.
+    defined: Arc<Mutex<BTreeSet<String>>>,
+}
+impl CombinedTools {
+    fn overrides(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, ToolDefinition>> {
+        self.overrides
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 }
 impl ToolRegistry for CombinedTools {
     fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -581,7 +607,7 @@ impl ToolRegistry for CombinedTools {
             .get(name)
             .cloned()
             .or_else(|| self.inner.get(name))?;
-        Some(match self.overrides.get(name) {
+        Some(match self.overrides().get(name) {
             Some(definition) => Arc::new(RedefinedTool {
                 inner: tool,
                 definition: definition.clone(),
@@ -595,11 +621,72 @@ impl ToolRegistry for CombinedTools {
     fn tool_server(&self, name: &str) -> Option<String> {
         self.inner.tool_server(name)
     }
+    fn starting(&self) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> {
+        let starting = self.inner.starting();
+        if self.extensions.definers().is_empty() {
+            return starting;
+        }
+        // Tools listed since the hooks last ran get them too, once those
+        // still being set up are in.
+        let fresh = {
+            let defined = self.defined.try_lock();
+            defined.map_or(true, |defined| {
+                self.inner
+                    .list()
+                    .iter()
+                    .any(|tool| !defined.contains(&tool.name))
+            })
+        };
+        if starting.is_none() && !fresh {
+            return None;
+        }
+        let inner = self.inner.clone();
+        let extensions = self.extensions.clone();
+        let overrides = self.overrides.clone();
+        let defined = self.defined.clone();
+        // The hooks run in a task of their own, which a turn stopped while
+        // it waits leaves running: a hook call given up on stops its
+        // extension.
+        let pass = tokio::spawn(async move {
+            if let Some(starting) = starting {
+                starting.await;
+            }
+            // One pass at a time: a turn begun meanwhile finds the tools
+            // rewritten.
+            let mut defined = defined.lock().await;
+            let definers = extensions.definers();
+            for definition in inner.list() {
+                if defined.contains(&definition.name) {
+                    continue;
+                }
+                let redefined = redefine(&definers, &definition).await;
+                defined.insert(definition.name.clone());
+                match redefined {
+                    Ok(Some(current)) => {
+                        overrides
+                            .write()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .insert(definition.name.clone(), current);
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        tool = definition.name,
+                        %error,
+                        "an extension's tool.definition hook failed; the tool keeps its definition"
+                    ),
+                }
+            }
+        });
+        Some(Box::pin(async move {
+            let _ = pass.await;
+        }))
+    }
     fn list(&self) -> Vec<ToolDefinition> {
+        let overrides = self.overrides();
         let mut tools = self.inner.list();
         tools.extend(self.extensions.tools.values().map(|tool| tool.definition()));
         for tool in &mut tools {
-            if let Some(definition) = self.overrides.get(&tool.name) {
+            if let Some(definition) = overrides.get(&tool.name) {
                 tool.description.clone_from(&definition.description);
                 tool.input_schema.clone_from(&definition.input_schema);
             }

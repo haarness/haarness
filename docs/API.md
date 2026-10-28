@@ -94,7 +94,7 @@ Primary resources:
 - `GET /v1/threads/{id}/diff` for the last completed turn that changed files and is not undone; `POST /v1/threads/{id}/revert` and `/unrevert` for stepwise undo/redo
 - `GET /v1/vcs/diff?mode=working|branch[&context=N][&summary=true][&path=FILE]` for bounded Git review, metadata-only listings, or one literal file. Entries are `ReviewFile` (a `FileDiff` plus optional `truncation` and `omittedFiles`); bounds are 1000 files, 512 KiB per patch and 8 MiB per response — see [large-diff review](LARGE-DIFF-REVIEW.md)
 - `GET /v1/threads/{id}/diff/review[?summary=true|path=FILE]` for deferred last-turn review; see [large-diff review](LARGE-DIFF-REVIEW.md)
-- Project files, every path resolved inside the project: `GET /v1/files/list?path=…[&hidden=true]`; `GET /v1/files/content?path=…` (`content`, `encoding`, `mime`, `revision`, `size`; at most 10 MiB) and `PUT` with `{path, content, revision, encoding?}` (`utf8` or `base64`; a new file uses the empty content's SHA-256 as its revision, and a stale revision is `409`); `POST /v1/files/action` with `mkdir`, `rename` (`target`) or `delete` (`confirm`). Changes publish `files.updated`. `GET /v1/files/search?q=…[&limit=N]` (default 8, at most 50) is the `@` mention search
+- Project files, every path resolved inside the project: `GET /v1/files/list?path=…[&hidden=true]`; `GET /v1/files/content?path=…` (`content`, `encoding`, `mime`, `revision`, `size`; at most 10 MiB) and `PUT` with `{path, content, revision, encoding?}` (`utf8` or `base64`; a new file uses the empty content's SHA-256 as its revision, and a stale revision is `409`); `POST /v1/files/action` with `mkdir`, `rename` (`target`) or `delete` (`confirm`). Changes publish `files.updated`. `GET /v1/files/search?q=…[&limit=N]` (default 8, at most 50) is the `@` mention search. A query that is `~`, `.` or `..`, or starts with `/`, `~/`, `./` or `../`, browses the one folder it names instead: folders first, each ending in `/`. The server takes each entry's type from the folder listing and follows only links, four at a time. It waits 1.5 s for the folder and then half a second for its links: a folder still silent then gives `[]`, and a link still unresolved shows without its `/`. A folder or link that answers after that serves the searches of the next 10 s, and one still being looked up is not looked up again meanwhile, so an offline network volume never holds up the answer and holds one lookup per path
 - `GET /v1/files/preview`, `/v1/files/preview/current` and `POST /v1/files/preview/restore` serve the saved versions of [canvas previews](CANVAS-PREVIEW.md) (`files.preview.v1`)
 - Browser hosts: `GET /v1/browser/hosts`, the host sockets `GET /v1/threads/{id}/browser/host`, `/v1/browser/drafts/{id}/host` and `/v1/browser/extension/host`, `POST /v1/threads/{id}/browser/tool`, the `…/tunnel/{action}` routes and `POST /v1/browser/drafts/{id}/adopt` (`browser.v1`, `browser-drafts.v1`, `browser-extension.v1`); see [Browser](BROWSER.md) and [Haarness for Chrome](CHROME-EXTENSION.md)
 - `POST /v1/cloud/agents`, `/v1/cloud/workspaces`, `/v1/cloud/chats` and `/v1/cloud/schedules` act on Haarness Cloud with this computer's signed-in account, through the same intents as the model's Cloud tools
@@ -178,7 +178,17 @@ the summary, exact todo JSON as data, then the retained turns. Media from the
 pre-compaction tail is represented by a textual attachment note rather than
 re-uploaded. Automatic compaction uses the selected model's context and output
 limits and retries pre-output context-overflow/HTTP-413 failures after safe
-compaction, under a bounded per-turn recovery ceiling.
+compaction, under a bounded per-turn recovery ceiling. A refusal of the request
+for its size in bytes (an HTTP 413, Bedrock's "413 Payload Too Large" or
+Gemini's "Request payload size exceeds the limit", rather than a context too
+long in tokens or a rate limit) compacts once until the provider takes a
+request again: when it refuses the compacted request as well, the turn fails
+with one error saying the chat is too large for the provider to take in one
+request, and to continue in a new chat or attach smaller files, instead of
+summarizing the summary. Where the chat cannot compact (compaction turned off,
+input queued meanwhile) such a refusal fails the turn with the same advice; a
+child agent's failure only says the provider refused the request as too large,
+for the model that started it.
 
 Workspace create accepts `{name, fromRef?, branch?, path?}` and always creates
 a unique, non-tracking Git branch. `GET /v1/workspaces/refs` discovers local
@@ -263,7 +273,50 @@ an OAuth token refresh that only rewrites `access`, `refresh`, and `expires` in
 content reload nothing either. A reload keeps each connected MCP server whose
 effective configuration (with `${VAR}` references resolved) is unchanged,
 instead of starting it again. Servers connect concurrently at startup and on
-reload.
+reload, in the background: the server answers at once, lists each as
+`connecting` until it has connected, failed or needs authorization, and then
+publishes `assets.updated` with `resource: "mcp"` and the server's `name`.
+Every start that comes to an answer is announced so, whoever began it
+(`configure`, `reconnect`), except a start that got a connection back after
+its transport closed and connected again: a server that keeps crashing does
+not have clients read their catalogs each time. Sixteen start at a time and
+the rest wait for a free place; each start, once begun, has the server's
+start limit (see `timeoutMs` below). A turn begun while a server from the
+configuration is still on that start waits for it before its first request,
+so a script's first message is offered the tools a later one would be; Stop
+ends the wait, and a turn begun once those starts ended never waits. A
+request to a server that is starting (its tools, a tool call, a resource or
+prompt request) waits for that start too.
+
+A server configured through `POST /v1/mcp/{name}` (as an editor's ACP
+session does) holds up no turn while it starts: its client waits for it. ACP
+takes a server still starting (or needing authorization) after 2 seconds as
+configured, so the session is set up at once, and waits for its servers
+still starting before the session's next prompt. A session's prompts run
+one at a time, in the order they were sent, so one sent meanwhile shares
+that wait and runs after it. Cancel reaches only the prompt that is running
+(ending its wait or its turn); the session's prompts queued behind it then
+run in order. A server that did not start is told to the editor in that
+prompt's reply and logged; the prompt goes on without it, and the server is
+left disconnected for the session's next load to configure again. One still
+starting after 150 seconds is told too, and the next prompt waits for it
+again. One that fails within the 2 seconds fails the session and is left
+disconnected too.
+
+Every start runs on its own: a client that gives up on `configure` or
+`reconnect` leaves it running. A `reconnect` during a start that has run
+less than 30 seconds waits for that start instead of beginning another; one
+that has run longer may be hung, so `reconnect` stops it and starts the
+server again, and turns waiting for the first start wait for the new one
+(`haarness mcp reconnect` and Desktop's Reconnect do the same).
+`disconnect` stops a start on its way, its process included, and ends the
+waits for it at once; so does the server being configured again or removed
+by a reload, and Haarness stopping. A server that failed holds up nothing: a
+reload tries it again in the background without making turns wait, and its
+tools then reach a turn already running from its next request, as after a
+`reconnect`, with an extension's `tool.definition` rewrite from the next
+turn. A reload while a server is still starting keeps that start.
+
 An edit that changes only agent definition files (markdown in an `agents` or
 `agent` folder) does not wait for active turns: once the files load, new
 turns use the new definitions and `assets.updated` (`resource: "agent"`) is
@@ -423,7 +476,10 @@ with the server's and tool's names as written); only requests to a model
 provider carry names in the characters providers accept (see
 [Plugins, skills and tools](REFERENCE.md#plugins-skills-and-tools)).
 `timeoutMs` (default 30 s) bounds the socket connect, initialization, and tool
-discovery as one deadline, plus a `headersHelper` run. In a JSON file a
+discovery as one deadline, plus a `headersHelper` run. A local (stdio) server
+without it has 2 minutes for that start (spawning it, initializing it and
+listing its tools), as `npx -y` and `uvx` fetch the server on its first run;
+its other requests keep 30 s. In a JSON file a
 `timeout` key counts too, in its ecosystem's unit: milliseconds in an opencode
 entry (`type: "local"` or `"remote"`), seconds in a Claude Code or plugin
 entry; edits leave the key and its unit as written. It does not bound tool
@@ -457,9 +513,12 @@ the text (after a command's string `arguments`) as a block under
 `MCP resource: setup · docs:docs://setup`. Its text is fenced, and cut past
 50 KiB (128 KiB for all of a message's resources) with a note that says where
 the whole text was saved; its images and PDFs join `attachments` (10 MiB
-together). A resource that is not read is named in its block with
-`(not read)`, and the block holds only the reason: the MCP server's error, `did
-not answer within 10 s`, or `a rule keeps this resource from the model`. The
+together, and only while the message's media stay within 20 MiB, the
+person's own attachments first). A resource that is not read is named in its
+block with `(not read)`, and the block holds only the reason: the MCP server's
+error, `did not answer within 10 s`, `a rule keeps this resource from the
+model`, or `its images and PDFs would take the message over the 20 MiB limit
+for media`. The
 chat's own rules decide as they do for `mcp_resource_read`, except that an ask
 is not asked (the person picked it, as they attach a file): a deny for
 `<server>:<uri>`, or a rule or tool setting that takes every tool of the server
@@ -519,31 +578,64 @@ with the reason.
 An attachment or tool image whose file is deleted later is named in the message
 ("no longer available") instead of failing every later request.
 
-A long chat can hold more images than a provider takes in one request. Before
-each request the runtime counts the images it would send, as the base64 the
-provider receives. Where a message takes them past the provider's limit, the
-images before it are replaced by a one-line note, oldest first, until the rest
-fit in three fifths of the limit (the person's own images in that message's
-turn stay, and what cannot be reached that way stays too). The images of the
-message that passed the limit go only when they and the person's images
-together still pass the limit itself, oldest first and only until the request
-fits, so the newest image reaches the model whenever it fits beside the
-person's. The note names the image (a file by its path), says it is no longer
-visible and must not be described from memory, and says to read the file again,
-or for an attached image to ask the person to attach it again, if it is needed.
-The limit is 25 MiB of images (Anthropic and Haarness Cloud take 32 MB in a
-request; OpenAI, the Gemini API and Gemini on Vertex AI take more), 15 MiB on
-Bedrock, which takes 20 MB, and for Claude models, directly, on Bedrock or
-through Haarness Cloud, also 100 images in a request to a model with a
-200K-token context window and 600 to a larger one. The cut moves only when the
-images kept pass the limit again, not with each new image, so the requests
-between two cuts carry the same history and the provider's prompt cache holds.
-The person's own images are those they attached to their messages (steers
-included, not what Haarness adds); when those alone pass the limit the request
-is sent as it is. Which turn an image belongs to is read from the history, not
-from the turn now running, so a new turn's first request repeats every earlier
-cut and reads the cache too. PDFs, audio and video are neither counted nor
-replaced. Stored messages do not change, and the transcript shows nothing: a
+A message carries at most 20 MiB of media, its images as stored and its PDFs,
+audio and video together (text files do not count), the most providers take
+inline. Since a stored message is sent again with every later request of its
+chat, turn and queued-input requests refuse more with `400` naming the size and
+the limit ("scan.pdf is 21 MiB, over the 20 MiB limit for media in one
+message"). That includes a message queued to run later (`delivery: "queue"`)
+and the attachments a queue edit adds to one: they are checked when they
+arrive, so a message that could never start never waits at the head of the
+queue. When its turn comes it is not refused for them again: a file that
+changed meanwhile reaches the model as one of the notes described next, and the queue
+moves on. A file named `.pdf`, or sent as `application/pdf`, is a PDF only
+when `%PDF-` appears in its first kilobyte; otherwise it is taken as an untyped file is:
+text when it reads as text, an image when its bytes are one, and refused
+otherwise. A stored attachment that would take its message past the limit
+(one an older server stored, or a file that has grown since), a stored PDF
+that no longer holds one (an LFS pointer after a checkout), or one no model
+reads (a web address or an archive an older server kept) is sent as a
+one-line note naming it instead, so the chat's later turns complete; an image
+a provider refused (below) takes no room.
+
+A long chat can hold more media than a provider takes in one request: many
+screenshots, or a few large PDFs. Before each request the runtime counts what it
+would send, as the base64 the provider receives, against two limits. The images
+alone are held to 25 MiB (Anthropic and Haarness Cloud take 32 MB in a request;
+OpenAI, the Gemini API and Gemini on Vertex AI take more), 15 MiB on Bedrock,
+and for Claude models, directly, on Bedrock or through Haarness Cloud, also to
+100 images in a request to a model with a 200K-token context window and 600 to a
+larger one; only images are replaced for these. Where the provider states what
+it takes in one request (Anthropic 32 MB, Bedrock 20 MB, Haarness Cloud 32 MiB,
+and 32 MB for Anthropic's models through it), every attachment (images, PDFs,
+audio and video) and the text of the messages together are held to that too,
+less 1 MiB for the system prompt and tools. That measure is close, not exact:
+the text after the last attachment, JSON escaping, and the system prompt and
+tools are estimated by that 1 MiB rather than counted. Other providers (OpenAI,
+the Gemini API, Gemini on Vertex AI and OpenAI-compatible servers, which take
+more or do not say) get no such cut; a refusal of the request's size is
+compacted for instead. Where a message takes a total past its limit, the
+attachments before it are replaced by a one-line note, oldest first, until the
+rest fit in three fifths of the limit (the person's own attachments in that
+message's turn stay, and what cannot be reached that way stays too). The
+attachments of the message that passed the limit go only when they and the
+person's together still pass the limit itself, oldest first and only until the
+request fits, so the newest attachment reaches the model whenever it fits beside
+the person's. For the whole request, a PDF, audio or video file of the turn
+that passed it is never replaced, whoever added it, or the note would send the
+model to read again what it just read; a request too large all the same is
+refused, and compaction answers that. The note names the attachment by its kind
+and name (a file by its path), says it is no longer visible (audible, for audio)
+and must not be described from memory, and says to read the file again, or for
+an attachment the person sent to ask them to attach it again, if it is needed.
+The cut moves only when the attachments kept pass a limit again, not with each
+new one, so the requests between two cuts carry the same history and the
+provider's prompt cache holds. The person's own attachments are those they
+attached to their messages (steers included, not what Haarness adds or a tool
+read); when those alone pass the limit the request is sent as it is. Which turn
+an attachment belongs to is read from the history, not from the turn now
+running, so a new turn's first request repeats every earlier cut and reads the
+cache too. Stored messages do not change, and the transcript shows nothing: a
 cut is logged as one `INFO` line of counts.
 
 When a provider still refuses an image (its type, size, pixels or count, or a

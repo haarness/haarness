@@ -22,6 +22,9 @@
   tools of the very same name (`a`'s `b__c` and `a__b`'s `c`) the first server's by name is offered.
 - A server started with `--workspace` from another folder starts its local MCP servers in the project folder, and a
   relative `cwd` is read from it.
+- A local server that takes 12 s to answer `initialize` (as a first `npx -y` download does) no longer keeps Haarness
+  from starting: Desktop's connect and a first `haarness run` succeed at once, the server reads `connecting` and then
+  `connected`, and the first turn waits for it and calls its tool.
 
 The keychain is a test file (HAARNESS_TEST_KEYCHAIN_FILE, honoured by debug builds only), so the script never
 touches the system's keychain, and it fails if a secret reaches anything else.
@@ -156,6 +159,8 @@ settings.write_text(json.dumps({
         # `google_drive`'s own name only in letter case.
         'Google Drive': names('Google Drive', ['search']),
         'google_drive': names('google_drive', ['search']),
+        # Answers `initialize` after 12 s, past the 8 s launchers wait for the server to answer.
+        'cold': server('recovery.py', env={'INIT_DELAY': '12', 'CALL_LOG': str(root/'cold-calls')}),
     },
 }, indent=2) + '\n')
 (workspace/'.haarness/config.toml').write_text('[tool_availability]\n"mcp__Docs_Server__plain" = false\n')
@@ -163,7 +168,7 @@ env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(root/'data'), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_TEST_KEYCHAIN_FILE=str(keychain), LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8')
 session = f'haarness-mcp-servers-{os.getpid()}'
-connection = None; foreground = None; stand_in = None; checks = []
+connection = None; foreground = None; stand_in = None; first_run = None; checks = []
 
 
 def run(args, **kwargs):
@@ -218,12 +223,21 @@ try:
         assert 'start with a letter or digit' in error.stderr, error.stderr
     check('`haarness mcp secret set` stores a piped secret without showing it')
 
+    started = time.monotonic()
     connection = desktop({'action': 'connect'})
+    connected_in = time.monotonic() - started
+    assert servers()['cold']['status'] == 'connecting', servers()['cold']
+    thread = api('/threads', {'title': 'MCP servers', 'provider': 'echo', 'model': 'echo-1', 'agent': 'build'})['id']
+    started = time.monotonic()
+    result = call(thread, 'mcp__cold__ping', {})
+    assert not result['is_error'] and result['output'] == 'pong', result
+    assert servers()['cold']['status'] == 'connected', servers()['cold']
+    check(f'Desktop\'s connect answers in {connected_in:.1f} s while a server takes 12 s to start; it reads connecting, '
+          f'then connected, and the first turn waited {time.monotonic() - started:.1f} s for it and called its tool')
     until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'hidden', 'app', 'keyed', 'missing', 'silent', 'a', 'a__b', 'Docs Server', 'Docs_Server', 'api.internal', 'billing_internal', 'notes', 'Google Drive', 'google_drive'}
           and all(item['status'] in ('connected', 'failed') for item in servers().values()), 'servers did not settle', 60)
     port = connection['url'].rsplit(':', 1)[1].strip('/')
     daemon = int(subprocess.run(['lsof', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN', '-t'], text=True, capture_output=True).stdout.split()[0])
-    thread = api('/threads', {'title': 'MCP servers', 'provider': 'echo', 'model': 'echo-1', 'agent': 'build'})['id']
 
     # --- keychain secrets
     result = call(thread, 'mcp__keyed__env', {'name': 'TOKEN'})
@@ -476,6 +490,18 @@ try:
         assert pathlib.Path(answer['cwd']).resolve() == expected.resolve(), (name, answer)
     check('a server started with --workspace from another folder starts its MCP servers in the project folder, and a relative cwd inside it')
 
+    # --- a first `haarness run` while a server takes 12 s to start
+    first_run = root/'first-run'; (first_run/'.haarness').mkdir(parents=True)
+    (first_run/'.haarness/haarness.json').write_text(json.dumps({'model': 'echo/echo-1', 'mcp': {
+        'cold': server('recovery.py', env={'INIT_DELAY': '12', 'CALL_LOG': str(root/'first-run-calls')})}}, indent=2) + '\n')
+    started = time.monotonic()
+    answer = run([str(binary), '--workspace', str(first_run), '--trust-project', 'run', '!tool mcp__cold__ping {}'])
+    took = time.monotonic() - started
+    assert 'Tool mcp__cold__ping => pong' in answer, answer
+    listed = run([str(binary), '--workspace', str(first_run), '--trust-project', 'mcp', 'ls'])
+    assert re.search(r'^cold\tstdio\tconnected\t', listed, re.M), listed
+    check(f'a first `haarness run` starts the server and its turn waits for the 12 s MCP server ({took:.1f} s in all) and calls its tool')
+
     # --- the providers' own wire formats
     for provider, model in [('anthropic', 'claude-sonnet-4-6'), ('openai', 'gpt-5.4-mini')]:
         wire_thread = api('/threads', {'title': f'Wire {provider}', 'provider': provider, 'model': model}, at=at)['id']
@@ -519,4 +545,6 @@ finally:
             foreground.kill()
     if connection:
         subprocess.run([str(binary), '--workspace', str(workspace), '--trust-project', 'serve', '--stop'], env=env, capture_output=True, timeout=35)
+    if first_run:
+        subprocess.run([str(binary), '--workspace', str(first_run), '--trust-project', 'serve', '--stop'], env=env, capture_output=True, timeout=35)
     e2e_scratch.settle(root)

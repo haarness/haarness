@@ -226,6 +226,7 @@ pub(crate) fn image_limits(models: &[ModelInfo], model: &str) -> haarness_core::
         .is_some_and(|window| window > 200_000);
     haarness_core::ImageLimits {
         count: Some(if larger { 600 } else { 100 }),
+        request: Some(32_000_000 - haarness_core::REQUEST_ALLOWANCE),
         ..haarness_core::ImageLimits::default()
     }
 }

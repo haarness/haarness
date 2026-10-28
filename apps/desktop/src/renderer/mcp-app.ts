@@ -181,15 +181,26 @@ function publicHost(host: string) {
 const BARE_HOST = /^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)*(:\d{1,5})?(\/|$)/i;
 
 /**
+ * The bare schemes `blob:` and `data:` point at bytes the page produced in
+ * memory, not at any server: a map library, say, loads tiles or a WebAssembly
+ * module from a `blob:` URL it created. A worker started from such a URL runs
+ * under the page's policy, so it gets no network access the page lacks.
+ */
+const OWN_CONTENT = /^(blob|data):$/i;
+
+/**
  * A CSP source list takes https and wss host sources of public sites only:
  * anything else (a keyword, a quote, a semicolon) could widen or end the
  * directive it is pasted into, and plain http, every host, or this computer's
  * network is not something a page may reach. IPv6 literals are not taken.
+ * Passing `own` (resource and connect lists only) also accepts those two bare
+ * schemes; frame and base-URI lists are read without it.
  */
-export function sources(list: unknown): string[] {
+export function sources(list: unknown, own = false): string[] {
   if (!Array.isArray(list)) return [];
   const found = list.flatMap((item) => {
     if (typeof item !== "string" || /[\s;,'"]/.test(item)) return [];
+    if (OWN_CONTENT.test(item)) return own ? [item.toLowerCase()] : [];
     let url: URL;
     try {
       // A bare host goes through every check below, as one with a scheme does.
@@ -211,34 +222,39 @@ export function sources(list: unknown): string[] {
  * The page's Content Security Policy, from the domains it declares (none: no network at all).
  * `form-action` closes the one network path `default-src` leaves open, a form posting to another
  * site. Nested frames are not allowed: the host page that holds the frame refuses them anyway.
+ * Two grants hold for every page, whatever it declares: `'wasm-unsafe-eval'`, since compiled
+ * WebAssembly has only the powers the page's inline script already has (string `eval` remains
+ * off), and `worker-src blob:`, for background threads built from in-memory code, which is how map
+ * libraries render tiles. Declared lists cannot add either keyword: quoted words are dropped.
  */
 export function policy(meta?: Meta) {
   const csp = meta?.csp;
-  const resources = sources(csp?.resourceDomains).join(" ");
-  const connect = sources(csp?.connectDomains).join(" ");
+  const resources = sources(csp?.resourceDomains, true);
+  const connect = sources(csp?.connectDomains, true).join(" ");
   const base = sources(csp?.baseUriDomains).join(" ");
+  // A Set, so a declared `data:` beside the built-in one is written once.
+  const loads = (...builtIn: string[]) => [...new Set([...builtIn, ...resources])].join(" ");
   return [
     "default-src 'none'",
-    `script-src 'self' 'unsafe-inline' ${resources}`,
-    `style-src 'self' 'unsafe-inline' ${resources}`,
-    `img-src 'self' data: blob: ${resources}`,
-    `font-src 'self' data: ${resources}`,
-    `media-src 'self' data: blob: ${resources}`,
+    `script-src ${loads("'self'", "'unsafe-inline'", "'wasm-unsafe-eval'")}`,
+    `style-src ${loads("'self'", "'unsafe-inline'")}`,
+    `img-src ${loads("'self'", "data:", "blob:")}`,
+    `font-src ${loads("'self'", "data:")}`,
+    `media-src ${loads("'self'", "data:", "blob:")}`,
     `connect-src ${connect || "'none'"}`,
+    "worker-src blob:",
     "frame-src 'none'",
     "object-src 'none'",
     `base-uri ${base || "'self'"}`,
     "form-action 'none'",
-  ]
-    .map((item) => item.trim())
-    .join("; ");
+  ].join("; ");
 }
 
 /** The domains granted in the end, from `hostCapabilities.sandbox.csp`. */
 export function granted(meta?: Meta) {
   return {
-    connectDomains: sources(meta?.csp?.connectDomains),
-    resourceDomains: sources(meta?.csp?.resourceDomains),
+    connectDomains: sources(meta?.csp?.connectDomains, true),
+    resourceDomains: sources(meta?.csp?.resourceDomains, true),
     frameDomains: [] as string[],
     baseUriDomains: sources(meta?.csp?.baseUriDomains),
   };
@@ -249,6 +265,7 @@ export const WHEEL = "haarnessWheel";
 export const LEFT = "haarnessLeft";
 export const INPUT = "haarnessInput";
 export const HOVER = "haarnessHover";
+export const LIFT = "haarnessLift";
 
 const attribute = (text: string) =>
   text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
@@ -264,8 +281,10 @@ const attribute = (text: string) =>
  * cannot make) with the token, so one press allows one link or message; and it says, with the
  * token, when the pointer comes into the page and leaves it, which the window cannot see past the
  * frame, so the page's options show while it is pointed at and a page can neither show nor hide
- * them itself. The script removes itself before the page runs, so the page cannot read the token
- * and speak for the person.
+ * them itself. It also reports, with the token, a button let go over the page: a press that began
+ * in the conversation and ends over a frame sends the conversation no pointerup, and it holds the
+ * view until it ends (transcript-press.ts). The script removes itself before the page runs, so the
+ * page cannot read the token and speak for the person.
  */
 export function document(html: string, meta: Meta | undefined, token: string) {
   const secret = JSON.stringify(token).replace(/</g, "\\u003c");
@@ -275,6 +294,8 @@ export function document(html: string, meta: Meta | undefined, token: string) {
     `addEventListener("pagehide",function(){p.postMessage({${LEFT}:s},"*")});` +
     `function press(e){if(e.isTrusted&&!e.repeat)p.postMessage({${INPUT}:s},"*")}` +
     `addEventListener("pointerdown",press,true);addEventListener("keydown",press,true);` +
+    `function lift(e){if(e.isTrusted)p.postMessage({${LIFT}:s},"*")}` +
+    `addEventListener("pointerup",lift,true);addEventListener("pointercancel",lift,true);` +
     `var h=0;function hover(v){if(h!==v){h=v;p.postMessage({${HOVER}:[v,s]},"*")}}` +
     `addEventListener("pointerover",function(){hover(1)},{passive:true,capture:true});` +
     `addEventListener("pointerout",function(e){if(!e.relatedTarget)hover(0)},{passive:true,capture:true});` +

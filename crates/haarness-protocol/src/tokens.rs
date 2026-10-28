@@ -85,8 +85,9 @@ const CALIBRATION_RANGE: (f64, f64) = (0.75, 1.5);
 /// thumbnail.
 const HEADER_BYTES: usize = 256 * 1024;
 
-/// Attachments above this are never sent inline, so they are not read.
-const MAX_MEDIA_BYTES: u64 = 20 * 1024 * 1024;
+/// Attachments above this are never sent inline, so they are not read: the
+/// request carries a line naming one instead.
+const MAX_MEDIA_BYTES: u64 = crate::MAX_INLINE_MEDIA_BYTES as u64;
 
 impl Tokenizer {
     /// Family for a model id as any provider names it: `claude-sonnet-5-5`,
@@ -146,6 +147,7 @@ impl Tokenizer {
             }
             MediaShape::Audio { bytes } => (bytes / 500).max(100),
             MediaShape::Video { bytes } => (bytes / 800).max(300),
+            MediaShape::LeftOut => 30,
             MediaShape::Unknown => self.image(2_048, 2_048),
         }
     }
@@ -480,10 +482,21 @@ fn prompt_total(prompt: &PromptUsage) -> Option<u64> {
 }
 
 enum MediaShape {
-    Image { width: u64, height: u64 },
-    Pdf { pages: u64 },
-    Audio { bytes: u64 },
-    Video { bytes: u64 },
+    Image {
+        width: u64,
+        height: u64,
+    },
+    Pdf {
+        pages: u64,
+    },
+    Audio {
+        bytes: u64,
+    },
+    Video {
+        bytes: u64,
+    },
+    /// Over [`MAX_MEDIA_BYTES`]: the request names it in a line instead.
+    LeftOut,
     Unknown,
 }
 
@@ -498,7 +511,15 @@ impl MediaShape {
                 .next()
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            let size = (encoded.len() as u64 / 4) * 3;
+            let padding = encoded
+                .bytes()
+                .rev()
+                .take_while(|&byte| byte == b'=')
+                .count();
+            let size = (encoded.len() / 4 * 3).saturating_sub(padding) as u64;
+            if size > MAX_MEDIA_BYTES {
+                return Self::LeftOut;
+            }
             let pdf = mime == "application/pdf";
             let prefix = if pdf {
                 encoded
@@ -514,8 +535,11 @@ impl MediaShape {
                 return Self::by_mime(&mime, 0);
             };
             let pdf = mime == "application/pdf";
-            if !metadata.is_file() || metadata.len() > MAX_MEDIA_BYTES {
+            if !metadata.is_file() {
                 return Self::by_mime(&mime, metadata.len());
+            }
+            if metadata.len() > MAX_MEDIA_BYTES {
+                return Self::LeftOut;
             }
             let limit = if pdf {
                 MAX_MEDIA_BYTES
@@ -831,6 +855,23 @@ mod tests {
             Tokenizer::ClaudeLegacy.media(dir.join("missing.png").to_str().unwrap()),
             1_603
         );
+        // Media over the inline limit is never sent: a line names it.
+        let scan = dir.join("scan.pdf");
+        let file = std::fs::File::create(&scan).unwrap();
+        file.set_len(MAX_MEDIA_BYTES + 1).unwrap();
+        assert_eq!(Tokenizer::Claude.media(scan.to_str().unwrap()), 30);
+        let inline = format!(
+            "data:application/pdf;base64,{}",
+            "A".repeat(usize::try_from(MAX_MEDIA_BYTES / 3 * 4 + 8).unwrap())
+        );
+        assert_eq!(Tokenizer::Claude.media(&inline), 30);
+        // At the limit exactly, its padding taken off, it is sent.
+        let full = MAX_MEDIA_BYTES.div_ceil(3) * 4;
+        let at_limit = format!(
+            "data:audio/mpeg;base64,{}=",
+            "A".repeat(usize::try_from(full - 1).unwrap())
+        );
+        assert_eq!(Tokenizer::Claude.media(&at_limit), MAX_MEDIA_BYTES / 500);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

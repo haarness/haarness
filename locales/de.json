@@ -1780,6 +1780,7 @@
   "{count} more lines": "{count} weitere Zeilen",
   "rejected": "abgelehnt",
   "Approvals changed in another window · ctrl+y to switch": "Freigaben in einem anderen Fenster geändert · Strg+Y zum Umschalten",
+  "Could not keep {mode}": "{mode} konnte nicht beibehalten werden",
   "Share usage statistics": "Nutzungsstatistiken teilen",
   "Diagnostics": "Diagnose",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "Die Haarness-Protokolle dieses Computers als ZIP, ohne bekannte Geheimnisse, zum Teilen, wenn etwas schiefläuft.",
@@ -2938,5 +2939,8 @@
   "Ends {date}": "Endet am {date}",
   "On hold": "Zurückgehalten",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Mehrverbrauch ist aus, daher werden gekaufte Credits nicht ausgegeben. Schalte ihn unter Abrechnung ein.",
-  "Your free trial didn't start: that card was already used for a trial.": "Deine kostenlose Testphase hat nicht begonnen: Diese Karte wurde bereits für eine Testphase genutzt."
+  "Your free trial didn't start: that card was already used for a trial.": "Deine kostenlose Testphase hat nicht begonnen: Diese Karte wurde bereits für eine Testphase genutzt.",
+  "The attachments come to {size}, over the {limit} limit for media in one message": "Die Anhänge umfassen {size} und überschreiten damit das Limit von {limit} für Medien in einer Nachricht",
+  "its images and PDFs would take the message over the 20 MiB limit for media": "seine Bilder und PDFs würden die Nachricht über das Limit von 20 MiB für Medien bringen",
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} ist {size} groß und überschreitet damit das Limit von {limit} für Medien in einer Nachricht"
 }

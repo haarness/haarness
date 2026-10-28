@@ -1780,6 +1780,7 @@
   "{count} more lines": "還有 {count} 行",
   "rejected": "已拒絕",
   "Approvals changed in another window · ctrl+y to switch": "核准方式已在另一個視窗中變更 · ctrl+y 切換",
+  "Could not keep {mode}": "無法保留「{mode}」模式",
   "Share usage statistics": "分享使用統計",
   "Diagnostics": "診斷",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "將這台電腦上的 Haarness 記錄打包為 zip，已移除已知的密鑰，出問題時可以分享。",
@@ -2938,5 +2939,8 @@
   "Ends {date}": "{date} 結束",
   "On hold": "已凍結",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "超額使用已關閉，因此不會花費已購額度。請在帳單中開啟。",
-  "Your free trial didn't start: that card was already used for a trial.": "免費試用未開始：這張卡已用於試用。"
+  "Your free trial didn't start: that card was already used for a trial.": "免費試用未開始：這張卡已用於試用。",
+  "The attachments come to {size}, over the {limit} limit for media in one message": "附件共 {size}，超過了單則訊息 {limit} 的媒體上限",
+  "its images and PDFs would take the message over the 20 MiB limit for media": "其中的圖片和 PDF 會使訊息超出 20 MiB 的媒體上限",
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} 大小為 {size}，超過了單則訊息 {limit} 的媒體上限"
 }
