@@ -2148,7 +2148,7 @@ impl AgentRuntime {
         if let Some(mode) = *self.lazy_tool_mode.read() {
             lazy_tools.mode = mode;
         }
-        Ok(select_tools(
+        let mut response = select_tools(
             components.tools.list(),
             &components.config.tool_availability,
             &live,
@@ -2156,7 +2156,17 @@ impl AgentRuntime {
             &promoted,
             context_window,
         )
-        .response)
+        .response;
+        // The server a tool comes from, as it is named: `a__b`'s tools read
+        // `mcp__a__b__…`, which names it only up to its first `__`.
+        for entry in &mut response.tools {
+            if entry.source.starts_with("mcp:")
+                && let Some(server) = components.tools.tool_server(&entry.id)
+            {
+                entry.source = format!("mcp:{server}");
+            }
+        }
+        Ok(response)
     }
 
     /// Set or clear a live workspace override and durably persist the whole

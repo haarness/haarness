@@ -11,6 +11,8 @@
   later request to that server, a tool call included) and the server is told to stop getting the prompt.
 - `${keychain:NAME}` resolves when a server starts, from `haarness mcp secret set` or Desktop's request; a missing
   entry fails that server naming the reference; the setting stays as written and no log holds the secret.
+- A tool reaches the server that lists it, with its own name: a server named `a__b` gets its tools' calls, and of two
+  tools of the very same name (`a`'s `b__c` and `a__b`'s `c`) the first server's by name is offered.
 - A server started with `--workspace` from another folder starts its local MCP servers in the project folder, and a
   relative `cwd` is read from it.
 
@@ -54,6 +56,9 @@ settings.write_text(json.dumps({
                                        'HOME_SEEN': '${HOME}'}),
         'missing': server('env.py', env={'TOKEN': 'Bearer ${keychain:absent-token}'}),
         'silent': server('prompts.py', timeoutMs=2000, env={'CANCEL_LOG': str(root/'prompt-cancels')}),
+        # `__` in a server's name: `a`'s `b__c` and `a__b`'s `c` are both `mcp__a__b__c`.
+        'a': server('names.py', env={'LABEL': 'a', 'TOOLS': json.dumps(['b__c'])}),
+        'a__b': server('names.py', env={'LABEL': 'a__b', 'TOOLS': json.dumps(['c', 'd'])}),
     },
 }, indent=2) + '\n')
 env = clean_env()
@@ -109,7 +114,7 @@ try:
     check('`haarness mcp secret set` stores a piped secret without showing it')
 
     connection = desktop({'action': 'connect'})
-    until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'hidden', 'app', 'keyed', 'missing', 'silent'}
+    until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'hidden', 'app', 'keyed', 'missing', 'silent', 'a', 'a__b'}
           and all(item['status'] in ('connected', 'failed') for item in servers().values()), 'servers did not settle', 60)
     port = connection['url'].rsplit(':', 1)[1].strip('/')
     daemon = int(subprocess.run(['lsof', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN', '-t'], text=True, capture_output=True).stdout.split()[0])
@@ -137,6 +142,15 @@ try:
     assert api('/mcp/missing/reconnect', {})['status'] == 'connected'
     assert call(thread, 'mcp__missing__env', {'name': 'TOKEN'})['output'] == 'Bearer desktop-secret'
     check('Desktop\'s store request keeps a secret for a reference, and a reconnect then starts the server')
+
+    # --- a tool reaches the server that lists it
+    catalog = {tool['id']: tool['source'] for tool in api(f'/tools?threadId={thread}')['tools']}
+    assert catalog.get('mcp__a__b__d') == 'mcp:a__b' and catalog.get('mcp__a__b__c') == 'mcp:a', catalog
+    for tool, own_server, own_tool in [('mcp__a__b__c', 'a', 'b__c'), ('mcp__a__b__d', 'a__b', 'd')]:
+        result = call(thread, tool, {})
+        answer = json.loads(result['output'])
+        assert not result['is_error'] and (answer['server'], answer['tool']) == (own_server, own_tool), (tool, result)
+    check('a tool reaches the server that lists it, `a__b`\'s included, and is listed under it; of two of the very same name the first server\'s is offered')
 
     # --- interactive apps switch
     app = servers()['app']

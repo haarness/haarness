@@ -793,6 +793,10 @@ impl ToolRegistry for ResourceFixtures {
     fn resource_servers(&self) -> Vec<String> {
         vec!["docs".into(), "hidden".into()]
     }
+
+    fn tool_server(&self, name: &str) -> Option<String> {
+        (name == "mcp__a__b__d").then(|| "a__b".into())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -964,4 +968,31 @@ async fn a_server_whose_tools_are_all_denied_keeps_its_resources_from_the_model(
         "{offered:?}"
     );
     assert!(offered.contains(&"read".to_owned()), "{offered:?}");
+}
+
+/// A server whose own name holds `__` (`a__b`) offers `mcp__a__b__d`:
+/// clients see the tool under that server, not under `a`.
+#[tokio::test]
+async fn a_tool_is_listed_under_the_server_that_offers_it() {
+    let mut fixtures = ResourceFixtures::new();
+    fixtures.tools.insert(
+        "mcp__a__b__d".into(),
+        Arc::new(ScopedResourceTool("mcp__a__b__d")) as Arc<dyn Tool>,
+    );
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(Vec::new())),
+        Arc::new(fixtures),
+        EventBus::new(64),
+        PathBuf::from("."),
+        String::new(),
+        RuntimeConfig::default(),
+    );
+    let catalog = runtime.tool_catalog(None).await.unwrap();
+    let tool = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.id == "mcp__a__b__d")
+        .unwrap();
+    assert_eq!(tool.source, "mcp:a__b");
 }

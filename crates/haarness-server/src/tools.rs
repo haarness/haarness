@@ -1870,7 +1870,9 @@ impl ToolRegistry for NativeToolRegistry {
             .tool_snapshot()
             .into_iter()
             .find(|tool| tool.name == name)?;
-        let server = name.strip_prefix("mcp__")?.split_once("__")?.0.to_owned();
+        // The server that listed the tool, not the text before the first
+        // `__` of its name: a server's own name may hold `__` (`a__b`).
+        let server = self.mcp.as_ref()?.tool_server(name)?;
         Some(Arc::new(McpProjectedTool {
             definition,
             server,
@@ -1882,6 +1884,9 @@ impl ToolRegistry for NativeToolRegistry {
             .as_ref()
             .map(|mcp| mcp.resource_servers())
             .unwrap_or_default()
+    }
+    fn tool_server(&self, name: &str) -> Option<String> {
+        self.mcp.as_ref()?.tool_server(name)
     }
     fn list(&self) -> Vec<ToolDefinition> {
         let mut values: Vec<_> = self.tools.values().map(|tool| tool.definition()).collect();
@@ -8865,6 +8870,107 @@ mod webfetch_tests {
         .await
         .expect("Stop must end the call");
         assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+    }
+
+    /// Servers `a` (tool `b__c`) and `a__b` (tools `c` and `d`), whose tools
+    /// are `mcp__a__b__c` (the first by name has it) and `mcp__a__b__d`; a
+    /// call answers with the server it reached.
+    struct TwoServers;
+
+    #[async_trait]
+    impl McpRegistry for TwoServers {
+        fn tool_snapshot(&self) -> Vec<ToolDefinition> {
+            ["mcp__a__b__c", "mcp__a__b__d"]
+                .into_iter()
+                .map(|name| ToolDefinition {
+                    name: name.into(),
+                    description: "fixture".into(),
+                    input_schema: json!({"type":"object"}),
+                })
+                .collect()
+        }
+        fn tool_server(&self, tool: &str) -> Option<String> {
+            match tool {
+                "mcp__a__b__c" => Some("a".into()),
+                "mcp__a__b__d" => Some("a__b".into()),
+                _ => None,
+            }
+        }
+        async fn list(&self) -> CoreResult<Vec<haarness_protocol::McpServerInfo>> {
+            Ok(Vec::new())
+        }
+        async fn configure(
+            &self,
+            _name: &str,
+            _config: haarness_protocol::McpConfigureRequest,
+        ) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn reconnect(&self, _name: &str) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn disconnect(&self, _name: &str) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn tools(&self, _name: &str) -> CoreResult<Vec<ToolDefinition>> {
+            Ok(Vec::new())
+        }
+        async fn call(&self, name: &str, tool: &str, _arguments: Value) -> CoreResult<ToolOutput> {
+            Ok(ToolOutput {
+                text: format!("{name}|{tool}"),
+                metadata: Value::Null,
+            })
+        }
+        async fn resources(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn resource_templates(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn read_resource(&self, _name: &str, _uri: &str) -> CoreResult<Value> {
+            unreachable!()
+        }
+        async fn prompts(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn get_prompt(
+            &self,
+            _name: &str,
+            _prompt: &str,
+            _arguments: Value,
+        ) -> CoreResult<Value> {
+            unreachable!()
+        }
+    }
+
+    /// A tool reaches the server that listed it, not the one named by the
+    /// text before the first `__` of its name.
+    #[tokio::test]
+    async fn an_mcp_tool_reaches_the_server_that_lists_it() {
+        let workspace = std::env::temp_dir();
+        let registry = NativeToolRegistry::with_extras(
+            workspace.clone(),
+            Some(Arc::new(TwoServers)),
+            None,
+            Vec::new(),
+        );
+        for (tool, reached) in [
+            ("mcp__a__b__c", "a|mcp__a__b__c"),
+            ("mcp__a__b__d", "a__b|mcp__a__b__d"),
+        ] {
+            let output = registry
+                .get(tool)
+                .unwrap_or_else(|| panic!("{tool} is not offered"))
+                .execute(json!({}), composite_context(&workspace))
+                .await
+                .unwrap();
+            assert_eq!(output.text, reached);
+        }
+        assert_eq!(
+            registry.tool_server("mcp__a__b__d").as_deref(),
+            Some("a__b")
+        );
+        assert!(registry.get("mcp__b__c").is_none());
     }
 }
 
