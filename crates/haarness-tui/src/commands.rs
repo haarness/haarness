@@ -2663,14 +2663,23 @@ impl App {
                 match client.revert(self.thread.id).await {
                     Ok(thread) => {
                         self.thread = thread;
+                        // The undone prompt is back in the composer before the
+                        // history is read again, so a read that fails keeps it;
+                        // the transcript then catches up on the next refresh.
                         let restored = self.undone_prompt();
-                        self.items = client.items(self.thread.id).await?;
-                        self.todos = client.todos(self.thread.id).await.unwrap_or_default();
                         self.undo_draft = None;
                         if let Some((text, attachments)) = restored {
                             self.composer.set_text(text);
                             self.attachments = attachments;
                         }
+                        self.items = match client.items(self.thread.id).await {
+                            Ok(items) => items,
+                            Err(error) => {
+                                self.refresh_needed = true;
+                                return Err(error);
+                            }
+                        };
+                        self.todos = client.todos(self.thread.id).await.unwrap_or_default();
                         self.notice = self.undo_notice("Undone — the next turn confirms");
                     }
                     Err(error) => self.notice = undo_error(&error, "Undo"),
@@ -4143,6 +4152,11 @@ impl App {
         let previous_thread = self.thread.id;
         let abandoned = (thread.id != previous_thread && self.is_untouched_session())
             .then_some(previous_thread);
+        // The chat being opened is read before either chat's draft moves: when
+        // the read fails, this one stays open with its draft, and the other
+        // chat keeps its own for the next try.
+        let items = client.items(thread.id).await?;
+        let todos = client.todos(thread.id).await.ok();
         // An unsaved queued-message edit belongs to the session being left;
         // its set-aside draft is what that session keeps.
         self.cancel_queue_edit();
@@ -4163,8 +4177,7 @@ impl App {
             .remove(&thread.id)
             .filter(|_| !thread.is_subagent);
         let previous_root = self.root_thread_id;
-        self.items = client.items(thread.id).await?;
-        let todos = client.todos(thread.id).await.ok();
+        self.items = items;
         self.agent_index = self
             .agents
             .iter()
