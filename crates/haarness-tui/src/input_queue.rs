@@ -33,7 +33,7 @@ impl App {
         };
         let request = QueueInputRequest {
             preview: Some(false),
-            reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_effort: self.requested_effort(),
             delivery: InputDelivery::Queue,
             request_id: RequestId::new(),
             text,

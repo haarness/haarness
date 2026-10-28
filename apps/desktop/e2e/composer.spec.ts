@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:http";
 import { stopChatHome } from "./fixtures/chat-home";
 
 /** An isolated Desktop on the echo provider, opened on a fresh project. */
@@ -46,6 +47,10 @@ async function launch(
     app,
     page,
     errors,
+    workspace,
+    /** Stops the project's server, as an update or another client may. */
+    stopServer: () =>
+      execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 }),
     async close() {
       await app.close().catch(() => {});
       try {
@@ -885,5 +890,194 @@ test("the new-chat heading holds still as the box grows, @ lists as wide as the 
     expect(errors).toEqual([]);
   } finally {
     await close();
+  }
+});
+
+test("a project whose server started again with another configuration offers its new level and commands", async ({}, info) => {
+  const configured = (level: string) => `[defaults]\nprovider="echo"\nmodel="echo-1"\nreasoning_effort="${level}"\n`;
+  const { page, errors, close, workspace, stopServer } = await launch(info, (folder) =>
+    writeFile(join(folder, ".haarness/config.toml"), configured("high")),
+  );
+  try {
+    // Echo lists no levels, so the pill shows the configured one.
+    const effort = page.locator(".composer-model .model-effort-summary");
+    await expect(effort).toHaveText("High");
+    // A configuration the server cannot read keeps it down after it stops,
+    // so what changes next reaches no reload: the window starts the server
+    // again itself once it can.
+    await writeFile(join(workspace, ".haarness/config.toml"), "[defaults\n");
+    stopServer();
+    await page.waitForTimeout(1500);
+    await mkdir(join(workspace, ".haarness/commands"), { recursive: true });
+    await writeFile(join(workspace, ".haarness/commands/fresh-review.md"), "---\ndescription: Review again\n---\nReview $ARGUMENTS.\n");
+    await writeFile(join(workspace, ".haarness/config.toml"), configured("low"));
+    await expect(effort).toHaveText("Low", { timeout: 60000 });
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill("/fresh");
+    await expect(page.locator("#slash-commands").getByRole("option")).toContainText(["fresh-review"]);
+    await input.press("Escape");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test("a configured reasoning level is the one in use until Model default overrides it, and each request says so", async ({}, info) => {
+  // An OpenAI-compatible model with three levels, which records every turn
+  // it is sent (a chat's title is asked for in a request of its own).
+  const turns: Record<string, unknown>[] = [];
+  const provider = createServer(async (request, response) => {
+    if (request.method === "GET") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "effort-model", supported_parameters: ["tools", "reasoning_effort"], reasoning_efforts: ["low", "medium", "high"] }] }));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    if (!JSON.stringify(body.messages).includes("Write a title")) turns.push(body);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end("data: " + JSON.stringify({ choices: [{ index: 0, delta: { content: "effort-reply" }, finish_reason: null }] })
+      + "\n\ndata: " + JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }) + "\n\ndata: [DONE]\n\n");
+  });
+  await new Promise<void>((done) => provider.listen(0, "127.0.0.1", done));
+  const address = provider.address();
+  if (!address || typeof address === "string") throw Error("Provider fixture did not bind");
+  const { page, errors, close } = await launch(info, async (workspace) => {
+    await writeFile(
+      join(workspace, ".haarness/config.toml"),
+      `[defaults]\nprovider="effort-fixture"\nmodel="effort-model"\nreasoning_effort="high"\n[providers.effort-fixture]\nname="Effort fixture"\nprotocol="openai-chat-completions"\nbase_url="http://127.0.0.1:${address.port}/v1"\nrequires_auth=false\ntools=true\nreasoning=true\n`,
+    );
+    await mkdir(join(workspace, ".haarness/commands"), { recursive: true });
+    await writeFile(join(workspace, ".haarness/commands/review-code.md"), "---\ndescription: Review code\n---\nReview $ARGUMENTS.\n");
+  });
+  try {
+    const model = page.getByRole("combobox", { name: "Model", exact: true });
+    const slider = page.getByRole("slider", { name: "Reasoning effort", exact: true });
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    const heading = page.locator(".reasoning-current strong");
+    const done = page.locator(".select-footer").getByRole("button", { name: "Done", exact: true });
+    async function ask(text: string, replies: number) {
+      await input.fill(text);
+      await input.press("Enter");
+      await expect(page.locator(".message.assistant")).toHaveCount(replies);
+      await expect.poll(() => turns.length).toBe(replies);
+      await expect(page.getByRole("button", { name: "Stop response", exact: true })).toHaveCount(0);
+      return turns.at(-1)!;
+    }
+    // The thumb moves at once, so each picture shows where it stops.
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(model).toHaveAttribute("data-value", "effort-fixture/effort-model");
+    // No choice made: the configured level is the one shown, on the pill too,
+    // and the picker marks it as the default.
+    await expect(model.locator(".model-effort-summary")).toHaveText("High");
+    await model.click();
+    await expect(slider).toHaveAttribute("aria-valuetext", "High");
+    await expect(heading).toHaveText("High default");
+    await expect(page.locator(".reasoning-scale span").first()).toHaveText("Model default");
+    const picker = page.locator(".select-popover");
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await shot(page, [picker, model], info.outputPath(`configured-level-${value}.png`));
+    }
+    await done.click();
+    await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    // The pill's own name is Arabic now; its class is not. The thumb stands
+    // inside the track at its far end, which reads leftward.
+    const pill = page.locator(".composer-model");
+    await pill.click();
+    await expect(page.locator(".reasoning-default")).toHaveText("افتراضي");
+    const [track, thumb] = await Promise.all([page.locator(".reasoning-slider").boundingBox(), page.locator(".reasoning-thumb").boundingBox()]);
+    expect(thumb!.x).toBeGreaterThanOrEqual(track!.x);
+    expect(thumb!.x - track!.x).toBeLessThan(10);
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await shot(page, [picker, pill], info.outputPath(`configured-level-ar-${value}.png`));
+    }
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+    await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+    await expect(page.locator("html")).not.toHaveAttribute("dir", "rtl");
+    expect((await ask("first at the configured level", 1)).reasoning_effort).toBe("high");
+
+    // Model default is a choice of its own: the request names no effort, and
+    // a slash command runs at it too.
+    const reset = page.getByRole("button", { name: "Reset to default", exact: true });
+    await model.click();
+    await slider.focus();
+    await slider.press("Home");
+    await expect(slider).toHaveAttribute("aria-valuetext", "Model default");
+    await expect(heading).toHaveText("Model default");
+    await expect(reset).toBeEnabled();
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await shot(page, [picker, model], info.outputPath(`model-default-${value}.png`));
+    }
+    await done.click();
+    await expect(model.locator(".model-effort-summary")).toHaveCount(0);
+    expect(await ask("second at the model default", 2)).not.toHaveProperty("reasoning_effort");
+    expect(await ask("/review-code at the model default", 3)).not.toHaveProperty("reasoning_effort");
+
+    // Reset follows the configuration again: nothing is named, and the turn
+    // runs at the configured level.
+    await model.click();
+    await reset.click();
+    await expect(slider).toHaveAttribute("aria-valuetext", "High");
+    await expect(heading).toHaveText("High default");
+    await expect(reset).toBeDisabled();
+    await done.click();
+    expect((await ask("fourth back on the configured level", 4)).reasoning_effort).toBe("high");
+
+    // A level picked goes out as it is, for a message and a slash command.
+    await model.click();
+    await slider.focus();
+    await slider.press("Home");
+    await slider.press("ArrowRight");
+    await expect(slider).toHaveAttribute("aria-valuetext", "Low");
+    await expect(heading).toHaveText("Low");
+    await done.click();
+    expect((await ask("fifth at low", 5)).reasoning_effort).toBe("low");
+    expect((await ask("/review-code at low", 6)).reasoning_effort).toBe("low");
+
+    // A model that lists no levels is sent the configured one as written, so
+    // the picker shows it, with Model default to override it.
+    await model.click();
+    await picker.locator('[role="option"][data-value="echo/echo-1"]').click();
+    await expect(model).toHaveAttribute("data-value", "echo/echo-1");
+    await expect(slider).toHaveAttribute("max", "1");
+    await expect(slider).toHaveAttribute("aria-valuetext", "High");
+    await expect(heading).toHaveText("High default");
+    await expect(reset).toBeDisabled();
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await shot(page, [picker, model], info.outputPath(`no-levels-${value}.png`));
+    }
+    await done.click();
+    await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    await pill.click();
+    await expect(page.locator(".reasoning-default")).toHaveText("افتراضي");
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await shot(page, [picker, pill], info.outputPath(`no-levels-ar-${value}.png`));
+    }
+    // The slider's own name is Arabic too.
+    const range = page.locator(".reasoning-slider input");
+    await range.focus();
+    await range.press("Home");
+    await expect(page.locator(".reasoning-default")).toHaveCount(0);
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await shot(page, [picker, pill], info.outputPath(`model-default-ar-${value}.png`));
+    }
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+    await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+    await expect(page.locator("html")).not.toHaveAttribute("dir", "rtl");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
 });

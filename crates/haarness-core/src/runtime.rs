@@ -2111,6 +2111,14 @@ impl AgentRuntime {
         )
     }
 
+    /// The configured reasoning effort (`defaults.reasoning_effort`) a turn
+    /// that names none runs at, if any.
+    #[must_use]
+    pub fn default_reasoning_effort(&self) -> Option<String> {
+        configured_reasoning_effort(self.components().config.default_reasoning_effort.as_deref())
+            .map(str::to_owned)
+    }
+
     fn components(&self) -> Arc<RuntimeComponents> {
         self.components.read().clone()
     }
@@ -9118,20 +9126,14 @@ impl RunnerTask {
                     reasoning_effort: if self.turn.ultracode {
                         ultracode_effort.clone()
                     } else {
-                        self.request
-                            .reasoning_effort
-                            .clone()
-                            .or_else(|| self.config.default_reasoning_effort.clone())
-                            .map(|effort| {
-                                supported_reasoning_effort(&provider_models, &model, effort)
-                            })
-                            .or_else(|| {
-                                default_visible_reasoning_effort(
-                                    &provider_models,
-                                    provider_id,
-                                    &model,
-                                )
-                            })
+                        turn_reasoning_effort(
+                            self.request.reasoning_effort.as_deref(),
+                            self.config.default_reasoning_effort.as_deref(),
+                        )
+                        .map(|effort| supported_reasoning_effort(&provider_models, &model, effort))
+                        .or_else(|| {
+                            default_visible_reasoning_effort(&provider_models, provider_id, &model)
+                        })
                     },
                     parameters: crate::RequestParameters {
                         cache_key: Some(self.thread.id.to_string()),
@@ -13744,6 +13746,26 @@ fn default_visible_reasoning_effort(
         .then(|| "medium".to_owned())
 }
 
+/// A configured `defaults.reasoning_effort` that names a level: an empty value
+/// or the model's own default configures nothing.
+fn configured_reasoning_effort(configured: Option<&str>) -> Option<&str> {
+    configured.filter(|effort| {
+        !effort.trim().is_empty() && *effort != haarness_protocol::MODEL_DEFAULT_EFFORT
+    })
+}
+
+/// The effort a turn asks for before it is fitted to the model: the request's
+/// own level, else the configured default. A request that names the model's
+/// default ([`haarness_protocol::MODEL_DEFAULT_EFFORT`]) skips the configured
+/// one, so the turn runs as it would with nothing configured.
+fn turn_reasoning_effort(requested: Option<&str>, configured: Option<&str>) -> Option<String> {
+    match requested {
+        Some(haarness_protocol::MODEL_DEFAULT_EFFORT) => None,
+        Some(effort) => Some(effort.to_owned()),
+        None => configured_reasoning_effort(configured).map(str::to_owned),
+    }
+}
+
 /// A chat keeps its effort when it switches model, and configured defaults name
 /// any level, but providers answer 400 to a level a model lacks (`none` on
 /// GPT-6.1 Sol, `minimal` on Claude). Use the nearest level the model lists,
@@ -13753,31 +13775,12 @@ fn supported_reasoning_effort(
     requested: &str,
     effort: String,
 ) -> String {
-    let Some(metadata) =
-        model_metadata(models, requested).filter(|model| !model.reasoning_efforts.is_empty())
-    else {
-        return effort;
-    };
-    if metadata.reasoning_efforts.contains(&effort) {
-        return effort;
-    }
-    let rank = |level: &str| {
-        haarness_protocol::REASONING_EFFORTS
-            .iter()
-            .position(|known| *known == level)
-            // `ultra` and other levels beyond `max` rank as the strongest.
-            .unwrap_or(haarness_protocol::REASONING_EFFORTS.len())
-    };
-    let wanted = rank(&effort);
-    metadata
-        .reasoning_efforts
-        .iter()
-        .min_by_key(|level| {
-            let rank = rank(level);
-            (rank.abs_diff(wanted), std::cmp::Reverse(rank))
+    let fitted = model_metadata(models, requested)
+        .and_then(|model| {
+            haarness_protocol::nearest_reasoning_effort(&model.reasoning_efforts, &effort)
         })
-        .cloned()
-        .unwrap_or(effort)
+        .map(str::to_owned);
+    fitted.unwrap_or(effort)
 }
 
 /// Resolve the symbolic Ultracode choice at execution time. The model catalog
@@ -17780,6 +17783,24 @@ mod tests {
                 "{model} {requested}"
             );
         }
+    }
+
+    #[test]
+    fn a_turn_naming_the_model_default_skips_the_configured_effort() {
+        use super::turn_reasoning_effort as effort;
+        // Nothing named: the configured level, as before.
+        assert_eq!(effort(None, Some("high")).as_deref(), Some("high"));
+        assert_eq!(effort(None, None), None);
+        // The model's own default wins over the configured level.
+        assert_eq!(effort(Some("default"), Some("high")), None);
+        assert_eq!(effort(Some("default"), None), None);
+        assert_eq!(effort(Some("low"), Some("high")).as_deref(), Some("low"));
+        // A configured value that names no level configures nothing, so it is
+        // never fitted to the model's strongest level.
+        assert_eq!(effort(None, Some("default")), None);
+        assert_eq!(effort(None, Some(" ")), None);
+        assert_eq!(super::configured_reasoning_effort(Some("default")), None);
+        assert_eq!(super::configured_reasoning_effort(Some("max")), Some("max"));
     }
 
     #[test]

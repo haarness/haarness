@@ -953,8 +953,9 @@ pub struct App {
     /// First empty Ctrl+C arms turn/session interruption or app quit; the
     /// matching second press confirms it.
     pub ctrl_c_action: Option<(InterruptTarget, std::time::Instant)>,
-    /// Effort sent with new turns: minimal|low|medium|high, None = provider
-    /// default.
+    /// Effort sent with new turns: a level the model lists, `default` for the
+    /// model's own default over a configured level, or None for no pick (the
+    /// configured level, else the model's default); see `requested_effort`.
     pub reasoning_effort: Option<String>,
     pub theme: Theme,
     /// A saved or committed palette choice takes precedence over automatic
@@ -2577,11 +2578,7 @@ impl App {
                 ref entries,
                 ..
             } => {
-                let current = if self.thread.ultracode {
-                    "ultracode"
-                } else {
-                    self.reasoning_effort.as_deref().unwrap_or("off")
-                };
+                let current = self.reasoning_choice();
                 self.filtered_options(entries)
                     .iter()
                     .position(|entry| entry.value == current)
@@ -3127,13 +3124,68 @@ impl App {
             .map_or(&[], |model| model.reasoning_efforts.as_slice())
     }
 
+    /// The levels a pick may name: those the model lists or, for a model that
+    /// lists none, the configured level, which the server sends it as written.
+    pub fn reasoning_levels(&self) -> Vec<String> {
+        match (self.reasoning_efforts(), self.configured_level()) {
+            ([], Some(configured)) => vec![configured.to_owned()],
+            (levels, _) => levels.to_vec(),
+        }
+    }
+
     pub fn normalize_reasoning(&mut self) {
-        if self
-            .reasoning_effort
-            .as_ref()
-            .is_some_and(|effort| !self.reasoning_efforts().contains(effort))
-        {
+        // The model's own default is no level: every model has one.
+        if self.reasoning_effort.as_ref().is_some_and(|effort| {
+            effort != haarness_protocol::MODEL_DEFAULT_EFFORT
+                && !self.reasoning_levels().contains(effort)
+        }) {
             self.reasoning_effort = None;
+        }
+    }
+
+    /// The level the server's `defaults.reasoning_effort` names, which a turn
+    /// that names no effort runs at.
+    pub fn configured_reasoning(&self) -> Option<&str> {
+        self.server_info
+            .as_ref()?
+            .default_reasoning_effort
+            .as_deref()
+            .filter(|effort| *effort != haarness_protocol::MODEL_DEFAULT_EFFORT)
+    }
+
+    /// The configured level as this model runs it: the nearest level it
+    /// lists, or the level itself when it lists none.
+    pub fn configured_level(&self) -> Option<&str> {
+        let configured = self.configured_reasoning()?;
+        haarness_protocol::nearest_reasoning_effort(self.reasoning_efforts(), configured)
+            .or(Some(configured))
+    }
+
+    /// The Reasoning picker's row for what the next turn runs at: `ultracode`,
+    /// a level, or `off` for the model's own default. With no pick that is
+    /// the configured level, when there is one.
+    pub fn reasoning_choice(&self) -> &str {
+        if self.thread.ultracode {
+            return "ultracode";
+        }
+        match self.reasoning_effort.as_deref() {
+            Some(haarness_protocol::MODEL_DEFAULT_EFFORT) => "off",
+            Some(effort) => effort,
+            None => self.configured_level().unwrap_or("off"),
+        }
+    }
+
+    /// The effort a request names. The model's own default is named only to
+    /// a server with a configured level to override: elsewhere naming none
+    /// means the same, and an older server would refuse the name.
+    pub fn requested_effort(&self) -> Option<String> {
+        match self.reasoning_effort.as_deref() {
+            Some(haarness_protocol::MODEL_DEFAULT_EFFORT)
+                if self.configured_reasoning().is_none() =>
+            {
+                None
+            }
+            effort => effort.map(str::to_owned),
         }
     }
 

@@ -125,6 +125,17 @@ from the active workspace configuration. Clients can combine these with the
 authenticated provider catalog, agent model overrides and recent choices to show
 a concrete model before creating a thread. Missing fields remain compatible with
 older servers; no credentials are included in these preferences.
+`defaultReasoningEffort` is the configured `defaults.reasoning_effort`, the level
+a turn that names no effort runs at (the nearest level the model lists, or the
+value as written for a model that lists none); it is absent when nothing is
+configured. A turn may then name `reasoningEffort: "default"` to run at the
+model's own default instead, and queued prompts, steering and background results
+of that chat keep the choice. A server from before this field does not know the
+name: its turn endpoint refuses it, while its input-queue and command endpoints
+take it as an unknown level and run the turn at the model's strongest level (or
+pass it on to a model that lists none). Clients therefore send it only to a
+server that reports `defaultReasoningEffort`; elsewhere naming no effort means the
+same.
 
 Tool dispatch accepts a model's `functions.` namespace and unambiguous ASCII capitalization differences. Exact registered names take precedence, including names containing that prefix. Ambiguous case matches, spelling mistakes, and other namespaces are not guessed. Resolution uses the full registry before availability and permissions, so a disabled exact name cannot fall back to another tool. The canonical name passes through the same advertised-tool, availability, permission, hook, and snapshot checks. Batch planning applies the same resolution, rejects recursive batches, and records invalid arguments, unknown names, and unavailable tools as individual failures while continuing other well-formed calls.
 

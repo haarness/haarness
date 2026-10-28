@@ -1010,10 +1010,16 @@ async fn run_with_client(
                     crate::api::SubscriptionEvent::Event(event) => {
                         app.reduce(*event, &client).await?;
                     }
-                    crate::api::SubscriptionEvent::ResyncRequired => {
+                    crate::api::SubscriptionEvent::ResyncRequired(info) => {
                         // Replace REST-backed snapshots after replay loss or a
                         // server restart. Clearing deltas avoids duplicating a
                         // partial stream against the authoritative transcript.
+                        // A restarted server read its configuration afresh:
+                        // its info comes with the restart, else it is read.
+                        match info {
+                            Some(info) => app.adopt_server_info(*info),
+                            None => app.refresh_server_info(&client, None).await,
+                        }
                         app.input_queue = client.input_queue(app.thread.id).await.unwrap_or_default();
                         if let Ok(items) = client.items(app.thread.id).await {
                             app.items = items;

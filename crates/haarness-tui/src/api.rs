@@ -267,8 +267,9 @@ pub enum PtyClientEvent {
 pub enum SubscriptionEvent {
     Event(Box<EventEnvelope>),
     /// The replay cursor fell outside the server buffer or the server process
-    /// changed. Callers must replace authoritative REST-backed state.
-    ResyncRequired,
+    /// changed. Callers must replace authoritative REST-backed state. It
+    /// carries the new server's info when the change was found by reading it.
+    ResyncRequired(Option<Box<haarness_protocol::ServerInfo>>),
     ConnectionLost {
         attempt: u32,
     },
@@ -301,7 +302,7 @@ fn parse_sse_frame(frame: &[u8]) -> Option<SubscriptionEvent> {
             .as_deref()
             == Some("resync_required")
     {
-        return Some(SubscriptionEvent::ResyncRequired);
+        return Some(SubscriptionEvent::ResyncRequired(None));
     }
     serde_json::from_str(&data)
         .ok()
@@ -1942,13 +1943,16 @@ impl ApiClient {
                     if expected_workspace.is_none() {
                         expected_workspace.clone_from(&info.workspace);
                     }
-                    if instance.is_some_and(|previous| previous != info.server_instance_id) {
+                    let restarted =
+                        instance.is_some_and(|previous| previous != info.server_instance_id);
+                    instance = Some(info.server_instance_id);
+                    if restarted {
                         cursor = None;
-                        if tx.send(SubscriptionEvent::ResyncRequired).await.is_err() {
+                        let resync = SubscriptionEvent::ResyncRequired(Some(Box::new(info)));
+                        if tx.send(resync).await.is_err() {
                             return;
                         }
                     }
-                    instance = Some(info.server_instance_id);
                 }
                 let endpoint = this.endpoint();
                 let mut request = endpoint
@@ -2070,7 +2074,10 @@ impl ApiClient {
                                         previous != event.server_instance_id
                                     }) {
                                         cursor = None;
-                                        if tx.send(SubscriptionEvent::ResyncRequired).await.is_err()
+                                        if tx
+                                            .send(SubscriptionEvent::ResyncRequired(None))
+                                            .await
+                                            .is_err()
                                         {
                                             return;
                                         }
@@ -2085,9 +2092,13 @@ impl ApiClient {
                                         return;
                                     }
                                 }
-                                SubscriptionEvent::ResyncRequired => {
+                                SubscriptionEvent::ResyncRequired(info) => {
                                     resynced = true;
-                                    if tx.send(SubscriptionEvent::ResyncRequired).await.is_err() {
+                                    if tx
+                                        .send(SubscriptionEvent::ResyncRequired(info))
+                                        .await
+                                        .is_err()
+                                    {
                                         return;
                                     }
                                 }
@@ -2659,6 +2670,7 @@ mod tests {
             default_provider: None,
             default_model: None,
             default_approval_mode: None,
+            default_reasoning_effort: None,
             default_agent: None,
             project_trusted: Some(true),
             pid: None,
@@ -2698,7 +2710,7 @@ mod tests {
     fn parses_resync_and_regular_sse_frames() {
         assert!(matches!(
             parse_sse_frame(b"event: resync_required\ndata: {\"type\":\"resync_required\"}\n\n"),
-            Some(SubscriptionEvent::ResyncRequired)
+            Some(SubscriptionEvent::ResyncRequired(None))
         ));
         let event = haarness_protocol::EventEnvelope {
             schema_version: haarness_protocol::SCHEMA_VERSION.into(),
@@ -3012,7 +3024,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
             {
-                SubscriptionEvent::ResyncRequired => resync = true,
+                SubscriptionEvent::ResyncRequired(_) => resync = true,
                 SubscriptionEvent::Reconnected => reconnected = true,
                 SubscriptionEvent::Event(event) if event.server_instance_id == new_instance => {
                     received_event = true;
@@ -3099,7 +3111,7 @@ mod tests {
         assert!(
             matches!(
                 seen.as_slice(),
-                [SubscriptionEvent::ResyncRequired, SubscriptionEvent::Event(event)] if event.event_id == 9
+                [SubscriptionEvent::ResyncRequired(_), SubscriptionEvent::Event(event)] if event.event_id == 9
             ),
             "no connection-lost notice between the resync and the next stream: {seen:?}"
         );
@@ -3151,7 +3163,7 @@ mod tests {
                     seen.push(format!("lost {attempt}"))
                 }
                 SubscriptionEvent::ServerRestarting => seen.push("restarting".into()),
-                SubscriptionEvent::ResyncRequired => seen.push("resync".into()),
+                SubscriptionEvent::ResyncRequired(_) => seen.push("resync".into()),
                 SubscriptionEvent::Reconnected => break,
                 SubscriptionEvent::Event(_) | SubscriptionEvent::ServerRestartFailed(_) => {}
             }
@@ -3557,18 +3569,20 @@ mod tests {
     async fn a_subscription_started_again_resyncs_first() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let info = serde_json::to_string(&fixture_server_info(uuid::Uuid::now_v7(), "/w")).unwrap();
+        let instance = uuid::Uuid::now_v7();
+        let info = serde_json::to_string(&fixture_server_info(instance, "/w")).unwrap();
         let server = tokio::spawn(serve_responses(
             listener,
             vec![response("application/json", &info)],
         ));
         let client = ApiClient::new(&format!("http://{address}"), "token").unwrap();
         let (mut events, task) = client.subscribe(Some((uuid::Uuid::nil(), 0)));
+        // With the info it read, so the TUI need not read it again.
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(5), events.recv())
                 .await
                 .unwrap(),
-            Some(SubscriptionEvent::ResyncRequired)
+            Some(SubscriptionEvent::ResyncRequired(Some(info))) if info.server_instance_id == instance
         ));
         task.abort();
         server.abort();
@@ -3615,7 +3629,7 @@ mod tests {
             );
         }
         assert!(
-            matches!(seen[0], SubscriptionEvent::ResyncRequired),
+            matches!(seen[0], SubscriptionEvent::ResyncRequired(_)),
             "{seen:?}"
         );
         task.abort();

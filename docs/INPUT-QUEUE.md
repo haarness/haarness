@@ -97,7 +97,7 @@ Slash commands and shell-mode commands are not deferred. Deferred-message action
 
 Three optional fields settle how a turn this input starts runs:
 
-- `reasoningEffort` picks the effort. Without it, the turn keeps the effort of the chat's latest prompt. Queued prompts, steering that starts a turn, background agent results and the continuation after Stop all keep it, rather than falling back to the default.
+- `reasoningEffort` picks the effort: a level, or `default` for the model's own default over a configured `defaults.reasoning_effort` (see [the API](API.md)). Without it, the turn keeps the effort of the chat's latest prompt. Queued prompts, steering that starts a turn, background agent results and the continuation after Stop all keep it, rather than falling back to the default.
 - `preview` says whether the client can show file previews. Text clients send `false`. Without it, the turn keeps the chat's last recorded value, so a prompt from a phone or a background result sends the model the same tools and system prompt as the turn before. Changing them would also rewrite the provider's whole cached prompt prefix.
 - `attended: true` says a person is at the client and can stop the turn, as Desktop, the terminal UI and an editor over ACP send it. A command's or skill's `` !`…` `` snippet in that turn then runs until it finishes or is stopped, instead of ending at `execution.shell_timeout_ms`. A queued message keeps it until it runs; without it, the turn keeps the deadline.
 
