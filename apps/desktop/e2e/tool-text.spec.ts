@@ -228,9 +228,14 @@ test("a right-to-left name keeps its code in one piece on its row and in its pan
   // closed), and before the language changes.
   const row = page.locator("details.tool-call").filter({ hasText: "200F" }).last();
   await expect(row).toHaveAttribute("data-status", "done");
-  await row.locator("summary").click();
   const input = row.locator(".tool-input");
-  await expect(input.locator(".spelled-code")).toHaveText("\\u{200F}");
+  // A reply landing on a busy machine can draw the row again, closed: open it
+  // until it stays open.
+  await expect(async () => {
+    if (!(await row.evaluate((element) => (element as HTMLDetailsElement).open)))
+      await row.locator("summary").click();
+    await expect(input.locator(".spelled-code")).toHaveText("\\u{200F}", { timeout: 2_000 });
+  }).toPass();
   await page.evaluate(() => (window as any).haarness.preferences({ language: "ar" }));
   try {
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
