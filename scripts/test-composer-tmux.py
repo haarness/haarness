@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The TUI's composer features in a real tmux pane, on the echo provider:
 long pastes (its own and Desktop's), slash commands shown as typed, the
-thinking display (Compact, Show, Hide), and a file over a message's media
-limit picked with @, refused with the draft kept. Pane captures, with their
-colours, go to COMPOSER_TMUX_EVIDENCE."""
+thinking display (Compact, Show, Hide), and files dropped into the prompt
+(media attached, other files and every file in shell mode kept as paths,
+media over a message's limit refused with the draft kept). Pane captures,
+with their colours, go to COMPOSER_TMUX_EVIDENCE."""
 import json
 import os
 import shlex
@@ -203,16 +204,58 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
         until(lambda: "Thinking display: Compact" in pane(), "Ctrl+T did not cycle back to Compact")
         checks.append("Thinking: one Thinking · <newest line> row, ▹ Thought for Ns that a click opens, Ctrl+T Compact → Show → Hide → Compact, kept across launches")
 
-        # A PDF over the 20 MiB a message carries, picked with @: the server
-        # refuses it in plain words, and the draft and its attachment stay.
+        # Files dropped into the prompt: a terminal pastes a dropped file's
+        # path, its spaces escaped.
         drops = root / "drops"
         drops.mkdir()
+        (drops / "README.md").write_text("# Notes\n")
+        (drops / "design.pdf").write_text("version https://git-lfs.github.com/spec/v1\noid sha256:4d7a\nsize 1048576\n")
+        (drops / "report.pdf").write_bytes(b"%PDF-1.7\n%%EOF\n")
+        (drops / "screen shot.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
         with open(drops / "scan.pdf", "wb") as handle:
             handle.write(b"%PDF-1.7\n")
             handle.truncate(21 * 1024 * 1024)
 
+        def drop(path):
+            run("tmux", "set-buffer", "-b", "composer", str(path).replace(" ", "\\ "))
+            run("tmux", "paste-buffer", "-p", "-b", "composer", "-t", session)
+
+        def draft():
+            """The prompt's text with its wrapped rows put back together."""
+            return "".join(line.strip() for line in composer().splitlines())
+
+        for name in ("README.md", "design.pdf"):
+            drop(drops / name)
+            until(lambda: f"{drops}/{name}" in draft(), f"a dropped {name} did not stay its path")
+            time.sleep(0.5)
+            assert "Attached" not in pane() and "not a supported" not in pane(), pane()
+            assert "No matches" not in pane(), "a dropped path opened the command list"
+            screen(f"drop-{name}")
+            keys("C-u")
+        drop(drops / "report.pdf")
+        until(lambda: "Attached 1 file" in pane() and "report.pdf" in composer(), "a dropped PDF was not attached")
+        screen("drop-pdf-attached")
+        keys("BSpace")
+        until(lambda: "report.pdf" not in composer(), "Backspace did not remove the PDF")
+        checks.append("Drops: README.md and a .pdf that is not a PDF stay their paths, no command list; a real PDF is attached")
+
+        text("!")
+        until(lambda: "shell — Enter runs the command" in pane(), "shell mode did not open")
+        text("ls -l ")
+        drop(drops / "screen shot.png")
+        until(lambda: f"{drops}/screen\\ shot.png" in draft(), "a file dropped in shell mode did not stay its path")
+        assert "Attached" not in pane(), pane()
+        screen("drop-shell")
+        keys("Enter")
+
         def items():
             return [item for chat in api("/threads") for item in api(f"/threads/{chat['id']}/items")]
+
+        def listed():
+            return any(item["data"]["type"] == "tool_result" and "screen shot.png" in item["data"].get("output", "")
+                       for item in items())
+        until(listed, "the shell command did not get the dropped path")
+        checks.append("Shell mode: a dropped image stays its path and the command runs on it")
 
         before = len(items())
         text(f"Summarise @{drops}/scan")

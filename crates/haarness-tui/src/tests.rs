@@ -24484,3 +24484,45 @@ async fn yolo_is_offered_only_where_the_server_keeps_it() {
     assert_eq!(requests.len(), 2, "{requests:#?}");
     assert!(requests[1].contains("\"mode\":\"yolo\""), "{}", requests[1]);
 }
+
+#[test]
+fn a_file_dropped_into_shell_mode_stays_its_path() {
+    let root = std::env::temp_dir().join(format!("haarness-drop-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let image = root.join("screen shot.png");
+    std::fs::write(&image, b"png fixture").unwrap();
+    let dropped = image.display().to_string().replace(' ', "\\ ");
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+
+    app.shell_mode = true;
+    app.composer.set_text("open ".into());
+    app.paste_into_prompt(&dropped);
+    assert!(app.attachments.is_empty());
+    assert_eq!(app.composer.text(), format!("open {dropped}"));
+
+    // Out of shell mode the same drop is an attachment.
+    app.shell_mode = false;
+    app.composer.clear();
+    app.paste_into_prompt(&dropped);
+    assert_eq!(
+        app.attachments,
+        vec![image.canonicalize().unwrap().display().to_string()]
+    );
+    assert!(app.composer.is_empty());
+
+    // A path to a file that is not media is text, not a refusal, and no
+    // command list opens over it.
+    let readme = root.join("README.md");
+    std::fs::write(&readme, "# Notes\n").unwrap();
+    app.notice.clear();
+    app.paste_into_prompt(&readme.display().to_string());
+    assert_eq!(app.composer.text(), readme.display().to_string());
+    assert!(app.notice.is_empty(), "{}", app.notice);
+    assert_eq!(app.attachments.len(), 1);
+    assert!(app.slash_suggestions().is_none());
+    app.composer.set_text("/mod".into());
+    assert!(app.slash_suggestions().is_some());
+
+    let _ = std::fs::remove_dir_all(root);
+}

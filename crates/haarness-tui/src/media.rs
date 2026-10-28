@@ -1,5 +1,6 @@
 //! Terminal paste/drop recognition for local document and media attachments.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -7,6 +8,8 @@ use tokio::io::AsyncReadExt as _;
 
 const MAX_ATTACHMENTS: usize = 8;
 const MAX_INLINE_BYTES: u64 = haarness_protocol::MAX_INLINE_MEDIA_BYTES as u64;
+/// How far into a file PDF readers look for its `%PDF-` header.
+const PDF_HEADER_WINDOW: u64 = 1024;
 
 /// Turn client-local paths into data URLs for an explicitly attached server.
 /// The filename parameter is display-only; provider adapters ignore it while
@@ -103,10 +106,12 @@ pub fn attachment_display(source: &str) -> (&str, String) {
     (badge, name)
 }
 
-/// Recognize a bracketed paste as one or more local attachment paths to add
-/// to `attached` (the draft's attachments). `None` means ordinary text; `Err`
-/// means it was definitely a file drop but could not be accepted and should
-/// be reported rather than inserted as a prompt.
+/// Recognize a bracketed paste as one or more local media paths to attach
+/// next to `attached` (the draft's attachments). `None` means ordinary text:
+/// not paths, or a path to a file that is not media (a README, or one named
+/// `.pdf` that is not a PDF), which a prompt names as text. `Err` means it
+/// was media that cannot be accepted and should be reported rather than
+/// inserted as a prompt.
 pub fn paths_from_paste(value: &str, attached: &[String]) -> Result<Option<Vec<String>>, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -129,6 +134,9 @@ pub fn paths_from_paste(value: &str, attached: &[String]) -> Result<Option<Vec<S
         }
         paths
     };
+    if !candidates.iter().all(|path| is_media(path)) {
+        return Ok(None);
+    }
     if candidates.len() > MAX_ATTACHMENTS {
         return Err(format!("Attach at most {MAX_ATTACHMENTS} files at once"));
     }
@@ -139,15 +147,6 @@ pub fn paths_from_paste(value: &str, attached: &[String]) -> Result<Option<Vec<S
         .fold(0_u64, u64::saturating_add);
     let mut result = Vec::new();
     for path in candidates {
-        if mime_for_path(&path).is_none() {
-            return Err(format!(
-                "{} is not a supported image, PDF, audio, or video",
-                path.file_name().map_or_else(
-                    || path.display().to_string(),
-                    |name| name.to_string_lossy().into()
-                )
-            ));
-        }
         let size = path
             .metadata()
             .map_err(|error| format!("Cannot read {}: {error}", path.display()))?
@@ -162,6 +161,22 @@ pub fn paths_from_paste(value: &str, attached: &[String]) -> Result<Option<Vec<S
         result.push(canonical.display().to_string());
     }
     Ok(Some(result))
+}
+
+/// Whether a file is media a message attaches: an image, audio or video by
+/// its name, or a PDF whose first kilobyte holds the `%PDF-` header (a Git
+/// LFS pointer named `.pdf` is text).
+fn is_media(path: &Path) -> bool {
+    match mime_for_path(path) {
+        Some("application/pdf") => {
+            let mut head = Vec::new();
+            std::fs::File::open(path)
+                .and_then(|file| file.take(PDF_HEADER_WINDOW).read_to_end(&mut head))
+                .is_ok_and(|_| head.windows(5).any(|part| part == b"%PDF-"))
+        }
+        Some(_) => true,
+        None => false,
+    }
 }
 
 /// The bytes an attachment of the draft sends: a data URL's payload, or a
@@ -404,6 +419,48 @@ mod tests {
         assert_eq!(
             attachment_display(&sources[1]),
             ("aud", "meeting.mp3".into())
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_pasted_path_to_a_file_that_is_not_media_stays_text() {
+        let root = std::env::temp_dir().join(format!("haarness-paste-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let readme = root.join("README.md");
+        std::fs::write(&readme, "# Notes\n").unwrap();
+        let image = root.join("shot.png");
+        std::fs::write(&image, b"png fixture").unwrap();
+
+        assert_eq!(paths_from_paste(readme.to_str().unwrap(), &[]), Ok(None));
+        // Together with media too: the paste is text naming both.
+        let both = format!("{} {}", image.display(), readme.display());
+        assert_eq!(paths_from_paste(&both, &[]), Ok(None));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_file_named_pdf_counts_as_one_only_when_it_holds_one() {
+        let root = std::env::temp_dir().join(format!("haarness-paste-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pointer = root.join("design.pdf");
+        std::fs::write(
+            &pointer,
+            "version https://git-lfs.github.com/spec/v1\noid sha256:4d7a\nsize 1048576\n",
+        )
+        .unwrap();
+        assert_eq!(paths_from_paste(pointer.to_str().unwrap(), &[]), Ok(None));
+
+        // A real one, its header after a little junk as readers allow.
+        let real = root.join("report.pdf");
+        std::fs::write(&real, b"\r\n%PDF-1.7\n%%EOF\n").unwrap();
+        assert_eq!(
+            paths_from_paste(real.to_str().unwrap(), &[]),
+            Ok(Some(vec![
+                real.canonicalize().unwrap().display().to_string()
+            ]))
         );
 
         let _ = std::fs::remove_dir_all(root);
