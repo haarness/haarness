@@ -4166,7 +4166,7 @@
             ]
           },
           "reasoningEffort": {
-            "description": "Reasoning effort chosen with the message. `None` keeps the effort of\nthe chat's latest prompt.",
+            "description": "Reasoning effort chosen with the message. `None` keeps the effort of\nthe chat's latest prompt; `default` runs it at the model's own default\nover a configured level.",
             "type": [
               "string",
               "null"
@@ -4965,7 +4965,7 @@
             ]
           },
           "reasoningEffort": {
-            "description": "Reasoning effort for a turn this input starts. `None` keeps the\neffort of the chat's latest prompt.",
+            "description": "Reasoning effort for a turn this input starts. `None` keeps the\neffort of the chat's latest prompt; `default` runs it at the model's\nown default over a configured level.",
             "type": [
               "string",
               "null"
