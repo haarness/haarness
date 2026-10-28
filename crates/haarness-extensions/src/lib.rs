@@ -644,7 +644,10 @@ impl ToolRegistry for CombinedTools {
         let extensions = self.extensions.clone();
         let overrides = self.overrides.clone();
         let defined = self.defined.clone();
-        Some(Box::pin(async move {
+        // The hooks run in a task of their own, which a turn stopped while
+        // it waits leaves running: a hook call given up on stops its
+        // extension.
+        let pass = tokio::spawn(async move {
             if let Some(starting) = starting {
                 starting.await;
             }
@@ -653,10 +656,12 @@ impl ToolRegistry for CombinedTools {
             let mut defined = defined.lock().await;
             let definers = extensions.definers();
             for definition in inner.list() {
-                if !defined.insert(definition.name.clone()) {
+                if defined.contains(&definition.name) {
                     continue;
                 }
-                match redefine(&definers, &definition).await {
+                let redefined = redefine(&definers, &definition).await;
+                defined.insert(definition.name.clone());
+                match redefined {
                     Ok(Some(current)) => {
                         overrides
                             .write()
@@ -671,6 +676,9 @@ impl ToolRegistry for CombinedTools {
                     ),
                 }
             }
+        });
+        Some(Box::pin(async move {
+            let _ = pass.await;
         }))
     }
     fn list(&self) -> Vec<ToolDefinition> {
