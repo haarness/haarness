@@ -1,6 +1,7 @@
 //! File-system lookups a request waits for only so long. A path on a network
-//! volume that went offline (an automounted map, a share whose server went to
-//! sleep), or a link into one, can hold a single call for minutes. Such a
+//! volume that went offline (a share whose server went to sleep, a mount on a
+//! network the computer left), or a link into one, can hold a single call for
+//! minutes. Such a
 //! lookup runs on a blocking thread, the request waits for it until its
 //! deadline, and the thread is left to finish on its own.
 //!
@@ -223,7 +224,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn callers_of_one_path_share_one_lookup_and_kinds_stay_apart() {
+    async fn asking_twice_about_a_path_starts_one_lookup_of_each_kind() {
         let path = unique("shared");
         let started = Arc::new(AtomicUsize::new(0));
         let slow = |started: Arc<AtomicUsize>, answer: u32| {

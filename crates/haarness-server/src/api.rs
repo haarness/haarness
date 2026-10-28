@@ -2141,25 +2141,6 @@ const PATH_LOOKUPS: PathLookups = PathLookups {
 /// How many of a folder's links are resolved at once.
 const LINKS_AT_ONCE: usize = 4;
 
-/// How long completion in a folder whose links ran out of time starts no
-/// new link lookups there, so a folder of links into an offline volume holds
-/// a few blocking threads, not a few more with every keystroke. Meanwhile its
-/// links show as they answered then, or as they answered since.
-const SLOW_LINKS_REST: Duration = Duration::from_secs(30);
-
-/// Folders whose links ran out of time: when, and whether each link that
-/// answered in time leads to a folder.
-type SlowLinkFolders = std::collections::HashMap<
-    std::path::PathBuf,
-    (
-        tokio::time::Instant,
-        Arc<std::collections::HashMap<String, bool>>,
-    ),
->;
-
-static SLOW_LINK_FOLDERS: std::sync::LazyLock<parking_lot::Mutex<SlowLinkFolders>> =
-    std::sync::LazyLock::new(Default::default);
-
 /// An entry's type, as a folder listing gives it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntryKind {
@@ -2281,46 +2262,25 @@ async fn explicit_path_suggestions(
         .filter(|(_, kind, _)| *kind == EntryKind::Link)
         .map(|(name, _, _)| name.clone())
         .collect::<Vec<_>>();
-    let resting = {
-        let mut slow = SLOW_LINK_FOLDERS.lock();
-        slow.retain(|_, (since, _)| since.elapsed() < SLOW_LINKS_REST);
-        slow.get(&directory)
-            .map(|(_, answered)| Arc::clone(answered))
-    };
+    // A link whose lookup is stuck answers at once that it did not resolve
+    // in time, and is not looked up again until that lookup returns (see
+    // `crate::lookups`): a folder of links into an offline volume holds one
+    // blocking thread per link at most, however often it is completed.
     let resolved = futures::stream::iter(links)
         .map(|name| {
             let link = directory.join(&name);
-            let resting = resting.clone();
             async move {
-                let folder = match resting {
-                    Some(answered) => answered
-                        .get(&name)
-                        .copied()
-                        .or_else(|| crate::lookups::kept("link", &link)),
-                    None => {
-                        let path = link.clone();
-                        crate::lookups::within("link", &link, deadline, move || {
-                            (lookups.follow)(&path)
-                        })
-                        .await
-                    }
-                };
+                let path = link.clone();
+                let folder = crate::lookups::within("link", &link, deadline, move || {
+                    (lookups.follow)(&path)
+                })
+                .await;
                 (name, folder)
             }
         })
         .buffer_unordered(LINKS_AT_ONCE)
         .collect::<Vec<_>>()
         .await;
-    if resting.is_none() && resolved.iter().any(|(_, folder)| folder.is_none()) {
-        let answered = resolved
-            .iter()
-            .filter_map(|(name, folder)| folder.map(|folder| (name.clone(), folder)))
-            .collect();
-        SLOW_LINK_FOLDERS.lock().insert(
-            directory.clone(),
-            (tokio::time::Instant::now(), Arc::new(answered)),
-        );
-    }
     let linked_folders = resolved
         .into_iter()
         .filter_map(|(name, folder)| folder.unwrap_or(false).then_some(name))
@@ -2392,8 +2352,7 @@ fn fuzzy_score(path: &str, query: &str) -> Option<i64> {
 #[cfg(test)]
 mod file_search_tests {
     use super::{
-        LINKS_AT_ONCE, Listing, PATH_LOOKUPS, PathLookups, explicit_path_suggestions, fuzzy_score,
-        list_folder,
+        Listing, PATH_LOOKUPS, PathLookups, explicit_path_suggestions, fuzzy_score, list_folder,
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -2539,24 +2498,24 @@ mod file_search_tests {
         list_folder(folder)
     }
 
-    /// `query`'s completion, asked `asks` times in a row on another thread,
-    /// so a completion that holds its thread fails the test instead of
-    /// hanging it: the answers that came within 5 s each, and how long each
-    /// took. `release` then lets the lookups that hang go.
+    /// The completions of `queries`, asked in a row on another thread, so a
+    /// completion that holds its thread fails the test instead of hanging
+    /// it: the answers that came within 5 s each, and how long each took.
+    /// `release` then lets the lookups that hang go.
     fn complete(
         workspace: PathBuf,
-        query: &'static str,
+        queries: &[&'static str],
         lookups: PathLookups,
-        asks: usize,
         release: &AtomicBool,
     ) -> Vec<(Vec<String>, Duration)> {
         let (sender, answers) = std::sync::mpsc::channel();
+        let asked = queries.to_vec();
         let asking = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            for _ in 0..asks {
+            for query in asked {
                 let started = Instant::now();
                 let found =
                     runtime.block_on(explicit_path_suggestions(&workspace, query, 20, lookups));
@@ -2564,7 +2523,7 @@ mod file_search_tests {
             }
         });
         let found = std::iter::from_fn(|| answers.recv_timeout(Duration::from_secs(5)).ok())
-            .take(asks)
+            .take(queries.len())
             .collect();
         release.store(true, Ordering::SeqCst);
         asking.join().unwrap();
@@ -2589,7 +2548,7 @@ mod file_search_tests {
         // Asked twice while the link hangs: the first answer waits for it as
         // long as links may take, the second not at all, and the linked
         // folder that answered keeps its `/`.
-        let answers = complete(tree.0.clone(), "./", lookups, 2, &LINK_RELEASED);
+        let answers = complete(tree.0.clone(), &["./", "./"], lookups, &LINK_RELEASED);
         assert_eq!(answers.len(), 2, "completion waited on a link that hangs");
         let (first, took) = &answers[0];
         assert_eq!(
@@ -2602,11 +2561,12 @@ mod file_search_tests {
         assert!(*took < Duration::from_millis(150), "{took:?}");
     }
 
-    /// A folder of links into an offline volume holds the few lookups the
-    /// first completion started; the completions after it start no more.
+    /// A folder of links into an offline volume looks each link up once,
+    /// however often it is completed, and a link an earlier completion never
+    /// reached (a narrower query left it out) is still looked up later.
     #[cfg(unix)]
     #[test]
-    fn a_folder_of_offline_links_starts_no_new_lookups_for_a_while() {
+    fn a_folder_of_offline_links_looks_up_each_link_once() {
         let tree = TestTree(
             std::env::temp_dir().join(format!("haarness-offline-{}", uuid::Uuid::now_v7())),
         );
@@ -2614,19 +2574,30 @@ mod file_search_tests {
         for index in 0..6 {
             std::os::unix::fs::symlink("target", tree.0.join(format!("offline-{index}"))).unwrap();
         }
+        std::os::unix::fs::symlink("target", tree.0.join("reachable")).unwrap();
         let lookups = PathLookups {
             follow: follow_offline,
             links: Duration::from_millis(200),
             ..PATH_LOOKUPS
         };
-        let answers = complete(tree.0.clone(), "./off", lookups, 3, &OFFLINE_RELEASED);
-        assert_eq!(answers.len(), 3, "completion waited on links that hang");
+        let answers = complete(
+            tree.0.clone(),
+            &["./off", "./off", "./off", "./off", "./"],
+            lookups,
+            &OFFLINE_RELEASED,
+        );
+        assert_eq!(answers.len(), 5, "completion waited on links that hang");
         assert!(
-            answers
+            answers[..4]
                 .iter()
                 .all(|(found, _)| found.len() == 6 && found.iter().all(|row| !row.ends_with('/')))
         );
-        assert_eq!(OFFLINE_STARTED.load(Ordering::SeqCst), LINKS_AT_ONCE);
+        assert!(
+            answers[4].0.contains(&"./reachable/".to_owned()),
+            "{:?}",
+            answers[4].0
+        );
+        assert_eq!(OFFLINE_STARTED.load(Ordering::SeqCst), 6);
     }
 
     #[test]
@@ -2642,9 +2613,8 @@ mod file_search_tests {
         };
         let answers = complete(
             tree.0.clone(),
-            "./hung-folder/",
+            &["./hung-folder/"],
             lookups,
-            1,
             &FOLDER_RELEASED,
         );
         let [(found, took)] = answers.as_slice() else {
