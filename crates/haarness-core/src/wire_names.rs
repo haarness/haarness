@@ -22,6 +22,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use futures::StreamExt as _;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
@@ -175,7 +176,9 @@ impl WireNames {
         request
     }
 
-    /// `stream` with the tool calls it carries under the tools' own names.
+    /// `stream` with the tool calls it carries under the tools' own names,
+    /// the steps of a `batch` call included, so its stored arguments, hooks,
+    /// approvals and every client read them so too.
     #[must_use]
     pub fn read_back(self: Arc<Self>, stream: ProviderStream) -> ProviderStream {
         if self.is_empty() {
@@ -185,16 +188,39 @@ impl WireNames {
             Ok(ProviderEvent::ToolCall {
                 call_id,
                 name,
-                arguments,
+                mut arguments,
                 provider_metadata,
-            }) => Ok(ProviderEvent::ToolCall {
-                call_id,
-                name: self.own(&name).to_owned(),
-                arguments,
-                provider_metadata,
-            }),
+            }) => {
+                let name = self.own(&name).to_owned();
+                if name == "batch" {
+                    self.own_steps(&mut arguments);
+                }
+                Ok(ProviderEvent::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                    provider_metadata,
+                })
+            }
             other => other,
         }))
+    }
+
+    /// The tools of a `batch` call's steps (`tool_calls[].tool`) under their
+    /// own names.
+    fn own_steps(&self, arguments: &mut Value) {
+        let steps = arguments
+            .get_mut("tool_calls")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten();
+        for step in steps {
+            if let Some(tool) = step.get_mut("tool")
+                && let Some(own) = tool.as_str().map(|name| self.own(name).to_owned())
+            {
+                *tool = Value::String(own);
+            }
+        }
     }
 
     fn rename(&self, name: &mut String) {
@@ -539,6 +565,39 @@ mod tests {
                 "read",
                 "mcp__Docs Server__files.read"
             ]
+        );
+    }
+
+    /// A `batch` call's steps name tools as the provider was sent them; they
+    /// are stored, shown and approved under the tools' own names.
+    #[tokio::test]
+    async fn a_batch_calls_steps_come_back_under_the_tools_own_names() {
+        let names = Arc::new(WireNames::new(["mcp__srv__what?", "read"]));
+        let events = futures::stream::iter([Ok(ProviderEvent::ToolCall {
+            call_id: "call".into(),
+            name: "batch".into(),
+            arguments: json!({"tool_calls": [
+                {"tool": "mcp__srv__what_", "parameters": {}},
+                {"tool": "read", "parameters": {"path": "a"}},
+                {"tool": 3, "parameters": {}}
+            ]}),
+            provider_metadata: Value::Null,
+        })]);
+        let arguments: Vec<Value> = names
+            .read_back(Box::pin(events))
+            .map(|event| match event.unwrap() {
+                ProviderEvent::ToolCall { arguments, .. } => arguments,
+                other => panic!("{other:?}"),
+            })
+            .collect()
+            .await;
+        assert_eq!(
+            arguments,
+            [json!({"tool_calls": [
+                {"tool": "mcp__srv__what?", "parameters": {}},
+                {"tool": "read", "parameters": {"path": "a"}},
+                {"tool": 3, "parameters": {}}
+            ]})]
         );
     }
 
