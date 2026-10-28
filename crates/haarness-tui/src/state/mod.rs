@@ -1074,6 +1074,11 @@ pub struct App {
     /// item. Its metadata holds every step's output, too much to walk or
     /// parse every frame.
     pub batch_results: std::cell::RefCell<std::collections::HashMap<ItemId, BatchOutcomes>>,
+    /// Each tool result's output without its escape sequences, keyed by the
+    /// result item; `None` where that is the stored text itself. Several
+    /// parts of a row read it every frame.
+    pub shown_outputs:
+        std::cell::RefCell<std::collections::HashMap<ItemId, Option<std::rc::Rc<str>>>>,
     /// Bumped when rendering inputs beyond width change (theme switches).
     pub render_generation: u64,
 }
@@ -1303,6 +1308,7 @@ impl App {
             render_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             diff_stats: std::cell::RefCell::new(std::collections::HashMap::new()),
             batch_results: std::cell::RefCell::new(std::collections::HashMap::new()),
+            shown_outputs: std::cell::RefCell::new(std::collections::HashMap::new()),
             render_generation: 0,
         }
     }
@@ -2123,6 +2129,19 @@ impl App {
         count: impl FnOnce() -> (usize, u64, u64),
     ) -> (usize, u64, u64) {
         *self.diff_stats.borrow_mut().entry(id).or_insert_with(count)
+    }
+    /// A result's output as a row shows it, worked out once: results never
+    /// change after they land.
+    pub fn cached_shown_output(
+        &self,
+        id: ItemId,
+        clean: impl FnOnce() -> Option<std::rc::Rc<str>>,
+    ) -> Option<std::rc::Rc<str>> {
+        self.shown_outputs
+            .borrow_mut()
+            .entry(id)
+            .or_insert_with(clean)
+            .clone()
     }
     /// A batch result's entries, read once: results never change after they land.
     pub fn cached_batch_results(

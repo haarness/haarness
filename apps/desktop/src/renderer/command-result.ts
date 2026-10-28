@@ -1,5 +1,6 @@
 import type { CommandExecutionResponse, WorkflowRun } from "@haarness/sdk";
 import { t } from "./i18n";
+import { withoutEscapes } from "./display-text";
 
 /**
  * A command's answer, shown above the composer of its chat until dismissed.
@@ -56,8 +57,11 @@ function workflowRunText(run: WorkflowRun) {
     cancelled: t("Workflow {name} was cancelled.", { name }),
     interrupted: t("Workflow {name} was interrupted.", { name }),
   }[run.status];
-  // The run ID is what /workflow cancel, pause and resume take.
-  return [status, run.error?.trim(), t("Run ID: {id}", { id: run.id })]
+  // The run ID is what /workflow cancel, pause and resume take. A run's
+  // error can carry a program's own output, read without its escape
+  // sequences as tool output is.
+  const error = run.error ? withoutEscapes(run.error).trim() : "";
+  return [status, error, t("Run ID: {id}", { id: run.id })]
     .filter(Boolean)
     .join("\n");
 }

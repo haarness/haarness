@@ -327,7 +327,7 @@ The server keeps the last two megabytes of a terminal's output. Reopening `/term
 
 A program that turns on application cursor keys (vim, less, htop and other full-screen programs) receives the arrows, Home and End as `ESC O x`, which is what the `xterm-256color` entry its `TERM` names says they send.
 
-Bare `/tools` opens the searchable runtime catalog with enabled, resident, deferred, source/group, and estimated-token state; Enter toggles durable workspace availability. `/tools lazy auto|always|off` controls context scaling and `/tools lazy reset` returns to the configured/default mode, while `/tools show|hide` retains the transcript-detail toggle. **Ctrl+R** (`fold` in `/keybinds`) opens or closes the fold nearest the prompt among those on screen, a tool's output, a long prompt or a thought, as a click on it does. Output opened that way, and a failure's, wraps under its gutter so an error reads to its last word; a quiet preview keeps one row per line.
+Bare `/tools` opens the searchable runtime catalog with enabled, resident, deferred, source/group, and estimated-token state; Enter toggles durable workspace availability. `/tools lazy auto|always|off` controls context scaling and `/tools lazy reset` returns to the configured/default mode, while `/tools show|hide` retains the transcript-detail toggle. **Ctrl+R** (`fold` in `/keybinds`) opens or closes the fold nearest the prompt among those on screen, a tool's output, a long prompt or a thought, as a click on it does. Output opened that way, and a failure's, wraps under its gutter so an error reads to its last word; a quiet preview keeps one row per line. Colours, window titles, cursor moves and the other escape sequences a command or an MCP server writes are left out of what is drawn, each sequence whole, there and in a workflow run's errors and logs, so no `[31m` is left of them; a title that is never ended is left out to the end of its line. The model still reads the output as it was written.
 
 `/diff` opens a full-screen review: a nested file tree, syntax-highlighted patches with real line numbers and word-level emphasis, and a line cursor. `/diff` starts on the Git working tree, `/diff branch` compares the current branch with its detected base, and `/diff last` shows the latest completed mutating turn — and `s` cycles between the three without leaving the viewer. Inside it, `tab` moves between the tree and the patches, `n`/`p` jump between edits, `]`/`[` between files, `v` switches side-by-side and stacked layouts, `x` cycles context lines (4, 12, 50, all), `t` hides the tree, `o` shows one patch at a time, `r` marks a file reviewed, `c` queues a comment on the line under the cursor, and `?` lists every shortcut. Queued comments are handed to the composer when the viewer closes, so a review travels with your next message. Layout choices persist between sessions.
 
@@ -549,6 +549,7 @@ models = "F2"                 # rebindable actions as /keybinds lists them; "non
 
 [tui.statusline]
 command = ["my-haarness-status"] # receives JSON on stdin and HAARNESS_STATUS_CONTEXT
+                              # shows its first line with text once escape sequences are left out
 refresh_ms = 2000
 timeout_ms = 5000
 
