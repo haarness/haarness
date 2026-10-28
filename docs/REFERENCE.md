@@ -654,7 +654,7 @@ reasoning = false
 images = false
 video = false                # generic Chat Completions video=true is rejected
 tools = true
-context_window = 131072
+context_window = 131072       # 0 counts as unknown: the model's own window applies
 max_output_tokens = 16384
 
 # Use the native Anthropic Messages wire against a custom commercial gateway.

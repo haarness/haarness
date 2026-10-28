@@ -10263,7 +10263,9 @@ fn provider_instances(
             images: section.images,
             video: section.video,
             tools: section.tools,
-            context_window: section.context_window,
+            // A window of 0 says nothing: the model's own one applies, and no
+            // app shows "0 context".
+            context_window: section.context_window.filter(|window| *window > 0),
             max_output_tokens: section.max_output_tokens,
         };
         let instance = haarness_providers::NativeInstance {
@@ -17589,6 +17591,35 @@ request_timeout = 0
         let runtime = super::runtime_config(&config, Vec::new(), Vec::new(), false).unwrap();
         assert_eq!(runtime.goal_token_budget, Some(24_000));
         assert_eq!(runtime.goal_max_turns, Some(9));
+    }
+
+    #[test]
+    fn a_provider_s_context_window_of_0_counts_as_unknown() {
+        let config: super::FileConfig = toml::from_str(
+            r#"
+            [providers.zero]
+            base_url = "http://127.0.0.1:9999/v1"
+            requires_auth = false
+            context_window = 0
+
+            [providers.given]
+            base_url = "http://127.0.0.1:9998/v1"
+            requires_auth = false
+            context_window = 65536
+        "#,
+        )
+        .unwrap();
+        let (instances, _) = super::provider_instances(&config, &std::collections::HashMap::new());
+        let window = |id: &str| {
+            let Some(haarness_providers::ProviderInstance::OpenAiChatCompletions(instance)) =
+                instances.iter().find(|instance| instance.id() == id)
+            else {
+                panic!("{id} must use Chat Completions")
+            };
+            instance.model_defaults.context_window
+        };
+        assert_eq!(window("zero"), None);
+        assert_eq!(window("given"), Some(65_536));
     }
 
     #[test]
