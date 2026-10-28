@@ -54,6 +54,9 @@ pub const CONFIG_EDIT_RULE: &str = "edit:<haarness configuration>";
 /// as [`Evaluation::matched`] names it (see [`is_credential_store_path`]).
 pub const CREDENTIAL_READ_RULE: &str = "read:<haarness sign-ins>";
 
+/// The rule a change of such a file through the file tools is asked under.
+pub const CREDENTIAL_EDIT_RULE: &str = "edit:<haarness sign-ins>";
+
 /// What a place [`record_credential_store`] names holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Store {
@@ -765,13 +768,12 @@ impl PermissionEngine {
                 configured: at >= self.floor_builtin,
             };
         }
-        // A read of a file where Haarness keeps sign-ins asks a person every
-        // time unless a deny refuses it: no rule, Always answer, Auto,
-        // `--yolo` or hook answers it.
-        if let Some(target) = operation
+        // A read or a change of a file where Haarness keeps sign-ins asks a
+        // person every time unless a deny refuses it: no rule, Always
+        // answer, Auto, `--yolo` or hook answers it.
+        if let Some((permission, target)) = operation
             .split_once(':')
-            .filter(|(permission, _)| *permission == "read")
-            .map(|(_, target)| target)
+            .filter(|(permission, _)| matches!(*permission, "read" | "edit"))
             && self.names_credential_store(target)
         {
             if let Some(rule) = self
@@ -789,7 +791,14 @@ impl PermissionEngine {
             }
             return Evaluation {
                 decision: PermissionDecision::Ask,
-                matched: Some(CREDENTIAL_READ_RULE.into()),
+                matched: Some(
+                    if permission == "edit" {
+                        CREDENTIAL_EDIT_RULE
+                    } else {
+                        CREDENTIAL_READ_RULE
+                    }
+                    .into(),
+                ),
                 protected: true,
                 configured: false,
             };
@@ -870,8 +879,8 @@ impl PermissionEngine {
         }
     }
 
-    /// Whether a `read` target is where Haarness keeps sign-ins, read from
-    /// the project folder when it is relative.
+    /// Whether a `read` or `edit` target is where Haarness keeps sign-ins,
+    /// read from the project folder when it is relative.
     fn names_credential_store(&self, target: &str) -> bool {
         if target.is_empty() || target == "*" {
             return false;
@@ -2685,6 +2694,18 @@ mod tests {
             assert_eq!(evaluation.matched.as_deref(), Some(CREDENTIAL_READ_RULE));
         }
         assert_eq!(engine.evaluate("read:auth.json"), Allow);
+        // A change through the file tools asks the same way.
+        engine.add_rule(rule("edit:*", Allow));
+        for operation in [
+            format!("edit:{}", store.display()),
+            format!("write:{}", store.display()),
+        ] {
+            let evaluation = engine.evaluate_detailed(&operation);
+            assert_eq!(evaluation.decision, Ask, "{operation}");
+            assert!(evaluation.protected, "{operation}");
+            assert_eq!(evaluation.matched.as_deref(), Some(CREDENTIAL_EDIT_RULE));
+        }
+        assert_eq!(engine.evaluate("edit:auth.json"), Allow);
         // A deny still refuses it.
         engine.add_rule(rule("read:*auth.json", Deny));
         assert_eq!(engine.evaluate(&format!("read:{}", store.display())), Deny);

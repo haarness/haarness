@@ -1434,7 +1434,12 @@ async fn parity_a_read_of_where_sign_ins_are_kept_asks_a_person_even_in_yolo() {
         "!tool bash {}",
         json!({ "command": format!("cat '{}'", store.display()) })
     );
-    for script in [&read, &cat] {
+    // A change of it through the file tools, too.
+    let write = format!(
+        "!tool write {}",
+        json!({ "path": store.display().to_string(), "content": "{}" })
+    );
+    for script in [&read, &cat, &write] {
         let turn = send(&runtime, &thread, script).await;
         let asked = pending(&runtime).await;
         assert_eq!(asked.allow_always, Some(false), "{script}");
@@ -1471,5 +1476,10 @@ async fn parity_a_read_of_where_sign_ins_are_kept_asks_a_person_even_in_yolo() {
             .iter()
             .any(|(output, _)| output.contains("\"key\":\"sk-fixture-secret\"")),
         "{outputs:?}"
+    );
+    assert!(
+        std::fs::read_to_string(&store)
+            .unwrap()
+            .contains("sk-fixture-secret")
     );
 }
