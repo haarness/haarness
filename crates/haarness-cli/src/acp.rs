@@ -71,6 +71,9 @@ struct Service {
     starting: Arc<Mutex<HashMap<String, Vec<SessionServer>>>>,
     /// A prompt's wait for its session's servers, which Cancel ends.
     waits: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    /// Held by a session's prompt until its turn has ended (see
+    /// `Service::prompt`).
+    gates: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl Service {
@@ -87,6 +90,7 @@ impl Service {
             mcp: Arc::new(Mutex::new(HashSet::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
             waits: Arc::new(Mutex::new(HashMap::new())),
+            gates: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -238,28 +242,64 @@ impl Service {
         connection: &ConnectionTo<Client>,
     ) -> AcpResult<PromptResponse> {
         let thread = thread_id(&request.session_id)?;
-        self.client.thread(thread).await.map_err(not_found)?;
         let (text, attachments) = prompt_content(request.prompt)?;
-        if text.trim().is_empty() && attachments.is_empty() {
-            return Err(invalid("prompt must contain text or supported media"));
-        }
-        if self.await_mcp(&request.session_id, connection).await? {
-            return Ok(PromptResponse::new(StopReason::Cancelled));
-        }
-
-        let (mut events, event_task) = self.client.subscribe(None);
-        let turn = self
-            .client
-            .start_turn(thread, self.prompt_turn(text, attachments))
-            .await
-            .map_err(|error| {
-                event_task.abort();
-                refused(&error)
-            })?;
-        self.active
+        let key = request.session_id.to_string();
+        // One prompt of a session at a time: a prompt sent while an earlier
+        // one waits for the session's MCP servers, or runs, goes after it in
+        // the order they were sent, rather than ahead of it or refused as the
+        // chat is busy, and shares that wait. Cancel reaches the prompt from
+        // here on.
+        let gate = self
+            .gates
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(request.session_id.to_string(), turn.id);
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        let held = gate.lock().await;
+        let stop = tokio_util::sync::CancellationToken::new();
+        self.waits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone(), stop.clone());
+        let begun = async {
+            self.client.thread(thread).await.map_err(not_found)?;
+            if text.trim().is_empty() && attachments.is_empty() {
+                return Err(invalid("prompt must contain text or supported media"));
+            }
+            if self
+                .await_mcp(&request.session_id, &stop, connection)
+                .await?
+            {
+                return Ok(None);
+            }
+            let (events, event_task) = self.client.subscribe(None);
+            let turn = self
+                .client
+                .start_turn(thread, self.prompt_turn(text, attachments))
+                .await
+                .map_err(|error| {
+                    event_task.abort();
+                    refused(&error)
+                })?;
+            self.active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key.clone(), turn.id);
+            // Cancelled while the turn was being started.
+            if stop.is_cancelled() {
+                let _ = self.client.interrupt(turn.id).await;
+            }
+            Ok(Some((turn, events, event_task)))
+        }
+        .await;
+        self.waits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
+        let Some((turn, mut events, event_task)) = begun? else {
+            return Ok(PromptResponse::new(StopReason::Cancelled));
+        };
 
         let mut calls = Calls::new();
         // The chats this turn starts under the session (subagents, workflow
@@ -422,6 +462,7 @@ impl Service {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&request.session_id.to_string());
+        drop(held);
         result
     }
 
@@ -517,12 +558,14 @@ impl Service {
     /// Before a prompt, wait for the session's MCP servers still starting
     /// when it was set up, as a turn waits for the servers Haarness starts
     /// itself: a start an editor asked for holds up no other chat. Cancel
-    /// ends the wait (`true`) and the next prompt waits again. A server that
-    /// did not start is told to the editor, logged and left stopped; the
-    /// prompt goes on without it.
+    /// (`stop`) ends the wait (`true`) and the next prompt waits again. A
+    /// server that did not start is told to the editor, logged and left
+    /// stopped; one still starting after the wait is told too and waited
+    /// for again next time. Either way the prompt goes on without it.
     async fn await_mcp(
         &self,
         session: &SessionId,
+        stop: &tokio_util::sync::CancellationToken,
         connection: &ConnectionTo<Client>,
     ) -> AcpResult<bool> {
         let key = session.to_string();
@@ -533,13 +576,8 @@ impl Service {
             .remove(&key)
             .unwrap_or_default();
         if servers.is_empty() {
-            return Ok(false);
+            return Ok(stop.is_cancelled());
         }
-        let stop = tokio_util::sync::CancellationToken::new();
-        self.waits
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key.clone(), stop.clone());
         let mut still = Vec::new();
         let mut servers = servers.into_iter();
         let mut cancelled = false;
@@ -564,7 +602,20 @@ impl Service {
                 .and_then(|listed| listed.into_iter().find(|server| server.name == name));
             match status {
                 Some(server) if matches!(server.status.as_str(), "connected" | "needs_auth") => {}
-                Some(server) if server.status == "connecting" => still.push((name, shown)),
+                // Still starting after the wait (a limit set past 150 s):
+                // the next prompt waits for it again.
+                Some(server) if server.status == "connecting" => {
+                    notify(
+                        connection,
+                        session,
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new(format!(
+                                "MCP server {shown} is still starting, so this prompt runs without its tools.\n\n"
+                            )),
+                        ))),
+                    )?;
+                    still.push((name, shown));
+                }
                 server => {
                     let why = server
                         .and_then(|server| server.detail.or(Some(server.status)))
@@ -583,10 +634,6 @@ impl Service {
                 }
             }
         }
-        self.waits
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&key);
         if !still.is_empty() {
             self.starting
                 .lock()
