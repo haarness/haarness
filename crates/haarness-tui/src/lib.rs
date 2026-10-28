@@ -654,9 +654,10 @@ async fn run_with_client(
     // First frame paints everything; afterwards the native renderer's cell
     // diffing suppresses unchanged output. Resize forces a full repaint.
     let mut force_redraw = true;
-    // A Tab or Enter held for the `@` list's answer, handled next (see
+    // Events to handle before reading the terminal again: a Tab or Enter
+    // held for the `@` list's answer, and what was typed behind it (see
     // `crate::file_search`).
-    let mut replay: Option<crossterm::event::KeyEvent> = None;
+    let mut replay: std::collections::VecDeque<TerminalEvent> = std::collections::VecDeque::new();
     // The deadline of the settling approval answer the tick is set to wake at.
     let mut settle_armed: Option<std::time::Instant> = None;
     let mut last_title = String::new();
@@ -790,14 +791,24 @@ async fn run_with_client(
             settle_armed = due;
         }
         tokio::select! {
-            // A Tab or Enter held for the `@` list's answer comes back as the
-            // next key once that answer is shown.
+            // Events let go by the `@` list come first, in order.
             (terminal, replayed) = async {
-                match replay.take() {
-                    Some(key) => (Some(Ok(TerminalEvent::Key(key))), true),
+                match replay.pop_front() {
+                    Some(event) => (Some(Ok(event)), true),
                     None => (input.next().await, false),
                 }
             } => if let Some(Ok(event)) = terminal {
+                // Behind a Tab or Enter held for the `@` list's answer, keys
+                // and pastes wait their turn.
+                let event = match app.file_search.pass(event) {
+                    crate::file_search::Pass::Now(event) => event,
+                    crate::file_search::Pass::Later(first) => {
+                        for event in first.into_iter().rev() {
+                            replay.push_front(event);
+                        }
+                        continue;
+                    }
+                };
                 match event {
                     TerminalEvent::Key(key) => {
                         let typed = if replayed {
@@ -873,7 +884,6 @@ async fn run_with_client(
                         force_redraw = true;
                     }
                     TerminalEvent::Paste(text) => {
-                        app.file_search.release();
                         if let Some(terminal) = &app.terminal {
                             if let (Some(id), Some(bytes)) =
                                 (terminal.active_id(), terminal.paste_bytes(&text))
@@ -937,9 +947,6 @@ async fn run_with_client(
                         app.selection = 0;
                     }
                     TerminalEvent::Mouse(mouse) => {
-                        if matches!(mouse.kind, crossterm::event::MouseEventKind::Down(_)) {
-                            app.file_search.release();
-                        }
                         if let Some(terminal) = &mut app.terminal {
                             match mouse.kind {
                                 crossterm::event::MouseEventKind::ScrollUp => terminal.scroll(-3),
@@ -1114,7 +1121,7 @@ async fn run_with_client(
             Some(version) = update_rx.recv() => app.update_available = Some(version),
             Some(update) = resources_rx.recv() => app.resources_arrived(update),
             (query, files) = app.file_search.answer(), if app.file_search.is_pending() => {
-                replay = app.files_found(&query, files);
+                replay.extend(app.files_found(&query, files));
             },
             Some(sent) = sends_rx.recv() => app.mentions_sent(sent, Some(&client)).await,
             Some(listed) = catalog_rx.recv() => {
@@ -1189,6 +1196,7 @@ async fn run_with_client(
             () = &mut shutdown => break,
             _ = tick.tick() => {
                 app.tick = app.tick.wrapping_add(1);
+                replay.extend(app.file_search.overdue());
                 if follow_again_at.is_some_and(|at| std::time::Instant::now() >= at) {
                     follow_again_at = None;
                     following = Some(Restarts::default());

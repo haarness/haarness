@@ -533,9 +533,6 @@ pub async fn handle_key_at(
     if key.kind == KeyEventKind::Release {
         return Ok(AppAction::Continue);
     }
-    // Any key lets go of a Tab or Enter held for the `@` list's answer
-    // (see `crate::file_search`).
-    app.file_search.release();
     app.follow_permission_head();
     // A one-key answer still settling meets the next key before anything
     // else does: typing decides in `permission_letter`; a key that takes

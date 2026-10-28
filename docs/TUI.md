@@ -29,10 +29,13 @@ shows comes from that server over REST and SSE, and quitting it never stops the 
 - `file_search.rs`: the `@` list's file search, off the key path. Each edit of an `@` query asks the
   server again and drops the search before it; the list shows the newest answer once it comes, while
   the prompt still holds its query, so a slow server or a folder that does not answer never holds up
-  typing. Tab and Enter pick only from rows that answer the query typed: pressed before that answer,
-  the key waits for it and acts on it as soon as it shows, and Esc or any other key lets it go.
-  Meanwhile Up, Down and Esc treat the list as open. A picked row is what the server said it is (a
-  folder ends with `/`); the TUI never looks for it on its own disk.
+  typing. Until the first answer the list shows the agents that match, or nothing. Tab and Enter
+  pick only from rows that answer the query typed: pressed before that answer, the key waits for it
+  and acts on it as soon as it shows; what is typed meanwhile waits behind it (two seconds at most,
+  then the key is dropped) and follows in order, and Esc or a click drops it. On `@` text no list
+  was opened for (recalled from history, pasted, or reached by moving the cursor) they act as they do
+  without a list. Up, Down and Esc treat a list whose files are on their way as open. A picked row is
+  what the server said it is (a folder ends with `/`); the TUI never looks for it on its own disk.
 - `view/`: frame composition (header, transcript, sidebar, menus, approval cards, composer), drawn into
   OpenTUI buffers. Hit regions recorded while drawing route mouse clicks.
 - `commands.rs`: the slash-command catalog and dispatch. `management.rs` renders the server-authored
