@@ -2938,5 +2938,6 @@
   "Ends {date}": "Se termine le {date}",
   "On hold": "Bloqués",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Le dépassement est désactivé : les crédits achetés ne sont pas dépensés. Activez-le dans Facturation.",
-  "Your free trial didn't start: that card was already used for a trial.": "Votre essai gratuit n’a pas démarré : cette carte a déjà servi pour un essai."
+  "Your free trial didn't start: that card was already used for a trial.": "Votre essai gratuit n’a pas démarré : cette carte a déjà servi pour un essai.",
+  "The attachments come to {size}, over the {limit} limit for media in one message": "Les pièces jointes totalisent {size}, au-delà de la limite de {limit} de médias par message"
 }

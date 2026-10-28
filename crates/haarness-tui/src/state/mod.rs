@@ -2719,7 +2719,7 @@ impl App {
         let paths = if self.shell_mode {
             Ok(None)
         } else {
-            crate::media::paths_from_paste(text, &self.attachments)
+            crate::media::paths_from_paste(text, &self.attachments, self.language)
         };
         match paths {
             Ok(Some(paths)) => {

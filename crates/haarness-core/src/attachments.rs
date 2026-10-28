@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 pub use haarness_protocol::MAX_INLINE_MEDIA_BYTES;
+use haarness_protocol::mebibytes;
 
 use crate::{CoreError, CoreResult};
 
@@ -627,17 +628,6 @@ fn not_a_pdf(name: &str) -> CoreError {
     CoreError::Invalid(format!(
         "{name} cannot be attached: it is named as a PDF but does not hold one"
     ))
-}
-
-/// A size in MiB as a person reads it: whole ones bare ("20 MiB"), others to
-/// a tenth rounded up, so a file just over a limit never reads as at it.
-fn mebibytes(bytes: u64) -> String {
-    const MIB: u64 = 1024 * 1024;
-    if bytes.is_multiple_of(MIB) {
-        return format!("{} MiB", bytes / MIB);
-    }
-    let tenths = bytes.saturating_mul(10).div_ceil(MIB);
-    format!("{}.{} MiB", tenths / 10, tenths % 10)
 }
 
 fn too_large(name: &str) -> CoreError {

@@ -2938,5 +2938,6 @@
   "Ends {date}": "Ends {date}",
   "On hold": "On hold",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Overage is off, so purchased credits are not spent. Turn it on in Billing.",
-  "Your free trial didn't start: that card was already used for a trial.": "Your free trial didn't start: that card was already used for a trial."
+  "Your free trial didn't start: that card was already used for a trial.": "Your free trial didn't start: that card was already used for a trial.",
+  "The attachments come to {size}, over the {limit} limit for media in one message": "The attachments come to {size}, over the {limit} limit for media in one message"
 }
