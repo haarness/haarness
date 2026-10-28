@@ -530,9 +530,11 @@ so a message that could never start never waits at the head of the queue. A
 file named `.pdf`, or sent as `application/pdf`, is a PDF only when `%PDF-`
 appears in its first kilobyte; otherwise it is taken as an untyped file is:
 text when it reads as text, an image when its bytes are one, and refused
-otherwise. A stored attachment that would take its message past the limit (one
-an older server stored, or a file that has grown since) is sent as a one-line
-note naming it instead, so the chat's later turns complete.
+otherwise. A stored attachment that would take its message past the limit
+(one an older server stored, or a file that has grown since), or a stored PDF
+that no longer holds one (an LFS pointer after a checkout), is sent as a
+one-line note naming it instead, so the chat's later turns complete; an image
+a provider refused (below) takes no room.
 
 A long chat can hold more images than a provider takes in one request. Before
 each request the runtime counts the images it would send, as the base64 the
