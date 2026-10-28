@@ -221,6 +221,10 @@ pub struct SqliteSnapshotStore {
     workspace: PathBuf,
     /// Unreadable paths already logged at WARN; every capture meets them again.
     warned: Arc<Mutex<BTreeSet<String>>>,
+    /// Whether ignore files in the folders above `workspace` count, as in a
+    /// project; a folder in the chat home reads none
+    /// ([`SqliteSnapshotFolders::open_in_chat_home`]).
+    outer_ignores: bool,
 }
 
 impl SqliteSnapshotStore {
@@ -230,6 +234,7 @@ impl SqliteSnapshotStore {
             connection: Arc::new(Mutex::new(open_connection(database)?)),
             workspace,
             warned: Arc::default(),
+            outer_ignores: true,
         })
     }
 
@@ -246,7 +251,10 @@ impl SqliteSnapshotStore {
     /// unreadable entry; the root itself must be readable.
     fn source_paths(&self) -> CoreResult<Vec<SourcePath>> {
         let mut builder = ignore::WalkBuilder::new(&self.workspace);
-        builder.hidden(false).follow_links(false);
+        builder
+            .hidden(false)
+            .follow_links(false)
+            .parents(self.outer_ignores);
         builder.filter_entry(|entry| {
             entry.depth() == 0
                 || (entry.file_name() != OsStr::new(".git")
@@ -971,6 +979,8 @@ struct FolderStores {
     /// One store per folder, so a folder's unreadable paths are warned
     /// about once and it is looked up once.
     stores: Mutex<BTreeMap<PathBuf, Arc<SqliteSnapshotStore>>>,
+    /// See [`SqliteSnapshotStore::outer_ignores`].
+    outer_ignores: bool,
 }
 
 impl SqliteSnapshotFolders {
@@ -981,12 +991,29 @@ impl SqliteSnapshotFolders {
         Self::with_connection(database.as_ref().to_path_buf(), None)
     }
 
+    /// For the chat home, whose chats' folders stand alone: no ignore file
+    /// in the folders above one counts, so a repository the chat home lies
+    /// in (a home folder kept in Git) never keeps a chat's files out of its
+    /// checkpoints. A folder's own ignore files still count.
+    #[must_use]
+    pub fn open_in_chat_home(database: impl AsRef<Path>) -> Self {
+        Self {
+            inner: Arc::new(FolderStores {
+                database: database.as_ref().to_path_buf(),
+                connection: Mutex::default(),
+                stores: Mutex::default(),
+                outer_ignores: false,
+            }),
+        }
+    }
+
     fn with_connection(database: PathBuf, connection: Option<Arc<Mutex<Connection>>>) -> Self {
         Self {
             inner: Arc::new(FolderStores {
                 database,
                 connection: Mutex::new(connection),
                 stores: Mutex::default(),
+                outer_ignores: true,
             }),
         }
     }
@@ -1037,6 +1064,7 @@ impl haarness_core::SnapshotFolders for SqliteSnapshotFolders {
             connection: self.connection()?,
             workspace: snapshot_root(folder.to_path_buf())?,
             warned: Arc::default(),
+            outer_ignores: self.inner.outer_ignores,
         });
         self.inner
             .stores
@@ -2430,6 +2458,49 @@ mod tests {
         );
         assert!(!workspace.join("added").exists());
         assert_eq!(scratch(&workspace), Vec::<String>::new());
+    }
+
+    /// A chat's folder in the chat home, under a repository whose
+    /// `.gitignore` hides everything (a home folder kept in Git): its
+    /// checkpoints still hold its files, and its own ignore files still
+    /// count. A project's folder reads the ignore files above it, as before.
+    #[tokio::test]
+    async fn a_chat_home_folder_is_checkpointed_whatever_ignore_files_lie_above_it() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-snap-home-{}", uuid::Uuid::now_v7()));
+        let _guard = tempdir::TempDirGuard(root.clone());
+        let chat = root.join("Chat folders/2026-10-28/chat-1a2b");
+        fs::create_dir_all(chat.join("src")).unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".gitignore"), "*\n").unwrap();
+        fs::write(chat.join("plan.md"), "plan").unwrap();
+        fs::write(chat.join("src/main.rs"), "fn main() {}").unwrap();
+        fs::write(chat.join("build.log"), "noise").unwrap();
+        fs::write(chat.join(".ignore"), "*.log\n").unwrap();
+        let database = root.join("test.db");
+        crate::SqliteStore::open(&database).unwrap();
+        let captured = |folders: SqliteSnapshotFolders| {
+            let chat = chat.clone();
+            async move {
+                haarness_core::SnapshotFolders::open(&folders, &chat).unwrap();
+                let store = Arc::clone(folders.inner.stores.lock().get(&chat).unwrap());
+                let snapshot = store.capture(ThreadId::new()).await.unwrap();
+                store
+                    .load_manifest(&snapshot.id)
+                    .unwrap()
+                    .into_keys()
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(
+            captured(SqliteSnapshotFolders::open_in_chat_home(&database)).await,
+            [".ignore", "plan.md", "src/main.rs"]
+        );
+        assert!(
+            captured(SqliteSnapshotFolders::open(&database))
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]

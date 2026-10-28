@@ -141,5 +141,13 @@
         ]
       }
     ]
+  },
+  "overrides": {
+    "@electron/get": {
+      "undici": "^7.30.1"
+    },
+    "node-gyp": {
+      "undici": "^6.29.1"
+    }
   }
 }
