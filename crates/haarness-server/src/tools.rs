@@ -345,6 +345,7 @@ impl InstructionDiscovery {
             loaded.entry(thread).or_default()
         };
         let mut attached = Vec::new();
+        let mut resolved = Vec::new();
         for candidate in candidates {
             if seen.len() >= NESTED_INSTRUCTION_LIMIT {
                 break;
@@ -355,7 +356,7 @@ impl InstructionDiscovery {
             if seen.contains(&key) {
                 continue;
             }
-            seen.insert(key);
+            seen.insert(key.clone());
             let Ok(content) = std::fs::read_to_string(&candidate) else {
                 continue;
             };
@@ -371,15 +372,19 @@ impl InstructionDiscovery {
                 .text
                 .push_str(&haarness_core::instructions::segment(&source, &content));
             attached.push(source);
+            resolved.push(key.display().to_string());
         }
         if attached.is_empty() {
             return;
         }
+        // With the files they resolve to, as `seen` keys them, so a later
+        // round tells what is in view without touching the disk.
         match output.metadata.as_object_mut() {
             Some(metadata) => {
                 metadata.insert("loaded".into(), json!(attached));
+                metadata.insert("loadedResolved".into(), json!(resolved));
             }
-            None => output.metadata = json!({ "loaded": attached }),
+            None => output.metadata = json!({ "loaded": attached, "loadedResolved": resolved }),
         }
     }
 }

@@ -106,10 +106,11 @@ pub fn nested(file: &Path, workspace: &Path, claude: bool) -> Vec<PathBuf> {
 /// undo removed the result that carried it.
 pub type InContext = std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<PathBuf>>>;
 
-/// The instruction files the tool results among `items` carried, as their
-/// `loaded` metadata names them, also for a `read` inside a batch. Each is
-/// keyed as `read` keys it, by the file it resolves to, so an `AGENTS.md`
-/// that is a symlink or spelled in another case stays in view.
+/// The instruction files the tool results among `items` carried, also for a
+/// `read` inside a batch, keyed as `read` keys them: by the file each
+/// resolves to (`loadedResolved`), so an `AGENTS.md` that is a symlink or
+/// spelled in another case stays in view. A result stored before reads
+/// recorded that names them as `loaded` does. Nothing here touches the disk.
 #[must_use]
 pub fn attached<'a>(
     items: impl IntoIterator<Item = &'a haarness_protocol::Item>,
@@ -117,14 +118,14 @@ pub fn attached<'a>(
     let mut found = std::collections::HashSet::new();
     let mut add = |metadata: &serde_json::Value| {
         for path in metadata
-            .get("loaded")
+            .get("loadedResolved")
+            .or_else(|| metadata.get("loaded"))
             .and_then(serde_json::Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(serde_json::Value::as_str)
-            .map(Path::new)
         {
-            found.insert(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
+            found.insert(PathBuf::from(path));
         }
     };
     for item in items {
@@ -511,6 +512,14 @@ mod tests {
         };
         let items = [
             result("read", serde_json::json!({"loaded": ["/w/a/AGENTS.md"]})),
+            // A symlink, named as read showed it and keyed by its target.
+            result(
+                "read",
+                serde_json::json!({
+                    "loaded": ["/w/link/AGENTS.md"],
+                    "loadedResolved": ["/w/link/CLAUDE.md"],
+                }),
+            ),
             result(
                 "batch",
                 serde_json::json!({"results": [
@@ -526,6 +535,7 @@ mod tests {
             found,
             [
                 PathBuf::from("/w/a/AGENTS.md"),
+                PathBuf::from("/w/link/CLAUDE.md"),
                 PathBuf::from("/w/b/AGENTS.md")
             ]
             .into_iter()
