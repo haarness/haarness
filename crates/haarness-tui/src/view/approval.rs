@@ -669,6 +669,10 @@ fn script_rows(
         .map(|root| root.trim_end_matches('/'))
         .and_then(|root| script.path.strip_prefix(root)?.strip_prefix('/'))
         .unwrap_or(&script.path);
+    // Named as the command's own text is, with what would not show as its
+    // code.
+    let path = spelled_out(path);
+    let path = path.as_str();
     // What is on disk now may not be what runs: one quiet line says why.
     if let Some(reason) = script.withheld {
         let note = match reason {

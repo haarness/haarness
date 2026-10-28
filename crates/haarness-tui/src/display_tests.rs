@@ -422,3 +422,41 @@ fn a_result_is_cleaned_once_and_read_from_then_on() {
     let text = frame_text(&app, (100, 20));
     assert!(text.contains("kept from the first frame"), "{text}");
 }
+
+/// The script a command runs, and the one it withholds, are named on the
+/// card with what would not show as a code.
+#[tokio::test]
+async fn a_script_path_on_the_card_shows_what_would_not_show() {
+    for (script, named) in [
+        (
+            serde_json::json!({"path": "/work/run\u{200b}.sh", "content": "echo hi\n"}),
+            "Script: /work/run\\u{200B}.sh · 1 line",
+        ),
+        (
+            serde_json::json!({"path": "/work/run\u{200b}.sh", "content": "", "withheld": "changeable"}),
+            "An earlier step of this command can change /work/run\\u{200B}.sh",
+        ),
+    ] {
+        let thread = fixture_thread();
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        let event = fixture_event(
+            "permission.requested",
+            thread.id,
+            thread.id,
+            serde_json::json!({
+                "permissionId": "perm-script-name",
+                "permission": "bash",
+                "operation": "bash:sh /work/run.sh",
+                "patterns": ["sh /work/run.sh"],
+                "alwaysPatterns": ["bash:sh /work/run.sh"],
+                "detail": {"command": "sh /work/run.sh"},
+                "script": script,
+            }),
+        );
+        app.reduce(event, &offline_client()).await.unwrap();
+        let card = crate::view::approval::approval_lines(&app, 120, 30).lines;
+        let text: String = card.iter().map(|line| line_text(line) + "\n").collect();
+        assert!(text.contains(named), "{text}");
+        assert!(!text.contains('\u{200b}'), "{text:?}");
+    }
+}

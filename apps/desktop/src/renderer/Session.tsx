@@ -3834,7 +3834,7 @@ function Permission(props: {
                 item().withheld === "written"
                   ? t("This command writes {path} before running it, so its contents can't be shown.")
                   : t("An earlier step of this command can change {path}, so its contents aren't shown."),
-                () => <bdi><code>{item().path}</code></bdi>,
+                () => <bdi><code><SpelledOut text={item().path} /></code></bdi>,
                 "{path}",
               )}
             </p>
@@ -3863,8 +3863,8 @@ function Permission(props: {
                   id={scriptBody}
                   aria-live="off"
                 >
-                  <div class="change-path" title={item().path}>
-                    <bdi dir="ltr">{item().path}</bdi>
+                  <div class="change-path" title={spelledOutText(item().path)}>
+                    <bdi dir="ltr"><SpelledOut text={item().path} /></bdi>
                   </div>
                   <div
                     class="change-lines"
