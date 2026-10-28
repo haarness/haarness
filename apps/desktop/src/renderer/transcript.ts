@@ -15,6 +15,7 @@ import type {
 import { lines, type DiffLine } from "./diff";
 import { language, t } from "./i18n";
 import { reviewReason } from "./approval-mode";
+import { withoutEscapes } from "./display-text";
 
 /** Provider call IDs can repeat in another turn; output belongs to one call. */
 export function toolResult(items: Item[], call?: Item, boundary = Infinity) {
@@ -430,6 +431,8 @@ export interface ToolResult {
  * ("tool error: ", which the row's state already says) and the system's
  * error number ("(os error 2)"); a command's output loses the `exit: N` line
  * the server puts first, which the row says as a chip when it is not 0.
+ * Colours, titles and other escape sequences a command or server wrote go
+ * whole; the model still reads the output as it was written.
  */
 export function resultText(name: string, result: ToolResult) {
   let text = result.output;
@@ -440,7 +443,7 @@ export function resultText(name: string, result: ToolResult) {
   // Only when the status is known: then the row says it, as a chip or not at all.
   else if (toolName(name) === "bash" && typeof object(result.metadata)?.exit === "number")
     text = text.replace(/^exit: -?\d+\n/, "");
-  return toolOutput(name, text);
+  return withoutEscapes(toolOutput(name, text));
 }
 /** A command's exit status, when it is not 0. */
 export function exitStatus(name: string, result?: ToolResult) {

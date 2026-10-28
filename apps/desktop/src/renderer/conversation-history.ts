@@ -1,5 +1,6 @@
 import type { Item, Thread } from "@haarness/sdk";
 import { plainMessage } from "./prompt-context";
+import { withoutEscapes } from "./display-text";
 
 export function retainedItems(items: Item[], thread?: Thread) {
   const boundary = thread?.revert?.sequence ?? Infinity;
@@ -48,7 +49,8 @@ function conversationText(item: Item, items: Item[]) {
       return [
         data.name,
         JSON.stringify(data.arguments),
-        result?.data.type === "tool_result" ? result.data.output : "",
+        // As the row shows it, without its escape sequences.
+        result?.data.type === "tool_result" ? withoutEscapes(result.data.output) : "",
       ].join("\n");
     }
     default:
