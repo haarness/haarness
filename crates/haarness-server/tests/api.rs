@@ -12992,8 +12992,24 @@ async fn a_queued_message_whose_file_changed_since_runs_with_a_note() {
         )
         .await
         .unwrap();
-    // A new attachment must still fit beside those it keeps.
+    // A list that is not the one it keeps must fit, the same file twice too.
     let queue = runtime.input_queue(thread.id).await.unwrap();
+    let error = runtime
+        .change_input_queue(
+            thread.id,
+            haarness_protocol::InputQueueAction::Edit {
+                revision: queue.revision,
+                id: item.id,
+                text: "read mid twice".into(),
+                attachments: Some(vec![mid.clone(), mid.clone(), gone.clone()]),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("over the 20 MiB limit"),
+        "{error}"
+    );
     let extra = pdf("extra.pdf", 1024 * 1024);
     let error = runtime
         .change_input_queue(

@@ -118,25 +118,6 @@ pub fn within_limit(sources: &[String]) -> CoreResult<()> {
     Ok(())
 }
 
-/// [`admit`] for a message admitted once already, when its turn comes (a
-/// queued message): each attachment on its own, and none refused. One whose
-/// file has changed since (grown past the limit, gone, no longer a PDF)
-/// stays as it was, a relative path made absolute, for the request to name
-/// in a note (see [`for_model`]) instead of holding back the queue.
-pub fn admit_each(attachments: Vec<String>, workspace: &Path) -> Vec<String> {
-    attachments
-        .into_iter()
-        .map(|source| {
-            admit_one(source.clone(), workspace).unwrap_or_else(|_| {
-                match file_path(&source).filter(|path| path.is_relative()) {
-                    Some(path) => workspace.join(path).to_string_lossy().into_owned(),
-                    None => source,
-                }
-            })
-        })
-        .collect()
-}
-
 /// [`admit`] on a blocking thread: converting an image is CPU work.
 pub async fn admit_off_executor(
     attachments: Vec<String>,
@@ -343,29 +324,38 @@ pub fn read_at_most(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
 }
 
 /// How much of [`MAX_INLINE_MEDIA_BYTES`] `sources` may take once admitted,
-/// read before admitting them: an image what it may be shrunk or converted to
-/// at most ([`crate::images::MAX_IMAGE_BYTES`]), other media its size, a text
+/// read before admitting them: a PNG, JPEG, GIF or WebP its size, at most
+/// what the server keeps of an image ([`crate::images::MAX_IMAGE_BYTES`]),
+/// another image (HEIC, BMP, TIFF), which is converted, that much; other
+/// media its size, a text
 /// file nothing. A relative path is read from `workspace`, the chat's folder;
 /// a file that cannot be read counts nothing (admitting it refuses it).
 #[must_use]
 pub fn media_estimate(sources: &[String], workspace: &Path) -> u64 {
     let image = crate::images::MAX_IMAGE_BYTES as u64;
+    // A PNG, JPEG, GIF or WebP is kept, or shrunk; any other image is
+    // converted, and may grow up to what the server keeps of one.
+    let image_bytes = |kind: &str, size: u64| {
+        if crate::images::is_provider_image(kind) {
+            size.min(image)
+        } else {
+            image
+        }
+    };
     let one = |source: &String| -> u64 {
         if let Some(data) = source.strip_prefix("data:") {
             let Ok(url) = DataUrl::parse(data) else {
                 return 0;
             };
-            if url.mime_type.starts_with("image/") {
-                return image;
-            }
-            if is_supported_media_mime(url.mime_type) {
+            if is_supported_media_mime(url.mime_type) && !url.mime_type.starts_with("image/") {
                 return url.decoded_len();
             }
-            // An image sent without its type is still one.
-            let sniffed = url
-                .head()
-                .is_some_and(|head| crate::images::sniff(&head).is_some());
-            return if sniffed { image } else { 0 };
+            // An image, by its type or its bytes (one sent without a type).
+            return match url.head().and_then(|head| crate::images::sniff(&head)) {
+                Some(kind) => image_bytes(kind, url.decoded_len()),
+                None if url.mime_type.starts_with("image/") => image,
+                None => 0,
+            };
         }
         let Some(path) = local_path(source).map(|path| workspace.join(path)) else {
             return 0;
@@ -377,16 +367,19 @@ pub fn media_estimate(sources: &[String], workspace: &Path) -> u64 {
         else {
             return 0;
         };
+        let sniffed = || {
+            read_at_most(&path, 64)
+                .ok()
+                .and_then(|head| crate::images::sniff(&head))
+        };
         match media_mime_for_path(&path) {
-            Some(mime) if mime.starts_with("image/") => image,
+            Some(mime) if mime.starts_with("image/") => {
+                sniffed().map_or(image, |kind| image_bytes(kind, size))
+            }
             Some(_) => size,
             // Text, or an image its bytes announce (a screenshot saved
             // without an extension).
-            None => {
-                let sniffed =
-                    read_at_most(&path, 64).is_ok_and(|head| crate::images::sniff(&head).is_some());
-                if sniffed { image } else { 0 }
-            }
+            None => sniffed().map_or(0, |kind| image_bytes(kind, size)),
         }
     };
     sources.iter().map(one).fold(0, u64::saturating_add)
@@ -491,9 +484,10 @@ pub fn sent_bytes(source: &str) -> usize {
 /// A stored message as a model receives it: text files are appended to the
 /// message, and media that can no longer be read (an upload folder deleted
 /// since) is named instead of failing the turn. So is media that would take
-/// the message past [`MAX_INLINE_MEDIA_BYTES`], and a PDF that does not hold
-/// one: stored before either was refused, or a file changed since (grown, or
-/// an LFS pointer after a checkout), it would fail every turn after it.
+/// the message past [`MAX_INLINE_MEDIA_BYTES`], a PDF that does not hold one,
+/// and what no model reads (a web address, an archive): stored before such
+/// were refused, or a file changed since (grown, or an LFS pointer after a
+/// checkout), it would fail every turn after it.
 /// Sources a provider refused (their [`fingerprint`]s in `omitted`) pass
 /// through for the caller to leave out, and take no room.
 pub fn for_model<S: std::hash::BuildHasher>(
@@ -562,8 +556,13 @@ pub fn for_model<S: std::hash::BuildHasher>(
             }
             continue;
         }
+        // No provider is sent an address, and one stored by an older server
+        // would fail every turn.
         if source.starts_with("http://") || source.starts_with("https://") {
-            media.push(source);
+            let _ = write!(
+                content,
+                "\n[Attachment {source} left out: a model cannot read it]"
+            );
             continue;
         }
         // Gone, or no longer readable (its permissions changed): the provider
@@ -577,9 +576,19 @@ pub fn for_model<S: std::hash::BuildHasher>(
             let _ = write!(content, "\n[Attachment {source} is no longer available]");
             continue;
         };
+        let typed = media_mime_for_path(&path);
         if refused(&source) {
             media.push(source);
-        } else if media_mime_for_path(&path) == Some("application/pdf")
+        } else if typed.is_none()
+            && !read_at_most(&path, 64).is_ok_and(|head| crate::images::sniff(&head).is_some())
+        {
+            // Neither media by its name nor an image by its bytes (an archive
+            // an older server stored): the provider would refuse it.
+            let _ = write!(
+                content,
+                "\n[Attachment {source} left out: a model cannot read it]"
+            );
+        } else if typed == Some("application/pdf")
             && !read_at_most(&path, PDF_HEADER_WINDOW).is_ok_and(|head| starts_like_pdf(&head))
         {
             not_a_pdf(&mut content, &source);
@@ -1137,42 +1146,36 @@ mod tests {
     }
 
     #[test]
-    fn a_message_admitted_again_keeps_what_changed_since_for_the_request_to_name() {
+    fn a_stored_attachment_no_model_reads_reaches_it_as_a_note() {
+        // Queued by an older server, never checked: an archive by path and a
+        // web address, which every provider refuses.
         let dir = std::env::temp_dir().join(format!("haarness-attach-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
-        sparse_pdf(&dir.join("scan.pdf"), 21 * MIB);
-        std::fs::write(dir.join("notes.md"), "# Notes\n").unwrap();
-        let kept = admit_each(
+        let bundle = dir.join("bundle.zip").to_string_lossy().into_owned();
+        std::fs::write(&bundle, b"PK\x03\x04\0\0zip").unwrap();
+        // A screenshot saved without an extension is still sent.
+        let capture = dir.join("capture").to_string_lossy().into_owned();
+        std::fs::write(&capture, image(4, 4, image::ImageFormat::Png)).unwrap();
+        let (content, media) = for_model(
+            "Look".into(),
             vec![
-                "scan.pdf".into(),
-                "gone.png".into(),
-                dir.join("gone.pdf").to_string_lossy().into_owned(),
-                "notes.md".into(),
+                bundle.clone(),
+                "https://example.com/a.png".into(),
+                capture.clone(),
             ],
-            &dir,
+            &HashSet::new(),
         );
-        assert_eq!(
-            kept[..3],
-            [
-                dir.join("scan.pdf").to_string_lossy().into_owned(),
-                dir.join("gone.png").to_string_lossy().into_owned(),
-                dir.join("gone.pdf").to_string_lossy().into_owned(),
-            ]
-        );
-        // What still admits is admitted as before.
-        assert!(kept[3].starts_with("data:text/plain;name=notes.md;base64,"));
-        let (content, media) = for_model(String::new(), kept, &HashSet::new());
-        assert!(media.is_empty());
+        assert_eq!(media, vec![capture]);
         assert!(
-            content.contains("scan.pdf left out: it would bring"),
+            content.contains(&format!(
+                "[Attachment {bundle} left out: a model cannot read it]"
+            )),
             "{content}"
         );
         assert!(
-            content.contains("gone.png is no longer available"),
-            "{content}"
-        );
-        assert!(
-            content.contains("<attached-file name=\"notes.md\">"),
+            content.contains(
+                "[Attachment https://example.com/a.png left out: a model cannot read it]"
+            ),
             "{content}"
         );
         std::fs::remove_dir_all(dir).unwrap();
@@ -1184,16 +1187,19 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let cap = crate::images::MAX_IMAGE_BYTES as u64;
         let png = image(4, 4, image::ImageFormat::Png);
+        let small = png.len() as u64;
         std::fs::write(dir.join("icon.png"), &png).unwrap();
         // HEIC grows when it becomes JPEG; a screenshot may have no extension.
         std::fs::write(dir.join("photo.heic"), b"\0\0\0\x18ftypheic").unwrap();
         std::fs::write(dir.join("capture"), &png).unwrap();
         std::fs::write(dir.join("notes"), "plain text").unwrap();
         sparse_pdf(&dir.join("scan.pdf"), 2 * MIB);
+        // A PNG, JPEG, GIF or WebP is kept or shrunk: its size; another is
+        // converted and may grow: what the server keeps of one.
         for (source, expected) in [
-            ("icon.png", cap),
+            ("icon.png", small),
             ("photo.heic", cap),
-            ("capture", cap),
+            ("capture", small),
             ("notes", 0),
             ("scan.pdf", 2 * MIB),
             ("missing.pdf", 0),
@@ -1206,7 +1212,9 @@ mod tests {
             data_url("application/pdf", None, &vec![0; 1024]),
             data_url("text/plain", None, b"notes"),
         ];
-        assert_eq!(media_estimate(&inline, &dir), 2 * cap + 1024);
+        assert_eq!(media_estimate(&inline, &dir), 2 * small + 1024);
+        let heic = data_url("image/heic", None, b"\0\0\0\x18ftypheic");
+        assert_eq!(media_estimate(&[heic], &dir), cap);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
