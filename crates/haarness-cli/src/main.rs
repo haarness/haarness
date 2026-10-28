@@ -11504,7 +11504,7 @@ impl Paths {
             let data = root.join("data");
             let config = root.join("config");
             let cache = root.join("cache");
-            fs::create_dir_all(&data)?;
+            layout::create_private_dir(&data)?;
             fs::create_dir_all(&config)?;
             fs::create_dir_all(&cache)?;
             if !data.join(".layout-v1").exists() {

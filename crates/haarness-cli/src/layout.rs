@@ -49,9 +49,10 @@ impl Layout {
             adopt_directory(&self.data, legacy.data_local_dir())?;
             adopt_directory(&self.cache, legacy.cache_dir())?;
         }
-        for dir in [&self.config, &self.data, &self.cache, &self.state] {
+        for dir in [&self.config, &self.cache, &self.state] {
             fs::create_dir_all(dir)?;
         }
+        create_private_dir(&self.data)?;
         let marker = self.config.join(".layout-v1");
         if !marker.exists() {
             if let Some(legacy) = legacy {
@@ -185,6 +186,32 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Makes the data folder `dir` for this user alone (0700 on Unix): it holds
+/// chats, saved tool output, previews and worktrees. One an older build made
+/// open to others is narrowed (one of another user's is left as it is). The
+/// folders above it, perhaps of the person's own choosing, are made as any
+/// folder is and never changed.
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        match fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+            Err(error) => return Err(error),
+        }
+        if fs::metadata(dir)?.permissions().mode() & 0o077 != 0 {
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(dir)
 }
 
 fn adopt_directory(target: &Path, source: &Path) -> Result<()> {
@@ -471,6 +498,41 @@ mod tests {
         assert_eq!(isolated.config, Path::new("/isolated/config"));
         assert_eq!(isolated.state, Path::new("/isolated/state"));
         assert!(Layout::resolve(home, Some(Path::new("relative")), |_| None).is_err());
+    }
+    /// The data folder is the person's alone, made so or narrowed when an
+    /// older build left it open; the folders above it are never changed.
+    #[cfg(unix)]
+    #[test]
+    fn the_data_folder_is_for_its_owner_alone_and_its_parents_stay_as_they_are() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let root = std::env::temp_dir().join(format!("haarness-private-{}", uuid::Uuid::now_v7()));
+        let xdg = root.join("xdg data");
+        fs::create_dir_all(&xdg).unwrap();
+        fs::set_permissions(&xdg, fs::Permissions::from_mode(0o755)).unwrap();
+        let layout = Layout::resolve(&root.join("home"), None, |key| {
+            (key == "XDG_DATA_HOME").then(|| xdg.clone())
+        })
+        .unwrap();
+        layout.initialize(None).unwrap();
+        assert_eq!(mode(&layout.data), 0o700);
+        assert_eq!(mode(&xdg), 0o755, "a chosen folder above it is unchanged");
+        // Made by an older build, open to everyone.
+        fs::set_permissions(&layout.data, fs::Permissions::from_mode(0o755)).unwrap();
+        layout.initialize(None).unwrap();
+        assert_eq!(mode(&layout.data), 0o700);
+        // One root for everything (HAARNESS_HOME, `--data-dir`): its data
+        // folder is private, the root itself is the person's.
+        let chosen = root.join("chosen");
+        fs::create_dir_all(&chosen).unwrap();
+        fs::set_permissions(&chosen, fs::Permissions::from_mode(0o751)).unwrap();
+        let isolated = Layout::resolve(&root.join("home"), Some(&chosen), |_| None).unwrap();
+        isolated.initialize(None).unwrap();
+        assert_eq!(mode(&isolated.data), 0o700);
+        assert_eq!(mode(&chosen), 0o751);
+        create_private_dir(&root.join("missing/data")).unwrap();
+        assert_eq!(mode(&root.join("missing/data")), 0o700);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn migration_keeps_existing_files_and_live_data_identity() {

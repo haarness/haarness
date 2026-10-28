@@ -52,6 +52,15 @@ fn a_run_with_a_data_dir_saves_long_tool_output_inside_it() {
         .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
         .unwrap_or_default();
     assert_eq!(saved.len(), 1, "{saved:?}");
+    // The whole output is the person's alone, and so is the data folder.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&saved[0]), 0o600);
+        assert_eq!(mode(&root.join("data/data/tool-output")), 0o700);
+        assert_eq!(mode(&root.join("data/data")), 0o700);
+    }
     // Nothing went to the app data folder of the home.
     for folder in [
         "home/Library/Application Support/dev.haarness.haarness",

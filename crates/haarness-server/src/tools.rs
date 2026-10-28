@@ -4786,11 +4786,11 @@ pub(crate) async fn truncate_output_at(text: String, directory: &Path) -> CoreRe
         return Ok(output(text));
     }
     let preview = output_preview(&text);
-    tokio::fs::create_dir_all(directory)
+    let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
         .await
         .map_err(tool_error)?;
-    let path = directory.join(format!("tool_{}.txt", uuid::Uuid::now_v7()));
-    tokio::fs::write(&path, &text).await.map_err(tool_error)?;
+    file.write_all(text.as_bytes()).await.map_err(tool_error)?;
+    file.flush().await.map_err(tool_error)?;
     let removed = text.len().saturating_sub(preview.len());
     let notice = format!(
         "The tool call succeeded but its output was truncated. Full output saved to: {}\n\
@@ -4825,7 +4825,7 @@ fn output_preview(text: &str) -> String {
 
 pub(crate) fn tool_output_dir() -> PathBuf {
     crate::data_folder().map_or_else(
-        || std::env::temp_dir().join("haarness/tool-output"),
+        || crate::data_folder::private_temp_folder().join("tool-output"),
         |folder| folder.join("tool-output"),
     )
 }
