@@ -12,6 +12,7 @@ mod file_lock;
 pub mod files;
 pub mod front;
 pub mod hooks;
+mod lookups;
 mod mcp_resources;
 pub mod models;
 pub mod plugins;
