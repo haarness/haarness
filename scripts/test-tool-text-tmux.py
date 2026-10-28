@@ -5,7 +5,8 @@ A command's colour, cursor and window title sequences show as their text in its 
 them reaches the terminal: the pane's title stays the TUI's and no red is drawn. A command holding a
 right-to-left override, a zero-width space and a carriage return shows them as codes on its approval
 card, in the muted colour, and on its row, in English and in Arabic, and denying it runs nothing. An
-edit whose new line holds a direction override and isolates shows them as codes in its change.
+edit whose new line holds a direction override and isolates shows them as codes in its change, and
+a right-to-left file name shows its direction mark as one code on its row.
 Pane captures, with their colours, go to TOOL_TEXT_EVIDENCE; TOOL_TEXT_THEME=light or dark draws
 them in that variant of the editorial theme.
 
@@ -47,6 +48,8 @@ project = root / "project"
 )
 ORIGINAL = 'if (role != "user") {\n  allow();\n}\n'
 (project / "access.js").write_text(ORIGINAL)
+RTL_NAME = "ملف\u200f.txt"
+(project / RTL_NAME).write_text("سطر\n")
 env = clean_env()
 env.update(
     HAARNESS_HOME=str(root / "home"),
@@ -185,6 +188,14 @@ try:
         until(lambda: "$ echo report" not in pane(), "the denial did not close the card")
         assert not (project / "ran.txt").exists(), "the denied command ran"
         check(f"an approval shows a direction override, a zero-width space and a carriage return as quiet codes ({language})")
+        if language == "ar":
+            # A right-to-left name keeps its code in one piece on its row.
+            paste("!tool read " + json.dumps({"path": RTL_NAME}))
+            keys("Enter")
+            until(lambda: "ملف\\u{200F}.txt" in pane(), "the read's row did not show its name")
+            assert "\u200f" not in pane(), "a direction mark reached the terminal"
+            screen("rtl-target")
+            check("a right-to-left name shows its mark as one code on its row")
     command("language", "en")
 
     # An edit whose new line turns its own direction around.

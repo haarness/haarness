@@ -67,7 +67,7 @@ While work runs, Send does what **Settings → General → Messages sent while w
    script it runs behind a quiet **View script · N lines** toggle, closed by default (see
    [The script a command runs](PERMISSIONS-AND-EXECUTION.md#the-script-a-command-runs)). A
    character in a request that would not show, or would move the text around it (a direction
-   override, a zero-width space, a carriage return), reads on its card as a muted code such as
+   override, a zero-width space, a carriage return), reads on its card as a muted code on a faint chip, such as
    `\u{202E}` (see [Choose what an approval remembers](PERMISSIONS-AND-EXECUTION.md#choose-what-an-approval-remembers)). See
    [Automatic approvals](AUTO-APPROVALS.md) and [Chrome approvals](PERMISSIONS-AND-EXECUTION.md#chrome-approvals).
 
