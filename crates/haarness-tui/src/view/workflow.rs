@@ -14,6 +14,7 @@ use haarness_protocol::{
     WorkflowDefinition, WorkflowRun, WorkflowRunAgent, WorkflowRunAgentStatus, WorkflowRunStatus,
 };
 
+use crate::escapes::without_escapes;
 use crate::locale::Language;
 use crate::state::{App, workflow_status, workflow_status_marker};
 use crate::theme::Theme;
@@ -233,12 +234,13 @@ pub fn run_body(app: &App, run: &WorkflowRun, width: usize) -> Vec<Line> {
         theme.muted,
     ));
 
-    // Failure outranks everything below it.
+    // Failure outranks everything below it. What a run, its agents and its
+    // logs wrote reads without escape sequences, as tool output does.
     if let Some(error) = run.error.as_deref() {
         lines.push(Line::empty());
         lines.push(section("failed", None, theme, width));
         lines.extend(wrap_spans(
-            &[Span::new(error.to_owned(), theme.danger)],
+            &[Span::new(without_escapes(error).into_owned(), theme.danger)],
             width,
             "",
             "",
@@ -258,7 +260,10 @@ pub fn run_body(app: &App, run: &WorkflowRun, width: usize) -> Vec<Line> {
             lines.push(agent_row(agent, width, theme));
             if let Some(error) = agent.error.as_deref() {
                 lines.push(line(
-                    format!("  {}", single_line(error, width.saturating_sub(2))),
+                    format!(
+                        "  {}",
+                        single_line(&without_escapes(error), width.saturating_sub(2))
+                    ),
                     theme.danger,
                 ));
             }
@@ -303,7 +308,7 @@ pub fn run_body(app: &App, run: &WorkflowRun, width: usize) -> Vec<Line> {
                 .as_deref()
                 .map_or_else(String::new, |phase| format!("{phase} · "));
             lines.push(line(
-                single_line(&format!("{phase}{}", log.message), width),
+                single_line(&format!("{phase}{}", without_escapes(&log.message)), width),
                 theme.muted,
             ));
         }
