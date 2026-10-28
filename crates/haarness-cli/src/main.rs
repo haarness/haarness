@@ -7411,7 +7411,7 @@ impl HotReloadController {
             self.trust,
         ));
         let memory_context = self.management.memory_index()?;
-        announce_mcp_starts(mcp_starts, self.runtime.events().clone());
+        report_mcp_starts(mcp_starts);
         Ok(HotReloadCandidate {
             disabled_skills,
             providers,
@@ -8245,7 +8245,20 @@ async fn application_at(
         ))?;
     }
     let runtime = Arc::new(runtime);
-    announce_mcp_starts(mcp_starts, runtime.events().clone());
+    // Each start that comes to an answer, whoever began it (startup, a
+    // reload, a Reconnect, configuring), tells clients to read the server's
+    // status and tools again.
+    let events = runtime.events().clone();
+    mcp.announce_starts(move |name| {
+        events.publish(
+            "assets.updated",
+            None,
+            None,
+            None,
+            json!({"resource": "mcp", "action": "start", "name": name}),
+        );
+    });
+    report_mcp_starts(mcp_starts);
     // A list still loading after a few seconds keeps loading while the server
     // starts answering; clients hear when it is in (`assets.updated`).
     haarness_server::models::catalog(
@@ -8358,9 +8371,13 @@ fn compose_mcp(
     config: &FileConfig,
     live: Option<&NativeMcpRegistry>,
 ) -> (Arc<NativeMcpRegistry>, Vec<(String, StartEnd)>) {
-    let registry = Arc::new(
-        NativeMcpRegistry::with_auth_dir(paths.data.join("mcp-oauth")).in_folder(workspace),
-    );
+    let mut registry =
+        NativeMcpRegistry::with_auth_dir(paths.data.join("mcp-oauth")).in_folder(workspace);
+    if let Some(live) = live {
+        // It stops when the live registry does, and announces as it does.
+        registry = registry.following(live);
+    }
+    let registry = Arc::new(registry);
     let mut starts = Vec::new();
     for (name, server) in &config.mcp {
         let prepared = match live {
@@ -8403,25 +8420,14 @@ async fn for_each_mcp_start(starts: Vec<(String, StartEnd)>, ended: impl Fn(&str
     }
 }
 
-/// Announce each of `starts` that ends (`assets.updated`, `resource:
-/// "mcp"`), for clients to read the server's status and tools again. Turns
-/// begun before they end wait for them (see `McpRegistry::starting`).
-fn announce_mcp_starts(starts: Vec<(String, StartEnd)>, events: haarness_core::EventBus) {
+/// Say why each of `starts` that fails did, as composing the server always
+/// has. Turns begun before they end wait for them (see
+/// `McpRegistry::starting`).
+fn report_mcp_starts(starts: Vec<(String, StartEnd)>) {
     if starts.is_empty() {
         return;
     }
-    tokio::spawn(async move {
-        for_each_mcp_start(starts, |name| {
-            events.publish(
-                "assets.updated",
-                None,
-                None,
-                None,
-                json!({"resource": "mcp", "action": "start", "name": name}),
-            );
-        })
-        .await;
-    });
+    tokio::spawn(for_each_mcp_start(starts, |_| {}));
 }
 
 async fn auth_command(

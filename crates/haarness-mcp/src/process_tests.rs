@@ -176,3 +176,32 @@ async fn a_start_no_longer_wanted_stops_its_processes() {
     sentinel.kill().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// A Disconnect stops the start on its way even when a reload waiting to
+/// apply shares it: the process goes, the turn's wait ends at once, and the
+/// reload then leaves the server disconnected.
+#[tokio::test]
+async fn a_disconnect_stops_a_start_a_waiting_reload_shares() {
+    let root = std::env::temp_dir().join(format!("haarness-mcp-shared-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let log = root.join("tree");
+    let live = NativeMcpRegistry::default();
+    live.prepare("tree", hung(&log)).unwrap();
+    launched(&log).await;
+    let candidate = NativeMcpRegistry::default().following(&live);
+    let (_, shared) = candidate
+        .prepare_reusing(&live, "tree", hung(&log))
+        .unwrap();
+    assert!(shared.is_none(), "the reload started the server again");
+    let waiting = live.starting().expect("a turn waits for the start");
+    live.disconnect("tree").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .expect("the turn kept waiting for a disconnected server");
+    gone_within(&log, Duration::from_secs(3)).await;
+    live.replace_from(&candidate);
+    drop(candidate);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(live.list().await.unwrap()[0].status, "disconnected");
+    std::fs::remove_dir_all(root).unwrap();
+}
