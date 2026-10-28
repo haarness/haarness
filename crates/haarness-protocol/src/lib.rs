@@ -671,8 +671,8 @@ pub struct StartTurnRequest {
     pub provider: Option<String>,
     pub model: Option<String>,
     /// A reasoning level (`none` to `max`), `ultracode`, or `default` for the
-    /// model's own default over a configured level; none runs at the
-    /// configured `defaults.reasoning_effort`, if any.
+    /// model's own default over a configured level. Omitted, the turn runs at
+    /// the configured `defaults.reasoning_effort`, if any.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     /// Per-turn tool visibility and execution policy. Missing names retain
