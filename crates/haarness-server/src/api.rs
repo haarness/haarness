@@ -2048,10 +2048,12 @@ async fn search_files(
         .runtime
         .is_chat_home()
         .then(|| state.workspace.clone());
+    if let Some(results) =
+        explicit_path_suggestions(&workspace, &raw_query, limit, PATH_LOOKUPS).await
+    {
+        return Ok(Json(results));
+    }
     let results = tokio::task::spawn_blocking(move || {
-        if let Some(results) = explicit_path_suggestions(&workspace, &raw_query, limit) {
-            return results;
-        }
         let needle = raw_query.to_ascii_lowercase();
         let mut scored: Vec<(i64, String)> = Vec::new();
         // `.gitignore` and `.ignore` apply in a folder outside Git too, and
@@ -2112,15 +2114,78 @@ async fn search_files(
     Ok(Json(results))
 }
 
+/// How explicit path completion looks at the disk. A folder on a network
+/// mount that cannot be reached right now, or a link into one, can hold a
+/// lookup for minutes, so each gets so long and no longer; tests stand in
+/// lookups that never answer.
+#[derive(Clone, Copy)]
+struct PathLookups {
+    /// A folder's entries, each with its type as the listing gives it, so
+    /// only a link needs looking at on its own.
+    list: fn(&std::path::Path) -> Option<Listing>,
+    /// Whether a link leads to a folder.
+    follow: fn(&std::path::Path) -> bool,
+    /// How long the folder may take to list.
+    folder: Duration,
+    /// How long its links may take to resolve, all together, once it has.
+    links: Duration,
+}
+
+const PATH_LOOKUPS: PathLookups = PathLookups {
+    list: list_folder,
+    follow: std::path::Path::is_dir,
+    folder: Duration::from_millis(1500),
+    links: Duration::from_millis(500),
+};
+
+/// How many of a folder's links are resolved at once.
+const LINKS_AT_ONCE: usize = 4;
+
+/// An entry's type, as a folder listing gives it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    Folder,
+    Link,
+    Other,
+}
+
+/// A folder's entries: each name and its type.
+type Listing = Vec<(String, EntryKind)>;
+
+fn list_folder(folder: &std::path::Path) -> Option<Listing> {
+    let entries = std::fs::read_dir(folder).ok()?;
+    Some(
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| {
+                let kind = match entry.file_type() {
+                    Ok(kind) if kind.is_symlink() => EntryKind::Link,
+                    Ok(kind) if kind.is_dir() => EntryKind::Folder,
+                    Ok(_) => EntryKind::Other,
+                    // No type in the listing and none on a second look:
+                    // followed like a link, as a path would be.
+                    Err(_) => EntryKind::Link,
+                };
+                (entry.file_name().to_string_lossy().into_owned(), kind)
+            })
+            .collect(),
+    )
+}
+
 /// Direct `/…`, `~/…`, `./…`, and `../…` completion. The user has explicitly
 /// named the location, so reveal one directory level and preserve their path
 /// notation in every result. Normal read/media permission checks still run
-/// when the selection is actually used.
-fn explicit_path_suggestions(
+/// when the selection is actually used. A folder that does not list within
+/// `lookups.folder` completes to nothing, and a link that has not resolved
+/// within `lookups.links` after that is listed by its name, without the `/`
+/// of a folder.
+async fn explicit_path_suggestions(
     workspace: &std::path::Path,
     query: &str,
     limit: usize,
+    lookups: PathLookups,
 ) -> Option<Vec<String>> {
+    use futures::StreamExt as _;
     let (expanded, exact_directory_prefix) = if query == "~" || query.starts_with("~/") {
         let Some(home) = haarness_protocol::home_dir() else {
             return Some(Vec::new());
@@ -2163,26 +2228,67 @@ fn explicit_path_suggestions(
         )
     };
     let fragment = fragment.to_ascii_lowercase();
-    let Ok(entries) = std::fs::read_dir(&directory) else {
-        // This was still an explicit path query. Do not reinterpret a typo or
-        // unreadable directory as a fuzzy workspace search.
+    let listed = {
+        let folder = directory.clone();
+        crate::lookups::within(
+            "folder",
+            &directory,
+            tokio::time::Instant::now() + lookups.folder,
+            move || (lookups.list)(&folder),
+        )
+        .await
+    };
+    let Some(Some(entries)) = listed else {
+        // This was still an explicit path query. Do not reinterpret a typo, an
+        // unreadable directory or one that does not answer as a fuzzy
+        // workspace search.
         return Some(Vec::new());
     };
-    let mut matches = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
+    let matches = entries
+        .into_iter()
+        .filter_map(|(name, kind)| {
             if name.starts_with('.') && !fragment.starts_with('.') {
                 return None;
             }
             let score = fuzzy_score(&name.to_ascii_lowercase(), &fragment)?;
-            // Follows symlinks, so a linked folder completes with its `/`.
-            let is_dir = entry.path().is_dir();
+            Some((name, kind, score))
+        })
+        .collect::<Vec<_>>();
+    // A link is followed, so a linked folder completes with its `/`.
+    let deadline = tokio::time::Instant::now() + lookups.links;
+    let links = matches
+        .iter()
+        .filter(|(_, kind, _)| *kind == EntryKind::Link)
+        .map(|(name, _, _)| name.clone())
+        .collect::<Vec<_>>();
+    let linked_folders = futures::stream::iter(links)
+        .map(|name| {
+            let link = directory.join(&name);
+            async move {
+                let path = link.clone();
+                crate::lookups::within("link", &link, deadline, move || (lookups.follow)(&path))
+                    .await
+                    .unwrap_or(false)
+                    .then_some(name)
+            }
+        })
+        .buffer_unordered(LINKS_AT_ONCE)
+        .filter_map(std::future::ready)
+        .collect::<std::collections::HashSet<_>>()
+        .await;
+    let mut matches = matches
+        .into_iter()
+        .map(|(name, kind, score)| {
+            let is_dir = match kind {
+                EntryKind::Folder => true,
+                EntryKind::Link => linked_folders.contains(&name),
+                EntryKind::Other => false,
+            };
             let mut display = format!("{display_prefix}{name}");
             if is_dir && !display.ends_with('/') {
                 display.push('/');
             }
-            Some((is_dir, score, display))
+            (is_dir, score, display)
         })
         .collect::<Vec<_>>();
     matches.sort_by(|a, b| {
@@ -2236,7 +2342,12 @@ fn fuzzy_score(path: &str, query: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod file_search_tests {
-    use super::{explicit_path_suggestions, fuzzy_score};
+    use super::{
+        Listing, PATH_LOOKUPS, PathLookups, explicit_path_suggestions, fuzzy_score, list_folder,
+    };
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
 
     /// The scores Desktop's port is pinned to as well.
     #[test]
@@ -2260,8 +2371,8 @@ mod file_search_tests {
         }
     }
 
-    #[test]
-    fn dot_paths_browse_relative_directories_and_preserve_the_typed_prefix() {
+    #[tokio::test]
+    async fn dot_paths_browse_relative_directories_and_preserve_the_typed_prefix() {
         let tree = TestTree(
             std::env::temp_dir().join(format!("haarness-dot-path-{}", uuid::Uuid::now_v7())),
         );
@@ -2270,8 +2381,16 @@ mod file_search_tests {
         std::fs::create_dir_all(tree.0.join("one/sibling-dir")).unwrap();
         std::fs::write(workspace.join("local.txt"), "local").unwrap();
         std::fs::write(workspace.join(".secret"), "hidden").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("local-dir", workspace.join("linked-dir")).unwrap();
+            std::os::unix::fs::symlink("local.txt", workspace.join("linked.txt")).unwrap();
+            std::os::unix::fs::symlink("missing", workspace.join("dangling")).unwrap();
+        }
+        let suggest =
+            |query: &'static str| explicit_path_suggestions(&workspace, query, 20, PATH_LOOKUPS);
 
-        let current = explicit_path_suggestions(&workspace, "./", 20).unwrap();
+        let current = suggest("./").await.unwrap();
         assert!(current.contains(&"./local-dir/".to_owned()), "{current:?}");
         assert!(current.contains(&"./local.txt".to_owned()), "{current:?}");
         assert!(!current.iter().any(|path| path.contains(".secret")));
@@ -2287,20 +2406,146 @@ mod file_search_tests {
             directory < file,
             "directories sort before files: {current:?}"
         );
+        // A link to a folder completes as one; a link to a file, or to
+        // nothing, as a file.
+        #[cfg(unix)]
+        assert_eq!(
+            current,
+            [
+                "./local-dir/",
+                "./linked-dir/",
+                "./dangling",
+                "./local.txt",
+                "./linked.txt"
+            ]
+        );
 
-        let parent = explicit_path_suggestions(&workspace, "../sib", 20).unwrap();
+        let parent = suggest("../sib").await.unwrap();
         assert_eq!(parent, vec!["../sibling-dir/"]);
-        let repeated = explicit_path_suggestions(&workspace, "../../", 20).unwrap();
+        let repeated = suggest("../../").await.unwrap();
         assert!(repeated.contains(&"../../one/".to_owned()), "{repeated:?}");
 
-        let hidden = explicit_path_suggestions(&workspace, "./.s", 20).unwrap();
+        let hidden = suggest("./.s").await.unwrap();
         assert!(hidden.contains(&"./.secret".to_owned()), "{hidden:?}");
-        assert!(
-            explicit_path_suggestions(&workspace, "../missing/", 20)
-                .unwrap()
-                .is_empty()
+        assert!(suggest("../missing/").await.unwrap().is_empty());
+        assert!(suggest("local").await.is_none());
+    }
+
+    #[cfg(unix)]
+    static LINK_RELEASED: AtomicBool = AtomicBool::new(false);
+    static FOLDER_RELEASED: AtomicBool = AtomicBool::new(false);
+
+    fn wait_for(released: &AtomicBool) {
+        while !released.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Follows a link as the server does, except that one named `hung`
+    /// hangs until the test lets it go, as a link into a network mount that
+    /// went away can.
+    #[cfg(unix)]
+    fn follow_hangs(link: &Path) -> bool {
+        if link.file_name().is_some_and(|name| name == "hung") {
+            wait_for(&LINK_RELEASED);
+        }
+        link.is_dir()
+    }
+
+    /// Lists a folder as the server does, except that one named
+    /// `hung-folder` hangs until the test lets it go.
+    fn list_hangs(folder: &Path) -> Option<Listing> {
+        if folder.file_name().is_some_and(|name| name == "hung-folder") {
+            wait_for(&FOLDER_RELEASED);
+        }
+        list_folder(folder)
+    }
+
+    /// `query`'s completion, asked `asks` times in a row on another thread,
+    /// so a completion that holds its thread fails the test instead of
+    /// hanging it: the answers that came within 5 s each, and how long each
+    /// took. `release` then lets the lookups that hang go.
+    fn complete(
+        workspace: PathBuf,
+        query: &'static str,
+        lookups: PathLookups,
+        asks: usize,
+        release: &AtomicBool,
+    ) -> Vec<(Vec<String>, Duration)> {
+        let (sender, answers) = std::sync::mpsc::channel();
+        let asking = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            for _ in 0..asks {
+                let started = Instant::now();
+                let found =
+                    runtime.block_on(explicit_path_suggestions(&workspace, query, 20, lookups));
+                let _ = sender.send((found.unwrap(), started.elapsed()));
+            }
+        });
+        let found = std::iter::from_fn(|| answers.recv_timeout(Duration::from_secs(5)).ok())
+            .take(asks)
+            .collect();
+        release.store(true, Ordering::SeqCst);
+        asking.join().unwrap();
+        found
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_does_not_resolve_in_time_is_listed_by_its_name() {
+        let tree = TestTree(
+            std::env::temp_dir().join(format!("haarness-hung-link-{}", uuid::Uuid::now_v7())),
         );
-        assert!(explicit_path_suggestions(&workspace, "local", 20).is_none());
+        std::fs::create_dir_all(tree.0.join("local-dir")).unwrap();
+        std::fs::write(tree.0.join("local.txt"), "local").unwrap();
+        std::os::unix::fs::symlink("local-dir", tree.0.join("hung")).unwrap();
+        std::os::unix::fs::symlink("local-dir", tree.0.join("linked-dir")).unwrap();
+        let lookups = PathLookups {
+            follow: follow_hangs,
+            links: Duration::from_millis(200),
+            ..PATH_LOOKUPS
+        };
+        // Asked twice while the link hangs: the first answer waits for it as
+        // long as links may take, the second not at all.
+        let answers = complete(tree.0.clone(), "./", lookups, 2, &LINK_RELEASED);
+        assert_eq!(answers.len(), 2, "completion waited on a link that hangs");
+        let (first, took) = &answers[0];
+        assert_eq!(
+            first,
+            &["./local-dir/", "./linked-dir/", "./hung", "./local.txt"]
+        );
+        assert!(*took < Duration::from_secs(2), "{took:?}");
+        let (second, took) = &answers[1];
+        assert_eq!(second, first);
+        assert!(*took < Duration::from_millis(150), "{took:?}");
+    }
+
+    #[test]
+    fn a_folder_that_does_not_answer_completes_to_nothing_in_time() {
+        let tree = TestTree(
+            std::env::temp_dir().join(format!("haarness-hung-folder-{}", uuid::Uuid::now_v7())),
+        );
+        std::fs::create_dir_all(tree.0.join("hung-folder/inside")).unwrap();
+        let lookups = PathLookups {
+            list: list_hangs,
+            folder: Duration::from_millis(200),
+            ..PATH_LOOKUPS
+        };
+        let answers = complete(
+            tree.0.clone(),
+            "./hung-folder/",
+            lookups,
+            1,
+            &FOLDER_RELEASED,
+        );
+        let [(found, took)] = answers.as_slice() else {
+            panic!("completion waited on a folder that does not answer");
+        };
+        assert!(found.is_empty(), "{found:?}");
+        assert!(*took < Duration::from_secs(2), "{took:?}");
     }
 }
 
