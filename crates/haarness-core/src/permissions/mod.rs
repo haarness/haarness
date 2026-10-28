@@ -54,33 +54,57 @@ pub const CONFIG_EDIT_RULE: &str = "edit:<haarness configuration>";
 /// as [`Evaluation::matched`] names it (see [`is_credential_store_path`]).
 pub const CREDENTIAL_READ_RULE: &str = "read:<haarness sign-ins>";
 
-/// Where this process keeps sign-ins, each with whether it is a folder of
-/// them: see [`record_credential_store`].
-static CREDENTIAL_STORES: std::sync::LazyLock<parking_lot::RwLock<Vec<(PathBuf, bool)>>> =
+/// What a place [`record_credential_store`] names holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Store {
+    /// The file itself.
+    File,
+    /// Every file in the folder.
+    Folder,
+    /// Every file of its name in its folder or any folder below.
+    Below,
+}
+
+/// Where this process keeps sign-ins and tokens: see
+/// [`record_credential_store`].
+static CREDENTIAL_STORES: std::sync::LazyLock<parking_lot::RwLock<Vec<(PathBuf, Store)>>> =
     std::sync::LazyLock::new(Default::default);
+
+fn record(path: &Path, kind: Store) {
+    let path = normalize_absolute(path);
+    let mut stores = CREDENTIAL_STORES.write();
+    if !stores.iter().any(|(known, _)| *known == path) {
+        stores.push((path, kind));
+    }
+}
 
 /// Record a file where this process keeps sign-ins (provider keys in
 /// `auth.json`, the Cloud sign-in in `credentials.json`), or a `folder` of
 /// them (MCP sign-in tokens), so [`is_credential_store_path`] knows it.
 pub fn record_credential_store(path: PathBuf, folder: bool) {
-    let path = normalize_absolute(&path);
-    let mut stores = CREDENTIAL_STORES.write();
-    if !stores.iter().any(|(known, _)| *known == path) {
-        stores.push((path, folder));
-    }
+    record(&path, if folder { Store::Folder } else { Store::File });
 }
 
-/// Whether `path` is where Haarness keeps sign-ins: a file
+/// Record that every file named `name` in `folder`, or in any folder below
+/// it, holds a token (the address and token of the server of each project,
+/// `runtime.json` in the cache folder), so [`is_credential_store_path`]
+/// knows them.
+pub fn record_credential_files_below(folder: &Path, name: &str) {
+    record(&folder.join(name), Store::Below);
+}
+
+/// Whether `path` is where Haarness keeps sign-ins or tokens: a file
 /// [`record_credential_store`] named, a temporary copy written while saving
-/// it (`auth.tmp-…` or `auth.json.tmp-…`), its lock (`auth.json.lock`), or
-/// anything in a folder of them. Compared as full paths, after `.` and `..`,
-/// as written and through links in the folders (letter case aside), never
-/// by name alone: a project's own `auth.json` is an ordinary file. A path
-/// whose own names are none of those is not one, with no look at the disk,
-/// so the many files a search judges cost nothing: callers also judge where
-/// a link leads (a read's resolved path, the shell's placed arguments, a
-/// search's link targets). A model-run read of one asks a person every
-/// time, and searches leave it out.
+/// it (`auth.tmp-…`, `auth.json.tmp-…` or `.auth.json-…`), its lock
+/// (`auth.json.lock`), anything in a folder of them, or a file of a name
+/// [`record_credential_files_below`] gave below its folder. Compared as full
+/// paths, after `.` and `..`, as written and through links in the folders
+/// (letter case aside), never by name alone: a project's own `auth.json` is
+/// an ordinary file. A path whose own names are none of those is not one,
+/// with no look at the disk, so the many files a search judges cost
+/// nothing: callers also judge where a link leads (a read's resolved path,
+/// the shell's placed arguments, a search's link targets). A model-run read
+/// of one asks a person every time, and searches leave it out.
 #[must_use]
 pub fn is_credential_store_path(path: &Path) -> bool {
     let stores = CREDENTIAL_STORES.read();
@@ -99,31 +123,38 @@ pub fn is_credential_store_path(path: &Path) -> bool {
         }
         spellings
     };
+    // Whether `inner` is `outer` or (with `below`) inside it, by any
+    // spelling of each.
+    let within = |inner: &Path, outer: &Path, below: bool| {
+        let outer = spellings(outer);
+        spellings(inner).iter().any(|inner| {
+            outer.iter().any(|outer| {
+                inner == outer
+                    || below
+                        && inner
+                            .strip_prefix(outer.as_str())
+                            .is_some_and(|rest| rest.starts_with(['/', '\\']))
+            })
+        })
+    };
     let real = path.canonicalize().ok();
     [Some(written), real]
         .into_iter()
         .flatten()
         .any(|candidate| {
-            stores.iter().any(|(store, folder)| {
-                if *folder {
-                    let inside = spellings(store);
-                    let candidate = key(&candidate);
-                    return inside.iter().any(|root| {
-                        candidate
-                            .strip_prefix(root.as_str())
-                            .is_some_and(|rest| rest.starts_with(['/', '\\']))
-                    });
-                }
-                store_file_name(store, &candidate)
-                    && match (candidate.parent(), store.parent()) {
-                        (Some(folder), Some(home)) => {
-                            let homes = spellings(home);
-                            spellings(folder)
-                                .iter()
-                                .any(|folder| homes.contains(folder))
+            stores.iter().any(|(store, kind)| match kind {
+                Store::Folder => candidate
+                    .parent()
+                    .is_some_and(|folder| within(folder, store, true)),
+                Store::File | Store::Below => {
+                    store_file_name(store, &candidate)
+                        && match (candidate.parent(), store.parent()) {
+                            (Some(folder), Some(home)) => {
+                                within(folder, home, *kind == Store::Below)
+                            }
+                            _ => false,
                         }
-                        _ => false,
-                    }
+                }
             })
         })
 }
@@ -140,9 +171,9 @@ pub(crate) fn may_name_credential_store(value: &str) -> bool {
 /// Whether `candidate`'s names are those of a store: its file name is a
 /// store file's (see [`store_file_name`]), or one of its folders is named as
 /// a folder of them is.
-fn names_a_store(stores: &[(PathBuf, bool)], candidate: &Path) -> bool {
-    stores.iter().any(|(store, folder)| {
-        if *folder {
+fn names_a_store(stores: &[(PathBuf, Store)], candidate: &Path) -> bool {
+    stores.iter().any(|(store, kind)| {
+        if *kind == Store::Folder {
             return store.file_name().is_some_and(|name| {
                 candidate
                     .components()
@@ -168,6 +199,7 @@ fn store_file_name(store: &Path, candidate: &Path) -> bool {
         || name == format!("{store}.lock")
         || name.starts_with(&format!("{store}.tmp-"))
         || name.starts_with(&format!("{stem}.tmp-"))
+        || name.starts_with(&format!(".{store}-"))
 }
 
 /// Whether `path` (after `.` and `..`, at any depth) is a file Haarness, or a
@@ -2591,13 +2623,18 @@ mod tests {
         std::fs::write(project.join("auth.json"), "{}").unwrap();
         record_credential_store(root.join("auth.json"), false);
         record_credential_store(root.join("mcp-oauth"), true);
+        record_credential_files_below(&root.join("cache"), "runtime.json");
         let store = root.join("auth.json");
         // The store, its temporary copies and lock, a file in a folder of
         // them, by any spelling of the path.
         for path in [
             store.clone(),
             root.join("auth.tmp-41-x2Yz"),
+            root.join(".auth.json-01a1"),
             root.join("auth.json.lock"),
+            root.join("cache/runtime.json"),
+            root.join("cache/workspaces/01a1/runtime.json"),
+            root.join("cache/workspaces/01a1/runtime.tmp-42"),
             root.join("mcp-oauth/server.json"),
             root.join("sub/../AUTH.JSON"),
             PathBuf::from(store.to_string_lossy().to_uppercase()),
@@ -2609,6 +2646,9 @@ mod tests {
             project.join("auth.json"),
             root.join("auth.json.bak"),
             root.join("mcp-oauth"),
+            root.join("runtime.json"),
+            project.join("runtime.json"),
+            root.join("cache/workspaces/01a1/notes.json"),
             PathBuf::from("auth.json"),
         ] {
             assert!(!is_credential_store_path(&path), "{}", path.display());
