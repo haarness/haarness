@@ -4,8 +4,11 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
 1. toml_order: `[permissions]` rules in `config.toml` apply in the order written, a `"*"` catch-all
    first, kept as TOML and once migrated to `haarness.json`: a deny written after a broader allow
    refuses, and a catch-all written last never overrides a deny before it.
-2. cd_link: a `cd` through a link that the shell takes out of the project by name
-   (`cd a/l/../../..` with `a/l` leading deeper in) asks, so a headless run stops before it writes.
+2. cd_link: a `cd` or `pushd` through a link that the shell takes out of the project by name
+   (`cd a/l/../../..` with `a/l` leading deeper in) asks, so a headless run stops before it writes,
+   while a path after a plain `cd` is read from where it went: `cd sub && cat ../README.md` and
+   `cd sub && echo x > ../out.txt` run without asking, and so does `cat ../README.md` with `sub` as
+   the call's `workdir`; a `cd` with no folder goes home and asks.
 3. resource_alias: a deny written in `opencode.json` under upstream OpenCode's name for the resource
    read tool refuses `mcp_resource_read`.
 4. backslash: a line that starts with a backslash is a command of its own (an `rm *` deny refuses
@@ -24,10 +27,13 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
 9. holding_always: through a server, Always on `cat ~/.gitconfig` from a project under the home folder
    remembers that file alone (saved for the folder), and Always on `cd ~ && ls` the home folder alone, so
    both run again without asking while `cat ~/.ssh/config` and `cat ~/.netrc` still ask.
+10. workdir_home: a line run with `~` as its `workdir`, from a project under the home folder, asks for the
+   home folder alone beside the file it names there, with no rule and with only `~/.gitconfig` allowed.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
-toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins, holding_always). No model is
+toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins, holding_always,
+workdir_home). No model is
 called; nothing outside the fixture is touched.
 """
 import json
@@ -128,16 +134,30 @@ def case_cd_link():
     (folder / 'deep' / 'er' / 'x').mkdir(parents=True)
     (folder / 'a').mkdir()
     (folder / 'a' / 'l').symlink_to('../deep/er/x')
+    (folder / 'sub').mkdir()
+    (folder / 'README.md').write_text('# chained read\n')
     escaped = folder.parent / 'escaped.txt'
     try:
-        output = bash(env, folder, 'cd a/l/../../.. && touch escaped.txt', code=1)
-        assert 'Stopped:' in output and str(folder.parent) in output, output
-        assert not escaped.exists(), 'the line ran outside the project without asking'
+        for line in ['cd a/l/../../.. && touch escaped.txt', 'pushd a/l/../../.. && touch escaped.txt']:
+            output = bash(env, folder, line, code=1)
+            assert 'Stopped:' in output and str(folder.parent) in output, output
+            assert not escaped.exists(), f'{line} ran outside the project without asking'
         output = bash(env, folder, 'cd a/l/.. && pwd', code=0)
         assert str(folder / 'a') in output, output
+        output = bash(env, folder, 'cd sub && cat ../README.md', code=0)
+        assert '# chained read' in output and 'Stopped' not in output, output
+        output = bash(env, folder, 'cd sub && echo chained > ../out.txt', code=0)
+        assert (folder / 'out.txt').read_text() == 'chained\n', output
+        output = call(env, folder, 'bash', {'workdir': 'sub', 'command': 'cat ../README.md'}, code=0)
+        assert '# chained read' in output and 'Stopped' not in output, output
+        home = Path(env['HOME'])
+        output = bash(env, folder, 'cd && touch bare-cd-probe', code=1)
+        assert 'Stopped:' in output and str(home) in output, output
+        assert not (home / 'bare-cd-probe').exists(), 'a cd with no folder ran in the home folder without asking'
     finally:
         stop(env, folder)
-    passed('a cd out of the project through a link asks; one that stays inside runs')
+    passed('a cd or pushd out of the project through a link asks; one that stays inside runs, and so does a '
+           'path after a cd or from a workdir that stays in the project; a cd with no folder asks')
 
 
 def case_resource_alias():
@@ -386,9 +406,34 @@ def case_holding_always():
            'the folder alone; ~/.ssh/config and ~/.netrc still ask')
 
 
+def case_workdir_home():
+    """A line run in the home folder asks about the folder itself, not only the files it names there."""
+    for name, allowed in [('workdir-home', False), ('workdir-home-file', True)]:
+        _, env = environment(name)
+        home = Path(env['HOME']).resolve()
+        folder = home / 'work' / 'app'
+        folder.mkdir(parents=True, exist_ok=True)
+        (home / '.gitconfig').write_text('[user]\n\tname = Fixture\n')
+        config = {'model': 'echo/echo-1', **REVIEW}
+        if allowed:
+            # What Always saves after `cat ~/.gitconfig`.
+            config['permission'] = {'external_directory': {f'{home}/.gitconfig': 'allow'}}
+        (folder / 'haarness.json').write_text(json.dumps(config))
+        subprocess.run(['git', 'init', '-q', str(folder)], check=True)
+        try:
+            command = 'cat .gitconfig && tar cf probe.tar .gitconfig'
+            output = call(env, folder, 'bash', {'workdir': '~', 'command': command}, code=1)
+            assert 'Stopped:' in output and f'"{home}/":"allow"' in output, output
+            assert not (home / 'probe.tar').exists(), 'the line ran in the home folder without asking'
+        finally:
+            stop(env, folder)
+    passed('a line run with ~ as its workdir asks for the home folder itself, also with ~/.gitconfig allowed')
+
+
 CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
          'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev,
-         'action_case': case_action_case, 'sign_ins': case_sign_ins, 'holding_always': case_holding_always}
+         'action_case': case_action_case, 'sign_ins': case_sign_ins, 'holding_always': case_holding_always,
+         'workdir_home': case_workdir_home}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]

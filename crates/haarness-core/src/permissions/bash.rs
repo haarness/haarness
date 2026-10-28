@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 
 use super::arity;
 
@@ -72,9 +73,10 @@ pub struct BashAnalysis {
 /// [`BashAnalysis::paths`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedPath {
-    /// Where it leads from the project folder, `~` and links followed; for
-    /// a path with a dynamic part (`/tmp/$name`), the folder its literal
-    /// start names.
+    /// Where it leads from the folder the shell is in (the project, or where
+    /// a plain `cd` before it in the line's `&&` chain went: see
+    /// [`chain_folders`]), `~` and links followed; for a path with a dynamic
+    /// part (`/tmp/$name`), the folder its literal start names.
     pub path: PathBuf,
     /// It is a file written in full: no dynamic part, and not a folder.
     pub file: bool,
@@ -149,8 +151,9 @@ pub struct Derived {
 }
 
 /// Commands whose non-flag arguments are filesystem paths worth resolving.
+/// `pushd` enters its folder like `cd`.
 const PATH_COMMANDS: &[&str] = &[
-    "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
+    "cd", "pushd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
 ];
 
 /// Programs that only look at the files they are given (their names, sizes,
@@ -245,6 +248,14 @@ const STDIN_PATHS: &[&str] = &["/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"];
 /// allowing).
 #[must_use]
 pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
+    analyze_in(command, workspace, workspace)
+}
+
+/// [`analyze`] for a command the shell runs in `workdir` (the folder a
+/// `bash` call names, resolved): its relative paths start there, and the
+/// project is still `workspace`.
+#[must_use]
+pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalysis {
     if command.len() > MAX_COMMAND_BYTES {
         let mut analysis = fallback(&clipped(command));
         analysis.unreadable = true;
@@ -252,6 +263,7 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
     }
     let mut reader = Reader {
         workspace,
+        start: workdir,
         analysis: BashAnalysis::default(),
         patterns: HashSet::new(),
         written: HashMap::new(),
@@ -267,6 +279,7 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
         nested_cd: false,
         moved: 0,
         unplaced: false,
+        folder: None,
     };
     if !reader.read(command, Depth::default()) {
         return fallback(command);
@@ -598,6 +611,8 @@ fn joined_continuations(text: &str, within: bool) -> Option<String> {
 
 struct Reader<'w> {
     workspace: &'w Path,
+    /// The folder the shell starts in: the project, or a call's `workdir`.
+    start: &'w Path,
     analysis: BashAnalysis,
     /// The patterns in the analysis, to keep them unique.
     patterns: HashSet<String>,
@@ -630,6 +645,10 @@ struct Reader<'w> {
     /// The line holds backquotes in a here-document no written command
     /// opens, so the line as one command is a command not read whole.
     unplaced: bool,
+    /// Where the relative paths being checked start when a plain `cd`
+    /// earlier in the line's `&&` chain moved the shell (see
+    /// [`chain_folders`]); [`Self::start`] otherwise.
+    folder: Option<Rc<Path>>,
 }
 
 /// The written command whose standard input a program reads.
@@ -831,6 +850,7 @@ impl Reader<'_> {
         // The traversal above visits parents before children but pops LIFO;
         // sort by position so patterns keep source order.
         command_nodes.sort_by_key(|(node, _)| node.start_byte());
+        let mut folders = HashMap::new();
         if depth.text == 0 {
             let mut statements = tree.root_node().walk();
             let statements: Vec<_> = tree
@@ -842,6 +862,15 @@ impl Reader<'_> {
                 [statement] if and_chain(*statement) => Some(Vec::new()),
                 _ => None,
             };
+            // Not for a line the parser cannot read whole, or one whose
+            // words the shell joins across lines: either may hold a `cd`
+            // where the tree has none.
+            if let [statement] = statements.as_slice()
+                && !tree.root_node().has_error()
+                && joined_continuations(command, true).is_none()
+            {
+                folders = chain_folders(*statement, command, self.start);
+            }
         }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
         let continued = command.contains("\\\n");
@@ -890,7 +919,9 @@ impl Reader<'_> {
             // Words written after a redirect (`rm 2>&1 -rf ~/x`) or a
             // here-document operator are the command's too.
             let (words, carried) = command_words(node, parent, command);
+            self.folder = folders.get(&node.id()).cloned();
             self.check_paths(&words, command);
+            self.folder = None;
             if depth.text == 0 {
                 self.source = None;
             }
@@ -1024,13 +1055,21 @@ impl Reader<'_> {
                     moved: false,
                 });
             }
-            let outside = external_dir(self.workspace, &node_text(dest, command), &value, complete);
+            self.folder = folders.get(&redirect.id()).cloned();
+            let outside = external_dir(
+                self.workspace,
+                self.from(),
+                &node_text(dest, command),
+                &value,
+                complete,
+            );
             self.name_path(
                 &node_text(dest, command),
                 &value,
                 complete,
                 outside.as_deref(),
             );
+            self.folder = None;
             if let Some(dir) = outside {
                 push_unique(&mut self.analysis.external_dirs, glob(&dir));
             }
@@ -1490,20 +1529,32 @@ impl Reader<'_> {
         if !complete || !PATH_COMMANDS.contains(&name.as_str()) {
             return;
         }
+        // A `cd` given no folder goes to the home folder.
+        let mut bare = name == "cd";
         for word in node.named_children(&mut node.walk()) {
-            if word.id() == program.id()
-                || !WORD_KINDS.contains(&word.kind())
-                || matches!(word.kind(), "command_substitution" | "process_substitution")
-            {
+            if word.id() == program.id() || !WORD_KINDS.contains(&word.kind()) {
+                continue;
+            }
+            if matches!(word.kind(), "command_substitution" | "process_substitution") {
+                bare = false;
                 continue;
             }
             let (argument, complete) = path_literal(word, source);
-            if argument.starts_with('-') || (name == "chmod" && argument.starts_with('+')) {
+            bare &= complete && argument.starts_with('-') && argument != "-";
+            if names_no_path(&name, &argument) {
                 continue;
             }
             let raw = node_text(word, source);
             self.check_folder(&name, &raw, &argument, complete);
         }
+        if bare {
+            self.check_folder(&name, "~", "~", true);
+        }
+    }
+
+    /// Where a relative path being checked starts: see [`Self::folder`].
+    fn from(&self) -> &Path {
+        self.folder.as_deref().unwrap_or(self.start)
     }
 
     /// An argument of a command in [`PATH_COMMANDS`] that leads outside the
@@ -1511,15 +1562,16 @@ impl Reader<'_> {
     /// out of the path as written (`cd -L`, its default), not of where a link
     /// in it leads, so a `cd` is also judged that way: with `a/l` leading
     /// deeper into the project, `cd a/l/../../..` reaches the project's
-    /// parent, though followed it is the project itself.
+    /// parent, though followed it is the project itself. `pushd` enters its
+    /// folder the same way.
     fn check_folder(&mut self, name: &str, raw: &str, value: &str, complete: bool) {
-        let outside = external_dir(self.workspace, raw, value, complete);
+        let outside = external_dir(self.workspace, self.from(), raw, value, complete);
         self.name_path(raw, value, complete, outside.as_deref());
         if let Some(dir) = outside {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
         }
-        if name == "cd"
-            && let Some(dir) = cd_dir(self.workspace, raw, value, complete)
+        if matches!(name, "cd" | "pushd")
+            && let Some(dir) = cd_dir(self.workspace, self.from(), raw, value, complete)
         {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
         }
@@ -1542,8 +1594,8 @@ impl Reader<'_> {
             return;
         }
         let path = match home_expansion(raw, target) {
-            Some(expanded) => resolve(self.workspace, &expanded),
-            None => resolve(self.workspace, Path::new(target)),
+            Some(expanded) => resolve(self.from(), &expanded),
+            None => resolve(self.from(), Path::new(target)),
         };
         self.analysis.paths.push(NamedPath {
             file: complete && !path.is_dir(),
@@ -2038,7 +2090,7 @@ impl Reader<'_> {
                     let (value, complete) = path_literal(word.node, source);
                     (complete
                         && !value.is_empty()
-                        && !value.starts_with('-')
+                        && !names_no_path(&name, &value)
                         && !brace_list(&word.raw)
                         && !searched(&value))
                     .then(|| (word.raw.clone(), value))
@@ -2072,16 +2124,40 @@ impl Reader<'_> {
         if !complete || !PATH_COMMANDS.contains(&name.as_str()) {
             return;
         }
+        // A `cd` given no folder (`cd`, `cd --`, `cd -P`) goes to the home
+        // folder.
+        if name == "cd"
+            && arguments.iter().all(|word| {
+                let (value, complete) = path_literal(word.node, source);
+                complete && value.starts_with('-') && value != "-"
+            })
+        {
+            self.check_folder(&name, "~", "~", true);
+        }
         for word in arguments {
             // Each path of a brace list (`cat {,~/.ssh/id_rsa}`) on its own.
             for path in expanded(word, source) {
-                if path.value.starts_with('-') || (name == "chmod" && path.value.starts_with('+')) {
+                if names_no_path(&name, &path.value) {
                     continue;
                 }
                 self.check_folder(&name, &path.raw, &path.value, path.complete);
             }
         }
     }
+}
+
+/// Whether an argument of a command in [`PATH_COMMANDS`] names no path: an
+/// option (`-x`, `chmod`'s `+x`), or a place in `pushd`'s folder stack
+/// (`+1`; `-1` reads as an option), which only turns to a folder the stack
+/// already holds. Any other `pushd +…` word is read as a folder, as zsh takes
+/// it.
+fn names_no_path(name: &str, value: &str) -> bool {
+    value.starts_with('-')
+        || (name == "chmod" && value.starts_with('+'))
+        || (name == "pushd"
+            && value.strip_prefix('+').is_some_and(|place| {
+                !place.is_empty() && place.bytes().all(|b| b.is_ascii_digit())
+            }))
 }
 
 /// The name [`Reader::check_deletions`] reads a program nobody can name by.
@@ -3540,6 +3616,107 @@ fn and_chain(node: tree_sitter::Node<'_>) -> bool {
     }
 }
 
+/// Builtins that run text or another command in the line's own shell, which
+/// [`moves_shell`] does not name: `time cd /x` moves it, a `trap`, `mapfile
+/// -C` or `readarray -C` runs text there later, and `enable -f` loads a
+/// builtin that may.
+const RUNS_IN_SHELL: &[&str] = &["time", "trap", "mapfile", "readarray", "enable"];
+
+/// Where the relative paths of the steps of a line's `&&` chain start once
+/// a plain `cd` or `pushd` in it moved the shell: the folder, by the node id
+/// of each later step's command and of the redirects that belong to it. A
+/// step starts where the steps before it left the shell, so a `cd`'s own
+/// folder and redirects are read from there too (`cd src && cat
+/// ../README.md` reads the project's `README.md`).
+///
+/// Only the `cd`s and `pushd`s at the start of the chain are followed, each
+/// plain: one folder [`plain_path`] takes that is a folder now (not a `pushd
+/// +N` place in the folder stack), with no assignment, substitution or word
+/// after a redirect. After them, every step is read from the folder they
+/// reached while each step before it is a command that cannot move the
+/// shell: a program written as a literal name that is not a builtin
+/// [`moves_shell`] or [`RUNS_IN_SHELL`] names. Any other step (a pipeline, a
+/// subshell, a group, an `||` list, `popd`, a `cd` that is not plain, a
+/// program nobody can name …), and a `cd` after a step that ran (it may have
+/// set `CDPATH` or `HOME`, or made a link where the `cd` goes), leaves the
+/// rest of the line read from where the shell started, as for any line.
+/// Past [`MAX_MOVES`] or a folder of [`MAX_PLACED_BYTES`] nothing more is
+/// followed.
+fn chain_folders(
+    chain: tree_sitter::Node<'_>,
+    source: &str,
+    workspace: &Path,
+) -> HashMap<usize, Rc<Path>> {
+    let mut folders = HashMap::new();
+    let mut folder: Rc<Path> = Rc::from(workspace);
+    let (mut moves, mut ran) = (0, false);
+    for (node, outer) in steps(chain) {
+        let (Some(command), redirects) = statement(node, &outer) else {
+            break;
+        };
+        if heredoc_holds_more(node) {
+            break;
+        }
+        if moves > 0 {
+            // A redirect written after a here-document's `<<EOF` hangs in it.
+            let inner = redirects
+                .iter()
+                .filter(|redirect| redirect.kind() == "heredoc_redirect")
+                .flat_map(|redirect| children(*redirect))
+                .filter(|child| child.kind() == "file_redirect");
+            for node in std::iter::once(command)
+                .chain(redirects.iter().copied())
+                .chain(inner)
+            {
+                folders.insert(node.id(), Rc::clone(&folder));
+            }
+        }
+        let words = words(command, source);
+        let plain = command
+            .named_children(&mut command.walk())
+            .all(|child| child.kind() != "variable_assignment")
+            && !has_substitution(command)
+            && redirects.iter().all(|redirect| {
+                redirect.kind() == "file_redirect"
+                    && redirect
+                        .children_by_field_name("destination", &mut redirect.walk())
+                        .count()
+                        == 1
+            });
+        match words.as_slice() {
+            [program, target]
+                if plain
+                    && program.literal
+                    && matches!(program.value.as_str(), "cd" | "pushd")
+                    && plain_path(target)
+                    && !names_no_path(&program.value, &target.value) =>
+            {
+                let target = home_expansion(&target.raw, &target.value)
+                    .unwrap_or_else(|| PathBuf::from(&target.value));
+                let next = folder.join(target);
+                moves += 1;
+                if ran
+                    || moves > MAX_MOVES
+                    || next.as_os_str().len() > MAX_PLACED_BYTES
+                    || !next.is_dir()
+                {
+                    break;
+                }
+                folder = Rc::from(next);
+            }
+            [program, ..]
+                if program.literal
+                    && !moves_shell(command, source)
+                    && !RUNS_IN_SHELL.contains(&program_name(&program.value).as_str()) =>
+            {
+                ran = true;
+            }
+            _ => break,
+        }
+    }
+    folders
+}
+
 /// `text` kept to [`CLIPPED_PATTERN_BYTES`], with `…` when cut.
 fn clipped(text: &str) -> String {
     if text.len() <= CLIPPED_PATTERN_BYTES {
@@ -3575,8 +3752,16 @@ fn glob(dir: &Path) -> String {
 /// or `cp` target, a new redirect file) is judged where it would be created,
 /// so a new file outside the project asks like an existing one. A value with
 /// a dynamic part (`/tmp/$name`) is judged by the folder its literal start
-/// names. `raw` is the source text, which tells an unquoted leading `~`.
-fn external_dir(workspace: &Path, raw: &str, value: &str, complete: bool) -> Option<PathBuf> {
+/// names. `raw` is the source text, which tells an unquoted leading `~`. A
+/// relative path starts at `from`: the project, or where the line's `cd`s
+/// took the shell.
+fn external_dir(
+    workspace: &Path,
+    from: &Path,
+    raw: &str,
+    value: &str,
+    complete: bool,
+) -> Option<PathBuf> {
     let target = if complete {
         value
     } else {
@@ -3586,8 +3771,8 @@ fn external_dir(workspace: &Path, raw: &str, value: &str, complete: bool) -> Opt
         return None;
     }
     let resolved = match home_expansion(raw, target) {
-        Some(expanded) => resolve(workspace, &expanded),
-        None => resolve(workspace, Path::new(target)),
+        Some(expanded) => resolve(from, &expanded),
+        None => resolve(from, Path::new(target)),
     };
     let workspace = resolve(workspace, Path::new(""));
     if resolved.starts_with(&workspace) {
@@ -3625,12 +3810,18 @@ fn stream_device(value: &str, complete: bool) -> bool {
         )
 }
 
-/// Where the shell's own `cd` takes a path from `workspace` when that is
-/// outside the project: by name, each `..` dropping the folder written
+/// Where the shell's own `cd` takes a path from `from` when that is outside
+/// the project (`workspace`): by name, each `..` dropping the folder written
 /// before it whatever link that is, then into the folder that names (links
 /// there followed, as the shell enters it). A dynamic part is judged by the
 /// literal start before it, as [`external_dir`] judges it.
-fn cd_dir(workspace: &Path, raw: &str, value: &str, complete: bool) -> Option<PathBuf> {
+fn cd_dir(
+    workspace: &Path,
+    from: &Path,
+    raw: &str,
+    value: &str,
+    complete: bool,
+) -> Option<PathBuf> {
     let target = if complete {
         value
     } else {
@@ -3640,10 +3831,10 @@ fn cd_dir(workspace: &Path, raw: &str, value: &str, complete: bool) -> Option<Pa
         return None;
     }
     let named = match home_expansion(raw, target) {
-        Some(expanded) => lexical(workspace, &expanded),
-        None => lexical(workspace, Path::new(target)),
+        Some(expanded) => lexical(from, &expanded),
+        None => lexical(from, Path::new(target)),
     };
-    let resolved = resolve(workspace, named);
+    let resolved = resolve(from, named);
     if resolved.starts_with(resolve(workspace, Path::new(""))) {
         return None;
     }
@@ -3844,10 +4035,11 @@ const MAX_SCRIPT_FILES: usize = 16;
 /// How many files earlier steps plainly write [`script_files`] keeps, to say
 /// a script is written before it runs.
 const MAX_WRITES: usize = 256;
-/// How many `cd`s [`script_files`] follows; past them the folder is unknown.
+/// How many `cd`s [`script_files`] and [`chain_folders`] follow; past them
+/// the folder is unknown.
 const MAX_MOVES: usize = 64;
-/// How long a folder [`script_files`] lays may get: the system's own path
-/// limit, so a line of `cd`s cannot grow it further.
+/// How long a folder [`script_files`] and [`chain_folders`] lay may get: the
+/// system's own path limit, so a line of `cd`s cannot grow it further.
 const MAX_PLACED_BYTES: usize = 4096;
 
 /// A script file a command line runs, from [`script_files`].
@@ -5078,6 +5270,198 @@ mod regression {
             "cd deep/er/x/.. && ls",
             "touch a/l/../../x",
             "cat a/l/../../../project/README.md",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pushd_is_judged_like_a_cd() {
+        let root = std::env::temp_dir().join(format!("haarness-pushd-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("deep/er/x")).unwrap();
+        std::fs::create_dir_all(workspace.join("a")).unwrap();
+        std::fs::create_dir_all(workspace.join("sub")).unwrap();
+        std::os::unix::fs::symlink("../deep/er/x", workspace.join("a/l")).unwrap();
+        let parent = root.canonicalize().unwrap();
+        let tmp = analyze("cd /tmp && cat notes.txt", &workspace).external_dirs;
+        assert!(!tmp.is_empty());
+        for command in [
+            "pushd /tmp && cat notes.txt",
+            "pushd /tmp > /dev/null && cat notes.txt",
+            "pushd -n /tmp",
+            "builtin pushd /tmp",
+        ] {
+            assert_eq!(analyze(command, &workspace).external_dirs, tmp, "{command}");
+        }
+        // Taken by name out of the project, though followed it is the
+        // project itself; a `+` word that is no place in the stack is a
+        // folder.
+        for command in [
+            "pushd a/l/../../.. && touch escaped.txt",
+            "pushd +../../../x",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                vec![glob(&parent)],
+                "{command}"
+            );
+        }
+        // A folder in the project, a place in the folder stack, and `popd`.
+        for command in [
+            "pushd sub && cargo test && popd",
+            "pushd a/l/.. && ls",
+            "pushd +1",
+            "pushd -0",
+            "popd",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        // Auto places a deletion after `pushd sub`, but `pushd +1` turns
+        // back to the project, not into a folder named `+1`.
+        assert!(outside_deletions("pushd sub && rm -rf ../x", &workspace, None).is_empty());
+        assert_eq!(
+            outside_deletions("pushd sub && pushd +1 && rm -rf ../x", &workspace, None),
+            vec![OutsideDeletion {
+                path: "../x".into(),
+                placed: false,
+                effect: Effect::Deletes,
+            }]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_after_a_plain_cd_in_an_and_chain_starts_where_the_cd_went() {
+        let root = std::env::temp_dir().join(format!("haarness-cd-chain-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("deep/er/x")).unwrap();
+        std::fs::create_dir_all(workspace.join("a")).unwrap();
+        std::fs::create_dir_all(workspace.join("sub/deeper")).unwrap();
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
+        std::os::unix::fs::symlink("../deep/er/x", workspace.join("a/l")).unwrap();
+        std::os::unix::fs::symlink("../deep", workspace.join("sub/l")).unwrap();
+        let parent = vec![glob(&root.canonicalize().unwrap())];
+        // Inside the project, read from where the `cd`s went: the
+        // command's paths and its redirects, also after commands that
+        // cannot move the shell; a link is entered where it leads.
+        for command in [
+            "cd src && cat ../README.md",
+            "cd sub && echo x > ../out.txt",
+            "cd sub && echo x > ../out.txt && cat ../README.md",
+            "cd sub && cat > ../notes.md <<'EOF'\n# x\nEOF",
+            "cd sub && cat <<'EOF' > ../notes.md\n# x\nEOF",
+            "cd sub > /dev/null && cat ../README.md",
+            "pushd sub > /dev/null && cat ../README.md && popd",
+            "cd sub && npm test && cp out.txt ../dist/",
+            "cd sub && cd deeper && cat ../../README.md",
+            "cd sub &&\ncat ../README.md",
+            "cd a/l && cat ../../../README.md",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        // Outside from there, and a redirect of the `cd` itself, which is
+        // opened before it runs.
+        for command in [
+            "cd sub && cat ../../x",
+            "cd sub && echo x > ../../out.txt",
+            "cd sub && cat <<'EOF' > ../../notes.md\n# x\nEOF",
+            "cd sub > ../log.txt && cat ../README.md",
+            "cd a/l && cat ../../../../x",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                parent,
+                "{command}"
+            );
+        }
+        // Read from the project, as before, where the folder is not known
+        // for sure: after `;`, in a subshell, a `cd` to a folder nobody can
+        // tell or that is not there, a `cd` after another step (which may
+        // have made a link where it goes), a step that may move the shell, a
+        // pipeline, an `||` list, `cd` run by another program, and a word the
+        // shell joins across lines.
+        let today = analyze("cat ../x", &workspace).external_dirs;
+        assert_eq!(today, parent);
+        for command in [
+            "cd sub; cat ../x",
+            "(cd sub) && cat ../x",
+            "cd \"$D\" && cat ../x",
+            "cd sub/../src && cat ../x",
+            "make && cd sub && cat ../x",
+            "cd nosuch && cat ../x",
+            "cd sub && make && cd deeper && cat ../x",
+            &format!(
+                "ln -sfn {} sub/l && cd {} && cat ../x",
+                root.join("outside").display(),
+                workspace.join("sub/l").display()
+            ),
+            "cd sub && eval true && cat ../x",
+            "cd sub && time true && cat ../x",
+            "cd sub && $run && cat ../x",
+            "pushd sub && pushd +1 && cat ../x",
+            "cd sub && popd && cat ../x",
+            "cd sub && cat ../x | head",
+            "cd sub || cat ../x",
+            "env cd sub && cat ../x",
+            "/usr/bin/cd sub && cat ../x",
+            &format!("cd sub && c\\\nd {} && cat ../x", workspace.display()),
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                today,
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_cd_with_no_folder_goes_to_the_home_folder() {
+        let root = std::env::temp_dir().join(format!("haarness-bare-cd-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        let home = analyze("cd ~", &workspace).external_dirs;
+        if home.is_empty() {
+            // The project is in the home folder here.
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        for command in [
+            "cd && rm -rf Documents",
+            "cd -- && ls",
+            "cd -P",
+            "cd -L && cat .zshrc",
+            "cd src && cd && rm -rf Documents",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                home,
+                "{command}"
+            );
+        }
+        // A folder, the folder before (`cd -`), or one known only when the
+        // line runs.
+        for command in [
+            "cd src && ls",
+            "cd -P src",
+            "cd -- src",
+            "cd -",
+            "cd \"$D\"",
         ] {
             assert!(
                 analyze(command, &workspace).external_dirs.is_empty(),
