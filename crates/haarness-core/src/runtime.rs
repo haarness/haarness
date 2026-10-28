@@ -1014,9 +1014,18 @@ fn is_provider_image_rejection(error: &CoreError, request_has_images: bool) -> b
             && ["media type", "media_type", "mime type"]
                 .iter()
                 .any(|marker| message.contains(marker)));
-    // Too many bytes, unless the provider says it is the context that is
-    // too long: compaction answers that one.
-    let oversized = OVERSIZED_REQUEST
+    named || is_provider_oversized_request(error)
+}
+
+/// A provider that refused the request for its size in bytes, not for a
+/// context too long in tokens: compacting answers the latter, and makes
+/// little difference to the former, whose bytes are mostly attachments.
+fn is_provider_oversized_request(error: &CoreError) -> bool {
+    let CoreError::Provider(message) = error else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    OVERSIZED_REQUEST
         .iter()
         .any(|marker| message.contains(marker))
         && ![
@@ -1026,8 +1035,19 @@ fn is_provider_image_rejection(error: &CoreError, request_has_images: bool) -> b
             "input is too long",
         ]
         .iter()
-        .any(|marker| message.contains(marker));
-    named || oversized
+        .any(|marker| message.contains(marker))
+}
+
+/// How a turn ends whose request the provider still refused as too large in
+/// bytes after the chat was compacted for it: the refusal follows, for the
+/// log. The transcript says what to do instead (see `describe_error`).
+const STILL_TOO_LARGE: &str = "request still too large after compacting: ";
+
+fn still_too_large(error: CoreError) -> CoreError {
+    match error {
+        CoreError::Provider(message) => CoreError::Provider(format!("{STILL_TOO_LARGE}{message}")),
+        error => error,
+    }
 }
 
 /// An image attachment in a sent request, where an Anthropic-shaped error
@@ -1269,6 +1289,12 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     let CoreError::Provider(raw) = error else {
         return error.to_string();
     };
+    if raw.starts_with(STILL_TOO_LARGE) {
+        return format!(
+            "{} refused this request as too large, even after the chat was compacted. Send smaller or fewer files, or continue in a new chat.",
+            provider.unwrap_or("The provider")
+        );
+    }
     if is_region_unavailable(raw) {
         return format!(
             "{} is not available in your country or region. Choose a model from another provider.",
@@ -8649,6 +8675,10 @@ impl RunnerTask {
                 .filter(|turns| *turns > 0)
                 .unwrap_or(crate::goal::MAX_GOAL_TURNS);
             let mut compactions_this_turn = 0_u8;
+            // A refusal of the request's bytes compacts once: when the
+            // summary leaves the request too large, more summaries would only
+            // summarize the last one.
+            let mut compacted_for_size = false;
             let mut recoveries = 0_u8;
             // Corrective rounds after a structured-output turn answered in the
             // wrong shape: without a forced tool choice a model can reply in
@@ -9284,11 +9314,16 @@ impl RunnerTask {
                             }
                             return Err(error_value);
                         }
+                        let oversized = is_provider_oversized_request(&error_value);
+                        if oversized && compacted_for_size {
+                            return Err(still_too_large(error_value));
+                        }
                         if compactions_this_turn < MAX_COMPACTIONS_PER_TURN
                             && is_provider_context_overflow(&error_value)
                             && self.recover_context_overflow(&provider, &model).await?
                         {
                             compactions_this_turn = compactions_this_turn.saturating_add(1);
+                            compacted_for_size |= oversized;
                             continue 'provider_round;
                         }
                         if transient_retries < TRANSIENT_RETRIES
@@ -9351,12 +9386,19 @@ impl RunnerTask {
                                 blocked = Some(error_value);
                                 break;
                             }
+                            let oversized =
+                                !saw_provider_event && is_provider_oversized_request(&error_value);
+                            if oversized && compacted_for_size {
+                                blocked = Some(still_too_large(error_value));
+                                break;
+                            }
                             if !saw_provider_event
                                 && compactions_this_turn < MAX_COMPACTIONS_PER_TURN
                                 && is_provider_context_overflow(&error_value)
                                 && self.recover_context_overflow(&provider, &model).await?
                             {
                                 compactions_this_turn = compactions_this_turn.saturating_add(1);
+                                compacted_for_size |= oversized;
                                 continue 'provider_round;
                             }
                             // Providers report an HTTP failure as the stream's
@@ -17291,6 +17333,55 @@ mod tests {
         ] {
             assert!(!overflow(message), "{message}");
         }
+    }
+
+    #[test]
+    fn a_refusal_of_the_requests_bytes_is_told_apart_from_a_context_too_long() {
+        let oversized = |message: &str| {
+            super::is_provider_oversized_request(&CoreError::Provider(message.into()))
+        };
+        for message in [
+            "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes.",
+            "HTTP 413 Request Entity Too Large",
+            r#"HTTP 413: {"type":"error","error":{"type":"request_too_large","message":"Request too large"}}"#,
+            "HTTP 400 Bad Request: Request payload size exceeds the limit: 20971520 bytes.",
+        ] {
+            assert!(oversized(message), "{message}");
+        }
+        for message in [
+            "prompt is too long: 210000 tokens > 200000 maximum",
+            "HTTP 413 Payload Too Large: maximum context length exceeded",
+            "Request too large for gpt-4o on tokens per min (TPM): Limit 30000, Requested 50000.",
+            "HTTP 400 Bad Request: messages: text content blocks must be non-empty",
+        ] {
+            assert!(!oversized(message), "{message}");
+        }
+        assert!(!super::is_provider_oversized_request(&CoreError::Tool(
+            "HTTP 413".into()
+        )));
+        // Refused again after compacting, the turn says what to do.
+        let refusal = CoreError::Provider(
+            "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes."
+                .into(),
+        );
+        let ended = super::still_too_large(refusal);
+        assert!(
+            ended
+                .to_string()
+                .contains("Request exceeds the maximum allowed number of bytes")
+        );
+        assert_eq!(
+            super::describe_error(&ended, Some("Anthropic")),
+            "Anthropic refused this request as too large, even after the chat was compacted. Send smaller or fewer files, or continue in a new chat."
+        );
+        assert_eq!(
+            super::user_facing_error(&ended),
+            "The provider refused this request as too large, even after the chat was compacted. Send smaller or fewer files, or continue in a new chat."
+        );
+        assert_eq!(
+            super::stop_failure_categories(&ended),
+            ("provider", "invalid_request")
+        );
     }
 
     #[test]
