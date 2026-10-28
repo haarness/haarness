@@ -2119,10 +2119,10 @@ html[dir="rtl"] .tool-target {
 .diff-line .spelled-code {
   color: inherit;
 }
-/* A Shell panel's command is history, muted already: its codes are a step
-   quieter still. */
+/* In a tool's input panel it takes the text color: the chip sets it apart,
+   and muted on the chip over the panel would read too faint. */
 .tool-input .spelled-code {
-  color: var(--faint);
+  color: var(--text);
 }
 /* An explicit Chrome request names each site it asks for, one per line. */
 .prompt-subject.chrome-approval {
