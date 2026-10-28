@@ -64,9 +64,6 @@ async function chip(element: Locator) {
   });
 }
 const CHIP = { tinted: true, bidi: "isolate", direction: "ltr" };
-/** `expected` with each `\u{…}` code between a left-to-right isolate and its
- * end, as plain text such as a row's target sets it apart. */
-const isolated = (expected: string) => expected.replace(/\\u\{[0-9A-F]+\}/g, (code) => "\u2066" + code + "\u2069");
 
 test.beforeAll(async () => {
   test.setTimeout(120000);
@@ -170,10 +167,13 @@ test("an approval shows what is invisible in a command as quiet codes, right to 
   } finally {
     await page.evaluate(() => (window as any).haarness.preferences({ language: "en" }));
   }
-  // The call's row waiting on the card shows the same codes, on one line.
-  await expect(page.locator(".tool-target").last()).toHaveText(
-    isolated("echo report\\u{202E}fdp.sh\\u{200B} && printf done\\u{D} printf more > ran.txt"),
-  );
+  // The call's row waiting on the card shows the same codes, on one line,
+  // set apart as on the card and with nothing added to what a copy takes.
+  const target = page.locator(".tool-target").last();
+  await expect(target).toHaveText("echo report\\u{202E}fdp.sh\\u{200B} && printf done\\u{D} printf more > ran.txt");
+  await expect(target.locator(".spelled-code")).toHaveText(["\\u{202E}", "\\u{200B}", "\\u{D}"]);
+  expect(await target.textContent()).not.toMatch(/[\u2066-\u2069]/);
+  expect(await chip(target)).toEqual(CHIP);
   await pictures("approval-row", page.locator("details.tool-call").last());
   // The answer is the request's own: denied as asked, nothing ran.
   await page.getByRole("button", { name: "Deny", exact: true }).click();
@@ -222,18 +222,22 @@ test("a right-to-left name keeps its code in one piece on its row and in its pan
   await writeFile(join(project, name), "سطر\n");
   await send("!tool read " + JSON.stringify({ path: name }));
   await idle();
-  const row = page.locator("details.tool-call").last();
+  // Opened once its result is in (a row drawn again without it starts
+  // closed), and before the language changes.
+  const row = page.locator("details.tool-call").filter({ hasText: "200F" }).last();
+  await expect(row).toHaveAttribute("data-status", "done");
+  await row.locator("summary").click();
+  const input = row.locator(".tool-input");
+  await expect(input.locator(".spelled-code")).toHaveText("\\u{200F}");
   await page.evaluate(() => (window as any).haarness.preferences({ language: "ar" }));
   try {
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
-    await expect(row.locator(".tool-target")).toHaveText(isolated("ملف\\u{200F}.txt"));
-    await row.locator("summary").click();
-    const input = row.locator(".tool-input");
+    await expect(row.locator(".tool-target")).toHaveText("ملف\\u{200F}.txt");
     await expect(input.locator(".spelled-code")).toHaveText("\\u{200F}");
     expect(await chip(input)).toEqual(CHIP);
     // The code reads left to right as written, after the name, not torn
     // around it.
-    const order = await row.locator(".tool-target").evaluate((element) => {
+    const order = await row.locator(".tool-target .spelled-code").evaluate((element) => {
       const range = document.createRange();
       const text = element.firstChild!;
       const at = (index: number) => {

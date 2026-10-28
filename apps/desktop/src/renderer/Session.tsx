@@ -117,7 +117,7 @@ import { isWorktree, locationName } from "../projects";
 import { createWorktree } from "./worktrees";
 import { ChangePreview, ToolActivity } from "./ToolActivity";
 import { SpelledOut } from "./SpelledOut";
-import { spelledOutText } from "./display-text";
+import { shortenSpelled, spelledOutText } from "./display-text";
 import { Mark } from "./brand";
 import { ChatLoading } from "./ChatLoading";
 import { matchesShortcut, shortcutLabel, shortcutText } from "./search";
@@ -4045,10 +4045,8 @@ function Permission(props: {
 /** A menu line too long for the menu, with its start and its end kept (a
  * command's start, a path's last folders) and the middle left out. */
 function middleTruncate(text: string, length = 30) {
-  const characters = Array.from(text);
-  if (characters.length <= length) return text;
-  const head = Math.ceil((length - 1) / 2);
-  return characters.slice(0, head).join("") + "…" + characters.slice(characters.length - (length - 1 - head)).join("");
+  // A rule's codes are kept whole or left out whole.
+  return shortenSpelled(text, length);
 }
 /** The closed script toggle: its size, which for a cut file counts only
  * what was read. */

@@ -26,7 +26,7 @@ import { watchOpenImages } from "./ImageViewer";
 import { Icon } from "./ui";
 import { requestReview } from "./Review";
 import { Shimmer } from "./Shimmer";
-import { SpelledOut } from "./SpelledOut";
+import { SpelledOut, SpelledText } from "./SpelledOut";
 import { turnsDirection } from "./display-text";
 import { useApp } from "./state";
 import { appsOff, loadMcpServers, mcpServersKnown, readOnlyServer, setApps } from "./mcp-servers";
@@ -43,6 +43,7 @@ import {
   toolInput,
   toolName,
   toolTitle,
+  imageName,
   toolFailed,
   toolVerb,
   ranInChrome,
@@ -217,7 +218,7 @@ export function ToolActivity(props: {
             <strong>{verb()}</strong>
           </Show>
           <span class="tool-target" title={toolTitle(props.args, shape().target)}>
-            {shape().target}
+            <SpelledText text={shape().target} />
           </span>
           <Show when={answer()}>
             <span class="tool-answer" title={answer()}>
@@ -300,7 +301,7 @@ export function ToolActivity(props: {
                         </Show>
                       </Show>
                       <Show when={image()} keyed>
-                        {(found) => <ReadImage image={found} alt={(shape().target ?? "").split(/[\\/]/).pop() ?? ""} />}
+                        {(found) => <ReadImage image={found} alt={imageName(props.args)} />}
                       </Show>
                     </div>
                   }

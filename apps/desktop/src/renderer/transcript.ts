@@ -15,7 +15,7 @@ import type {
 import { lines, type DiffLine } from "./diff";
 import { language, t } from "./i18n";
 import { reviewReason } from "./approval-mode";
-import { spelledOutText, withoutEscapes } from "./display-text";
+import { spelledOutPlain, spelledOutText, withoutEscapes } from "./display-text";
 
 /** Provider call IDs can repeat in another turn; output belongs to one call. */
 export function toolResult(items: Item[], call?: Item, boundary = Infinity) {
@@ -642,6 +642,12 @@ function targetText(args: unknown): string {
  * the row, written as its code, as on the call's approval card. */
 export function toolTarget(args: unknown): string {
   return spelledOutText(targetText(args)).replace(/\s+/g, " ");
+}
+/** A read image's name: its file's own name as the call wrote it, taken from
+ * the path before what would not show is spelled out, so a code's backslash
+ * is never read as a folder. */
+export function imageName(args: unknown): string {
+  return spelledOutPlain(targetText(args).split(/[\\/]/).pop() ?? "");
 }
 /**
  * A tool row's tooltip: the whole target with its line breaks, so a

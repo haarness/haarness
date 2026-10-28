@@ -257,3 +257,41 @@ export function spelledOutPlain(text: string): string {
     .map((part) => part.text)
     .join("");
 }
+
+/** What `spelledOutText` wrote, cut back into what shows as written and its
+ * codes, without the isolates around them, for a page that sets each code
+ * apart itself (`.spelled-code`), so a copy of it gains no characters. A pair
+ * of isolates there is always one of its codes: the text's own isolates are
+ * codes. */
+export function spelledTextParts(text: string): { text: string; code: boolean }[] {
+  const parts: { text: string; code: boolean }[] = [];
+  let last = 0;
+  for (const match of text.matchAll(/\u2066(\\u\{[0-9A-F]+\})\u2069/g)) {
+    if (match.index > last) parts.push({ text: text.slice(last, match.index), code: false });
+    parts.push({ text: match[1], code: true });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length || !parts.length) parts.push({ text: text.slice(last), code: false });
+  return parts;
+}
+
+/** `text` from `spelledOutText` in about `length` characters, with an
+ * ellipsis in the middle where it is longer. A code counts as the characters
+ * it shows and is kept whole or left out whole, never cut. */
+export function shortenSpelled(text: string, length = 30): string {
+  const units = Array.from(text.matchAll(/\u2066\\u\{[0-9A-F]+\}\u2069|[\s\S]/gu), (match) => match[0]);
+  const shown = (unit: string) => (unit.length > 2 && unit.startsWith("\u2066") ? unit.length - 2 : 1);
+  if (units.reduce((sum, unit) => sum + shown(unit), 0) <= length) return text;
+  const take = (from: string[], room: number) => {
+    const kept: string[] = [];
+    for (const unit of from) {
+      if (shown(unit) > room) break;
+      kept.push(unit);
+      room -= shown(unit);
+    }
+    return kept;
+  };
+  const head = take(units, Math.ceil((length - 1) / 2));
+  const tail = take([...units].reverse(), length - 1 - Math.ceil((length - 1) / 2)).reverse();
+  return head.join("") + "…" + tail.join("");
+}
