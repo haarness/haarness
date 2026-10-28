@@ -414,6 +414,15 @@ try:
     until(lambda:'approvals: yolo' in capture(),'the TUI does not show the new chat in Yolo')
     save('archive-keeps-yolo')
     check('/archive opens the next chat in the archived chat\'s Review or Yolo')
+    # Another client clears that chat's own setting: its Auto now comes from
+    # the default alone, so the chat /archive opens is left to the default.
+    api('/v1/threads/'+opened+'/approval-mode',{'mode':'inherit'},'PUT')
+    until(lambda:'approvals: yolo' not in capture() and ' auto ' in capture().split('\n')[-2],'the TUI did not follow the cleared setting')
+    opened=opened_by('/archive')
+    time.sleep(1)
+    mode=api('/v1/threads/'+opened+'/approval-mode')
+    assert mode['mode']=='auto' and not mode['explicit'], mode
+    check('/archive from a chat with no setting of its own leaves the new chat to the default')
     print(f'{len(checks)} real-server TUI scenarios passed.',flush=True)
     (root/'tui.txt').write_text(capture())
 finally:

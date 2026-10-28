@@ -1780,6 +1780,7 @@
   "{count} more lines": "{count} linjer mere",
   "rejected": "afvist",
   "Approvals changed in another window · ctrl+y to switch": "Godkendelserne blev ændret i et andet vindue · ctrl+y for at skifte",
+  "Could not keep approvals · ctrl+y to switch": "Godkendelserne kunne ikke beholdes · ctrl+y for at skifte",
   "Share usage statistics": "Del brugsstatistik",
   "Diagnostics": "Diagnostik",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "Denne computers Haarness-logfiler som zip, uden kendte hemmeligheder, til at dele, når noget går galt.",

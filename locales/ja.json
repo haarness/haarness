@@ -1780,6 +1780,7 @@
   "{count} more lines": "あと {count} 行",
   "rejected": "拒否済み",
   "Approvals changed in another window · ctrl+y to switch": "承認方法が別のウィンドウで変更されました · ctrl+y で切り替え",
+  "Could not keep approvals · ctrl+y to switch": "承認方法を引き継げませんでした · ctrl+y で切り替え",
   "Share usage statistics": "使用状況の統計を共有",
   "Diagnostics": "診断",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "このコンピュータの Haarness のログを、既知のシークレットを除いた zip にして、問題が起きたときに共有できます。",

@@ -4854,6 +4854,7 @@ impl App {
                 directory: None,
             })
             .await?;
+        let mut kept = true;
         if let Some(mode) = carried {
             let request = haarness_protocol::SetApprovalModeRequest {
                 mode: mode.setting(),
@@ -4861,30 +4862,33 @@ impl App {
             };
             if let Err(error) = client.set_approval_mode(thread.id, &request).await {
                 tracing::warn!(%error, ?mode, "could not start the new chat in the open chat's mode");
+                kept = false;
             }
         }
         self.refresh_threads(client).await?;
-        self.switch_thread(thread, client).await
+        self.switch_thread(thread, client).await?;
+        // The new chat runs in the default, which may ask less than the
+        // mode it should have kept: say so over the switch's "Ready". The
+        // band beside it shows the mode the chat is in.
+        if !kept {
+            self.notice = "Could not keep approvals · ctrl+y to switch".into();
+        }
+        Ok(())
     }
 
-    /// The mode a chat opened in place of this one starts in: this chat's
-    /// Auto or Yolo, or a Review someone chose for it. A Review that only
-    /// comes from `defaults.approval_mode` is not written, so the new chat
-    /// keeps following the configuration. Nothing on a server that keeps no
-    /// modes, where this launch's own switch already covers every chat.
+    /// The mode a chat opened in place of this one starts in: the mode
+    /// someone chose for this chat (or for the agent that delegated to it).
+    /// A mode that only comes from `defaults.approval_mode` is not written,
+    /// so the new chat keeps following the configuration, and neither is
+    /// one not read yet. Nothing on a server that keeps no modes, where this
+    /// launch's own switch already covers every chat.
     fn carried_approval_mode(&self) -> Option<haarness_protocol::ApprovalMode> {
-        use haarness_protocol::ApprovalMode;
-        if !self.approval_server {
-            return None;
-        }
-        match self.chat_approval_mode() {
-            ApprovalMode::Review => self
-                .approval_mode
-                .as_ref()
-                .filter(|info| info.thread_id == self.thread.id && info.explicit)
-                .map(|_| ApprovalMode::Review),
-            mode => Some(mode),
-        }
+        self.approval_mode
+            .as_ref()
+            .filter(|info| {
+                self.approval_server && info.thread_id == self.thread.id && info.explicit
+            })
+            .map(|info| info.mode)
     }
 
     fn upsert_thread(&mut self, thread: Thread) {
