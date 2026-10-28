@@ -3101,11 +3101,20 @@ impl App {
             .map_or(&[], |model| model.reasoning_efforts.as_slice())
     }
 
+    /// The levels a pick may name: those the model lists or, for a model that
+    /// lists none, the configured level, which the server sends it as written.
+    pub fn reasoning_levels(&self) -> Vec<String> {
+        match (self.reasoning_efforts(), self.configured_level()) {
+            ([], Some(configured)) => vec![configured.to_owned()],
+            (levels, _) => levels.to_vec(),
+        }
+    }
+
     pub fn normalize_reasoning(&mut self) {
         // The model's own default is no level: every model has one.
         if self.reasoning_effort.as_ref().is_some_and(|effort| {
             effort != haarness_protocol::MODEL_DEFAULT_EFFORT
-                && !self.reasoning_efforts().contains(effort)
+                && !self.reasoning_levels().contains(effort)
         }) {
             self.reasoning_effort = None;
         }

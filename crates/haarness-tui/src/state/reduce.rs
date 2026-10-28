@@ -405,6 +405,14 @@ impl App {
                 if !self.notice_is_fresh(std::time::Instant::now()) {
                     self.notice = "Configuration reloaded".into();
                 }
+                // The configured reasoning level may have changed with it:
+                // /reasoning shows it, and provider default is named over it.
+                if let Ok(info) = client.info().await
+                    && let Some(current) = self.server_info.as_mut()
+                    && current.server_instance_id == info.server_instance_id
+                {
+                    current.default_reasoning_effort = info.default_reasoning_effort;
+                }
             }
             "configuration.reload_queued" => {
                 self.notice =

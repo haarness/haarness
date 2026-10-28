@@ -4611,6 +4611,82 @@ async fn without_a_configured_effort_provider_default_is_no_pick() {
 }
 
 #[tokio::test]
+async fn a_model_that_lists_no_levels_shows_the_configured_one_and_provider_default_overrides_it() {
+    let mut app = selector_fixture();
+    app.thread.model = "gpt-5.4".into();
+    app.providers[0].models[0].reasoning_efforts.clear();
+    // Nothing configured: no level to offer, as before.
+    app.server_info = Some(side_server_info(Vec::new()));
+    assert_eq!(reasoning_rows(&app).len(), 1);
+    app.execute_command("/reasoning high", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_effort, None);
+    assert!(
+        app.notice.contains("does not support reasoning effort"),
+        "{}",
+        app.notice
+    );
+
+    // Configured high: the server sends it as written, so it is the row in use.
+    app.server_info.as_mut().unwrap().default_reasoning_effort = Some("high".into());
+    assert_eq!(app.reasoning_choice(), "high");
+    assert_eq!(
+        reasoning_rows(&app),
+        [
+            ("off".to_owned(), "Let the model decide".to_owned()),
+            (
+                "high".to_owned(),
+                "Deep thinking · default · active".to_owned()
+            ),
+        ]
+    );
+    app.execute_command("/reasoning off", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.requested_effort().as_deref(), Some("default"));
+    assert_eq!(app.reasoning_choice(), "off");
+    app.execute_command("/reasoning high", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.requested_effort().as_deref(), Some("high"));
+    assert_eq!(app.notice, "Reasoning effort: high");
+}
+
+#[tokio::test]
+async fn a_reloaded_configuration_brings_its_reasoning_level_to_the_picker() {
+    let mut app = selector_fixture();
+    let before = side_server_info(Vec::new());
+    let mut after = before.clone();
+    after.default_reasoning_effort = Some("high".into());
+    app.server_info = Some(before);
+    assert_eq!(app.reasoning_choice(), "off");
+    let (address, server) =
+        side_chat_server(vec![Some(serde_json::to_string(&after).unwrap())]).await;
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let thread = app.thread.id;
+    app.reduce(
+        fixture_event(
+            "configuration.reloaded",
+            thread,
+            thread,
+            serde_json::json!({}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.reasoning_choice(), "high");
+    let requests = server.await.unwrap();
+    assert!(requests[0].starts_with("GET /v1/info"), "{requests:?}");
+    // Provider default is now named over it.
+    app.execute_command("/reasoning off", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.requested_effort().as_deref(), Some("default"));
+}
+
+#[tokio::test]
 async fn ultracode_off_names_the_configured_level_it_returns_to() {
     // The chat goes back to the configured level, to a level picked before
     // Ultracode came on (the chat's own setting, or another client's), or to
