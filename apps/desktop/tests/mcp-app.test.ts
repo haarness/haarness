@@ -142,7 +142,8 @@ test("only host sources reach the page's policy, and no network is the default",
     "frame-src 'none'",
     "object-src 'none'",
     "form-action 'none'",
-    "script-src 'self' 'unsafe-inline'",
+    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
+    "worker-src blob:",
   ])
     assert.ok(closed.split("; ").includes(directive), `${directive} in ${closed}`);
   const open = policy({
@@ -153,9 +154,9 @@ test("only host sources reach the page's policy, and no network is the default",
     },
   });
   assert.ok(open.includes("connect-src https://api.example.com;"));
-  assert.ok(open.includes("script-src 'self' 'unsafe-inline' https://cdn.example.com;"));
+  assert.ok(open.includes("script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.example.com;"));
   assert.ok(open.includes("frame-src 'none'"));
-  assert.ok(!open.includes("unsafe-eval"));
+  assert.ok(!open.includes("'unsafe-eval'"));
   assert.ok(!open.includes("youtube"));
   assert.deepEqual(granted({ csp: { frameDomains: ["https://www.youtube.com"], connectDomains: ["https://a.example"] } }), {
     connectDomains: ["https://a.example"],
@@ -200,8 +201,70 @@ test("a declared host without a scheme is an https source, checked like one with
     assert.deepEqual(sources([host]), [], host);
   const meta = { csp: { connectDomains: ["data.example.org"], resourceDomains: ["*.static.example.net", "localhost:3000"] } };
   assert.ok(policy(meta).includes("connect-src https://data.example.org;"), policy(meta));
-  assert.ok(policy(meta).includes("script-src 'self' 'unsafe-inline' https://*.static.example.net;"), policy(meta));
+  assert.ok(policy(meta).includes("script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://*.static.example.net;"), policy(meta));
   assert.deepEqual(granted(meta).connectDomains, ["https://data.example.org"]);
+});
+
+test("every page policy allows WebAssembly and blob: workers, and none allows eval", () => {
+  for (const meta of [undefined, { csp: { resourceDomains: ["https://cdn.example.com", "blob:"], connectDomains: ["blob:"] } }]) {
+    const value = policy(meta);
+    assert.match(value, /(^|; )script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'( |;)/, value);
+    assert.equal(value.match(/wasm-unsafe-eval/g)?.length, 1, value);
+    assert.ok(value.split("; ").includes("worker-src blob:"), value);
+    assert.ok(!value.includes("'unsafe-eval'"), value);
+  }
+  // Neither can be declared: a quoted keyword is no source.
+  const declared = policy({ csp: { resourceDomains: ["'wasm-unsafe-eval'", "'unsafe-eval'"], connectDomains: ["worker-src"] } });
+  assert.ok(!declared.includes("'unsafe-eval'"), declared);
+  assert.ok(declared.includes("connect-src 'none'"), declared);
+});
+
+test("blob: and data: are taken for resources and connections only", () => {
+  const meta = {
+    csp: {
+      resourceDomains: ["https://tiles.example.com", "blob:", "DATA:", "blob:"],
+      connectDomains: ["https://tiles.example.com", "Blob:"],
+      frameDomains: ["blob:", "data:", "https://www.example.com"],
+      baseUriDomains: ["data:", "blob:"],
+    },
+  };
+  const value = policy(meta);
+  for (const directive of [
+    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://tiles.example.com blob: data:",
+    "style-src 'self' 'unsafe-inline' https://tiles.example.com blob: data:",
+    // Listed once each where the directive already has them.
+    "img-src 'self' data: blob: https://tiles.example.com",
+    "font-src 'self' data: https://tiles.example.com blob:",
+    "media-src 'self' data: blob: https://tiles.example.com",
+    "connect-src https://tiles.example.com blob:",
+    "frame-src 'none'",
+    "base-uri 'self'",
+  ])
+    assert.ok(value.split("; ").includes(directive), `${directive} in ${value}`);
+  assert.deepEqual(granted(meta), {
+    connectDomains: ["https://tiles.example.com", "blob:"],
+    resourceDomains: ["https://tiles.example.com", "blob:", "data:"],
+    frameDomains: [],
+    baseUriDomains: [],
+  });
+  // Only the bare scheme: a blob or data URL, a wildcard after it, or another local scheme is no source.
+  for (const item of [
+    "blob:https://tiles.example.com/1f0c",
+    "blob:null/1f0c",
+    "data:text/javascript,alert(1)",
+    "data:,x",
+    "blob:*.example.com",
+    "data:;default-src *",
+    "blob:'unsafe-eval'",
+    "blob",
+    "data",
+    "filesystem:https://tiles.example.com/temporary/x",
+    "javascript:",
+    "about:",
+    "ws:",
+  ])
+    assert.deepEqual(sources([item], true), [], item);
+  assert.deepEqual(sources(["blob:", "data:"]), []);
 });
 
 test("the page document starts with its policy and the host script, after its doctype", () => {
@@ -435,10 +498,23 @@ test("a failing host answers with an error, and the host's own requests get thei
 test("the frame's host page is a separate document whose policy keeps the page in its frame", async () => {
   const page = await readFile(new URL("../src/renderer/public/mcp-app.html", import.meta.url), "utf8");
   const csp = page.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)?.[1] ?? "";
-  for (const directive of ["default-src 'none'", "frame-src 'none'", "object-src 'none'", "form-action 'none'", "base-uri 'none'", "connect-src https: wss:"])
+  for (const directive of [
+    "default-src 'none'",
+    "frame-src 'none'",
+    "object-src 'none'",
+    "form-action 'none'",
+    "base-uri 'none'",
+    "connect-src blob: data: https: wss:",
+    // The page inherits this policy, and a worker it starts inherits both: WebAssembly and blob:
+    // workers must pass here as well as in the page's own policy.
+    "script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: data: https:",
+    "worker-src blob:",
+  ])
     assert.ok(csp.split("; ").includes(directive), directive);
-  // Secure origins only, even before the page's own policy narrows them.
+  // Secure origins and what the page makes itself only, even before the page's own policy narrows them.
   assert.ok(!/\b(http|ws):/.test(csp), csp);
+  assert.ok(!csp.includes("'unsafe-eval'"), csp);
+  assert.ok(!/(^|\s)\*(\s|;|$)/.test(csp), csp);
   // The page frame runs scripts and forms only: an opaque origin, no popups, no top navigation.
   assert.match(page, /setAttribute\('sandbox', 'allow-scripts allow-forms'\)/);
   // Each relayed message says whether the person had just acted in the page, read as it arrives.

@@ -181,15 +181,26 @@ function publicHost(host: string) {
 const BARE_HOST = /^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)*(:\d{1,5})?(\/|$)/i;
 
 /**
+ * `blob:` and `data:`, written as just the scheme, name what the page makes
+ * itself rather than a place on the network (a map library fetching tiles or
+ * a WebAssembly module from a `blob:` URL it made). Workers made from such a
+ * URL inherit the page's policy and so can reach nothing the page cannot.
+ */
+const OWN_CONTENT = /^(blob|data):$/i;
+
+/**
  * A CSP source list takes https and wss host sources of public sites only:
  * anything else (a keyword, a quote, a semicolon) could widen or end the
  * directive it is pasted into, and plain http, every host, or this computer's
  * network is not something a page may reach. IPv6 literals are not taken.
+ * With `own`, for where a page loads resources and connects, `blob:` and
+ * `data:` are taken too; a nested frame or the base URI never takes them.
  */
-export function sources(list: unknown): string[] {
+export function sources(list: unknown, own = false): string[] {
   if (!Array.isArray(list)) return [];
   const found = list.flatMap((item) => {
     if (typeof item !== "string" || /[\s;,'"]/.test(item)) return [];
+    if (OWN_CONTENT.test(item)) return own ? [item.toLowerCase()] : [];
     let url: URL;
     try {
       // A bare host goes through every check below, as one with a scheme does.
@@ -211,34 +222,39 @@ export function sources(list: unknown): string[] {
  * The page's Content Security Policy, from the domains it declares (none: no network at all).
  * `form-action` closes the one network path `default-src` leaves open, a form posting to another
  * site. Nested frames are not allowed: the host page that holds the frame refuses them anyway.
+ * `'wasm-unsafe-eval'` allows WebAssembly to compile: a module can do no more than the page's own
+ * scripts, and `eval` is still refused. `worker-src blob:` lets the page run work, WebAssembly
+ * included, in a worker made from a `blob:` URL, as map libraries draw their tiles. Neither is
+ * something a page can declare.
  */
 export function policy(meta?: Meta) {
   const csp = meta?.csp;
-  const resources = sources(csp?.resourceDomains).join(" ");
-  const connect = sources(csp?.connectDomains).join(" ");
+  const resources = sources(csp?.resourceDomains, true);
+  const connect = sources(csp?.connectDomains, true).join(" ");
   const base = sources(csp?.baseUriDomains).join(" ");
+  // Each directive lists its own sources first, then the declared ones, without repeats.
+  const loads = (...own: string[]) => [...new Set([...own, ...resources])].join(" ");
   return [
     "default-src 'none'",
-    `script-src 'self' 'unsafe-inline' ${resources}`,
-    `style-src 'self' 'unsafe-inline' ${resources}`,
-    `img-src 'self' data: blob: ${resources}`,
-    `font-src 'self' data: ${resources}`,
-    `media-src 'self' data: blob: ${resources}`,
+    `script-src ${loads("'self'", "'unsafe-inline'", "'wasm-unsafe-eval'")}`,
+    `style-src ${loads("'self'", "'unsafe-inline'")}`,
+    `img-src ${loads("'self'", "data:", "blob:")}`,
+    `font-src ${loads("'self'", "data:")}`,
+    `media-src ${loads("'self'", "data:", "blob:")}`,
     `connect-src ${connect || "'none'"}`,
+    "worker-src blob:",
     "frame-src 'none'",
     "object-src 'none'",
     `base-uri ${base || "'self'"}`,
     "form-action 'none'",
-  ]
-    .map((item) => item.trim())
-    .join("; ");
+  ].join("; ");
 }
 
 /** The domains granted in the end, from `hostCapabilities.sandbox.csp`. */
 export function granted(meta?: Meta) {
   return {
-    connectDomains: sources(meta?.csp?.connectDomains),
-    resourceDomains: sources(meta?.csp?.resourceDomains),
+    connectDomains: sources(meta?.csp?.connectDomains, true),
+    resourceDomains: sources(meta?.csp?.resourceDomains, true),
     frameDomains: [] as string[],
     baseUriDomains: sources(meta?.csp?.baseUriDomains),
   };
