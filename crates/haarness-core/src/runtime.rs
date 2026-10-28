@@ -14724,7 +14724,16 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             .get("command")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        let analysis = crate::permissions::bash::analyze(command, workspace);
+        // Relative paths start where the shell tool runs the line.
+        let workdir = arguments
+            .get("workdir")
+            .and_then(serde_json::Value::as_str)
+            .map(|dir| crate::permissions::resolve_permission_path(workspace, dir));
+        let analysis = crate::permissions::bash::analyze_in(
+            command,
+            workspace,
+            workdir.as_deref().unwrap_or(workspace),
+        );
         let mut external_patterns = analysis.external_dirs.clone();
         let mut external_paths = analysis
             .external_dirs
@@ -15400,6 +15409,44 @@ mod shell_reading_tests {
         ] {
             assert!(bash(command, &root).contains(&(Ask, true)), "{command}");
         }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bash_workdir_is_where_the_line_s_relative_paths_start() {
+        let root = std::env::temp_dir().join(format!("haarness-workdir-{}", uuid::Uuid::now_v7()));
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir_all(project.join("vendor")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(project.join("README.md"), "# x\n").unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), project.join("vendor/lib")).unwrap();
+        let outside = root.join("outside").canonicalize().unwrap();
+        let asked = |arguments: serde_json::Value| {
+            ask_plans("bash", &arguments, &project)
+                .into_iter()
+                .find(|plan| plan.permission == "external_directory")
+                .map(|plan| plan.patterns)
+                .unwrap_or_default()
+        };
+        // From the project `../README.md` is outside; from `src` it is the
+        // project's own.
+        assert!(!asked(json!({ "command": "cat ../README.md" })).is_empty());
+        assert_eq!(
+            asked(json!({ "workdir": "src", "command": "cat ../README.md" })),
+            Vec::<String>::new()
+        );
+        assert!(!asked(json!({ "workdir": "src", "command": "cat ../../x" })).is_empty());
+        // `cd lib` from `vendor` enters the link, and `../x` is next to
+        // where it leads.
+        let found = asked(json!({ "workdir": "vendor", "command": "cd lib && rm -rf ../x" }));
+        assert!(
+            found
+                .iter()
+                .any(|pattern| pattern.starts_with(&outside.display().to_string())),
+            "{found:?}"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

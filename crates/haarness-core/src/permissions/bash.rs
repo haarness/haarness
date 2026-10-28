@@ -248,6 +248,14 @@ const STDIN_PATHS: &[&str] = &["/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"];
 /// allowing).
 #[must_use]
 pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
+    analyze_in(command, workspace, workspace)
+}
+
+/// [`analyze`] for a command the shell runs in `workdir` (the folder a
+/// `bash` call names, resolved): its relative paths start there, and the
+/// project is still `workspace`.
+#[must_use]
+pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalysis {
     if command.len() > MAX_COMMAND_BYTES {
         let mut analysis = fallback(&clipped(command));
         analysis.unreadable = true;
@@ -255,6 +263,7 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
     }
     let mut reader = Reader {
         workspace,
+        start: workdir,
         analysis: BashAnalysis::default(),
         patterns: HashSet::new(),
         written: HashMap::new(),
@@ -602,6 +611,8 @@ fn joined_continuations(text: &str, within: bool) -> Option<String> {
 
 struct Reader<'w> {
     workspace: &'w Path,
+    /// The folder the shell starts in: the project, or a call's `workdir`.
+    start: &'w Path,
     analysis: BashAnalysis,
     /// The patterns in the analysis, to keep them unique.
     patterns: HashSet<String>,
@@ -636,7 +647,7 @@ struct Reader<'w> {
     unplaced: bool,
     /// Where the relative paths being checked start when a plain `cd`
     /// earlier in the line's `&&` chain moved the shell (see
-    /// [`chain_folders`]); the project otherwise.
+    /// [`chain_folders`]); [`Self::start`] otherwise.
     folder: Option<Rc<Path>>,
 }
 
@@ -858,7 +869,7 @@ impl Reader<'_> {
                 && !tree.root_node().has_error()
                 && joined_continuations(command, true).is_none()
             {
-                folders = chain_folders(*statement, command, self.workspace);
+                folders = chain_folders(*statement, command, self.start);
             }
         }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
@@ -1543,7 +1554,7 @@ impl Reader<'_> {
 
     /// Where a relative path being checked starts: see [`Self::folder`].
     fn from(&self) -> &Path {
-        self.folder.as_deref().unwrap_or(self.workspace)
+        self.folder.as_deref().unwrap_or(self.start)
     }
 
     /// An argument of a command in [`PATH_COMMANDS`] that leads outside the
