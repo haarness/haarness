@@ -269,12 +269,15 @@ impl ModelProvider for HaarnessCloudProvider {
             .map(|identity| URL_SAFE_NO_PAD.encode(identity))
     }
     /// The router passes an Anthropic model's request on to Anthropic,
-    /// whose image count limits apply.
+    /// whose limits apply. It takes 32 MiB in a request itself.
     fn image_limits(&self, model: &str) -> haarness_core::ImageLimits {
         if model.starts_with("anthropic/") {
             crate::anthropic::image_limits(&self.info().models, model)
         } else {
-            haarness_core::ImageLimits::default()
+            haarness_core::ImageLimits {
+                request: Some(32 * 1024 * 1024 - haarness_core::REQUEST_ALLOWANCE),
+                ..haarness_core::ImageLimits::default()
+            }
         }
     }
     fn info(&self) -> ProviderInfo {
