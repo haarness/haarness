@@ -35,6 +35,21 @@ pub async fn inline_sources(sources: Vec<String>) -> anyhow::Result<Vec<String>>
         };
         let mime = mime_for_path(&path)
             .ok_or_else(|| anyhow::anyhow!("unsupported media attachment {}", path.display()))?;
+        let name = path.file_name().map_or_else(
+            || "attachment".into(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        // The server's words: an attached server refuses no less.
+        let size = tokio::fs::metadata(&path)
+            .await
+            .map_or(0, |metadata| metadata.len());
+        if size > MAX_INLINE_BYTES {
+            anyhow::bail!(file_over_limit(
+                crate::locale::Language::English,
+                &name,
+                size
+            ));
+        }
         // What is left of the limit, and one byte more: a file over it is
         // refused once that byte arrives, without reading the rest.
         let room = MAX_INLINE_BYTES.saturating_sub(total);
@@ -50,13 +65,8 @@ pub async fn inline_sources(sources: Vec<String>) -> anyhow::Result<Vec<String>>
             })?;
         total = total.saturating_add(bytes.len() as u64);
         if total > MAX_INLINE_BYTES {
-            // The server's words: an attached server refuses no less.
             anyhow::bail!(over_limit(crate::locale::Language::English, total));
         }
-        let name = path.file_name().map_or_else(
-            || "attachment".into(),
-            |name| name.to_string_lossy().into_owned(),
-        );
         let name = encode_name(&name);
         result.push(format!(
             "data:{mime};name={name};base64,{}",
@@ -119,16 +129,30 @@ pub fn over_limit(language: crate::locale::Language, total: u64) -> String {
     )
 }
 
+/// Why a message is refused for one file's media, as the server words it.
+pub fn file_over_limit(language: crate::locale::Language, name: &str, size: u64) -> String {
+    language.format(
+        "{name} is {size}, over the {limit} limit for media in one message",
+        &[
+            ("name", name),
+            ("size", &haarness_protocol::mebibytes(size)),
+            ("limit", &haarness_protocol::mebibytes(MAX_INLINE_BYTES)),
+        ],
+    )
+}
+
 /// Recognize a bracketed paste as one or more local media paths to attach
 /// next to `attached` (the draft's attachments). `None` means ordinary text:
 /// not paths, or a path to a file that is not media (a README, or one named
 /// `.pdf` that is not a PDF), which a prompt names as text. `Err` means it
 /// was media that cannot be accepted and should be reported, in `language`,
-/// rather than inserted as a prompt.
+/// rather than inserted as a prompt. `uploads` says the files go to the
+/// server whole (an attached server), images too.
 pub fn paths_from_paste(
     value: &str,
     attached: &[String],
     language: crate::locale::Language,
+    uploads: bool,
 ) -> Result<Option<Vec<String>>, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -159,10 +183,12 @@ pub fn paths_from_paste(
     }
     // Counted as the server counts the message, what is attached already
     // included. Images are left out: it shrinks each to a few MB, so only
-    // other media can take a message past the limit here.
+    // other media can take a message past the limit here. Uploaded, an
+    // image goes whole.
+    let counts = |source: &str| uploads || !is_image(source);
     let mut total = attached
         .iter()
-        .filter(|source| !is_image(source))
+        .filter(|source| counts(source))
         .map(|source| attached_bytes(source))
         .fold(0_u64, u64::saturating_add);
     let mut result: Vec<String> = Vec::new();
@@ -177,7 +203,14 @@ pub fn paths_from_paste(
             .display()
             .to_string();
         let counted = attached.contains(&canonical) || result.contains(&canonical);
-        if !counted && !is_image(&canonical) {
+        if !counted && counts(&canonical) {
+            if size > MAX_INLINE_BYTES {
+                let name = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+                return Err(file_over_limit(language, &name, size));
+            }
             total = total.saturating_add(size);
             if total > MAX_INLINE_BYTES {
                 return Err(over_limit(language, total));
@@ -362,7 +395,7 @@ mod tests {
     #[test]
     fn ordinary_absolute_text_is_not_mistaken_for_a_drop() {
         assert_eq!(
-            paths_from_paste("/definitely/not/a/file.png", &[], Language::English).unwrap(),
+            paths_from_paste("/definitely/not/a/file.png", &[], Language::English, false).unwrap(),
             None
         );
     }
@@ -383,7 +416,7 @@ mod tests {
         std::fs::write(&image, b"png fixture").unwrap();
         let escaped = image.display().to_string().replace(' ', "\\ ");
 
-        let paths = paths_from_paste(&escaped, &[], Language::English)
+        let paths = paths_from_paste(&escaped, &[], Language::English, false)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -414,7 +447,7 @@ mod tests {
         let file = std::fs::File::create(&image).unwrap();
         file.set_len(11 * 1024 * 1024).unwrap();
         assert!(
-            paths_from_paste(image.to_str().unwrap(), &[], Language::English)
+            paths_from_paste(image.to_str().unwrap(), &[], Language::English, false)
                 .unwrap()
                 .is_some()
         );
@@ -423,21 +456,24 @@ mod tests {
                 .await
                 .is_ok()
         );
-        // The server shrinks an image, so a paste takes a large one; an
-        // upload to an attached server still carries it whole.
+        // The server shrinks an image, so a paste takes a large one; one
+        // uploaded to an attached server goes whole, so it is refused there
+        // when it is dropped, by name.
         file.set_len(20 * 1024 * 1024 + 1).unwrap();
         assert!(
-            paths_from_paste(image.to_str().unwrap(), &[], Language::English)
+            paths_from_paste(image.to_str().unwrap(), &[], Language::English, false)
                 .unwrap()
                 .is_some()
+        );
+        let named = "screen shot.png is 20.1 MiB, over the 20 MiB limit for media in one message";
+        assert_eq!(
+            paths_from_paste(image.to_str().unwrap(), &[], Language::English, true),
+            Err(named.into())
         );
         let error = inline_sources(vec![image.display().to_string()])
             .await
             .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "The attachments come to 20.1 MiB, over the 20 MiB limit for media in one message"
-        );
+        assert_eq!(error.to_string(), named);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -478,12 +514,15 @@ mod tests {
         std::fs::write(&image, b"png fixture").unwrap();
 
         assert_eq!(
-            paths_from_paste(readme.to_str().unwrap(), &[], Language::English),
+            paths_from_paste(readme.to_str().unwrap(), &[], Language::English, false),
             Ok(None)
         );
         // Together with media too: the paste is text naming both.
         let both = format!("{} {}", image.display(), readme.display());
-        assert_eq!(paths_from_paste(&both, &[], Language::English), Ok(None));
+        assert_eq!(
+            paths_from_paste(&both, &[], Language::English, false),
+            Ok(None)
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -499,7 +538,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            paths_from_paste(pointer.to_str().unwrap(), &[], Language::English),
+            paths_from_paste(pointer.to_str().unwrap(), &[], Language::English, false),
             Ok(None)
         );
 
@@ -507,7 +546,7 @@ mod tests {
         let real = root.join("report.pdf");
         std::fs::write(&real, b"\r\n%PDF-1.7\n%%EOF\n").unwrap();
         assert_eq!(
-            paths_from_paste(real.to_str().unwrap(), &[], Language::English),
+            paths_from_paste(real.to_str().unwrap(), &[], Language::English, false),
             Ok(Some(vec![
                 real.canonicalize().unwrap().display().to_string()
             ]))
@@ -531,17 +570,17 @@ mod tests {
                 shot
             })
             .collect();
-        let first = paths_from_paste(shots[0].to_str().unwrap(), &[], Language::English)
+        let first = paths_from_paste(shots[0].to_str().unwrap(), &[], Language::English, false)
             .unwrap()
             .unwrap();
         assert!(
-            paths_from_paste(shots[1].to_str().unwrap(), &first, Language::English)
+            paths_from_paste(shots[1].to_str().unwrap(), &first, Language::English, false)
                 .unwrap()
                 .is_some()
         );
         let both = format!("{} {}", shots[0].display(), shots[1].display());
         assert_eq!(
-            paths_from_paste(&both, &[], Language::English)
+            paths_from_paste(&both, &[], Language::English, false)
                 .unwrap()
                 .map(|paths| paths.len()),
             Some(2)
@@ -564,12 +603,17 @@ mod tests {
         }
         let attached = vec![first.canonicalize().unwrap().display().to_string()];
         assert!(
-            paths_from_paste(second.to_str().unwrap(), &[], Language::English)
+            paths_from_paste(second.to_str().unwrap(), &[], Language::English, false)
                 .unwrap()
                 .is_some()
         );
         assert_eq!(
-            paths_from_paste(second.to_str().unwrap(), &attached, Language::English),
+            paths_from_paste(
+                second.to_str().unwrap(),
+                &attached,
+                Language::English,
+                false
+            ),
             Err(
                 "The attachments come to 24 MiB, over the 20 MiB limit for media in one message"
                     .into()
@@ -577,7 +621,7 @@ mod tests {
         );
         // In the interface language.
         assert_eq!(
-            paths_from_paste(second.to_str().unwrap(), &attached, Language::German),
+            paths_from_paste(second.to_str().unwrap(), &attached, Language::German, false),
             Err(Language::German.format(
                 "The attachments come to {size}, over the {limit} limit for media in one message",
                 &[("size", "24 MiB"), ("limit", "20 MiB")]
@@ -585,9 +629,9 @@ mod tests {
         );
         // A file attached already is not counted twice.
         let again = format!("{} {}", first.display(), second.display());
-        assert!(paths_from_paste(&again, &attached, Language::English).is_err());
+        assert!(paths_from_paste(&again, &attached, Language::English, false).is_err());
         assert!(
-            paths_from_paste(first.to_str().unwrap(), &attached, Language::English)
+            paths_from_paste(first.to_str().unwrap(), &attached, Language::English, false)
                 .unwrap()
                 .is_some()
         );
@@ -596,7 +640,15 @@ mod tests {
             "data:application/pdf;base64,{}",
             STANDARD.encode(vec![0_u8; 12 * 1024 * 1024])
         );
-        assert!(paths_from_paste(second.to_str().unwrap(), &[picked], Language::English).is_err());
+        assert!(
+            paths_from_paste(
+                second.to_str().unwrap(),
+                &[picked],
+                Language::English,
+                false
+            )
+            .is_err()
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

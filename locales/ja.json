@@ -2940,5 +2940,6 @@
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "超過利用がオフのため、購入済みクレジットは使われません。請求でオンにしてください。",
   "Your free trial didn't start: that card was already used for a trial.": "無料トライアルは開始されませんでした。このカードはすでにトライアルで使われています。",
   "The attachments come to {size}, over the {limit} limit for media in one message": "添付ファイルは合計 {size} で、1 件のメッセージのメディア上限 {limit} を超えています",
-  "its images and PDFs would take the message over the 20 MiB limit for media": "このリソースの画像と PDF を含めると、メッセージがメディア上限の 20 MiB を超えます"
+  "its images and PDFs would take the message over the 20 MiB limit for media": "このリソースの画像と PDF を含めると、メッセージがメディア上限の 20 MiB を超えます",
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} は {size} で、1 件のメッセージのメディア上限 {limit} を超えています"
 }

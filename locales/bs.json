@@ -2940,5 +2940,6 @@
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "Prekoračenje je isključeno, pa se kupljeni krediti ne troše. Uključite ga u naplati.",
   "Your free trial didn't start: that card was already used for a trial.": "Besplatni probni period nije počeo: ta kartica je već korištena za probni period.",
   "The attachments come to {size}, over the {limit} limit for media in one message": "Prilozi zajedno imaju {size}, više od ograničenja od {limit} za medije u jednoj poruci",
-  "its images and PDFs would take the message over the 20 MiB limit for media": "njegove slike i PDF datoteke bi poruku odvele preko ograničenja od 20 MiB za medije"
+  "its images and PDFs would take the message over the 20 MiB limit for media": "njegove slike i PDF datoteke bi poruku odvele preko ograničenja od 20 MiB za medije",
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} ima {size}, više od ograničenja od {limit} za medije u jednoj poruci"
 }

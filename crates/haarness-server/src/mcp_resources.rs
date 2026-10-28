@@ -347,10 +347,12 @@ pub(crate) const MEDIA_REFUSAL: &str =
 /// becomes a block after the text, under `MCP resource: <name> ·
 /// <server>:<uri>`, its text fenced (cut past 50 KiB, and past 128 KiB for
 /// all of them, with a note that says where the whole was saved), and its
-/// images and PDFs join `attachments` (10 MiB together). A resource the
-/// chat's rules keep from it (`denied`), one that cannot be read or does not
-/// answer within `budget`, or an image that is not one, is named in its block
-/// as not read, with the reason, and the message goes on without it. No ask
+/// images and PDFs join `attachments` (10 MiB together, and only while the
+/// message's media stay within the limit; `workspace` is the chat's folder,
+/// where the person's relative attachments are read). A resource the chat's
+/// rules keep from it (`denied`), one that cannot be read or does not answer
+/// within `budget`, or an image that is not one, is named in its block as
+/// not read, with the reason, and the message goes on without it. No ask
 /// is asked: the person picked it. The same server and URI twice is read
 /// once; two servers with one URI are two mentions.
 pub(crate) async fn read_mentions(
@@ -420,7 +422,7 @@ pub(crate) async fn read_mentions(
                 match admitted(media, workspace).await {
                     Ok(media) => {
                         let total = carried.saturating_add(
-                            haarness_core::attachments::media_estimate(&media, workspace),
+                            haarness_core::attachments::admitted_media_bytes(&media),
                         );
                         if total > haarness_core::attachments::MAX_INLINE_MEDIA_BYTES as u64 {
                             Err(MEDIA_REFUSAL.to_owned())

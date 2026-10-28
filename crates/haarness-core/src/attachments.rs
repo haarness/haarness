@@ -342,31 +342,54 @@ pub fn read_at_most(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// About how much of [`MAX_INLINE_MEDIA_BYTES`] `sources` take once
-/// admitted, read before admitting them: an image at most what it is shrunk
-/// to, other media its size, a text file nothing. A relative path is read
-/// from `workspace`; a file that cannot be read counts nothing (admitting it
-/// refuses it).
+/// How much of [`MAX_INLINE_MEDIA_BYTES`] `sources` may take once admitted,
+/// read before admitting them: an image what it may be shrunk or converted to
+/// at most ([`crate::images::MAX_IMAGE_BYTES`]), other media its size, a text
+/// file nothing. A relative path is read from `workspace`, the chat's folder;
+/// a file that cannot be read counts nothing (admitting it refuses it).
 #[must_use]
 pub fn media_estimate(sources: &[String], workspace: &Path) -> u64 {
-    let cap = crate::images::MAX_IMAGE_BYTES as u64;
-    sources
-        .iter()
-        .map(|source| {
-            let image = is_image_source(source);
-            let size = if source.starts_with("data:") {
-                media_bytes(source).unwrap_or(0)
-            } else {
-                local_path(source)
-                    .map(|path| workspace.join(path))
-                    .filter(|path| media_mime_for_path(path).is_some())
-                    .and_then(|path| std::fs::metadata(path).ok())
-                    .filter(std::fs::Metadata::is_file)
-                    .map_or(0, |metadata| metadata.len())
+    let image = crate::images::MAX_IMAGE_BYTES as u64;
+    let one = |source: &String| -> u64 {
+        if let Some(data) = source.strip_prefix("data:") {
+            let Ok(url) = DataUrl::parse(data) else {
+                return 0;
             };
-            if image { size.min(cap) } else { size }
-        })
-        .fold(0, u64::saturating_add)
+            if url.mime_type.starts_with("image/") {
+                return image;
+            }
+            if is_supported_media_mime(url.mime_type) {
+                return url.decoded_len();
+            }
+            // An image sent without its type is still one.
+            let sniffed = url
+                .head()
+                .is_some_and(|head| crate::images::sniff(&head).is_some());
+            return if sniffed { image } else { 0 };
+        }
+        let Some(path) = local_path(source).map(|path| workspace.join(path)) else {
+            return 0;
+        };
+        let Some(size) = std::fs::metadata(&path)
+            .ok()
+            .filter(std::fs::Metadata::is_file)
+            .map(|metadata| metadata.len())
+        else {
+            return 0;
+        };
+        match media_mime_for_path(&path) {
+            Some(mime) if mime.starts_with("image/") => image,
+            Some(_) => size,
+            // Text, or an image its bytes announce (a screenshot saved
+            // without an extension).
+            None => {
+                let sniffed =
+                    read_at_most(&path, 64).is_ok_and(|head| crate::images::sniff(&head).is_some());
+                if sniffed { image } else { 0 }
+            }
+        }
+    };
+    sources.iter().map(one).fold(0, u64::saturating_add)
 }
 
 /// What admitted `sources` take of [`MAX_INLINE_MEDIA_BYTES`], as [`admit`]
@@ -1152,6 +1175,38 @@ mod tests {
             content.contains("<attached-file name=\"notes.md\">"),
             "{content}"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_estimate_counts_every_image_at_what_it_may_be_converted_to() {
+        let dir = std::env::temp_dir().join(format!("haarness-attach-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cap = crate::images::MAX_IMAGE_BYTES as u64;
+        let png = image(4, 4, image::ImageFormat::Png);
+        std::fs::write(dir.join("icon.png"), &png).unwrap();
+        // HEIC grows when it becomes JPEG; a screenshot may have no extension.
+        std::fs::write(dir.join("photo.heic"), b"\0\0\0\x18ftypheic").unwrap();
+        std::fs::write(dir.join("capture"), &png).unwrap();
+        std::fs::write(dir.join("notes"), "plain text").unwrap();
+        sparse_pdf(&dir.join("scan.pdf"), 2 * MIB);
+        for (source, expected) in [
+            ("icon.png", cap),
+            ("photo.heic", cap),
+            ("capture", cap),
+            ("notes", 0),
+            ("scan.pdf", 2 * MIB),
+            ("missing.pdf", 0),
+        ] {
+            assert_eq!(media_estimate(&[source.into()], &dir), expected, "{source}");
+        }
+        let inline = [
+            data_url("image/png", None, &png),
+            data_url("application/octet-stream", Some("shot"), &png),
+            data_url("application/pdf", None, &vec![0; 1024]),
+            data_url("text/plain", None, b"notes"),
+        ];
+        assert_eq!(media_estimate(&inline, &dir), 2 * cap + 1024);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
