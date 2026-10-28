@@ -129,8 +129,8 @@ impl HookPort for Hooks {
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
     async fn permission_request(
         &self,
@@ -443,8 +443,8 @@ impl HookPort for StampHooks {
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
     async fn permission_request(
         &self,

@@ -525,6 +525,20 @@ fn plain_tool_output(text: String) -> ToolOutput {
     }
 }
 
+/// Appends what hooks said once a tool ran after its own result, which
+/// stays as it was: their context, then the feedback of the hooks that
+/// objected (exit code 2's stderr or a `"decision": "block"` reason), which
+/// the model reads as theirs, as Claude Code passes it to Claude.
+fn append_post_tool_hooks(output: &mut String, decision: crate::HookDecision) {
+    use std::fmt::Write as _;
+    if let Some(context) = decision.context {
+        let _ = write!(output, "\n\n<hook-context>\n{context}\n</hook-context>");
+    }
+    if let Some(feedback) = decision.block {
+        let _ = write!(output, "\n\n<hook-feedback>\n{feedback}\n</hook-feedback>");
+    }
+}
+
 fn tool_output_attachments(metadata: &serde_json::Value) -> Vec<String> {
     metadata
         .get("attachments")
@@ -5228,18 +5242,12 @@ impl AgentRuntime {
         }
         if let Some(hooks) = &components.hooks {
             // Still capture the completed tool's after-snapshot when a hook is cancelled.
-            let context = tokio::select! {
+            let decision = tokio::select! {
                 biased;
-                () = cancel.cancelled() => None,
-                context = hooks.post_tool_use(thread_id, name, &arguments, &output.text, is_error) => context,
+                () = cancel.cancelled() => crate::HookDecision::default(),
+                decision = hooks.post_tool_use(thread_id, name, &arguments, &output.text, is_error) => decision,
             };
-            if let Some(context) = context {
-                use std::fmt::Write as _;
-                let _ = write!(
-                    output.text,
-                    "\n\n<hook-context>\n{context}\n</hook-context>"
-                );
-            }
+            append_post_tool_hooks(&mut output.text, decision);
         }
         if let (Some(snapshots), Some(before)) = (&snapshots, before_snapshot) {
             let after = snapshots.capture(thread_id).await?;
@@ -10840,18 +10848,12 @@ impl RunnerTask {
             );
         }
         if let Some(hooks) = &self.hooks {
-            let context = tokio::select! {
+            let decision = tokio::select! {
                 biased;
-                () = self.cancel.cancelled() => None,
-                context = hooks.post_tool_use(self.thread.id, name, &arguments, &output.text, false) => context,
+                () = self.cancel.cancelled() => crate::HookDecision::default(),
+                decision = hooks.post_tool_use(self.thread.id, name, &arguments, &output.text, false) => decision,
             };
-            if let Some(context) = context {
-                use std::fmt::Write as _;
-                let _ = write!(
-                    output.text,
-                    "\n\n<hook-context>\n{context}\n</hook-context>"
-                );
-            }
+            append_post_tool_hooks(&mut output.text, decision);
         }
         Ok(output)
     }
@@ -11553,17 +11555,12 @@ impl RunnerTask {
             );
         }
         if let Some(hooks) = &self.hooks {
-            let context = tokio::select! {
+            let decision = tokio::select! {
                 biased;
-                () = self.cancel.cancelled() => None,
-                context = hooks.post_tool_use(self.thread.id, "question", &arguments, &output.text, false) => context,
+                () = self.cancel.cancelled() => crate::HookDecision::default(),
+                decision = hooks.post_tool_use(self.thread.id, "question", &arguments, &output.text, false) => decision,
             };
-            if let Some(context) = context {
-                let _ = write!(
-                    output.text,
-                    "\n\n<hook-context>\n{context}\n</hook-context>"
-                );
-            }
+            append_post_tool_hooks(&mut output.text, decision);
         }
         Ok(output)
     }
@@ -17948,8 +17945,8 @@ mod tests {
                 _: &serde_json::Value,
                 _: &str,
                 _: bool,
-            ) -> Option<String> {
-                None
+            ) -> crate::HookDecision {
+                crate::HookDecision::default()
             }
             async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> crate::HookDecision {
                 crate::HookDecision::default()

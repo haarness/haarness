@@ -727,20 +727,26 @@ impl HookPort for CombinedHooks {
         arguments: &Value,
         output: &str,
         is_error: bool,
-    ) -> Option<String> {
+    ) -> HookDecision {
         let prior = if let Some(inner) = &self.inner {
             inner
                 .post_tool_use(thread, tool, arguments, output, is_error)
                 .await
         } else {
-            None
+            HookDecision::default()
         };
-        let result = self.decision("tool.after", json!({"threadId":thread,"tool":tool,"arguments":arguments,"output":output,"isError":is_error}), HookDecision { context: prior, ..HookDecision::default() }).await;
+        // Extensions see the command hooks' context; a command hook's
+        // feedback stays its own and never stops them.
+        let result = self.decision("tool.after", json!({"threadId":thread,"tool":tool,"arguments":arguments,"output":output,"isError":is_error}), HookDecision { context: prior.context, ..HookDecision::default() }).await;
         let mut context = result.context;
         if let Some(error) = result.block {
             append(&mut context, &error);
         }
-        context
+        HookDecision {
+            context,
+            block: prior.block,
+            ..HookDecision::default()
+        }
     }
     async fn user_prompt_submit(&self, thread: ThreadId, prompt: &str) -> HookDecision {
         let prior = if let Some(inner) = &self.inner {

@@ -432,8 +432,8 @@ impl haarness_core::HookPort for BlockPrompt {
         _: &serde_json::Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> haarness_core::HookDecision {
+        haarness_core::HookDecision::default()
     }
     async fn permission_request(
         &self,

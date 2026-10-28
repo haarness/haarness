@@ -11873,6 +11873,86 @@ async fn pre_tool_use_hook_blocks_and_post_tool_use_annotates() {
     );
 }
 
+/// A `PostToolUse` hook that exits 2 cannot undo the call: what it printed
+/// reaches the model after the tool's own result, which stays as it was.
+#[tokio::test]
+async fn a_post_tool_use_hook_that_exits_two_reaches_the_model_after_the_result() {
+    let workspace = std::env::temp_dir();
+    let provider = Capturing::default();
+    let requests = provider.requests.clone();
+    let hooks = haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(&serde_json::json!({
+            "PostToolUse": [{"matcher": "Bash", "hooks": [
+                {"command": "echo 'lint: 2 warnings in src/lib.rs' >&2; exit 2"},
+            ]}],
+        })),
+        workspace.clone(),
+    );
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+        EventBus::new(256),
+        workspace.clone(),
+        String::new(),
+        haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..haarness_core::RuntimeConfig::default()
+        },
+    )
+    .with_hooks(Arc::new(hooks));
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(r#"!tool bash {"command":"echo built"}"#),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let feedback = "\n\n<hook-feedback>\nlint: 2 warnings in src/lib.rs\n</hook-feedback>";
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let (output, is_error) = items
+        .iter()
+        .find_map(|item| match &item.data {
+            haarness_protocol::ItemData::ToolResult {
+                output, is_error, ..
+            } => Some((output.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("the bash call has a result");
+    assert!(!is_error, "{output}");
+    let result = output
+        .strip_suffix(feedback)
+        .unwrap_or_else(|| panic!("{output}"));
+    assert!(result.contains("built"), "{output}");
+    // The next request carries it to the model.
+    let requests = requests.lock().unwrap();
+    let sent = requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            ProviderMessage::ToolResult { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .expect("the follow-up request carries the tool result");
+    assert!(sent.ends_with(feedback), "{sent}");
+}
+
 #[tokio::test]
 async fn workspace_rest_lifecycle_uses_real_git_and_enforces_activity_leases() {
     let root =

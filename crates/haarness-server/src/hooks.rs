@@ -13,7 +13,8 @@
 //! carry `{"decision": "block", "reason", "additionalContext",
 //! "hookSpecificOutput": {"permissionDecision": "allow"|"deny"|"ask"}}`; a
 //! `PermissionRequest` hook answers with `hookSpecificOutput.decision`
-//! (`{"behavior": "allow", "always": true}` answers Always).
+//! (`{"behavior": "allow", "always": true}` answers Always). After a tool ran,
+//! a block is the hook's feedback, which the model reads after the result.
 //!
 //! Events: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
 //! `UserPromptSubmit`, `PermissionRequest`, `Stop`, `SessionStart`,
@@ -378,8 +379,17 @@ impl ConfiguredHooks {
         let mut always = None;
         for entry in self.matching(event, values) {
             let outcome = self.run(entry, payload).await;
-            if outcome.block.is_some() && combined.block.is_none() {
-                combined.block = outcome.block;
+            // The first block stops an action; after a tool ran, every
+            // hook's feedback reaches the model.
+            if let Some(block) = outcome.block {
+                match &mut combined.block {
+                    Some(existing) if is_after_tool(event) => {
+                        existing.push('\n');
+                        existing.push_str(&block);
+                    }
+                    Some(_) => {}
+                    None => combined.block = Some(block),
+                }
             }
             if let Some(context) = outcome.context {
                 match &mut combined.context {
@@ -574,6 +584,12 @@ fn expand_hook_value(value: &str, entry: &HookEntry, workspace: &std::path::Path
         })
 }
 
+/// Whether `event` runs after a tool ran, when a block can no longer stop
+/// it: the hook's reason is feedback for the model instead.
+fn is_after_tool(event: &str) -> bool {
+    matches!(event, "PostToolUse" | "PostToolUseFailure")
+}
+
 #[derive(Default)]
 struct HookOutcome {
     block: Option<String>,
@@ -695,8 +711,9 @@ impl HookLabel {
         );
     }
 
-    /// One INFO per block, with the first line of its reason. Events whose
-    /// block the runtime ignores log at DEBUG so the INFO line stays true.
+    /// One INFO per block, with the first line of its reason, and one per
+    /// hook whose feedback reaches the model after a tool ran. Events whose
+    /// block the runtime ignores log at DEBUG so the INFO lines stay true.
     fn blocked(&self, code: Option<i32>, reason: &str) {
         let redacted = redact(head(reason, SCAN_CHARS));
         let line = redacted
@@ -717,6 +734,16 @@ impl HookLabel {
                 code,
                 reason = %reason,
                 "hook blocked"
+            );
+        } else if is_after_tool(&self.event) {
+            tracing::info!(
+                event = %self.event,
+                session = self.session.as_deref(),
+                tool = self.tool.as_deref(),
+                program = %self.program,
+                code,
+                reason = %reason,
+                "hook feedback added to the tool result"
             );
         } else {
             tracing::debug!(
@@ -1140,13 +1167,13 @@ impl HookPort for ConfiguredHooks {
         arguments: &Value,
         output: &str,
         is_error: bool,
-    ) -> Option<String> {
+    ) -> HookDecision {
         let event = if is_error {
             "PostToolUseFailure"
         } else {
             "PostToolUse"
         };
-        let context = self
+        let outcome = self
             .run_event(
                 event,
                 Some(tool),
@@ -1160,8 +1187,7 @@ impl HookPort for ConfiguredHooks {
                     "error": is_error.then_some(output),
                 }),
             )
-            .await
-            .context;
+            .await;
         if !is_error && let Some(file_path) = changed_file(tool, arguments) {
             let _ = self
                 .run_event(
@@ -1178,7 +1204,12 @@ impl HookPort for ConfiguredHooks {
                 )
                 .await;
         }
-        context
+        // The tool already ran: a block is the hooks' feedback on it.
+        HookDecision {
+            block: outcome.block,
+            context: outcome.context,
+            ..HookDecision::default()
+        }
     }
 
     async fn user_prompt_submit(&self, thread: ThreadId, prompt: &str) -> HookDecision {
@@ -2251,6 +2282,75 @@ mod tests {
                 ("PostToolUseFailure", &json!("exit 1")),
                 ("PostToolUse", &Value::Null)
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hook_that_objects_after_a_tool_ran_gives_the_model_its_reason() {
+        let (capture, _guard) = Capture::install();
+        let hooks = ConfiguredHooks::new(
+            ConfiguredHooks::parse_block(&json!({
+                "PostToolUse": [{"hooks": [
+                    {"command": "echo 'src/lib.rs is not formatted' >&2; exit 2"},
+                    {"command": r#"echo '{"additionalContext":"formatter ran"}'"#},
+                    {"command": r#"echo '{"decision":"block","reason":"run the tests next"}'"#},
+                ]}],
+                "PostToolUseFailure": [{"hooks": [
+                    {"command": "echo 'retry with --force' >&2; exit 2"},
+                ]}],
+            })),
+            std::env::temp_dir(),
+        );
+        let thread = ThreadId::new();
+        // Every hook's feedback reaches the model, beside the context.
+        let decision = hooks
+            .post_tool_use(
+                thread,
+                "edit",
+                &json!({"path": "src/lib.rs"}),
+                "Edited",
+                false,
+            )
+            .await;
+        assert_eq!(
+            decision.block.as_deref(),
+            Some("src/lib.rs is not formatted\nrun the tests next")
+        );
+        assert_eq!(decision.context.as_deref(), Some("formatter ran"));
+        let decision = hooks
+            .post_tool_use(thread, "bash", &json!({"command": "false"}), "failed", true)
+            .await;
+        assert_eq!(decision.block.as_deref(), Some("retry with --force"));
+        assert!(decision.context.is_none());
+        let fed = capture.matching("hook feedback added to the tool result");
+        assert_eq!(fed.len(), 3, "{:?}", capture.lines());
+        assert!(fed.iter().all(|line| line.starts_with("INFO ")));
+        for (line, expected) in fed.iter().zip([
+            [
+                " event=PostToolUse ",
+                " tool=edit",
+                "reason=src/lib.rs is not formatted",
+            ],
+            [
+                " event=PostToolUse ",
+                " tool=edit",
+                "reason=run the tests next",
+            ],
+            [
+                " event=PostToolUseFailure",
+                " tool=bash",
+                "reason=retry with --force",
+            ],
+        ]) {
+            for expected in expected {
+                assert!(line.contains(expected), "{expected}: {line}");
+            }
+        }
+        assert!(capture.matching("hook blocked").is_empty());
+        assert!(
+            capture
+                .matching("hook block ignored: this event cannot be blocked")
+                .is_empty()
         );
     }
 
