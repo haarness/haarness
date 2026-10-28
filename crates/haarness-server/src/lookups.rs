@@ -1,9 +1,8 @@
 //! File-system lookups a request waits for only so long. A path on a network
 //! volume that went offline (a share whose server went to sleep, a mount on a
 //! network the computer left), or a link into one, can hold a single call for
-//! minutes. Such a
-//! lookup runs on a blocking thread, the request waits for it until its
-//! deadline, and the thread is left to finish on its own.
+//! minutes. Such a lookup runs on a blocking thread, the request waits for it
+//! until its deadline, and the thread is left to finish on its own.
 //!
 //! While a lookup of a path runs, asking about the same path again waits for
 //! that lookup instead of starting another one. Once a lookup has outlived a

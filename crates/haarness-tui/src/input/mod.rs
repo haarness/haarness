@@ -1137,7 +1137,7 @@ pub async fn handle_key_at(
             {
                 // An `@` list still waiting for its files closes too, and
                 // stays closed when they would have come.
-                app.file_search.stop();
+                app.file_search.closed();
                 app.mention_suggestions.clear();
                 app.mention_resources.want = None;
                 app.autocomplete_hidden = true;
@@ -1571,7 +1571,7 @@ pub(crate) fn apply_mention(app: &mut App, client: &ApiClient) -> bool {
 /// suggestions.
 pub(crate) fn refresh_mentions(app: &mut App, client: &ApiClient) {
     if app.shell_mode || app.composer.text().starts_with('/') {
-        app.file_search.stop();
+        app.file_search.closed();
         app.mention_suggestions.clear();
         return;
     }
@@ -1582,7 +1582,7 @@ pub(crate) fn refresh_mentions(app: &mut App, client: &ApiClient) {
             crate::file_search::search(app, client, query);
         }
         None => {
-            app.file_search.stop();
+            app.file_search.closed();
             app.mention_suggestions.clear();
             app.mention_resources.want = None;
         }
