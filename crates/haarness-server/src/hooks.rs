@@ -284,9 +284,14 @@ impl ConfiguredHooks {
         };
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut outcome = HookOutcome::default();
+        let after_tool = is_after_tool(&entry.event);
         // Exit code 2 is the Claude "block" convention; stderr is the reason.
         if output.status.code() == Some(2) {
             let reason = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            // After a tool ran, a hook that says nothing gives no feedback.
+            if reason.is_empty() && after_tool {
+                return outcome;
+            }
             let reason = if reason.is_empty() {
                 "blocked by hook".into()
             } else {
@@ -302,7 +307,16 @@ impl ConfiguredHooks {
             label.failed(output.status, &output.stderr, false);
         }
         let mut deny_reason = None;
+        let mut feedback = None;
         if let Ok(parsed) = serde_json::from_str::<Value>(stdout.trim()) {
+            if parsed.get("decision").and_then(Value::as_str) == Some("block") {
+                feedback = parsed
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty())
+                    .map(str::to_owned);
+            }
             if parsed.get("decision").and_then(Value::as_str) == Some("block")
                 || parsed.get("continue").and_then(Value::as_bool) == Some(false)
             {
@@ -380,6 +394,12 @@ impl ConfiguredHooks {
             outcome.updated_input = None;
             outcome.context = None;
             outcome.always = false;
+        }
+        // After a tool ran, only what is meant for the model is its feedback:
+        // a successful hook's block `reason`, never `continue: false`'s
+        // `stopReason` (that is for the person) nor a failed hook's answer.
+        if after_tool {
+            outcome.block = feedback.filter(|_| output.status.success());
         }
         // A permission deny stops the action only where the runtime reads it.
         let denied = outcome.permission == Some(PermissionDecision::Deny)
@@ -2569,6 +2589,42 @@ mod tests {
                 .matching("hook block ignored: this event cannot be blocked")
                 .is_empty()
         );
+    }
+
+    /// After a tool ran the model gets only what a hook meant for it: not
+    /// `continue: false`'s `stopReason`, which is for the person, nor the
+    /// answer of a hook that failed, nor a stand-in for a hook that said
+    /// nothing. Before a tool runs, the same answers still block.
+    #[tokio::test]
+    async fn after_a_tool_the_model_gets_only_what_a_hook_meant_for_it() {
+        let quiet = [
+            "exit 2",
+            r#"echo '{"continue":false,"stopReason":"Stopped for the person"}'"#,
+            r#"echo '{"decision":"block","reason":"from a crashed hook"}'; exit 1"#,
+            r#"echo '{"decision":"block"}'"#,
+        ];
+        for command in quiet {
+            for event in ["PostToolUse", "PostToolUseFailure"] {
+                let decision = hooks_for(event, json!([{"command": command}]))
+                    .post_tool_use(
+                        &HookCall::new(ThreadId::new()),
+                        "bash",
+                        &json!({"command": "make"}),
+                        "built",
+                        event == "PostToolUseFailure",
+                    )
+                    .await;
+                assert!(decision.block.is_none(), "{event} {command}: {decision:?}");
+            }
+            let decision = hooks_for("PreToolUse", json!([{"command": command}]))
+                .pre_tool_use(
+                    &HookCall::new(ThreadId::new()),
+                    "bash",
+                    &json!({"command": "make"}),
+                )
+                .await;
+            assert!(decision.block.is_some(), "PreToolUse {command}");
+        }
     }
 
     /// Windows reads a verbatim `\\?\` path as a different spelling; a hook
