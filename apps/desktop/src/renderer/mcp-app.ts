@@ -265,6 +265,7 @@ export const WHEEL = "haarnessWheel";
 export const LEFT = "haarnessLeft";
 export const INPUT = "haarnessInput";
 export const HOVER = "haarnessHover";
+export const LIFT = "haarnessLift";
 
 const attribute = (text: string) =>
   text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
@@ -280,8 +281,10 @@ const attribute = (text: string) =>
  * cannot make) with the token, so one press allows one link or message; and it says, with the
  * token, when the pointer comes into the page and leaves it, which the window cannot see past the
  * frame, so the page's options show while it is pointed at and a page can neither show nor hide
- * them itself. The script removes itself before the page runs, so the page cannot read the token
- * and speak for the person.
+ * them itself. It also reports, with the token, a button let go over the page: a press that began
+ * in the conversation and ends over a frame sends the conversation no pointerup, and it holds the
+ * view until it ends (transcript-press.ts). The script removes itself before the page runs, so the
+ * page cannot read the token and speak for the person.
  */
 export function document(html: string, meta: Meta | undefined, token: string) {
   const secret = JSON.stringify(token).replace(/</g, "\\u003c");
@@ -291,6 +294,8 @@ export function document(html: string, meta: Meta | undefined, token: string) {
     `addEventListener("pagehide",function(){p.postMessage({${LEFT}:s},"*")});` +
     `function press(e){if(e.isTrusted&&!e.repeat)p.postMessage({${INPUT}:s},"*")}` +
     `addEventListener("pointerdown",press,true);addEventListener("keydown",press,true);` +
+    `function lift(e){if(e.isTrusted)p.postMessage({${LIFT}:s},"*")}` +
+    `addEventListener("pointerup",lift,true);addEventListener("pointercancel",lift,true);` +
     `var h=0;function hover(v){if(h!==v){h=v;p.postMessage({${HOVER}:[v,s]},"*")}}` +
     `addEventListener("pointerover",function(){hover(1)},{passive:true,capture:true});` +
     `addEventListener("pointerout",function(e){if(!e.relatedTarget)hover(0)},{passive:true,capture:true});` +

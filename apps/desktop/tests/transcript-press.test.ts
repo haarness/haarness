@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createTranscriptPress, listenForPress, type PressPointer } from "../src/renderer/transcript-press";
+import { LIFTED_IN_FRAME, createTranscriptPress, listenForPress, type PressPointer } from "../src/renderer/transcript-press";
 
 /** A press tracker and how many times it said the last press ended. */
 function tracker() {
@@ -167,10 +167,13 @@ test("the window's pointer events hold and end the press", () => {
   assert.equal(counted.ended, 3);
 });
 
-test("a menu, the window losing focus or the page hiding ends a press whose release may never come", () => {
+test("a menu, a button let go over an app's frame, the window losing focus or the page hiding ends a press whose release may never come", () => {
   const { view, document, press, counted, down } = page();
   down();
   view.dispatchEvent(new Event("contextmenu"));
+  assert.equal(press.held(), false);
+  down();
+  view.dispatchEvent(new Event(LIFTED_IN_FRAME));
   assert.equal(press.held(), false);
   down();
   view.dispatchEvent(new Event("blur"));
@@ -182,7 +185,7 @@ test("a menu, the window losing focus or the page hiding ends a press whose rele
   document.hidden = true;
   document.dispatchEvent(new Event("visibilitychange"));
   assert.equal(press.held(), false);
-  assert.equal(counted.ended, 3);
+  assert.equal(counted.ended, 4);
 });
 
 test("a control losing focus is not the window losing it, and stopping stops listening", () => {
