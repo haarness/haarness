@@ -574,12 +574,13 @@ impl ProviderEvent {
 
 pub type ProviderStream = Pin<Box<dyn Stream<Item = CoreResult<ProviderEvent>> + Send>>;
 
-/// How many images, and how many bytes of them, one request to a provider
-/// may carry. Past either, the runtime replaces the oldest images of the
-/// request with a short note (see [`ModelProvider::image_limits`]).
+/// How many bytes of media (images, PDFs, audio, video), and how many
+/// images, one request to a provider may carry. Past either, the runtime
+/// replaces the oldest attachments of the request with a short note (see
+/// [`ModelProvider::image_limits`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageLimits {
-    /// Base64 bytes of the request's images, leaving the rest of the
+    /// Base64 bytes of the request's media, leaving the rest of the
     /// provider's request size to the text.
     pub bytes: usize,
     /// Images in one request, where the provider documents a number.
@@ -587,7 +588,7 @@ pub struct ImageLimits {
 }
 
 impl Default for ImageLimits {
-    /// 25 MiB of images: most providers take 32 MB or more in a request.
+    /// 25 MiB of media: most providers take 32 MB or more in a request.
     fn default() -> Self {
         Self {
             bytes: 25 * 1024 * 1024,
@@ -641,8 +642,8 @@ pub trait ModelProvider: Send + Sync {
     fn explicit_prompt_cache_scope(&self, _model: &str) -> Option<String> {
         None
     }
-    /// The images one request for `model` may carry. The default holds them
-    /// to 25 MiB and counts none.
+    /// The media one request for `model` may carry. The default holds them
+    /// to 25 MiB and counts no images.
     fn image_limits(&self, _model: &str) -> ImageLimits {
         ImageLimits::default()
     }

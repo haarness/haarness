@@ -8986,11 +8986,11 @@ impl RunnerTask {
                     info!(
                         thread = %self.thread.id,
                         turn = %self.turn.id,
-                        images = cut.images,
+                        media = cut.media,
                         removed = cut.removed,
                         bytes = cut.bytes,
                         kept = cut.kept,
-                        "oldest images left out to fit the provider's request limits"
+                        "oldest attachments left out to fit the provider's request limits"
                     );
                 }
                 if recovering {
