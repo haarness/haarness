@@ -2939,5 +2939,8 @@
   "Ends {date}": "Termina el {date}",
   "On hold": "Retenidos",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "El exceso está desactivado, así que los créditos comprados no se gastan. Actívalo en Facturación.",
-  "Your free trial didn't start: that card was already used for a trial.": "Tu prueba gratuita no empezó: esa tarjeta ya se usó para una prueba."
+  "Your free trial didn't start: that card was already used for a trial.": "Tu prueba gratuita no empezó: esa tarjeta ya se usó para una prueba.",
+  "The attachments come to {size}, over the {limit} limit for media in one message": "Los adjuntos suman {size}, por encima del límite de {limit} de contenido multimedia por mensaje",
+  "its images and PDFs would take the message over the 20 MiB limit for media": "sus imágenes y PDF harían que el mensaje superara el límite de 20 MiB de contenido multimedia",
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} ocupa {size}, por encima del límite de {limit} de contenido multimedia por mensaje"
 }

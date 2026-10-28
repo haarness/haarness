@@ -2577,6 +2577,27 @@ impl AgentRuntime {
             .await
     }
 
+    /// Where chat `id` reads a message's relative attachment paths from: the
+    /// folder it works in.
+    pub async fn attachment_folder(&self, id: ThreadId) -> CoreResult<PathBuf> {
+        self.thread_workspace(&self.reading_thread(id).await?, FolderAccess::Read)
+            .await
+    }
+
+    /// A message's attachments as [`crate::attachments::admit`] keeps them, a
+    /// relative path read from where the chat works.
+    async fn admitted_attachments(
+        &self,
+        id: ThreadId,
+        attachments: Vec<String>,
+    ) -> CoreResult<Vec<String>> {
+        if attachments.is_empty() {
+            return Ok(attachments);
+        }
+        let workspace = self.attachment_folder(id).await?;
+        crate::attachments::admit_off_executor(attachments, workspace).await
+    }
+
     pub async fn input_queue(&self, id: ThreadId) -> CoreResult<haarness_protocol::InputQueue> {
         self.repository.get_thread(id).await?;
         self.repository.input_queue(id).await
@@ -2592,7 +2613,7 @@ impl AgentRuntime {
     async fn defer_input(
         &self,
         id: ThreadId,
-        request: QueueInputRequest,
+        mut request: QueueInputRequest,
     ) -> CoreResult<QueueInputResponse> {
         if request.synthetic {
             return Err(CoreError::Invalid(
@@ -2600,6 +2621,10 @@ impl AgentRuntime {
             ));
         }
         self.repository.get_thread(id).await?;
+        // Checked before it waits, as a message sent at once is: one the
+        // turn would refuse when its time came would sit at the head of the
+        // queue and hold back every message behind it.
+        request.attachments = self.admitted_attachments(id, request.attachments).await?;
         loop {
             let active = self.active.get(&id).map(|entry| Arc::clone(entry.value()));
             if let Some(active) = active {
@@ -2741,9 +2766,41 @@ impl AgentRuntime {
     pub async fn change_input_queue(
         &self,
         id: ThreadId,
-        action: haarness_protocol::InputQueueAction,
+        mut action: haarness_protocol::InputQueueAction,
     ) -> CoreResult<haarness_protocol::InputQueue> {
         self.repository.get_thread(id).await?;
+        // An edit's new attachments are checked as a queued message's are.
+        // Those the message has already were checked when it arrived: a
+        // client sends them back with every edit, and one whose file has
+        // changed since must not keep its text from being edited.
+        if let haarness_protocol::InputQueueAction::Edit {
+            id: key,
+            attachments: Some(attachments),
+            ..
+        } = &mut action
+        {
+            let queue = self.repository.input_queue(id).await?;
+            let had = queue
+                .items
+                .iter()
+                .find(|item| item.id == *key)
+                .map(|item| item.attachments.clone())
+                .unwrap_or_default();
+            let (kept, new): (Vec<_>, Vec<_>) = std::mem::take(attachments)
+                .into_iter()
+                .enumerate()
+                .partition(|(_, source)| had.contains(source));
+            let (places, sources): (Vec<_>, Vec<_>) = new.into_iter().unzip();
+            let admitted = self.admitted_attachments(id, sources).await?;
+            let mut merged = kept;
+            merged.extend(places.into_iter().zip(admitted));
+            merged.sort_by_key(|(place, _)| *place);
+            *attachments = merged.into_iter().map(|(_, source)| source).collect();
+            // Unless it keeps them exactly, they must fit together.
+            if *attachments != had {
+                crate::attachments::within_limit(attachments)?;
+            }
+        }
         if let haarness_protocol::InputQueueAction::Steer { revision, id: key } = action {
             loop {
                 let active = self.active.get(&id).map(|entry| Arc::clone(entry.value()));
@@ -2810,17 +2867,9 @@ impl AgentRuntime {
                 "text or an attachment is required".into(),
             ));
         }
-        if !request.attachments.is_empty() {
-            // A relative attachment is read from where the chat works.
-            let workspace = self
-                .thread_workspace(&self.reading_thread(thread_id).await?, FolderAccess::Read)
-                .await?;
-            request.attachments = crate::attachments::admit_off_executor(
-                std::mem::take(&mut request.attachments),
-                workspace,
-            )
+        request.attachments = self
+            .admitted_attachments(thread_id, std::mem::take(&mut request.attachments))
             .await?;
-        }
         loop {
             let thread = self.repository.get_thread(thread_id).await?;
             let active_turn = self
@@ -6167,16 +6216,15 @@ impl AgentRuntime {
             ));
         }
         let _reload = self.reload_gate.read().await;
-        if !request.attachments.is_empty() {
-            // A relative attachment is read from where the chat works.
-            let workspace = self
-                .thread_workspace(&self.reading_thread(thread_id).await?, FolderAccess::Read)
+        // A queued message was checked when it arrived, and its turn takes
+        // the message as the queue holds it. It is not refused now: a file
+        // that changed meanwhile, or one an older server queued unchecked,
+        // reaches the model as a note (see `attachments::for_model`), and the
+        // queue moves on.
+        if queue_revision.is_none() {
+            request.attachments = self
+                .admitted_attachments(thread_id, std::mem::take(&mut request.attachments))
                 .await?;
-            request.attachments = crate::attachments::admit_off_executor(
-                std::mem::take(&mut request.attachments),
-                workspace,
-            )
-            .await?;
         }
         self.apply_chat_turn_settings(thread_id, &mut request).await;
         let components = self.components();
@@ -13527,7 +13575,7 @@ fn provider_messages_with_origins(
                     (content, attachments)
                 } else {
                     let (content, attachments) =
-                        crate::attachments::for_model(content, attachments);
+                        crate::attachments::for_model(content, attachments, &omitted);
                     without_omitted(content, attachments, &omitted)
                 };
                 let message = if attachments.is_empty() || replayed_after_compaction {
@@ -13611,8 +13659,11 @@ fn provider_messages_with_origins(
             } => valid_calls.get(&call_id).cloned().map(|name| {
                 // A tool's image is a file it saw; one deleted since is named
                 // instead of failing every later request.
-                let (output, attachments) =
-                    crate::attachments::for_model(output, tool_output_attachments(&metadata));
+                let (output, attachments) = crate::attachments::for_model(
+                    output,
+                    tool_output_attachments(&metadata),
+                    &omitted,
+                );
                 let (output, attachments) = without_omitted(output, attachments, &omitted);
                 ProviderMessage::ToolResult {
                     call_id,

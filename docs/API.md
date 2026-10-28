@@ -467,9 +467,12 @@ the text (after a command's string `arguments`) as a block under
 `MCP resource: setup · docs:docs://setup`. Its text is fenced, and cut past
 50 KiB (128 KiB for all of a message's resources) with a note that says where
 the whole text was saved; its images and PDFs join `attachments` (10 MiB
-together). A resource that is not read is named in its block with
-`(not read)`, and the block holds only the reason: the MCP server's error, `did
-not answer within 10 s`, or `a rule keeps this resource from the model`. The
+together, and only while the message's media stay within 20 MiB, the
+person's own attachments first). A resource that is not read is named in its
+block with `(not read)`, and the block holds only the reason: the MCP server's
+error, `did not answer within 10 s`, `a rule keeps this resource from the
+model`, or `its images and PDFs would take the message over the 20 MiB limit
+for media`. The
 chat's own rules decide as they do for `mcp_resource_read`, except that an ask
 is not asked (the person picked it, as they attach a file): a deny for
 `<server>:<uri>`, or a rule or tool setting that takes every tool of the server
@@ -528,6 +531,26 @@ with the reason.
 
 An attachment or tool image whose file is deleted later is named in the message
 ("no longer available") instead of failing every later request.
+
+A message carries at most 20 MiB of media, its images as stored and its PDFs,
+audio and video together (text files do not count), the most providers take
+inline. Since a stored message is sent again with every later request of its
+chat, turn and queued-input requests refuse more with `400` naming the size and
+the limit ("scan.pdf is 21 MiB, over the 20 MiB limit for media in one
+message"). That includes a message queued to run later (`delivery: "queue"`)
+and the attachments a queue edit adds to one: they are checked when they
+arrive, so a message that could never start never waits at the head of the
+queue. When its turn comes it is not refused for them again: a file that
+changed meanwhile reaches the model as one of the notes described next, and the queue
+moves on. A file named `.pdf`, or sent as `application/pdf`, is a PDF only
+when `%PDF-` appears in its first kilobyte; otherwise it is taken as an untyped file is:
+text when it reads as text, an image when its bytes are one, and refused
+otherwise. A stored attachment that would take its message past the limit
+(one an older server stored, or a file that has grown since), a stored PDF
+that no longer holds one (an LFS pointer after a checkout), or one no model
+reads (a web address or an archive an older server kept) is sent as a
+one-line note naming it instead, so the chat's later turns complete; an image
+a provider refused (below) takes no room.
 
 A long chat can hold more media than a provider takes in one request: many
 screenshots, or a few large PDFs. Before each request the runtime counts what it

@@ -2939,5 +2939,8 @@
   "Ends {date}": "{date} 結束",
   "On hold": "已凍結",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "超額使用已關閉，因此不會花費已購額度。請在帳單中開啟。",
-  "Your free trial didn't start: that card was already used for a trial.": "免費試用未開始：這張卡已用於試用。"
+  "Your free trial didn't start: that card was already used for a trial.": "免費試用未開始：這張卡已用於試用。",
+  "The attachments come to {size}, over the {limit} limit for media in one message": "附件共 {size}，超過了單則訊息 {limit} 的媒體上限",
+  "its images and PDFs would take the message over the 20 MiB limit for media": "其中的圖片和 PDF 會使訊息超出 20 MiB 的媒體上限",
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} 大小為 {size}，超過了單則訊息 {limit} 的媒體上限"
 }

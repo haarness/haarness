@@ -28,6 +28,10 @@ const KEY: &str = "mcp-resource\u{1f}";
 const SUMMARY: &str = "<details>\n<summary>MCP resource: ";
 /// Why the server left a mention unread when a rule keeps it from the chat.
 pub(crate) const RULE_REFUSAL: &str = "a rule keeps this resource from the model";
+/// Why the server left a mention unread when its images and PDFs would take
+/// the message past the media one message carries.
+const MEDIA_REFUSAL: &str =
+    "its images and PDFs would take the message over the 20 MiB limit for media";
 
 /// One resource the `@` list can offer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -718,6 +722,9 @@ pub(crate) fn unread_reason(language: crate::locale::Language, reason: &str) -> 
     if reason == RULE_REFUSAL {
         return language.text(RULE_REFUSAL).to_owned();
     }
+    if reason == MEDIA_REFUSAL {
+        return language.text(MEDIA_REFUSAL).to_owned();
+    }
     if let Some(seconds) = reason
         .strip_prefix("did not answer within ")
         .and_then(|rest| rest.strip_suffix(" s"))
@@ -730,6 +737,23 @@ pub(crate) fn unread_reason(language: crate::locale::Language, reason: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasons_haarness_wrote_read_in_the_persons_language() {
+        let german = crate::locale::Language::German;
+        for reason in [RULE_REFUSAL, MEDIA_REFUSAL] {
+            assert_eq!(unread_reason(german, reason), german.text(reason));
+            assert_ne!(unread_reason(german, reason), reason);
+        }
+        assert_eq!(
+            unread_reason(german, "did not answer within 10 s"),
+            german.format("did not answer within {seconds} s", &[("seconds", "10")])
+        );
+        assert_eq!(
+            unread_reason(german, "MCP error -32002: Resource not found"),
+            "MCP error -32002: Resource not found"
+        );
+    }
 
     fn resource(server: &str, uri: &str, name: &str) -> Resource {
         Resource {
