@@ -541,6 +541,39 @@ fn append_post_tool_hooks(output: &mut String, decision: crate::HookDecision) {
     }
 }
 
+/// The message of a failed call's error that what its `PostToolUseFailure`
+/// hooks say follows, keeping the error's kind. None for a failure that is
+/// not the tool's own (a stop, or a person's or Auto's reviewer's refusal of
+/// a call the tool made), and for a provider's error, whose message the
+/// model reads rewritten: no hook runs for those.
+fn failure_message(error: &mut CoreError) -> Option<&mut String> {
+    match error {
+        CoreError::NotFound(message)
+        | CoreError::Conflict(message)
+        | CoreError::PermissionDenied(message)
+        | CoreError::Invalid(message)
+        | CoreError::Storage(message)
+        | CoreError::Tool(message) => Some(message),
+        CoreError::PermissionRejected(_)
+        | CoreError::ReviewBlocked(_)
+        | CoreError::Provider(_)
+        | CoreError::ProviderBlocked(_)
+        | CoreError::ProviderIncomplete(_)
+        | CoreError::Cancelled => None,
+    }
+}
+
+/// A failed call's error without what hooks added after it, so goal
+/// tracking still knows a repeated failure when a hook answers differently
+/// each time (a timestamp, a counter).
+fn without_hook_text(error: &str) -> &str {
+    ["\n\n<hook-context>\n", "\n\n<hook-feedback>\n"]
+        .iter()
+        .filter_map(|marker| error.find(marker))
+        .min()
+        .map_or(error, |at| &error[..at])
+}
+
 /// The most of each hook block a tool's result takes. Many programs exit 2
 /// on a usage error, so a hook wrapping every tool would otherwise add all
 /// they print to every result.
@@ -9926,9 +9959,12 @@ impl RunnerTask {
                     if self.depth == 0 {
                         let (successful, failure) = match &result {
                             Ok(_) => (true, None),
-                            Err(error) => {
-                                (false, Some(normalize_goal_turn_text(&error.to_string())))
-                            }
+                            Err(error) => (
+                                false,
+                                Some(normalize_goal_turn_text(without_hook_text(
+                                    &error.to_string(),
+                                ))),
+                            ),
                         };
                         goal_turn_tool_outcomes.push(GoalToolOutcomeFingerprint {
                             name: name.clone(),
@@ -10979,7 +11015,14 @@ impl RunnerTask {
             ok = result.is_ok(),
             "tool finished"
         );
-        let mut output = result?;
+        let mut output = match result {
+            Ok(output) => output,
+            Err(error) => {
+                return Err(self
+                    .after_failed_call(&hook_call, name, &arguments, hook_context, error)
+                    .await);
+            }
+        };
         if let Some(context) = hook_context {
             use std::fmt::Write as _;
             let _ = write!(
@@ -10996,6 +11039,37 @@ impl RunnerTask {
             append_post_tool_hooks(&mut output.text, decision);
         }
         Ok(output)
+    }
+
+    /// A call whose tool ran and failed runs `PostToolUseFailure` hooks, as
+    /// one outside a turn does: what they (and the call's `PreToolUse`
+    /// hooks) say follows the error's message, and the error keeps its kind.
+    async fn after_failed_call(
+        &self,
+        hook_call: &crate::HookCall,
+        name: &str,
+        arguments: &serde_json::Value,
+        hook_context: Option<String>,
+        mut error: CoreError,
+    ) -> CoreError {
+        let Some(hooks) = &self.hooks else {
+            return error;
+        };
+        let shown = user_facing_error(&error);
+        let Some(message) = failure_message(&mut error) else {
+            return error;
+        };
+        if let Some(context) = hook_context {
+            use std::fmt::Write as _;
+            let _ = write!(message, "\n\n<hook-context>\n{context}\n</hook-context>");
+        }
+        let decision = tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => crate::HookDecision::default(),
+            decision = hooks.post_tool_use(hook_call, name, arguments, &shown, true) => decision,
+        };
+        append_post_tool_hooks(message, decision);
+        error
     }
 
     /// The effective permission engine for this turn: agent defaults →
@@ -15871,6 +15945,43 @@ mod tests {
         ProviderMessage, hook_question_answer, parse_goal_criteria_selection, provider_messages,
         question_request, resolve_pending_question, subagent_title,
     };
+
+    #[test]
+    fn hooks_after_a_failed_call_keep_its_kind_and_goal_tracking_reads_past_them() {
+        let mut error = CoreError::NotFound("missing.txt".into());
+        let message = super::failure_message(&mut error).unwrap();
+        message.push_str("\n\n<hook-context>\nchecked at 10:02\n</hook-context>");
+        super::append_post_tool_hooks(
+            message,
+            crate::HookDecision {
+                block: Some("list the folder first".into()),
+                ..crate::HookDecision::default()
+            },
+        );
+        assert!(matches!(&error, CoreError::NotFound(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            "not found: missing.txt\n\n<hook-context>\nchecked at 10:02\n</hook-context>\n\n<hook-feedback>\nlist the folder first\n</hook-feedback>"
+        );
+        // The same failure again, a hook answering otherwise, reads the same.
+        assert_eq!(
+            super::without_hook_text(&error.to_string()),
+            "not found: missing.txt"
+        );
+        assert_eq!(
+            super::without_hook_text("tool error: x\n\n<hook-feedback>\nlater\n</hook-feedback>"),
+            "tool error: x"
+        );
+        assert_eq!(super::without_hook_text("tool error: x"), "tool error: x");
+        // A stop, a person's refusal and a provider's error run no hooks.
+        for mut error in [
+            CoreError::Cancelled,
+            CoreError::PermissionRejected("no".into()),
+            CoreError::Provider("HTTP 529".into()),
+        ] {
+            assert!(super::failure_message(&mut error).is_none(), "{error:?}");
+        }
+    }
 
     #[test]
     fn what_hooks_add_after_a_tool_is_kept_to_a_bound_that_says_so() {
