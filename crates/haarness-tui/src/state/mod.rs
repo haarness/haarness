@@ -749,6 +749,9 @@ pub struct App {
     pub todos: Vec<haarness_protocol::TodoEntry>,
     pub model_favorites: Vec<String>,
     pub model_recents: Vec<String>,
+    /// Favorites and shortcuts changed here that `tui-state.toml` could not
+    /// take yet (`preferences.rs`).
+    pub(crate) unsaved: crate::preferences::Unsaved,
     pub providers: Vec<ProviderInfo>,
     pub agents: Vec<AgentProfile>,
     pub agent_index: usize,
@@ -1249,6 +1252,7 @@ impl App {
             keybindings_skipped,
             model_favorites: crate::config::load_state().model_favorites,
             model_recents: crate::config::load_state().model_recents,
+            unsaved: crate::preferences::Unsaved::default(),
             theme: Theme::default(),
             theme_selected: false,
             terminal_background: false,

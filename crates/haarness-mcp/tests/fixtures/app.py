@@ -35,6 +35,7 @@ p{margin:4px 0}button{margin:4px 4px 0 0}
 <button id="read-own">Read own page</button>
 <button id="read-other">Read another resource</button>
 <button id="fetch">Fetch undeclared</button>
+<button id="fetch-declared">Fetch declared</button>
 <button id="leave">Leave the page</button>
 <div style="height:120px"></div>
 <script>
@@ -77,7 +78,8 @@ addEventListener("message", (event) => {
     out("font", "font " + ((params.styles.variables || {})["--font-sans"] || ""));
   if (message.method === "ui/resource-teardown") parent.postMessage({ jsonrpc: "2.0", id: message.id, result: {} }, "*");
 });
-document.addEventListener("securitypolicyviolation", (event) => out("status", "blocked " + event.effectiveDirective));
+let blocked = 0;
+document.addEventListener("securitypolicyviolation", (event) => { blocked++; out("status", "blocked " + event.effectiveDirective); });
 const click = (id, run) => document.getElementById(id).addEventListener("click", run);
 click("link", () => request("ui/open-link", { url: "https://example.com/forecast" }).then((reply) => out("status", "link " + answer(reply))));
 click("ask", () => request("ui/message", { role: "user", content: [{ type: "text", text: "What about tomorrow in Lisbon?" }] })
@@ -98,6 +100,11 @@ click("read-own", () => request("resources/read", { uri: "ui://weather/view.html
   .then((reply) => out("status", "read " + (reply.error ? "error " + reply.error.message : reply.result.contents.length + " contents"))));
 click("read-other", () => request("resources/read", { uri: "file:///etc/hosts" }).then((reply) => out("status", "read " + answer(reply))));
 click("fetch", () => fetch("https://undeclared.example/data").then(() => out("status", "fetched"), () => {}));
+// A failure the policy caused says so, whichever of the two arrives first.
+click("fetch-declared", () => {
+  const before = blocked;
+  fetch("https://live.weather.example/data").then(() => out("status", "fetched"), () => blocked === before && out("status", "fetch failed"));
+});
 click("leave", () => { location.href = "https://example.com/elsewhere"; });
 request("ui/initialize", { protocolVersion: "2026-01-26", appInfo: { name: "weather-fixture", version: "1" }, appCapabilities: {} })
   .then((reply) => {
@@ -168,7 +175,8 @@ for line in sys.stdin:
             result = {'contents': [{
                 'uri': URI, 'mimeType': MIME, 'text': PAGE,
                 '_meta': {'ui': {'prefersBorder': True, 'csp': {
-                    'connectDomains': ['https://api.weather.example'],
+                    # Declared without a scheme: the page may reach it over https.
+                    'connectDomains': ['https://api.weather.example', 'live.weather.example'],
                     # Only host sources reach the policy; the rest is dropped.
                     'resourceDomains': ['https://cdn.weather.example', "'unsafe-eval'", 'https://x.example; script-src *'],
                 }}},

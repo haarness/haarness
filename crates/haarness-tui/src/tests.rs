@@ -19008,6 +19008,543 @@ fn model_picker_prioritizes_favorites_then_recents_without_losing_search() {
     assert_eq!(app.filtered_models(), [second]);
 }
 
+/// Two TUIs on one config folder, each still holding the model lists it read
+/// at start: what one saves is not undone by the other's next save.
+#[test]
+fn two_tuis_with_stale_model_lists_keep_each_others_favorites_and_recents() {
+    // A provider of its own, so tests running alongside never touch these.
+    let provider = format!("lists-{}", uuid::Uuid::now_v7());
+    let tui = || {
+        let mut app = selector_fixture();
+        app.providers[0].id = provider.clone();
+        app.thread.provider = provider.clone();
+        app.model_favorites.clear();
+        app.model_recents.clear();
+        app
+    };
+    let (mut first, mut second) = (tui(), tui());
+    let one = format!("{provider}/gpt-5.4");
+    let two = format!("{provider}/gpt-5.4-mini");
+    let toggle = |app: &mut App, model: &str| {
+        app.selection = app
+            .filtered_models()
+            .iter()
+            .position(|m| m == model)
+            .unwrap();
+        app.toggle_model_favorite();
+    };
+    toggle(&mut first, &one);
+    toggle(&mut second, &two);
+    let saved = crate::config::load_state().model_favorites;
+    assert!(saved.contains(&one) && saved.contains(&two), "{saved:?}");
+    // The picker shows the lists as saved, the other TUI's favorite too.
+    assert!(
+        second.model_favorites.contains(&one),
+        "{:?}",
+        second.model_favorites
+    );
+    assert_eq!(second.filtered_models()[second.selection], two);
+    // Taking a favorite out leaves the other TUI's in place.
+    toggle(&mut first, &one);
+    let saved = crate::config::load_state().model_favorites;
+    assert!(!saved.contains(&one) && saved.contains(&two), "{saved:?}");
+    assert!(!first.model_favorites.contains(&one));
+
+    first.thread.model = "gpt-5.4".into();
+    first.remember_model();
+    second.thread.model = "gpt-5.4-mini".into();
+    second.remember_model();
+    let recents = crate::config::load_state().model_recents;
+    let at = |model: &str| recents.iter().position(|m| m == model);
+    assert!(at(&two).is_some() && at(&two) < at(&one), "{recents:?}");
+    assert!(
+        second.model_recents.contains(&one),
+        "{:?}",
+        second.model_recents
+    );
+}
+
+/// A model favorite that cannot be saved (the state file is there but cannot
+/// be read) says so, and the picker shows it until the TUI quits.
+#[cfg(unix)]
+#[test]
+fn a_model_favorite_that_cannot_be_saved_says_so() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = std::env::temp_dir().join(format!(
+        "haarness-unsaved-favorite-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("tui-state.toml");
+    std::fs::write(&path, "theme = \"kept\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Permissions do not stop a superuser, who reads the file anyway.
+    if std::fs::read(&path).is_ok() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
+    let mut app = selector_fixture();
+    app.model_favorites.clear();
+    app.selection = 0;
+    let model = app.filtered_models()[0].clone();
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    app.toggle_model_favorite();
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let body = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(
+        app.notice,
+        "Model favorites not saved · kept until you quit"
+    );
+    assert!(app.model_favorites.contains(&model));
+    assert_eq!(body, "theme = \"kept\"\n");
+}
+
+/// A favorite whose save failed stays one when a later save works, and that
+/// save writes it, rather than the lists on disk taking its place.
+#[cfg(unix)]
+#[test]
+fn a_favorite_that_could_not_be_saved_is_written_by_the_next_save() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory =
+        std::env::temp_dir().join(format!("haarness-later-favorite-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("tui-state.toml");
+    std::fs::write(&path, "theme = \"kept\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Permissions do not stop a superuser, who reads the file anyway.
+    if std::fs::read(&path).is_ok() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut app = selector_fixture();
+    app.model_favorites.clear();
+    app.selection = 0;
+    let model = app.filtered_models()[0].clone();
+    app.toggle_model_favorite();
+    let first_notice = app.notice.clone();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // A model switch saves the recent models, and the favorite with them.
+    app.thread.model = "gpt-5.4-mini".into();
+    app.remember_model();
+    let saved = crate::config::load_state();
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(
+        first_notice,
+        "Model favorites not saved · kept until you quit"
+    );
+    assert!(
+        app.model_favorites.contains(&model),
+        "{:?}",
+        app.model_favorites
+    );
+    assert!(
+        saved.model_favorites.contains(&model),
+        "{:?}",
+        saved.model_favorites
+    );
+    assert_eq!(saved.theme.as_deref(), Some("kept"));
+    assert!(app.unsaved.favorites.is_empty());
+}
+
+/// Shortcuts `/keybinds` could not save apply all the same and say so, the
+/// form shows them when it opens again, and a save that works writes them.
+#[cfg(unix)]
+#[tokio::test]
+async fn shortcuts_that_cannot_be_saved_apply_and_say_so() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = std::env::temp_dir().join(format!(
+        "haarness-unsaved-shortcuts-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("tui-state.toml");
+    std::fs::write(&path, "theme = \"kept\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&path).is_ok() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut app = selector_fixture();
+    let client = offline_client();
+    let form = |app: &App| {
+        let mut input = app.management.view.submit.clone().unwrap();
+        for field in &app.management.view.fields {
+            input[&field.key] = field.value.clone().into();
+        }
+        input
+    };
+    app.open_management("keybinds", &serde_json::json!({"action": "view"}), &client)
+        .await
+        .unwrap();
+    let mut input = form(&app);
+    input["models"] = "F7".into();
+    app.open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    let applied = app.keybindings.get("models").cloned();
+    let notice = app.notice.clone();
+    app.open_management("keybinds", &serde_json::json!({"action": "view"}), &client)
+        .await
+        .unwrap();
+    let kept = app.keybindings.get("models").cloned();
+    let shown = form(&app)["models"].clone();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let input = form(&app);
+    app.open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    let saved = crate::config::load_state();
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(applied.as_deref(), Some("F7"));
+    assert_eq!(notice, "Shortcuts not saved · kept until you quit");
+    assert_eq!(kept.as_deref(), Some("F7"));
+    assert_eq!(shown, "F7");
+    assert_eq!(
+        saved.keybindings.get("models").map(String::as_str),
+        Some("F7")
+    );
+    assert_eq!(saved.theme.as_deref(), Some("kept"));
+    assert!(app.notice.is_empty(), "{}", app.notice);
+    assert!(app.unsaved.keybindings.is_empty());
+}
+
+/// Shortcuts a `/keybinds` save could not write are kept as the changes
+/// they were: a shortcut another TUI saves later shows in this one's form,
+/// applies here, and stays when this one saves.
+#[cfg(unix)]
+#[tokio::test]
+async fn unsaved_shortcuts_do_not_undo_another_tuis_later_shortcut() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = std::env::temp_dir().join(format!(
+        "haarness-shortcuts-elsewhere-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("tui-state.toml");
+    std::fs::write(&path, "theme = \"kept\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&path).is_ok() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut app = selector_fixture();
+    let client = offline_client();
+    let form = |app: &App| {
+        let mut input = app.management.view.submit.clone().unwrap();
+        for field in &app.management.view.fields {
+            input[&field.key] = field.value.clone().into();
+        }
+        input
+    };
+    let view = serde_json::json!({"action": "view"});
+    app.open_management("keybinds", &view, &client)
+        .await
+        .unwrap();
+    let mut input = form(&app);
+    input["models"] = "F7".into();
+    app.open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // Another TUI on the folder rebinds Sessions.
+    let elsewhere = crate::config::save_state(|state| {
+        state.keybindings.insert("sessions".into(), "F9".into());
+    });
+    app.open_management("keybinds", &view, &client)
+        .await
+        .unwrap();
+    let shown = form(&app);
+    let active = app.keybindings.clone();
+    let input = form(&app);
+    app.open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    let saved = crate::config::load_state().keybindings;
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(elsewhere);
+    assert_eq!(
+        (shown["sessions"].clone(), shown["models"].clone()),
+        ("F9".into(), "F7".into())
+    );
+    assert_eq!(active.get("sessions").map(String::as_str), Some("F9"));
+    assert_eq!(active.get("models").map(String::as_str), Some("F7"));
+    assert_eq!(saved.get("sessions").map(String::as_str), Some("F9"));
+    assert_eq!(saved.get("models").map(String::as_str), Some("F7"));
+}
+
+/// A `/keybinds` form left open writes only what was changed in it: a
+/// shortcut another TUI saved meanwhile stays, here and on disk.
+#[tokio::test]
+async fn a_shortcuts_form_left_open_keeps_another_tuis_later_shortcut() {
+    let directory =
+        std::env::temp_dir().join(format!("haarness-open-shortcuts-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut app = selector_fixture();
+    let client = offline_client();
+    app.open_management("keybinds", &serde_json::json!({"action": "view"}), &client)
+        .await
+        .unwrap();
+    let mut input = app.management.view.submit.clone().unwrap();
+    for field in &app.management.view.fields {
+        input[&field.key] = field.value.clone().into();
+    }
+    // Another TUI on the folder rebinds Sessions while the form is open.
+    let elsewhere = crate::config::save_state(|state| {
+        state.keybindings.insert("sessions".into(), "F9".into());
+    });
+    input["models"] = "F7".into();
+    app.open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    let saved = crate::config::load_state().keybindings;
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(elsewhere);
+    assert_eq!(saved.get("sessions").map(String::as_str), Some("F9"));
+    assert_eq!(saved.get("models").map(String::as_str), Some("F7"));
+    assert_eq!(
+        app.keybindings.get("sessions").map(String::as_str),
+        Some("F9")
+    );
+    assert!(app.unsaved.keybindings.is_empty());
+}
+
+/// A key another TUI takes between the form's check and its save is refused
+/// as a clash in the form is: the error names it, the form keeps its edits,
+/// and nothing is kept as unsaved.
+#[tokio::test]
+async fn a_shortcut_key_taken_while_the_form_saves_is_refused_as_a_clash() {
+    use fs2::FileExt as _;
+    let directory =
+        std::env::temp_dir().join(format!("haarness-shortcut-race-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut app = selector_fixture();
+    let client = offline_client();
+    app.open_management("keybinds", &serde_json::json!({"action": "view"}), &client)
+        .await
+        .unwrap();
+    let models = app
+        .management
+        .view
+        .fields
+        .iter()
+        .position(|field| field.key == "models")
+        .unwrap();
+    app.management.view.fields[models].value = "F7".into();
+    // Another TUI holds the state lock and gives Sessions F7 before it lets go.
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(directory.join("tui-state.lock"))
+        .unwrap();
+    held.lock_exclusive().unwrap();
+    let other = std::thread::spawn({
+        let path = directory.join("tui-state.toml");
+        move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::fs::write(path, "[keybindings]\nsessions = \"F7\"\n").unwrap();
+            drop(held);
+        }
+    });
+    let saved = app
+        .management_choice(crate::state::OptionsKind::Management, "save", &client)
+        .await;
+    other.join().unwrap();
+    let on_disk = crate::config::load_state().keybindings;
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    let error = saved.unwrap_err().to_string();
+    assert!(error.contains("F7"), "{error}");
+    assert_eq!(app.management.view.fields[models].value, "F7");
+    assert!(app.unsaved.keybindings.is_empty());
+    assert_eq!(on_disk.get("models"), None);
+    assert_eq!(on_disk.get("sessions").map(String::as_str), Some("F7"));
+}
+
+/// A kept shortcut whose key another TUI takes later is dropped: this TUI and
+/// its form never show two actions on one key.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_kept_shortcut_whose_key_another_tui_takes_is_dropped() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory =
+        std::env::temp_dir().join(format!("haarness-kept-shortcut-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("tui-state.toml");
+    std::fs::write(&path, "theme = \"kept\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&path).is_ok() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut app = selector_fixture();
+    let client = offline_client();
+    let view = serde_json::json!({"action": "view"});
+    app.open_management("keybinds", &view, &client)
+        .await
+        .unwrap();
+    let mut input = app.management.view.submit.clone().unwrap();
+    for field in &app.management.view.fields {
+        input[&field.key] = field.value.clone().into();
+    }
+    input["models"] = "F7".into();
+    app.open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    let kept = app.unsaved.keybindings.clone();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // Another TUI on the folder gives Sessions the same key.
+    let elsewhere = crate::config::save_state(|state| {
+        state.keybindings.insert("sessions".into(), "F7".into());
+    });
+    app.open_management("keybinds", &view, &client)
+        .await
+        .unwrap();
+    let shown = app
+        .management
+        .view
+        .fields
+        .iter()
+        .map(|field| (field.key.clone(), field.value.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(elsewhere);
+    assert_eq!(kept.get("models").map(String::as_str), Some("F7"));
+    assert!(app.unsaved.keybindings.is_empty());
+    for bindings in [&app.keybindings, &shown] {
+        assert_eq!(bindings.get("sessions").map(String::as_str), Some("F7"));
+        assert_eq!(bindings.get("models").map(String::as_str), Some("F2"));
+    }
+}
+
+/// What one `App` of this TUI could not save (a favorite, a recent model, a
+/// shortcut) goes with it to the next one a server switch starts. Once the
+/// file can take them, the save as the TUI leaves writes the favorite and
+/// the recent model, and a `/keybinds` save the shortcut, checked as a form.
+#[cfg(unix)]
+#[tokio::test]
+async fn what_could_not_be_saved_follows_a_server_switch_and_is_written_on_leaving() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory =
+        std::env::temp_dir().join(format!("haarness-unsaved-switch-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("tui-state.toml");
+    std::fs::write(&path, "theme = \"kept\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&path).is_ok() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut first = selector_fixture();
+    first.model_favorites.clear();
+    first.selection = 0;
+    let favorite = first.filtered_models()[0].clone();
+    first.toggle_model_favorite();
+    first.thread.model = "gpt-5.4-mini".into();
+    first.remember_model();
+    let recent = format!("{}/gpt-5.4-mini", first.thread.provider);
+    let client = offline_client();
+    first
+        .open_management("keybinds", &serde_json::json!({"action": "view"}), &client)
+        .await
+        .unwrap();
+    let mut input = first.management.view.submit.clone().unwrap();
+    for field in &first.management.view.fields {
+        input[&field.key] = field.value.clone().into();
+    }
+    input["models"] = "F7".into();
+    first
+        .open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    // A server switch starts a new App from the saved state.
+    let mut second = selector_fixture();
+    second.model_favorites.clear();
+    second.model_recents.clear();
+    second.keep_unsaved(first.unsaved.clone());
+    let carried = (
+        second.model_favorites.contains(&favorite),
+        second.model_recents.first() == Some(&recent),
+        second.keybindings.get("models").cloned(),
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let left = crate::save_leaving_state(&second);
+    let saved = crate::config::load_state();
+    second
+        .open_management("keybinds", &serde_json::json!({"action": "view"}), &client)
+        .await
+        .unwrap();
+    let mut input = second.management.view.submit.clone().unwrap();
+    for field in &second.management.view.fields {
+        input[&field.key] = field.value.clone().into();
+    }
+    second
+        .open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    let shortcuts = crate::config::load_state().keybindings;
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(carried, (true, true, Some("F7".into())));
+    assert!(left);
+    assert!(
+        saved.model_favorites.contains(&favorite),
+        "{:?}",
+        saved.model_favorites
+    );
+    assert_eq!(saved.model_recents.first(), Some(&recent));
+    // Shortcuts go in only through `/keybinds`, which checks them.
+    assert_eq!(saved.keybindings.get("models"), None);
+    assert_eq!(shortcuts.get("models").map(String::as_str), Some("F7"));
+    assert_eq!(saved.theme.as_deref(), Some("kept"));
+}
+
+/// Two TUIs' review viewers opened on the same saved choices: closing each
+/// saves only what was changed in it, so the second to close does not undo
+/// the first one's choice.
+#[test]
+fn review_viewers_closed_in_two_tuis_keep_both_layout_choices() {
+    let directory =
+        std::env::temp_dir().join(format!("haarness-review-choices-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let open = || {
+        let mut app = selector_fixture();
+        let viewer = crate::diffview::DiffViewer::new(
+            crate::diffview::DiffSource::WorkingTree,
+            review_files(),
+            crate::config::load_diff_preferences(),
+        );
+        app.overlay = crate::state::Overlay::Diff(Box::new(viewer));
+        app
+    };
+    let (mut first, mut second) = (open(), open());
+    viewer_mut(&mut first).layout = Some(crate::diffview::DiffLayout::Split);
+    viewer_mut(&mut second).tree_visible = false;
+    first.close_diff_viewer();
+    second.close_diff_viewer();
+    let saved = crate::config::load_diff_preferences();
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(saved.layout, Some(crate::diffview::DiffLayout::Split));
+    assert!(!saved.tree_visible);
+}
+
 #[test]
 fn sent_references_read_as_their_chips_in_the_bubble_and_come_back_as_chips() {
     use crate::prompt_context::{Part, display, parts, snapshot};
@@ -22153,7 +22690,11 @@ fn help_uses_the_width_it_has_and_keybinds_names_the_fixed_keys() {
     for line in app.lines((80, 30)) {
         assert!(line.width() <= 80);
     }
-    let view = crate::keybindings::view(&serde_json::json!({})).unwrap();
+    let (view, _) = crate::keybindings::view(
+        &serde_json::json!({}),
+        &std::collections::BTreeMap::default(),
+    )
+    .unwrap();
     assert!(view.lines.iter().any(|line| line.contains("esc esc stop")));
     assert!(
         view.lines
@@ -22430,6 +22971,37 @@ fn undo_fixture() -> (App, Thread) {
     (app, thread)
 }
 
+/// An undo whose history read fails still puts the undone prompt back in
+/// the composer, and the transcript catches up on the next refresh.
+#[tokio::test]
+async fn an_undo_whose_history_cannot_be_read_keeps_the_undone_prompt() {
+    let (mut app, thread) = undo_fixture();
+    let mut reverted = thread.clone();
+    reverted.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+    });
+    let error = serde_json::json!({
+        "code": "storage",
+        "message": "database is locked",
+        "retryable": true,
+    })
+    .to_string();
+    let (client, server) = workspace_http_status_client(
+        vec![
+            (200, serde_json::to_string(&reverted).unwrap()),
+            (500, error),
+        ],
+        false,
+    )
+    .await;
+    assert!(app.execute_command("/undo", &client).await.is_err());
+    server.await.unwrap();
+    assert_eq!(app.composer.text(), "write the file");
+    assert!(app.refresh_needed);
+}
+
 #[tokio::test]
 async fn undo_restores_the_prompt_and_slash_starts_a_command_over_it() {
     let (mut app, thread) = undo_fixture();
@@ -22613,6 +23185,60 @@ async fn leaving_over_a_set_aside_undone_prompt_keeps_it_as_the_draft() {
     assert_eq!(
         app.drafts.get(&thread.id).map(|draft| draft.text.as_str()),
         Some("write the file")
+    );
+}
+
+/// Opening a chat whose history cannot be read leaves both drafts where they
+/// were: the chat that stays open keeps what is typed in it, and the other
+/// chat's draft is there once it does open.
+#[tokio::test]
+async fn a_chat_whose_history_cannot_be_read_keeps_its_draft_for_the_next_switch() {
+    let thread = fixture_thread();
+    let other = Thread {
+        title: "Another thread".into(),
+        ..fixture_thread()
+    };
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone(), other.clone()],
+        vec![],
+        vec![],
+        vec![],
+    );
+    app.composer.set_text("typed here".into());
+    app.drafts.insert(
+        other.id,
+        crate::servers::Draft {
+            text: "waiting there".into(),
+            attachments: vec!["/tmp/plan.png".into()],
+            shell: false,
+        },
+    );
+    let error = serde_json::json!({
+        "code": "storage",
+        "message": "database is locked",
+        "retryable": true,
+    })
+    .to_string();
+    let (client, server) = workspace_http_status_client(vec![(500, error)], false).await;
+    assert!(app.switch_thread(other.clone(), &client).await.is_err());
+    server.await.unwrap();
+    assert_eq!(app.thread.id, thread.id);
+    assert_eq!(app.composer.text(), "typed here");
+    assert_eq!(
+        app.drafts.get(&other.id).map(|draft| draft.text.as_str()),
+        Some("waiting there")
+    );
+
+    let (client, server) = navigation_client().await;
+    app.switch_thread(other.clone(), &client).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(app.thread.id, other.id);
+    assert_eq!(app.composer.text(), "waiting there");
+    assert_eq!(app.attachments, ["/tmp/plan.png"]);
+    assert_eq!(
+        app.drafts.get(&thread.id).map(|draft| draft.text.as_str()),
+        Some("typed here")
     );
 }
 
