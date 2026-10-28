@@ -28,6 +28,13 @@ pub(crate) fn resolve_name(name: &str, names: impl IntoIterator<Item = String>) 
             };
         }
     }
+    // A name the model wrote as providers saw the tool (a workflow it
+    // wrote, run later): the tool's own name, from the names it is among.
+    let wire = crate::wire_names::WireNames::new(names.iter().map(String::as_str));
+    let own = wire.own(name);
+    if own != name {
+        return own.to_owned();
+    }
     name.to_owned()
 }
 
@@ -198,6 +205,42 @@ mod tests {
         assert_eq!(resolve("glbo"), "glbo");
         assert_eq!(resolve("other.glob"), "other.glob");
         assert_eq!(resolve(" glob "), " glob ");
+    }
+
+    /// A workflow or Code Mode script the model wrote names an MCP tool the
+    /// way providers saw it: that is the tool with its own name.
+    #[test]
+    fn a_tool_named_as_providers_saw_it_is_the_tool() {
+        let resolve = |name| {
+            resolve_name(
+                name,
+                [
+                    "mcp__Docs Server__files.read",
+                    "mcp__Docs_Server__plain",
+                    "mcp__Docs Server__plain",
+                    "read",
+                ]
+                .map(str::to_owned),
+            )
+        };
+        assert_eq!(
+            resolve("mcp__Docs_Server__files_read"),
+            "mcp__Docs Server__files.read"
+        );
+        // The tool whose own name providers take keeps it.
+        assert_eq!(
+            resolve("mcp__Docs_Server__plain"),
+            "mcp__Docs_Server__plain"
+        );
+        let names = crate::wire_names::WireNames::new([
+            "mcp__Docs Server__plain",
+            "mcp__Docs_Server__plain",
+        ]);
+        assert_eq!(
+            resolve(names.wire("mcp__Docs Server__plain")),
+            "mcp__Docs Server__plain"
+        );
+        assert_eq!(resolve("mcp__nothing__here"), "mcp__nothing__here");
     }
 
     #[test]

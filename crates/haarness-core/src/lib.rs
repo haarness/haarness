@@ -30,6 +30,7 @@ mod stream_limits;
 mod tool_catalog;
 mod tool_validation;
 mod turn_context;
+pub mod wire_names;
 mod workflows;
 
 pub use agents::{

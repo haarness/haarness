@@ -406,7 +406,10 @@ performs initialization and capability discovery again.
 A local server, and a remote server's `headersHelper`, run in the server's
 project folder (the chat home's own folder there); a relative `cwd` is read
 from the project folder, `~/…` from the home folder, and the settings keep
-`cwd` as written.
+`cwd` as written. Tools keep their own names in the API (`mcp__<server>__<tool>`
+with the server's and tool's names as written); only requests to a model
+provider carry names in the characters providers accept (see
+[Plugins, skills and tools](REFERENCE.md#plugins-skills-and-tools)).
 `timeoutMs` (default 30 s) bounds the socket connect, initialization, and tool
 discovery as one deadline, plus a `headersHelper` run. In a JSON file a
 `timeout` key counts too, in its ecosystem's unit: milliseconds in an opencode
