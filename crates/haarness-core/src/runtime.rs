@@ -2537,23 +2537,6 @@ impl AgentRuntime {
         crate::attachments::admit_off_executor(attachments, workspace).await
     }
 
-    /// A queued message's attachments when its turn comes, as
-    /// [`crate::attachments::admit_each`] keeps them: checked when they
-    /// arrived, they are never refused now. One whose file changed since
-    /// reaches the model as a note, and the queue moves on.
-    async fn admitted_again(&self, id: ThreadId, attachments: Vec<String>) -> Vec<String> {
-        if attachments.is_empty() {
-            return attachments;
-        }
-        let Ok(workspace) = self.attachment_folder(id).await else {
-            return attachments;
-        };
-        let kept = attachments.clone();
-        tokio::task::spawn_blocking(move || crate::attachments::admit_each(attachments, &workspace))
-            .await
-            .unwrap_or(kept)
-    }
-
     pub async fn input_queue(&self, id: ThreadId) -> CoreResult<haarness_protocol::InputQueue> {
         self.repository.get_thread(id).await?;
         self.repository.input_queue(id).await
@@ -2747,14 +2730,13 @@ impl AgentRuntime {
                 .enumerate()
                 .partition(|(_, source)| had.contains(source));
             let (places, sources): (Vec<_>, Vec<_>) = new.into_iter().unzip();
-            let added = !sources.is_empty();
             let admitted = self.admitted_attachments(id, sources).await?;
             let mut merged = kept;
             merged.extend(places.into_iter().zip(admitted));
             merged.sort_by_key(|(place, _)| *place);
             *attachments = merged.into_iter().map(|(_, source)| source).collect();
-            // What it adds must fit beside what it keeps.
-            if added {
+            // Unless it keeps them exactly, they must fit together.
+            if *attachments != had {
                 crate::attachments::within_limit(attachments)?;
             }
         }
@@ -6173,13 +6155,16 @@ impl AgentRuntime {
             ));
         }
         let _reload = self.reload_gate.read().await;
-        let attachments = std::mem::take(&mut request.attachments);
-        request.attachments = if queue_revision.is_some() {
-            // A queued message, checked when it arrived.
-            self.admitted_again(thread_id, attachments).await
-        } else {
-            self.admitted_attachments(thread_id, attachments).await?
-        };
+        // A queued message was checked when it arrived, and its turn takes
+        // the message as the queue holds it. It is not refused now: a file
+        // that changed meanwhile, or one an older server queued unchecked,
+        // reaches the model as a note (see `attachments::for_model`), and the
+        // queue moves on.
+        if queue_revision.is_none() {
+            request.attachments = self
+                .admitted_attachments(thread_id, std::mem::take(&mut request.attachments))
+                .await?;
+        }
         self.apply_chat_turn_settings(thread_id, &mut request).await;
         let components = self.components();
         // A standalone `ultracode` in the user's current request is a one-turn

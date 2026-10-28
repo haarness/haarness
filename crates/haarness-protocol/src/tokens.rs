@@ -511,7 +511,12 @@ impl MediaShape {
                 .next()
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            let size = (encoded.len() as u64 / 4) * 3;
+            let padding = encoded
+                .bytes()
+                .rev()
+                .take_while(|&byte| byte == b'=')
+                .count();
+            let size = (encoded.len() / 4 * 3).saturating_sub(padding) as u64;
             if size > MAX_MEDIA_BYTES {
                 return Self::LeftOut;
             }
@@ -860,6 +865,13 @@ mod tests {
             "A".repeat(usize::try_from(MAX_MEDIA_BYTES / 3 * 4 + 8).unwrap())
         );
         assert_eq!(Tokenizer::Claude.media(&inline), 30);
+        // At the limit exactly, its padding taken off, it is sent.
+        let full = MAX_MEDIA_BYTES.div_ceil(3) * 4;
+        let at_limit = format!(
+            "data:audio/mpeg;base64,{}=",
+            "A".repeat(usize::try_from(full - 1).unwrap())
+        );
+        assert_eq!(Tokenizer::Claude.media(&at_limit), MAX_MEDIA_BYTES / 500);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
