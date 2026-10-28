@@ -46,28 +46,102 @@ pub fn data_folder() -> Option<PathBuf> {
         .map(|project| project.data_local_dir().to_owned())
 }
 
-/// Makes `folder`, and what is missing above it, for this user alone (0700
-/// on Unix): saved output holds whole command output and MCP resources. One
-/// already there that others can open (made by an older build) is narrowed
-/// too, when this user may; the folders above it are left as they are.
-pub(crate) async fn private_folder(folder: &Path) -> std::io::Result<()> {
-    let mut builder = tokio::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    builder.mode(0o700);
-    builder.create(folder).await?;
+/// Names a data folder holds once Haarness has kept its files there: what
+/// tells one of its own from a folder of the person's that only has the
+/// same name (`--data-dir ~` makes `~/data` the data folder).
+const KEPT: [&str; 4] = [
+    ".layout-v1",
+    "workspaces.json",
+    "haarness.db",
+    "tool-output",
+];
+
+/// Makes the data folder `folder` for this user alone (0700 on Unix): it
+/// holds chats, credentials, saved tool output, previews and worktrees. The
+/// folders above it, perhaps of the person's own choosing, are made as any
+/// folder is and never changed. One already there is narrowed (see
+/// [`narrow_kept_folder`]), at every start.
+pub fn private_data_folder(folder: &Path) -> std::io::Result<()> {
+    if let Some(parent) = folder.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = tokio::fs::metadata(folder).await?.permissions().mode();
-        if mode & 0o077 != 0 {
-            // Another user's folder is not this one's to change; the files
-            // written in it are still private.
-            let _ =
-                tokio::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).await;
+        use std::os::unix::fs::DirBuilderExt as _;
+        match std::fs::DirBuilder::new().mode(0o700).create(folder) {
+            Ok(()) => return Ok(()),
+            Err(_) if folder.is_dir() => {}
+            Err(error) => return Err(error),
         }
+        narrow_kept_folder(folder);
+        Ok(())
     }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(folder)
+}
+
+/// Narrows the folder the server keeps saved output and preview versions in
+/// ([`data_folder`]) as [`private_data_folder`] narrows the data folder:
+/// without `--data-dir` it need not be that one (on a Mac it is the app's
+/// Application Support folder, the data folder `~/.local/share/haarness`).
+pub fn keep_data_folder_private() {
+    if let Some(folder) = data_folder() {
+        narrow_kept_folder(&folder);
+    }
+}
+
+/// Takes the group's and others' access away from `folder` when it already
+/// holds Haarness's files ([`KEPT`]); a folder that holds none of them, or
+/// is another user's, is left as it is.
+fn narrow_kept_folder(folder: &Path) {
+    #[cfg(unix)]
+    if KEPT.iter().any(|name| folder.join(name).exists()) {
+        narrow(folder);
+    }
+    #[cfg(not(unix))]
+    let _ = folder;
+}
+
+/// Masks `folder`'s permission bits to its owner's (0700 at most), so one
+/// its owner cannot write to stays so. Another user's is not this one's to
+/// change.
+#[cfg(unix)]
+fn narrow(folder: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    if let Ok(metadata) = std::fs::metadata(folder)
+        && metadata.is_dir()
+        && metadata.permissions().mode() & 0o077 != 0
+    {
+        let mode = metadata.permissions().mode() & 0o700;
+        let _ = std::fs::set_permissions(folder, std::fs::Permissions::from_mode(mode));
+    }
+}
+
+/// Makes `folder`, and what is missing above it, for this user alone (0700
+/// on Unix): saved output holds whole command output and MCP resources, a
+/// preview version a page. One already there that others can open (made by
+/// an older build) is narrowed too, when this user may; the folders above it
+/// are left as they are.
+pub(crate) fn private_folder_blocking(folder: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(folder)?;
+    #[cfg(unix)]
+    narrow(folder);
     Ok(())
+}
+
+/// [`private_folder_blocking`], off the async workers.
+pub(crate) async fn private_folder(folder: &Path) -> std::io::Result<()> {
+    let folder = folder.to_owned();
+    tokio::task::spawn_blocking(move || private_folder_blocking(&folder))
+        .await
+        .map_err(std::io::Error::other)?
 }
 
 /// A new file `<prefix>_<id>.txt` in `folder` (made as [`private_folder`]
@@ -281,6 +355,52 @@ mod tests {
             assert_ne!(chosen, named);
             assert_eq!(mode(&chosen), 0o700);
             assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+        }
+
+        fn set_mode(path: &Path, mode: u32) {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        /// A data folder Haarness makes is private; one already there is
+        /// narrowed only once it holds Haarness's files, and only masked:
+        /// a folder its owner cannot write to stays so.
+        #[test]
+        fn a_data_folder_is_narrowed_only_once_it_holds_haarness_s_files() {
+            let scratch = Scratch::new();
+            let fresh = scratch.0.join("fresh/data");
+            private_data_folder(&fresh).unwrap();
+            assert_eq!(mode(&fresh), 0o700);
+
+            let theirs = scratch.0.join("theirs");
+            std::fs::create_dir(&theirs).unwrap();
+            std::fs::write(theirs.join("photo.jpg"), "").unwrap();
+            set_mode(&theirs, 0o755);
+            private_data_folder(&theirs).unwrap();
+            assert_eq!(mode(&theirs), 0o755, "a folder of the person's");
+
+            let kept = scratch.0.join("kept");
+            std::fs::create_dir_all(kept.join("tool-output")).unwrap();
+            set_mode(&kept, 0o775);
+            private_data_folder(&kept).unwrap();
+            assert_eq!(mode(&kept), 0o700);
+
+            set_mode(&kept, 0o555);
+            private_data_folder(&kept).unwrap();
+            assert_eq!(mode(&kept), 0o500, "never made writable");
+            set_mode(&kept, 0o700);
+        }
+
+        /// A saved-output or preview folder an older build left open is
+        /// masked to its owner, never made writable.
+        #[test]
+        fn an_open_output_folder_is_masked_to_its_owner() {
+            let scratch = Scratch::new();
+            let folder = scratch.0.join("tool-output");
+            std::fs::create_dir(&folder).unwrap();
+            set_mode(&folder, 0o555);
+            private_folder_blocking(&folder).unwrap();
+            assert_eq!(mode(&folder), 0o500);
+            set_mode(&folder, 0o700);
         }
     }
 }

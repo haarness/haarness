@@ -71,3 +71,38 @@ fn a_run_with_a_data_dir_saves_long_tool_output_inside_it() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+/// Without `--data-dir`, a Mac's server keeps saved output and previews in
+/// the app's Application Support folder, which need not be the data folder
+/// (`~/.local/share/haarness`): one an older build left open, with
+/// Haarness's files in it, is narrowed at every start as the data folder is.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_server_s_own_folder_is_narrowed_at_start_too() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = std::env::temp_dir().join(format!("haarness-server-dir-{}", uuid::Uuid::now_v7()));
+    let home = root.join("home");
+    let server = home.join("Library/Application Support/dev.haarness.haarness");
+    fs::create_dir_all(server.join("tool-output")).unwrap();
+    fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
+    // A data folder of its own, so the server's is not taken over as it.
+    fs::create_dir_all(home.join(".local/share/haarness")).unwrap();
+    let _ = Command::new(env!("CARGO_BIN_EXE_haarness"))
+        .arg("logs")
+        .current_dir(&root)
+        .env_remove("HAARNESS_DATA_DIR")
+        .env_remove("HAARNESS_HOME")
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("HAARNESS_TELEMETRY", "0")
+        .env("HAARNESS_CLOUD_API_URL", "http://127.0.0.1:9")
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap();
+    let mode = fs::metadata(&server).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+    fs::remove_dir_all(root).unwrap();
+}
