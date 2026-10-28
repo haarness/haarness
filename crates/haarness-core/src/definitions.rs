@@ -627,13 +627,31 @@ pub async fn prepare(
         prepared.push_str("\n\n");
         prepared.push_str(input);
     }
-    Ok(expand_references(&prepared, invoker))
+    expand_references_aside(prepared, invoker).await
 }
 
 /// Bounds for `@path` expansion in command templates.
 const REFERENCE_FILE_LIMIT: usize = 20;
 const REFERENCE_FILE_BYTES: usize = 128 * 1024;
 const REFERENCE_DIR_ENTRIES: usize = 200;
+
+/// [`expand_references`] on a blocking thread: a path it reads may be on a
+/// network mount that does not answer, or a pipe nothing writes to, and
+/// either holds the call that looks at it.
+async fn expand_references_aside(
+    text: String,
+    invoker: &dyn crate::ToolInvoker,
+) -> CoreResult<String> {
+    if crate::instructions::references(&text).is_empty() {
+        return Ok(text);
+    }
+    let workspace = invoker.workspace();
+    let agents = invoker.delegable_agents();
+    let rules = invoker.read_rules();
+    tokio::task::spawn_blocking(move || expand_references(&text, workspace, &agents, rules))
+        .await
+        .map_err(|error| CoreError::Tool(error.to_string()))
+}
 
 /// `@path` tokens in a prepared template become bounded snapshots of
 /// workspace files, one-level directory listings, or delegation hints for
@@ -643,18 +661,20 @@ const REFERENCE_DIR_ENTRIES: usize = 200;
 /// [`crate::instructions::left_out`] keeps out (a secret, where Haarness
 /// keeps sign-ins, one the agent's `read` rules deny), judged where it
 /// really is, is named with a note instead of its text.
-fn expand_references(text: &str, invoker: &dyn crate::ToolInvoker) -> String {
+fn expand_references(
+    text: &str,
+    workspace: Option<String>,
+    agents: &[String],
+    rules: Option<crate::PermissionEngine>,
+) -> String {
     let references = crate::instructions::references(text);
     if references.is_empty() {
         return text.to_owned();
     }
-    let workspace = invoker
-        .workspace()
+    let workspace = workspace
         .map(PathBuf::from)
         .and_then(|path| path.canonicalize().ok());
     let home = haarness_protocol::home_dir();
-    let agents = invoker.delegable_agents();
-    let rules = invoker.read_rules();
     let mut seen = std::collections::HashSet::new();
     let mut blocks = Vec::new();
     let mut files = 0;
@@ -1503,6 +1523,69 @@ mod tests {
         for note in notes {
             assert!(text.contains(note), "{note}\n{text}");
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A `@` reference to a pipe nothing writes to holds the read that
+    /// looks at it, as a file on a network mount that does not answer does;
+    /// the turn's async worker stays free meanwhile.
+    #[cfg(unix)]
+    #[test]
+    fn a_reference_that_hangs_holds_no_async_worker() {
+        let root = std::env::temp_dir().join(format!("haarness-refs-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pipe = root.join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&pipe)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (sender, answer) = std::sync::mpsc::channel();
+        let preparing = std::thread::spawn({
+            let (root, pipe) = (root.clone(), pipe.clone());
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let text = runtime.block_on(async {
+                    // Runs only while the reference leaves this runtime's
+                    // one thread free.
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        tokio::task::spawn_blocking(move || {
+                            std::fs::write(pipe, "WRITTEN_MEANWHILE")
+                        })
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    });
+                    let invoker = StubInvoker {
+                        workspace: root,
+                        agents: Vec::new(),
+                    };
+                    prepare(
+                        "Read @pipe",
+                        "",
+                        &DefinitionExecution::default(),
+                        "s",
+                        &invoker,
+                    )
+                    .await
+                });
+                let _ = sender.send(text);
+            }
+        });
+        let text = answer.recv_timeout(std::time::Duration::from_secs(5));
+        if text.is_err() {
+            // The read held the thread: let it go so the test can end.
+            std::fs::write(&pipe, "WRITTEN_LATE").unwrap();
+        }
+        preparing.join().unwrap();
+        let text = text.expect("the reference held the async worker").unwrap();
+        assert!(text.contains("WRITTEN_MEANWHILE"), "{text}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
