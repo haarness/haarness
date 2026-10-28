@@ -15,7 +15,7 @@ import type {
 import { lines, type DiffLine } from "./diff";
 import { language, t } from "./i18n";
 import { reviewReason } from "./approval-mode";
-import { literalText, withoutEscapes } from "./display-text";
+import { spelledOutText, withoutEscapes } from "./display-text";
 
 /** Provider call IDs can repeat in another turn; output belongs to one call. */
 export function toolResult(items: Item[], call?: Item, boundary = Infinity) {
@@ -144,7 +144,7 @@ function humanTarget(record: Record<string, unknown> | undefined) {
   for (const key of humanFields) {
     const value = record?.[key];
     if (typeof value !== "string") continue;
-    const text = literalText(value).replace(/\s+/g, " ").trim();
+    const text = spelledOutText(value).replace(/\s+/g, " ").trim();
     if (text && !opaqueId(text)) return text;
   }
   return "";
@@ -213,15 +213,15 @@ export function describeTool(name: string, args: unknown): ToolShape {
       ...known,
       target:
         typeof record.path === "string"
-          ? t("{pattern} in {path}", { pattern: literalText(record.pattern), path: literalText(record.path) })
-          : literalText(record.pattern),
+          ? t("{pattern} in {path}", { pattern: spelledOutText(record.pattern), path: spelledOutText(record.path) })
+          : spelledOutText(record.pattern),
     };
   if (name === "list" && ["", ".", "./"].includes(toolTarget(args)))
     // The root has no name of its own; "." would only make a reader pause.
     return { ...known, target: t("the project folder") };
   if (name === "apply_patch" && typeof record?.input === "string") {
     // The envelope is instructions for the tool; the reader wants the files.
-    const files = patchFiles(record.input).map((file) => literalText(file.path));
+    const files = patchFiles(record.input).map((file) => spelledOutText(file.path));
     if (files.length)
       return {
         ...known,
@@ -232,10 +232,10 @@ export function describeTool(name: string, args: unknown): ToolShape {
   // A resource row names the resource it read, or the server it listed.
   if (name === "mcp_resource_read" || name === "mcp_resource_list") {
     const value = name === "mcp_resource_read" ? record?.uri : record?.server;
-    return { ...known, target: typeof value === "string" ? literalText(value.trim()) : "" };
+    return { ...known, target: typeof value === "string" ? spelledOutText(value.trim()) : "" };
   }
   if (name === "load_tool" && Array.isArray(record?.queries))
-    return { ...known, target: targetList(record.queries.filter((query): query is string => typeof query === "string").map(literalText)) };
+    return { ...known, target: targetList(record.queries.filter((query): query is string => typeof query === "string").map(spelledOutText)) };
   if (known && !familyTools.has(name) && !["execute", "skill", "question", "todo", "todowrite", "todoread"].includes(name))
     return { ...known, target: humanTarget(record) };
   if (known) return { ...known, target: toolTarget(args) };
@@ -639,7 +639,7 @@ function targetText(args: unknown): string {
 /** A row's target on one line, with what would not show, or would reorder
  * the row, written as its code, as on the call's approval card. */
 export function toolTarget(args: unknown): string {
-  return literalText(targetText(args)).replace(/\s+/g, " ");
+  return spelledOutText(targetText(args)).replace(/\s+/g, " ");
 }
 /**
  * A tool row's tooltip: the whole target with its line breaks, so a
@@ -648,7 +648,7 @@ export function toolTarget(args: unknown): string {
  * shown as the row shows it.
  */
 export function toolTitle(args: unknown, target: string): string {
-  const text = literalText(targetText(args));
+  const text = spelledOutText(targetText(args));
   return text.replace(/\s+/g, " ") === target ? text : target;
 }
 /**

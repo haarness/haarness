@@ -46,7 +46,7 @@ async function pictures(name: string, target: Locator) {
 /** Whether `element`'s codes are drawn in a quieter color than its text. */
 async function quietness(element: Locator) {
   return element.evaluate((element) => {
-    const code = getComputedStyle(element.querySelector(".literal-code")!).color;
+    const code = getComputedStyle(element.querySelector(".spelled-code")!).color;
     return { quieter: code !== getComputedStyle(element).color };
   });
 }
@@ -127,7 +127,7 @@ test("an approval shows what is invisible in a command as quiet codes, right to 
   await expect(subject).toHaveText(shown);
   // Nothing in the card can reorder or hide a part of the command.
   expect(await subject.textContent()).not.toMatch(/[\u202e\u200b\r]/);
-  await expect(subject.locator(".literal-code")).toHaveText(["\\u{202E}", "\\u{200B}", "\\u{D}"]);
+  await expect(subject.locator(".spelled-code")).toHaveText(["\\u{202E}", "\\u{200B}", "\\u{D}"]);
   // Quieter than the command around them, in the theme's own muted color.
   const colors = await subject.evaluate((element) => {
     const probe = document.createElement("span");
@@ -137,7 +137,7 @@ test("an approval shows what is invisible in a command as quiet codes, right to 
     probe.remove();
     return {
       muted,
-      code: getComputedStyle(element.querySelector(".literal-code")!).color,
+      code: getComputedStyle(element.querySelector(".spelled-code")!).color,
       text: getComputedStyle(element).color,
     };
   });
@@ -167,7 +167,7 @@ test("an approval shows what is invisible in a command as quiet codes, right to 
   await denied.locator("summary").click();
   const input = denied.locator(".tool-input");
   await expect(input).toHaveText("$ " + shown);
-  await expect(input.locator(".literal-code")).toHaveText(["\\u{202E}", "\\u{200B}", "\\u{D}"]);
+  await expect(input.locator(".spelled-code")).toHaveText(["\\u{202E}", "\\u{200B}", "\\u{D}"]);
   expect(await quietness(input)).toEqual({ quieter: true });
   await pictures("shell-panel", denied);
   const [thread] = await api("listThreads");
@@ -186,7 +186,7 @@ test("an edit's card shows what turns a changed line around as a quiet code, and
   const card = page.locator(".prompt-dock.approval");
   const changes = card.locator(".approval-changes");
   await expect(changes).toContainText('if (role != "user\\u{202E} \\u{2066}// admin\\u{2069} \\u{2066}") {');
-  await expect(changes.locator(".literal-code")).toHaveText(["\\u{202E}", "\\u{2066}", "\\u{2069}", "\\u{2066}"]);
+  await expect(changes.locator(".spelled-code")).toHaveText(["\\u{202E}", "\\u{2066}", "\\u{2069}", "\\u{2066}"]);
   // Right-to-left text and its mark belong to the file: no code there.
   await expect(changes).toContainText('const greeting = "مرحبا\u200f";');
   expect(await changes.textContent()).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/);

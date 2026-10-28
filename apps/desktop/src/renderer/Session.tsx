@@ -116,8 +116,8 @@ import { Portal } from "solid-js/web";
 import { isWorktree, locationName } from "../projects";
 import { createWorktree } from "./worktrees";
 import { ChangePreview, ToolActivity } from "./ToolActivity";
-import { Literal } from "./Literal";
-import { literalText } from "./display-text";
+import { SpelledOut } from "./SpelledOut";
+import { spelledOutText } from "./display-text";
 import { Mark } from "./brand";
 import { ChatLoading } from "./ChatLoading";
 import { matchesShortcut, shortcutLabel, shortcutText } from "./search";
@@ -3686,7 +3686,7 @@ function Permission(props: {
   // What "always" would let through, in words rather than as stored rules.
   const alwaysRules = () =>
     (props.permission.alwaysPatterns ?? []).map((rule) =>
-      describeAlwaysRule(category(), literalText(rule), { t, shortPath }),
+      describeAlwaysRule(category(), spelledOutText(rule), { t, shortPath }),
     );
   // Offered in Review only: from Yolo it would be a step back.
   const autoOffered = () => app.approvalMode() === "review" && canAutoApprove(props.permission);
@@ -3774,7 +3774,7 @@ function Permission(props: {
                   <li>
                     {splitAround(
                       chromeRequestText(line.category),
-                      () => <bdi><Literal text={line.origin} /></bdi>,
+                      () => <bdi><SpelledOut text={line.origin} /></bdi>,
                       "{origin}",
                     )}
                   </li>
@@ -3783,23 +3783,23 @@ function Permission(props: {
               <For each={otherPatterns()}>
                 {(pattern) => (
                   <li>
-                    <code><Literal text={pattern} /></code>
+                    <code><SpelledOut text={pattern} /></code>
                   </li>
                 )}
               </For>
             </ul>
             <Show when={explicitDetail()}>
-              <pre class="prompt-subject prompt-detail"><Literal text={explicitDetail()} /></pre>
+              <pre class="prompt-subject prompt-detail"><SpelledOut text={explicitDetail()} /></pre>
             </Show>
           </>
         }
       >
         <Show
           when={permissionCommand(props.permission.detail)}
-          fallback={<pre class="prompt-subject prompt-detail"><Literal text={detail()} /></pre>}
+          fallback={<pre class="prompt-subject prompt-detail"><SpelledOut text={detail()} /></pre>}
         >
           <pre class="prompt-subject approval-command">
-            <Literal text={permissionCommand(props.permission.detail)} />
+            <SpelledOut text={permissionCommand(props.permission.detail)} />
           </pre>
         </Show>
         {/* Why Auto's reviewer left this to the person: one quiet line under
@@ -3891,7 +3891,7 @@ function Permission(props: {
         <For each={linkTargets()}>
           {(target) => (
             <p class="approval-target">
-              {splitAround(t("Leads to {path}"), () => <bdi><code><Literal text={target} /></code></bdi>, "{path}")}
+              {splitAround(t("Leads to {path}"), () => <bdi><code><SpelledOut text={target} /></code></bdi>, "{path}")}
             </p>
           )}
         </For>
@@ -3904,7 +3904,7 @@ function Permission(props: {
               {(rule) =>
                 splitAround(
                   t("Haarness could not read all of this command; a rule for {rule} may apply."),
-                  () => <bdi><code><Literal text={rule()} /></code></bdi>,
+                  () => <bdi><code><SpelledOut text={rule()} /></code></bdi>,
                   "{rule}",
                 )
               }

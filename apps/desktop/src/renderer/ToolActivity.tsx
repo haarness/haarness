@@ -26,7 +26,7 @@ import { watchOpenImages } from "./ImageViewer";
 import { Icon } from "./ui";
 import { requestReview } from "./Review";
 import { Shimmer } from "./Shimmer";
-import { Literal } from "./Literal";
+import { SpelledOut } from "./SpelledOut";
 import { turnsDirection } from "./display-text";
 import { useApp } from "./state";
 import { appsOff, loadMcpServers, mcpServersKnown, readOnlyServer, setApps } from "./mcp-servers";
@@ -280,7 +280,7 @@ export function ToolActivity(props: {
                           {/* A command reads as on its approval card: what
                               would not show is a quiet code. */}
                           <Show when={input().label === "Shell"} fallback={input().text}>
-                            <Literal text={input().text} />
+                            <SpelledOut text={input().text} />
                           </Show>
                         </pre>
                       </Show>
@@ -481,7 +481,7 @@ export function ChangePreview(props: {
               </span>
               <code>
                 <Show when={props.directions} fallback={row.text || " "}>
-                  <Literal text={row.text || " "} shows={turnsDirection} />
+                  <SpelledOut text={row.text || " "} shows={turnsDirection} />
                 </Show>
               </code>
             </div>
