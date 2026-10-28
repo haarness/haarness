@@ -281,9 +281,15 @@ impl App {
         if let Ok(info) = client.info().await
             && instance.is_none_or(|instance| instance == info.server_instance_id)
         {
-            self.server_info = Some(info);
-            self.normalize_reasoning();
+            self.adopt_server_info(info);
         }
+    }
+
+    /// Take `info` as the server's, dropping a pick its configuration no
+    /// longer offers.
+    pub(crate) fn adopt_server_info(&mut self, info: haarness_protocol::ServerInfo) {
+        self.server_info = Some(info);
+        self.normalize_reasoning();
     }
 
     pub async fn reduce(&mut self, event: EventEnvelope, client: &ApiClient) -> Result<()> {
