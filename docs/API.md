@@ -282,10 +282,13 @@ A server configured through `POST /v1/mcp/{name}` (as an editor's ACP
 session does) holds up no turn while it starts: its client waits for it. ACP
 takes a server still starting (or needing authorization) after 2 seconds as
 configured, so the session is set up at once, and waits for its servers
-still starting before the session's next prompt (Cancel ends that wait). One
-that did not start is told to the editor in that prompt's reply and logged;
-the prompt goes on without it, and the server is left disconnected for the
-session's next load to configure again. One that fails within the 2
+still starting before the session's next prompt (Cancel ends that wait).
+A session's prompts run one at a time, in the order they were sent, so one
+sent meanwhile shares that wait and runs after it. A server that did not
+start is told to the editor in that prompt's reply and logged; the prompt
+goes on without it, and the server is left disconnected for the session's
+next load to configure again. One still starting after 150 seconds (its
+limit set longer) is told too, and the next prompt waits for it again. One that fails within the 2
 seconds fails the session and is left disconnected too.
 
 Every start runs on its own: a client that gives up on `configure` or

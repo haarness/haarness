@@ -1113,3 +1113,105 @@ async fn a_session_with_a_server_slow_to_start_is_set_up_at_once() {
     assert!(status.success(), "Haarness ACP process failed");
     daemon_guard.stop().await;
 }
+
+/// Prompts sent back to back while the session's MCP server starts run in
+/// the order they were sent, the second sharing the first's wait; a Cancel
+/// during the wait ends that prompt, and the next one waits again and gets
+/// the server's tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prompts_sent_while_a_server_starts_keep_their_order() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, _, _) =
+        acp_session(&directory).await;
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../haarness-mcp/tests/fixtures/recovery.py"
+    );
+    let delay = directory.0.join("delay");
+    std::fs::write(&delay, "4").expect("write the server's delay");
+    let slow = json!({"name": "slow", "command": python3(), "args": [fixture],
+                      "env": [{"name": "INIT_DELAY_FILE", "value": delay},
+                              {"name": "CALL_LOG", "value": directory.0.join("calls")}]});
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":20, "method":"session/new",
+               "params":{"cwd":workspace, "mcpServers":[slow]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let created = receive_response(&mut lines, &mut stdin, 20, &mut messages).await;
+    let session = created["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{created}"))
+        .to_owned();
+    for (id, text) in [(21, "first"), (22, "second")] {
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0", "id":id, "method":"session/prompt",
+                   "params":{"sessionId":session, "prompt":[{"type":"text", "text":text}]}}),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let mut answered = Vec::new();
+    let mut texts = Vec::new();
+    while answered.len() < 2 {
+        let message = receive(&mut lines).await;
+        if let Some(id) = message["id"]
+            .as_u64()
+            .filter(|_| message.get("method").is_none())
+        {
+            assert_eq!(message["result"]["stopReason"], "end_turn", "{message}");
+            answered.push(id);
+        } else if let Some(text) = update_text(&message, "agent_message_chunk") {
+            texts.push(text.to_owned());
+        }
+    }
+    assert_eq!(answered, [21, 22], "the prompts were answered out of order");
+    assert_eq!(texts, ["Echo: first", "Echo: second"], "{texts:?}");
+
+    // A Cancel while a prompt waits for the server ends that prompt. (Another
+    // name: chats made within a minute share the first 8 characters of their
+    // id, which name an editor's server.)
+    std::fs::write(&delay, "30").expect("write the server's delay");
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":23, "method":"session/new",
+               "params":{"cwd":workspace, "mcpServers":[json!({"name": "stalled", "command": python3(), "args": [fixture],
+                      "env": [{"name": "INIT_DELAY_FILE", "value": delay},
+                              {"name": "CALL_LOG", "value": directory.0.join("calls")}]})]}}),
+    )
+    .await;
+    let created = receive_response(&mut lines, &mut stdin, 23, &mut messages).await;
+    let session = created["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{created}"))
+        .to_owned();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":24, "method":"session/prompt",
+               "params":{"sessionId":session, "prompt":[{"type":"text", "text":"waiting"}]}}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "method":"session/cancel", "params":{"sessionId":session}}),
+    )
+    .await;
+    let started = std::time::Instant::now();
+    let cancelled = receive_response(&mut lines, &mut stdin, 24, &mut messages).await;
+    assert_eq!(
+        cancelled["result"]["stopReason"], "cancelled",
+        "{cancelled}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    daemon_guard.stop().await;
+}
