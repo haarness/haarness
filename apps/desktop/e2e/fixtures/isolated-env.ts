@@ -1,9 +1,12 @@
 /** What every Desktop a spec starts gets, whatever the runner's environment
- * holds: no usage statistics, and Haarness Cloud on a closed loopback port. A
+ * holds: no usage statistics, Haarness Cloud on a closed loopback port, and
+ * schedules written into the test's own folders but never handed to launchd,
+ * systemd or Task Scheduler (an isolated data folder does not move those). A
  * spec that talks to a Cloud stand-in sets its own HAARNESS_CLOUD_API_URL. */
 export const ISOLATED = {
   HAARNESS_TELEMETRY: "0",
   HAARNESS_CLOUD_API_URL: "http://127.0.0.1:9",
+  HAARNESS_SCHEDULE_SKIP_INSTALL: "1",
 };
 
 /**

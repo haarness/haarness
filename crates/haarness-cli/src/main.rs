@@ -1494,6 +1494,10 @@ async fn cli_main() -> Result<()> {
     if base_paths.root.is_some() {
         haarness_server::use_data_folder(base_paths.data.clone());
         haarness_workflows::use_cache_folder(base_paths.cache.clone());
+    } else {
+        // Without `--data-dir` the server keeps its files in a folder of
+        // its own, which need not be the data folder made private above.
+        haarness_server::keep_data_folder_private();
     }
     // An edit of the global configuration or the system folder asks a person;
     // tell the permission engine which folders those are in this process.
@@ -8192,8 +8196,13 @@ async fn application_at(
     if folder_snapshots_enabled(file_config.snapshots.as_ref()) {
         // Opened when a chat's folder first is: a server none of whose chats
         // has a folder opens nothing more.
-        let folders = folders
-            .get_or_insert_with(|| haarness_store::SqliteSnapshotFolders::open(&paths.database));
+        let folders = folders.get_or_insert_with(|| {
+            if registered_workspace.chat_home {
+                haarness_store::SqliteSnapshotFolders::open_in_chat_home(&paths.database)
+            } else {
+                haarness_store::SqliteSnapshotFolders::open(&paths.database)
+            }
+        });
         runtime = runtime.with_folder_snapshots(Arc::new(folders.clone()));
     }
     if let Some(folders) = folders {
@@ -11509,7 +11518,7 @@ impl Paths {
             let data = root.join("data");
             let config = root.join("config");
             let cache = root.join("cache");
-            fs::create_dir_all(&data)?;
+            haarness_server::private_data_folder(&data)?;
             fs::create_dir_all(&config)?;
             fs::create_dir_all(&cache)?;
             if !data.join(".layout-v1").exists() {

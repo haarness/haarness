@@ -26,7 +26,9 @@ pub mod vcs;
 pub mod workflow;
 
 pub use api::{ServerHandle, ServerState, serve};
-pub use data_folder::{data_folder, use_data_folder};
+pub use data_folder::{
+    data_folder, keep_data_folder_private, private_data_folder, use_data_folder,
+};
 pub use hooks::{ConfiguredHooks, HookEntry};
 pub use plugins::PluginRegistry;
 pub use skills::FilesystemSkillRegistry;

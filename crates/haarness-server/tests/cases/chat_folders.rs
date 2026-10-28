@@ -28,6 +28,13 @@ impl Fixture {
     /// A runtime over the project folder whose chats' own folders are
     /// checkpointed (as the CLI composes it), and the requests its model got.
     fn runtime(&self) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<ProviderRequest>>>) {
+        self.runtime_with(|database| haarness_store::SqliteSnapshotFolders::open(database))
+    }
+
+    fn runtime_with(
+        &self,
+        folders: fn(&std::path::Path) -> haarness_store::SqliteSnapshotFolders,
+    ) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<ProviderRequest>>>) {
         let database = self.root.join("db.sqlite");
         let provider = Capturing::default();
         let requests = provider.requests.clone();
@@ -45,15 +52,16 @@ impl Fixture {
                 ..RuntimeConfig::default()
             },
         )
-        .with_folder_snapshots(Arc::new(haarness_store::SqliteSnapshotFolders::open(
-            &database,
-        )));
+        .with_folder_snapshots(Arc::new(folders(&database)));
         (runtime, requests)
     }
 
-    /// The same runtime, run as the chat home.
+    /// The same runtime, run as the chat home (whose chats' folders the CLI
+    /// checkpoints standing alone).
     fn chat_home(&self) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<ProviderRequest>>>) {
-        let (runtime, requests) = self.runtime();
+        let (runtime, requests) = self.runtime_with(|database| {
+            haarness_store::SqliteSnapshotFolders::open_in_chat_home(database)
+        });
         (runtime.as_chat_home(), requests)
     }
 }
@@ -1081,6 +1089,98 @@ async fn served(
     .await
     .unwrap();
     (format!("http://{}", handle.address), handle)
+}
+
+/// The chat home under a repository whose `.gitignore` hides everything (a
+/// home folder kept in Git): a chat's search, `@` file search and Undo still
+/// see its files, and the repository above does not make its dependency
+/// folders searchable.
+#[tokio::test]
+async fn ignore_files_above_the_chat_home_hide_nothing_from_its_chats() {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.root.join(".git")).unwrap();
+    std::fs::write(fixture.root.join(".gitignore"), "*\n").unwrap();
+    let (runtime, _) = fixture.chat_home();
+    let a = chat(&runtime, None).await.unwrap();
+    turn(
+        &runtime,
+        a.id,
+        r#"!tool write {"path":"plan.md","content":"needle"}"#,
+    )
+    .await;
+    // Undo's checkpoints hold the file.
+    let review = runtime.diff_last_turn(a.id).await.unwrap();
+    assert_eq!(
+        review
+            .iter()
+            .map(|file| file.file.as_str())
+            .collect::<Vec<_>>(),
+        ["plan.md"]
+    );
+    turn(&runtime, a.id, r#"!tool grep {"pattern":"needle"}"#).await;
+    let found = last_result(&runtime, a.id, "grep").await;
+    assert!(found.contains("plan.md"), "{found}");
+    // A person's own search there (a workflow's too) as well.
+    let found = runtime
+        .run_direct_tool(
+            a.id,
+            "grep",
+            json!({"pattern": "needle"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .output
+        .text;
+    assert!(found.contains("plan.md"), "{found}");
+    // A search of a subfolder leaves out what the chat's folder leaves out,
+    // the model's and a person's alike.
+    std::fs::create_dir_all(folder(&a).join("sub")).unwrap();
+    std::fs::write(folder(&a).join(".ignore"), "*.log\n").unwrap();
+    std::fs::write(folder(&a).join("sub/a.log"), "needle").unwrap();
+    std::fs::write(folder(&a).join("sub/b.txt"), "needle").unwrap();
+    // As grep writes it on this system.
+    let kept = std::path::Path::new("sub")
+        .join("b.txt")
+        .display()
+        .to_string();
+    turn(
+        &runtime,
+        a.id,
+        r#"!tool grep {"pattern":"needle","path":"sub"}"#,
+    )
+    .await;
+    let found = last_result(&runtime, a.id, "grep").await;
+    assert!(found.contains(&kept) && !found.contains("a.log"), "{found}");
+    let found = runtime
+        .run_direct_tool(
+            a.id,
+            "grep",
+            json!({"pattern": "needle", "path": "sub"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .output
+        .text;
+    assert!(found.contains(&kept) && !found.contains("a.log"), "{found}");
+
+    std::fs::create_dir_all(folder(&a).join("node_modules/dep")).unwrap();
+    std::fs::write(folder(&a).join("node_modules/dep/plan.js"), "").unwrap();
+    let (base, _handle) = served(&fixture, runtime).await;
+    let found: Vec<String> = reqwest::Client::new()
+        .get(format!(
+            "{base}/v1/files/search?q=plan&limit=50&threadId={}",
+            a.id
+        ))
+        .bearer_auth("fixture-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(found, ["plan.md"]);
 }
 
 #[tokio::test]

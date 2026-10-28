@@ -33,6 +33,9 @@ class Fixture:
             # A test server never reports usage statistics (a release build
             # would send them to Haarness Cloud a minute after it starts).
             "HAARNESS_TELEMETRY": "0",
+            # Nor hands a schedule to launchd or systemd, whose folders and
+            # login domain a test HOME does not change.
+            "HAARNESS_SCHEDULE_SKIP_INSTALL": "1",
         }
         # Use explicit echo defaults, Review and an ask rule to test approval
         # round-trips (a chat with no setting of its own is otherwise in Auto).

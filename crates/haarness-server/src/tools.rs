@@ -3061,9 +3061,17 @@ impl Tool for BuiltinTool {
                 // workers, as glob's does: a large tree or a slow disk holds
                 // none of them, and Stop ends the call at once.
                 let workspace = context.workspace.clone();
+                let chat_home = context.execution.chat_home.clone();
                 let cancel = context.cancel.clone();
                 let walk = tokio::task::spawn_blocking(move || {
-                    text::grep_walk(&regex, &root, &workspace, &secrets, &cancel)
+                    text::grep_walk(
+                        &regex,
+                        &root,
+                        &workspace,
+                        chat_home.as_deref(),
+                        &secrets,
+                        &cancel,
+                    )
                 });
                 let found = tokio::select! {
                     () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
@@ -4820,11 +4828,11 @@ pub(crate) async fn truncate_output_at(text: String, directory: &Path) -> CoreRe
         return Ok(output(text));
     }
     let preview = output_preview(&text);
-    tokio::fs::create_dir_all(directory)
+    let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
         .await
         .map_err(tool_error)?;
-    let path = directory.join(format!("tool_{}.txt", uuid::Uuid::now_v7()));
-    tokio::fs::write(&path, &text).await.map_err(tool_error)?;
+    file.write_all(text.as_bytes()).await.map_err(tool_error)?;
+    file.flush().await.map_err(tool_error)?;
     let removed = text.len().saturating_sub(preview.len());
     let notice = format!(
         "The tool call succeeded but its output was truncated. Full output saved to: {}\n\
@@ -4857,9 +4865,21 @@ fn output_preview(text: &str) -> String {
     preview.join("\n")
 }
 
+/// Whether `path` lies in the chat home `chat_home` (see
+/// [`haarness_core::ExecutionSettings::chat_home`]), whose searches read no
+/// ignore file from the folders above it.
+pub(crate) fn within_chat_home(path: &Path, chat_home: Option<&Path>) -> bool {
+    chat_home.is_some_and(|home| {
+        path.starts_with(home)
+            || path
+                .canonicalize()
+                .is_ok_and(|path| home.canonicalize().is_ok_and(|home| path.starts_with(home)))
+    })
+}
+
 pub(crate) fn tool_output_dir() -> PathBuf {
     crate::data_folder().map_or_else(
-        || std::env::temp_dir().join("haarness/tool-output"),
+        || crate::data_folder::private_temp_folder().join("tool-output"),
         |folder| folder.join("tool-output"),
     )
 }

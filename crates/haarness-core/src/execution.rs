@@ -26,6 +26,13 @@ pub struct ExecutionSettings {
     /// `HAARNESS_SESSION_ID`). Set per call by the runtime, never configured.
     #[serde(skip)]
     pub person_shell: bool,
+    /// The chat home, when this runtime is it ([`crate::AgentRuntime::as_chat_home`]):
+    /// a search inside it reads no ignore file from the folders above it, so
+    /// a repository the chat home happens to lie in (a home folder kept in
+    /// Git, say) never hides a chat's files. Set per call by the runtime,
+    /// never configured.
+    #[serde(skip)]
+    pub chat_home: Option<std::path::PathBuf>,
 }
 
 impl Default for ExecutionSettings {
@@ -42,6 +49,7 @@ impl Default for ExecutionSettings {
             plan_read_tools: Vec::new(),
             shell_env: std::collections::BTreeMap::new(),
             person_shell: false,
+            chat_home: None,
         }
     }
 }

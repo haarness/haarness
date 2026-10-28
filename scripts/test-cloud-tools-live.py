@@ -69,7 +69,9 @@ enabled=false
     env = {k: os.environ[k] for k in ['PATH', 'HOME', 'USER', 'LANG', 'TMPDIR',
            'HAARNESS_CLOUD_API_URL', 'HAARNESS_CLOUD_CONFIG_DIR', 'HAARNESS_API_KEY'] if k in os.environ}
     env.update(HAARNESS_DATA_DIR=str(root / 'data'), HAARNESS_HOME=str(root / 'home'),
-               HAARNESS_TEST_PROVIDER='1', HAARNESS_LOG='warn,haarness_account::cloud::events=debug')
+               HAARNESS_TEST_PROVIDER='1', HAARNESS_LOG='warn,haarness_account::cloud::events=debug',
+               # A local schedule the model makes is written, never handed to launchd or systemd.
+               HAARNESS_SCHEDULE_SKIP_INSTALL='1')
     args = [str(BINARY), '--workspace', str(workspace)]
     endpoint = json.loads(run(args + ['desktop'], env=env, input='{"action":"connect"}', timeout=120))
     tmux = f'haarness-cloud-tools-{os.getpid()}'

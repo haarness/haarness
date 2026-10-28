@@ -77,9 +77,9 @@ pub(crate) async fn run(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    tokio::fs::create_dir_all(directory).await.map_err(error)?;
-    let path = directory.join(format!("tool_{}.txt", uuid::Uuid::now_v7()));
-    let mut file = tokio::fs::File::create(&path).await.map_err(error)?;
+    let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
+        .await
+        .map_err(error)?;
     let mut child = Command::from(command)
         .kill_on_drop(true)
         .spawn()
