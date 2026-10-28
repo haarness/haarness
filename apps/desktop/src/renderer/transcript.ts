@@ -319,8 +319,10 @@ function phraseList(phrases: string[]) {
     : new Intl.ListFormat(code, { type: "conjunction" }).format(parts);
 }
 function describeBrowser(action: string, record?: Record<string, unknown>): ToolShape {
+  // As the call wrote it, with what would not show written as its code, as on
+  // the Chrome card.
   const text = (value: unknown) =>
-    typeof value === "string" && value.trim() ? value.replace(/\s+/g, " ").trim() : "";
+    typeof value === "string" && value.trim() ? spelledOutText(value).replace(/\s+/g, " ").trim() : "";
   const quoted = (value: unknown) => (text(value) ? `“${text(value)}”` : "");
   const target =
     action === "fill"

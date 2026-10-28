@@ -249,3 +249,11 @@ export function spelledOutText(text: string): string {
     .map((part) => (part.code ? "\u2066" + part.text + "\u2069" : part.text))
     .join("");
 }
+
+/** `text` spelled out with nothing around its codes, for text that is
+ * searched, previewed or read aloud rather than laid out beside other text. */
+export function spelledOutPlain(text: string): string {
+  return spelledOutParts(text)
+    .map((part) => part.text)
+    .join("");
+}
