@@ -2939,5 +2939,6 @@
   "On hold": "已冻结",
   "Overage is off, so purchased credits are not spent. Turn it on in Billing.": "超额使用已关闭，因此不会花费已购额度。请在账单中开启。",
   "Your free trial didn't start: that card was already used for a trial.": "免费试用未开始：这张卡已用于试用。",
-  "The attachments come to {size}, over the {limit} limit for media in one message": "附件共 {size}，超过了单条消息 {limit} 的媒体上限"
+  "The attachments come to {size}, over the {limit} limit for media in one message": "附件共 {size}，超过了单条消息 {limit} 的媒体上限",
+  "its images and PDFs would take the message over the 20 MiB limit for media": "其中的图片和 PDF 会使消息超出 20 MiB 的媒体上限"
 }

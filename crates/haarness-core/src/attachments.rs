@@ -319,6 +319,33 @@ pub fn read_at_most(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// About how much of [`MAX_INLINE_MEDIA_BYTES`] `sources` take once
+/// admitted, read before admitting them: an image at most what it is shrunk
+/// to, other media its size, a text file nothing. A relative path is read
+/// from `workspace`; a file that cannot be read counts nothing (admitting it
+/// refuses it).
+#[must_use]
+pub fn media_estimate(sources: &[String], workspace: &Path) -> u64 {
+    let cap = crate::images::MAX_IMAGE_BYTES as u64;
+    sources
+        .iter()
+        .map(|source| {
+            let image = is_image_source(source);
+            let size = if source.starts_with("data:") {
+                media_bytes(source).unwrap_or(0)
+            } else {
+                local_path(source)
+                    .map(|path| workspace.join(path))
+                    .filter(|path| media_mime_for_path(path).is_some())
+                    .and_then(|path| std::fs::metadata(path).ok())
+                    .filter(std::fs::Metadata::is_file)
+                    .map_or(0, |metadata| metadata.len())
+            };
+            if image { size.min(cap) } else { size }
+        })
+        .fold(0, u64::saturating_add)
+}
+
 /// The bytes a provider loads for a stored media source: a media data URL's
 /// payload or a file's length. `None` for a text file, which reaches the
 /// model as text, and for a file that is gone.

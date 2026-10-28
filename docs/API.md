@@ -457,9 +457,12 @@ the text (after a command's string `arguments`) as a block under
 `MCP resource: setup · docs:docs://setup`. Its text is fenced, and cut past
 50 KiB (128 KiB for all of a message's resources) with a note that says where
 the whole text was saved; its images and PDFs join `attachments` (10 MiB
-together). A resource that is not read is named in its block with
-`(not read)`, and the block holds only the reason: the MCP server's error, `did
-not answer within 10 s`, or `a rule keeps this resource from the model`. The
+together, and only while the message's media stay within 20 MiB, the
+person's own attachments first). A resource that is not read is named in its
+block with `(not read)`, and the block holds only the reason: the MCP server's
+error, `did not answer within 10 s`, `a rule keeps this resource from the
+model`, or `its images and PDFs would take the message over the 20 MiB limit
+for media`. The
 chat's own rules decide as they do for `mcp_resource_read`, except that an ask
 is not asked (the person picked it, as they attach a file): a deny for
 `<server>:<uri>`, or a rule or tool setting that takes every tool of the server

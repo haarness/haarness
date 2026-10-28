@@ -336,6 +336,11 @@ const MENTIONS_BYTES: usize = 128 * 1024;
 /// Why a mention was not read when a rule keeps it from the chat. Clients
 /// show it in the person's language.
 pub(crate) const RULE_REFUSAL: &str = "a rule keeps this resource from the model";
+/// Why a mention was not read when its images and PDFs would take the
+/// message past the media one message carries. Clients show it in the
+/// person's language.
+pub(crate) const MEDIA_REFUSAL: &str =
+    "its images and PDFs would take the message over the 20 MiB limit for media";
 
 /// Reads the resources a person mentioned with `@` into their message, as
 /// `mcp_resource_read` reads one for the model, all within `budget`: each
@@ -404,12 +409,26 @@ pub(crate) async fn read_mentions(
     let mut attached = 0usize;
     let mut room = MENTIONS_BYTES;
     let mut blocks = Vec::new();
+    // The message's media so far, the person's own first: a mention whose
+    // media would take it past the limit is not read, rather than the whole
+    // message refused.
+    let mut carried = haarness_core::attachments::media_estimate(attachments, workspace);
     for (mention, read) in unique.iter().zip(reads) {
         let read = match read {
             Ok(result) => {
                 let (body, media) = resource_contents(&result, &mut attached);
                 match admitted(media, workspace).await {
-                    Ok(media) => Ok((body, media)),
+                    Ok(media) => {
+                        let total = carried.saturating_add(
+                            haarness_core::attachments::media_estimate(&media, workspace),
+                        );
+                        if total > haarness_core::attachments::MAX_INLINE_MEDIA_BYTES as u64 {
+                            Err(MEDIA_REFUSAL.to_owned())
+                        } else {
+                            carried = total;
+                            Ok((body, media))
+                        }
+                    }
                     Err(error) => Err(sentence(error)),
                 }
             }
@@ -591,6 +610,13 @@ mod tests {
                 }
                 "docs://pixel" => {
                     Ok(json!({"contents": [{"uri": uri, "mimeType": "image/png", "blob": PIXEL}]}))
+                }
+                "docs://manual" => {
+                    let mut pdf = b"%PDF-1.7\n".to_vec();
+                    pdf.resize(1024 * 1024, 0);
+                    Ok(
+                        json!({"contents": [{"uri": uri, "mimeType": "application/pdf", "blob": STANDARD.encode(pdf)}]}),
+                    )
                 }
                 "docs://fenced" => Ok(
                     json!({"contents": [{"uri": uri, "mimeType": "text/markdown", "text": "```sh\nrun\n```"}]}),
@@ -884,6 +910,51 @@ mod tests {
         );
         assert!(blocks[2].contains("# Setup"), "{text}");
         assert!(attachments.is_empty(), "{attachments:?}");
+    }
+
+    #[tokio::test]
+    async fn a_mention_whose_media_would_take_the_message_over_the_limit_is_not_read() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-mention-media-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        // The person's own PDF leaves less than the mentioned manual needs.
+        let mut file = std::fs::File::create(workspace.join("scan.pdf")).unwrap();
+        std::io::Write::write_all(&mut file, b"%PDF-1.7\n").unwrap();
+        file.set_len(19 * 1024 * 1024 + 512 * 1024).unwrap();
+        let registry = Resources::default();
+        let mut text = "Compare".to_owned();
+        let mut attachments = vec!["scan.pdf".to_owned()];
+        read_mentions(
+            &registry,
+            &workspace,
+            vec![
+                mention("docs", "docs://manual", Some("manual")),
+                mention("docs", "docs://pixel", Some("pixel")),
+            ],
+            &|_: &str, _: &str| false,
+            MENTION_BUDGET,
+            &mut text,
+            &mut attachments,
+        )
+        .await
+        .unwrap();
+        assert!(
+            text.contains(&format!(
+                "MCP resource: manual · docs:docs://manual (not read)</summary>\n\n```\n{MEDIA_REFUSAL}\n```"
+            )),
+            "{text}"
+        );
+        // A smaller one after it still fits.
+        assert!(
+            text.contains("[image/png attachment: docs://pixel]"),
+            "{text}"
+        );
+        assert_eq!(attachments.len(), 2, "{attachments:?}");
+        assert!(attachments[1].starts_with("data:image/png"));
+        assert!(MEDIA_REFUSAL.contains(&haarness_protocol::mebibytes(
+            haarness_core::attachments::MAX_INLINE_MEDIA_BYTES as u64
+        )));
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[tokio::test]
