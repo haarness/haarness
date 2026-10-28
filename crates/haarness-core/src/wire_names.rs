@@ -140,6 +140,21 @@ impl WireNames {
             .map_or(name, String::as_str)
     }
 
+    /// `mask` (tool names or patterns to a value, as a workflow agent's or
+    /// an agent's `tools`) with each key that is a wire name under the tool's
+    /// own name; a key written as that own name wins. Patterns are kept as
+    /// written: they match the tools' own names.
+    pub fn own_keys<V>(&self, mask: impl IntoIterator<Item = (String, V)>) -> Vec<(String, V)> {
+        let (mut keys, own): (Vec<_>, Vec<_>) = mask
+            .into_iter()
+            .partition(|(key, _)| self.own.contains_key(key));
+        for (key, _) in &mut keys {
+            key.clone_from(&self.own[key.as_str()]);
+        }
+        keys.extend(own);
+        keys
+    }
+
     /// `request` with its tools, and the calls and results of its history,
     /// under their wire names.
     #[must_use]
@@ -524,6 +539,28 @@ mod tests {
                 "read",
                 "mcp__Docs Server__files.read"
             ]
+        );
+    }
+
+    #[test]
+    fn a_mask_keyed_by_wire_names_is_keyed_by_the_tools_own() {
+        let names = WireNames::new(["mcp__Docs Server__files.read", "mcp__Docs Server__plain"]);
+        let mask: HashMap<String, bool> = names
+            .own_keys([
+                ("mcp__Docs_Server__files_read".to_owned(), false),
+                ("mcp__Docs_Server__plain".to_owned(), false),
+                ("mcp__Docs Server__plain".to_owned(), true),
+                ("mcp__Docs_Server__*".to_owned(), false),
+            ])
+            .into_iter()
+            .collect();
+        assert_eq!(
+            mask,
+            HashMap::from([
+                ("mcp__Docs Server__files.read".to_owned(), false),
+                ("mcp__Docs Server__plain".to_owned(), true),
+                ("mcp__Docs_Server__*".to_owned(), false),
+            ])
         );
     }
 

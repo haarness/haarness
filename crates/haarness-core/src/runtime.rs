@@ -2107,6 +2107,17 @@ impl AgentRuntime {
         self.workspace.display().to_string()
     }
 
+    /// `tools`, a tool mask a workflow agent was given (its script may be
+    /// one the model wrote), with each key that names a tool as providers
+    /// were sent it under the tool's own name (see [`crate::wire_names`]).
+    #[must_use]
+    pub fn own_tool_names(&self, tools: HashMap<String, bool>) -> HashMap<String, bool> {
+        let definitions = self.components().tools.list();
+        let names =
+            crate::wire_names::WireNames::new(definitions.iter().map(|tool| tool.name.as_str()));
+        names.own_keys(tools).into_iter().collect()
+    }
+
     /// Authoritative catalog for clients. With a thread id, session-local
     /// promotions and that thread's provider context are reflected.
     pub async fn tool_catalog(
