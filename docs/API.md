@@ -524,9 +524,12 @@ audio and video together (text files do not count), the most providers take
 inline. Since a stored message is sent again with every later request of its
 chat, turn and queued-input requests refuse more with `400` naming the size and
 the limit ("scan.pdf is 21 MiB, over the 20 MiB limit for media in one
-message"). A file named `.pdf`, or sent as `application/pdf`, is a PDF only when
-`%PDF-` appears in its first kilobyte; otherwise it is taken as an untyped file
-is: text when it reads as text, an image when its bytes are one, and refused
+message"). That includes a message queued to run later (`delivery: "queue"`)
+and the attachments a queue edit gives one: they are checked when they arrive,
+so a message that could never start never waits at the head of the queue. A
+file named `.pdf`, or sent as `application/pdf`, is a PDF only when `%PDF-`
+appears in its first kilobyte; otherwise it is taken as an untyped file is:
+text when it reads as text, an image when its bytes are one, and refused
 otherwise. A stored attachment that would take its message past the limit (one
 an older server stored, or a file that has grown since) is sent as a one-line
 note naming it instead, so the chat's later turns complete.
