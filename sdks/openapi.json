@@ -562,7 +562,7 @@
             ]
           },
           "reasoningEffort": {
-            "description": "A reasoning level (`none` to `max`), `ultracode`, or `default` for the\nmodel's own default over a configured level; none runs at the\nconfigured `defaults.reasoning_effort`, if any.",
+            "description": "A reasoning level (`none` to `max`), `ultracode`, or `default` for the\nmodel's own default over a configured level. Omitted, the turn runs at\nthe configured `defaults.reasoning_effort`, if any.",
             "type": [
               "string",
               "null"
@@ -5927,7 +5927,7 @@
             ]
           },
           "reasoningEffort": {
-            "description": "A reasoning level (`none` to `max`), `ultracode`, or `default` for the\nmodel's own default over a configured level; none runs at the\nconfigured `defaults.reasoning_effort`, if any.",
+            "description": "A reasoning level (`none` to `max`), `ultracode`, or `default` for the\nmodel's own default over a configured level. Omitted, the turn runs at\nthe configured `defaults.reasoning_effort`, if any.",
             "type": [
               "string",
               "null"
