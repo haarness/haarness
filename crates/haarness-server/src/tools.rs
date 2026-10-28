@@ -1904,6 +1904,9 @@ impl ToolRegistry for NativeToolRegistry {
     fn tool_server(&self, name: &str) -> Option<String> {
         self.mcp.as_ref()?.tool_server(name)
     }
+    fn starting(&self) -> Option<futures::future::BoxFuture<'static, ()>> {
+        self.mcp.as_ref()?.starting()
+    }
     fn list(&self) -> Vec<ToolDefinition> {
         let mut values: Vec<_> = self.tools.values().map(|tool| tool.definition()).collect();
         if let Some(mcp) = &self.mcp {

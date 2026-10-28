@@ -10,7 +10,7 @@ use credentials::FileCredentialStore;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use futures::StreamExt;
+use futures::{FutureExt as _, StreamExt, future::BoxFuture};
 use haarness_core::{CoreError, CoreResult, McpRegistry, ToolDefinition, ToolOutput};
 use haarness_protocol::{McpConfigureRequest, McpServerInfo};
 use http::{HeaderName, HeaderValue};
@@ -40,13 +40,26 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{Semaphore, mpsc, oneshot},
     task::JoinHandle,
 };
+use tokio_util::sync::CancellationToken;
 
 /// Connection, discovery and header-helper deadline for a server that sets
 /// no `timeout_ms`.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+/// How long a local server without `timeout_ms` may take to start (spawn,
+/// initialize, list its tools). Launchers such as `npx -y` and `uvx` fetch
+/// the server on its first run, which can outlast the 30 s its other
+/// requests keep ([`DEFAULT_TIMEOUT_MS`]).
+const LOCAL_START_TIMEOUT_MS: u64 = 120_000;
+/// Servers a composed configuration starts at once. Each may take its whole
+/// start limit, so hung servers must not queue the rest behind them one limit
+/// at a time.
+const START_CONCURRENCY: usize = 16;
+/// The slots of [`START_CONCURRENCY`], shared by every configuration
+/// composed in this process.
+static START_SLOTS: Semaphore = Semaphore::const_new(START_CONCURRENCY);
 /// Character budget for an MCP tool description. Descriptions reach the
 /// model with every request and some servers ship whole manuals in them.
 const DEFAULT_DESCRIPTION_LIMIT: usize = 2048;
@@ -77,11 +90,60 @@ pub struct NativeMcpRegistry {
     /// The project folder: local servers start in it, and read a relative
     /// `cwd` from it (see [`launch_config`]).
     folder: Option<PathBuf>,
+    /// Cancelled when Haarness stops (see [`Self::close`]). A hot reload's
+    /// candidate has a child of the live registry's.
+    closed: CancellationToken,
+    /// Told the name of each server whose start came to an answer (see
+    /// [`Self::announce_starts`]); a candidate shares the live registry's.
+    announce: Announcer,
 }
+/// Where a registry tells of each start that came to an answer.
+type Announcer = Arc<RwLock<Option<Arc<dyn Fn(&str) + Send + Sync>>>>;
+/// How long an explicit Reconnect waits for a start already on its way
+/// rather than beginning another: a start that has run this long may be
+/// hung, and Reconnect is then how a person gets out of it.
+#[cfg(not(test))]
+const RECONNECT_JOINS_FOR: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const RECONNECT_JOINS_FOR: Duration = Duration::from_millis(800);
 /// The registry a connection reports catalog changes to. A hot reload
 /// connects servers in a candidate registry and then moves their entries into
 /// the live one, so the target is shared with the entry and retargeted there.
 type Home = Arc<RwLock<std::sync::Weak<RwLock<BTreeMap<String, Entry>>>>>;
+/// The end of a server's start: what it came to, or `None` when it was
+/// stopped (the server disconnected, configured again or removed, or
+/// Haarness stopping) before it did.
+pub type StartEnd = futures::future::Shared<BoxFuture<'static, Option<CoreResult<McpServerInfo>>>>;
+/// A server's start in flight, which runs in a task of its own so a request
+/// that began it and gave up cannot stop it. The copies of its entry (a hot
+/// reload's candidate and the live registry) share it; once the last is
+/// gone (the server configured again or removed, its registry dropped), the
+/// start stops, and with it the process it began.
+struct Running {
+    /// Begun for a configuration (when Haarness started, on a reload or a
+    /// configure request), not to reconnect: turns wait for it.
+    first: bool,
+    began: std::time::Instant,
+    stop: CancellationToken,
+    ended: StartEnd,
+}
+impl Running {
+    /// Whether the start's task is still on its way. Asked of a copy, so it
+    /// holds whether or not anyone waits for the start.
+    fn alive(&self) -> bool {
+        self.ended.clone().now_or_never().is_none()
+    }
+    /// Whether the start is on its way and nothing stopped it: one stopped
+    /// may not have ended yet, and is not one to wait for or share.
+    fn running(&self) -> bool {
+        self.alive() && !self.stop.is_cancelled()
+    }
+}
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
 #[derive(Clone)]
 struct Entry {
     generation: uuid::Uuid,
@@ -105,8 +167,31 @@ struct Entry {
     oversized: Option<Arc<AtomicBool>>,
     /// The server declared the resources capability when it last connected.
     resources: bool,
+    /// The start in flight, until it ends.
+    start: Option<Arc<Running>>,
 }
 impl Entry {
+    /// Stop the start on its way, if any. Explicitly: a hot reload's
+    /// candidate waiting to apply may share it.
+    fn stop_start(&mut self) {
+        if let Some(running) = self.start.take() {
+            running.stop.cancel();
+        }
+    }
+    /// What a turn waits for while this server is on its first start.
+    fn starting(&self) -> Option<StartEnd> {
+        self.start
+            .as_ref()
+            .filter(|running| running.first)
+            .and(self.pending())
+    }
+    /// What a request to this server waits for: the start it is on.
+    fn pending(&self) -> Option<StartEnd> {
+        self.start
+            .as_ref()
+            .filter(|running| running.running() && self.info.status == "connecting")
+            .map(|running| running.ended.clone())
+    }
     /// Offer `tools`, as the server `name` listed them, under their names
     /// in Haarness.
     fn set_catalog(&mut self, name: &str, tools: Vec<ToolDefinition>) {
@@ -354,63 +439,43 @@ impl McpRegistry for NativeMcpRegistry {
         name: &str,
         config: McpConfigureRequest,
     ) -> CoreResult<McpServerInfo> {
-        if !matches!(
-            config.transport.as_str(),
-            "stdio" | "streamable_http" | "sse"
-        ) {
-            return Err(CoreError::Invalid(format!(
-                "unsupported MCP transport {}",
-                config.transport
-            )));
+        let enabled = config.enabled;
+        let info = self.register(name, config)?;
+        if !enabled {
+            return Ok(info);
         }
-        let info = McpServerInfo {
-            name: name.into(),
-            transport: config.transport.clone(),
-            status: if config.enabled {
-                "disconnected"
-            } else {
-                "disabled"
-            }
-            .into(),
-            detail: None,
-            scope: None,
-            apps: config.apps.filter(|on| !on),
-            app_tools: None,
-            turned_off: None,
-        };
-        self.servers.write().insert(
-            name.into(),
-            Entry {
-                generation: uuid::Uuid::now_v7(),
-                info: info.clone(),
-                config: config.clone(),
-                tools: Vec::new(),
-                remembered: Vec::new(),
-                names: HashMap::new(),
-                identity: None,
-                credential: None,
-                worker: None,
-                auth_challenge: None,
-                home: None,
-                adopted: false,
-                oversized: None,
-                resources: false,
-            },
-        );
-        if config.enabled {
-            self.reconnect(name).await
-        } else {
-            Ok(info)
-        }
+        // Started at a client's request (an editor's session, say), which
+        // waits for it itself: other chats' turns do not.
+        let ended = self.launch(name, None, false, false)?;
+        self.finished(name, ended).await
     }
     async fn reconnect(&self, name: &str) -> CoreResult<McpServerInfo> {
-        self.connect(name, None).await
+        let ended = self.launch_with(name, None, false, false, Some(RECONNECT_JOINS_FOR))?;
+        self.finished(name, ended).await
+    }
+    fn starting(&self) -> Option<BoxFuture<'static, ()>> {
+        let names: Vec<String> = self
+            .servers
+            .read()
+            .iter()
+            .filter(|(_, entry)| entry.starting().is_some())
+            .map(|(name, _)| name.clone())
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        let registry = self.clone();
+        Some(Box::pin(async move {
+            registry.until_started(&names, true).await
+        }))
     }
     async fn disconnect(&self, name: &str) -> CoreResult<McpServerInfo> {
         let mut servers = self.servers.write();
         let entry = servers
             .get_mut(name)
             .ok_or_else(|| CoreError::NotFound(format!("MCP server {name}")))?;
+        // A start on its way stops, and a turn waiting for it goes on.
+        entry.stop_start();
         entry.generation = uuid::Uuid::now_v7();
         entry.worker = None;
         entry.oversized = None;
@@ -428,6 +493,7 @@ impl McpRegistry for NativeMcpRegistry {
         Ok(entry.info.clone())
     }
     async fn tools(&self, name: &str) -> CoreResult<Vec<ToolDefinition>> {
+        self.started(name).await;
         self.revoke_stale();
         self.servers
             .read()
@@ -542,181 +608,263 @@ impl NativeMcpRegistry {
             }
         }
     }
+    /// Record `name` with `config`, not connected yet: `disconnected`, or
+    /// `disabled` when it is off.
+    fn register(&self, name: &str, config: McpConfigureRequest) -> CoreResult<McpServerInfo> {
+        if !matches!(
+            config.transport.as_str(),
+            "stdio" | "streamable_http" | "sse"
+        ) {
+            return Err(CoreError::Invalid(format!(
+                "unsupported MCP transport {}",
+                config.transport
+            )));
+        }
+        let info = McpServerInfo {
+            name: name.into(),
+            transport: config.transport.clone(),
+            status: if config.enabled {
+                "disconnected"
+            } else {
+                "disabled"
+            }
+            .into(),
+            detail: None,
+            scope: None,
+            apps: config.apps.filter(|on| !on),
+            app_tools: None,
+            turned_off: None,
+        };
+        let mut servers = self.servers.write();
+        if let Some(replaced) = servers.get_mut(name) {
+            replaced.stop_start();
+        }
+        servers.insert(
+            name.into(),
+            Entry {
+                generation: uuid::Uuid::now_v7(),
+                info: info.clone(),
+                config,
+                tools: Vec::new(),
+                remembered: Vec::new(),
+                names: HashMap::new(),
+                identity: None,
+                credential: None,
+                worker: None,
+                auth_challenge: None,
+                home: None,
+                adopted: false,
+                oversized: None,
+                resources: false,
+                start: None,
+            },
+        );
+        Ok(info)
+    }
+    /// Start `name` in a task of its own, or join the start it is on: a
+    /// Reconnect meanwhile waits for that start rather than discarding it.
+    /// `expected` is the generation a recovery saw fail. Turns wait for a
+    /// `first` start; a `queued` one waits for a slot among
+    /// [`START_CONCURRENCY`]. Returns the start's end.
+    fn launch(
+        &self,
+        name: &str,
+        expected: Option<uuid::Uuid>,
+        first: bool,
+        queued: bool,
+    ) -> CoreResult<StartEnd> {
+        self.launch_with(name, expected, first, queued, None)
+    }
+    /// [`Self::launch`], restarting a start on its way that has run
+    /// `restart_after` or longer instead of joining it.
+    fn launch_with(
+        &self,
+        name: &str,
+        expected: Option<uuid::Uuid>,
+        mut first: bool,
+        queued: bool,
+        restart_after: Option<Duration>,
+    ) -> CoreResult<StartEnd> {
+        let mut servers = self.servers.write();
+        // Under the lock `close` takes: a start begun after it would run on.
+        if self.closed.is_cancelled() {
+            return Err(stopping());
+        }
+        let entry = servers
+            .get_mut(name)
+            .ok_or_else(|| CoreError::NotFound(format!("MCP server {name}")))?;
+        if expected
+            .is_some_and(|expected| entry.generation != expected || entry.info.status != "failed")
+        {
+            return Err(CoreError::Conflict(format!(
+                "MCP server {name} changed before recovery"
+            )));
+        }
+        if !entry.config.enabled {
+            return Err(CoreError::Invalid(format!("MCP server {name} is disabled")));
+        }
+        if let Some(running) = entry.start.as_ref().filter(|running| running.running()) {
+            if restart_after.is_none_or(|limit| running.began.elapsed() < limit) {
+                return Ok(running.ended.clone());
+            }
+            // Begun again: whoever waited for the server's first start
+            // waits for this one.
+            first |= running.first;
+            entry.stop_start();
+        }
+        entry.generation = uuid::Uuid::now_v7();
+        entry.info.status = "connecting".into();
+        entry.info.detail = None;
+        entry.worker = None;
+        entry.oversized = None;
+        entry.tools.clear();
+        // Where the start reports: a hot reload that moves the entry into
+        // the live registry retargets it (see `replace_from`).
+        let home: Home = Arc::new(RwLock::new(Arc::downgrade(&self.servers)));
+        entry.home = Some(home.clone());
+        // Haarness stopping stops it too.
+        let stop = self.closed.child_token();
+        let (done, ended) = oneshot::channel();
+        let ended: StartEnd = ended.map(Result::ok).boxed().shared();
+        entry.start = Some(Arc::new(Running {
+            first,
+            began: std::time::Instant::now(),
+            stop: stop.clone(),
+            ended: ended.clone(),
+        }));
+        let start = McpStart {
+            name: name.to_owned(),
+            config: entry.config.clone(),
+            generation: entry.generation,
+            home,
+            auth_dir: self.auth_dir.clone(),
+            folder: self.folder.clone(),
+            closed: self.closed.clone(),
+            announce: self.announce.clone(),
+            recovery: expected.is_some(),
+            stop,
+            queued,
+            done,
+        };
+        drop(servers);
+        tokio::spawn(start.run());
+        Ok(ended)
+    }
     fn connect<'a>(
         &'a self,
         name: &'a str,
         expected: Option<uuid::Uuid>,
-    ) -> futures::future::BoxFuture<'a, CoreResult<McpServerInfo>> {
+    ) -> BoxFuture<'a, CoreResult<McpServerInfo>> {
         Box::pin(async move {
-            let (config, generation) = {
-                let mut servers = self.servers.write();
-                let entry = servers
-                    .get_mut(name)
-                    .ok_or_else(|| CoreError::NotFound(format!("MCP server {name}")))?;
-                if expected.is_some_and(|expected| {
-                    entry.generation != expected || entry.info.status != "failed"
-                }) {
-                    return Err(CoreError::Conflict(format!(
-                        "MCP server {name} changed before recovery"
-                    )));
-                }
-                if !entry.config.enabled {
-                    return Err(CoreError::Invalid(format!("MCP server {name} is disabled")));
-                }
-                entry.generation = uuid::Uuid::now_v7();
-                entry.info.status = "connecting".into();
-                entry.info.detail = None;
-                entry.worker = None;
-                entry.oversized = None;
-                entry.tools.clear();
-                (entry.config.clone(), entry.generation)
-            };
-            let identity = schema_identity(name, &config, self.auth_dir.as_deref());
-            let credential = (config.transport == "streamable_http"
-                && oauth_enabled(&config, &config.headers))
-            .then(|| manager_store(name, self.auth_dir.as_deref()));
-            let home: Home = Arc::new(RwLock::new(Arc::downgrade(&self.servers)));
-            let handler = CatalogClient::new(
-                home.clone(),
-                name,
-                generation,
-                credential.clone(),
-                config.apps != Some(false),
-            );
-            let oversized = (config.transport == "stdio").then(Arc::<AtomicBool>::default);
-            let launch = launch_config(&config, self.folder.as_deref());
-            let activation = async {
-                let config = &launch;
-                match config.transport.as_str() {
-                    "stdio" => {
-                        let result = async {
-                            let program = config.command.as_deref().ok_or_else(|| {
-                                CoreError::Invalid("stdio MCP requires command".into())
-                            })?;
-                            let resolved = executable::resolve(program, config);
-                            let mut command =
-                                tokio::process::Command::new(resolved.as_ref().map_or_else(
-                                    || std::ffi::OsStr::new(program),
-                                    |(path, _)| path.as_os_str(),
-                                ));
-                            command.args(&config.args);
-                            if let Some(cwd) = &config.cwd {
-                                command.current_dir(cwd);
-                            }
-                            for name in haarness_core::private_env_names() {
-                                command.env_remove(name);
-                            }
-                            command
-                                .envs(resolve_references(&config.env, lookup_limit(config)).await?);
-                            if let Some((_, path)) = resolved {
-                                command.env("PATH", path);
-                            }
-                            let passed = oversized.clone().unwrap_or_default();
-                            let transport = process::Process::new(command, passed.clone())
-                                .map_err(|error| {
-                                    CoreError::Tool(format!("cannot start {program}: {error}"))
-                                })?;
-                            let client =
-                                handler.clone().serve(transport).await.map_err(mcp_error)?;
-                            let tools = client.list_all_tools().await.map_err(mcp_error)?;
-                            let definitions = client.service().connected(client.peer(), &tools);
-                            let limit = Limit {
-                                name: name.to_owned(),
-                                passed,
-                            };
-                            let tx = spawn_worker(client, None, Some(limit));
-                            CoreResult::Ok((definitions, tx, None))
-                        }
-                        .await;
-                        result.map_err(ActivationError::Core)
-                    }
-                    "streamable_http" => {
-                        activate_remote(name, config, credential.clone(), handler.clone()).await
-                    }
-                    "sse" => activate_legacy_sse(name, config, handler.clone())
-                        .await
-                        .map(|(tools, worker)| (tools, worker, None))
-                        .map_err(ActivationError::Core),
-                    _ => unreachable!(),
-                }
-            };
-            // The configured timeout bounds initialization and discovery as
-            // one deadline. Tool calls on the connection are not bounded by it.
-            let timeout = connection_timeout(&config);
-            let activated = tokio::time::timeout(timeout, activation)
-                .await
-                .unwrap_or_else(|_| {
-                    Err(ActivationError::Core(CoreError::Tool(format!(
-                        "MCP connection timed out after {}",
-                        describe_timeout(timeout)
-                    ))))
-                });
-            // A disconnect, reconfiguration or newer reconnect owns the slot now.
-            let mut servers = self.servers.write();
-            let entry = servers
-                .get_mut(name)
-                .ok_or_else(|| CoreError::NotFound(format!("MCP server {name}")))?;
-            if entry.generation != generation {
-                return Err(CoreError::Conflict(format!(
-                    "MCP server {name} changed while connecting"
-                )));
-            }
-            let activated = match activated {
-                Ok(activated) => activated,
-                Err(ActivationError::AuthorizationRequired(challenge)) => {
-                    entry.forget_catalog();
-                    entry.identity = None;
-                    entry.worker = None;
-                    entry.auth_challenge = challenge;
-                    entry.info.status = "needs_auth".into();
-                    entry.info.detail = Some(format!(
-                        "authorization required; run `haarness mcp auth {name}`"
-                    ));
-                    return Ok(entry.info.clone());
-                }
-                Err(ActivationError::Core(_))
-                    if oversized
-                        .as_ref()
-                        .is_some_and(|passed| passed.load(Ordering::Acquire)) =>
-                {
-                    stop_oversized(name, entry, oversized);
-                    return Err(oversized_error(name));
-                }
-                Err(ActivationError::Core(error)) => {
-                    entry.info.status = "failed".into();
-                    // Clients, the model's `mcp_manage` and logs show this:
-                    // a URL in it keeps its host but not its credentials.
-                    entry.info.detail = Some(format!(
-                        "connection failed: {}",
-                        haarness_core::redact::urls_in(&concise_error(&error))
-                    ));
-                    return Err(error);
-                }
-            };
-            let (definitions, worker, credential) = activated;
-            if !credential_valid(credential.as_ref()) {
-                revoke_entry(entry);
-                return Err(CoreError::Conflict(format!(
-                    "MCP server {name} credentials changed while connecting"
-                )));
-            }
-            entry.set_catalog(name, definitions);
-            let count = entry.tools.len();
-            entry.identity = schema_identity(name, &config, self.auth_dir.as_deref()).or(identity);
-            entry.credential = credential;
-            entry.worker = Some(worker);
-            entry.auth_challenge = None;
-            entry.home = Some(home);
-            entry.oversized = oversized;
-            entry.resources = handler.resources.load(Ordering::Acquire);
-            entry.info.app_tools = handler.app_tools();
-            entry.info.status = "connected".into();
-            entry.info.detail = Some(format!("{count} tools discovered"));
-            let info = entry.info.clone();
-            drop(servers);
-            self.watch(name, generation);
-            Ok(info)
+            let ended = self.launch(name, expected, false, false)?;
+            self.finished(name, ended).await
         })
+    }
+    /// What `ended` came to. A request that gives up on it leaves the start
+    /// running; the wait ends when Haarness stops.
+    async fn finished(&self, name: &str, ended: StartEnd) -> CoreResult<McpServerInfo> {
+        tokio::select! {
+            biased;
+            end = ended => end.unwrap_or_else(|| {
+                Err(CoreError::Conflict(format!(
+                    "MCP server {name} changed while connecting"
+                )))
+            }),
+            () = self.closed.cancelled() => Err(stopping()),
+        }
+    }
+    /// Wait while `name` is on a start, so a request sent just after
+    /// Haarness started it (or a client configured or reconnected it)
+    /// reaches it as one sent later does.
+    async fn started(&self, name: &str) {
+        self.until_started(&[name.to_owned()], false).await;
+    }
+    /// Wait while any of `names` is on a start (only its first one, for a
+    /// turn), following a start that a Reconnect began again (see
+    /// [`RECONNECT_JOINS_FOR`]), until each has connected or failed, is
+    /// disconnected, or Haarness stops.
+    async fn until_started(&self, names: &[String], first: bool) {
+        loop {
+            let pending: Vec<StartEnd> = {
+                let servers = self.servers.read();
+                names
+                    .iter()
+                    .filter_map(|name| {
+                        let entry = servers.get(name)?;
+                        if first {
+                            entry.starting()
+                        } else {
+                            entry.pending()
+                        }
+                    })
+                    .collect()
+            };
+            if pending.is_empty() {
+                return;
+            }
+            tokio::select! {
+                _ = futures::future::join_all(pending) => {}
+                () = self.closed.cancelled() => return,
+            }
+        }
+    }
+
+    /// Record `name` as [`McpRegistry::configure`] does, but leave an
+    /// enabled server connecting while its start runs in the background (at
+    /// most [`START_CONCURRENCY`] at once), so Haarness answers at once.
+    /// Until the start ends, a turn and a request to the server wait for it.
+    /// Returns the start's end, for a caller that waits for it.
+    pub fn prepare(
+        &self,
+        name: &str,
+        config: McpConfigureRequest,
+    ) -> CoreResult<(McpServerInfo, Option<StartEnd>)> {
+        self.prepare_start(name, config, true)
+    }
+    fn prepare_start(
+        &self,
+        name: &str,
+        config: McpConfigureRequest,
+        first: bool,
+    ) -> CoreResult<(McpServerInfo, Option<StartEnd>)> {
+        let enabled = config.enabled;
+        let info = self.register(name, config)?;
+        if !enabled {
+            return Ok((info, None));
+        }
+        let ended = self.launch(name, None, first, true)?;
+        let info = self
+            .servers
+            .read()
+            .get(name)
+            .map_or(info, |entry| entry.info.clone());
+        Ok((info, Some(ended)))
+    }
+
+    /// Stop every start in flight and end the waits for them: Haarness is
+    /// stopping, and a request still waiting would hold that up.
+    pub fn close(&self) {
+        let mut servers = self.servers.write();
+        self.closed.cancel();
+        for entry in servers.values_mut() {
+            entry.stop_start();
+        }
+    }
+
+    /// Tell `announce` the name of each server whose start comes to an
+    /// answer (connected, failed or needing authorization), whoever began
+    /// it: Haarness tells clients, which read the server's status again.
+    pub fn announce_starts(&self, announce: impl Fn(&str) + Send + Sync + 'static) {
+        *self.announce.write() = Some(Arc::new(announce));
+    }
+
+    /// This registry as a hot reload's candidate for `live`: it stops when
+    /// `live` does, and its starts are announced as `live`'s are.
+    #[must_use]
+    pub fn following(mut self, live: &Self) -> Self {
+        self.closed = live.closed.child_token();
+        self.announce = live.announce.clone();
+        self
     }
 
     #[must_use]
@@ -743,11 +891,16 @@ impl NativeMcpRegistry {
         }
     }
 
-    /// Atomically replace the complete configured server generation. The
-    /// candidate registry is composed and connected before this call, so API
-    /// readers never observe a partly-added/partly-removed MCP set.
+    /// Atomically replace the complete configured server generation, so API
+    /// readers never observe a partly-added/partly-removed MCP set. Servers
+    /// of the candidate still starting finish here: their starts follow the
+    /// move.
     pub fn replace_from(&self, candidate: &Self) {
-        let mut entries = candidate.servers.read().clone();
+        // Held to the end: a start that finishes meanwhile writes into the
+        // candidate before its entries are copied, or into this registry
+        // once its home points here (see `with_home`).
+        let staged = candidate.servers.write();
+        let mut entries = staged.clone();
         let mut servers = self.servers.write();
         let mut watch = Vec::new();
         for (name, entry) in &mut entries {
@@ -772,54 +925,96 @@ impl NativeMcpRegistry {
         for home in entries.values().filter_map(|entry| entry.home.as_ref()) {
             *home.write() = Arc::downgrade(&self.servers);
         }
+        // A start this generation does not carry over (its server removed or
+        // configured anew) stops.
+        for (name, replaced) in servers.iter_mut() {
+            let kept = entries.get(name).is_some_and(|entry| {
+                matches!((&entry.start, &replaced.start), (Some(new), Some(old)) if Arc::ptr_eq(new, old))
+            });
+            if !kept {
+                replaced.stop_start();
+            }
+        }
+        // A server the candidate shared while it was starting, whose start
+        // stopped since (a Disconnect would have left it disconnected here),
+        // starts again rather than staying connecting.
+        let stalled: Vec<String> = entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry.config.enabled
+                    && entry.info.status == "connecting"
+                    && !entry
+                        .start
+                        .as_ref()
+                        .is_some_and(|running| running.running())
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
         *servers = entries;
         drop(servers);
+        drop(staged);
         for (name, generation) in watch {
             self.watch(&name, generation);
         }
+        for name in stalled {
+            let _ = self.launch(&name, None, false, true);
+        }
     }
 
-    /// Configure `name` in this candidate generation, sharing `live`'s
-    /// connection when it already serves the same effective configuration.
-    /// A hot reload composes a candidate for every source change; respawning
-    /// unchanged servers would restart their processes, drop their session
-    /// state and rerun their OAuth and header helpers for nothing.
-    pub async fn configure_reusing(
+    /// [`Self::prepare`] `name` in this candidate generation, sharing
+    /// `live`'s connection when it already serves (or is starting with) the
+    /// same effective configuration. A hot reload composes a candidate for
+    /// every source change; respawning unchanged servers would restart their
+    /// processes, drop their session state and rerun their OAuth and header
+    /// helpers for nothing.
+    pub fn prepare_reusing(
         &self,
         live: &Self,
         name: &str,
         config: McpConfigureRequest,
-    ) -> CoreResult<McpServerInfo> {
-        let reusable = (self.auth_dir == live.auth_dir)
+    ) -> CoreResult<(McpServerInfo, Option<StartEnd>)> {
+        let current = (self.auth_dir == live.auth_dir)
             .then(|| live.servers.read().get(name).cloned())
             .flatten()
-            .filter(|entry| {
-                // A server stopped for an oversized reply stays stopped
-                // through a reload that leaves its settings as they were:
-                // only Reconnect, or an edit of its own settings, starts it.
-                let stopped = entry.info.status == "failed"
-                    && entry
-                        .oversized
-                        .as_ref()
-                        .is_some_and(|passed| passed.load(Ordering::Acquire));
-                let connected = entry.info.status == "connected"
-                    && entry
-                        .worker
-                        .as_ref()
-                        .is_some_and(|worker| !worker.is_closed());
-                config.enabled
-                    && (connected || stopped)
-                    && credential_valid(entry.credential.as_ref())
-                    && same_effective_config(&entry.config, &config)
-            });
+            .filter(|entry| same_effective_config(&entry.config, &config));
+        // One that already started with these settings and is not connected
+        // (it failed, or was disconnected) starts again, but nothing waits
+        // for it: a failed server holds up no turn.
+        let first = current.is_none();
+        let reusable = current.filter(|entry| {
+            // A server stopped for an oversized reply stays stopped
+            // through a reload that leaves its settings as they were:
+            // only Reconnect, or an edit of its own settings, starts it.
+            let stopped = entry.info.status == "failed"
+                && entry
+                    .oversized
+                    .as_ref()
+                    .is_some_and(|passed| passed.load(Ordering::Acquire));
+            let connected = entry.info.status == "connected"
+                && entry
+                    .worker
+                    .as_ref()
+                    .is_some_and(|worker| !worker.is_closed());
+            // Still on a start that runs: it finishes in the live registry.
+            // One left connecting without a start (none should be) starts
+            // again.
+            let connecting = entry.info.status == "connecting"
+                && entry
+                    .start
+                    .as_ref()
+                    .is_some_and(|running| running.running());
+            config.enabled
+                && (connected || stopped || connecting)
+                && credential_valid(entry.credential.as_ref())
+        });
         let Some(mut entry) = reusable else {
-            return self.configure(name, config).await;
+            return self.prepare_start(name, config, first);
         };
         entry.config = config;
         entry.adopted = true;
         let info = entry.info.clone();
         self.servers.write().insert(name.into(), entry);
-        Ok(info)
+        Ok((info, None))
     }
 
     pub async fn begin_oauth(&self, name: &str, redirect_uri: &str) -> CoreResult<McpOAuthSession> {
@@ -894,6 +1089,7 @@ impl NativeMcpRegistry {
             }
             // Fence pending lists/connections before the credential I/O. A
             // failed clear also leaves the old account's catalog unavailable.
+            entry.stop_start();
             entry.generation = uuid::Uuid::now_v7();
             entry.worker = None;
             entry.forget_catalog();
@@ -939,6 +1135,7 @@ impl NativeMcpRegistry {
         name: &str,
         command: impl FnOnce(oneshot::Sender<CoreResult<T>>) -> WorkerCommand,
     ) -> CoreResult<T> {
+        self.started(name).await;
         self.revoke_stale();
         // The read guard ends with this statement: `stopped` reads the lock
         // again, and a second read while a writer waits would never return.
@@ -973,6 +1170,8 @@ impl NativeMcpRegistry {
         name: &str,
         request: impl std::future::Future<Output = CoreResult<T>>,
     ) -> CoreResult<T> {
+        // A server still starting has its own limit for that.
+        self.started(name).await;
         let limit = self
             .servers
             .read()
@@ -1007,6 +1206,8 @@ impl NativeMcpRegistry {
         let weak = Arc::downgrade(&self.servers);
         let auth_dir = self.auth_dir.clone();
         let folder = self.folder.clone();
+        let closed = self.closed.clone();
+        let announce = self.announce.clone();
         let name = name.to_owned();
         tokio::spawn(async move {
             loop {
@@ -1065,6 +1266,8 @@ impl NativeMcpRegistry {
                     servers,
                     auth_dir,
                     folder,
+                    closed,
+                    announce,
                 };
                 let _ = registry.connect(&name, Some(generation)).await;
                 return;
@@ -1072,6 +1275,271 @@ impl NativeMcpRegistry {
         });
     }
 }
+/// A server's start: it spawns or reaches the server, initializes it and
+/// lists its tools within its start limit, then records how that went. It
+/// runs in a task of its own (see [`NativeMcpRegistry::launch`]).
+struct McpStart {
+    name: String,
+    config: McpConfigureRequest,
+    generation: uuid::Uuid,
+    /// The registry the server's entry is in, followed when a hot reload
+    /// moves the entry into the live one.
+    home: Home,
+    auth_dir: Option<PathBuf>,
+    folder: Option<PathBuf>,
+    closed: CancellationToken,
+    announce: Announcer,
+    /// Begun to get a connection back after its transport closed: it is
+    /// announced only when the server ends up other than connected, so a
+    /// server that keeps crashing does not have clients read their catalogs
+    /// again each time.
+    recovery: bool,
+    /// Cancelled when the start is to stop (see [`Running`]), or Haarness
+    /// stops.
+    stop: CancellationToken,
+    /// Waits for a slot among [`START_CONCURRENCY`] first.
+    queued: bool,
+    /// Where what the start came to goes. Dropped without it (a start
+    /// stopped or overtaken), it tells whoever waits that it came to nothing.
+    done: oneshot::Sender<CoreResult<McpServerInfo>>,
+}
+
+impl McpStart {
+    /// Start the server and record whether it connected, failed or needs
+    /// authorization. A start stopped, or overtaken before it ran (the
+    /// server disconnected or configured again meanwhile, its registry
+    /// dropped), starts nothing, or stops what it started.
+    async fn run(self) {
+        let Self {
+            name,
+            config,
+            generation,
+            home,
+            auth_dir,
+            folder,
+            closed,
+            announce,
+            recovery,
+            stop,
+            queued,
+            done,
+        } = self;
+        let name = name.as_str();
+        let _slot = if queued {
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => return,
+                slot = START_SLOTS.acquire() => slot.ok(),
+            }
+        } else {
+            None
+        };
+        let servers = home.read().upgrade();
+        if stop.is_cancelled()
+            || !servers.is_some_and(|servers| {
+                servers
+                    .read()
+                    .get(name)
+                    .is_some_and(|entry| entry.generation == generation)
+            })
+        {
+            return;
+        }
+        let identity = schema_identity(name, &config, auth_dir.as_deref());
+        let credential = (config.transport == "streamable_http"
+            && oauth_enabled(&config, &config.headers))
+        .then(|| manager_store(name, auth_dir.as_deref()));
+        let handler = CatalogClient::new(
+            home.clone(),
+            name,
+            generation,
+            credential.clone(),
+            config.apps != Some(false),
+        );
+        let oversized = (config.transport == "stdio").then(Arc::<AtomicBool>::default);
+        let launch = launch_config(&config, folder.as_deref());
+        let activation = async {
+            let config = &launch;
+            match config.transport.as_str() {
+                "stdio" => {
+                    let result = async {
+                        let program = config.command.as_deref().ok_or_else(|| {
+                            CoreError::Invalid("stdio MCP requires command".into())
+                        })?;
+                        let resolved = executable::resolve(program, config);
+                        let mut command =
+                            tokio::process::Command::new(resolved.as_ref().map_or_else(
+                                || std::ffi::OsStr::new(program),
+                                |(path, _)| path.as_os_str(),
+                            ));
+                        command.args(&config.args);
+                        if let Some(cwd) = &config.cwd {
+                            command.current_dir(cwd);
+                        }
+                        for name in haarness_core::private_env_names() {
+                            command.env_remove(name);
+                        }
+                        command.envs(resolve_references(&config.env, lookup_limit(config)).await?);
+                        if let Some((_, path)) = resolved {
+                            command.env("PATH", path);
+                        }
+                        let passed = oversized.clone().unwrap_or_default();
+                        let transport =
+                            process::Process::new(command, passed.clone()).map_err(|error| {
+                                CoreError::Tool(format!("cannot start {program}: {error}"))
+                            })?;
+                        let client = handler.clone().serve(transport).await.map_err(mcp_error)?;
+                        let tools = client.list_all_tools().await.map_err(mcp_error)?;
+                        let definitions = client.service().connected(client.peer(), &tools);
+                        let limit = Limit {
+                            name: name.to_owned(),
+                            passed,
+                        };
+                        let tx = spawn_worker(client, None, Some(limit));
+                        CoreResult::Ok((definitions, tx, None))
+                    }
+                    .await;
+                    result.map_err(ActivationError::Core)
+                }
+                "streamable_http" => {
+                    activate_remote(name, config, credential.clone(), handler.clone()).await
+                }
+                "sse" => activate_legacy_sse(name, config, handler.clone())
+                    .await
+                    .map(|(tools, worker)| (tools, worker, None))
+                    .map_err(ActivationError::Core),
+                _ => unreachable!(),
+            }
+        };
+        // One deadline bounds initialization and discovery. Tool calls on
+        // the connection are not bounded by it.
+        let timeout = start_timeout(&config);
+        // Stopped, the start drops what it began, the server's process
+        // included.
+        let activated = tokio::select! {
+            biased;
+            () = stop.cancelled() => return,
+            activated = tokio::time::timeout(timeout, activation) => {
+                activated.unwrap_or_else(|_| {
+                    Err(ActivationError::Core(CoreError::Tool(format!(
+                        "MCP connection timed out after {}",
+                        describe_timeout(timeout)
+                    ))))
+                })
+            }
+        };
+        let settled = with_home(&home, |servers, entries| {
+            let Some(entry) = entries.get_mut(name) else {
+                return (Err(CoreError::NotFound(format!("MCP server {name}"))), None);
+            };
+            // A disconnect, reconfiguration or newer reconnect owns the slot now.
+            if entry.generation != generation {
+                return (
+                    Err(CoreError::Conflict(format!(
+                        "MCP server {name} changed while connecting"
+                    ))),
+                    None,
+                );
+            }
+            entry.start = None;
+            let activated = match activated {
+                Ok(activated) => activated,
+                Err(ActivationError::AuthorizationRequired(challenge)) => {
+                    entry.forget_catalog();
+                    entry.identity = None;
+                    entry.worker = None;
+                    entry.auth_challenge = challenge;
+                    entry.info.status = "needs_auth".into();
+                    entry.info.detail = Some(format!(
+                        "authorization required; run `haarness mcp auth {name}`"
+                    ));
+                    return (Ok(entry.info.clone()), None);
+                }
+                Err(ActivationError::Core(_))
+                    if oversized
+                        .as_ref()
+                        .is_some_and(|passed| passed.load(Ordering::Acquire)) =>
+                {
+                    stop_oversized(name, entry, oversized);
+                    return (Err(oversized_error(name)), None);
+                }
+                Err(ActivationError::Core(error)) => {
+                    entry.info.status = "failed".into();
+                    // Clients, the model's `mcp_manage` and logs show this:
+                    // a URL in it keeps its host but not its credentials.
+                    entry.info.detail = Some(format!(
+                        "connection failed: {}",
+                        haarness_core::redact::urls_in(&concise_error(&error))
+                    ));
+                    return (Err(error), None);
+                }
+            };
+            let (definitions, worker, credential) = activated;
+            if !credential_valid(credential.as_ref()) {
+                revoke_entry(entry);
+                return (
+                    Err(CoreError::Conflict(format!(
+                        "MCP server {name} credentials changed while connecting"
+                    ))),
+                    None,
+                );
+            }
+            entry.set_catalog(name, definitions);
+            let count = entry.tools.len();
+            entry.identity = schema_identity(name, &config, auth_dir.as_deref()).or(identity);
+            entry.credential = credential;
+            entry.worker = Some(worker);
+            entry.auth_challenge = None;
+            entry.oversized = oversized;
+            entry.resources = handler.resources.load(Ordering::Acquire);
+            entry.info.app_tools = handler.app_tools();
+            entry.info.status = "connected".into();
+            entry.info.detail = Some(format!("{count} tools discovered"));
+            (Ok(entry.info.clone()), Some(servers.clone()))
+        });
+        let Some((result, connected)) = settled else {
+            return;
+        };
+        if let Some(servers) = connected {
+            NativeMcpRegistry {
+                servers,
+                auth_dir,
+                folder,
+                closed,
+                announce: announce.clone(),
+            }
+            .watch(name, generation);
+        }
+        let reconnected = result.as_ref().is_ok_and(|info| info.status == "connected");
+        let _ = done.send(result);
+        let told = announce.read().clone();
+        if let Some(announce) = told
+            && !(recovery && reconnected)
+        {
+            announce(name);
+        }
+    }
+}
+
+/// Run `write` on the entries of the registry `home` names when their lock
+/// is taken, so a hot reload moving the entry into the live registry
+/// meanwhile is followed rather than missed (`replace_from` retargets `home`
+/// while it holds both registries' locks). `None` once that registry is gone.
+fn with_home<T>(
+    home: &Home,
+    write: impl FnOnce(&Arc<RwLock<BTreeMap<String, Entry>>>, &mut BTreeMap<String, Entry>) -> T,
+) -> Option<T> {
+    let mut write = Some(write);
+    loop {
+        let servers = home.read().upgrade()?;
+        let mut entries = servers.write();
+        let target = home.read().as_ptr();
+        if std::ptr::eq(target, Arc::as_ptr(&servers)) {
+            return write.take().map(|write| write(&servers, &mut entries));
+        }
+    }
+}
+
 /// Marks `entry` failed after its stdio server sent a message over
 /// [`process::MESSAGE_LIMIT`]. The connection has ended and stopped the
 /// server already; the log names the server, never what it sent.
@@ -1120,6 +1588,7 @@ fn credential_valid(credential: Option<&FileCredentialStore>) -> bool {
     credential.is_none_or(FileCredentialStore::valid)
 }
 fn revoke_entry(entry: &mut Entry) {
+    entry.stop_start();
     entry.generation = uuid::Uuid::now_v7();
     entry.worker = None;
     entry.forget_catalog();
@@ -1405,6 +1874,18 @@ fn connection_timeout(config: &McpConfigureRequest) -> Duration {
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .clamp(1, 600_000),
     )
+}
+
+/// How long a start (spawning or reaching the server, initializing it and
+/// listing its tools) may take: its `timeout_ms` when set; otherwise 2
+/// minutes for a local server, which a launcher may still be fetching, and
+/// 30 s for a remote one.
+fn start_timeout(config: &McpConfigureRequest) -> Duration {
+    if config.timeout_ms.is_none() && config.transport == "stdio" {
+        Duration::from_millis(LOCAL_START_TIMEOUT_MS)
+    } else {
+        connection_timeout(config)
+    }
 }
 
 /// `config` as its server starts in the project in `folder`: a relative
@@ -1834,6 +2315,12 @@ fn manager_store(name: &str, auth_dir: Option<&Path>) -> FileCredentialStore {
 }
 
 /// The failure as a person reads it, without the `tool error:` category.
+/// Why a start or a wait for one ended without an answer: Haarness is
+/// stopping.
+fn stopping() -> CoreError {
+    CoreError::Conflict("Haarness is stopping".into())
+}
+
 fn concise_error(error: &CoreError) -> String {
     match error {
         CoreError::Tool(message) => message.clone(),
@@ -4054,7 +4541,7 @@ mod recovery_tests {
             "transport": "stdio", "command": "python3",
             "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/recovery.py")],
             "env": {"CALL_LOG": log, "INIT_DELAY": delay},
-            "enabled": true, "timeout_ms": 2000
+            "enabled": true, "timeoutMs": 2000
         }))
         .unwrap()
     }
@@ -4460,12 +4947,25 @@ mod recovery_tests {
         std::fs::read_to_string(log).map_or(0, |text| text.lines().count())
     }
 
+    /// [`NativeMcpRegistry::prepare_reusing`] with the start, when there is
+    /// one, run to its end.
+    async fn configure_reusing(
+        candidate: &NativeMcpRegistry,
+        live: &NativeMcpRegistry,
+        name: &str,
+        config: McpConfigureRequest,
+    ) -> CoreResult<McpServerInfo> {
+        match candidate.prepare_reusing(live, name, config)? {
+            (_, Some(ended)) => ended.await.expect("the start came to an end"),
+            (info, None) => Ok(info),
+        }
+    }
+
     /// Swap in a candidate generation composed against `live`, as a hot
     /// reload does.
     async fn reload(live: &NativeMcpRegistry, config: McpConfigureRequest) -> McpServerInfo {
         let candidate = NativeMcpRegistry::default();
-        let info = candidate
-            .configure_reusing(live, "fixture", config)
+        let info = configure_reusing(&candidate, live, "fixture", config)
             .await
             .unwrap();
         live.replace_from(&candidate);
@@ -4509,8 +5009,7 @@ mod recovery_tests {
         // The live entry stays authoritative when it moved on after the
         // candidate shared it: here an explicit disconnect.
         let candidate = NativeMcpRegistry::default();
-        candidate
-            .configure_reusing(&live, "fixture", configured("second"))
+        configure_reusing(&candidate, &live, "fixture", configured("second"))
             .await
             .unwrap();
         live.disconnect("fixture").await.unwrap();
@@ -4526,6 +5025,420 @@ mod recovery_tests {
         assert_eq!(launches(&launch_log), 3);
         live.disconnect("fixture").await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `config` for the recovery fixture, logging each launch to `launches`.
+    fn counted(root: &Path, delay: &str) -> McpConfigureRequest {
+        let mut config = config(&root.join("calls"), delay);
+        config.env.insert(
+            "LAUNCH_LOG".into(),
+            root.join("launches").display().to_string(),
+        );
+        config
+    }
+
+    fn scratch(label: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("haarness-mcp-{label}-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// Haarness answers while its servers start: a server prepared is
+    /// connecting, a turn begun meanwhile has its start to wait for, and a
+    /// request to it waits for that start instead of failing.
+    #[tokio::test]
+    async fn a_server_still_starting_is_waited_for_by_turns_and_requests() {
+        let root = scratch("starting");
+        let registry = NativeMcpRegistry::default();
+        let (info, ended) = registry.prepare("fixture", counted(&root, "0.5")).unwrap();
+        assert_eq!(info.status, "connecting");
+        assert!(registry.tool_snapshot().is_empty());
+        let starting = registry.starting().expect("a turn waits for the start");
+        let ping = registry.call("fixture", "ping", serde_json::json!({}));
+        assert_eq!(ping.await.unwrap().text, "pong");
+        tokio::time::timeout(Duration::from_secs(5), starting)
+            .await
+            .expect("the wait ended with the start");
+        assert!(
+            registry
+                .tool_snapshot()
+                .iter()
+                .any(|tool| tool.name == "mcp__fixture__ping")
+        );
+        let end = ended.expect("an enabled server starts").await;
+        assert_eq!(end.unwrap().unwrap().status, "connected");
+        // A turn begun once it has started does not wait.
+        assert!(registry.starting().is_none());
+        assert_eq!(launches(&root.join("launches")), 1);
+        registry.disconnect("fixture").await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A start that fails, or that a Disconnect stops, ends the wait at
+    /// once: a failed server holds up nothing.
+    #[tokio::test]
+    async fn a_failed_or_stopped_start_ends_the_wait() {
+        let root = scratch("ended");
+        let registry = NativeMcpRegistry::default();
+        let mut broken = counted(&root, "0");
+        broken.command = Some("false".into());
+        let (_, ended) = registry.prepare("broken", broken).unwrap();
+        let starting = registry.starting().unwrap();
+        assert!(ended.unwrap().await.unwrap().is_err());
+        tokio::time::timeout(Duration::from_secs(1), starting)
+            .await
+            .expect("a failed start ended the wait");
+        assert_eq!(registry.list().await.unwrap()[0].status, "failed");
+        assert!(registry.starting().is_none());
+
+        let (_, ended) = registry.prepare("slow", counted(&root, "1.5")).unwrap();
+        let starting = registry.starting().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        registry.disconnect("slow").await.unwrap();
+        tokio::time::timeout(Duration::from_millis(500), starting)
+            .await
+            .expect("a Disconnect ended the wait");
+        assert!(
+            ended.unwrap().await.is_none(),
+            "the stopped start came to nothing"
+        );
+        tokio::time::sleep(Duration::from_millis(1_800)).await;
+        let slow = registry.list().await.unwrap().remove(1);
+        assert_eq!(slow.status, "disconnected");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A Reconnect during a start joins it: the server is not started twice,
+    /// and a turn begun meanwhile still waits for it and gets its tools.
+    #[tokio::test]
+    async fn a_reconnect_during_a_start_joins_it() {
+        let root = scratch("join");
+        let registry = NativeMcpRegistry::default();
+        registry.prepare("fixture", counted(&root, "1")).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let reconnect = registry.reconnect("fixture");
+        let during = registry.starting().expect("a turn begun meanwhile waits");
+        assert_eq!(reconnect.await.unwrap().status, "connected");
+        during.await;
+        assert!(
+            registry
+                .tool_snapshot()
+                .iter()
+                .any(|tool| tool.name == "mcp__fixture__ping")
+        );
+        assert_eq!(launches(&root.join("launches")), 1);
+        registry.disconnect("fixture").await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A Reconnect joins a start younger than [`RECONNECT_JOINS_FOR`] and
+    /// begins again one that has run longer, which may be hung: the new start
+    /// is the server's first start still, so a turn that waited for the old
+    /// one waits for it and gets its tools.
+    #[tokio::test]
+    async fn a_reconnect_begins_again_a_start_that_has_run_long() {
+        let root = scratch("restart");
+        let delay = root.join("delay");
+        std::fs::write(&delay, "30").unwrap();
+        let mut configured = counted(&root, "0");
+        configured
+            .env
+            .insert("INIT_DELAY_FILE".into(), delay.display().to_string());
+        configured.timeout_ms = Some(60_000);
+        let registry = NativeMcpRegistry::default();
+        registry.prepare("fixture", configured).unwrap();
+        let waiting = registry.starting().expect("a turn waits for the start");
+        tokio::time::sleep(RECONNECT_JOINS_FOR + Duration::from_millis(200)).await;
+        std::fs::write(&delay, "0").unwrap();
+        let reconnected =
+            tokio::time::timeout(Duration::from_secs(5), registry.reconnect("fixture"))
+                .await
+                .expect("the Reconnect waited for the hung start");
+        assert_eq!(reconnected.unwrap().status, "connected");
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("the turn's wait did not follow the new start");
+        assert!(
+            registry
+                .tool_snapshot()
+                .iter()
+                .any(|tool| tool.name == "mcp__fixture__ping")
+        );
+        assert_eq!(launches(&root.join("launches")), 2);
+        registry.disconnect("fixture").await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every start that comes to an answer is announced, whoever began it:
+    /// configuring, a Reconnect, a reload's candidate (which shares the live
+    /// registry's announcer and stops when it does).
+    #[tokio::test]
+    async fn every_start_that_ends_is_announced() {
+        let root = scratch("announce");
+        let told = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let live = NativeMcpRegistry::default();
+        live.announce_starts({
+            let told = told.clone();
+            move |name| told.lock().push(name.to_owned())
+        });
+        live.configure("configured", counted(&root, "0"))
+            .await
+            .unwrap();
+        live.reconnect("configured").await.unwrap();
+        // A server whose transport closed and that got its connection back
+        // is not: it may keep crashing.
+        assert!(
+            live.call("configured", "crash", serde_json::json!({}))
+                .await
+                .is_err()
+        );
+        status(&live, "failed").await;
+        status(&live, "connected").await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let candidate = NativeMcpRegistry::default().following(&live);
+        let (_, ended) = candidate
+            .prepare_reusing(&live, "added", counted(&root, "0"))
+            .unwrap();
+        ended.unwrap().await.unwrap().unwrap();
+        assert_eq!(*told.lock(), ["configured", "configured", "added"]);
+        // Haarness stopping stops the candidate's starts too.
+        let (_, ended) = candidate
+            .prepare_reusing(&live, "slow", counted(&root, "5"))
+            .unwrap();
+        live.close();
+        let end = tokio::time::timeout(Duration::from_secs(1), ended.unwrap())
+            .await
+            .expect("the candidate's start ran on after Haarness stopped");
+        assert!(end.is_none());
+        assert!(matches!(
+            candidate.prepare("late", counted(&root, "0")),
+            Err(CoreError::Conflict(_))
+        ));
+        live.disconnect("configured").await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A server a reload's candidate shared while it was starting, whose
+    /// start stopped before the reload applied without its server being
+    /// disconnected, starts again when it applies instead of staying
+    /// connecting.
+    #[tokio::test]
+    async fn a_shared_start_stopped_before_its_reload_applied_starts_again() {
+        // Stopped and ended, or stopped and not ended yet.
+        for ended in [true, false] {
+            let root = scratch("stalled");
+            let configured = counted(&root, "0.5");
+            let live = NativeMcpRegistry::default();
+            live.prepare("fixture", configured.clone()).unwrap();
+            let candidate = NativeMcpRegistry::default().following(&live);
+            let (_, shared) = candidate
+                .prepare_reusing(&live, "fixture", configured)
+                .unwrap();
+            assert!(shared.is_none());
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while launches(&root.join("launches")) < 1 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let (unsent, never) = oneshot::channel::<CoreResult<McpServerInfo>>();
+            {
+                let mut servers = live.servers.write();
+                let entry = servers.get_mut("fixture").unwrap();
+                entry.stop_start();
+                if !ended {
+                    let stop = CancellationToken::new();
+                    stop.cancel();
+                    entry.start = Some(Arc::new(Running {
+                        first: true,
+                        began: std::time::Instant::now(),
+                        stop,
+                        ended: never.map(Result::ok).boxed().shared(),
+                    }));
+                }
+            }
+            live.replace_from(&candidate);
+            drop(candidate);
+            status(&live, "connected").await;
+            assert_eq!(launches(&root.join("launches")), 2);
+            drop(unsent);
+            live.disconnect("fixture").await.unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// A server a client configured (an editor's session) holds up no other
+    /// chat's turn while it starts; a request to it waits for it.
+    #[tokio::test]
+    async fn a_configured_start_holds_no_turn_but_its_requests_wait() {
+        let root = scratch("configured");
+        let registry = NativeMcpRegistry::default();
+        let configure = tokio::spawn({
+            let registry = registry.clone();
+            let configured = counted(&root, "0.8");
+            async move { registry.configure("editor", configured).await }
+        });
+        status(&registry, "connecting").await;
+        assert!(registry.starting().is_none(), "a turn waited for it");
+        let tools = registry.tools("editor").await.unwrap();
+        assert!(tools.iter().any(|tool| tool.name == "mcp__editor__ping"));
+        assert_eq!(configure.await.unwrap().unwrap().status, "connected");
+        registry.disconnect("editor").await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A start a request began runs in a task of its own: the request giving
+    /// up (a client's timeout) leaves it running to the end.
+    #[tokio::test]
+    async fn a_start_outlives_the_request_that_began_it() {
+        let root = scratch("outlives");
+        let registry = NativeMcpRegistry::default();
+        let configure = registry.configure("fixture", counted(&root, "0.8"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), configure)
+                .await
+                .is_err()
+        );
+        // So does a Reconnect that joins it and gives up too.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), registry.reconnect("fixture"))
+                .await
+                .is_err()
+        );
+        status(&registry, "connected").await;
+        let ping = registry
+            .call("fixture", "ping", serde_json::json!({}))
+            .await;
+        assert_eq!(ping.unwrap().text, "pong");
+        assert_eq!(launches(&root.join("launches")), 1);
+        registry.disconnect("fixture").await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A hot reload applies before the servers it added have started: their
+    /// starts finish in the live registry, which turns wait on meanwhile.
+    #[tokio::test]
+    async fn a_start_that_ends_after_its_reload_applied_lands_in_the_live_registry() {
+        let root = scratch("lands");
+        let live = NativeMcpRegistry::default();
+        let candidate = NativeMcpRegistry::default();
+        let (_, ended) = candidate
+            .prepare_reusing(&live, "fixture", counted(&root, "0.5"))
+            .unwrap();
+        live.replace_from(&candidate);
+        drop(candidate);
+        assert_eq!(live.list().await.unwrap()[0].status, "connecting");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            live.starting().expect("the live registry waits for it"),
+        )
+        .await
+        .unwrap();
+        let end = ended.expect("a new server starts").await;
+        assert_eq!(end.unwrap().unwrap().status, "connected");
+        assert_eq!(live.list().await.unwrap()[0].status, "connected");
+        let ping = live.call("fixture", "ping", serde_json::json!({})).await;
+        assert_eq!(ping.unwrap().text, "pong");
+        live.disconnect("fixture").await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A reload while a server starts keeps that start rather than spawning
+    /// the server again; one that already failed with the same settings is
+    /// tried again without holding up turns, and changed settings are.
+    #[tokio::test]
+    async fn reloads_keep_a_start_in_progress_and_hold_turns_only_for_new_settings() {
+        let root = scratch("reload-start");
+        let configured = counted(&root, "0.5");
+        let live = NativeMcpRegistry::default();
+        live.prepare("fixture", configured.clone()).unwrap();
+        let candidate = NativeMcpRegistry::default();
+        let (info, again) = candidate
+            .prepare_reusing(&live, "fixture", configured.clone())
+            .unwrap();
+        assert!(again.is_none(), "the server was started a second time");
+        assert_eq!(info.status, "connecting");
+        live.replace_from(&candidate);
+        drop(candidate);
+        tokio::time::timeout(Duration::from_secs(5), live.starting().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(live.list().await.unwrap()[0].status, "connected");
+        assert_eq!(launches(&root.join("launches")), 1);
+        live.disconnect("fixture").await.unwrap();
+
+        let mut broken = configured;
+        broken.command = Some("false".into());
+        assert!(live.configure("fixture", broken.clone()).await.is_err());
+        let candidate = NativeMcpRegistry::default();
+        let (_, retry) = candidate
+            .prepare_reusing(&live, "fixture", broken.clone())
+            .unwrap();
+        assert!(retry.is_some(), "a reload tries a failed server again");
+        assert!(
+            candidate.starting().is_none(),
+            "a turn waited for a server that already failed with these settings"
+        );
+        broken.args.push("--changed".into());
+        let candidate = NativeMcpRegistry::default();
+        let (_, changed) = candidate.prepare_reusing(&live, "fixture", broken).unwrap();
+        assert!(changed.is_some() && candidate.starting().is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A server left connecting without a start that runs (none should be:
+    /// its start's task ended without a word, and nobody waited for it) is
+    /// started again by the next reload, as a server stuck connecting
+    /// always was.
+    #[tokio::test]
+    async fn a_reload_starts_again_a_server_connecting_without_a_start() {
+        let root = scratch("stuck");
+        let configured = counted(&root, "5");
+        for gone in [false, true] {
+            let live = NativeMcpRegistry::default();
+            let (_, ended) = live.prepare("fixture", configured.clone()).unwrap();
+            let (silent, never) = oneshot::channel::<CoreResult<McpServerInfo>>();
+            drop(silent);
+            live.servers.write().get_mut("fixture").unwrap().start = (!gone).then(|| {
+                Arc::new(Running {
+                    first: true,
+                    began: std::time::Instant::now(),
+                    stop: CancellationToken::new(),
+                    ended: never.map(Result::ok).boxed().shared(),
+                })
+            });
+            assert!(ended.unwrap().await.is_none());
+            assert_eq!(live.list().await.unwrap()[0].status, "connecting");
+            let candidate = NativeMcpRegistry::default();
+            let (_, again) = candidate
+                .prepare_reusing(&live, "fixture", configured.clone())
+                .unwrap();
+            assert!(again.is_some(), "the stuck server was kept as it was");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Without `timeout_ms`, a local server's start gets 2 minutes and
+    /// everything else (its later requests, a remote server's start) 30 s;
+    /// a `timeout_ms` that is set is used for each of them.
+    #[test]
+    fn a_local_server_without_a_timeout_has_two_minutes_to_start() {
+        let mut local = config(Path::new("/nonexistent"), "0");
+        local.timeout_ms = None;
+        assert_eq!(start_timeout(&local), Duration::from_secs(120));
+        assert_eq!(connection_timeout(&local), Duration::from_secs(30));
+        local.timeout_ms = Some(5_000);
+        assert_eq!(start_timeout(&local), Duration::from_secs(5));
+        let remote = McpConfigureRequest {
+            transport: "streamable_http".into(),
+            url: Some("http://127.0.0.1:9/mcp".into()),
+            command: None,
+            timeout_ms: None,
+            ..local
+        };
+        assert_eq!(start_timeout(&remote), Duration::from_secs(30));
     }
 
     #[tokio::test]
@@ -4574,7 +5487,7 @@ mod recovery_tests {
                 "PID_LOG": dir.join("pids"),
                 "FLOOD_INIT": if flood_init { "1" } else { "0" },
             },
-            "enabled": true, "timeout_ms": 20_000
+            "enabled": true, "timeoutMs": 20_000
         }))
         .unwrap()
     }
@@ -4638,8 +5551,7 @@ mod recovery_tests {
         // Neither the watcher, a call nor a reload that leaves its settings
         // as they were starts it again.
         let candidate = NativeMcpRegistry::default();
-        let reloaded = candidate
-            .configure_reusing(&registry, "flood", flood_config(&dir, false))
+        let reloaded = configure_reusing(&candidate, &registry, "flood", flood_config(&dir, false))
             .await
             .unwrap();
         registry.replace_from(&candidate);

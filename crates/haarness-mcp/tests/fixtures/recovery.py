@@ -13,7 +13,12 @@ for line in sys.stdin:
         continue
     method = request.get('method')
     if method == 'initialize':
-        time.sleep(float(os.environ.get('INIT_DELAY', '0')))
+        delay = os.environ.get('INIT_DELAY', '0')
+        # A file naming the delay, read at each launch, so a test can change it between starts.
+        if os.path.exists(os.environ.get('INIT_DELAY_FILE', '')):
+            with open(os.environ['INIT_DELAY_FILE']) as file:
+                delay = file.read()
+        time.sleep(float(delay))
         result = {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'recovery-fixture', 'version': '1'}}
     elif method == 'tools/list':
         result = {'tools': [{'name': name, 'description': name, 'inputSchema': {'type': 'object'}} for name in ['ping', 'crash', 'wait']]}
