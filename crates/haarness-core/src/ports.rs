@@ -714,6 +714,11 @@ pub trait ToolInvoker: Send + Sync {
     fn instructions_in_context(&self) -> Option<crate::instructions::InContext> {
         None
     }
+    /// What Stop cancels for the turn this call runs in, when it runs in
+    /// one: work the call does outside a tool ends with it.
+    fn stop_token(&self) -> Option<CancellationToken> {
+        None
+    }
     async fn invoke(&self, name: &str, arguments: Value) -> CoreResult<ToolOutput>;
     /// A batch step refused before it starts still takes its number, so the
     /// call ids of the steps after it (`<batch call id>:N`) stay their place
