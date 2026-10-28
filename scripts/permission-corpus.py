@@ -69,6 +69,11 @@ CORPUS = [
     'cd build && cmake .. && make -j8', 'pushd src && cargo build && popd', 'cd "$HOME" && ls',
     'cd ~/work && ls', 'cd deep/er/x/.. && ls', 'cd a/l/.. && ls', 'pushd a/l/../../.. && touch escaped.txt',
     'cd a/l && ls', 'pushd /tmp && cat notes.txt', 'pushd -n /tmp', 'pushd +1', 'popd',
+    'cd src && cat ../README.md', 'cd src && echo x > ../out.txt', 'cd src && cat ../../outside/secret',
+    'cd src; cat ../README.md', '(cd src) && cat ../README.md', 'cd "$D" && cat ../README.md',
+    'cd web && npm install && npm run build && cp -r dist ../build/', 'npm ci && cd src && cat ../README.md',
+    'cd src && cargo test 2>&1 | tee ../test.log', 'cd deep/er && cat ../../README.md && cd x && ls',
+    'cd /tmp && cat ../etc/hosts', 'cd a/l && cat ../../../README.md', 'cd src && eval true && cat ../README.md',
     # Quoting and nested shells
     'echo "hello world"', "echo 'single $x'", "printf '%s\\n' \"$PATH\"", 'grep -E "a|b" README.md',
     "sh -c 'echo $0' x", 'bash -c "npm run build && npm test"', 'node -e "console.log(1)"',
