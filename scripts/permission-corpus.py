@@ -74,6 +74,8 @@ CORPUS = [
     'cd web && npm install && npm run build && cp -r dist ../build/', 'npm ci && cd src && cat ../README.md',
     'cd src && cargo test 2>&1 | tee ../test.log', 'cd deep/er && cat ../../README.md && cd x && ls',
     'cd /tmp && cat ../etc/hosts', 'cd a/l && cat ../../../README.md', 'cd src && eval true && cat ../README.md',
+    'cd nosuch && rm -rf ../build', 'cd && rm -rf Documents', 'cd -',
+    'pushd src && pushd +1 && rm -rf ../x',
     # Quoting and nested shells
     'echo "hello world"', "echo 'single $x'", "printf '%s\\n' \"$PATH\"", 'grep -E "a|b" README.md',
     "sh -c 'echo $0' x", 'bash -c "npm run build && npm test"', 'node -e "console.log(1)"',
