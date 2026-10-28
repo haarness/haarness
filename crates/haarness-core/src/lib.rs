@@ -49,9 +49,9 @@ pub use permissions::{
     CONFIG_EDIT_RULE, CREDENTIAL_READ_RULE, EXPLICIT_GRANT_PREFIX, PermissionDecision,
     PermissionEngine, PermissionRule, expand_home, explicit_decision, explicit_granted,
     forget_rule_links, global_config_dir_from, is_config_path, is_credential_store_path,
-    is_global_config_path, is_secret_path, is_system_config_path, record_credential_store,
-    resolve_permission_entry, resolve_permission_path, set_global_config_dir,
-    set_system_config_dir,
+    is_global_config_path, is_secret_path, is_system_config_path, record_credential_files_below,
+    record_credential_store, resolve_permission_entry, resolve_permission_path,
+    set_global_config_dir, set_system_config_dir,
 };
 pub use ports::*;
 pub use prompts::{PromptFile, PromptMode, PromptName, Prompts};

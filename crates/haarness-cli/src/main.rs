@@ -1500,9 +1500,7 @@ async fn cli_main() -> Result<()> {
     haarness_core::set_global_config_dir(base_paths.config_dir().to_path_buf());
     haarness_core::set_system_config_dir(crate::layout::system_config_dir());
     // A model-run read of where sign-ins are kept asks a person every time.
-    for (store, folder) in base_paths.credential_stores() {
-        haarness_core::record_credential_store(store, folder);
-    }
+    base_paths.record_credential_stores();
     if let Some(problem) = haarness_protocol::system_config_dir_problem() {
         tracing::warn!("{problem}");
         // A server started in the background has only its log.
@@ -11569,25 +11567,41 @@ impl Paths {
         self.config.parent().expect("config file has parent")
     }
 
-    /// Where this process keeps sign-ins, each with whether it is a folder
-    /// of them: provider keys (`auth.json`, and the copy an older layout
-    /// left in the configuration folder), MCP sign-in tokens, and the Cloud
-    /// sign-in.
+    /// Where this process keeps sign-ins and tokens, each with whether it is
+    /// a folder of them: provider keys (`auth.json`, and the copy an older
+    /// layout left in the configuration folder), MCP sign-in tokens, the
+    /// Cloud sign-in, and the servers the terminal UI saved with their
+    /// tokens or passwords (`tui-servers.json`). Each project's server
+    /// address and token (`runtime.json`) are recorded by
+    /// [`Self::record_credential_stores`].
     fn credential_stores(&self) -> Vec<(PathBuf, bool)> {
         let mut stores = vec![
             (self.auth.clone(), false),
             (self.config_dir().join("auth.json"), false),
             (self.data.join("mcp-oauth"), true),
+            (self.config_dir().join("tui-servers.json"), false),
         ];
         if self.root.is_none()
             && let Some(legacy) = directories::ProjectDirs::from("dev", "haarness", "haarness")
         {
             stores.push((legacy.config_dir().join("auth.json"), false));
+            stores.push((legacy.config_dir().join("tui-servers.json"), false));
         }
         if let Ok(cloud) = haarness_account::Config::from_env() {
             stores.push((cloud.path(), false));
         }
         stores
+    }
+
+    /// Tell the permission engine where this process keeps sign-ins and
+    /// tokens: a model-run read of one asks a person every time.
+    fn record_credential_stores(&self) {
+        for (store, folder) in self.credential_stores() {
+            haarness_core::record_credential_store(store, folder);
+        }
+        // The server's address and bearer token, which answer its approvals:
+        // the cache folder's and each project's below it.
+        haarness_core::record_credential_files_below(&self.cache, "runtime.json");
     }
 
     /// The file that lists the registered workspaces.
@@ -14661,6 +14675,42 @@ request_timeout = 0
         assert!(!valid_provider_url("http://models.example.test/v1"));
         assert!(!valid_provider_url("http://localhost.evil.test/v1"));
         assert!(!valid_provider_url("https://user@example.test/v1"));
+    }
+
+    #[test]
+    fn server_tokens_and_saved_servers_are_kept_like_sign_ins() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-token-stores-{}", uuid::Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        paths.record_credential_stores();
+        let project = paths.scoped("fixture", false).unwrap();
+        for path in [
+            paths.runtime.clone(),
+            project.runtime.clone(),
+            paths.cache.join("workspaces/fixture/runtime.tmp-42"),
+            paths.auth.clone(),
+            paths.data.join("mcp-oauth/server.json"),
+            paths.config_dir().join("tui-servers.json"),
+            paths.config_dir().join(".tui-servers.json-01a1"),
+        ] {
+            assert!(
+                haarness_core::is_credential_store_path(&path),
+                "{}",
+                path.display()
+            );
+        }
+        for path in [
+            root.join("project/runtime.json"),
+            paths.config_dir().join("tui-server-drafts.json"),
+            paths.cache.join("workspaces/fixture/other.json"),
+        ] {
+            assert!(
+                !haarness_core::is_credential_store_path(&path),
+                "{}",
+                path.display()
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
