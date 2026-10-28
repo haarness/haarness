@@ -201,7 +201,7 @@ The same rule covers the other shell text Haarness runs from configuration. An M
 | `SessionStart` | a chat is created; not a chat started inside another (a task subagent, a workflow's thread or agent), so a slow hook never holds up their first prompt | `source` (`startup`), `agent` | `source` |
 | `UserPromptSubmit` | a root turn starts | `prompt` | — |
 | `PreToolUse` / `PermissionRequest` | before a tool runs (the `question` tool too) / before the user is prompted | `tool_name`, `tool_input`; `PermissionRequest` adds `permission_patterns`, `allow_always` and, when that is true, `always_patterns` and `permission_suggestions` | tool name / the permission asked (`bash`, `edit`, `external_directory`, …); Claude aliases accepted |
-| `PostToolUse` / `PostToolUseFailure` | after a tool finishes (an answered question too, with the answer as its output) | `tool_name`, `tool_input`, `tool_response`, `error` | tool name |
+| `PostToolUse` / `PostToolUseFailure` | after a tool finishes (an answered question too, with the answer as its output) / after a tool call made outside a turn fails (a `!` command, a workflow's own call) | `tool_name`, `tool_input`, `tool_response`, `error` | tool name |
 | `FileChanged` | after a successful `write`, `edit`, `multiedit` or notebook edit | `tool_name`, `tool_input`, `file_path` | tool name |
 | `Stop` | a root turn completed | — | — |
 | `PostCompact` | after a compaction commits | `trigger`, `compaction` | `manual` or `automatic` |

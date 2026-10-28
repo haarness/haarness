@@ -1141,16 +1141,17 @@ impl HookPort for ConfiguredHooks {
         output: &str,
         is_error: bool,
     ) -> Option<String> {
+        let event = if is_error {
+            "PostToolUseFailure"
+        } else {
+            "PostToolUse"
+        };
         let context = self
             .run_event(
-                if is_error {
-                    "PostToolUseFailure"
-                } else {
-                    "PostToolUse"
-                },
+                event,
                 Some(tool),
                 &json!({
-                    "hook_event_name": "PostToolUse",
+                    "hook_event_name": event,
                     "session_id": thread,
                     "cwd": self.workspace,
                     "tool_name": tool,
@@ -2222,6 +2223,34 @@ mod tests {
         assert_eq!(
             changed_file("edit", &json!({"path":"./~/notes.md"})).as_deref(),
             Some("./~/notes.md")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_tool_runs_post_tool_use_failure_hooks_under_that_name() {
+        let thread = ThreadId::new();
+        let events = captured(
+            json!({"PostToolUse": [{}], "PostToolUseFailure": [{"matcher": "Bash"}]}),
+            async |hooks| {
+                hooks
+                    .post_tool_use(thread, "bash", &json!({"command": "false"}), "exit 1", true)
+                    .await;
+                hooks
+                    .post_tool_use(thread, "bash", &json!({"command": "true"}), "ok", false)
+                    .await;
+            },
+        )
+        .await;
+        let seen: Vec<(&str, &Value)> = events
+            .iter()
+            .map(|event| (event["hook_event_name"].as_str().unwrap(), &event["error"]))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("PostToolUseFailure", &json!("exit 1")),
+                ("PostToolUse", &Value::Null)
+            ]
         );
     }
 
