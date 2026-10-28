@@ -241,9 +241,8 @@ impl Service {
         request: PromptRequest,
         connection: &ConnectionTo<Client>,
     ) -> AcpResult<PromptResponse> {
-        // A prompt that cannot run fails at once, not behind a running one.
+        // A prompt with nothing in it fails at once, not behind a running one.
         let thread = thread_id(&request.session_id)?;
-        self.client.thread(thread).await.map_err(not_found)?;
         let (text, attachments) = prompt_content(request.prompt)?;
         if text.trim().is_empty() && attachments.is_empty() {
             return Err(invalid("prompt must contain text or supported media"));
@@ -268,6 +267,7 @@ impl Service {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key.clone(), stop.clone());
         let begun: AcpResult<Option<_>> = async {
+            self.client.thread(thread).await.map_err(not_found)?;
             if self
                 .await_mcp(&request.session_id, &stop, connection)
                 .await?
