@@ -458,8 +458,9 @@ impl ApiClient {
         self
     }
 
-    /// Whether this client sends attached files to the server whole, as
-    /// data URLs, rather than their paths.
+    /// Whether this client sends the files it attaches itself, read from
+    /// this computer, as data URLs; otherwise the server reads an attached
+    /// path from its own disk.
     #[must_use]
     pub fn uploads_attachments(&self) -> bool {
         self.upload_attachments

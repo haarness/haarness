@@ -7057,6 +7057,9 @@ pub(crate) struct DefinitionShell<'a> {
 
 #[async_trait::async_trait]
 impl crate::ToolInvoker for TurnToolInvoker {
+    fn stop_token(&self) -> Option<CancellationToken> {
+        Some(self.runner.cancel.clone())
+    }
     fn parallel_safe(&self, name: &str, arguments: &serde_json::Value) -> bool {
         self.runner
             .tools
