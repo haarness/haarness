@@ -138,7 +138,7 @@ impl ModelProvider for BedrockProvider {
         &self.instance.id
     }
 
-    /// Bedrock takes 20 MB in a request; its images get 15 MiB of it. A
+    /// Bedrock takes 20 MB in a request; its media get 15 MiB of it. A
     /// Claude model takes as many images as it does from Anthropic, named by
     /// its id or an ARN holding it (a foundation model or a cross-region
     /// inference profile). An application inference profile's ARN names no
