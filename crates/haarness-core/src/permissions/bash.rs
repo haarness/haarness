@@ -154,9 +154,11 @@ const PATH_COMMANDS: &[&str] = &[
 ];
 
 /// Programs that only look at the files they are given (their names, sizes,
-/// kinds, where they lead), never print or change what is in them.
+/// where they lead), never print or change what is in them, whatever their
+/// options say. `file` and `du` are not among them: `file -f`, `file -m`
+/// and `du --files0-from` read a file they are given.
 const LOOKS_ONLY: &[&str] = &[
-    "basename", "dirname", "du", "file", "ls", "readlink", "realpath", "stat", "test", "[",
+    "basename", "dirname", "ls", "readlink", "realpath", "stat", "test", "[",
 ];
 
 /// Programs that destroy their file operands, for `xargs` in front of them.
@@ -2059,6 +2061,11 @@ impl Reader<'_> {
         {
             for word in arguments {
                 let (value, complete) = path_literal(word.node, source);
+                // An option's value as well (`--files0-from=<file>`).
+                let value = match value.split_once('=') {
+                    Some((option, path)) if option.starts_with('-') => path.to_owned(),
+                    _ => value,
+                };
                 self.name_path(&word.raw, &value, complete, None);
             }
         }

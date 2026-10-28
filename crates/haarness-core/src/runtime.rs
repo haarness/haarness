@@ -15151,11 +15151,19 @@ mod shell_reading_tests {
             "stat auth.json",
             "test -f auth.json && echo yes",
             "[ -s auth.json ]",
-            "du -h auth.json; file auth.json",
+            "readlink auth.json; realpath auth.json",
         ] {
             assert_eq!(bash(command, &root), Vec::new(), "{command}");
         }
-        for command in ["chmod 644 auth.json", "ls -l auth.json && head auth.json"] {
+        // `file` and `du` can be told to read a file they are given.
+        for command in [
+            "chmod 644 auth.json",
+            "ls -l auth.json && head auth.json",
+            "file -f auth.json",
+            "file -m auth.json /dev/null",
+            "du --files0-from=auth.json",
+            "du -h auth.json",
+        ] {
             assert!(bash(command, &root).contains(&(Ask, true)), "{command}");
         }
         std::fs::remove_dir_all(&root).unwrap();
