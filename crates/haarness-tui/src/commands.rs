@@ -2541,6 +2541,7 @@ impl App {
                     .find(|p| p.id == self.thread.provider)
                     .and_then(|p| p.models.iter().find(|m| m.id == self.thread.model))
                     .and_then(|m| m.context_window)
+                    .filter(|window| *window > 0)
                 {
                     lines.push(format!("Context window: {window} tokens"));
                 }
