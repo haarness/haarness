@@ -319,6 +319,42 @@ async fn an_edit_on_its_card_shows_what_turns_a_line_around() {
     );
 }
 
+/// A failed workflow's error, an agent's error and its logs read without
+/// the escape sequences a program left in them.
+#[test]
+fn a_workflow_run_reads_its_errors_and_logs_without_escape_sequences() {
+    let thread = fixture_thread();
+    let app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let mut run = fixture_workflow_run("nightly", haarness_protocol::WorkflowRunStatus::Failed);
+    run.error = Some("\u{1b}[31mstep 3 failed\u{1b}[39m: lint".into());
+    run.logs[0].message = "\u{1b}]0;runner\u{7}\u{1b}[1mchecking\u{1b}[22m 4 files".into();
+    run.agents = vec![
+        serde_json::from_value(serde_json::json!({
+            "id": "agent-1",
+            "label": "linter",
+            "status": "failed",
+            "error": "\u{1b}[33mwarning:\u{1b}[0m model refused",
+            "startedAt": run.time.created,
+        }))
+        .unwrap(),
+    ];
+    let body = crate::view::workflow::run_body(&app, &run, 100);
+    let text = body.iter().map(Line::text).collect::<Vec<_>>().join("\n");
+    assert!(text.contains("step 3 failed: lint"), "{text}");
+    assert!(text.contains("checking 4 files"), "{text}");
+    assert!(text.contains("warning: model refused"), "{text}");
+    for remains in [
+        "[31m",
+        "[1m",
+        "[33m",
+        "]0;",
+        "runner",
+        '\u{1b}'.to_string().as_str(),
+    ] {
+        assert!(!text.contains(remains), "{remains:?} in {text}");
+    }
+}
+
 /// A patch's row names its file with what would not show as a code, as
 /// the other rows do.
 #[test]
