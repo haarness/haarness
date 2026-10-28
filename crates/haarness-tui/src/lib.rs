@@ -8,6 +8,7 @@ mod connect;
 mod diff;
 mod diffview;
 mod escapes;
+mod file_search;
 mod highlight;
 mod input;
 mod input_queue;
@@ -653,6 +654,10 @@ async fn run_with_client(
     // First frame paints everything; afterwards the native renderer's cell
     // diffing suppresses unchanged output. Resize forces a full repaint.
     let mut force_redraw = true;
+    // Events to handle before reading the terminal again: a Tab or Enter
+    // held for the `@` list's answer, and what was typed behind it (see
+    // `crate::file_search`).
+    let mut replay: std::collections::VecDeque<TerminalEvent> = std::collections::VecDeque::new();
     // The deadline of the settling approval answer the tick is set to wake at.
     let mut settle_armed: Option<std::time::Instant> = None;
     let mut last_title = String::new();
@@ -786,12 +791,34 @@ async fn run_with_client(
             settle_armed = due;
         }
         tokio::select! {
-            terminal = input.next() => if let Some(Ok(event)) = terminal {
+            // Events let go by the `@` list come first, in order.
+            (terminal, replayed) = async {
+                match replay.pop_front() {
+                    Some(event) => (Some(Ok(event)), true),
+                    None => (input.next().await, false),
+                }
+            } => if let Some(Ok(event)) = terminal {
+                // Behind a Tab or Enter held for the `@` list's answer, keys
+                // and pastes wait their turn.
+                let event = match app.file_search.pass(event) {
+                    crate::file_search::Pass::Now(event) => event,
+                    crate::file_search::Pass::Later(first) => {
+                        for event in first.into_iter().rev() {
+                            replay.push_front(event);
+                        }
+                        continue;
+                    }
+                };
                 match event {
                     TerminalEvent::Key(key) => {
+                        let typed = if replayed {
+                            std::time::Instant::now()
+                        } else {
+                            input.read_at()
+                        };
                         // A failed request behind a keystroke becomes a
                         // notice; it must never take the whole TUI down.
-                        match handle_key_at(&mut app, key, input.read_at(), &client).await {
+                        match handle_key_at(&mut app, key, typed, &client).await {
                             Ok(AppAction::Quit) => {
                                 quit = true;
                                 break;
@@ -1082,6 +1109,9 @@ async fn run_with_client(
             Some(message) = side_rx.recv() => app.side_message(message),
             Some(version) = update_rx.recv() => app.update_available = Some(version),
             Some(update) = resources_rx.recv() => app.resources_arrived(update),
+            (query, files) = app.file_search.answer(), if app.file_search.is_pending() => {
+                replay.extend(app.files_found(&query, files));
+            },
             Some(sent) = sends_rx.recv() => app.mentions_sent(sent, Some(&client)).await,
             Some(listed) = catalog_rx.recv() => {
                 match listed {
@@ -1155,6 +1185,7 @@ async fn run_with_client(
             () = &mut shutdown => break,
             _ = tick.tick() => {
                 app.tick = app.tick.wrapping_add(1);
+                replay.extend(app.file_search.overdue());
                 if follow_again_at.is_some_and(|at| std::time::Instant::now() >= at) {
                     follow_again_at = None;
                     following = Some(Restarts::default());

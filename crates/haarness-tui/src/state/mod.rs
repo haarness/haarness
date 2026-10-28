@@ -911,6 +911,8 @@ pub struct App {
     pub terminal: Option<crate::pty_view::TerminalWorkspace>,
     /// Live @-mention completion results from the server.
     pub mention_suggestions: Vec<String>,
+    /// The `@` list's file search on its way.
+    pub(crate) file_search: crate::file_search::FileSearch,
     /// The attached server's MCP resources for the `@` list.
     pub(crate) mention_resources: crate::resource_mentions::Listing,
     /// Where a resource listing read off the event loop goes (see
@@ -1229,6 +1231,7 @@ impl App {
             shell_mode: false,
             terminal: None,
             mention_suggestions: Vec::new(),
+            file_search: crate::file_search::FileSearch::default(),
             mention_resources: crate::resource_mentions::Listing::default(),
             resources_tx: None,
             sends_tx: None,
