@@ -8,7 +8,8 @@ import { stopChatHome } from "./fixtures/chat-home";
 
 // MCP servers in Desktop: a server that failed says why under its name, the model's resource tools read in
 // plain words, a server's interactive apps turn off from its page's options or its row in Settings (and back
-// on with Undo) unless the server comes from a plugin, and a secret-looking value is kept in the keychain with
+// on with Undo) unless the server comes from a plugin, a server slow to start reads connecting and then
+// connected in open Settings, and a secret-looking value is kept in the keychain with
 // a click, never replacing another entry and taken out again when the server cannot be added. The keychain is
 // a test file (HAARNESS_TEST_KEYCHAIN_FILE, which only debug builds read), so the system's is never touched:
 // with a release build (CI's), the tests that store a secret are skipped.
@@ -244,6 +245,20 @@ test("a plugin's server shows its apps state but neither its switch nor its page
   await expect(view.locator(".mcp-app-menu")).toHaveCount(0);
   // The app server's own page still offers it.
   await expect(page.locator(".mcp-app[data-mcp-app]").first().locator(".mcp-app-menu")).toHaveCount(1);
+});
+
+test("a server slow to start reads connecting in Settings, then connected, while Settings stays open", async () => {
+  await openMcpSettings();
+  const written = JSON.parse(await readFile(settingsFile(), "utf8"));
+  written.mcp.slow = { command: "python3", args: [join(fixtures, "recovery.py")], env: { INIT_DELAY: "5" } };
+  await writeFile(settingsFile(), JSON.stringify(written, null, 2));
+  // The configuration applies before the server has started, and its row says so.
+  const badge = block("slow").locator(".badge");
+  await expect(badge).toHaveText("connecting", { timeout: 30000 });
+  await pictures(block("slow"), "mcp-server-connecting");
+  await expect(badge).toHaveText("connected", { timeout: 30000 });
+  await pictures(block("slow"), "mcp-server-connected");
+  await closeSettings();
 });
 
 test("a server that cannot be added takes the secrets it stored out again", async () => {

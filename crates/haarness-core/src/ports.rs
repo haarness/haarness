@@ -804,6 +804,13 @@ pub trait ToolRegistry: Send + Sync {
     fn tool_server(&self, _name: &str) -> Option<String> {
         None
     }
+    /// Completes once the tools still being set up when it is asked (MCP
+    /// servers on their first start, see [`McpRegistry::starting`]) are in
+    /// the list; `None` when none are. A turn waits for it before its first
+    /// request.
+    fn starting(&self) -> Option<futures::future::BoxFuture<'static, ()>> {
+        None
+    }
 
     /// Exact registrations win. Repair only unambiguous capitalization or the
     /// known function namespace; never guess spellings or choose by permission.
@@ -1051,6 +1058,15 @@ pub trait McpRegistry: Send + Sync {
     /// The model's resource tools are offered only while there is one.
     fn resource_servers(&self) -> Vec<String> {
         Vec::new()
+    }
+    /// Completes once every server still on its first start (the start
+    /// Haarness began for its configuration, when it started or on a
+    /// reload) has connected or failed; `None` when none is. Haarness
+    /// answers before its MCP servers have started, so a turn begun
+    /// meanwhile waits for this and is offered the tools one begun a moment
+    /// later would be.
+    fn starting(&self) -> Option<futures::future::BoxFuture<'static, ()>> {
+        None
     }
     async fn resources(&self, name: &str) -> CoreResult<Vec<Value>>;
     async fn resource_templates(&self, name: &str) -> CoreResult<Vec<Value>>;

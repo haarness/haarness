@@ -263,7 +263,17 @@ an OAuth token refresh that only rewrites `access`, `refresh`, and `expires` in
 content reload nothing either. A reload keeps each connected MCP server whose
 effective configuration (with `${VAR}` references resolved) is unchanged,
 instead of starting it again. Servers connect concurrently at startup and on
-reload.
+reload, in the background (16 at a time): the server answers at once, lists
+each as `connecting` until it has connected, failed or needs authorization,
+and then publishes `assets.updated` with `resource: "mcp"` and the server's
+`name`. A turn begun while a server is still on that start waits for it before
+its first request, at most the server's start limit (see `timeoutMs` below),
+so a script's first message is offered the tools a later one would be; Stop
+ends the wait, and a turn begun once those starts ended never waits. A
+request to such a server (its tools, a tool call, a resource or prompt
+request) waits for it the same way. A server that failed holds up nothing: a
+reload tries it again in the background without making turns wait, and a
+reload while a server is still starting keeps that start.
 An edit that changes only agent definition files (markdown in an `agents` or
 `agent` folder) does not wait for active turns: once the files load, new
 turns use the new definitions and `assets.updated` (`resource: "agent"`) is

@@ -8779,6 +8779,17 @@ impl RunnerTask {
                     }
                 }
             }
+            // Haarness answers before its MCP servers have started: a turn
+            // begun while one is still on its first start waits for it, so
+            // it is offered the tools (and the prompt prefix) a turn begun a
+            // moment later would be. Stop ends the wait.
+            if let Some(starting) = self.tools.starting() {
+                tokio::select! {
+                    biased;
+                    () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+                    () = starting => {}
+                }
+            }
             // A changed date or memory index and this prompt's hook context
             // reach the model in a hidden message stored with the turn, so the
             // system prompt and every earlier message stay byte-identical.

@@ -35,7 +35,7 @@ use fs2::FileExt as _;
 use haarness_core::{
     AgentRuntime, EventBus, McpRegistry, ProviderRegistry, SkillRegistry, ToolRegistry,
 };
-use haarness_mcp::NativeMcpRegistry;
+use haarness_mcp::{McpStart, NativeMcpRegistry};
 use haarness_protocol::{
     CreateThreadRequest, GoalActionRequest, GoalState, GoalStatus, ItemData, McpConfigureRequest,
     PTY_CAPABILITY, PermissionReply, PermissionReplyDecision, QuestionReply, RequestId,
@@ -7349,13 +7349,12 @@ impl HotReloadController {
             }
         }
         let providers: Arc<dyn ProviderRegistry> = Arc::new(registry);
-        let candidate_mcp = compose_mcp(
+        let (candidate_mcp, mcp_starts) = compose_mcp(
             &self.paths,
             &self.workspace,
             &sources.file_config,
             Some(&self.mcp),
-        )
-        .await;
+        );
         let candidate_skills = FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone());
         let disabled_skills =
             capability_state::disabled(&self.paths, &self.workspace, self.trust, "skill")?;
@@ -7403,6 +7402,11 @@ impl HotReloadController {
             &self.workspace,
             self.trust,
         ));
+        let memory_context = self.management.memory_index()?;
+        // New and changed servers start now, in the background: the
+        // generation applies without waiting for them, and turns begun
+        // before they end wait for them.
+        spawn_mcp_starts(mcp_starts, self.runtime.events().clone());
         Ok(HotReloadCandidate {
             disabled_skills,
             providers,
@@ -7416,7 +7420,7 @@ impl HotReloadController {
             mcp: candidate_mcp,
             lsp: sources.file_config.lsp.unwrap_or_default(),
             formatter: sources.file_config.formatter.unwrap_or_default(),
-            memory_context: self.management.memory_index()?,
+            memory_context,
             watch: ReloadWatch::from_layers(&sources.json_layers),
             notices,
         })
@@ -8095,7 +8099,10 @@ async fn application_at(
         .with_stream_limits(&stream_limits(&file_config)),
     );
     let provider_definitions = provider_fingerprints(&file_config, &auth, providers.as_ref());
-    let mcp = mcp_from_config(paths, workspace, &file_config).await;
+    // Its servers start once the runtime can announce them, in the
+    // background: one slow to start (a first `npx -y` download) must not
+    // keep this server from answering.
+    let (mcp, mcp_starts) = compose_mcp(paths, workspace, &file_config, None);
     let skills = Arc::new(FilesystemSkillRegistry::new_scoped(skill_roots));
     skills.set_disabled(capability_state::disabled(
         paths, workspace, trust, "skill",
@@ -8234,6 +8241,7 @@ async fn application_at(
         ))?;
     }
     let runtime = Arc::new(runtime);
+    spawn_mcp_starts(mcp_starts, runtime.events().clone());
     // A list still loading after a few seconds keeps loading while the server
     // starts answering; clients hear when it is in (`assets.updated`).
     haarness_server::models::catalog(
@@ -8322,62 +8330,99 @@ async fn configured_mcp(
     Ok(mcp_from_config(paths, workspace, &load_config(paths, workspace, trust)?).await)
 }
 
-/// Servers connecting at once while an MCP generation is composed. Each may
-/// take its whole connection timeout, so hung servers must not queue the
-/// rest behind them one timeout at a time.
+/// Servers connecting at once while an MCP generation starts. Each may take
+/// its whole start limit, so hung servers must not queue the rest behind
+/// them one limit at a time.
 const MCP_CONNECT_CONCURRENCY: usize = 16;
 
+/// The MCP registry of a one-shot composition (a marketplace command), its
+/// servers started before it is used.
 async fn mcp_from_config(
     paths: &Paths,
     workspace: &Path,
     config: &FileConfig,
 ) -> Arc<NativeMcpRegistry> {
-    compose_mcp(paths, workspace, config, None).await
+    let (registry, starts) = compose_mcp(paths, workspace, config, None);
+    start_mcp(starts, |_| {}).await;
+    registry
 }
 
-/// Compose an MCP generation from configuration. A hot reload passes the
+/// Compose an MCP generation from configuration, its enabled servers left
+/// connecting beside the starts that connect them. A hot reload passes the
 /// `live` registry so servers whose configuration is unchanged keep their
-/// connection instead of respawning.
-async fn compose_mcp(
+/// connection, or the start they are on, instead of respawning.
+fn compose_mcp(
     paths: &Paths,
     workspace: &Path,
     config: &FileConfig,
     live: Option<&NativeMcpRegistry>,
-) -> Arc<NativeMcpRegistry> {
-    use futures::StreamExt as _;
+) -> (Arc<NativeMcpRegistry>, Vec<McpStart>) {
     let registry = Arc::new(
         NativeMcpRegistry::with_auth_dir(paths.data.join("mcp-oauth")).in_folder(workspace),
     );
-    let servers = config
-        .mcp
-        .iter()
-        .map(|(name, server)| (name.clone(), server.clone()))
-        .collect::<Vec<_>>();
-    let results = futures::stream::iter(servers)
-        .map(|(name, server)| {
-            let registry = registry.clone();
-            let live = live.cloned();
-            async move {
-                let result = match live {
-                    Some(live) => registry.configure_reusing(&live, &name, server).await,
-                    None => registry.configure(&name, server).await,
-                };
-                (name, result)
-            }
-        })
-        .buffered(MCP_CONNECT_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
-    for (name, result) in results {
-        if let Err(error) = result {
-            eprintln!("MCP {name}: {error}");
+    let mut starts = Vec::new();
+    for (name, server) in &config.mcp {
+        let prepared = match live {
+            Some(live) => registry.prepare_reusing(live, name, server.clone()),
+            None => registry.prepare(name, server.clone()),
+        };
+        match prepared {
+            Ok((_, start)) => starts.extend(start),
+            Err(error) => eprintln!("MCP {name}: {error}"),
         }
     }
     // Clients tag the system folder's servers, which Haarness never changes.
     for name in &config.base_mcp {
         registry.set_scope(name, Some("system".into()));
     }
-    registry
+    (registry, starts)
+}
+
+/// Run `starts`, at most [`MCP_CONNECT_CONCURRENCY`] at once. `ended` hears
+/// of each server whose start ended, connected or not.
+async fn start_mcp(starts: Vec<McpStart>, ended: impl Fn(&str)) {
+    use futures::StreamExt as _;
+    futures::stream::iter(starts)
+        .map(|start| async move {
+            let name = start.name().to_owned();
+            (name, start.run().await)
+        })
+        .buffer_unordered(MCP_CONNECT_CONCURRENCY)
+        .for_each(|(name, result)| {
+            // A start overtaken by a reconnect, a disconnect or a newer
+            // configuration (a conflict) leaves reporting to that one.
+            if let Err(error) = result
+                && !matches!(error, haarness_core::CoreError::Conflict(_))
+            {
+                eprintln!("MCP {name}: {error}");
+            }
+            ended(&name);
+            futures::future::ready(())
+        })
+        .await;
+}
+
+/// Start an MCP generation's servers in the background, so the server
+/// answers meanwhile; turns begun before they end wait for them (see
+/// `McpRegistry::starting`). Each server whose start ended is announced
+/// (`assets.updated`, `resource: "mcp"`), for clients to read its status and
+/// tools again.
+fn spawn_mcp_starts(starts: Vec<McpStart>, events: haarness_core::EventBus) {
+    if starts.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        start_mcp(starts, |name| {
+            events.publish(
+                "assets.updated",
+                None,
+                None,
+                None,
+                json!({"resource": "mcp", "action": "start", "name": name}),
+            );
+        })
+        .await;
+    });
 }
 
 async fn auth_command(
