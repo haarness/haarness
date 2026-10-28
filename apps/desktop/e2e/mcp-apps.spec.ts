@@ -349,13 +349,14 @@ test("the page cannot call tools, read other resources, reach undeclared hosts o
   expect(errors).toEqual([]);
 });
 
-test("the page runs WebAssembly in a worker it starts from a blob: URL, and eval stays refused", async () => {
+test("the page runs WebAssembly in a worker it starts from a blob: URL, where eval and undeclared hosts stay refused", async () => {
   const view = await show('{"city":"Sintra"}');
   const frame = content(view);
   await steady(view);
   await frame.getByRole("button", { name: "Add in a worker" }).click();
-  // The worker fetched the module from the page's own blob: URL, compiled and ran it.
-  await expect(frame.locator("#status")).toHaveText("wasm 42, eval refused");
+  // The worker fetched the module from the page's own blob: URL, compiled and ran it; it reached
+  // no further than the page may.
+  await expect(frame.locator("#status")).toHaveText("wasm 42, eval refused, undeclared host refused");
   const declared = await frame.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute("content");
   expect(declared).toContain("'wasm-unsafe-eval'");
   expect(declared).toContain("worker-src blob:");
