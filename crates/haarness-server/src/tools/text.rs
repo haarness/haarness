@@ -348,7 +348,7 @@ impl GrepStop {
 /// not searched (as before files were read a line at a time); a secret-named
 /// or denied file is counted, not read. Stop ends it between any two reads.
 /// Inside `chat_home` no ignore file above the chat's own folder
-/// (`workspace`) is read; see [`ChatFolderIgnores`].
+/// (`workspace`) is read; see [`grep_files`].
 pub(super) fn grep_walk(
     regex: &regex::Regex,
     root: &Path,
@@ -362,19 +362,7 @@ pub(super) fn grep_walk(
         skipped: super::Skipped::default(),
         stopped: None,
     };
-    let alone = super::within_chat_home(root, chat_home);
-    let mut builder = ignore::WalkBuilder::new(root);
-    builder.standard_filters(true).parents(!alone);
-    if let Some(above) = alone
-        .then(|| ChatFolderIgnores::between(workspace, root))
-        .flatten()
-    {
-        let walked = root.to_path_buf();
-        builder.filter_entry(move |entry| !above.leave_out(&walked, entry));
-    }
-    let walk = builder
-        .build()
-        .filter_map(Result::ok)
+    let walk = grep_files(root, workspace, chat_home)
         .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()));
     for (files, entry) in walk.enumerate() {
         if cancel.is_cancelled() {
@@ -462,13 +450,84 @@ pub(super) fn grep_walk(
     Ok(found)
 }
 
+/// What `grep` walks under `root`, in walk order. Outside the chat home,
+/// `root` and the ignore files of every folder above it, as ripgrep reads
+/// them. In the chat home nothing above the chat's own folder (`workspace`)
+/// counts: a subfolder of it is walked from the chat's folder, keeping only
+/// the way down to the subfolder and what is in it, so every ignore file on
+/// the way is weighed as ripgrep weighs it there (a `!` line below, a
+/// repository nested in the subfolder, a worktree's excludes). Only when
+/// that way is itself left out (a subfolder named although ignored, which
+/// ripgrep searches all the same) is the subfolder walked on its own, with
+/// [`ChatFolderIgnores`] for the folders above it.
+fn grep_files(
+    root: &Path,
+    workspace: &Path,
+    chat_home: Option<&Path>,
+) -> Box<dyn Iterator<Item = ignore::DirEntry>> {
+    let walk = |start: &Path, parents: bool| {
+        let mut builder = ignore::WalkBuilder::new(start);
+        builder.standard_filters(true).parents(parents);
+        builder
+    };
+    if !super::within_chat_home(root, chat_home) {
+        return Box::new(walk(root, true).build().filter_map(Result::ok));
+    }
+    let Some(chat) = root
+        .is_dir()
+        .then(|| chat_folder_above(root, workspace))
+        .flatten()
+    else {
+        return Box::new(walk(root, false).build().filter_map(Result::ok));
+    };
+    let reached = std::rc::Rc::new(std::cell::Cell::new(false));
+    let way = root.to_path_buf();
+    let down = walk(&chat, false)
+        .filter_entry(move |entry| way.starts_with(entry.path()) || entry.path().starts_with(&way))
+        .build()
+        .filter_map(Result::ok);
+    let seen = std::rc::Rc::clone(&reached);
+    let target = root.to_path_buf();
+    let down = down.inspect(move |entry| {
+        if entry.path() == target {
+            seen.set(true);
+        }
+    });
+    let root = root.to_path_buf();
+    let workspace = workspace.to_path_buf();
+    let alone = std::iter::once(()).flat_map(move |()| {
+        (!reached.get())
+            .then(|| {
+                let mut builder = walk(&root, false);
+                if let Some(above) = ChatFolderIgnores::between(&workspace, &root) {
+                    let walked = root.clone();
+                    builder.filter_entry(move |entry| !above.leave_out(&walked, entry));
+                }
+                builder.build().filter_map(Result::ok)
+            })
+            .into_iter()
+            .flatten()
+    });
+    Box::new(down.chain(alone))
+}
+
+/// The folder among `root`'s parents that is the chat's own folder `chat`,
+/// written as `root` writes it.
+fn chat_folder_above(root: &Path, chat: &Path) -> Option<std::path::PathBuf> {
+    let chat = chat.canonicalize().ok()?;
+    root.ancestors()
+        .skip(1)
+        .find(|folder| folder.canonicalize().is_ok_and(|folder| folder == chat))
+        .map(Path::to_path_buf)
+}
+
 /// In the chat home, the ignore files of the folders from a chat's own
-/// folder down to a subfolder it searches, which a walk of that subfolder
-/// reads as its parents do in a project: their `.ignore` files always, and
-/// their `.gitignore` and Git excludes when a repository holds them (up to
-/// the nearest repository's own folder), as a walk of the chat's folder
-/// itself reads them. The searched folder's own ignore files and those below
-/// it are the walk's; no folder above the chat's own counts.
+/// folder down to a subfolder it names although they leave the subfolder
+/// out (see [`grep_files`]), read as a walk reads its parents': their
+/// `.ignore` files always, and their `.gitignore` and Git excludes when a
+/// repository holds them (up to the nearest repository's own folder). The
+/// subfolder's own ignore files and those below it are the walk's; no
+/// folder above the chat's own counts.
 struct ChatFolderIgnores {
     /// The searched folder, canonical: walked paths are matched under it.
     root: std::path::PathBuf,
@@ -669,6 +728,7 @@ mod tests {
     /// (a folder named there is searched whatever they say, as ripgrep
     /// does). A folder that is not in the chat home reads the ignore files
     /// above it, as ripgrep does.
+    #[cfg(unix)]
     #[test]
     fn grep_in_the_chat_home_reads_no_ignore_file_above_it() {
         let root = grep_fixture(&[(".gitignore", b"*\n")]);
@@ -716,6 +776,7 @@ mod tests {
     /// A chat's folder in a chat home no repository holds: a search of a
     /// subfolder leaves out what the chat's `.ignore` leaves out; its
     /// `.gitignore` counts once the folder is a repository.
+    #[cfg(unix)]
     #[test]
     fn a_subfolder_search_in_the_chat_home_keeps_the_chat_s_ignore_files() {
         let root = grep_fixture(&[]);
@@ -731,6 +792,45 @@ mod tests {
         assert_eq!(search(), ["sub/b.txt:1:needle", "sub/build/c.txt:1:needle"]);
         std::fs::create_dir(chat.join(".git")).unwrap();
         assert_eq!(search(), ["sub/b.txt:1:needle"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A chat's folder that is a Git repository: a search of a subfolder
+    /// finds what ripgrep finds there with the chat's folder outermost, as
+    /// a search of the whole folder does. A `!` line in the subfolder takes
+    /// a file back from the chat's `.gitignore`, the repository's excludes
+    /// count, and a repository nested below reads none of the chat's lines.
+    #[cfg(unix)]
+    #[test]
+    fn a_subfolder_search_in_the_chat_home_weighs_ignore_files_as_ripgrep_does() {
+        let root = grep_fixture(&[]);
+        let home = root.join("Chat folders");
+        let chat = home.join("2026-10-28/chat-1a2b");
+        std::fs::create_dir_all(chat.join(".git/info")).unwrap();
+        std::fs::create_dir_all(chat.join("sub/lib/.git")).unwrap();
+        std::fs::write(chat.join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(chat.join(".git/info/exclude"), "*.tmp\n").unwrap();
+        std::fs::write(chat.join("sub/.gitignore"), "!keep.log\n").unwrap();
+        for file in [
+            "sub/keep.log",
+            "sub/drop.log",
+            "sub/ok.txt",
+            "sub/a.tmp",
+            "sub/lib/x.log",
+        ] {
+            std::fs::write(chat.join(file), "needle\n").unwrap();
+        }
+        let found = [
+            "sub/keep.log:1:needle",
+            "sub/lib/x.log:1:needle",
+            "sub/ok.txt:1:needle",
+        ];
+        assert_eq!(chat_grep(&chat.join("sub"), &chat, Some(&home)), found);
+        assert_eq!(chat_grep(&chat, &chat, Some(&home)), found);
+        assert_eq!(
+            chat_grep(&chat.join("sub/lib"), &chat, Some(&home)),
+            ["sub/lib/x.log:1:needle"]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
