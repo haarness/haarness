@@ -4,9 +4,10 @@
 A command's colour, cursor and window title sequences show as their text in its output, and none of
 them reaches the terminal: the pane's title stays the TUI's and no red is drawn. A command holding a
 right-to-left override, a zero-width space and a carriage return shows them as codes on its approval
-card, in the muted colour, and on its row, in English and in Arabic, and denying it runs nothing. Pane captures, with
-their colours, go to TOOL_TEXT_EVIDENCE; TOOL_TEXT_THEME=light or dark draws them in that variant of
-the editorial theme.
+card, in the muted colour, and on its row, in English and in Arabic, and denying it runs nothing. An
+edit whose new line holds a direction override and isolates shows them as codes in its change.
+Pane captures, with their colours, go to TOOL_TEXT_EVIDENCE; TOOL_TEXT_THEME=light or dark draws
+them in that variant of the editorial theme.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-tool-text-tmux.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -33,6 +34,7 @@ SESSION = "text"
 COLOURED = "printf '\\033]0;window-title-proof\\007\\033[31mred\\033[0m plain\\n'"
 HIDDEN = "echo report\u202efdp.sh\u200b && printf done\r\nprintf more > ran.txt"
 CODES = ("\\u{202E}", "\\u{200B}", "\\u{D}")
+TURNED = 'if (role != "user\u202e \u2066// admin\u2069 \u2066") {'
 
 root = Path(tempfile.mkdtemp(prefix="haarness-tool-text-", dir=os.environ.get("HAARNESS_E2E_DIR"))).resolve()
 evidence = Path(os.environ.get("TOOL_TEXT_EVIDENCE", root / "evidence"))
@@ -41,8 +43,10 @@ project = root / "project"
 (project / ".haarness").mkdir(parents=True)
 # Every command asks, in Review (chats otherwise start in Auto), so the card shows.
 (project / ".haarness/config.toml").write_text(
-    '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n'
+    '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\nedit="ask"\n'
 )
+ORIGINAL = 'if (role != "user") {\n  allow();\n}\n'
+(project / "access.js").write_text(ORIGINAL)
 env = clean_env()
 env.update(
     HAARNESS_HOME=str(root / "home"),
@@ -182,6 +186,21 @@ try:
         assert not (project / "ran.txt").exists(), "the denied command ran"
         check(f"an approval shows a direction override, a zero-width space and a carriage return as quiet codes ({language})")
     command("language", "en")
+
+    # An edit whose new line turns its own direction around.
+    paste("!tool edit " + json.dumps({"path": "access.js", "old": 'if (role != "user") {', "new": TURNED}))
+    keys("Enter")
+    until(lambda: "+ if (role" in pane(), "the edit's card did not show")
+    shown = pane()
+    assert '+ if (role != "user\\u{202E} \\u{2066}// admin\\u{2069} \\u{2066}") {' in shown, shown
+    assert not re.search("[\u202a-\u202e\u2066-\u2069]", shown), f"a direction control reached the terminal:\n{shown}"
+    line = next(line for line in coloured().splitlines() if "+ if (role" in line)
+    assert colour_of(line, "\\u{202E}") != colour_of(line, "+ if (role"), f"the code is not quieter: {line!r}"
+    screen("approval-edit")
+    keys("n")
+    until(lambda: "+ if (role" not in pane(), "the denial did not close the edit's card")
+    assert (project / "access.js").read_text() == ORIGINAL, "the denied edit changed the file"
+    check("an edit's card shows a direction override and isolates in its changed line as quiet codes")
     print(f"PASS {len(checks)} tool text scenarios in the TUI.", flush=True)
 finally:
     subprocess.run(["tmux", "-L", SOCKET, "kill-server"], capture_output=True)

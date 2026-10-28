@@ -6,10 +6,11 @@ import { join, resolve } from "node:path";
 import { stopChatHome } from "./fixtures/chat-home";
 import { isolatedEnv } from "./fixtures/isolated-env";
 
-// What a command or a server writes, as a person reads it: a row shows the
-// text of a command's colours and window title, not their escape sequences,
-// and an approval shows what is invisible in a command as quiet codes, in an
-// RTL language too. Pictures are kept in HAARNESS_SCREENSHOTS when it is set.
+// What a command or a server writes, as someone reading the chat sees it: a
+// row shows the text of a command's colours and window title, not their
+// escape sequences, and an approval shows what is invisible in a command as
+// quiet codes, in an RTL language too, and in the lines an edit changes.
+// Pictures are kept in HAARNESS_SCREENSHOTS when it is set.
 let app: ElectronApplication, page: Page, root: string, project: string;
 let env: Record<string, string>;
 const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
@@ -58,8 +59,9 @@ test.beforeAll(async () => {
   // Chats start in Auto; these approvals wait for a person, so the project asks for Review.
   await writeFile(
     join(project, ".haarness/config.toml"),
-    '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\n',
+    '[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[permissions]\nbash="ask"\nedit="ask"\n',
   );
+  await writeFile(join(project, "access.js"), 'if (role != "user") {\n  allow();\n}\n');
   if (shots) await mkdir(shots, { recursive: true });
   env = isolatedEnv();
   Object.assign(env, {
@@ -172,5 +174,26 @@ test("an approval shows what is invisible in a command as quiet codes, right to 
   const items = await api("listItems", thread.id);
   const call = items.filter((item: any) => item.data.type === "tool_call").at(-1);
   expect(call.data.arguments.command).toBe(command);
+  expect(errors).toEqual([]);
+});
+
+test("an edit's card shows what turns a changed line around as a quiet code, and the file's own text as written", async () => {
+  const line = 'if (role != "user\u202e \u2066// admin\u2069 \u2066") {';
+  await send(
+    "!tool edit " +
+      JSON.stringify({ path: "access.js", old: 'if (role != "user") {', new: line + '\n  const greeting = "مرحبا\u200f";' }),
+  );
+  const card = page.locator(".prompt-dock.approval");
+  const changes = card.locator(".approval-changes");
+  await expect(changes).toContainText('if (role != "user\\u{202E} \\u{2066}// admin\\u{2069} \\u{2066}") {');
+  await expect(changes.locator(".literal-code")).toHaveText(["\\u{202E}", "\\u{2066}", "\\u{2069}", "\\u{2066}"]);
+  // Right-to-left text and its mark belong to the file: no code there.
+  await expect(changes).toContainText('const greeting = "مرحبا\u200f";');
+  expect(await changes.textContent()).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/);
+  expect(await quietness(changes.locator(".diff-line.add").first())).toEqual({ quieter: true });
+  await pictures("approval-edit", card);
+  await page.getByRole("button", { name: "Deny", exact: true }).click();
+  await idle();
+  expect(await readFile(join(project, "access.js"), "utf8")).toBe('if (role != "user") {\n  allow();\n}\n');
   expect(errors).toEqual([]);
 });

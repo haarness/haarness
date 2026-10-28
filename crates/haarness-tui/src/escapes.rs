@@ -218,10 +218,18 @@ const FLAG_TAGS: [&str; 3] = [
     "\u{e0067}\u{e0062}\u{e0077}\u{e006c}\u{e0073}\u{e007f}",
 ];
 
-/// `text` with each character [`shows_as_code`] names handed to `code`,
-/// which writes it; the rest is kept as it is.
-fn with_codes(text: &str, code: impl Fn(&mut String, char)) -> String {
-    if !text.chars().any(shows_as_code) {
+/// Whether `character` overrides or isolates the direction of the text
+/// after it (U+202A–U+202E, U+2066–U+2069). In the lines of a file an edit
+/// changes, only these are codes: they can make a changed line read as
+/// something it is not, while marks and joiners there belong to the text.
+fn turns_direction(character: char) -> bool {
+    matches!(character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// `text` with each character `is_code` names handed to `code`, which
+/// writes it; the rest is kept as it is.
+fn with_codes(text: &str, is_code: fn(char) -> bool, code: impl Fn(&mut String, char)) -> String {
+    if !text.chars().any(is_code) {
         return text.to_owned();
     }
     let mut shown = String::with_capacity(text.len() + 16);
@@ -234,7 +242,7 @@ fn with_codes(text: &str, code: impl Fn(&mut String, char)) -> String {
             shown.push(character);
             shown.push_str(tags);
             rest = &rest[tags.len()..];
-        } else if shows_as_code(character) {
+        } else if is_code(character) {
             code(&mut shown, character);
         } else {
             shown.push(character);
@@ -253,7 +261,7 @@ fn push_code(shown: &mut String, character: char) {
 /// for a line of plain text such as the status band's.
 #[must_use]
 pub(crate) fn literal(text: &str) -> String {
-    with_codes(text, push_code)
+    with_codes(text, shows_as_code, push_code)
 }
 
 /// Opens and closes a code in [`marked`] text. Both are format characters,
@@ -262,15 +270,25 @@ pub(crate) fn literal(text: &str) -> String {
 const CODE_START: char = '\u{2061}';
 const CODE_END: char = '\u{2062}';
 
-/// [`literal`] with each code between two markers, so the rows it wraps to
-/// can draw the codes quieter than the text around them ([`marked_spans`]).
+/// [`literal`] with each code between two markers, so every row the text
+/// wraps onto can draw the codes quieter than the text around them
+/// ([`marked_spans`]).
 #[must_use]
 pub(crate) fn marked(text: &str) -> String {
-    with_codes(text, |shown, character| {
-        shown.push(CODE_START);
-        push_code(shown, character);
-        shown.push(CODE_END);
-    })
+    with_codes(text, shows_as_code, push_marked)
+}
+
+/// [`marked`] for the lines of a file an edit changes: only what
+/// [`turns_direction`] names is a code there.
+#[must_use]
+pub(crate) fn marked_directions(text: &str) -> String {
+    with_codes(text, turns_direction, push_marked)
+}
+
+fn push_marked(shown: &mut String, character: char) {
+    shown.push(CODE_START);
+    push_code(shown, character);
+    shown.push(CODE_END);
 }
 
 /// Whether a code is still open at the end of `row`, a row of [`marked`]
@@ -423,6 +441,20 @@ mod tests {
         assert_eq!(literal("a\u{2029}b\u{ad}c"), "a\\u{2029}b\\u{AD}c");
         // Tags that spell no flag, or more than one, show.
         assert_eq!(literal("🏴\u{e0061}\u{e007f}"), "🏴\\u{E0061}\\u{E007F}");
+    }
+
+    /// In an edit's lines only direction overrides and isolates are codes;
+    /// right-to-left text and its marks read as written.
+    #[test]
+    fn an_edit_shows_only_what_turns_the_direction() {
+        let line = "if (role != \"user\u{202e} \u{2066}// admin\u{2069} \u{2066}\") {";
+        assert_eq!(
+            marked_directions(line).replace([CODE_START, CODE_END], ""),
+            "if (role != \"user\\u{202E} \\u{2066}// admin\\u{2069} \\u{2066}\") {"
+        );
+        for text in ["مرحبا\u{200f} بالعالم", "a\u{200b}b\tc", "שלום"] {
+            assert_eq!(marked_directions(text), text);
+        }
     }
 
     #[test]

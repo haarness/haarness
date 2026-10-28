@@ -3916,7 +3916,7 @@ function Permission(props: {
         <div class="approval-changes">
           <For each={changes()}>
             {(change) => (
-              <ChangePreview change={change} showPath={changes().length > 1} />
+              <ChangePreview change={change} showPath={changes().length > 1} directions />
             )}
           </For>
         </div>

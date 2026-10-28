@@ -195,12 +195,25 @@ const FLAG_TAGS = [
 /** A character as a code a reader can see: `\u{1B}`. */
 const codeOf = (code: number) => `\\u{${code.toString(16).toUpperCase()}}`;
 
-/** `text` cut into what shows as written and the codes `showsAsCode` names,
- * for a card that draws the codes quieter than the text around them. */
-export function literalParts(text: string): { text: string; code: boolean }[] {
+/**
+ * Whether the character at `code` overrides or isolates the direction of
+ * the text after it (U+202A–U+202E, U+2066–U+2069). In the lines of a file
+ * an edit changes, only these are codes: they can make a changed line read
+ * as something it is not, while marks and joiners there belong to the text.
+ */
+export const turnsDirection = (code: number) =>
+  (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069);
+
+/** `text` cut into what shows as written and the codes `shows` names
+ * (`showsAsCode` unless said), for a card that draws the codes quieter than
+ * the text around them. */
+export function literalParts(
+  text: string,
+  shows: (code: number) => boolean = showsAsCode,
+): { text: string; code: boolean }[] {
   let any = false;
   for (const character of text)
-    if (showsAsCode(character.codePointAt(0)!)) {
+    if (shows(character.codePointAt(0)!)) {
       any = true;
       break;
     }
@@ -215,7 +228,7 @@ export function literalParts(text: string): { text: string; code: boolean }[] {
     if (tags) {
       run += character + tags;
       index += tags.length;
-    } else if (!showsAsCode(code)) run += character;
+    } else if (!shows(code)) run += character;
     else {
       if (run) parts.push({ text: run, code: false });
       run = "";

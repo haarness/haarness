@@ -27,6 +27,7 @@ import { Icon } from "./ui";
 import { requestReview } from "./Review";
 import { Shimmer } from "./Shimmer";
 import { Literal } from "./Literal";
+import { turnsDirection } from "./display-text";
 import { useApp } from "./state";
 import { appsOff, loadMcpServers, mcpServersKnown, readOnlyServer, setApps } from "./mcp-servers";
 import { markSelection, selectedByClick, type SelectionMark } from "./selection-click";
@@ -457,6 +458,9 @@ export function ChangePreview(props: {
   showPath?: boolean;
   /** Opens the change's file in Review. */
   review?: () => void;
+  /** On an approval card: a direction override or isolate in a line reads
+   * as a quiet code, so the change cannot read as something it is not. */
+  directions?: boolean;
 }) {
   const rows = createMemo(() => changeRows(props.change));
   const shown = () => rows().slice(0, CHANGE_PREVIEW_LINES);
@@ -475,7 +479,11 @@ export function ChangePreview(props: {
               <span class="diff-sign">
                 {row.kind === "add" ? "+" : row.kind === "remove" ? "−" : " "}
               </span>
-              <code>{row.text || " "}</code>
+              <code>
+                <Show when={props.directions} fallback={row.text || " "}>
+                  <Literal text={row.text || " "} shows={turnsDirection} />
+                </Show>
+              </code>
             </div>
           )}
         </For>

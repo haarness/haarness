@@ -272,6 +272,53 @@ async fn an_ordinary_command_reads_on_its_card_as_written() {
     );
 }
 
+/// An edit's changed lines show a direction override or isolate as a muted
+/// code, so a reordered line cannot read innocently on its card; the
+/// file's right-to-left text and its marks read as written.
+#[tokio::test]
+async fn an_edit_on_its_card_shows_what_turns_a_line_around() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let new = "if (role != \"user\u{202e} \u{2066}// admin\u{2069} \u{2066}\") {\nlet greeting = \"مرحبا\u{200f}\";\n";
+    let event = fixture_event(
+        "permission.requested",
+        thread.id,
+        thread.id,
+        serde_json::json!({
+            "permissionId": "perm-edit",
+            "permission": "edit",
+            "operation": "edit:src/access.js",
+            "patterns": ["src/access.js"],
+            "alwaysPatterns": ["edit:src/*"],
+            "detail": {"path": "src/access.js", "old": "if (role != \"user\") {\n", "new": new},
+        }),
+    );
+    app.reduce(event, &offline_client()).await.unwrap();
+    let card = crate::view::approval::approval_lines(&app, 100, 30).lines;
+    let card_text: String = card.iter().map(|line| line_text(line) + "\n").collect();
+    assert!(
+        card_text
+            .contains("+ if (role != \"user\\u{202E} \\u{2066}// admin\\u{2069} \\u{2066}\") {"),
+        "{card_text}"
+    );
+    assert!(
+        card_text.contains("+ let greeting = \"مرحبا\u{200f}\";"),
+        "{card_text}"
+    );
+    assert!(
+        !card_text.contains(['\u{202e}', '\u{2066}', '\u{2069}', '\u{2061}', '\u{2062}']),
+        "{card_text:?}"
+    );
+    let spans: Vec<_> = card.iter().flat_map(|line| &line.spans).collect();
+    assert!(
+        spans
+            .iter()
+            .filter(|span| span.text.contains("\\u{"))
+            .all(|span| span.text.starts_with("\\u{") && span.fg == app.theme.muted),
+        "{spans:#?}"
+    );
+}
+
 /// A patch's row names its file with what would not show as a code, as
 /// the other rows do.
 #[test]

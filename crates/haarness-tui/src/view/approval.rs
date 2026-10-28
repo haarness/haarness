@@ -17,7 +17,7 @@ use haarness_opentui::{Line, Span, attr};
 use haarness_protocol::{PendingPermissionInfo, PermissionScript, ScriptWithheld};
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::escapes::{code_open_after, literal, marked, marked_spans};
+use crate::escapes::{code_open_after, literal, marked, marked_directions, marked_spans};
 use crate::locale::Language;
 use crate::state::{App, PermissionChoice, SubjectFit};
 use crate::theme::Theme;
@@ -1102,17 +1102,10 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
             };
             let row = format!("{marker} {text}");
             let pad = inner.saturating_sub(row.width());
-            push_row(
-                &mut panel,
-                vec![
-                    Span::new("  ", theme.text).on(theme.overlay),
-                    Span::new(row, fg).on(bg),
-                    Span::new(" ".repeat(pad), fg).on(bg),
-                ],
-                width,
-                theme,
-                focused,
-            );
+            let mut spans = vec![Span::new("  ", theme.text).on(theme.overlay)];
+            spans.extend(marked_spans(&row, fg, theme.muted, bg, &mut false));
+            spans.push(Span::new(" ".repeat(pad), fg).on(bg));
+            push_row(&mut panel, spans, width, theme, focused);
         }
         if hidden > 0 {
             push_row(
@@ -1187,7 +1180,10 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
 fn change_preview(pending: &PendingPermissionInfo, width: usize) -> Vec<(char, String)> {
     let detail = &pending.detail;
     let text = |key: &str| detail.get(key).and_then(serde_json::Value::as_str);
-    let clip = |line: &str| single_line(line.trim_end(), width.saturating_sub(2));
+    // A direction override or isolate in a changed line is a code, so the
+    // line cannot read as something it is not; the rest is the file's text.
+    let clip =
+        |line: &str| single_line(&marked_directions(line.trim_end()), width.saturating_sub(2));
     if let (Some(old), Some(new)) = (text("old"), text("new")) {
         let diff = similar::TextDiff::from_lines(old, new);
         return diff
