@@ -219,6 +219,7 @@ impl ApiEndpoint {
 }
 
 #[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)] // independent settings of one client, not a state machine
 pub struct ApiClient {
     endpoint: Arc<RwLock<ApiEndpoint>>,
     endpoint_resolver: Option<EndpointResolver>,
@@ -228,6 +229,9 @@ pub struct ApiClient {
     /// `haarness --yolo`: approve this client's own requests, never the
     /// server's (see [`ApiClient::with_auto_approve`]).
     auto_approve: bool,
+    /// A person is at this client and can stop what it starts (see
+    /// [`ApiClient::attended`]).
+    attended: bool,
     pty_events: tokio::sync::broadcast::Sender<PtyClientEvent>,
     pty_connections: Arc<Mutex<HashMap<PtyId, PtyClientConnection>>>,
     /// Silence after which a connection counts as lost (see [`STREAM_IDLE`]).
@@ -263,8 +267,9 @@ pub enum PtyClientEvent {
 pub enum SubscriptionEvent {
     Event(Box<EventEnvelope>),
     /// The replay cursor fell outside the server buffer or the server process
-    /// changed. Callers must replace authoritative REST-backed state.
-    ResyncRequired,
+    /// changed. Callers must replace authoritative REST-backed state. It
+    /// carries the new server's info when the change was found by reading it.
+    ResyncRequired(Option<Box<haarness_protocol::ServerInfo>>),
     ConnectionLost {
         attempt: u32,
     },
@@ -297,7 +302,7 @@ fn parse_sse_frame(frame: &[u8]) -> Option<SubscriptionEvent> {
             .as_deref()
             == Some("resync_required")
     {
-        return Some(SubscriptionEvent::ResyncRequired);
+        return Some(SubscriptionEvent::ResyncRequired(None));
     }
     serde_json::from_str(&data)
         .ok()
@@ -377,6 +382,7 @@ impl ApiClient {
             upload_attachments: false,
             local_workspace_switching: false,
             auto_approve: false,
+            attended: false,
             pty_events,
             pty_connections: Arc::new(Mutex::new(HashMap::new())),
             stream_idle: STREAM_IDLE,
@@ -423,6 +429,16 @@ impl ApiClient {
     #[must_use]
     pub fn auto_approves(&self) -> bool {
         self.auto_approve
+    }
+
+    /// A person is at this client (the terminal UI, an editor over ACP) and
+    /// can stop the turns it starts: its messages and commands say so
+    /// (`attended`), and their `!` snippets then run without the shell
+    /// deadline. `haarness run` and other scripts leave it off.
+    #[must_use]
+    pub fn attended(mut self) -> Self {
+        self.attended = true;
+        self
     }
 
     /// Refresh a remote ticket without enabling local project switching.
@@ -1540,6 +1556,7 @@ impl ApiClient {
         let span = tracing::info_span!("haarness.client.turn", "otel.kind" = "client");
         async {
             request.auto_approve |= self.auto_approve;
+            request.attended |= self.attended;
             request.attachments = self.attachments(request.attachments).await?;
             Ok(self
                 .request(reqwest::Method::POST, &format!("/v1/threads/{id}/turns"))
@@ -1559,6 +1576,7 @@ impl ApiClient {
         id: haarness_protocol::ThreadId,
         mut request: ExecuteCommandRequest,
     ) -> Result<CommandExecutionResponse> {
+        request.attended |= self.attended;
         request.attachments = self.attachments(request.attachments).await?;
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/commands"))
@@ -1661,6 +1679,7 @@ impl ApiClient {
         id: haarness_protocol::ThreadId,
         mut request: haarness_protocol::QueueInputRequest,
     ) -> Result<haarness_protocol::QueueInputResponse> {
+        request.attended |= self.attended;
         request.attachments = self.attachments(request.attachments).await?;
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/input"))
@@ -1924,13 +1943,16 @@ impl ApiClient {
                     if expected_workspace.is_none() {
                         expected_workspace.clone_from(&info.workspace);
                     }
-                    if instance.is_some_and(|previous| previous != info.server_instance_id) {
+                    let restarted =
+                        instance.is_some_and(|previous| previous != info.server_instance_id);
+                    instance = Some(info.server_instance_id);
+                    if restarted {
                         cursor = None;
-                        if tx.send(SubscriptionEvent::ResyncRequired).await.is_err() {
+                        let resync = SubscriptionEvent::ResyncRequired(Some(Box::new(info)));
+                        if tx.send(resync).await.is_err() {
                             return;
                         }
                     }
-                    instance = Some(info.server_instance_id);
                 }
                 let endpoint = this.endpoint();
                 let mut request = endpoint
@@ -2052,7 +2074,10 @@ impl ApiClient {
                                         previous != event.server_instance_id
                                     }) {
                                         cursor = None;
-                                        if tx.send(SubscriptionEvent::ResyncRequired).await.is_err()
+                                        if tx
+                                            .send(SubscriptionEvent::ResyncRequired(None))
+                                            .await
+                                            .is_err()
                                         {
                                             return;
                                         }
@@ -2067,9 +2092,13 @@ impl ApiClient {
                                         return;
                                     }
                                 }
-                                SubscriptionEvent::ResyncRequired => {
+                                SubscriptionEvent::ResyncRequired(info) => {
                                     resynced = true;
-                                    if tx.send(SubscriptionEvent::ResyncRequired).await.is_err() {
+                                    if tx
+                                        .send(SubscriptionEvent::ResyncRequired(info))
+                                        .await
+                                        .is_err()
+                                    {
                                         return;
                                     }
                                 }
@@ -2641,6 +2670,7 @@ mod tests {
             default_provider: None,
             default_model: None,
             default_approval_mode: None,
+            default_reasoning_effort: None,
             default_agent: None,
             project_trusted: Some(true),
             pid: None,
@@ -2680,7 +2710,7 @@ mod tests {
     fn parses_resync_and_regular_sse_frames() {
         assert!(matches!(
             parse_sse_frame(b"event: resync_required\ndata: {\"type\":\"resync_required\"}\n\n"),
-            Some(SubscriptionEvent::ResyncRequired)
+            Some(SubscriptionEvent::ResyncRequired(None))
         ));
         let event = haarness_protocol::EventEnvelope {
             schema_version: haarness_protocol::SCHEMA_VERSION.into(),
@@ -2994,7 +3024,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
             {
-                SubscriptionEvent::ResyncRequired => resync = true,
+                SubscriptionEvent::ResyncRequired(_) => resync = true,
                 SubscriptionEvent::Reconnected => reconnected = true,
                 SubscriptionEvent::Event(event) if event.server_instance_id == new_instance => {
                     received_event = true;
@@ -3081,7 +3111,7 @@ mod tests {
         assert!(
             matches!(
                 seen.as_slice(),
-                [SubscriptionEvent::ResyncRequired, SubscriptionEvent::Event(event)] if event.event_id == 9
+                [SubscriptionEvent::ResyncRequired(_), SubscriptionEvent::Event(event)] if event.event_id == 9
             ),
             "no connection-lost notice between the resync and the next stream: {seen:?}"
         );
@@ -3133,7 +3163,7 @@ mod tests {
                     seen.push(format!("lost {attempt}"))
                 }
                 SubscriptionEvent::ServerRestarting => seen.push("restarting".into()),
-                SubscriptionEvent::ResyncRequired => seen.push("resync".into()),
+                SubscriptionEvent::ResyncRequired(_) => seen.push("resync".into()),
                 SubscriptionEvent::Reconnected => break,
                 SubscriptionEvent::Event(_) | SubscriptionEvent::ServerRestartFailed(_) => {}
             }
@@ -3539,18 +3569,20 @@ mod tests {
     async fn a_subscription_started_again_resyncs_first() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let info = serde_json::to_string(&fixture_server_info(uuid::Uuid::now_v7(), "/w")).unwrap();
+        let instance = uuid::Uuid::now_v7();
+        let info = serde_json::to_string(&fixture_server_info(instance, "/w")).unwrap();
         let server = tokio::spawn(serve_responses(
             listener,
             vec![response("application/json", &info)],
         ));
         let client = ApiClient::new(&format!("http://{address}"), "token").unwrap();
         let (mut events, task) = client.subscribe(Some((uuid::Uuid::nil(), 0)));
+        // With the info it read, so the TUI need not read it again.
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(5), events.recv())
                 .await
                 .unwrap(),
-            Some(SubscriptionEvent::ResyncRequired)
+            Some(SubscriptionEvent::ResyncRequired(Some(info))) if info.server_instance_id == instance
         ));
         task.abort();
         server.abort();
@@ -3597,7 +3629,7 @@ mod tests {
             );
         }
         assert!(
-            matches!(seen[0], SubscriptionEvent::ResyncRequired),
+            matches!(seen[0], SubscriptionEvent::ResyncRequired(_)),
             "{seen:?}"
         );
         task.abort();

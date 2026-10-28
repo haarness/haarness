@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use futures::stream;
 use haarness_core::{
-    AgentRuntime, CoreResult, EventBus, HookDecision, HookPort, LazyToolSettings, ModelProvider,
-    PermissionDecision, PermissionRule, ProviderEvent, ProviderMessage, ProviderRequest,
-    ProviderStream, RuntimeConfig, StaticProviderRegistry, Tool, ToolContext, ToolDefinition,
-    ToolOutput, ToolRegistry,
+    AgentRuntime, CoreResult, EventBus, HookCall, HookDecision, HookPort, LazyToolSettings,
+    ModelProvider, PermissionDecision, PermissionRule, ProviderEvent, ProviderMessage,
+    ProviderRequest, ProviderStream, RuntimeConfig, StaticProviderRegistry, Tool, ToolContext,
+    ToolDefinition, ToolOutput, ToolRegistry,
 };
 use haarness_protocol::{
     BtwRequest, CreateThreadRequest, LazyToolMode, ProviderInfo, RequestId, StartTurnRequest,
@@ -112,29 +112,29 @@ impl HookPort for Hooks {
         );
         Ok(())
     }
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         self.submits.fetch_add(1, Ordering::SeqCst);
         HookDecision {
             context: Some("Submit hook marker".into()),
             ..Default::default()
         }
     }
-    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
         HookDecision::default()
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -142,7 +142,7 @@ impl HookPort for Hooks {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: ThreadId) {}
+    async fn stop(&self, _: &HookCall) {}
 }
 struct HeldTool {
     entered: CancellationToken,
@@ -201,6 +201,7 @@ fn request() -> StartTurnRequest {
         reasoning_effort: None,
         tools: None,
         command: None,
+        ..Default::default()
     }
 }
 async fn done(runtime: &AgentRuntime, turn: haarness_protocol::TurnId) {
@@ -424,7 +425,7 @@ async fn cold_side_context_and_repeated_refusals_are_bounded_and_do_not_execute(
 struct StampHooks(AtomicUsize);
 #[async_trait]
 impl HookPort for StampHooks {
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision {
             context: Some(format!(
                 "Hook stamp {}",
@@ -433,22 +434,22 @@ impl HookPort for StampHooks {
             ..Default::default()
         }
     }
-    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
         HookDecision::default()
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -456,7 +457,7 @@ impl HookPort for StampHooks {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: ThreadId) {}
+    async fn stop(&self, _: &HookCall) {}
 }
 
 /// Every request must start with the previous one byte for byte (the system

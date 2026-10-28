@@ -99,6 +99,52 @@ pub fn nested(file: &Path, workspace: &Path, claude: bool) -> Vec<PathBuf> {
     out
 }
 
+/// The nested instruction files one turn's model can see: those attached to
+/// a `read` result still in its context. The turn sets it from the history
+/// each provider round sends and that round's reads add to it, so a file is
+/// attached once while it stays in view, and again after compaction or an
+/// undo removed the result that carried it.
+pub type InContext = std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<PathBuf>>>;
+
+/// The instruction files the tool results among `items` carried, also for a
+/// `read` inside a batch, keyed as `read` keys them: by the file each
+/// resolves to (`loadedResolved`), so an `AGENTS.md` that is a symlink or
+/// spelled in another case stays in view. A result stored before reads
+/// recorded that names them as `loaded` does. Nothing here touches the disk.
+#[must_use]
+pub fn attached<'a>(
+    items: impl IntoIterator<Item = &'a haarness_protocol::Item>,
+) -> std::collections::HashSet<PathBuf> {
+    let mut found = std::collections::HashSet::new();
+    let mut add = |metadata: &serde_json::Value| {
+        for path in metadata
+            .get("loadedResolved")
+            .or_else(|| metadata.get("loaded"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            found.insert(PathBuf::from(path));
+        }
+    };
+    for item in items {
+        let haarness_protocol::ItemData::ToolResult { metadata, .. } = &item.data else {
+            continue;
+        };
+        add(metadata);
+        for step in metadata
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            add(&step["metadata"]);
+        }
+    }
+    found
+}
+
 /// Wrap one instruction body for the system prompt or a tool result.
 #[must_use]
 pub fn segment(source: &str, content: &str) -> String {
@@ -300,9 +346,14 @@ pub type ImportFilter<'a> = &'a dyn Fn(&Path) -> Option<&'static str>;
 /// ≤ 20 files, 40 KiB per file, 200 KiB total). Imported bodies follow the
 /// line that referenced them. Targets outside the workspace are only
 /// followed when `trusted` (global configuration); references that do not
-/// name an existing file are left as written. A secret-named file (`.env`),
-/// or one `omit` refuses, is never read: an `[Instruction import omitted: …]`
-/// line takes its place, as nothing asks before instructions load.
+/// name an existing file are left as written. An import [`left_out`] keeps
+/// out is never read: an `[Instruction import omitted: …]` line takes its
+/// place, as nothing asks before instructions load. The file itself is
+/// judged too, where it really is (a link `AGENTS.md -> …/auth.json`), and
+/// only an `[Instruction file omitted: …]` line is returned for it then; a
+/// read rule that denies it counts only for a file outside the project
+/// that is not `trusted` (one a project's `instructions` names), so the
+/// project's and the person's own instruction files load as before.
 #[must_use]
 pub fn read_with_imports(
     path: &Path,
@@ -318,7 +369,72 @@ pub fn read_with_imports(
         trusted,
         omit,
     };
+    if let Some(reason) = file_left_out(path, workspace, trusted, omit) {
+        return Some(format!(
+            "[Instruction file omitted: {} ({reason})]\n",
+            path.display()
+        ));
+    }
     resolve(path, &scope, budget, 0)
+}
+
+/// Why [`read_with_imports`] leaves the instruction file itself out, if it
+/// does, for a notice to the person as well.
+#[must_use]
+pub fn file_left_out(
+    path: &Path,
+    workspace: &Path,
+    trusted: bool,
+    omit: ImportFilter<'_>,
+) -> Option<&'static str> {
+    let canonical = path.canonicalize().ok()?;
+    let root = workspace.canonicalize().ok();
+    let inside = root
+        .as_deref()
+        .is_some_and(|root| canonical.starts_with(root));
+    let rules: ImportFilter<'_> = if trusted || inside { &|_| None } else { omit };
+    left_out(&canonical, root.as_deref(), rules)
+}
+
+/// Why [`left_out`] leaves out a secret-named file.
+pub const SECRET_FILE: &str = "it is a secret file";
+
+/// Whether a file's name says it is a template of settings rather than the
+/// settings (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`).
+#[must_use]
+pub fn is_template(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy().to_ascii_lowercase();
+        [".example", ".sample", ".template", ".dist"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+    })
+}
+
+/// Why Haarness leaves a file out of a prompt it builds by itself (an
+/// instruction file, an `@` import in one, a file a skill or command names
+/// with `@`), if it does: a secret-named file (`.env`), a file where
+/// Haarness keeps sign-ins, or one `omit` refuses (a `read` rule that
+/// denies it). `canonical` is where the file really is, and `workspace` the
+/// project folder, also as it really is. Nothing asks before such a prompt
+/// is sent, so the file is left out with a note instead.
+#[must_use]
+pub fn left_out(
+    canonical: &Path,
+    workspace: Option<&Path>,
+    omit: ImportFilter<'_>,
+) -> Option<&'static str> {
+    let relative = workspace
+        .and_then(|workspace| canonical.strip_prefix(workspace).ok())
+        .unwrap_or(canonical);
+    if crate::is_secret_path(relative) {
+        return Some(SECRET_FILE);
+    }
+    // A read of one asks a person, and nobody is asked here.
+    if crate::is_credential_store_path(canonical) {
+        return Some("Haarness keeps sign-ins there");
+    }
+    omit(canonical)
 }
 
 /// What stays the same across one file's imports.
@@ -331,13 +447,7 @@ struct Scope<'a> {
 
 /// Why an import of `canonical` is left out, if it is.
 fn omitted(canonical: &Path, workspace: Option<&Path>, scope: &Scope<'_>) -> Option<&'static str> {
-    let relative = workspace
-        .and_then(|workspace| canonical.strip_prefix(workspace).ok())
-        .unwrap_or(canonical);
-    if crate::is_secret_path(relative) {
-        return Some("it is a secret file");
-    }
-    (scope.omit)(canonical)
+    left_out(canonical, workspace, scope.omit)
 }
 
 fn resolve(
@@ -446,6 +556,55 @@ mod tests {
         fs::write(root.join(".claude/CLAUDE.md"), "nested").unwrap();
         assert_eq!(find_in(&root, true), vec![root.join(".claude/CLAUDE.md")]);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn attached_names_what_read_results_carried_also_inside_a_batch() {
+        let result = |name: &str, metadata: serde_json::Value| haarness_protocol::Item {
+            id: haarness_protocol::ItemId::new(),
+            thread_id: haarness_protocol::ThreadId::new(),
+            turn_id: None,
+            sequence: 1,
+            data: haarness_protocol::ItemData::ToolResult {
+                call_id: "call".into(),
+                name: name.into(),
+                output: String::new(),
+                is_error: false,
+                metadata,
+            },
+            created_at: chrono::Utc::now(),
+        };
+        let items = [
+            result("read", serde_json::json!({"loaded": ["/w/a/AGENTS.md"]})),
+            // A symlink, named as read showed it and keyed by its target.
+            result(
+                "read",
+                serde_json::json!({
+                    "loaded": ["/w/link/AGENTS.md"],
+                    "loadedResolved": ["/w/link/CLAUDE.md"],
+                }),
+            ),
+            result(
+                "batch",
+                serde_json::json!({"results": [
+                    {"tool": "read", "metadata": {"loaded": ["/w/b/AGENTS.md"]}},
+                    {"tool": "read", "error": "denied"},
+                ]}),
+            ),
+            result("bash", serde_json::json!({"exit": 0})),
+            result("read", serde_json::Value::Null),
+        ];
+        let found = attached(&items);
+        assert_eq!(
+            found,
+            [
+                PathBuf::from("/w/a/AGENTS.md"),
+                PathBuf::from("/w/link/CLAUDE.md"),
+                PathBuf::from("/w/b/AGENTS.md")
+            ]
+            .into_iter()
+            .collect()
+        );
     }
 
     #[test]

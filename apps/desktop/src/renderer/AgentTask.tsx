@@ -9,6 +9,7 @@ import { useApp } from "./state";
 import { Icon } from "./ui";
 import {
   agentTaskActiveTurn,
+  agentTaskError,
   agentTaskStatus,
   type AgentTask as Task,
 } from "./agent-tasks";
@@ -29,6 +30,7 @@ export function AgentTask(props: { task: Task }) {
   };
   const text = (value: unknown) =>
     typeof value === "string" ? value.trim() : "";
+  const error = () => agentTaskError(props.task);
   const title = () =>
     text(args().description) ||
     child()?.title ||
@@ -129,8 +131,8 @@ export function AgentTask(props: { task: Task }) {
             <Shimmer active={working()}>{title()}</Shimmer>
           </span>
           <Show when={props.task.result?.is_error}>
-            <span class="agent-task-error" title={props.task.result?.output}>
-              {props.task.result?.output}
+            <span class="agent-task-error" title={error()}>
+              {error()}
             </span>
           </Show>
           <span class="agent-task-meta">

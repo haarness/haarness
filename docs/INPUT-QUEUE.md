@@ -95,14 +95,15 @@ Slash commands and shell-mode commands are not deferred. Deferred-message action
 }
 ```
 
-Two optional fields settle how a turn this input starts runs:
+Three optional fields settle how a turn this input starts runs:
 
-- `reasoningEffort` picks the effort. Without it, the turn keeps the effort of the chat's latest prompt. Queued prompts, steering that starts a turn, background agent results and the continuation after Stop all keep it, rather than falling back to the default.
+- `reasoningEffort` picks the effort: a level, or `default` for the model's own default over a configured `defaults.reasoning_effort` (see [the API](API.md)). Without it, the turn keeps the effort of the chat's latest prompt. Queued prompts, steering that starts a turn, background agent results and the continuation after Stop all keep it, rather than falling back to the default.
 - `preview` says whether the client can show file previews. Text clients send `false`. Without it, the turn keeps the chat's last recorded value, so a prompt from a phone or a background result sends the model the same tools and system prompt as the turn before. Changing them would also rewrite the provider's whole cached prompt prefix.
+- `attended: true` says a person is at the client and can stop the turn, as Desktop, the terminal UI and an editor over ACP send it. A command's or skill's `` !`…` `` snippet in that turn then runs until it finishes or is stopped, instead of ending at `execution.shell_timeout_ms`. A queued message keeps it until it runs; without it, the turn keeps the deadline.
 
 A deferred admission while busy returns `queued: true`, with no transcript item or new turn yet. Reuse the request ID when retrying: a deferred admission remembers its first delivery choice even after delivery or removal, so retries do not resurrect work. A person's message steered into a running turn is remembered by its request ID too, so a retry of it returns `queued: true` and is not delivered twice, even when retries race. A steer that started a turn because nothing was running is remembered by that turn: its retry, even one racing it, returns the same `turn` instead of steering the message into it again.
 
-`GET /v1/threads/{threadId}/input/queue` returns `{revision, items}`. Each item has `id`, `text`, and `attachments`. Mutate through `POST` to the same URL using the latest revision:
+`GET /v1/threads/{threadId}/input/queue` returns `{revision, items}`. Each item has `id`, `text`, and `attachments`, plus the `reasoningEffort`, `preview` and `attended` it was queued with, when they were sent. Mutate through `POST` to the same URL using the latest revision:
 
 ```json
 {"action":"edit","revision":3,"id":"ea73602e-4b13-4c34-86cd-71cd488fbf61","text":"Update docs and examples"}

@@ -538,6 +538,10 @@
             },
             "type": "array"
           },
+          "attended": {
+            "description": "A person is in this conversation and can stop the turn: Desktop, the\nterminal UI and an editor over ACP send it with every message and\ncommand. A command's or skill's `` !`\u2026` `` snippet in such a turn, and\nin the subagents it starts, runs until it ends or the turn is stopped.\nWithout it (a script, Haarness Cloud, an older client) a snippet keeps\nthe `execution.shell_timeout_ms` deadline, as a scheduled run's always\ndoes. Nothing else depends on it.",
+            "type": "boolean"
+          },
           "autoApprove": {
             "description": "Non-interactive caller explicitly authorizes permission prompts for\nthis turn. Scheduled runs set this after the schedule itself has been\napproved; ordinary REST/TUI clients leave it false.",
             "type": "boolean"
@@ -562,6 +566,7 @@
             ]
           },
           "reasoningEffort": {
+            "description": "A reasoning level (`none` to `max`), `ultracode`, or `default` for the\nmodel's own default over a configured level. Omitted, the turn runs at\nthe configured `defaults.reasoning_effort`, if any.",
             "type": [
               "string",
               "null"
@@ -1579,6 +1584,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "attended": {
+            "description": "A person can stop the turn a prompt command starts (see\n[`StartTurnRequest::attended`]).",
+            "type": "boolean"
           },
           "model": {
             "type": [
@@ -4154,6 +4163,10 @@
             },
             "type": "array"
           },
+          "attended": {
+            "description": "Queued by a person who can stop the turn it starts (see\n`StartTurnRequest::attended`).",
+            "type": "boolean"
+          },
           "id": {
             "$ref": "#/components/schemas/RequestId"
           },
@@ -4165,7 +4178,7 @@
             ]
           },
           "reasoningEffort": {
-            "description": "Reasoning effort chosen with the message. `None` keeps the effort of\nthe chat's latest prompt.",
+            "description": "Reasoning effort chosen with the message. `None` keeps the effort of\nthe chat's latest prompt; `default` runs it at the model's own default\nover a configured level.",
             "type": [
               "string",
               "null"
@@ -4952,6 +4965,10 @@
             },
             "type": "array"
           },
+          "attended": {
+            "description": "A person can stop the turn this input starts, now or once it leaves\nthe queue (see [`StartTurnRequest::attended`]).",
+            "type": "boolean"
+          },
           "delivery": {
             "$ref": "#/components/schemas/InputDelivery",
             "description": "Steer by default for compatibility; queue waits for an idle boundary."
@@ -4964,7 +4981,7 @@
             ]
           },
           "reasoningEffort": {
-            "description": "Reasoning effort for a turn this input starts. `None` keeps the\neffort of the chat's latest prompt.",
+            "description": "Reasoning effort for a turn this input starts. `None` keeps the\neffort of the chat's latest prompt; `default` runs it at the model's\nown default over a configured level.",
             "type": [
               "string",
               "null"
@@ -5624,6 +5641,13 @@
               "null"
             ]
           },
+          "defaultReasoningEffort": {
+            "description": "The reasoning effort a turn that names none runs at\n(`defaults.reasoning_effort`), so a client can show it as the current\nlevel; absent when none is configured, and on older servers. A turn\nnames `default` to run at the model's own default instead.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "eventCursor": {
             "description": "Latest published event id. Snapshot-first clients capture this before\nhydration, then replay only deltas after the snapshot boundary.",
             "format": "int64",
@@ -5895,6 +5919,10 @@
             },
             "type": "array"
           },
+          "attended": {
+            "description": "A person is in this conversation and can stop the turn: Desktop, the\nterminal UI and an editor over ACP send it with every message and\ncommand. A command's or skill's `` !`\u2026` `` snippet in such a turn, and\nin the subagents it starts, runs until it ends or the turn is stopped.\nWithout it (a script, Haarness Cloud, an older client) a snippet keeps\nthe `execution.shell_timeout_ms` deadline, as a scheduled run's always\ndoes. Nothing else depends on it.",
+            "type": "boolean"
+          },
           "autoApprove": {
             "description": "Non-interactive caller explicitly authorizes permission prompts for\nthis turn. Scheduled runs set this after the schedule itself has been\napproved; ordinary REST/TUI clients leave it false.",
             "type": "boolean"
@@ -5919,6 +5947,7 @@
             ]
           },
           "reasoningEffort": {
+            "description": "A reasoning level (`none` to `max`), `ultracode`, or `default` for the\nmodel's own default over a configured level. Omitted, the turn runs at\nthe configured `defaults.reasoning_effort`, if any.",
             "type": [
               "string",
               "null"

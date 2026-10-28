@@ -59,17 +59,46 @@ struct Service {
     mcp: Arc<Mutex<HashSet<String>>>,
 }
 
+impl Service {
+    fn new(config: Config) -> Self {
+        Self {
+            // The person in the editor can cancel what a prompt starts.
+            client: config.client.attended(),
+            workspace: config.workspace,
+            provider: config.provider,
+            model: config.model,
+            agent: config.agent,
+            auto_approve: config.auto_approve,
+            active: Arc::new(Mutex::new(HashMap::new())),
+            mcp: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// The turn an editor's prompt starts.
+    fn prompt_turn(&self, text: String, attachments: Vec<String>) -> StartTurnRequest {
+        StartTurnRequest {
+            request_id: RequestId::new(),
+            text,
+            attachments,
+            resources: Vec::new(),
+            synthetic: false,
+            auto_approve: self.auto_approve,
+            agent: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            tools: Some(HashMap::from([
+                ("question".into(), false),
+                ("preview".into(), false),
+            ])),
+            command: None,
+            ..Default::default()
+        }
+    }
+}
+
 pub async fn serve(config: Config) -> Result<()> {
-    let service = Service {
-        client: config.client,
-        workspace: config.workspace,
-        provider: config.provider,
-        model: config.model,
-        agent: config.agent,
-        auto_approve: config.auto_approve,
-        active: Arc::new(Mutex::new(HashMap::new())),
-        mcp: Arc::new(Mutex::new(HashSet::new())),
-    };
+    let service = Service::new(config);
 
     let create = service.clone();
     let load = service.clone();
@@ -202,26 +231,7 @@ impl Service {
         let (mut events, event_task) = self.client.subscribe(None);
         let turn = self
             .client
-            .start_turn(
-                thread,
-                StartTurnRequest {
-                    request_id: RequestId::new(),
-                    text,
-                    attachments,
-                    resources: Vec::new(),
-                    synthetic: false,
-                    auto_approve: self.auto_approve,
-                    agent: None,
-                    provider: None,
-                    model: None,
-                    reasoning_effort: None,
-                    tools: Some(HashMap::from([
-                        ("question".into(), false),
-                        ("preview".into(), false),
-                    ])),
-                    command: None,
-                },
-            )
+            .start_turn(thread, self.prompt_turn(text, attachments))
             .await
             .map_err(|error| {
                 event_task.abort();
@@ -368,7 +378,7 @@ impl Service {
                     }
                     // Events may have been missed: requests raised or settled
                     // meanwhile are read again from the server.
-                    SubscriptionEvent::ResyncRequired => {
+                    SubscriptionEvent::ResyncRequired(_) => {
                         let current = self.client.turn(turn.id).await.map_err(internal)?;
                         if !matches!(current.status, TurnStatus::Queued | TurnStatus::Running) {
                             break finish(current);
@@ -1383,6 +1393,39 @@ mod tests {
             error.code,
             agent_client_protocol::Error::internal_error().code
         );
+    }
+
+    /// An editor's prompt says a person can stop its turn, so a command's
+    /// `!` snippet in it runs past the shell deadline.
+    #[tokio::test]
+    async fn a_prompt_s_turn_says_a_person_can_stop_it() {
+        let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen = bodies.clone();
+        let app = axum::Router::new().route(
+            "/v1/threads/{id}/turns",
+            axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                seen.lock().unwrap().push(body);
+                async { (axum::http::StatusCode::BAD_REQUEST, "fixture") }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let service = Service::new(Config {
+            client: ApiClient::new(&url, "token").unwrap(),
+            workspace: PathBuf::from("/fixture"),
+            provider: None,
+            model: None,
+            agent: None,
+            auto_approve: false,
+        });
+        let turn = service.prompt_turn("Run the tests".into(), Vec::new());
+        let _ = service.client.start_turn(ThreadId::new(), turn).await;
+        server.abort();
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["attended"], true, "{}", bodies[0]);
+        assert_eq!(bodies[0]["text"], "Run the tests");
     }
 
     #[test]

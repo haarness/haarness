@@ -23,7 +23,7 @@ const test = base.extend<{ desktop: Fixture }>({
     await writeFile(join(b, "second.txt"), "Second project");
     await writeFile(join(a, "proof.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6Z9kAAAAASUVORK5CYII=", "base64"));
     const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
-    const env: Record<string, string> = { ...process.env, HAARNESS_BIN: binary, HAARNESS_HOME: join(temp, "home"), HAARNESS_DATA_DIR: join(temp, "data"), HAARNESS_DESKTOP_DATA: join(temp, "desktop"), HAARNESS_TEST_PROVIDER: "1", HAARNESS_DESKTOP_TEST: "1" };
+    const env: Record<string, string> = { ...process.env, HAARNESS_BIN: binary, HAARNESS_HOME: join(temp, "home"), HAARNESS_DATA_DIR: join(temp, "data"), HAARNESS_DESKTOP_DATA: join(temp, "desktop"), HAARNESS_TEST_PROVIDER: "1", HAARNESS_DESKTOP_TEST: "1", HAARNESS_SCHEDULE_SKIP_INSTALL: "1" };
     delete env.ELECTRON_RUN_AS_NODE;
     delete env.ELECTRON_RENDERER_URL;
     const app = await _electron.launch({ args: ["."], env, timeout: 60000 });

@@ -465,12 +465,7 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
                 .map(|entry| {
                     let current = match kind {
                         crate::state::OptionsKind::ReasoningEffort => {
-                            entry.value
-                                == if app.thread.ultracode {
-                                    "ultracode"
-                                } else {
-                                    app.reasoning_effort.as_deref().unwrap_or("off")
-                                }
+                            entry.value == app.reasoning_choice()
                         }
                         crate::state::OptionsKind::Language => entry.value == app.language.code(),
                         crate::state::OptionsKind::Tasks => {

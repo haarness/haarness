@@ -15,6 +15,7 @@ import type {
 import { lines, type DiffLine } from "./diff";
 import { language, t } from "./i18n";
 import { reviewReason } from "./approval-mode";
+import { spelledOutPlain, spelledOutText, withoutEscapes } from "./display-text";
 
 /** Provider call IDs can repeat in another turn; output belongs to one call. */
 export function toolResult(items: Item[], call?: Item, boundary = Infinity) {
@@ -143,7 +144,7 @@ function humanTarget(record: Record<string, unknown> | undefined) {
   for (const key of humanFields) {
     const value = record?.[key];
     if (typeof value !== "string") continue;
-    const text = value.replace(/\s+/g, " ").trim();
+    const text = spelledOutText(value).replace(/\s+/g, " ").trim();
     if (text && !opaqueId(text)) return text;
   }
   return "";
@@ -212,15 +213,15 @@ export function describeTool(name: string, args: unknown): ToolShape {
       ...known,
       target:
         typeof record.path === "string"
-          ? t("{pattern} in {path}", { pattern: record.pattern, path: record.path })
-          : record.pattern,
+          ? t("{pattern} in {path}", { pattern: spelledOutText(record.pattern), path: spelledOutText(record.path) })
+          : spelledOutText(record.pattern),
     };
   if (name === "list" && ["", ".", "./"].includes(toolTarget(args)))
     // The root has no name of its own; "." would only make a reader pause.
     return { ...known, target: t("the project folder") };
   if (name === "apply_patch" && typeof record?.input === "string") {
     // The envelope is instructions for the tool; the reader wants the files.
-    const files = patchFiles(record.input).map((file) => file.path);
+    const files = patchFiles(record.input).map((file) => spelledOutText(file.path));
     if (files.length)
       return {
         ...known,
@@ -231,10 +232,10 @@ export function describeTool(name: string, args: unknown): ToolShape {
   // A resource row names the resource it read, or the server it listed.
   if (name === "mcp_resource_read" || name === "mcp_resource_list") {
     const value = name === "mcp_resource_read" ? record?.uri : record?.server;
-    return { ...known, target: typeof value === "string" ? value.trim() : "" };
+    return { ...known, target: typeof value === "string" ? spelledOutText(value.trim()) : "" };
   }
   if (name === "load_tool" && Array.isArray(record?.queries))
-    return { ...known, target: targetList(record.queries.filter((query): query is string => typeof query === "string")) };
+    return { ...known, target: targetList(record.queries.filter((query): query is string => typeof query === "string").map(spelledOutText)) };
   if (known && !familyTools.has(name) && !["execute", "skill", "question", "todo", "todowrite", "todoread"].includes(name))
     return { ...known, target: humanTarget(record) };
   if (known) return { ...known, target: toolTarget(args) };
@@ -318,8 +319,10 @@ function phraseList(phrases: string[]) {
     : new Intl.ListFormat(code, { type: "conjunction" }).format(parts);
 }
 function describeBrowser(action: string, record?: Record<string, unknown>): ToolShape {
+  // As the call wrote it, with what would not show written as its code, as on
+  // the Chrome card.
   const text = (value: unknown) =>
-    typeof value === "string" && value.trim() ? value.replace(/\s+/g, " ").trim() : "";
+    typeof value === "string" && value.trim() ? spelledOutText(value).replace(/\s+/g, " ").trim() : "";
   const quoted = (value: unknown) => (text(value) ? `“${text(value)}”` : "");
   const target =
     action === "fill"
@@ -430,6 +433,8 @@ export interface ToolResult {
  * ("tool error: ", which the row's state already says) and the system's
  * error number ("(os error 2)"); a command's output loses the `exit: N` line
  * the server puts first, which the row says as a chip when it is not 0.
+ * Colours, titles and other escape sequences a command or server wrote go
+ * whole; the model still reads the output as it was written.
  */
 export function resultText(name: string, result: ToolResult) {
   let text = result.output;
@@ -440,7 +445,7 @@ export function resultText(name: string, result: ToolResult) {
   // Only when the status is known: then the row says it, as a chip or not at all.
   else if (toolName(name) === "bash" && typeof object(result.metadata)?.exit === "number")
     text = text.replace(/^exit: -?\d+\n/, "");
-  return toolOutput(name, text);
+  return withoutEscapes(toolOutput(name, text));
 }
 /** A command's exit status, when it is not 0. */
 export function exitStatus(name: string, result?: ToolResult) {
@@ -633,8 +638,16 @@ function targetText(args: unknown): string {
   );
   return typeof first === "string" ? first.trim() : "";
 }
+/** A row's target on one line, with what would not show, or would reorder
+ * the row, written as its code, as on the call's approval card. */
 export function toolTarget(args: unknown): string {
-  return targetText(args).replace(/\s+/g, " ");
+  return spelledOutText(targetText(args)).replace(/\s+/g, " ");
+}
+/** A read image's name: its file's own name as the call wrote it, taken from
+ * the path before what would not show is spelled out, so a code's backslash
+ * is never read as a folder. */
+export function imageName(args: unknown): string {
+  return spelledOutPlain(targetText(args).split(/[\\/]/).pop() ?? "");
 }
 /**
  * A tool row's tooltip: the whole target with its line breaks, so a
@@ -643,7 +656,7 @@ export function toolTarget(args: unknown): string {
  * shown as the row shows it.
  */
 export function toolTitle(args: unknown, target: string): string {
-  const text = targetText(args);
+  const text = spelledOutText(targetText(args));
   return text.replace(/\s+/g, " ") === target ? text : target;
 }
 /**

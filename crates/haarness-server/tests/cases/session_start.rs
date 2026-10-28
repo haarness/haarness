@@ -1,32 +1,32 @@
 //! `SessionStart` runs for chats people start, not for the chats a chat
 //! starts inside itself.
 use super::*;
-use haarness_core::{HookDecision, HookPort};
+use haarness_core::{HookCall, HookDecision, HookPort};
 use haarness_protocol::ThreadId;
 
 #[derive(Default)]
 struct Starts(std::sync::Mutex<Vec<ThreadId>>);
 #[async_trait]
 impl HookPort for Starts {
-    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
         HookDecision::default()
     }
     async fn post_tool_use(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &Value,
         _: &str,
         _: bool,
-    ) -> Option<String> {
-        None
+    ) -> HookDecision {
+        HookDecision::default()
     }
-    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
         HookDecision::default()
     }
     async fn permission_request(
         &self,
-        _: ThreadId,
+        _: &HookCall,
         _: &str,
         _: &[String],
         _: Option<&[String]>,
@@ -34,9 +34,9 @@ impl HookPort for Starts {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: ThreadId) {}
-    async fn session_start(&self, thread: ThreadId, _agent: &str) {
-        self.0.lock().unwrap().push(thread);
+    async fn stop(&self, _: &HookCall) {}
+    async fn session_start(&self, call: &HookCall) {
+        self.0.lock().unwrap().push(call.thread);
     }
 }
 

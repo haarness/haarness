@@ -387,6 +387,7 @@ fn side_server_info(capabilities: Vec<String>) -> haarness_protocol::ServerInfo 
         default_provider: None,
         default_model: None,
         default_approval_mode: None,
+        default_reasoning_effort: None,
         default_agent: None,
         project_trusted: None,
         pid: None,
@@ -3926,6 +3927,7 @@ fn home_is_a_launch_masthead_settled_onto_the_composer() {
         default_provider: None,
         default_model: None,
         default_approval_mode: None,
+        default_reasoning_effort: None,
         default_agent: None,
         project_trusted: Some(false),
         pid: None,
@@ -4213,6 +4215,7 @@ fn masthead_names_the_session_without_repeating_its_id() {
         default_provider: None,
         default_model: None,
         default_approval_mode: None,
+        default_reasoning_effort: None,
         default_agent: None,
         project_trusted: Some(true),
         pid: None,
@@ -4518,6 +4521,345 @@ async fn reasoning_commands_use_each_models_advertised_domain() {
         .await
         .unwrap();
     assert!(app.reasoning_effort.is_none());
+}
+
+/// The Reasoning picker's rows as their descriptions read, by value.
+fn reasoning_rows(app: &App) -> Vec<(String, String)> {
+    super::commands::reasoning_entries(app)
+        .into_iter()
+        .filter(|entry| entry.value != "display")
+        .map(|entry| (entry.value, entry.description))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_configured_effort_reads_as_the_current_level_and_provider_default_overrides_it() {
+    let mut app = selector_fixture();
+    let mut info = side_server_info(Vec::new());
+    info.default_reasoning_effort = Some("high".into());
+    app.server_info = Some(info);
+
+    // No pick: the configured level is the one in use, marked as the default.
+    assert_eq!(app.reasoning_choice(), "high");
+    // A level picked shows in the band; the configured one, a default, does not.
+    assert!(!side_frame(&app).contains("high"));
+    app.reasoning_effort = Some("medium".into());
+    assert!(side_frame(&app).contains("medium"));
+    app.reasoning_effort = None;
+    assert_eq!(
+        reasoning_rows(&app),
+        [
+            ("off".to_owned(), "Let the model decide".to_owned()),
+            ("low".to_owned(), "Brief thinking".to_owned()),
+            ("medium".to_owned(), "Balanced thinking".to_owned()),
+            (
+                "high".to_owned(),
+                "Deep thinking · default · active".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(app.requested_effort(), None, "no pick names nothing");
+
+    // Provider default is a pick of its own, sent by name; no badge says so.
+    app.execute_command("/reasoning off", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_effort.as_deref(), Some("default"));
+    assert_eq!(app.requested_effort().as_deref(), Some("default"));
+    assert_eq!(app.notice, "Reasoning effort: provider default");
+    assert_eq!(app.reasoning_choice(), "off");
+    let rows = reasoning_rows(&app);
+    assert_eq!(rows[0].1, "Let the model decide · active");
+    assert_eq!(rows[3].1, "Deep thinking · default");
+    app.notice.clear();
+    let frame = side_frame(&app);
+    assert!(!frame.contains("default"), "{frame}");
+    // Every model has a default of its own, so a model switch keeps it.
+    app.thread.model = "gpt-5.4-mini".into();
+    app.normalize_reasoning();
+    assert_eq!(app.reasoning_effort.as_deref(), Some("default"));
+
+    // A level the model lacks is marked where the model runs it.
+    app.providers[0].models[1].reasoning_efforts = vec!["low".into(), "medium".into()];
+    app.server_info.as_mut().unwrap().default_reasoning_effort = Some("max".into());
+    app.reasoning_effort = None;
+    assert_eq!(app.reasoning_choice(), "medium");
+
+    // A server with nothing configured is never sent the name.
+    app.reasoning_effort = Some("default".into());
+    app.server_info.as_mut().unwrap().default_reasoning_effort = None;
+    assert_eq!(app.requested_effort(), None);
+    assert_eq!(app.reasoning_choice(), "off");
+}
+
+#[tokio::test]
+async fn without_a_configured_effort_provider_default_is_no_pick() {
+    let mut app = selector_fixture();
+    app.server_info = Some(side_server_info(Vec::new()));
+    app.reasoning_effort = Some("high".into());
+    app.execute_command("/reasoning off", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_effort, None);
+    assert_eq!(app.requested_effort(), None);
+    let rows = reasoning_rows(&app);
+    assert_eq!(rows[0].1, "Let the model decide · active");
+    assert!(
+        rows.iter().all(|(_, text)| !text.contains("· default")),
+        "{rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_model_that_lists_no_levels_shows_the_configured_one_and_provider_default_overrides_it() {
+    let mut app = selector_fixture();
+    app.thread.model = "gpt-5.4".into();
+    app.providers[0].models[0].reasoning_efforts.clear();
+    // Nothing configured: no level to offer, as before.
+    app.server_info = Some(side_server_info(Vec::new()));
+    assert_eq!(reasoning_rows(&app).len(), 1);
+    app.execute_command("/reasoning high", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_effort, None);
+    assert!(
+        app.notice.contains("does not support reasoning effort"),
+        "{}",
+        app.notice
+    );
+
+    // Configured high: the server sends it as written, so it is the row in use.
+    app.server_info.as_mut().unwrap().default_reasoning_effort = Some("high".into());
+    assert_eq!(app.reasoning_choice(), "high");
+    assert_eq!(
+        reasoning_rows(&app),
+        [
+            ("off".to_owned(), "Let the model decide".to_owned()),
+            (
+                "high".to_owned(),
+                "Deep thinking · default · active".to_owned()
+            ),
+        ]
+    );
+    app.execute_command("/reasoning off", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.requested_effort().as_deref(), Some("default"));
+    assert_eq!(app.reasoning_choice(), "off");
+    app.execute_command("/reasoning high", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.requested_effort().as_deref(), Some("high"));
+    assert_eq!(app.notice, "Reasoning effort: high");
+}
+
+#[tokio::test]
+async fn a_reloaded_configuration_brings_its_reasoning_level_to_the_picker() {
+    let mut app = selector_fixture();
+    // A model that lists no levels, so a pick of the configured one stands
+    // only while it is configured.
+    app.providers[0].models[0].reasoning_efforts.clear();
+    app.thread.model = "gpt-5.4".into();
+    let before = side_server_info(Vec::new());
+    app.server_info = Some(before.clone());
+    assert_eq!(app.reasoning_choice(), "off");
+    // The server restarted since this client read its info, then reloaded.
+    let mut restarted = before.clone();
+    restarted.server_instance_id = uuid::Uuid::now_v7();
+    restarted.default_reasoning_effort = Some("high".into());
+    let mut removed = restarted.clone();
+    removed.default_reasoning_effort = None;
+    let mut other = restarted.clone();
+    other.server_instance_id = uuid::Uuid::now_v7();
+    let (address, server) = side_chat_server(
+        [&restarted, &removed, &other, &restarted]
+            .into_iter()
+            .map(|info| Some(serde_json::to_string(info).unwrap()))
+            .collect(),
+    )
+    .await;
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let thread = app.thread.id;
+    let reload = |instance| {
+        let mut event = fixture_event(
+            "configuration.reloaded",
+            thread,
+            thread,
+            serde_json::json!({}),
+        );
+        event.server_instance_id = instance;
+        event
+    };
+    app.reduce(reload(restarted.server_instance_id), &client)
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_choice(), "high");
+    assert_eq!(
+        app.server_info.as_ref().unwrap().server_instance_id,
+        restarted.server_instance_id
+    );
+    app.execute_command("/reasoning high", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_effort.as_deref(), Some("high"));
+
+    // The level is no longer configured: a pick of it is no longer offered.
+    app.reduce(reload(restarted.server_instance_id), &client)
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_effort, None);
+    assert_eq!(app.reasoning_choice(), "off");
+
+    // An answer from another run of the server than the event's is not taken.
+    app.reduce(reload(restarted.server_instance_id), &client)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.server_info.as_ref().unwrap().server_instance_id,
+        restarted.server_instance_id
+    );
+
+    // After a restart the TUI takes whatever answers.
+    app.refresh_server_info(&client, None).await;
+    assert_eq!(app.reasoning_choice(), "high");
+    let requests = server.await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.starts_with("GET /v1/info")),
+        "{requests:?}"
+    );
+    // Provider default is now named over it.
+    app.execute_command("/reasoning off", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.requested_effort().as_deref(), Some("default"));
+}
+
+#[tokio::test]
+async fn ultracode_off_names_the_configured_level_it_returns_to() {
+    // The chat goes back to the configured level, to a level picked before
+    // Ultracode came on (the chat's own setting, or another client's), or to
+    // the model's own default.
+    for (configured, picked, returns_to) in [
+        (Some("medium"), None, "medium"),
+        (Some("medium"), Some("low"), "low"),
+        (Some("medium"), Some("default"), "provider default"),
+        (None, Some("high"), "high"),
+        (None, None, "provider default"),
+    ] {
+        let mut app = selector_fixture();
+        let mut info = side_server_info(Vec::new());
+        info.default_reasoning_effort = configured.map(str::to_owned);
+        app.server_info = Some(info);
+        app.thread.ultracode = true;
+        app.reasoning_effort = picked.map(str::to_owned);
+        assert_eq!(app.reasoning_choice(), "ultracode");
+        let thread = app.thread.clone();
+        let mut updated = thread.clone();
+        updated.ultracode = false;
+        let (address, server) =
+            side_chat_server(vec![Some(serde_json::to_string(&updated).unwrap())]).await;
+        let client =
+            crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+        app.execute_command("/ultracode off", &client)
+            .await
+            .unwrap();
+        assert!(!app.thread.ultracode);
+        assert_eq!(
+            app.notice,
+            format!("Ultracode disabled · reasoning uses {returns_to}")
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_prompt_command_names_the_model_default_only_to_a_server_that_configures_a_level() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    for configured in [Some("high"), None] {
+        let thread = fixture_thread();
+        let turn = haarness_protocol::Turn {
+            id: haarness_protocol::TurnId::new(),
+            thread_id: thread.id,
+            request_id: haarness_protocol::RequestId::new(),
+            status: haarness_protocol::TurnStatus::Running,
+            agent: "build".into(),
+            provider: thread.provider.clone(),
+            model: thread.model.clone(),
+            ultracode: false,
+            error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let response_body =
+            serde_json::to_string(&haarness_protocol::CommandExecutionResponse::Turn { turn })
+                .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = socket.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 202 Accepted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let client =
+            crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        let mut info = side_server_info(Vec::new());
+        info.default_reasoning_effort = configured.map(str::to_owned);
+        app.server_info = Some(info);
+        app.server_commands = vec![haarness_protocol::CommandInfo {
+            execution: haarness_protocol::DefinitionExecution::default(),
+            name: "review-code".into(),
+            description: "configured review".into(),
+            source: Some("configured".into()),
+            agent: None,
+            model: None,
+            argument_hint: None,
+            template: "hidden on client".into(),
+            plugin: None,
+        }];
+        app.reasoning_effort = Some("default".into());
+
+        app.execute_command("/review-code focus", &client)
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        match configured {
+            Some(_) => assert_eq!(body["reasoningEffort"], "default"),
+            None => assert!(body.get("reasoningEffort").is_none(), "{body}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -18775,6 +19117,7 @@ async fn a_yolo_client_flags_the_turns_it_starts_and_a_plain_one_does_not() {
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await;
@@ -18785,6 +19128,49 @@ async fn a_yolo_client_flags_the_turns_it_starts_and_a_plain_one_does_not() {
             "{}",
             requests[0]
         );
+    }
+}
+
+#[tokio::test]
+async fn an_attended_client_says_a_person_can_stop_what_it_starts() {
+    for attended in [true, false] {
+        let (client, server) =
+            workspace_http_status_client(vec![(200, "{}".into()); 3], false).await;
+        let client = if attended { client.attended() } else { client };
+        let thread = ThreadId::new();
+        // `{}` is no answer; only the requests matter here.
+        let _ = client
+            .start_turn(
+                thread,
+                haarness_protocol::StartTurnRequest {
+                    text: "hi".into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let _ = client
+            .queue_input(
+                thread,
+                haarness_protocol::QueueInputRequest {
+                    text: "hi".into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let _ = client
+            .execute_command(
+                thread,
+                haarness_protocol::ExecuteCommandRequest {
+                    name: "review".into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in requests {
+            assert_eq!(request.contains("\"attended\":true"), attended, "{request}");
+        }
     }
 }
 
@@ -18962,6 +19348,543 @@ fn model_picker_prioritizes_favorites_then_recents_without_losing_search() {
     assert_eq!(app.filtered_models(), [first, second.clone()]);
     app.overlay_filter = "mini".into();
     assert_eq!(app.filtered_models(), [second]);
+}
+
+/// Two TUIs on one config folder, each still holding the model lists it read
+/// at start: what one saves is not undone by the other's next save.
+#[test]
+fn two_tuis_with_stale_model_lists_keep_each_others_favorites_and_recents() {
+    // A provider of its own, so tests running alongside never touch these.
+    let provider = format!("lists-{}", uuid::Uuid::now_v7());
+    let tui = || {
+        let mut app = selector_fixture();
+        app.providers[0].id = provider.clone();
+        app.thread.provider = provider.clone();
+        app.model_favorites.clear();
+        app.model_recents.clear();
+        app
+    };
+    let (mut first, mut second) = (tui(), tui());
+    let one = format!("{provider}/gpt-5.4");
+    let two = format!("{provider}/gpt-5.4-mini");
+    let toggle = |app: &mut App, model: &str| {
+        app.selection = app
+            .filtered_models()
+            .iter()
+            .position(|m| m == model)
+            .unwrap();
+        app.toggle_model_favorite();
+    };
+    toggle(&mut first, &one);
+    toggle(&mut second, &two);
+    let saved = crate::config::load_state().model_favorites;
+    assert!(saved.contains(&one) && saved.contains(&two), "{saved:?}");
+    // The picker shows the lists as saved, the other TUI's favorite too.
+    assert!(
+        second.model_favorites.contains(&one),
+        "{:?}",
+        second.model_favorites
+    );
+    assert_eq!(second.filtered_models()[second.selection], two);
+    // Taking a favorite out leaves the other TUI's in place.
+    toggle(&mut first, &one);
+    let saved = crate::config::load_state().model_favorites;
+    assert!(!saved.contains(&one) && saved.contains(&two), "{saved:?}");
+    assert!(!first.model_favorites.contains(&one));
+
+    first.thread.model = "gpt-5.4".into();
+    first.remember_model();
+    second.thread.model = "gpt-5.4-mini".into();
+    second.remember_model();
+    let recents = crate::config::load_state().model_recents;
+    let at = |model: &str| recents.iter().position(|m| m == model);
+    assert!(at(&two).is_some() && at(&two) < at(&one), "{recents:?}");
+    assert!(
+        second.model_recents.contains(&one),
+        "{:?}",
+        second.model_recents
+    );
+}
+
+/// A model favorite that cannot be saved (the state file is there but cannot
+/// be read) says so, and the picker shows it until the TUI quits.
+#[cfg(unix)]
+#[test]
+fn a_model_favorite_that_cannot_be_saved_says_so() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = std::env::temp_dir().join(format!(
+        "haarness-unsaved-favorite-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("tui-state.toml");
+    std::fs::write(&path, "theme = \"kept\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Permissions do not stop a superuser, who reads the file anyway.
+    if std::fs::read(&path).is_ok() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
+    let mut app = selector_fixture();
+    app.model_favorites.clear();
+    app.selection = 0;
+    let model = app.filtered_models()[0].clone();
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    app.toggle_model_favorite();
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let body = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(
+        app.notice,
+        "Model favorites not saved · kept until you quit"
+    );
+    assert!(app.model_favorites.contains(&model));
+    assert_eq!(body, "theme = \"kept\"\n");
+}
+
+/// A favorite whose save failed stays one when a later save works, and that
+/// save writes it, rather than the lists on disk taking its place.
+#[cfg(unix)]
+#[test]
+fn a_favorite_that_could_not_be_saved_is_written_by_the_next_save() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory =
+        std::env::temp_dir().join(format!("haarness-later-favorite-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("tui-state.toml");
+    std::fs::write(&path, "theme = \"kept\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Permissions do not stop a superuser, who reads the file anyway.
+    if std::fs::read(&path).is_ok() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut app = selector_fixture();
+    app.model_favorites.clear();
+    app.selection = 0;
+    let model = app.filtered_models()[0].clone();
+    app.toggle_model_favorite();
+    let first_notice = app.notice.clone();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // A model switch saves the recent models, and the favorite with them.
+    app.thread.model = "gpt-5.4-mini".into();
+    app.remember_model();
+    let saved = crate::config::load_state();
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(
+        first_notice,
+        "Model favorites not saved · kept until you quit"
+    );
+    assert!(
+        app.model_favorites.contains(&model),
+        "{:?}",
+        app.model_favorites
+    );
+    assert!(
+        saved.model_favorites.contains(&model),
+        "{:?}",
+        saved.model_favorites
+    );
+    assert_eq!(saved.theme.as_deref(), Some("kept"));
+    assert!(app.unsaved.favorites.is_empty());
+}
+
+/// Shortcuts `/keybinds` could not save apply all the same and say so, the
+/// form shows them when it opens again, and a save that works writes them.
+#[cfg(unix)]
+#[tokio::test]
+async fn shortcuts_that_cannot_be_saved_apply_and_say_so() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = std::env::temp_dir().join(format!(
+        "haarness-unsaved-shortcuts-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("tui-state.toml");
+    std::fs::write(&path, "theme = \"kept\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&path).is_ok() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut app = selector_fixture();
+    let client = offline_client();
+    let form = |app: &App| {
+        let mut input = app.management.view.submit.clone().unwrap();
+        for field in &app.management.view.fields {
+            input[&field.key] = field.value.clone().into();
+        }
+        input
+    };
+    app.open_management("keybinds", &serde_json::json!({"action": "view"}), &client)
+        .await
+        .unwrap();
+    let mut input = form(&app);
+    input["models"] = "F7".into();
+    app.open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    let applied = app.keybindings.get("models").cloned();
+    let notice = app.notice.clone();
+    app.open_management("keybinds", &serde_json::json!({"action": "view"}), &client)
+        .await
+        .unwrap();
+    let kept = app.keybindings.get("models").cloned();
+    let shown = form(&app)["models"].clone();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let input = form(&app);
+    app.open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    let saved = crate::config::load_state();
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(applied.as_deref(), Some("F7"));
+    assert_eq!(notice, "Shortcuts not saved · kept until you quit");
+    assert_eq!(kept.as_deref(), Some("F7"));
+    assert_eq!(shown, "F7");
+    assert_eq!(
+        saved.keybindings.get("models").map(String::as_str),
+        Some("F7")
+    );
+    assert_eq!(saved.theme.as_deref(), Some("kept"));
+    assert!(app.notice.is_empty(), "{}", app.notice);
+    assert!(app.unsaved.keybindings.is_empty());
+}
+
+/// Shortcuts a `/keybinds` save could not write are kept as the changes
+/// they were: a shortcut another TUI saves later shows in this one's form,
+/// applies here, and stays when this one saves.
+#[cfg(unix)]
+#[tokio::test]
+async fn unsaved_shortcuts_do_not_undo_another_tuis_later_shortcut() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = std::env::temp_dir().join(format!(
+        "haarness-shortcuts-elsewhere-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("tui-state.toml");
+    std::fs::write(&path, "theme = \"kept\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&path).is_ok() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut app = selector_fixture();
+    let client = offline_client();
+    let form = |app: &App| {
+        let mut input = app.management.view.submit.clone().unwrap();
+        for field in &app.management.view.fields {
+            input[&field.key] = field.value.clone().into();
+        }
+        input
+    };
+    let view = serde_json::json!({"action": "view"});
+    app.open_management("keybinds", &view, &client)
+        .await
+        .unwrap();
+    let mut input = form(&app);
+    input["models"] = "F7".into();
+    app.open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // Another TUI on the folder rebinds Sessions.
+    let elsewhere = crate::config::save_state(|state| {
+        state.keybindings.insert("sessions".into(), "F9".into());
+    });
+    app.open_management("keybinds", &view, &client)
+        .await
+        .unwrap();
+    let shown = form(&app);
+    let active = app.keybindings.clone();
+    let input = form(&app);
+    app.open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    let saved = crate::config::load_state().keybindings;
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(elsewhere);
+    assert_eq!(
+        (shown["sessions"].clone(), shown["models"].clone()),
+        ("F9".into(), "F7".into())
+    );
+    assert_eq!(active.get("sessions").map(String::as_str), Some("F9"));
+    assert_eq!(active.get("models").map(String::as_str), Some("F7"));
+    assert_eq!(saved.get("sessions").map(String::as_str), Some("F9"));
+    assert_eq!(saved.get("models").map(String::as_str), Some("F7"));
+}
+
+/// A `/keybinds` form left open writes only what was changed in it: a
+/// shortcut another TUI saved meanwhile stays, here and on disk.
+#[tokio::test]
+async fn a_shortcuts_form_left_open_keeps_another_tuis_later_shortcut() {
+    let directory =
+        std::env::temp_dir().join(format!("haarness-open-shortcuts-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut app = selector_fixture();
+    let client = offline_client();
+    app.open_management("keybinds", &serde_json::json!({"action": "view"}), &client)
+        .await
+        .unwrap();
+    let mut input = app.management.view.submit.clone().unwrap();
+    for field in &app.management.view.fields {
+        input[&field.key] = field.value.clone().into();
+    }
+    // Another TUI on the folder rebinds Sessions while the form is open.
+    let elsewhere = crate::config::save_state(|state| {
+        state.keybindings.insert("sessions".into(), "F9".into());
+    });
+    input["models"] = "F7".into();
+    app.open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    let saved = crate::config::load_state().keybindings;
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(elsewhere);
+    assert_eq!(saved.get("sessions").map(String::as_str), Some("F9"));
+    assert_eq!(saved.get("models").map(String::as_str), Some("F7"));
+    assert_eq!(
+        app.keybindings.get("sessions").map(String::as_str),
+        Some("F9")
+    );
+    assert!(app.unsaved.keybindings.is_empty());
+}
+
+/// A key another TUI takes between the form's check and its save is refused
+/// as a clash in the form is: the error names it, the form keeps its edits,
+/// and nothing is kept as unsaved.
+#[tokio::test]
+async fn a_shortcut_key_taken_while_the_form_saves_is_refused_as_a_clash() {
+    use fs2::FileExt as _;
+    let directory =
+        std::env::temp_dir().join(format!("haarness-shortcut-race-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut app = selector_fixture();
+    let client = offline_client();
+    app.open_management("keybinds", &serde_json::json!({"action": "view"}), &client)
+        .await
+        .unwrap();
+    let models = app
+        .management
+        .view
+        .fields
+        .iter()
+        .position(|field| field.key == "models")
+        .unwrap();
+    app.management.view.fields[models].value = "F7".into();
+    // Another TUI holds the state lock and gives Sessions F7 before it lets go.
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(directory.join("tui-state.lock"))
+        .unwrap();
+    held.lock_exclusive().unwrap();
+    let other = std::thread::spawn({
+        let path = directory.join("tui-state.toml");
+        move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::fs::write(path, "[keybindings]\nsessions = \"F7\"\n").unwrap();
+            drop(held);
+        }
+    });
+    let saved = app
+        .management_choice(crate::state::OptionsKind::Management, "save", &client)
+        .await;
+    other.join().unwrap();
+    let on_disk = crate::config::load_state().keybindings;
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    let error = saved.unwrap_err().to_string();
+    assert!(error.contains("F7"), "{error}");
+    assert_eq!(app.management.view.fields[models].value, "F7");
+    assert!(app.unsaved.keybindings.is_empty());
+    assert_eq!(on_disk.get("models"), None);
+    assert_eq!(on_disk.get("sessions").map(String::as_str), Some("F7"));
+}
+
+/// A kept shortcut whose key another TUI takes later is dropped: this TUI and
+/// its form never show two actions on one key.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_kept_shortcut_whose_key_another_tui_takes_is_dropped() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory =
+        std::env::temp_dir().join(format!("haarness-kept-shortcut-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("tui-state.toml");
+    std::fs::write(&path, "theme = \"kept\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&path).is_ok() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut app = selector_fixture();
+    let client = offline_client();
+    let view = serde_json::json!({"action": "view"});
+    app.open_management("keybinds", &view, &client)
+        .await
+        .unwrap();
+    let mut input = app.management.view.submit.clone().unwrap();
+    for field in &app.management.view.fields {
+        input[&field.key] = field.value.clone().into();
+    }
+    input["models"] = "F7".into();
+    app.open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    let kept = app.unsaved.keybindings.clone();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // Another TUI on the folder gives Sessions the same key.
+    let elsewhere = crate::config::save_state(|state| {
+        state.keybindings.insert("sessions".into(), "F7".into());
+    });
+    app.open_management("keybinds", &view, &client)
+        .await
+        .unwrap();
+    let shown = app
+        .management
+        .view
+        .fields
+        .iter()
+        .map(|field| (field.key.clone(), field.value.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(elsewhere);
+    assert_eq!(kept.get("models").map(String::as_str), Some("F7"));
+    assert!(app.unsaved.keybindings.is_empty());
+    for bindings in [&app.keybindings, &shown] {
+        assert_eq!(bindings.get("sessions").map(String::as_str), Some("F7"));
+        assert_eq!(bindings.get("models").map(String::as_str), Some("F2"));
+    }
+}
+
+/// What one `App` of this TUI could not save (a favorite, a recent model, a
+/// shortcut) goes with it to the next one a server switch starts. Once the
+/// file can take them, the save as the TUI leaves writes the favorite and
+/// the recent model, and a `/keybinds` save the shortcut, checked as a form.
+#[cfg(unix)]
+#[tokio::test]
+async fn what_could_not_be_saved_follows_a_server_switch_and_is_written_on_leaving() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory =
+        std::env::temp_dir().join(format!("haarness-unsaved-switch-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("tui-state.toml");
+    std::fs::write(&path, "theme = \"kept\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&path).is_ok() {
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let mut first = selector_fixture();
+    first.model_favorites.clear();
+    first.selection = 0;
+    let favorite = first.filtered_models()[0].clone();
+    first.toggle_model_favorite();
+    first.thread.model = "gpt-5.4-mini".into();
+    first.remember_model();
+    let recent = format!("{}/gpt-5.4-mini", first.thread.provider);
+    let client = offline_client();
+    first
+        .open_management("keybinds", &serde_json::json!({"action": "view"}), &client)
+        .await
+        .unwrap();
+    let mut input = first.management.view.submit.clone().unwrap();
+    for field in &first.management.view.fields {
+        input[&field.key] = field.value.clone().into();
+    }
+    input["models"] = "F7".into();
+    first
+        .open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    // A server switch starts a new App from the saved state.
+    let mut second = selector_fixture();
+    second.model_favorites.clear();
+    second.model_recents.clear();
+    second.keep_unsaved(first.unsaved.clone());
+    let carried = (
+        second.model_favorites.contains(&favorite),
+        second.model_recents.first() == Some(&recent),
+        second.keybindings.get("models").cloned(),
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let left = crate::save_leaving_state(&second);
+    let saved = crate::config::load_state();
+    second
+        .open_management("keybinds", &serde_json::json!({"action": "view"}), &client)
+        .await
+        .unwrap();
+    let mut input = second.management.view.submit.clone().unwrap();
+    for field in &second.management.view.fields {
+        input[&field.key] = field.value.clone().into();
+    }
+    second
+        .open_management("keybinds", &input, &client)
+        .await
+        .unwrap();
+    let shortcuts = crate::config::load_state().keybindings;
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(carried, (true, true, Some("F7".into())));
+    assert!(left);
+    assert!(
+        saved.model_favorites.contains(&favorite),
+        "{:?}",
+        saved.model_favorites
+    );
+    assert_eq!(saved.model_recents.first(), Some(&recent));
+    // Shortcuts go in only through `/keybinds`, which checks them.
+    assert_eq!(saved.keybindings.get("models"), None);
+    assert_eq!(shortcuts.get("models").map(String::as_str), Some("F7"));
+    assert_eq!(saved.theme.as_deref(), Some("kept"));
+}
+
+/// Two TUIs' review viewers opened on the same saved choices: closing each
+/// saves only what was changed in it, so the second to close does not undo
+/// the first one's choice.
+#[test]
+fn review_viewers_closed_in_two_tuis_keep_both_layout_choices() {
+    let directory =
+        std::env::temp_dir().join(format!("haarness-review-choices-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    crate::config::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+    let open = || {
+        let mut app = selector_fixture();
+        let viewer = crate::diffview::DiffViewer::new(
+            crate::diffview::DiffSource::WorkingTree,
+            review_files(),
+            crate::config::load_diff_preferences(),
+        );
+        app.overlay = crate::state::Overlay::Diff(Box::new(viewer));
+        app
+    };
+    let (mut first, mut second) = (open(), open());
+    viewer_mut(&mut first).layout = Some(crate::diffview::DiffLayout::Split);
+    viewer_mut(&mut second).tree_visible = false;
+    first.close_diff_viewer();
+    second.close_diff_viewer();
+    let saved = crate::config::load_diff_preferences();
+    crate::config::THREAD_CONFIG_DIR.set(None);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(saved.layout, Some(crate::diffview::DiffLayout::Split));
+    assert!(!saved.tree_visible);
 }
 
 #[test]
@@ -19428,6 +20351,7 @@ fn queued_input(text: &str, attachments: &[&str]) -> haarness_protocol::PendingI
         id: haarness_protocol::RequestId::new(),
         text: text.into(),
         attachments: attachments.iter().map(|path| (*path).to_owned()).collect(),
+        ..Default::default()
     }
 }
 
@@ -20604,6 +21528,7 @@ fn home_names_the_missing_provider_and_the_agent_mention() {
         default_provider: None,
         default_model: None,
         default_approval_mode: None,
+        default_reasoning_effort: None,
         default_agent: None,
         project_trusted: Some(false),
         pid: None,
@@ -21565,6 +22490,9 @@ mod completion_tests;
 #[path = "chrome_tests.rs"]
 mod chrome_tests;
 
+#[path = "display_tests.rs"]
+mod display_tests;
+
 fn remote_control_text(app: &App, size: (u32, u32)) -> String {
     app.lines(size)
         .iter()
@@ -22108,7 +23036,11 @@ fn help_uses_the_width_it_has_and_keybinds_names_the_fixed_keys() {
     for line in app.lines((80, 30)) {
         assert!(line.width() <= 80);
     }
-    let view = crate::keybindings::view(&serde_json::json!({})).unwrap();
+    let (view, _) = crate::keybindings::view(
+        &serde_json::json!({}),
+        &std::collections::BTreeMap::default(),
+    )
+    .unwrap();
     assert!(view.lines.iter().any(|line| line.contains("esc esc stop")));
     assert!(
         view.lines
@@ -22275,6 +23207,7 @@ async fn the_band_cuts_a_notice_to_the_room_left_after_the_folder() {
         default_provider: None,
         default_model: None,
         default_approval_mode: None,
+        default_reasoning_effort: None,
         default_agent: None,
         project_trusted: Some(true),
         pid: None,
@@ -22383,6 +23316,37 @@ fn undo_fixture() -> (App, Thread) {
     ];
     let app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
     (app, thread)
+}
+
+/// An undo whose history read fails still puts the undone prompt back in
+/// the composer, and the transcript catches up on the next refresh.
+#[tokio::test]
+async fn an_undo_whose_history_cannot_be_read_keeps_the_undone_prompt() {
+    let (mut app, thread) = undo_fixture();
+    let mut reverted = thread.clone();
+    reverted.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+    });
+    let error = serde_json::json!({
+        "code": "storage",
+        "message": "database is locked",
+        "retryable": true,
+    })
+    .to_string();
+    let (client, server) = workspace_http_status_client(
+        vec![
+            (200, serde_json::to_string(&reverted).unwrap()),
+            (500, error),
+        ],
+        false,
+    )
+    .await;
+    assert!(app.execute_command("/undo", &client).await.is_err());
+    server.await.unwrap();
+    assert_eq!(app.composer.text(), "write the file");
+    assert!(app.refresh_needed);
 }
 
 #[tokio::test]
@@ -22568,6 +23532,60 @@ async fn leaving_over_a_set_aside_undone_prompt_keeps_it_as_the_draft() {
     assert_eq!(
         app.drafts.get(&thread.id).map(|draft| draft.text.as_str()),
         Some("write the file")
+    );
+}
+
+/// Opening a chat whose history cannot be read leaves both drafts where they
+/// were: the chat that stays open keeps what is typed in it, and the other
+/// chat's draft is there once it does open.
+#[tokio::test]
+async fn a_chat_whose_history_cannot_be_read_keeps_its_draft_for_the_next_switch() {
+    let thread = fixture_thread();
+    let other = Thread {
+        title: "Another thread".into(),
+        ..fixture_thread()
+    };
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone(), other.clone()],
+        vec![],
+        vec![],
+        vec![],
+    );
+    app.composer.set_text("typed here".into());
+    app.drafts.insert(
+        other.id,
+        crate::servers::Draft {
+            text: "waiting there".into(),
+            attachments: vec!["/tmp/plan.png".into()],
+            shell: false,
+        },
+    );
+    let error = serde_json::json!({
+        "code": "storage",
+        "message": "database is locked",
+        "retryable": true,
+    })
+    .to_string();
+    let (client, server) = workspace_http_status_client(vec![(500, error)], false).await;
+    assert!(app.switch_thread(other.clone(), &client).await.is_err());
+    server.await.unwrap();
+    assert_eq!(app.thread.id, thread.id);
+    assert_eq!(app.composer.text(), "typed here");
+    assert_eq!(
+        app.drafts.get(&other.id).map(|draft| draft.text.as_str()),
+        Some("waiting there")
+    );
+
+    let (client, server) = navigation_client().await;
+    app.switch_thread(other.clone(), &client).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(app.thread.id, other.id);
+    assert_eq!(app.composer.text(), "waiting there");
+    assert_eq!(app.attachments, ["/tmp/plan.png"]);
+    assert_eq!(
+        app.drafts.get(&thread.id).map(|draft| draft.text.as_str()),
+        Some("typed here")
     );
 }
 

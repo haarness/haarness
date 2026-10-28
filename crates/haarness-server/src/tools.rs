@@ -306,7 +306,10 @@ impl NativeToolRegistry {
 /// workspace subdirectory, every `AGENTS.md` (and, under Claude Code
 /// compatibility, `CLAUDE.md`-family file) between that directory and the
 /// workspace root that the system prompt does not already carry is appended
-/// to the result, once per thread.
+/// to the result, once while the model can see it: in an agent's turn the
+/// turn says what is in view, so a file compaction or an undo took out of
+/// the conversation comes back with the next read; elsewhere, once per
+/// thread.
 #[derive(Default)]
 struct InstructionDiscovery {
     claude: std::sync::atomic::AtomicBool,
@@ -315,7 +318,7 @@ struct InstructionDiscovery {
     >,
 }
 
-/// Nested instruction files attached per thread before discovery stops.
+/// Nested instruction files in view at once before discovery stops.
 const NESTED_INSTRUCTION_LIMIT: usize = 20;
 
 impl InstructionDiscovery {
@@ -325,15 +328,24 @@ impl InstructionDiscovery {
         file: &Path,
         workspace: &Path,
         thread: haarness_protocol::ThreadId,
+        in_context: Option<haarness_core::instructions::InContext>,
     ) {
         let claude = self.claude.load(std::sync::atomic::Ordering::Relaxed);
         let candidates = haarness_core::instructions::nested(file, workspace, claude);
         if candidates.is_empty() {
             return;
         }
-        let mut loaded = self.loaded.lock();
-        let seen = loaded.entry(thread).or_default();
+        let mut turn_view;
+        let mut loaded;
+        let seen = if let Some(view) = &in_context {
+            turn_view = view.lock();
+            &mut *turn_view
+        } else {
+            loaded = self.loaded.lock();
+            loaded.entry(thread).or_default()
+        };
         let mut attached = Vec::new();
+        let mut resolved = Vec::new();
         for candidate in candidates {
             if seen.len() >= NESTED_INSTRUCTION_LIMIT {
                 break;
@@ -344,7 +356,7 @@ impl InstructionDiscovery {
             if seen.contains(&key) {
                 continue;
             }
-            seen.insert(key);
+            seen.insert(key.clone());
             let Ok(content) = std::fs::read_to_string(&candidate) else {
                 continue;
             };
@@ -360,15 +372,19 @@ impl InstructionDiscovery {
                 .text
                 .push_str(&haarness_core::instructions::segment(&source, &content));
             attached.push(source);
+            resolved.push(key.display().to_string());
         }
         if attached.is_empty() {
             return;
         }
+        // With the files they resolve to, as `seen` keys them, so a later
+        // round tells what is in view without touching the disk.
         match output.metadata.as_object_mut() {
             Some(metadata) => {
                 metadata.insert("loaded".into(), json!(attached));
+                metadata.insert("loadedResolved".into(), json!(resolved));
             }
-            None => output.metadata = json!({ "loaded": attached }),
+            None => output.metadata = json!({ "loaded": attached, "loadedResolved": resolved }),
         }
     }
 }
@@ -1870,7 +1886,9 @@ impl ToolRegistry for NativeToolRegistry {
             .tool_snapshot()
             .into_iter()
             .find(|tool| tool.name == name)?;
-        let server = name.strip_prefix("mcp__")?.split_once("__")?.0.to_owned();
+        // The server that listed the tool, not the text before the first
+        // `__` of its name: a server's own name may hold `__` (`a__b`).
+        let server = self.mcp.as_ref()?.tool_server(name)?;
         Some(Arc::new(McpProjectedTool {
             definition,
             server,
@@ -1882,6 +1900,9 @@ impl ToolRegistry for NativeToolRegistry {
             .as_ref()
             .map(|mcp| mcp.resource_servers())
             .unwrap_or_default()
+    }
+    fn tool_server(&self, name: &str) -> Option<String> {
+        self.mcp.as_ref()?.tool_server(name)
     }
     fn list(&self) -> Vec<ToolDefinition> {
         let mut values: Vec<_> = self.tools.values().map(|tool| tool.definition()).collect();
@@ -2898,8 +2919,17 @@ impl Tool for BuiltinTool {
                     () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
                     read = read => read.map_err(tool_error)??,
                 });
-                self.instructions
-                    .attach(&mut output, &path, &context.workspace, context.thread_id);
+                let in_context = context
+                    .invoker
+                    .as_ref()
+                    .and_then(|invoker| invoker.instructions_in_context());
+                self.instructions.attach(
+                    &mut output,
+                    &path,
+                    &context.workspace,
+                    context.thread_id,
+                    in_context,
+                );
                 Ok(output)
             }
             Kind::ImageGenerate => {
@@ -3036,9 +3066,17 @@ impl Tool for BuiltinTool {
                 // workers, as glob's does: a large tree or a slow disk holds
                 // none of them, and Stop ends the call at once.
                 let workspace = context.workspace.clone();
+                let chat_home = context.execution.chat_home.clone();
                 let cancel = context.cancel.clone();
                 let walk = tokio::task::spawn_blocking(move || {
-                    text::grep_walk(&regex, &root, &workspace, &secrets, &cancel)
+                    text::grep_walk(
+                        &regex,
+                        &root,
+                        &workspace,
+                        chat_home.as_deref(),
+                        &secrets,
+                        &cancel,
+                    )
                 });
                 let found = tokio::select! {
                     () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
@@ -3083,6 +3121,15 @@ impl Tool for BuiltinTool {
                 let before = string(&args, "old")?;
                 let after = string(&args, "new")?;
                 let text = text::read_utf8(&path, "edit").await?;
+                // An empty old is found between every two characters; said
+                // plainly rather than as a count of those places. An empty
+                // file still takes its first text this way.
+                if before.is_empty() && !text.is_empty() {
+                    return Err(CoreError::Invalid(
+                        "old is empty: give the exact text to replace, or use write to replace the whole file"
+                            .into(),
+                    ));
+                }
                 let (before, after) = text::crlf_edit(&text, before, after);
                 let (before, after) = (before.as_ref(), after.as_ref());
                 let count = text.matches(before).count();
@@ -3854,6 +3901,8 @@ enum Hidden {
     Secret,
     /// A configured, agent or inherited `read` rule denies it.
     Denied,
+    /// Haarness keeps sign-ins in it (`haarness_core::is_credential_store_path`).
+    SignIns,
 }
 
 /// How many files a search left out, by why.
@@ -3861,6 +3910,7 @@ enum Hidden {
 struct Skipped {
     secret: usize,
     denied: usize,
+    sign_ins: usize,
     /// Glob matches in a linked folder that leads out of the project.
     outside: usize,
 }
@@ -3876,6 +3926,7 @@ impl Skipped {
         match hidden {
             Hidden::Secret => self.secret += 1,
             Hidden::Denied => self.denied += 1,
+            Hidden::SignIns => self.sign_ins += 1,
         }
     }
 }
@@ -3913,6 +3964,9 @@ impl SecretFilter {
         let relative = self.relative(path);
         if haarness_core::is_secret_path(relative) {
             return Some(Hidden::Secret);
+        }
+        if haarness_core::is_credential_store_path(path) {
+            return Some(Hidden::SignIns);
         }
         self.rules
             .as_ref()
@@ -4136,6 +4190,13 @@ fn with_skipped(mut output: ToolOutput, skipped: Skipped, partial: bool) -> Tool
             plural(skipped.denied)
         ));
     }
+    if skipped.sign_ins > 0 {
+        reasons.push(format!(
+            "{at_least}{} file{} where Haarness keeps sign-ins",
+            skipped.sign_ins,
+            plural(skipped.sign_ins)
+        ));
+    }
     // Said so the model does not take those files for absent.
     if skipped.outside > 0 {
         reasons.push(format!(
@@ -4162,6 +4223,9 @@ fn with_skipped(mut output: ToolOutput, skipped: Skipped, partial: bool) -> Tool
         }
         if skipped.denied > 0 {
             metadata.insert("denied".into(), json!(skipped.denied));
+        }
+        if skipped.sign_ins > 0 {
+            metadata.insert("signIns".into(), json!(skipped.sign_ins));
         }
         if skipped.outside > 0 {
             metadata.insert("outside".into(), json!(skipped.outside));
@@ -4786,11 +4850,11 @@ pub(crate) async fn truncate_output_at(text: String, directory: &Path) -> CoreRe
         return Ok(output(text));
     }
     let preview = output_preview(&text);
-    tokio::fs::create_dir_all(directory)
+    let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
         .await
         .map_err(tool_error)?;
-    let path = directory.join(format!("tool_{}.txt", uuid::Uuid::now_v7()));
-    tokio::fs::write(&path, &text).await.map_err(tool_error)?;
+    file.write_all(text.as_bytes()).await.map_err(tool_error)?;
+    file.flush().await.map_err(tool_error)?;
     let removed = text.len().saturating_sub(preview.len());
     let notice = format!(
         "The tool call succeeded but its output was truncated. Full output saved to: {}\n\
@@ -4823,9 +4887,21 @@ fn output_preview(text: &str) -> String {
     preview.join("\n")
 }
 
+/// Whether `path` lies in the chat home `chat_home` (see
+/// [`haarness_core::ExecutionSettings::chat_home`]), whose searches read no
+/// ignore file from the folders above it.
+pub(crate) fn within_chat_home(path: &Path, chat_home: Option<&Path>) -> bool {
+    chat_home.is_some_and(|home| {
+        path.starts_with(home)
+            || path
+                .canonicalize()
+                .is_ok_and(|path| home.canonicalize().is_ok_and(|home| path.starts_with(home)))
+    })
+}
+
 pub(crate) fn tool_output_dir() -> PathBuf {
     crate::data_folder().map_or_else(
-        || std::env::temp_dir().join("haarness/tool-output"),
+        || crate::data_folder::private_temp_folder().join("tool-output"),
         |folder| folder.join("tool-output"),
     )
 }
@@ -4971,6 +5047,61 @@ mod tests {
                 .ends_with("crates/api/CLAUDE.md"),
             "nearest first"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The turn's view of its context, as the runtime hands it to a tool.
+    struct InView(haarness_core::instructions::InContext);
+
+    #[async_trait]
+    impl haarness_core::ToolInvoker for InView {
+        fn instructions_in_context(&self) -> Option<haarness_core::instructions::InContext> {
+            Some(Arc::clone(&self.0))
+        }
+        async fn invoke(&self, name: &str, _arguments: Value) -> CoreResult<ToolOutput> {
+            panic!("read invoked {name}");
+        }
+        fn side_effectful_for(&self, _name: &str, _arguments: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn read_attaches_a_nested_instruction_file_again_once_it_is_out_of_view() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-read-in-view-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join("crates/api/src")).unwrap();
+        std::fs::write(root.join("crates/AGENTS.md"), "CRATE_RULES").unwrap();
+        std::fs::write(root.join("crates/api/src/lib.rs"), "fn api() {}").unwrap();
+        std::fs::write(root.join("crates/api/src/main.rs"), "fn main() {}").unwrap();
+        let workspace = root.canonicalize().unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let read = registry.get("read").unwrap();
+        let view = haarness_core::instructions::InContext::default();
+        let mut context = tool_context(&workspace);
+        context.invoker = Some(Arc::new(InView(Arc::clone(&view))));
+
+        let first = read
+            .execute(json!({"path":"crates/api/src/lib.rs"}), context.clone())
+            .await
+            .unwrap();
+        assert!(first.text.contains("CRATE_RULES"), "{}", first.text);
+        assert_eq!(view.lock().len(), 1, "the turn sees what was attached");
+        // Still in view: another read in that folder does not repeat it.
+        let second = read
+            .execute(json!({"path":"crates/api/src/main.rs"}), context.clone())
+            .await
+            .unwrap();
+        assert!(!second.text.contains("CRATE_RULES"), "{}", second.text);
+        // Compaction took the first result out of the conversation: the
+        // next round's view no longer holds it, and a read brings it back.
+        view.lock().clear();
+        let third = read
+            .execute(json!({"path":"crates/api/src/main.rs"}), context.clone())
+            .await
+            .unwrap();
+        assert!(third.text.contains("CRATE_RULES"), "{}", third.text);
+        assert_eq!(third.metadata["loaded"].as_array().unwrap().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -7430,6 +7561,73 @@ export default workflow({
     }
 
     #[tokio::test]
+    async fn searches_and_listings_leave_out_where_sign_ins_are_kept() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-search-sign-ins-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("data")).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        for file in [
+            "data/auth.json",
+            "data/auth.json.lock",
+            "data/notes.md",
+            "auth.json",
+        ] {
+            std::fs::write(workspace.join(file), format!("needle {file}\n")).unwrap();
+        }
+        haarness_core::record_credential_store(workspace.join("data/auth.json"), false);
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |tool: &'static str, args: Value| {
+            let registry = &registry;
+            let context = tool_context(&workspace);
+            async move {
+                registry
+                    .get(tool)
+                    .unwrap()
+                    .execute(args, context)
+                    .await
+                    .unwrap()
+            }
+        };
+        let grep = run("grep", json!({"pattern":"needle","path":"."})).await;
+        assert!(
+            grep.text.contains("data/notes.md:1:needle"),
+            "{}",
+            grep.text
+        );
+        // The project's own `auth.json` is an ordinary file.
+        assert!(
+            grep.text.contains("auth.json:1:needle auth.json"),
+            "{}",
+            grep.text
+        );
+        assert!(
+            !grep.text.contains("needle data/auth.json"),
+            "{}",
+            grep.text
+        );
+        assert!(
+            grep.text
+                .ends_with("(skipped 2 files where Haarness keeps sign-ins)"),
+            "{}",
+            grep.text
+        );
+        assert_eq!(grep.metadata["signIns"], 2);
+        let direct = run("grep", json!({"pattern":"needle","path":"data/auth.json"})).await;
+        assert_eq!(
+            direct.text,
+            "No files found\n\n(skipped 1 file where Haarness keeps sign-ins)"
+        );
+        let list = run("list", json!({"path":"data"})).await;
+        assert_eq!(
+            list.text,
+            "notes.md\n\n(skipped 2 files where Haarness keeps sign-ins)"
+        );
+        let glob = run("glob", json!({"pattern":"data/*"})).await;
+        assert!(!glob.text.contains("auth.json"), "{}", glob.text);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
     async fn a_glob_stopped_at_its_limit_says_its_skip_count_is_a_lower_bound() {
         let workspace =
             std::env::temp_dir().join(format!("haarness-glob-cap-{}", uuid::Uuid::now_v7()));
@@ -7770,6 +7968,33 @@ export default workflow({
     }
 
     #[tokio::test]
+    async fn a_read_past_the_end_says_how_long_the_file_is() {
+        let (root, _) = read_fixture("f.txt", b"one\ntwo\nthree\n");
+        let past = |offset: usize| {
+            let root = root.clone();
+            async move {
+                read_text_of(&root, json!({"path":"f.txt","offset":offset}))
+                    .await
+                    .unwrap()
+                    .text
+            }
+        };
+        assert_eq!(past(2).await, "three");
+        assert_eq!(
+            past(3).await,
+            "(the file has 3 lines, so offset 3 is past its end)"
+        );
+        assert_eq!(
+            past(40).await,
+            "(the file has 3 lines, so offset 40 is past its end)"
+        );
+        // An empty file read from its start is still just empty.
+        std::fs::write(root.join("f.txt"), b"").unwrap();
+        assert_eq!(past(0).await, "");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn read_splits_lines_as_it_always_did() {
         for body in [
             "one\ntwo\nthree\n",
@@ -7791,11 +8016,20 @@ export default workflow({
                     .take(limit)
                     .collect::<Vec<_>>()
                     .join("\n");
-                if body.lines().count() > offset + limit {
+                let count = body.lines().count();
+                if count > offset + limit {
                     expected = format!(
                         "{expected}\n\n(more lines follow; read on with offset={})",
                         offset + shown
                     );
+                } else if shown == 0 && offset > 0 {
+                    // Past the end, the result says so rather than nothing.
+                    let length = match count {
+                        0 => "is empty".to_owned(),
+                        1 => "has 1 line".to_owned(),
+                        count => format!("has {count} lines"),
+                    };
+                    expected = format!("(the file {length}, so offset {offset} is past its end)");
                 }
                 assert_eq!(result.text, expected, "{body:?} {offset} {limit}");
             }
@@ -7970,6 +8204,29 @@ export default workflow({
             .unwrap()
             .execute(args, tool_context(root))
             .await
+    }
+
+    #[tokio::test]
+    async fn an_edit_with_an_empty_old_says_what_to_do_instead() {
+        let (root, file) = read_fixture("notes.md", b"# Notes\n");
+        let refused = edit_in(&root, "edit", json!({"path":"notes.md","old":"","new":"x"})).await;
+        assert!(
+            matches!(&refused, Err(CoreError::Invalid(message))
+                if message.contains("old is empty") && message.contains("use write")),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"# Notes\n");
+        // An empty file takes its first text.
+        std::fs::write(&file, b"").unwrap();
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"notes.md","old":"","new":"# Notes\n"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"# Notes\n");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -8866,6 +9123,107 @@ mod webfetch_tests {
         .expect("Stop must end the call");
         assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
     }
+
+    /// Servers `a` (tool `b__c`) and `a__b` (tools `c` and `d`), whose tools
+    /// are `mcp__a__b__c` (the first by name has it) and `mcp__a__b__d`; a
+    /// call answers with the server it reached.
+    struct TwoServers;
+
+    #[async_trait]
+    impl McpRegistry for TwoServers {
+        fn tool_snapshot(&self) -> Vec<ToolDefinition> {
+            ["mcp__a__b__c", "mcp__a__b__d"]
+                .into_iter()
+                .map(|name| ToolDefinition {
+                    name: name.into(),
+                    description: "fixture".into(),
+                    input_schema: json!({"type":"object"}),
+                })
+                .collect()
+        }
+        fn tool_server(&self, tool: &str) -> Option<String> {
+            match tool {
+                "mcp__a__b__c" => Some("a".into()),
+                "mcp__a__b__d" => Some("a__b".into()),
+                _ => None,
+            }
+        }
+        async fn list(&self) -> CoreResult<Vec<haarness_protocol::McpServerInfo>> {
+            Ok(Vec::new())
+        }
+        async fn configure(
+            &self,
+            _name: &str,
+            _config: haarness_protocol::McpConfigureRequest,
+        ) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn reconnect(&self, _name: &str) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn disconnect(&self, _name: &str) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn tools(&self, _name: &str) -> CoreResult<Vec<ToolDefinition>> {
+            Ok(Vec::new())
+        }
+        async fn call(&self, name: &str, tool: &str, _arguments: Value) -> CoreResult<ToolOutput> {
+            Ok(ToolOutput {
+                text: format!("{name}|{tool}"),
+                metadata: Value::Null,
+            })
+        }
+        async fn resources(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn resource_templates(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn read_resource(&self, _name: &str, _uri: &str) -> CoreResult<Value> {
+            unreachable!()
+        }
+        async fn prompts(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn get_prompt(
+            &self,
+            _name: &str,
+            _prompt: &str,
+            _arguments: Value,
+        ) -> CoreResult<Value> {
+            unreachable!()
+        }
+    }
+
+    /// A tool reaches the server that listed it, not the one named by the
+    /// text before the first `__` of its name.
+    #[tokio::test]
+    async fn an_mcp_tool_reaches_the_server_that_lists_it() {
+        let workspace = std::env::temp_dir();
+        let registry = NativeToolRegistry::with_extras(
+            workspace.clone(),
+            Some(Arc::new(TwoServers)),
+            None,
+            Vec::new(),
+        );
+        for (tool, reached) in [
+            ("mcp__a__b__c", "a|mcp__a__b__c"),
+            ("mcp__a__b__d", "a__b|mcp__a__b__d"),
+        ] {
+            let output = registry
+                .get(tool)
+                .unwrap_or_else(|| panic!("{tool} is not offered"))
+                .execute(json!({}), composite_context(&workspace))
+                .await
+                .unwrap();
+            assert_eq!(output.text, reached);
+        }
+        assert_eq!(
+            registry.tool_server("mcp__a__b__d").as_deref(),
+            Some("a__b")
+        );
+        assert!(registry.get("mcp__b__c").is_none());
+    }
 }
 
 /// What reaches the agent's shell from the skill tool and Code Mode: a
@@ -8994,6 +9352,7 @@ mod agent_shell_tests {
                     tools: None,
                     command: None,
                     resources: Vec::new(),
+                    ..Default::default()
                 },
             )
             .await

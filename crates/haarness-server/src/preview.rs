@@ -55,15 +55,17 @@ fn record(workspace: &Path, data: &[u8]) -> Result<String, Failure> {
     }
     let hash = files::hash(data);
     let dir = directory(workspace)?;
-    fs::create_dir_all(&dir).map_err(bad)?;
+    // A page can show what only its owner should see: the folder and its
+    // versions are theirs alone, as saved tool output is.
+    crate::data_folder::private_folder_blocking(&dir).map_err(bad)?;
     // Write a complete new blob before publishing it. Concurrent previews of identical bytes are safe.
     let temporary = dir.join(format!(".{}", uuid::Uuid::now_v7()));
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(bad)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&temporary).map_err(bad)?;
         file.write_all(data).map_err(bad)?;
         file.sync_all().map_err(bad)?;
         fs::rename(&temporary, dir.join(&hash)).map_err(bad)
@@ -352,6 +354,24 @@ pub async fn restore_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A preview version is its owner's alone, in a folder only they can
+    /// open, as saved tool output is.
+    #[cfg(unix)]
+    #[test]
+    fn a_preview_version_is_readable_by_its_owner_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let root =
+            std::env::temp_dir().join(format!("haarness-preview-mode-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let workspace = root.canonicalize().unwrap();
+        let hash = record(&workspace, b"<h1>private</h1>").unwrap();
+        let folder = directory(&workspace).unwrap();
+        assert_eq!(mode(&folder), 0o700);
+        assert_eq!(mode(&folder.join(&hash)), 0o600);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// `~/page.html` is in the home folder, outside the project, never a
     /// project folder named `~` (that one is `./~/page.html`).

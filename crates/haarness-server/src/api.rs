@@ -845,6 +845,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
         default_provider,
         default_model,
         default_approval_mode: Some(state.runtime.approval_mode_default()),
+        default_reasoning_effort: state.runtime.default_reasoning_effort(),
         pid: Some(std::process::id()),
     })
 }
@@ -1662,10 +1663,12 @@ async fn start_turn(
     }
     if let Some(effort) = request.reasoning_effort.as_deref()
         && effort != "ultracode"
+        && effort != haarness_protocol::MODEL_DEFAULT_EFFORT
         && !haarness_protocol::REASONING_EFFORTS.contains(&effort)
     {
         return Err(CoreError::Invalid(format!(
-            "reasoning_effort must be {}|ultracode, got {effort}",
+            "reasoning_effort must be {}|{}|ultracode, got {effort}",
+            haarness_protocol::MODEL_DEFAULT_EFFORT,
             haarness_protocol::REASONING_EFFORTS.join("|")
         ))
         .into());
@@ -2038,6 +2041,13 @@ async fn search_files(
             .unwrap_or_else(|| state.workspace.clone()),
         None => state.workspace.clone(),
     };
+    // The chat home stands alone, whatever folders hold it: neither their
+    // ignore files nor a repository among them (a home folder kept in Git)
+    // change what a search there finds.
+    let chat_home = state
+        .runtime
+        .is_chat_home()
+        .then(|| state.workspace.clone());
     let results = tokio::task::spawn_blocking(move || {
         if let Some(results) = explicit_path_suggestions(&workspace, &raw_query, limit) {
             return results;
@@ -2050,12 +2060,17 @@ async fn search_files(
         // files a person means.
         let named = needle.clone();
         let top = workspace.clone();
+        let alone = crate::tools::within_chat_home(&workspace, chat_home.as_deref());
         let in_git = workspace
             .ancestors()
+            .take_while(|folder| {
+                !alone || crate::tools::within_chat_home(folder, chat_home.as_deref())
+            })
             .any(|folder| folder.join(".git").exists());
         let walker = ignore::WalkBuilder::new(&workspace)
             .hidden(true)
             .require_git(false)
+            .parents(!alone)
             .max_depth(Some(12))
             .filter_entry(move |entry| {
                 !(!in_git

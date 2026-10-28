@@ -1,5 +1,5 @@
 use super::*;
-use haarness_core::EmptyToolRegistry;
+use haarness_core::{EmptyToolRegistry, HookCall};
 use haarness_protocol::TurnId;
 
 fn fixture(body: &str) -> (tempfile::TempDir, Config) {
@@ -88,7 +88,11 @@ async fn typed_tools_hooks_state_and_schema_use_real_bun() {
     let hooks = extensions.wrap_hooks(None);
     let thread = ThreadId::new();
     let decision = hooks
-        .pre_tool_use(thread, "ext__fixture__greet", &json!({"name":"original"}))
+        .pre_tool_use(
+            &HookCall::new(thread),
+            "ext__fixture__greet",
+            &json!({"name":"original"}),
+        )
         .await;
     let output = tool
         .execute(decision.updated_input.unwrap(), context(root.path()))
@@ -104,7 +108,7 @@ async fn typed_tools_hooks_state_and_schema_use_real_bun() {
     );
     assert_eq!(
         hooks
-            .user_prompt_submit(thread, "hello")
+            .user_prompt_submit(&HookCall::new(thread), "hello")
             .await
             .context
             .as_deref(),
@@ -112,7 +116,11 @@ async fn typed_tools_hooks_state_and_schema_use_real_bun() {
     );
     assert_eq!(
         hooks
-            .pre_tool_use(thread, "ext__fixture__greet", &json!({"name":"blocked"}))
+            .pre_tool_use(
+                &HookCall::new(thread),
+                "ext__fixture__greet",
+                &json!({"name":"blocked"})
+            )
             .await
             .block
             .as_deref(),
@@ -132,6 +140,64 @@ async fn typed_tools_hooks_state_and_schema_use_real_bun() {
     assert_eq!(request.reasoning_effort.as_deref(), Some("high"));
 }
 
+/// Command hooks that object once a tool ran.
+struct Objects;
+#[async_trait]
+impl HookPort for Objects {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn post_tool_use(
+        &self,
+        _: &HookCall,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> HookDecision {
+        HookDecision {
+            block: Some("FORMAT_FEEDBACK".into()),
+            context: Some("COMMAND_CONTEXT".into()),
+            ..HookDecision::default()
+        }
+    }
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: &HookCall,
+        _: &str,
+        _: &[String],
+        _: Option<&[String]>,
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn stop(&self, _: &HookCall) {}
+}
+
+#[tokio::test]
+async fn command_hook_feedback_after_a_tool_passes_extensions_and_never_stops_them() {
+    let (root, config) = fixture(GOOD);
+    let extensions = Extensions::load(&config, root.path()).await.unwrap();
+    let hooks = extensions.wrap_hooks(Some(Arc::new(Objects)));
+    let decision = hooks
+        .post_tool_use(
+            &HookCall::new(ThreadId::new()),
+            "read",
+            &json!({"path":"a"}),
+            "text",
+            false,
+        )
+        .await;
+    assert_eq!(decision.block.as_deref(), Some("FORMAT_FEEDBACK"));
+    assert_eq!(
+        decision.context.as_deref(),
+        Some("COMMAND_CONTEXT\nRESULT_CONTEXT")
+    );
+}
+
 #[tokio::test]
 async fn a_throwing_event_observer_never_skips_or_fails_the_real_hook() {
     let (root, config) = fixture(
@@ -149,7 +215,7 @@ export default () => ({apiVersion:1, name:'observer', hooks: {
     let thread = ThreadId::new();
     assert_eq!(
         hooks
-            .user_prompt_submit(thread, "hello")
+            .user_prompt_submit(&HookCall::new(thread), "hello")
             .await
             .context
             .as_deref(),
@@ -157,7 +223,7 @@ export default () => ({apiVersion:1, name:'observer', hooks: {
     );
     assert!(
         hooks
-            .pre_tool_use(thread, "read", &json!({"path":"a"}))
+            .pre_tool_use(&HookCall::new(thread), "read", &json!({"path":"a"}))
             .await
             .block
             .is_none()
@@ -469,24 +535,31 @@ async fn lifecycle_params_env_and_permission_hooks_reach_extensions() {
     let hooks = extensions.wrap_hooks(None);
     let thread = ThreadId::new();
     let turn = TurnId::new();
-    hooks.session_start(thread, "build").await;
+    hooks
+        .session_start(&HookCall {
+            agent: Some("build".into()),
+            ..HookCall::new(thread)
+        })
+        .await;
     hooks
         .turn_end(
-            thread,
+            &HookCall::new(thread),
             turn,
             &json!({"agent":"build","finishReason":"stop"}),
         )
         .await;
-    hooks.session_end(thread, "archived").await;
+    hooks.session_end(&HookCall::new(thread), "archived").await;
     let compaction: haarness_protocol::Item = serde_json::from_value(json!({
         "id":haarness_protocol::ItemId::new(), "threadId":thread, "turnId":null,
         "sequence":1, "createdAt":"2026-09-30T00:00:00Z",
         "data":{"type":"compaction","summary":"saved summary","files_touched":[],"outstanding":[]}
     }))
     .unwrap();
-    hooks.post_compact(thread, "automatic", &compaction).await;
     hooks
-        .stop_failure(thread, turn, &json!({"error":"incomplete"}))
+        .post_compact(&HookCall::new(thread), "automatic", &compaction)
+        .await;
+    hooks
+        .stop_failure(&HookCall::new(thread), turn, &json!({"error":"incomplete"}))
         .await;
     extensions
         .notify_config(&json!({"model":"echo/echo-1"}))
@@ -537,7 +610,7 @@ async fn lifecycle_params_env_and_permission_hooks_reach_extensions() {
 
     let denied = hooks
         .permission_request(
-            thread,
+            &HookCall::new(thread),
             "bash",
             &["rm -rf /".to_owned()],
             None,
@@ -548,7 +621,7 @@ async fn lifecycle_params_env_and_permission_hooks_reach_extensions() {
     assert_eq!(denied.block.as_deref(), Some("DENIED_BY_PERMISSION_ASK"));
     let allowed = hooks
         .permission_request(
-            thread,
+            &HookCall::new(thread),
             "read",
             &["x".to_owned()],
             None,
@@ -560,7 +633,7 @@ async fn lifecycle_params_env_and_permission_hooks_reach_extensions() {
     // The patterns asked about reach the extension beside the arguments.
     let secret = hooks
         .permission_request(
-            thread,
+            &HookCall::new(thread),
             "read",
             &[".env".to_owned()],
             None,
@@ -571,7 +644,7 @@ async fn lifecycle_params_env_and_permission_hooks_reach_extensions() {
     assert_eq!(secret.block.as_deref(), Some("SECRET_READ"));
     let open = hooks
         .permission_request(
-            thread,
+            &HookCall::new(thread),
             "write",
             &["x".to_owned()],
             None,
@@ -580,9 +653,13 @@ async fn lifecycle_params_env_and_permission_hooks_reach_extensions() {
         .await;
     assert_eq!(open.permission, None);
 
-    let blocked = hooks.command_execute_before(thread, "forbidden", "").await;
+    let blocked = hooks
+        .command_execute_before(&HookCall::new(thread), "forbidden", "")
+        .await;
     assert_eq!(blocked.block.as_deref(), Some("COMMAND_BLOCKED"));
-    let observed = hooks.command_execute_before(thread, "review", "src").await;
+    let observed = hooks
+        .command_execute_before(&HookCall::new(thread), "review", "src")
+        .await;
     assert!(observed.block.is_none());
     assert_eq!(observed.context.as_deref(), Some("COMMAND_CONTEXT src"));
 
@@ -648,7 +725,7 @@ async fn unsupported_hooks_and_malformed_results_are_rejected() {
             .contains("temperature must be a number")
     );
     let decision = hooks
-        .permission_request(thread, "bash", &[], None, &json!({}))
+        .permission_request(&HookCall::new(thread), "bash", &[], None, &json!({}))
         .await;
     assert_eq!(decision.permission, Some(PermissionDecision::Deny));
     assert!(decision.block.unwrap().contains("status must be"));
@@ -737,4 +814,39 @@ fn redefined_tools_keep_explicit_approvals_and_constraints() {
         Some(PermissionDecision::Deny)
     );
     assert_eq!(tool.definition().description, "Rewritten by an extension");
+}
+
+/// With an extension's tools beside them, MCP tools still name the server
+/// that offers them (`a__b` for its `mcp__a__b__d`), for clients to show.
+#[test]
+fn combined_tools_name_the_mcp_server_of_a_tool() {
+    struct Servers;
+    impl ToolRegistry for Servers {
+        fn get(&self, _name: &str) -> Option<Arc<dyn Tool>> {
+            None
+        }
+        fn list(&self) -> Vec<ToolDefinition> {
+            Vec::new()
+        }
+        fn resource_servers(&self) -> Vec<String> {
+            vec!["a__b".into()]
+        }
+        fn tool_server(&self, name: &str) -> Option<String> {
+            (name == "mcp__a__b__d").then(|| "a__b".into())
+        }
+    }
+    let combined = CombinedTools {
+        inner: Arc::new(Servers),
+        extensions: Arc::new(Extensions {
+            hosts: Vec::new(),
+            tools: BTreeMap::new(),
+            workspace: PathBuf::new(),
+        }),
+        overrides: BTreeMap::new(),
+    };
+    assert_eq!(
+        combined.tool_server("mcp__a__b__d").as_deref(),
+        Some("a__b")
+    );
+    assert_eq!(combined.resource_servers(), ["a__b"]);
 }

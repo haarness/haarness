@@ -291,26 +291,105 @@ const FIXED_KEYS: &[&str] = &[
     "Fixed: esc esc stop · ctrl+c clear, then stop · alt+enter queue · ctrl+g approval · tab agent · ctrl+y approvals · ctrl+b sidebar · ctrl+t thinking",
 ];
 
-pub(crate) fn view(input: &Value) -> Result<ManagementView> {
-    let (mut bindings, _) = load();
-    if input["action"] == "save" {
-        let loaded = bindings.clone();
-        for (name, _, _) in ACTIONS {
-            bindings.insert(
-                (*name).into(),
-                input[*name].as_str().context("Missing shortcut")?.into(),
-            );
-        }
-        validate(&bindings)?;
-        let saved = saved_state(
-            &bindings,
-            &loaded,
-            configured(),
-            crate::config::load_state().keybindings,
-        );
-        crate::config::save_state(|s| s.keybindings = saved);
+/// What the shortcuts form did with a save.
+pub(crate) enum Saving {
+    /// The form was only shown.
+    None,
+    Saved,
+    /// `tui-state.toml` could not take them: the shortcuts this save changed,
+    /// by action, which apply until it can.
+    NotSaved(BTreeMap<String, String>),
+}
+
+/// `changes`, by action, laid over `bindings`.
+fn lay_over(bindings: &mut BTreeMap<String, String>, changes: &BTreeMap<String, String>) {
+    for (action, key) in changes {
+        bindings.insert(action.clone(), key.clone());
     }
-    Ok(ManagementView{title:"Keyboard shortcuts".into(),lines:FIXED_KEYS.iter().map(|line| (*line).to_owned()).chain(["Use ctrl+k, alt+r, alt+up, F6 or none. Restart to reload [tui.keybinds] from config.toml; edits here apply immediately.".to_owned()]).collect(),fields:ACTIONS.iter().map(|(name,label,_)|ManagementField{key:(*name).into(),label:(*label).into(),value:bindings.get(*name).cloned().unwrap_or_default(),required:true,secret:false,choices:vec![]}).collect(),submit:Some(json!({"action":"save"})),..ManagementView::default()})
+}
+
+/// `unsaved` (shortcuts no save could write, by action) laid over
+/// `bindings`, the ones loaded now. One whose key another action holds by
+/// now (another TUI took it) is dropped from `unsaved` and left out, as is
+/// one that would then clash in its turn: two actions never share a key.
+pub(crate) fn lay_over_unsaved(
+    bindings: &mut BTreeMap<String, String>,
+    unsaved: &mut BTreeMap<String, String>,
+) {
+    let key = |value: &String| parse(value).ok().flatten();
+    loop {
+        let mut laid = bindings.clone();
+        lay_over(&mut laid, unsaved);
+        let clashing = unsaved
+            .keys()
+            .filter(|action| {
+                let held = laid.get(*action).and_then(key);
+                held.is_some()
+                    && laid
+                        .iter()
+                        .any(|(other, value)| other != *action && key(value) == held)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if clashing.is_empty() {
+            *bindings = laid;
+            return;
+        }
+        for action in clashing {
+            unsaved.remove(&action);
+        }
+    }
+}
+
+/// The shortcuts form, with `unsaved` laid over what is saved now, and what
+/// a save from it did. A save writes only the shortcuts changed in the form
+/// since it opened (it carries the values it opened with), with `unsaved`,
+/// over what is saved when it writes: another TUI may have changed the
+/// others meanwhile. A key another TUI took since is refused, as a key two
+/// fields of the form share is.
+pub(crate) fn view(
+    input: &Value,
+    unsaved: &BTreeMap<String, String>,
+) -> Result<(ManagementView, Saving)> {
+    let (mut bindings, _) = load();
+    let mut changes = unsaved.clone();
+    lay_over_unsaved(&mut bindings, &mut changes);
+    let mut saving = Saving::None;
+    if input["action"] == "save" {
+        for (name, _, _) in ACTIONS {
+            let value = input[*name].as_str().context("Missing shortcut")?;
+            if input["opened"][*name].as_str() != Some(value) {
+                changes.insert((*name).into(), value.into());
+            }
+        }
+        lay_over(&mut bindings, &changes);
+        validate(&bindings)?;
+        let mut clash = None;
+        let saved = crate::config::save_state(|state| {
+            let config = configured();
+            let loaded = settle(config.clone(), state.keybindings.clone()).bindings;
+            let mut bindings = loaded.clone();
+            lay_over(&mut bindings, &changes);
+            match validate(&bindings) {
+                Ok(()) => {
+                    let kept = std::mem::take(&mut state.keybindings);
+                    state.keybindings = saved_state(&bindings, &loaded, config, kept);
+                }
+                // Another TUI took one of these keys since the form opened.
+                Err(error) => clash = Some(error),
+            }
+        });
+        if let Some(error) = clash {
+            return Err(error);
+        }
+        saving = if saved {
+            Saving::Saved
+        } else {
+            Saving::NotSaved(changes)
+        };
+    }
+    let view = ManagementView{title:"Keyboard shortcuts".into(),lines:FIXED_KEYS.iter().map(|line| (*line).to_owned()).chain(["Use ctrl+k, alt+r, alt+up, F6 or none. Restart to reload [tui.keybinds] from config.toml; edits here apply immediately.".to_owned()]).collect(),fields:ACTIONS.iter().map(|(name,label,_)|ManagementField{key:(*name).into(),label:(*label).into(),value:bindings.get(*name).cloned().unwrap_or_default(),required:true,secret:false,choices:vec![]}).collect(),submit:Some(json!({"action":"save","opened":bindings})),..ManagementView::default()};
+    Ok((view, saving))
 }
 
 #[cfg(test)]

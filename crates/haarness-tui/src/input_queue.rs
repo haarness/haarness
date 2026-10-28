@@ -33,13 +33,14 @@ impl App {
         };
         let request = QueueInputRequest {
             preview: Some(false),
-            reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_effort: self.requested_effort(),
             delivery: InputDelivery::Queue,
             request_id: RequestId::new(),
             text,
             attachments: self.attachments.clone(),
             resources,
             synthetic: false,
+            ..Default::default()
         };
         if !request.resources.is_empty() {
             let mentions = request.resources.clone();

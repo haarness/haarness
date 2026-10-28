@@ -83,6 +83,7 @@ Primary resources:
 - `GET|POST /v1/ptys`; `GET|PATCH|DELETE /v1/ptys/{id}`; WebSocket `GET /v1/ptys/{id}/connect?cursor=N`
 - `POST /v1/threads/{id}/fork`, `/turns`, `/commands`, `/compact`
   A turn needs text or an attachment: `/turns` refuses text that is empty or only whitespace with neither an attachment nor a `command` (`400`, "text or an attachment is required"), as queued input always did, and the `task` tool refuses a blank `prompt`. Claude refuses whitespace-only text, and a blank message kept in the chat would fail every later turn. For the same reason, a reply that is only whitespace (the line breaks a model can stream before a tool call) is kept in the chat but never sent back to a model, and the Anthropic and Bedrock adapters leave out blank text next to an image or a document (Bedrock, which needs text beside a document, gets `(document attached)`, and an empty tool result reads `(no output)`). A chat that already runs a turn refuses `/turns` with `409 conflict` and the message "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped." (`haarness run --session` and editors over ACP show it as it is); `/input` steers a message into the running turn instead.
+  A client that shows the conversation to a person with a Stop control sends `attended: true` with `/turns`, `/input` (kept with a queued message until it runs) and `/commands`, as Desktop, the terminal UI and an editor over ACP do: a command's or skill's `` !`…` `` snippet in the turn that starts, and in the subagents it starts, then runs until it finishes or the turn is stopped. Without it (a script, `haarness run`, an SDK call, Haarness Cloud, an older client) a snippet ends at `execution.shell_timeout_ms` as a model's shell call does; a scheduled run keeps that deadline whatever is sent, and so do turns Haarness starts itself (a background result, a goal's next step, a workflow's agent, a `/loop` prompt). The field is optional and changes nothing else; servers before it ignore it.
 - `POST /v1/threads/{id}/input` steers a message into the running turn, or with `delivery: "queue"` keeps it for after; revisioned `GET|POST /v1/threads/{id}/input/queue` lists and changes what is queued (`input-queue.v1`; see [Steer and Queue](INPUT-QUEUE.md#api-and-sdks) for delivery, retries, events and SDK usage)
 - `POST /v1/threads/{id}/btw` asks a side question about the chat without adding to it; `POST /v1/threads/{id}/btw/stream` streams its answer as SSE (`btw.stream.v1`; see [side questions](SIDE-QUESTIONS.md#api))
 - `GET|POST /v1/threads/{id}/loop`: `{prompt, intervalSeconds}` (default 300, kept between 30 and 86,400) starts a recurring prompt in the chat, which expires after 7 days; `{stop: true}` ends it
@@ -124,6 +125,17 @@ from the active workspace configuration. Clients can combine these with the
 authenticated provider catalog, agent model overrides and recent choices to show
 a concrete model before creating a thread. Missing fields remain compatible with
 older servers; no credentials are included in these preferences.
+`defaultReasoningEffort` is the configured `defaults.reasoning_effort`, the level
+a turn that names no effort runs at (the nearest level the model lists, or the
+value as written for a model that lists none); it is absent when nothing is
+configured. A turn may then name `reasoningEffort: "default"` to run at the
+model's own default instead, and queued prompts, steering and background results
+of that chat keep the choice. A server from before this field does not know the
+name: its turn endpoint refuses it, while its input-queue and command endpoints
+take it as an unknown level and run the turn at the model's strongest level (or
+pass it on to a model that lists none). Clients therefore send it only to a
+server that reports `defaultReasoningEffort`; elsewhere naming no effort means the
+same.
 
 Tool dispatch accepts a model's `functions.` namespace and unambiguous ASCII capitalization differences. Exact registered names take precedence, including names containing that prefix. Ambiguous case matches, spelling mistakes, and other namespaces are not guessed. Resolution uses the full registry before availability and permissions, so a disabled exact name cannot fall back to another tool. The canonical name passes through the same advertised-tool, availability, permission, hook, and snapshot checks. Batch planning applies the same resolution, rejects recursive batches, and records invalid arguments, unknown names, and unavailable tools as individual failures while continuing other well-formed calls.
 
@@ -403,6 +415,13 @@ server reports `needs_auth` with a non-secret detail until the CLI completes
 the public OAuth authorization-code + PKCE flow. `disconnect` drops the live
 worker and advertised tools without deleting configuration; `reconnect`
 performs initialization and capability discovery again.
+A local server, and a remote server's `headersHelper`, run in the server's
+project folder (the chat home's own folder there); a relative `cwd` is read
+from the project folder, `~/…` from the home folder, and the settings keep
+`cwd` as written. Tools keep their own names in the API (`mcp__<server>__<tool>`
+with the server's and tool's names as written); only requests to a model
+provider carry names in the characters providers accept (see
+[Plugins, skills and tools](REFERENCE.md#plugins-skills-and-tools)).
 `timeoutMs` (default 30 s) bounds the socket connect, initialization, and tool
 discovery as one deadline, plus a `headersHelper` run. In a JSON file a
 `timeout` key counts too, in its ecosystem's unit: milliseconds in an opencode

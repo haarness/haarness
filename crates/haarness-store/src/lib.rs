@@ -1936,6 +1936,7 @@ mod tests {
             reasoning_effort: None,
             tools: None,
             command: None,
+            ..Default::default()
         };
         let (turn, prompt, created) = store.start_turn(thread.id, request.clone()).await.unwrap();
         assert!(created);
@@ -2251,6 +2252,7 @@ mod tests {
             reasoning_effort: None,
             tools: None,
             command: None,
+            ..Default::default()
         };
         let first = store.start_turn(thread.id, request.clone()).await.unwrap();
         let second = store.start_turn(thread.id, request).await.unwrap();
@@ -2611,6 +2613,7 @@ mod tests {
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -2898,6 +2901,7 @@ mod tests {
             reasoning_effort: None,
             tools: None,
             command: None,
+            ..Default::default()
         };
         let parent_turn = store
             .start_turn(parent.id, request("launch child"))
@@ -2986,6 +2990,7 @@ mod tests {
             reasoning_effort: None,
             tools: None,
             command: None,
+            ..Default::default()
         };
         // An idle chat whose background subagent was running, and a busy one
         // whose foreground subagent was.
@@ -3119,6 +3124,7 @@ mod tests {
             reasoning_effort: None,
             tools: None,
             command: None,
+            ..Default::default()
         };
         let mut chats = Vec::new();
         for _ in 0..2 {
@@ -3263,6 +3269,7 @@ mod tests {
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -3344,6 +3351,7 @@ mod tests {
             reasoning_effort: None,
             tools: None,
             command: None,
+            ..Default::default()
         };
         let first = store
             .start_turn(first_thread.id, request("first"))

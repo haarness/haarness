@@ -601,6 +601,17 @@ pub async fn prepare(
                 .unwrap_or(&result.text)
                 .trim_end(),
         );
+        // Only the end of a long output is kept: the model is told, so it
+        // does not take the part it reads for the whole.
+        if result.metadata.get("stdoutCut").and_then(Value::as_bool) == Some(true) {
+            prepared.push_str(&snippet_cut_note(
+                result.metadata.get("outputPath").and_then(Value::as_str),
+                result
+                    .metadata
+                    .get("outputSavedBytes")
+                    .and_then(Value::as_u64),
+            ));
+        }
         last = whole.end();
     }
     prepared.push_str(&substitutions(&template[last..], &context, false, false));
@@ -628,7 +639,10 @@ const REFERENCE_DIR_ENTRIES: usize = 200;
 /// workspace files, one-level directory listings, or delegation hints for
 /// subagent-mode agents, appended after the text. Tokens inside code stay
 /// literal; paths outside the
-/// workspace are ignored unless written with an explicit `~/`.
+/// workspace are ignored unless written with an explicit `~/`. A file
+/// [`crate::instructions::left_out`] keeps out (a secret, where Haarness
+/// keeps sign-ins, one the agent's `read` rules deny), judged where it
+/// really is, is named with a note instead of its text.
 fn expand_references(text: &str, invoker: &dyn crate::ToolInvoker) -> String {
     let references = crate::instructions::references(text);
     if references.is_empty() {
@@ -640,6 +654,7 @@ fn expand_references(text: &str, invoker: &dyn crate::ToolInvoker) -> String {
         .and_then(|path| path.canonicalize().ok());
     let home = haarness_protocol::home_dir();
     let agents = invoker.delegable_agents();
+    let rules = invoker.read_rules();
     let mut seen = std::collections::HashSet::new();
     let mut blocks = Vec::new();
     let mut files = 0;
@@ -661,6 +676,24 @@ fn expand_references(text: &str, invoker: &dyn crate::ToolInvoker) -> String {
         files += 1;
         if target.is_dir() {
             blocks.push(directory_listing(&name, &target));
+            continue;
+        }
+        if let Some(reason) = target.canonicalize().ok().and_then(|real| {
+            crate::instructions::left_out(&real, workspace.as_deref(), &|file| {
+                rules.as_ref().and_then(|rules| {
+                    (rules.evaluate(&format!("read:{}", file.display()))
+                        == crate::PermissionDecision::Deny)
+                        .then_some("a read rule denies it")
+                })
+            })
+            // A template of settings a skill names (`.env.sample`) reads as
+            // before; only `.env.example` is no secret to the read rules.
+            .filter(|reason| {
+                *reason != crate::instructions::SECRET_FILE
+                    || !crate::instructions::is_template(&real)
+            })
+        }) {
+            blocks.push(format!("[File context omitted: {name} ({reason})]"));
             continue;
         }
         let size = std::fs::metadata(&target)
@@ -775,6 +808,28 @@ fn placeholder_values<'a>(
     .into_iter()
     .filter_map(|(name, value)| Some((name, value?)))
     .collect()
+}
+
+/// Follows a `!` snippet's output when the shell kept only its end.
+fn snippet_cut_note(saved: Option<&str>, saved_bytes: Option<u64>) -> String {
+    let rest = match (saved, saved_bytes) {
+        (Some(path), Some(bytes)) => format!(
+            "; only the first {} of what it printed is saved, in {path}",
+            byte_size(bytes)
+        ),
+        (Some(path), None) => format!("; everything it printed is saved in {path}"),
+        (None, _) => String::new(),
+    };
+    format!("\n(only the last 2000 lines or 50 KB of this output are shown{rest})")
+}
+
+/// `bytes` in whole MiB, or KiB below one MiB.
+fn byte_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{} MiB", bytes / (1024 * 1024))
+    } else {
+        format!("{} KiB", bytes / 1024)
+    }
 }
 
 /// The environment a `!` snippet runs with, where its shell reads the
@@ -1229,6 +1284,69 @@ mod tests {
         }
     }
 
+    /// Answers each `!` snippet with `metadata`, as the shell tool would.
+    struct Answers(Value);
+    #[async_trait::async_trait]
+    impl crate::ToolInvoker for Answers {
+        async fn definition_shell(
+            &self,
+            _shown: String,
+            _run: String,
+            _env: std::collections::BTreeMap<String, String>,
+        ) -> CoreResult<crate::ToolOutput> {
+            Ok(crate::ToolOutput {
+                text: String::new(),
+                metadata: self.0.clone(),
+            })
+        }
+        async fn invoke(&self, _: &str, _: Value) -> CoreResult<crate::ToolOutput> {
+            Err(CoreError::Tool("unused".into()))
+        }
+        fn side_effectful_for(&self, _: &str, _: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_snippet_whose_output_was_cut_says_so() {
+        let prepared = |metadata: Value| async move {
+            prepare(
+                "Log: !`cat build.log` Review it.",
+                "",
+                &DefinitionExecution::default(),
+                "session",
+                &Answers(metadata),
+            )
+            .await
+            .unwrap()
+        };
+        assert_eq!(
+            prepared(serde_json::json!({"exit": 0, "stdout": "ok\n"})).await,
+            "Log: ok Review it."
+        );
+        assert_eq!(
+            prepared(serde_json::json!({
+                "exit": 0, "stdout": "line 9000\n", "stdoutCut": true,
+                "outputPath": "/data/tool-output/tool_1.txt",
+            }))
+            .await,
+            "Log: line 9000\n(only the last 2000 lines or 50 KB of this output are shown; everything it printed is saved in /data/tool-output/tool_1.txt) Review it."
+        );
+        assert_eq!(
+            prepared(serde_json::json!({"exit": 0, "stdout": "tail", "stdoutCut": true})).await,
+            "Log: tail\n(only the last 2000 lines or 50 KB of this output are shown) Review it."
+        );
+        // A snippet with no deadline saved only the start of what it printed.
+        assert_eq!(
+            prepared(serde_json::json!({
+                "exit": 0, "stdout": "line 9000\n", "stdoutCut": true,
+                "outputPath": "/data/tool-output/tool_2.txt", "outputSavedBytes": 67_108_864,
+            }))
+            .await,
+            "Log: line 9000\n(only the last 2000 lines or 50 KB of this output are shown; only the first 64 MiB of what it printed is saved, in /data/tool-output/tool_2.txt) Review it."
+        );
+    }
+
     /// A folder name in a `!` snippet is plain text wherever it stands, and a
     /// folder name in the template's text can never start a snippet.
     #[cfg(unix)]
@@ -1309,6 +1427,83 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(text, "Project: /work/w !`printf SNIPPET`");
+    }
+
+    /// [`StubInvoker`] with the agent's `read` rules.
+    struct RulesInvoker {
+        workspace: PathBuf,
+        rules: crate::PermissionEngine,
+    }
+    #[async_trait::async_trait]
+    impl crate::ToolInvoker for RulesInvoker {
+        fn workspace(&self) -> Option<String> {
+            Some(self.workspace.display().to_string())
+        }
+        fn read_rules(&self) -> Option<crate::PermissionEngine> {
+            Some(self.rules.clone())
+        }
+        async fn invoke(&self, _: &str, _: Value) -> CoreResult<crate::ToolOutput> {
+            Err(CoreError::Tool("unused".into()))
+        }
+        fn side_effectful_for(&self, _: &str, _: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn template_references_leave_out_secrets_sign_ins_and_denied_files() {
+        // A project at the home folder, which holds the data folder.
+        let root = std::env::temp_dir().join(format!("haarness-refs-out-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join(".st/data")).unwrap();
+        std::fs::create_dir_all(root.join("private")).unwrap();
+        let store = root.join(".st/data/auth.json");
+        std::fs::write(&store, "SIGN_IN_SECRET").unwrap();
+        std::fs::write(root.join(".env"), "ENV_SECRET").unwrap();
+        std::fs::write(root.join(".env.sample"), "SAMPLE_BODY").unwrap();
+        std::fs::write(root.join(".env.template"), "TEMPLATE_BODY").unwrap();
+        std::fs::write(root.join("private/notes.md"), "PRIVATE_BODY").unwrap();
+        std::fs::write(root.join("auth.json"), "OWN_FILE_BODY").unwrap();
+        crate::record_credential_store(store.clone(), false);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&store, root.join("notes.txt")).unwrap();
+        let mut rules = crate::PermissionEngine::build_defaults();
+        rules.set_workspace(&root);
+        rules.add_rule(crate::PermissionRule {
+            pattern: "read:private/*".into(),
+            decision: crate::PermissionDecision::Deny,
+        });
+        let invoker = RulesInvoker {
+            workspace: root.clone(),
+            rules,
+        };
+        let text = prepare(
+            "Read @.st/data/auth.json @.env @private/notes.md @notes.txt @auth.json @.env.sample @.env.template",
+            "",
+            &DefinitionExecution::default(),
+            "session",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        for hidden in ["SIGN_IN_SECRET", "ENV_SECRET", "PRIVATE_BODY"] {
+            assert!(!text.contains(hidden), "{text}");
+        }
+        // Templates of settings read as before.
+        for shown in ["OWN_FILE_BODY", "SAMPLE_BODY", "TEMPLATE_BODY"] {
+            assert!(text.contains(shown), "{text}");
+        }
+        let mut notes = vec![
+            "[File context omitted: .st/data/auth.json (Haarness keeps sign-ins there)]",
+            "[File context omitted: .env (it is a secret file)]",
+            "[File context omitted: private/notes.md (a read rule denies it)]",
+        ];
+        if cfg!(unix) {
+            notes.push("[File context omitted: notes.txt (Haarness keeps sign-ins there)]");
+        }
+        for note in notes {
+            assert!(text.contains(note), "{note}\n{text}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

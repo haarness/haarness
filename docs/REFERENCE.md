@@ -204,7 +204,11 @@ refuses it and stops, naming what was asked: allow it with a permission rule,
 or pass `--yolo`. `haarness run --auto` without a terminal instead refuses each
 request that still needs a person and goes on, stopping after five refusals in
 a row; it exits with status 3 when it finished but refused any (see
-[Auto approvals](AUTO-APPROVALS.md)). After an ungraceful server/process failure,
+[Auto approvals](AUTO-APPROVALS.md)). A command's or skill's `` !`…` ``
+snippet in a run keeps the `execution.shell_timeout_ms` deadline, so one that
+hangs fails the run instead of holding it until the job is cancelled; in the
+terminal UI, Desktop and an editor over ACP, where you can stop it, a snippet
+runs until it finishes. After an ungraceful server/process failure,
 Haarness preserves recorded transcript work and marks orphaned effects
 interrupted; it never blindly replays shell, edit, or other side-effecting tools.
 Any active goal is restored as paused—not falsely pursuing—until new user input
@@ -323,7 +327,7 @@ The server keeps the last two megabytes of a terminal's output. Reopening `/term
 
 A program that turns on application cursor keys (vim, less, htop and other full-screen programs) receives the arrows, Home and End as `ESC O x`, which is what the `xterm-256color` entry its `TERM` names says they send.
 
-Bare `/tools` opens the searchable runtime catalog with enabled, resident, deferred, source/group, and estimated-token state; Enter toggles durable workspace availability. `/tools lazy auto|always|off` controls context scaling and `/tools lazy reset` returns to the configured/default mode, while `/tools show|hide` retains the transcript-detail toggle. **Ctrl+R** (`fold` in `/keybinds`) opens or closes the fold nearest the prompt among those on screen, a tool's output, a long prompt or a thought, as a click on it does. Output opened that way, and a failure's, wraps under its gutter so an error reads to its last word; a quiet preview keeps one row per line.
+Bare `/tools` opens the searchable runtime catalog with enabled, resident, deferred, source/group, and estimated-token state; Enter toggles durable workspace availability. `/tools lazy auto|always|off` controls context scaling and `/tools lazy reset` returns to the configured/default mode, while `/tools show|hide` retains the transcript-detail toggle. **Ctrl+R** (`fold` in `/keybinds`) opens or closes the fold nearest the prompt among those on screen, a tool's output, a long prompt or a thought, as a click on it does. Output opened that way, and a failure's, wraps under its gutter so an error reads to its last word; a quiet preview keeps one row per line. Colours, window titles, cursor moves and the other escape sequences a command or an MCP server writes are left out of what is drawn, each sequence whole, there and in a workflow run's errors and logs, so no `[31m` is left of them; a title that is never ended is left out to the end of its line. The model still reads the output as it was written.
 
 `/diff` opens a full-screen review: a nested file tree, syntax-highlighted patches with real line numbers and word-level emphasis, and a line cursor. `/diff` starts on the Git working tree, `/diff branch` compares the current branch with its detected base, and `/diff last` shows the latest completed mutating turn — and `s` cycles between the three without leaving the viewer. Inside it, `tab` moves between the tree and the patches, `n`/`p` jump between edits, `]`/`[` between files, `v` switches side-by-side and stacked layouts, `x` cycles context lines (4, 12, 50, all), `t` hides the tree, `o` shows one patch at a time, `r` marks a file reviewed, `c` queues a comment on the line under the cursor, and `?` lists every shortcut. Queued comments are handed to the composer when the viewer closes, so a review travels with your next message. Layout choices persist between sessions.
 
@@ -429,6 +433,10 @@ Who can read an entry depends on the store. On macOS an entry Haarness stores be
 
 MCP settings never show their credentials, wherever they are displayed (`haarness mcp get`, the TUI and Desktop settings, the model's `mcp_manage` tool): environment and header values, a password or user name in the server URL, credential-named query parameters such as `?api_key=`, and command arguments such as `--api-key VALUE`, `--token=VALUE`, `-H 'Authorization: …'` or a proxy's `user:password@proxy:3128` read `<redacted>`, while the host, path and other arguments stay readable. A setting saved back unchanged keeps the values it stands for; in edited arguments a hidden value stays with its own flag (`--token <redacted>` keeps the token wherever it moves), and one that cannot be matched without doubt is refused with a request to give it in full. A server that cannot be reached is named the same way in its status.
 
+In Haarness an MCP tool is named `mcp__<server>__<tool>`, with the server's and the tool's names as they are written. A call reaches the server that lists the tool, with the tool's own name, so the tools of a server whose name holds `__` (`a__b` offering `d` as `mcp__a__b__d`) reach that server and not `a`. Two servers' tools whose names come out the very same (`a` offering `b__c` and `a__b` offering `c` are both `mcp__a__b__c`) are one tool, the first server's by name, and the log says so once. The tool settings in Desktop list a tool under the server that offers it.
+
+Only the model sees an MCP tool under another name, and only when its own name holds a character providers refuse or is longer than 64, since a provider refuses a whole request over one tool name outside letters, digits, `_` and `-` (OpenAI, Anthropic and Bedrock take at most 64 of them). Each request to a provider then gives the tool a name of those characters, its other characters as `_` (`mcp__Docs Server__files.read` goes out as `mcp__Docs_Server__files_read`); when that name would be longer than 64, or another tool of the request, or of the tools it was chosen from, already has it (`Docs_Server` offering `files_read` beside `Docs Server`), the name keeps its start and ends with `_` and eight characters of a hash of the tool's own name. The calls and results of the chat's history go out under the same names, and what the model writes back is read back as the tools' own names: its calls, a Code Mode or `batch` step (stored with the steps' own names), a `load_tool` query, a workflow it writes, and a tool named in a workflow agent's `tools` or in an agent it creates with `agent_manage`; a pattern there (`mcp__Docs_Server__*`) matches the tools' own names, as everywhere else. Adding a server whose tool names come out as one already sent can move that tool's name (`Docs_Server` added beside `Docs Server` gives `Docs Server`'s tools the hash), which costs the chat one prompt-cache miss, so a script that names a tool should use its own name, which never changes. Everything else uses the tools' own names: permission rules and Always answers, `tool_availability`, an agent's tools, `lazy_tools.pin`, hooks (their matchers and payloads), workflows, transcripts, approvals, the API, Desktop and the TUI. A name providers take is sent as it is, so a request whose tools all have such names is unchanged.
+
 An MCP tool's text, images and audio reach the model as its result. A tool that answers with structured content and no text (as one with an output schema may, or beside only an image, audio or a link) has that content passed on as JSON text, to the model and to a workflow's `tool()` call alike; a failure with no text at all says which tool failed. Structured content that uses a name Haarness fills itself in a result's metadata (`attachments`, `diffs`, `mcp_app`) is kept under `structuredContent` instead, so a tool cannot add media, file changes or a page by naming them. A tool that an [MCP App](https://modelcontextprotocol.io/extensions/apps) marks as one only its own page calls (`_meta.ui.visibility: ["app"]`) is left out of the model's tools, `haarness mcp tools` and workflows; a visibility list naming neither `model` nor `app` counts as both.
 
 When a connected server declares resources (documents, records and other data it exposes beside its tools), the model gets two more tools: `mcp_resource_list` lists the resources and resource templates of one server, or of every server that has resources, each entry naming the server to read it from, and `mcp_resource_read` reads one by server and URI. They are offered only while such a server is connected (or reconnecting with the same settings), so a session whose servers expose tools only keeps the tool list it had, and with it its prompt cache; with lazy tools on they load like other MCP schemas. A read returns text as text, cut with a note that says where the whole of it was saved when it is long (as other tools' output is), images and PDFs as attachments for models that take them (at most 10 MiB per read), and other binary content by its type and size, never as base64 text. A read or listing of a server that is not connected, or declares no resources, names the servers that do. A server whose tools a rule or setting takes away entirely (`"mcp__docs__*": "deny"`, or `"mcp__docs__*": false` under `tools`, for the chat or its agent) keeps its resources from the model too: a listing of every server leaves it out without asking about it, a read naming it is refused, and with no resource server left the two tools are not offered. A rule about one of its tools leaves its resources alone. A listing or read waits as long as the server's connection timeout (`timeoutMs`, or `timeout` in seconds in a JSON entry; 30 s by default) and then fails saying so; Stop ends it at once. Either way the server is told a read was cancelled. Listing a server's prompts and getting one (`haarness mcp prompts`, `haarness mcp prompt`, `GET /v1/mcp/{name}/prompts` and `POST /v1/mcp/{name}/prompts/{prompt}`) wait as long and fail the same way; the server is then told to stop getting the prompt, and a listing nobody waits for any more holds up none of that server's later requests. Requests to one server go out in the order they come. A tool call, read or prompt is then answered as soon as the server answers it when the server answers over a stream (a local stdio server, a legacy SSE server, or a Streamable HTTP server that answers with an event stream), so a slow one holds up no other request to that server; a Streamable HTTP server that answers each request with plain JSON is still answered one request at a time, and listings always run one after another. Both tools run without asking unless a permission rule says otherwise; their permissions are `mcp_resource_list` (the server name) and `mcp_resource_read` (`<server>:<uri>`), described under [MCP resources](PERMISSIONS-AND-EXECUTION.md#mcp-resources). Desktop rows read “Read an MCP resource `docs://setup`” and “Listed MCP resources `docs`”; the TUI names the tool with the resource or server beside it.
@@ -456,7 +464,8 @@ line longer than 2000 characters shows its first 2000 and ends in
 50 KB, whatever `limit` asks, and then ends with `(stopped at 50 KB; read on
 with offset=N)` (or `2000 lines`); a read whose `limit` (2000 when none is
 given) ends before the file does ends with `(more lines follow; read on with
-offset=N)`. Text that is not UTF-8 (a
+offset=N)`. An offset at or past the end returns `(the file has N lines, so
+offset M is past its end)` instead of nothing. Text that is not UTF-8 (a
 Latin-1 file) shows `�` for what does not decode, with a note that `edit`
 cannot change it and `write` would replace those bytes (`edit` and `multiedit`
 refuse it as not UTF-8 text). A file with a NUL byte in its first 8 KiB counts
@@ -466,7 +475,9 @@ meets one that is not is refused (`… holds binary data, not text`). A folder, 
 `edit` and `multiedit` give an `old` of several lines those ends when it does
 not occur as written (one that does, a stretch of LF lines, keeps its own), and
 the lines `new` adds end as the line `old` is found in does: CRLF there, LF in
-an LF stretch or a CSV cell holding bare LF; two matches still refuse the edit. Direct prompt attachments use a 20 MiB aggregate limit; Gemini retains
+an LF stretch or a CSV cell holding bare LF; two matches still refuse the edit.
+An `edit` whose `old` is empty is refused with a pointer to `write` (an empty
+file still takes its first text that way). Direct prompt attachments use a 20 MiB aggregate limit; Gemini retains
 its 10 MiB aggregate adapter budget for inline request overhead. OpenAI,
 Anthropic, and Bedrock accept PDF/images; Gemini accepts PDF/image/audio/video.
 OpenAI-compatible Chat endpoints receive their native file, image, or MP3/WAV
@@ -528,7 +539,7 @@ provider = "openai"          # used when a new thread does not name one
 model = "gpt-5.6"
 small_model = "openai/gpt-5.4-mini" # chat titles and, for chats on its provider, Auto's reviewer
 agent = "build"
-reasoning_effort = "medium"  # none|minimal|low|medium|high|xhigh|max
+reasoning_effort = "medium"  # none|minimal|low|medium|high|xhigh|max (see below)
 ultracode = false             # durable default for newly created sessions
 output_style = "concise"      # concise|explanatory|formal|minimal, or an output-styles/<name>.md file
 approval_mode = "auto"        # auto|review|yolo: the mode of a chat with no setting of its own; review in any file wins, a project's yolo is ignored
@@ -542,6 +553,7 @@ models = "F2"                 # rebindable actions as /keybinds lists them; "non
 
 [tui.statusline]
 command = ["my-haarness-status"] # receives JSON on stdin and HAARNESS_STATUS_CONTEXT
+                              # shows its first line with text once escape sequences are left out
 refresh_ms = 2000
 timeout_ms = 5000
 
@@ -647,7 +659,7 @@ reasoning = false
 images = false
 video = false                # generic Chat Completions video=true is rejected
 tools = true
-context_window = 131072
+context_window = 131072       # 0 counts as unknown: the model's own window applies
 max_output_tokens = 16384
 
 # Use the native Anthropic Messages wire against a custom commercial gateway.
@@ -723,6 +735,12 @@ oauthClientId = "public-id"  # optional; otherwise discovery/DCR is used
 oauthScopes = ["mcp:tools"]  # optional; otherwise server metadata selects scopes
 enabled = true
 ```
+
+`defaults.reasoning_effort` is the level a turn that names no effort runs at, fitted to the
+nearest level the model lists. Desktop and the TUI show it as the current level, marked
+*default*; choosing **Model default** in Desktop's model picker or **provider default** in the
+TUI's `/reasoning` (`/reasoning off`) runs your next messages at the model's own default
+instead.
 
 `${NAME}` and `${NAME:-fallback}` in an MCP entry come from the server's environment.
 Environment values and headers (and the headers helper's environment) are resolved once,

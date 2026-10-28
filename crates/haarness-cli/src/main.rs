@@ -1494,11 +1494,17 @@ async fn cli_main() -> Result<()> {
     if base_paths.root.is_some() {
         haarness_server::use_data_folder(base_paths.data.clone());
         haarness_workflows::use_cache_folder(base_paths.cache.clone());
+    } else {
+        // Without `--data-dir` the server keeps its files in a folder of
+        // its own, which need not be the data folder made private above.
+        haarness_server::keep_data_folder_private();
     }
     // An edit of the global configuration or the system folder asks a person;
     // tell the permission engine which folders those are in this process.
     haarness_core::set_global_config_dir(base_paths.config_dir().to_path_buf());
     haarness_core::set_system_config_dir(crate::layout::system_config_dir());
+    // A model-run read of where sign-ins are kept asks a person every time.
+    base_paths.record_credential_stores();
     if let Some(problem) = haarness_protocol::system_config_dir_problem() {
         tracing::warn!("{problem}");
         // A server started in the background has only its log.
@@ -3940,6 +3946,7 @@ async fn execute_schedule(
                     reasoning_effort: schedule.variant.clone(),
                     tools: Some(HashMap::from([("question".into(), false)])),
                     command: None,
+                    ..Default::default()
                 },
             )
             .await?;
@@ -4096,6 +4103,7 @@ async fn arm_loop(
             reasoning_effort: runtime.chat_reasoning_effort(thread_id).await,
             tools: None,
             command: None,
+            ..Default::default()
         };
         match runtime.start_turn(thread_id, request).await {
             Ok(_) => tracing::info!(thread = %thread_id, "loop prompt submitted"),
@@ -4911,6 +4919,7 @@ async fn run_command(
                         command: args
                             .command
                             .map(|command| command.trim_start_matches('/').to_owned()),
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -7098,6 +7107,7 @@ fn compose_runtime_sources(
         yolo,
     )?;
     runtime_config.auto_review = json_layers.auto_review.clone();
+    runtime_config.global_rules = json_layers.global_rules().to_vec();
     runtime_config.disabled_agents = capability_state::disabled(paths, workspace, trust, "agent")?;
     runtime_config
         .disabled_agents
@@ -7339,7 +7349,13 @@ impl HotReloadController {
             }
         }
         let providers: Arc<dyn ProviderRegistry> = Arc::new(registry);
-        let candidate_mcp = compose_mcp(&self.paths, &sources.file_config, Some(&self.mcp)).await;
+        let candidate_mcp = compose_mcp(
+            &self.paths,
+            &self.workspace,
+            &sources.file_config,
+            Some(&self.mcp),
+        )
+        .await;
         let candidate_skills = FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone());
         let disabled_skills =
             capability_state::disabled(&self.paths, &self.workspace, self.trust, "skill")?;
@@ -8079,7 +8095,7 @@ async fn application_at(
         .with_stream_limits(&stream_limits(&file_config)),
     );
     let provider_definitions = provider_fingerprints(&file_config, &auth, providers.as_ref());
-    let mcp = mcp_from_config(paths, &file_config).await;
+    let mcp = mcp_from_config(paths, workspace, &file_config).await;
     let skills = Arc::new(FilesystemSkillRegistry::new_scoped(skill_roots));
     skills.set_disabled(capability_state::disabled(
         paths, workspace, trust, "skill",
@@ -8189,8 +8205,13 @@ async fn application_at(
     if folder_snapshots_enabled(file_config.snapshots.as_ref()) {
         // Opened when a chat's folder first is: a server none of whose chats
         // has a folder opens nothing more.
-        let folders = folders
-            .get_or_insert_with(|| haarness_store::SqliteSnapshotFolders::open(&paths.database));
+        let folders = folders.get_or_insert_with(|| {
+            if registered_workspace.chat_home {
+                haarness_store::SqliteSnapshotFolders::open_in_chat_home(&paths.database)
+            } else {
+                haarness_store::SqliteSnapshotFolders::open(&paths.database)
+            }
+        });
         runtime = runtime.with_folder_snapshots(Arc::new(folders.clone()));
     }
     if let Some(folders) = folders {
@@ -8298,7 +8319,7 @@ async fn configured_mcp(
     workspace: &Path,
     trust: bool,
 ) -> Result<Arc<NativeMcpRegistry>> {
-    Ok(mcp_from_config(paths, &load_config(paths, workspace, trust)?).await)
+    Ok(mcp_from_config(paths, workspace, &load_config(paths, workspace, trust)?).await)
 }
 
 /// Servers connecting at once while an MCP generation is composed. Each may
@@ -8306,8 +8327,12 @@ async fn configured_mcp(
 /// rest behind them one timeout at a time.
 const MCP_CONNECT_CONCURRENCY: usize = 16;
 
-async fn mcp_from_config(paths: &Paths, config: &FileConfig) -> Arc<NativeMcpRegistry> {
-    compose_mcp(paths, config, None).await
+async fn mcp_from_config(
+    paths: &Paths,
+    workspace: &Path,
+    config: &FileConfig,
+) -> Arc<NativeMcpRegistry> {
+    compose_mcp(paths, workspace, config, None).await
 }
 
 /// Compose an MCP generation from configuration. A hot reload passes the
@@ -8315,13 +8340,14 @@ async fn mcp_from_config(paths: &Paths, config: &FileConfig) -> Arc<NativeMcpReg
 /// connection instead of respawning.
 async fn compose_mcp(
     paths: &Paths,
+    workspace: &Path,
     config: &FileConfig,
     live: Option<&NativeMcpRegistry>,
 ) -> Arc<NativeMcpRegistry> {
     use futures::StreamExt as _;
-    let registry = Arc::new(NativeMcpRegistry::with_auth_dir(
-        paths.data.join("mcp-oauth"),
-    ));
+    let registry = Arc::new(
+        NativeMcpRegistry::with_auth_dir(paths.data.join("mcp-oauth")).in_folder(workspace),
+    );
     let servers = config
         .mcp
         .iter()
@@ -8659,7 +8685,7 @@ async fn mcp_command(
         } => {
             let (target, entry) = mcp_entry_or_system(paths, workspace, project, &name)?;
             let entry = loaded_mcp_entry(&target, entry);
-            let registry = oauth_registry(paths, &name, &entry, true).await?;
+            let registry = oauth_registry(paths, workspace, &name, &entry, true).await?;
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, callback_port))
                 .await
                 .context("cannot bind the MCP OAuth loopback callback")?;
@@ -8689,7 +8715,7 @@ async fn mcp_command(
         McpCommand::Logout { name, project } => {
             let (target, entry) = mcp_entry_or_system(paths, workspace, project, &name)?;
             let entry = loaded_mcp_entry(&target, entry);
-            let registry = oauth_registry(paths, &name, &entry, false).await?;
+            let registry = oauth_registry(paths, workspace, &name, &entry, false).await?;
             registry.clear_oauth(&name).await?;
             let server = client.configure_mcp(&name, &entry).await?;
             println!(
@@ -8894,11 +8920,13 @@ fn read_mcp_secret(name: &str) -> Result<String> {
 
 async fn oauth_registry(
     paths: &Paths,
+    workspace: &Path,
     name: &str,
     entry: &McpConfigureRequest,
     probe: bool,
 ) -> Result<NativeMcpRegistry> {
-    let registry = NativeMcpRegistry::with_auth_dir(paths.data.join("mcp-oauth"));
+    let registry =
+        NativeMcpRegistry::with_auth_dir(paths.data.join("mcp-oauth")).in_folder(workspace);
     let mut staged = entry.clone();
     staged.enabled = probe;
     registry.configure(name, staged).await?;
@@ -10260,7 +10288,9 @@ fn provider_instances(
             images: section.images,
             video: section.video,
             tools: section.tools,
-            context_window: section.context_window,
+            // A window of 0 says nothing: the model's own one applies, and no
+            // app shows "0 context".
+            context_window: section.context_window.filter(|window| *window > 0),
             max_output_tokens: section.max_output_tokens,
         };
         let instance = haarness_providers::NativeInstance {
@@ -10898,6 +10928,8 @@ fn runtime_config(
         },
         read_roots: Vec::new(),
         base_rules,
+        // Set by the composition root, which knows the layers.
+        global_rules: Vec::new(),
         granted_rules: persisted_rules,
         default_agent: defaults.agent,
         default_provider: defaults.provider,
@@ -11504,7 +11536,7 @@ impl Paths {
             let data = root.join("data");
             let config = root.join("config");
             let cache = root.join("cache");
-            fs::create_dir_all(&data)?;
+            haarness_server::private_data_folder(&data)?;
             fs::create_dir_all(&config)?;
             fs::create_dir_all(&cache)?;
             if !data.join(".layout-v1").exists() {
@@ -11560,6 +11592,43 @@ impl Paths {
 
     fn config_dir(&self) -> &Path {
         self.config.parent().expect("config file has parent")
+    }
+
+    /// Where this process keeps sign-ins and tokens, each with whether it is
+    /// a folder of them: provider keys (`auth.json`, and the copy an older
+    /// layout left in the configuration folder), MCP sign-in tokens, the
+    /// Cloud sign-in, and the servers the terminal UI saved with their
+    /// tokens or passwords (`tui-servers.json`). Each project's server
+    /// address and token (`runtime.json`) are recorded by
+    /// [`Self::record_credential_stores`].
+    fn credential_stores(&self) -> Vec<(PathBuf, bool)> {
+        let mut stores = vec![
+            (self.auth.clone(), false),
+            (self.config_dir().join("auth.json"), false),
+            (self.data.join("mcp-oauth"), true),
+            (self.config_dir().join("tui-servers.json"), false),
+        ];
+        if self.root.is_none()
+            && let Some(legacy) = directories::ProjectDirs::from("dev", "haarness", "haarness")
+        {
+            stores.push((legacy.config_dir().join("auth.json"), false));
+            stores.push((legacy.config_dir().join("tui-servers.json"), false));
+        }
+        if let Ok(cloud) = haarness_account::Config::from_env() {
+            stores.push((cloud.path(), false));
+        }
+        stores
+    }
+
+    /// Tell the permission engine where this process keeps sign-ins and
+    /// tokens: a model-run read of one asks a person every time.
+    fn record_credential_stores(&self) {
+        for (store, folder) in self.credential_stores() {
+            haarness_core::record_credential_store(store, folder);
+        }
+        // The server's address and bearer token, which answer its approvals:
+        // the cache folder's and each project's below it.
+        haarness_core::record_credential_files_below(&self.cache, "runtime.json");
     }
 
     /// The file that lists the registered workspaces.
@@ -14636,6 +14705,42 @@ request_timeout = 0
     }
 
     #[test]
+    fn server_tokens_and_saved_servers_are_kept_like_sign_ins() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-token-stores-{}", uuid::Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        paths.record_credential_stores();
+        let project = paths.scoped("fixture", false).unwrap();
+        for path in [
+            paths.runtime.clone(),
+            project.runtime.clone(),
+            paths.cache.join("workspaces/fixture/runtime.tmp-42"),
+            paths.auth.clone(),
+            paths.data.join("mcp-oauth/server.json"),
+            paths.config_dir().join("tui-servers.json"),
+            paths.config_dir().join(".tui-servers.json-01a1"),
+        ] {
+            assert!(
+                haarness_core::is_credential_store_path(&path),
+                "{}",
+                path.display()
+            );
+        }
+        for path in [
+            root.join("project/runtime.json"),
+            paths.config_dir().join("tui-server-drafts.json"),
+            paths.cache.join("workspaces/fixture/other.json"),
+        ] {
+            assert!(
+                !haarness_core::is_credential_store_path(&path),
+                "{}",
+                path.display()
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn server_password_options_are_shared_by_all_connection_entrypoints() {
         for arguments in [
             vec![
@@ -14813,6 +14918,7 @@ request_timeout = 0
             default_provider: None,
             default_model: None,
             default_approval_mode: None,
+            default_reasoning_effort: None,
             default_agent: None,
             project_trusted: None,
             pid: None,
@@ -15424,6 +15530,7 @@ request_timeout = 0
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -15799,6 +15906,7 @@ request_timeout = 0
                     reasoning_effort: None,
                     tools: None,
                     command: Some("nope".into()),
+                    ..Default::default()
                 },
             )
             .await;
@@ -15912,6 +16020,7 @@ request_timeout = 0
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -16004,6 +16113,7 @@ request_timeout = 0
                             reasoning_effort: None,
                             tools: None,
                             command: None,
+                            ..Default::default()
                         },
                     )
                     .await
@@ -16145,6 +16255,7 @@ request_timeout = 0
                     tools: None,
                     command: None,
                     resources: Vec::new(),
+                    ..Default::default()
                 },
             )
             .await
@@ -16908,6 +17019,7 @@ request_timeout = 0
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -17580,6 +17692,35 @@ request_timeout = 0
         let runtime = super::runtime_config(&config, Vec::new(), Vec::new(), false).unwrap();
         assert_eq!(runtime.goal_token_budget, Some(24_000));
         assert_eq!(runtime.goal_max_turns, Some(9));
+    }
+
+    #[test]
+    fn a_provider_s_context_window_of_0_counts_as_unknown() {
+        let config: super::FileConfig = toml::from_str(
+            r#"
+            [providers.zero]
+            base_url = "http://127.0.0.1:9999/v1"
+            requires_auth = false
+            context_window = 0
+
+            [providers.given]
+            base_url = "http://127.0.0.1:9998/v1"
+            requires_auth = false
+            context_window = 65536
+        "#,
+        )
+        .unwrap();
+        let (instances, _) = super::provider_instances(&config, &std::collections::HashMap::new());
+        let window = |id: &str| {
+            let Some(haarness_providers::ProviderInstance::OpenAiChatCompletions(instance)) =
+                instances.iter().find(|instance| instance.id() == id)
+            else {
+                panic!("{id} must use Chat Completions")
+            };
+            instance.model_defaults.context_window
+        };
+        assert_eq!(window("zero"), None);
+        assert_eq!(window("given"), Some(65_536));
     }
 
     #[test]
