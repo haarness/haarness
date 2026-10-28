@@ -61,7 +61,8 @@ struct Service {
 
 pub async fn serve(config: Config) -> Result<()> {
     let service = Service {
-        client: config.client,
+        // The person in the editor can cancel what a prompt starts.
+        client: config.client.attended(),
         workspace: config.workspace,
         provider: config.provider,
         model: config.model,
@@ -220,6 +221,7 @@ impl Service {
                         ("preview".into(), false),
                     ])),
                     command: None,
+                    ..Default::default()
                 },
             )
             .await

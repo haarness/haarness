@@ -11,8 +11,10 @@ The server logs one `agent shell environment set` line per agent command, with n
 Then `haarness run` under an outer agent (AI_AGENT=outer-agent, AGENT=1) keeps that agent's
 AI_AGENT, in its commands and in the person's own, and logs that it did.
 With the shell deadline set to 1.5 s, a slash command's block that takes 3 s still completes in the
-person's turn, while the model's own 3 s command times out; a block that prints 3000 lines puts its
-last 2000 in the prompt with a line saying so.
+person's turn, and so does a skill's 3 s block the person's message loads, while the model's own
+3 s command times out; a block that prints 3000 lines puts its last 2000 in the prompt with a line
+saying so. A `haarness run` without a terminal keeps the 1.5 s deadline for the same block, and for
+a skill's block in a subagent it starts.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-agent-shell-env-tmux.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -44,6 +46,9 @@ UNMARKED = 'unset|unset|unset|unset'
 record = lambda file: f"{show(file)}; exec python3 \"$@\""
 (project/'.haarness/commands/slowblock.md').write_text(
     "---\ndescription: A block slower than the shell deadline\n---\nSLOW !`sleep 3; printf SLOW_BLOCK_DONE`\n")
+(project/'.haarness/skills/slowskill').mkdir(parents=True, exist_ok=True)
+(project/'.haarness/skills/slowskill/SKILL.md').write_text(
+    "---\nname: slowskill\ndescription: A skill whose block is slower than the shell deadline\n---\nSKILL !`sleep 3; printf SLOW_SKILL_DONE`\n")
 (project/'.haarness/commands/manylines.md').write_text(
     "---\ndescription: A block that prints 3000 lines\n---\nLINES !`seq 3000`\n")
 (project/'.haarness/config.toml').write_text(f'''
@@ -173,6 +178,15 @@ try:
     until(lambda: 'everything it printed is saved in' in capture(), 'the echo did not end with the note')
     check('a block that prints 3000 lines puts its last 2000 in the prompt and says where all of it is')
 
+    paste('!tool skill ' + json.dumps({'name': 'slowskill'}))
+    def skill_loaded():
+        results = [item['data'] for item in call(f'/threads/{chat}/items')
+                   if item['data']['type'] == 'tool_result' and item['data']['name'] == 'skill']
+        return results and results[-1]
+    loaded = until(skill_loaded, 'the skill did not load', seconds=30)
+    assert not loaded['is_error'] and 'SKILL SLOW_SKILL_DONE' in loaded['output'], loaded
+    check("a skill's 3 s block that the person's message loads outlasts the 1.5 s deadline too")
+
     task = {'agent': 'general', 'background': True,
             'prompt': '!tool bash ' + json.dumps({'command': show(project/'background.txt')})}
     paste('!tool task ' + json.dumps(task))
@@ -207,13 +221,13 @@ try:
     # Model, slash command block, background child and workflow: one line each, none with an outer
     # marker (the TUI's AI_AGENT=haarness was Haarness's own) or a stale id; the person's command and
     # the write tool log none.
-    lines = until(lambda: len(logged()) >= 7 and logged(), 'the server did not log the agent commands')
+    lines = until(lambda: len(logged()) >= 8 and logged(), 'the server did not log the agent commands')
     time.sleep(1)
     lines = logged()
-    # The model's two commands and the three slash command blocks name the chat.
-    assert len(lines) == 7, lines
+    # The model's two commands, the three slash command blocks and the skill's block name the chat.
+    assert len(lines) == 8, lines
     named = sorted(re.search(r'thread_id=(\S+)', line).group(1) for line in lines)
-    assert named == sorted([chat] * 5 + [children[0], runs[0]]), (named, lines)
+    assert named == sorted([chat] * 6 + [children[0], runs[0]]), (named, lines)
     assert all('outer_marker_kept=false stale_id_replaced=false' in line and ' INFO ' in line for line in lines), lines
     assert not any(STALE in line for line in lines), lines
     check('the server logs one line per agent command with its chat id, no outer marker and no stale id')
@@ -234,6 +248,26 @@ try:
     seen = until(lambda: read(outer/'person.txt'), "the person's command did not run")
     assert seen == 'unset|unset|outer-agent|unset', seen
     check("haarness run under an outer agent keeps that agent's AI_AGENT, in its command and the person's, and logs it")
+
+    # A script's `haarness run` (no terminal) has nobody to stop a block that never ends, and says
+    # nothing of a person: it keeps the deadline.
+    def scripted(*args):
+        return subprocess.run([str(binary), '--workspace', str(project), '--trust-project', 'run', *args],
+                              env=env, cwd=project, text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+    failed = scripted('--command', 'slowblock')
+    assert failed.returncode != 0 and 'timed out after 1500 ms' in failed.stderr, (failed.returncode, failed.stdout, failed.stderr)
+    check("a haarness run keeps the 1.5 s deadline for the slash command's 3 s block")
+    before = {thread['id'] for thread in call('/threads?archived=true')}
+    task = {'agent': 'general', 'prompt': '!tool skill ' + json.dumps({'name': 'slowskill'})}
+    finished = scripted('!tool task ' + json.dumps(task))
+    assert finished.returncode == 0, (finished.stdout, finished.stderr)
+    child = [thread['id'] for thread in call('/threads?archived=true')
+             if thread['id'] not in before and thread.get('parentId')]
+    assert len(child) == 1, child
+    skill = [item['data'] for item in call(f'/threads/{child[0]}/items')
+             if item['data']['type'] == 'tool_result' and item['data']['name'] == 'skill']
+    assert len(skill) == 1 and skill[0]['is_error'] and 'timed out after 1500 ms' in skill[0]['output'], skill
+    check("its subagent keeps the deadline for a skill's 3 s block")
     print(f'PASS {len(checks)} agent shell environment scenarios.', flush=True)
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)

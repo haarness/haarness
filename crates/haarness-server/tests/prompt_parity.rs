@@ -201,6 +201,7 @@ fn request() -> StartTurnRequest {
         reasoning_effort: None,
         tools: None,
         command: None,
+        ..Default::default()
     }
 }
 async fn done(runtime: &AgentRuntime, turn: haarness_protocol::TurnId) {

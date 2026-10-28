@@ -178,6 +178,7 @@ async fn turn(
                 reasoning_effort: None,
                 tools: None,
                 command: None,
+                ..Default::default()
             },
         )
         .await

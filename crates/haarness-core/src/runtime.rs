@@ -2449,6 +2449,7 @@ impl AgentRuntime {
                             id: request.request_id,
                             text: request.text,
                             attachments: request.attachments,
+                            attended: request.attended,
                         },
                     )
                     .await?;
@@ -2468,6 +2469,7 @@ impl AgentRuntime {
                         id: request.request_id,
                         text: request.text,
                         attachments: request.attachments,
+                        attended: request.attended,
                     },
                 )
                 .await?;
@@ -2535,6 +2537,7 @@ impl AgentRuntime {
                             .preview
                             .map(|preview| HashMap::from([("preview".into(), preview)])),
                         command: None,
+                        attended: input.attended,
                     },
                     Vec::new(),
                     None,
@@ -2710,6 +2713,7 @@ impl AgentRuntime {
                         },
                         tools: tools.clone(),
                         command: None,
+                        attended: request.attended,
                     },
                     Vec::new(),
                     None,
@@ -3521,6 +3525,7 @@ impl AgentRuntime {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: true,
+                ..Default::default()
             },
             false,
             false,
@@ -3571,6 +3576,7 @@ impl AgentRuntime {
                             attachments: Vec::new(),
                             resources: Vec::new(),
                             synthetic: true,
+                            ..Default::default()
                         };
                         self.append_queued_input(&chat, active.id, &request).await?;
                         return CoreResult::Ok("steered into the turn that started meanwhile");
@@ -6396,6 +6402,7 @@ impl AgentRuntime {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: true,
+                ..Default::default()
             };
             if let Err(error) = self
                 .queue_input_with_options(
@@ -10797,10 +10804,13 @@ impl RunnerTask {
             if executed.get("command").and_then(serde_json::Value::as_str) == Some(snippet.shown) {
                 executed["command"] = json!(snippet.run);
             }
-            // The command waits for its snippet's whole output, so a person's
-            // turn waits as long as it runs (a test suite, a long build);
-            // Stop still ends it. A run nobody can stop keeps the deadline.
-            if !self.unattended
+            // The command waits for its snippet's whole output. In a turn a
+            // person can stop (their client says so) it waits as long as the
+            // snippet runs, a test suite or a long build; anything else (a
+            // schedule, a script, a client that does not say) keeps the
+            // deadline.
+            if self.request.attended
+                && !self.unattended
                 && executed.get("timeout").is_none()
                 && executed.get("timeout_ms").is_none()
             {
@@ -11821,6 +11831,7 @@ impl RunnerTask {
                                 attachments: Vec::new(),
                                 resources: Vec::new(),
                                 synthetic: false,
+                                ..Default::default()
                             },
                         )
                         .await?;
@@ -11910,6 +11921,7 @@ impl RunnerTask {
             },
             tools,
             command: None,
+            attended: self.request.attended,
         };
         let (turn, user, _) = self
             .repository
@@ -12276,6 +12288,7 @@ impl RunnerTask {
                             attachments: Vec::new(),
                             resources: Vec::new(),
                             synthetic: true,
+                            ..Default::default()
                         },
                         task.delivery_auto_approve,
                         task.delivery_unattended,
