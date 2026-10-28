@@ -1780,6 +1780,7 @@
   "{count} more lines": "อีก {count} บรรทัด",
   "rejected": "ถูกปฏิเสธ",
   "Approvals changed in another window · ctrl+y to switch": "การอนุมัติถูกเปลี่ยนในหน้าต่างอื่น · ctrl+y เพื่อสลับ",
+  "Could not keep approvals · ctrl+y to switch": "คงการอนุมัติไว้ไม่ได้ · ctrl+y เพื่อสลับ",
   "Share usage statistics": "แชร์สถิติการใช้งาน",
   "Diagnostics": "การวินิจฉัย",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "บันทึกของ Haarness ในคอมพิวเตอร์เครื่องนี้เป็นไฟล์ zip โดยนำข้อมูลลับที่รู้จักออกแล้ว เพื่อแชร์เมื่อเกิดปัญหา",

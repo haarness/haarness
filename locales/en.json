@@ -1780,6 +1780,7 @@
   "{count} more lines": "{count} more lines",
   "rejected": "rejected",
   "Approvals changed in another window · ctrl+y to switch": "Approvals changed in another window · ctrl+y to switch",
+  "Could not keep approvals · ctrl+y to switch": "Could not keep approvals · ctrl+y to switch",
   "Share usage statistics": "Share usage statistics",
   "Diagnostics": "Diagnostics",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.",
