@@ -49,9 +49,10 @@ impl Layout {
             adopt_directory(&self.data, legacy.data_local_dir())?;
             adopt_directory(&self.cache, legacy.cache_dir())?;
         }
-        for dir in [&self.config, &self.data, &self.cache, &self.state] {
+        for dir in [&self.config, &self.cache, &self.state] {
             fs::create_dir_all(dir)?;
         }
+        haarness_server::private_data_folder(&self.data)?;
         let marker = self.config.join(".layout-v1");
         if !marker.exists() {
             if let Some(legacy) = legacy {
@@ -438,18 +439,47 @@ pub fn resource_roots(
     workspace: &Path,
     project_config: bool,
 ) -> Vec<PathBuf> {
+    resource_roots_scoped(config, home, workspace, project_config)
+        .into_iter()
+        .map(|(root, _)| root)
+        .collect()
+}
+
+/// [`resource_roots`], each with whether it is one of the project's own
+/// folders rather than the person's. A project folder that is the home
+/// folder (a project, or a Git repository of dotfiles, at `~`) lists the
+/// person's folders again: they stay the person's.
+pub fn resource_roots_scoped(
+    config: &Path,
+    home: Option<&Path>,
+    workspace: &Path,
+    project_config: bool,
+) -> Vec<(PathBuf, bool)> {
     let mut roots = Vec::new();
     if let Some(home) = home {
-        roots.extend([".opencode", ".haarness"].map(|name| home.join(name)));
+        roots.extend([".opencode", ".haarness"].map(|name| (home.join(name), false)));
     }
-    roots.push(config.to_path_buf());
+    roots.push((config.to_path_buf(), false));
     for directory in project_directories(workspace)
         .into_iter()
         .filter(|_| project_config)
     {
-        roots.extend([".opencode", ".haarness"].map(|name| directory.join(name)));
+        for name in [".opencode", ".haarness"] {
+            let root = directory.join(name);
+            let project = !persons_folder(&roots, &root);
+            roots.push((root, project));
+        }
     }
     roots
+}
+
+/// Whether `folder` is one of `listed` that is the person's, as written or
+/// where it really is.
+pub(crate) fn persons_folder(listed: &[(PathBuf, bool)], folder: &Path) -> bool {
+    let real = folder.canonicalize().ok();
+    listed.iter().any(|(known, project)| {
+        !project && (known == folder || real.is_some() && known.canonicalize().ok() == real)
+    })
 }
 
 #[cfg(test)]
@@ -471,6 +501,50 @@ mod tests {
         assert_eq!(isolated.config, Path::new("/isolated/config"));
         assert_eq!(isolated.state, Path::new("/isolated/state"));
         assert!(Layout::resolve(home, Some(Path::new("relative")), |_| None).is_err());
+    }
+    /// The data folder is the person's alone: made so, or narrowed at every
+    /// start once it holds Haarness's files (an older build left it open).
+    /// A folder of the person's that only has its name, and the folders
+    /// above it, are never changed.
+    #[cfg(unix)]
+    #[test]
+    fn the_data_folder_is_for_its_owner_alone_and_its_parents_stay_as_they_are() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let root = std::env::temp_dir().join(format!("haarness-private-{}", uuid::Uuid::now_v7()));
+        let xdg = root.join("xdg data");
+        fs::create_dir_all(&xdg).unwrap();
+        fs::set_permissions(&xdg, fs::Permissions::from_mode(0o755)).unwrap();
+        let layout = Layout::resolve(&root.join("home"), None, |key| {
+            (key == "XDG_DATA_HOME").then(|| xdg.clone())
+        })
+        .unwrap();
+        layout.initialize(None).unwrap();
+        assert_eq!(mode(&layout.data), 0o700);
+        assert_eq!(mode(&xdg), 0o755, "a chosen folder above it is unchanged");
+        // Made by an older build, open to everyone, with Haarness's files.
+        fs::write(layout.data.join("workspaces.json"), "{}").unwrap();
+        fs::set_permissions(&layout.data, fs::Permissions::from_mode(0o755)).unwrap();
+        layout.initialize(None).unwrap();
+        assert_eq!(mode(&layout.data), 0o700);
+        // One root for everything (HAARNESS_HOME, `--data-dir`): its data
+        // folder is private, the root itself is the person's.
+        let chosen = root.join("chosen");
+        fs::create_dir_all(&chosen).unwrap();
+        fs::set_permissions(&chosen, fs::Permissions::from_mode(0o751)).unwrap();
+        let isolated = Layout::resolve(&root.join("home"), Some(&chosen), |_| None).unwrap();
+        isolated.initialize(None).unwrap();
+        assert_eq!(mode(&isolated.data), 0o700);
+        assert_eq!(mode(&chosen), 0o751);
+        // A root whose `data` is a folder of the person's (`--data-dir ~`).
+        let theirs = root.join("theirs");
+        fs::create_dir_all(theirs.join("data")).unwrap();
+        fs::write(theirs.join("data/photo.jpg"), "").unwrap();
+        fs::set_permissions(theirs.join("data"), fs::Permissions::from_mode(0o755)).unwrap();
+        let isolated = Layout::resolve(&root.join("home"), Some(&theirs), |_| None).unwrap();
+        isolated.initialize(None).unwrap();
+        assert_eq!(mode(&theirs.join("data")), 0o755);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn migration_keeps_existing_files_and_live_data_identity() {

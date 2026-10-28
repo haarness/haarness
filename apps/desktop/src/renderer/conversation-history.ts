@@ -1,5 +1,6 @@
 import type { Item, Thread } from "@haarness/sdk";
 import { plainMessage } from "./prompt-context";
+import { spelledOutPlain, withoutEscapes } from "./display-text";
 
 export function retainedItems(items: Item[], thread?: Thread) {
   const boundary = thread?.revert?.sequence ?? Infinity;
@@ -47,8 +48,11 @@ function conversationText(item: Item, items: Item[]) {
       );
       return [
         data.name,
-        JSON.stringify(data.arguments),
-        result?.data.type === "tool_result" ? result.data.output : "",
+        // With what would not show spelled out, so the preview cannot be
+        // reordered and searching for a code finds it.
+        spelledOutPlain(JSON.stringify(data.arguments)),
+        // As the row shows it, without its escape sequences.
+        result?.data.type === "tool_result" ? withoutEscapes(result.data.output) : "",
       ].join("\n");
     }
     default:

@@ -782,6 +782,7 @@ mod tests {
             default_provider: None,
             default_model: None,
             default_approval_mode: None,
+            default_reasoning_effort: None,
             default_agent: None,
             project_trusted: None,
             pid: None,
@@ -1080,6 +1081,7 @@ mod tests {
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await;
@@ -1095,6 +1097,7 @@ mod tests {
                     attachments: Vec::new(),
                     resources: Vec::new(),
                     synthetic: false,
+                    ..Default::default()
                 },
             )
             .await;
@@ -1115,6 +1118,7 @@ mod tests {
                     tools: None,
                     wait: false,
                     timeout_ms: None,
+                    ..Default::default()
                 },
             )
             .await;

@@ -9,6 +9,18 @@ pub(crate) fn resolve_name(name: &str, names: impl IntoIterator<Item = String>) 
     let mut names: Vec<_> = names.into_iter().collect();
     names.sort();
     names.dedup();
+    if names.iter().any(|registered| registered == name) {
+        return name.to_owned();
+    }
+    // A name the model wrote as providers were sent the tool (a `batch` or
+    // Code Mode step, a workflow it wrote): the tool's own name, before any
+    // repair of letter case, which could reach another tool instead
+    // (`mcp__Google_Drive__search` is `Google Drive`'s, not `google_drive`'s).
+    let wire = crate::wire_names::WireNames::new(names.iter().map(String::as_str));
+    let own = wire.own(name);
+    if own != name {
+        return own.to_owned();
+    }
     let local = name
         .get(..10)
         .filter(|prefix| prefix.eq_ignore_ascii_case("functions."))
@@ -198,6 +210,69 @@ mod tests {
         assert_eq!(resolve("glbo"), "glbo");
         assert_eq!(resolve("other.glob"), "other.glob");
         assert_eq!(resolve(" glob "), " glob ");
+    }
+
+    /// A workflow or Code Mode script the model wrote names an MCP tool the
+    /// way providers saw it: that is the tool with its own name.
+    #[test]
+    fn a_tool_named_as_providers_saw_it_is_the_tool() {
+        let resolve = |name| {
+            resolve_name(
+                name,
+                [
+                    "mcp__Docs Server__files.read",
+                    "mcp__Docs_Server__plain",
+                    "mcp__Docs Server__plain",
+                    "read",
+                ]
+                .map(str::to_owned),
+            )
+        };
+        assert_eq!(
+            resolve("mcp__Docs_Server__files_read"),
+            "mcp__Docs Server__files.read"
+        );
+        // The tool whose own name providers take keeps it.
+        assert_eq!(
+            resolve("mcp__Docs_Server__plain"),
+            "mcp__Docs_Server__plain"
+        );
+        let names = crate::wire_names::WireNames::new([
+            "mcp__Docs Server__plain",
+            "mcp__Docs_Server__plain",
+        ]);
+        assert_eq!(
+            resolve(names.wire("mcp__Docs Server__plain")),
+            "mcp__Docs Server__plain"
+        );
+        assert_eq!(resolve("mcp__nothing__here"), "mcp__nothing__here");
+    }
+
+    /// `Google Drive` and `google_drive` both offer `search`: the name
+    /// providers were sent for the first differs from the second's own name
+    /// only in letter case, and still means the first.
+    #[test]
+    fn a_provider_name_wins_over_a_repair_of_letter_case() {
+        let names = [
+            "mcp__Google Drive__search".to_owned(),
+            "mcp__google_drive__search".to_owned(),
+        ];
+        let resolve = |name| resolve_name(name, names.clone());
+        for written in [
+            "mcp__Google_Drive__search",
+            "functions.mcp__Google_Drive__search",
+        ] {
+            assert_eq!(resolve(written), "mcp__Google Drive__search", "{written}");
+        }
+        assert_eq!(
+            resolve("mcp__google_drive__search"),
+            "mcp__google_drive__search"
+        );
+        // Letter case is still repaired for a tool's own name.
+        assert_eq!(
+            resolve("MCP__GOOGLE_DRIVE__SEARCH"),
+            "mcp__google_drive__search"
+        );
     }
 
     #[test]

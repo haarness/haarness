@@ -51,6 +51,14 @@ export function createReconnectWait(now: () => number = Date.now) {
   };
 }
 
+/** Whether a reconnect found another run of the server than the one this
+ * window read when the project opened: it restarted, and read its
+ * configuration (the configured reasoning level among it) afresh, so what the
+ * window knows of it is read again. */
+export function serverRestarted(known: string | undefined, fresh: string) {
+  return !!known && known !== fresh;
+}
+
 /** Signals that arrive together (a wake brings the network and the window
  * back too) count as one when they are this close. */
 export const SIGNAL_MERGE_MS = 1000;

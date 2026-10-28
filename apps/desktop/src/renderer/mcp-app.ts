@@ -173,6 +173,14 @@ function publicHost(host: string) {
 }
 
 /**
+ * A declared host with no scheme (`cdn.example.com`, `*.example.com`,
+ * `cdn.example.com:8443/lib/`), as servers often send them, is read as an
+ * https one. As written it is no URL, or one whose scheme is
+ * `cdn.example.com:`.
+ */
+const BARE_HOST = /^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)*(:\d{1,5})?(\/|$)/i;
+
+/**
  * A CSP source list takes https and wss host sources of public sites only:
  * anything else (a keyword, a quote, a semicolon) could widen or end the
  * directive it is pasted into, and plain http, every host, or this computer's
@@ -180,11 +188,12 @@ function publicHost(host: string) {
  */
 export function sources(list: unknown): string[] {
   if (!Array.isArray(list)) return [];
-  return list.flatMap((item) => {
+  const found = list.flatMap((item) => {
     if (typeof item !== "string" || /[\s;,'"]/.test(item)) return [];
     let url: URL;
     try {
-      url = new URL(item);
+      // A bare host goes through every check below, as one with a scheme does.
+      url = new URL(!item.includes("://") && BARE_HOST.test(item) ? `https://${item}` : item);
     } catch {
       return [];
     }
@@ -194,6 +203,8 @@ export function sources(list: unknown): string[] {
     const source = `${url.protocol}//${url.host}${url.pathname === "/" ? "" : url.pathname}`;
     return /^(https|wss):\/\/[a-z0-9*.-]+(:\d+)?(\/[A-Za-z0-9._~%!$&()*+=:@/-]*)?$/.test(source) ? [source] : [];
   });
+  // `cdn.example.com` next to `https://cdn.example.com` is one source.
+  return [...new Set(found)];
 }
 
 /**

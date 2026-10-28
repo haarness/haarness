@@ -2103,6 +2103,27 @@ html[dir="rtl"] .tool-target {
 .prompt-subject.prompt-detail {
   color: var(--muted);
 }
+/* A character a request carries that would not show, or would move the
+   text around it (a direction override, a zero-width space, a carriage
+   return), written as its code: muted, on a faint chip of its own so it is
+   found at a glance, and kept left to right as one piece in right-to-left
+   text. No padding, so code keeps its columns. */
+.spelled-code {
+  color: var(--muted);
+  background: var(--word-change);
+  border-radius: var(--r-xs);
+  unicode-bidi: isolate;
+  direction: ltr;
+}
+/* In a changed line it keeps the line's own color; the chip marks it. */
+.diff-line .spelled-code {
+  color: inherit;
+}
+/* In a tool's input panel it takes the text color: the chip sets it apart,
+   and muted on the chip over the panel would read too faint. */
+.tool-input .spelled-code {
+  color: var(--text);
+}
 /* An explicit Chrome request names each site it asks for, one per line. */
 .prompt-subject.chrome-approval {
   list-style: none;

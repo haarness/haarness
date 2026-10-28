@@ -4,6 +4,7 @@ import {
   createReconnectWait,
   isWake,
   onReconnectHint,
+  serverRestarted,
 } from "./reconnect-wait";
 import { shareOrder, type RemoteAction, type RemoteShare } from "./remote-control";
 import { createAttachmentDrafts } from "./attachment-drafts";
@@ -100,8 +101,10 @@ import {
 import { chatFolderPath, newChatFolder } from "./chat-folder";
 import { createProjectOverview } from "./project-overview";
 import { carryDraft } from "./draft-carry";
+import { commandBody, messageBody } from "./send-request";
 import { checkAttachments, fileAttachments, type Attachment } from "./media";
 import type { SearchEntry } from "./search";
+import { requestedReasoning } from "./reasoning";
 import {
   commandNote,
   followRun,
@@ -643,11 +646,14 @@ function createApp(saved?: Preferences) {
       knownInfo ?? api<T.ServerInfo>("info"),
     ]);
     if (current !== generation || request !== catalogRequest) return;
-    set("providers", values[0]);
-    set("agents", values[1]);
-    set("commands", values[2]);
-    if (state.connection) set("connection", "info", values[3]);
-    set("catalogVersion", (n) => n + 1);
+    // One change: nothing sees new models with the old configured level.
+    batch(() => {
+      set("providers", values[0]);
+      set("agents", values[1]);
+      set("commands", values[2]);
+      if (state.connection) set("connection", "info", values[3]);
+      set("catalogVersion", (n) => n + 1);
+    });
   }
   async function refresh() {
     const current = generation;
@@ -937,6 +943,9 @@ function createApp(saved?: Preferences) {
     const previous = subscription;
     subscription = "";
     if (previous) await window.haarness.unsubscribe(previous);
+    // Which run of the server the window read before, by value: a reconnect
+    // below updates the connection's info in place.
+    const known = state.connection?.info.serverInstanceId;
     let info: T.ServerInfo;
     try {
       info = knownInfo ?? (await api<T.ServerInfo>("info"));
@@ -955,6 +964,13 @@ function createApp(saved?: Preferences) {
       info = view.info;
     }
     if (!valid()) return;
+    // The window's models, commands and the server's configured reasoning
+    // level came from the run that answered when the project opened.
+    if (serverRestarted(known, info.serverInstanceId))
+      void catalogs(false, info).catch((error) => {
+        // An attempt a newer one replaced says nothing.
+        if (valid()) showError(error);
+      });
     await refresh();
     if (!valid()) return;
     const selected = state.selected;
@@ -2357,27 +2373,30 @@ function createApp(saved?: Preferences) {
     await window.haarness.storage(key, pending);
     const noteKey = sessionKey(connection, thread.id);
     set("commandNotes", noteKey, undefined);
-    const input = {
+    // A slash command runs at the effort a message would.
+    const reasoningEffort = requestedReasoning(
+      effort,
+      state.connection?.info.defaultReasoningEffort,
+    );
+    const input = messageBody({
       delivery,
-      preview: true,
-      tools: { preview: true },
       text: promptWithContext(text, context),
       attachments,
-      ...mentioned,
+      mentioned,
       requestId: pending.requestId,
-      ...(effort ? { reasoningEffort: effort } : {}),
-    };
+      effort: reasoningEffort,
+    });
     if (pending.method === "executeCommand" && command) {
       const response = await targetApi<T.CommandExecutionResponse>(
         "executeCommand",
         thread.id,
-        {
+        commandBody({
           name: command[1],
-          tools: { preview: true },
           arguments: promptWithContext(command[2], context),
-          ...mentioned,
+          mentioned,
+          effort: reasoningEffort,
           requestId: pending.requestId,
-        },
+        }),
       );
       const note = commandNote(
         text,

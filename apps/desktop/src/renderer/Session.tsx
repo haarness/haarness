@@ -68,6 +68,7 @@ import {
 } from "../chrome";
 import { chatTitle } from "./chat-title";
 import { parseModel, selectModel } from "./model-selection";
+import { carriedReasoning } from "./reasoning";
 import { AgentTask } from "./AgentTask";
 import { Shimmer } from "./Shimmer";
 import { agentTasks, taskKey, type AgentTask as Task } from "./agent-tasks";
@@ -116,6 +117,8 @@ import { Portal } from "solid-js/web";
 import { isWorktree, locationName } from "../projects";
 import { createWorktree } from "./worktrees";
 import { ChangePreview, ToolActivity } from "./ToolActivity";
+import { SpelledOut } from "./SpelledOut";
+import { shortenSpelled, spelledOutText } from "./display-text";
 import { Mark } from "./brand";
 import { ChatLoading } from "./ChatLoading";
 import { matchesShortcut, shortcutLabel, shortcutText } from "./search";
@@ -2189,13 +2192,20 @@ export function Session() {
         await app.choose(value.id);
     }
   }
-  const efforts = () =>
+  const chatModel = () =>
     state.providers
       .find((p) => p.id === selectedModel()?.provider)
-      ?.models.find((m) => m.id === selectedModel()?.model)?.reasoningEfforts ??
-    [];
+      ?.models.find((m) => m.id === selectedModel()?.model);
   createEffect(() => {
-    if (state.ready && effort() && !efforts().includes(effort())) setEffort("");
+    const model = chatModel();
+    // A model missing from a list still loading keeps the choice.
+    if (!model) return;
+    const kept = carriedReasoning(
+      effort(),
+      model.reasoningEfforts,
+      state.connection?.info.defaultReasoningEffort,
+    );
+    if (state.ready && effort() && kept !== effort()) setEffort("");
   });
   const thought = createMemo(() =>
     state.preferences.thinking === "compact" && !stream()?.text
@@ -3073,6 +3083,7 @@ export function Session() {
                         onChange={(value) => app.run(() => model(value))}
                         options={modelOptions()}
                         effort={effort()}
+                        configured={state.connection?.info.defaultReasoningEffort}
                         onEffortChange={setEffort}
                         onOpen={() => void app.run(() => app.catalogs(true))}
                       />
@@ -3684,7 +3695,7 @@ function Permission(props: {
   // What "always" would let through, in words rather than as stored rules.
   const alwaysRules = () =>
     (props.permission.alwaysPatterns ?? []).map((rule) =>
-      describeAlwaysRule(category(), rule, { t, shortPath }),
+      describeAlwaysRule(category(), spelledOutText(rule), { t, shortPath }),
     );
   // Offered in Review only: from Yolo it would be a step back.
   const autoOffered = () => app.approvalMode() === "review" && canAutoApprove(props.permission);
@@ -3772,7 +3783,7 @@ function Permission(props: {
                   <li>
                     {splitAround(
                       chromeRequestText(line.category),
-                      () => <bdi>{line.origin}</bdi>,
+                      () => <bdi><SpelledOut text={line.origin} /></bdi>,
                       "{origin}",
                     )}
                   </li>
@@ -3781,23 +3792,23 @@ function Permission(props: {
               <For each={otherPatterns()}>
                 {(pattern) => (
                   <li>
-                    <code>{pattern}</code>
+                    <code><SpelledOut text={pattern} /></code>
                   </li>
                 )}
               </For>
             </ul>
             <Show when={explicitDetail()}>
-              <pre class="prompt-subject prompt-detail">{explicitDetail()}</pre>
+              <pre class="prompt-subject prompt-detail"><SpelledOut text={explicitDetail()} /></pre>
             </Show>
           </>
         }
       >
         <Show
           when={permissionCommand(props.permission.detail)}
-          fallback={<pre class="prompt-subject prompt-detail">{detail()}</pre>}
+          fallback={<pre class="prompt-subject prompt-detail"><SpelledOut text={detail()} /></pre>}
         >
           <pre class="prompt-subject approval-command">
-            {permissionCommand(props.permission.detail)}
+            <SpelledOut text={permissionCommand(props.permission.detail)} />
           </pre>
         </Show>
         {/* Why Auto's reviewer left this to the person: one quiet line under
@@ -3832,7 +3843,7 @@ function Permission(props: {
                 item().withheld === "written"
                   ? t("This command writes {path} before running it, so its contents can't be shown.")
                   : t("An earlier step of this command can change {path}, so its contents aren't shown."),
-                () => <bdi><code>{item().path}</code></bdi>,
+                () => <bdi><code><SpelledOut text={item().path} /></code></bdi>,
                 "{path}",
               )}
             </p>
@@ -3861,8 +3872,8 @@ function Permission(props: {
                   id={scriptBody}
                   aria-live="off"
                 >
-                  <div class="change-path" title={item().path}>
-                    <bdi dir="ltr">{item().path}</bdi>
+                  <div class="change-path" title={spelledOutText(item().path)}>
+                    <bdi dir="ltr"><SpelledOut text={item().path} /></bdi>
                   </div>
                   <div
                     class="change-lines"
@@ -3889,7 +3900,7 @@ function Permission(props: {
         <For each={linkTargets()}>
           {(target) => (
             <p class="approval-target">
-              {splitAround(t("Leads to {path}"), () => <bdi><code>{target}</code></bdi>, "{path}")}
+              {splitAround(t("Leads to {path}"), () => <bdi><code><SpelledOut text={target} /></code></bdi>, "{path}")}
             </p>
           )}
         </For>
@@ -3902,7 +3913,7 @@ function Permission(props: {
               {(rule) =>
                 splitAround(
                   t("Haarness could not read all of this command; a rule for {rule} may apply."),
-                  () => <bdi><code>{rule()}</code></bdi>,
+                  () => <bdi><code><SpelledOut text={rule()} /></code></bdi>,
                   "{rule}",
                 )
               }
@@ -3914,7 +3925,7 @@ function Permission(props: {
         <div class="approval-changes">
           <For each={changes()}>
             {(change) => (
-              <ChangePreview change={change} showPath={changes().length > 1} />
+              <ChangePreview change={change} showPath={changes().length > 1} directions />
             )}
           </For>
         </div>
@@ -4043,10 +4054,8 @@ function Permission(props: {
 /** A menu line too long for the menu, with its start and its end kept (a
  * command's start, a path's last folders) and the middle left out. */
 function middleTruncate(text: string, length = 30) {
-  const characters = Array.from(text);
-  if (characters.length <= length) return text;
-  const head = Math.ceil((length - 1) / 2);
-  return characters.slice(0, head).join("") + "…" + characters.slice(characters.length - (length - 1 - head)).join("");
+  // A rule's codes are kept whole or left out whole.
+  return shortenSpelled(text, length);
 }
 /** The closed script toggle: its size, which for a cut file counts only
  * what was read. */

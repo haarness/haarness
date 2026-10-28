@@ -7,6 +7,7 @@ mod config;
 mod connect;
 mod diff;
 mod diffview;
+mod escapes;
 mod highlight;
 mod input;
 mod input_queue;
@@ -373,12 +374,14 @@ pub async fn run_with_thread_and_resolver_fork_switching(
 }
 
 async fn run_with_client(
-    mut client: ApiClient,
+    client: ApiClient,
     initial_thread: Option<uuid::Uuid>,
     continue_last: bool,
     fork: bool,
     open_in: Option<haarness_protocol::ApprovalMode>,
 ) -> Result<Option<PathBuf>> {
+    // A person at the terminal can stop every turn this UI starts.
+    let mut client = client.attended();
     let initial_info = client.info().await.ok();
     // The server waits for a signed-in provider's list while it has no
     // model to show (up to 10 s on a stalled network): the first frame does
@@ -702,7 +705,7 @@ async fn run_with_client(
                 Ok(()) => {
                     event_task.abort();
                     client.disconnect_all_ptys();
-                    client = connection.client;
+                    client = connection.client.attended();
                     let update_available = app.update_available.take();
                     app = connection.app;
                     app.update_available = update_available;
@@ -1007,10 +1010,16 @@ async fn run_with_client(
                     crate::api::SubscriptionEvent::Event(event) => {
                         app.reduce(*event, &client).await?;
                     }
-                    crate::api::SubscriptionEvent::ResyncRequired => {
+                    crate::api::SubscriptionEvent::ResyncRequired(info) => {
                         // Replace REST-backed snapshots after replay loss or a
                         // server restart. Clearing deltas avoids duplicating a
                         // partial stream against the authoritative transcript.
+                        // A restarted server read its configuration afresh:
+                        // its info comes with the restart, else it is read.
+                        match info {
+                            Some(info) => app.adopt_server_info(*info),
+                            None => app.refresh_server_info(&client, None).await,
+                        }
                         app.input_queue = client.input_queue(app.thread.id).await.unwrap_or_default();
                         if let Ok(items) = client.items(app.thread.id).await {
                             app.items = items;
@@ -1221,33 +1230,8 @@ async fn run_with_client(
     event_task.abort();
     statusline_task.abort();
     client.disconnect_all_ptys();
-    // Remember the last meaningful session for an explicit `--continue`.
-    // A fresh, untouched home thread must not replace that resume target.
-    let root_thread = app
-        .parent_stack
-        .first()
-        .map_or(app.thread.id, |parent| parent.id);
-    let offset = app.effective_viewport_offset();
-    let expanded = app
-        .expanded
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
+    save_leaving_state(&app);
     let meaningful = !app.items.is_empty();
-    config::save_state(move |state| {
-        if meaningful {
-            let root_thread = root_thread.to_string();
-            state.last_thread = Some(root_thread.clone());
-            state.viewport_offset = Some(offset);
-            state.thread_views.insert(
-                root_thread,
-                config::ThreadViewState {
-                    viewport_offset: offset,
-                    expanded,
-                },
-            );
-        }
-    });
     draft_save?;
     if quit && meaningful && client.supports_local_workspace_switch() {
         let root = app.parent_stack.first().unwrap_or(&app.thread);
@@ -1299,6 +1283,40 @@ fn shell_quote(value: &str) -> String {
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
     }
+}
+
+/// What the TUI saves as it leaves: the last meaningful session, for an
+/// explicit `--continue`, with its view, and the favorites and recent models
+/// no save could write yet (`preferences::Unsaved`). Whether it was saved.
+fn save_leaving_state(app: &App) -> bool {
+    // A fresh, untouched home thread must not replace that resume target.
+    let root_thread = app
+        .parent_stack
+        .first()
+        .map_or(app.thread.id, |parent| parent.id);
+    let offset = app.effective_viewport_offset();
+    let expanded = app
+        .expanded
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let meaningful = !app.items.is_empty();
+    let unsaved = app.unsaved.clone();
+    config::save_state(move |state| {
+        if meaningful {
+            let root_thread = root_thread.to_string();
+            state.last_thread = Some(root_thread.clone());
+            state.viewport_offset = Some(offset);
+            state.thread_views.insert(
+                root_thread,
+                config::ThreadViewState {
+                    viewport_offset: offset,
+                    expanded,
+                },
+            );
+        }
+        unsaved.apply(state);
+    })
 }
 
 /// The footer left in the shell after quitting: which chat this was and the

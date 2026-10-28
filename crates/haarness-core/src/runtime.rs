@@ -525,6 +525,37 @@ fn plain_tool_output(text: String) -> ToolOutput {
     }
 }
 
+/// Appends what hooks said once a tool ran after its own result, which
+/// stays as it was: their context, then the feedback of the hooks that
+/// objected (exit code 2's stderr or a `"decision": "block"` reason), which
+/// the model reads as theirs, as Claude Code passes it to Claude.
+fn append_post_tool_hooks(output: &mut String, decision: crate::HookDecision) {
+    use std::fmt::Write as _;
+    if let Some(context) = decision.context {
+        let context = clip_hook_text(&context);
+        let _ = write!(output, "\n\n<hook-context>\n{context}\n</hook-context>");
+    }
+    if let Some(feedback) = decision.block {
+        let feedback = clip_hook_text(&feedback);
+        let _ = write!(output, "\n\n<hook-feedback>\n{feedback}\n</hook-feedback>");
+    }
+}
+
+/// The most of each hook block a tool's result takes. Many programs exit 2
+/// on a usage error, so a hook wrapping every tool would otherwise add all
+/// they print to every result.
+const HOOK_TEXT_CHARS: usize = 16_000;
+
+/// `text` kept to [`HOOK_TEXT_CHARS`] characters, saying how many were cut.
+fn clip_hook_text(text: &str) -> std::borrow::Cow<'_, str> {
+    let Some((at, _)) = text.char_indices().nth(HOOK_TEXT_CHARS) else {
+        return text.into();
+    };
+    let more = text[at..].chars().count();
+    let unit = if more == 1 { "character" } else { "characters" };
+    format!("{}… ({more} more {unit} not shown)", &text[..at]).into()
+}
+
 fn tool_output_attachments(metadata: &serde_json::Value) -> Vec<String> {
     metadata
         .get("attachments")
@@ -1743,9 +1774,33 @@ impl AgentRuntime {
         self
     }
 
+    /// Whether this runtime is the chat home ([`Self::as_chat_home`]).
+    #[must_use]
+    pub const fn is_chat_home(&self) -> bool {
+        self.chat_home
+    }
+
     /// Where chat `thread` works: its own folder, or the project folder.
     async fn thread_workspace(&self, thread: &Thread, access: FolderAccess) -> CoreResult<PathBuf> {
         thread_workspace(&self.workspace, thread, access).await
+    }
+
+    /// Whom hooks about chat `thread` run for outside a turn: the chat,
+    /// `agent` when one acts, and its own folder when it has one. Nothing is
+    /// made for them: a folder that a link stands in for is left out, and
+    /// one that is gone is left to the hooks, which then run in the project
+    /// folder, as they do when it goes during a turn.
+    async fn hook_call(&self, thread: &Thread, agent: Option<&str>) -> crate::HookCall {
+        let folder = match thread.directory {
+            Some(_) => self.thread_workspace(thread, FolderAccess::Read).await.ok(),
+            None => None,
+        };
+        crate::HookCall {
+            thread: thread.id,
+            agent: agent.map(str::to_owned),
+            folder,
+            folder_is_project: self.chat_home,
+        }
     }
 
     /// The snapshot store of `workspace`, where chat `thread` works.
@@ -2031,9 +2086,7 @@ impl AgentRuntime {
         }
         let custom = self.custom_agent(&agent);
         if let Some(custom) = &custom {
-            for rule in custom.permissions.iter().cloned() {
-                engine.add_rule(rule);
-            }
+            custom.apply_permissions(&mut engine);
         }
         if let Some(parent_id) = thread.and_then(|thread| thread.parent_id) {
             engine.add_inherited_ceiling(self.permission_boundary_for_lineage(parent_id).await?);
@@ -2054,6 +2107,14 @@ impl AgentRuntime {
             components.config.default_provider.clone(),
             components.config.default_model.clone(),
         )
+    }
+
+    /// The configured reasoning effort (`defaults.reasoning_effort`) a turn
+    /// that names none runs at, if any.
+    #[must_use]
+    pub fn default_reasoning_effort(&self) -> Option<String> {
+        configured_reasoning_effort(self.components().config.default_reasoning_effort.as_deref())
+            .map(str::to_owned)
     }
 
     fn components(&self) -> Arc<RuntimeComponents> {
@@ -2107,6 +2168,17 @@ impl AgentRuntime {
         self.workspace.display().to_string()
     }
 
+    /// `tools`, a tool mask a workflow agent was given (its script may be
+    /// one the model wrote), with each key that names a tool as providers
+    /// were sent it under the tool's own name (see [`crate::wire_names`]).
+    #[must_use]
+    pub fn own_tool_names(&self, tools: HashMap<String, bool>) -> HashMap<String, bool> {
+        let definitions = self.components().tools.list();
+        let names =
+            crate::wire_names::WireNames::new(definitions.iter().map(|tool| tool.name.as_str()));
+        names.own_keys(tools).into_iter().collect()
+    }
+
     /// Authoritative catalog for clients. With a thread id, session-local
     /// promotions and that thread's provider context are reflected.
     pub async fn tool_catalog(
@@ -2148,7 +2220,7 @@ impl AgentRuntime {
         if let Some(mode) = *self.lazy_tool_mode.read() {
             lazy_tools.mode = mode;
         }
-        Ok(select_tools(
+        let mut response = select_tools(
             components.tools.list(),
             &components.config.tool_availability,
             &live,
@@ -2156,7 +2228,17 @@ impl AgentRuntime {
             &promoted,
             context_window,
         )
-        .response)
+        .response;
+        // The server a tool comes from, as it is named: `a__b`'s tools read
+        // `mcp__a__b__…`, which names it only up to its first `__`.
+        for entry in &mut response.tools {
+            if entry.source.starts_with("mcp:")
+                && let Some(server) = components.tools.tool_server(&entry.id)
+            {
+                entry.source = format!("mcp:{server}");
+            }
+        }
+        Ok(response)
     }
 
     /// Set or clear a live workspace override and durably persist the whole
@@ -2449,6 +2531,7 @@ impl AgentRuntime {
                             id: request.request_id,
                             text: request.text,
                             attachments: request.attachments,
+                            attended: request.attended,
                         },
                     )
                     .await?;
@@ -2468,6 +2551,7 @@ impl AgentRuntime {
                         id: request.request_id,
                         text: request.text,
                         attachments: request.attachments,
+                        attended: request.attended,
                     },
                 )
                 .await?;
@@ -2535,6 +2619,7 @@ impl AgentRuntime {
                             .preview
                             .map(|preview| HashMap::from([("preview".into(), preview)])),
                         command: None,
+                        attended: input.attended,
                     },
                     Vec::new(),
                     None,
@@ -2710,6 +2795,7 @@ impl AgentRuntime {
                         },
                         tools: tools.clone(),
                         command: None,
+                        attended: request.attended,
                     },
                     Vec::new(),
                     None,
@@ -2919,7 +3005,8 @@ impl AgentRuntime {
         if thread.parent_id.is_none()
             && let Some(hooks) = &components.hooks
         {
-            hooks.session_start(thread.id, &thread.agent).await;
+            let call = self.hook_call(&thread, Some(&thread.agent)).await;
+            hooks.session_start(&call).await;
         }
         Ok(thread)
     }
@@ -3026,7 +3113,8 @@ impl AgentRuntime {
         );
         if archiving && thread.archived {
             if let Some(hooks) = &self.components().hooks {
-                hooks.session_end(id, "archived").await;
+                let call = self.hook_call(&thread, None).await;
+                hooks.session_end(&call, "archived").await;
             }
         }
         Ok(thread)
@@ -3049,7 +3137,7 @@ impl AgentRuntime {
             items.retain(|item| item.sequence <= revert.sequence);
         }
         let models = self.components().providers.models(&thread.provider);
-        let window = model_metadata(&models, &thread.model).and_then(|info| info.context_window);
+        let window = stated_window(model_metadata(&models, &thread.model));
         Ok(ContextUsage {
             estimate: tokens::context(&items, Tokenizer::for_model(&thread.model)),
             window,
@@ -3205,9 +3293,7 @@ impl AgentRuntime {
                 engine.add_grant(rule);
             }
             if let Some(custom) = custom {
-                for rule in custom.permissions {
-                    engine.add_rule(rule);
-                }
+                custom.apply_permissions(&mut engine);
             }
             let mut lazy = components.config.lazy_tools.clone();
             if let Some(mode) = *self.lazy_tool_mode.read() {
@@ -3228,8 +3314,9 @@ impl AgentRuntime {
                 .map_or_else(HashSet::new, |entry| entry.value().clone());
             let selection = select_tools(
                 catalog
-                    .into_iter()
+                    .iter()
                     .filter(|tool| !engine.disables_tool(&tool.name) && !is_goal_tool(&tool.name))
+                    .cloned()
                     .collect(),
                 &components.config.tool_availability,
                 &self.tool_availability.read(),
@@ -3292,7 +3379,13 @@ impl AgentRuntime {
         // Return local refusals and allow a bounded text-only recovery; never
         // resolve a live executor or persist these synthetic exchanges.
         for attempt in 0..3 {
-            let mut stream = provider.stream(prepared.clone(), cancel.clone()).await?;
+            let mut stream = crate::wire_names::stream(
+                provider.as_ref(),
+                prepared.clone(),
+                &catalog,
+                cancel.clone(),
+            )
+            .await?;
             // An attempt after refused tool calls answers from scratch, so
             // whatever the previous one wrote before its calls is taken back.
             if attempt > 0 {
@@ -3521,6 +3614,7 @@ impl AgentRuntime {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: true,
+                ..Default::default()
             },
             false,
             false,
@@ -3571,6 +3665,7 @@ impl AgentRuntime {
                             attachments: Vec::new(),
                             resources: Vec::new(),
                             synthetic: true,
+                            ..Default::default()
                         };
                         self.append_queued_input(&chat, active.id, &request).await?;
                         return CoreResult::Ok("steered into the turn that started meanwhile");
@@ -3827,9 +3922,7 @@ impl AgentRuntime {
         let metadata = model_metadata(&models, model);
         compaction_input_limit(
             &components.config.compaction,
-            metadata
-                .and_then(|info| info.context_window)
-                .unwrap_or(128_000),
+            stated_window(metadata).unwrap_or(128_000),
             metadata.and_then(|info| info.max_output_tokens),
         )
     }
@@ -3886,7 +3979,8 @@ impl AgentRuntime {
         let item = self.repository.compact(id, request, expected_tail).await?;
         drop(admission_guard);
         if let Some(hooks) = &self.components().hooks {
-            hooks.post_compact(id, "manual", &item).await;
+            let call = self.hook_call(&thread, None).await;
+            hooks.post_compact(&call, "manual", &item).await;
         }
         Ok(item)
     }
@@ -3984,7 +4078,8 @@ impl AgentRuntime {
         );
         drop(admission_guard);
         if let Some(hooks) = &self.components().hooks {
-            hooks.post_compact(id, "manual", &item).await;
+            let call = self.hook_call(&thread, None).await;
+            hooks.post_compact(&call, "manual", &item).await;
         }
         Ok(item)
     }
@@ -4577,9 +4672,7 @@ impl AgentRuntime {
                     "tool {name} is disabled by agent tools"
                 )));
             }
-            for rule in custom.permissions {
-                engine.add_rule(rule);
-            }
+            custom.apply_permissions(&mut engine);
         }
         if let Some(parent_id) = thread.parent_id {
             engine.add_inherited_ceiling(self.permission_boundary_for_lineage(parent_id).await?);
@@ -4625,11 +4718,18 @@ impl AgentRuntime {
 
         let mut hook_permission = None;
         let mut hook_context = None;
+        // The chat's agent, and its own folder when it works in one.
+        let hook_call = crate::HookCall {
+            thread: thread_id,
+            agent: Some(thread.agent.clone()),
+            folder: (workspace != self.workspace).then(|| workspace.clone()),
+            folder_is_project: self.chat_home,
+        };
         if let Some(hooks) = &components.hooks {
             let decision = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Err(CoreError::Cancelled),
-                decision = hooks.pre_tool_use(thread_id, name, &arguments) => decision,
+                decision = hooks.pre_tool_use(&hook_call, name, &arguments) => decision,
             };
             if let Some(reason) = decision.block {
                 return Err(CoreError::PermissionDenied(format!(
@@ -5079,9 +5179,13 @@ impl AgentRuntime {
                 if let Some(hooks) = &components.hooks {
                     let hooks = Arc::clone(hooks);
                     let message = format!("Permission needed: {operation}");
+                    let call = crate::HookCall {
+                        agent: None,
+                        ..hook_call.clone()
+                    };
                     tokio::spawn(async move {
                         hooks
-                            .notification(thread_id, "permission_prompt", &message)
+                            .notification(&call, "permission_prompt", &message)
                             .await;
                     });
                 }
@@ -5166,6 +5270,7 @@ impl AgentRuntime {
         }
         let mut execution = components.config.execution.clone();
         execution.person_shell = !agent_work;
+        execution.chat_home = self.chat_home.then(|| self.workspace.clone());
         if name == "bash"
             && allowed.is_ok()
             && let Some(hooks) = &components.hooks
@@ -5228,18 +5333,12 @@ impl AgentRuntime {
         }
         if let Some(hooks) = &components.hooks {
             // Still capture the completed tool's after-snapshot when a hook is cancelled.
-            let context = tokio::select! {
+            let decision = tokio::select! {
                 biased;
-                () = cancel.cancelled() => None,
-                context = hooks.post_tool_use(thread_id, name, &arguments, &output.text, is_error) => context,
+                () = cancel.cancelled() => crate::HookDecision::default(),
+                decision = hooks.post_tool_use(&hook_call, name, &arguments, &output.text, is_error) => decision,
             };
-            if let Some(context) = context {
-                use std::fmt::Write as _;
-                let _ = write!(
-                    output.text,
-                    "\n\n<hook-context>\n{context}\n</hook-context>"
-                );
-            }
+            append_post_tool_hooks(&mut output.text, decision);
         }
         if let (Some(snapshots), Some(before)) = (&snapshots, before_snapshot) {
             let after = snapshots.capture(thread_id).await?;
@@ -6300,6 +6399,7 @@ impl AgentRuntime {
             command: prepared_command,
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(Vec::new()),
+            instructions_in_context: crate::instructions::InContext::default(),
             cancel,
             workspace,
             runtime_workspace: self.workspace.clone(),
@@ -6397,6 +6497,7 @@ impl AgentRuntime {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: true,
+                ..Default::default()
             };
             if let Err(error) = self
                 .queue_input_with_options(
@@ -6495,9 +6596,7 @@ impl AgentRuntime {
             engine.add_grant(rule);
         }
         if let Some(custom) = &agent.custom {
-            for rule in custom.permissions.iter().cloned() {
-                engine.add_rule(rule);
-            }
+            custom.apply_permissions(&mut engine);
         }
         engine.boundary()
     }
@@ -6794,6 +6893,9 @@ struct RunnerTask {
     /// run`, ACP) still has a person to ask, and so does anyone who later
     /// types in that chat or a fork of it.
     unattended: bool,
+    /// The nested instruction files this turn's model can see, set from the
+    /// history each provider round sends.
+    instructions_in_context: crate::instructions::InContext,
 }
 
 struct TurnToolInvoker {
@@ -6829,6 +6931,9 @@ impl crate::ToolInvoker for TurnToolInvoker {
     }
     fn read_rules(&self) -> Option<PermissionEngine> {
         Some(self.runner.permission_engine_for_tool(&self.agent, "read"))
+    }
+    fn instructions_in_context(&self) -> Option<crate::instructions::InContext> {
+        Some(Arc::clone(&self.runner.instructions_in_context))
     }
     fn delegable_agents(&self) -> Vec<String> {
         self.runner
@@ -7860,6 +7965,18 @@ struct ChatTurnSettings {
 }
 
 impl RunnerTask {
+    /// Whom this turn's hooks run for: its chat, `agent` when one acts, and
+    /// the folder its tools work in when that is not the project folder (the
+    /// chat's own, or for a child agent its parent's).
+    fn hook_call(&self, agent: Option<&str>) -> crate::HookCall {
+        crate::HookCall {
+            thread: self.thread.id,
+            agent: agent.map(str::to_owned),
+            folder: (self.workspace != self.runtime_workspace).then(|| self.workspace.clone()),
+            folder_is_project: self.chat_home,
+        }
+    }
+
     /// The transcript's words for a failure of this turn, naming its provider.
     fn visible_error(&self, error: &CoreError) -> String {
         let name = self
@@ -8080,10 +8197,11 @@ impl RunnerTask {
         {
             let (category, kind) = stop_failure_categories(error);
             let detail = json!({"error":category,"error_type":kind,"error_details":self.visible_error(error),"provider_id":self.turn.provider,"model_id":self.turn.model});
+            let call = self.hook_call(None);
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => {},
-                () = hooks.stop_failure(self.thread.id, self.turn.id, &detail) => {}
+                () = hooks.stop_failure(&call, self.turn.id, &detail) => {}
             }
         }
         self.close_acceptance().await;
@@ -8377,9 +8495,7 @@ impl RunnerTask {
         let metadata = model_metadata(&models, model);
         let input_limit = compaction_input_limit(
             &self.config.compaction,
-            metadata
-                .and_then(|info| info.context_window)
-                .unwrap_or(128_000),
+            stated_window(metadata).unwrap_or(128_000),
             metadata.and_then(|info| info.max_output_tokens),
         );
         let item = self
@@ -8420,10 +8536,11 @@ impl RunnerTask {
         );
         drop(accepting);
         if let Some(hooks) = &self.hooks {
+            let call = self.hook_call(None);
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                () = hooks.post_compact(self.thread.id, "automatic", &item) => {}
+                () = hooks.post_compact(&call, "automatic", &item) => {}
             }
         }
         self.set_status("thinking", None);
@@ -8512,10 +8629,11 @@ impl RunnerTask {
             let mut prompt_context: Option<String> = None;
             if self.depth == 0 {
                 if let Some(hooks) = &self.hooks {
+                    let call = self.hook_call(Some(agent));
                     let decision = tokio::select! {
                         biased;
                         () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                        decision = hooks.user_prompt_submit(self.thread.id, &self.request.text) => decision,
+                        decision = hooks.user_prompt_submit(&call, &self.request.text) => decision,
                     };
                     if let Some(reason) = decision.block {
                         return Err(CoreError::Invalid(format!("{PROMPT_BLOCKED}{reason}")));
@@ -8527,10 +8645,11 @@ impl RunnerTask {
                 && !self.command_started.swap(true, Ordering::SeqCst)
             {
                 if let Some(hooks) = &self.hooks {
+                    let call = self.hook_call(Some(agent));
                     let decision = tokio::select! {
                         biased;
                         () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                        decision = hooks.command_execute_before(self.thread.id, &command.name, &self.request.text) => decision,
+                        decision = hooks.command_execute_before(&call, &command.name, &self.request.text) => decision,
                     };
                     if let Some(reason) = decision.block {
                         return Err(CoreError::Invalid(format!(
@@ -8716,9 +8835,7 @@ impl RunnerTask {
                 {
                     let provider_models = self.providers.models(provider_id);
                     let model_info = model_metadata(&provider_models, &model);
-                    let context_window = model_info
-                        .and_then(|info| info.context_window)
-                        .unwrap_or(128_000);
+                    let context_window = stated_window(model_info).unwrap_or(128_000);
                     let budget = compaction_input_limit(
                         &self.config.compaction,
                         context_window,
@@ -8802,10 +8919,11 @@ impl RunnerTask {
                         }
                         drop(accepting);
                         if let (Some(hooks), Some(item)) = (&self.hooks, compacted) {
+                            let call = self.hook_call(None);
                             tokio::select! {
                                 biased;
                                 () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                                () = hooks.post_compact(self.thread.id, "automatic", &item) => {}
+                                () = hooks.post_compact(&call, "automatic", &item) => {}
                             }
                         }
                         self.set_status("thinking", None);
@@ -8822,6 +8940,11 @@ impl RunnerTask {
                 }
                 let current_attachments =
                     crate::image_budget::turn_attachments(&items, Some(self.turn.id));
+                // A nested instruction file whose read result compaction or
+                // an undo removed is no longer in view: the next read below
+                // its folder attaches it again.
+                *self.instructions_in_context.lock() =
+                    crate::instructions::attached(provider_visible_items(&items));
                 let (mut messages, origins) = provider_messages_with_origins(items);
                 let source_messages = messages.clone();
                 let image_limits = provider.image_limits(&model);
@@ -9023,20 +9146,14 @@ impl RunnerTask {
                     reasoning_effort: if self.turn.ultracode {
                         ultracode_effort.clone()
                     } else {
-                        self.request
-                            .reasoning_effort
-                            .clone()
-                            .or_else(|| self.config.default_reasoning_effort.clone())
-                            .map(|effort| {
-                                supported_reasoning_effort(&provider_models, &model, effort)
-                            })
-                            .or_else(|| {
-                                default_visible_reasoning_effort(
-                                    &provider_models,
-                                    provider_id,
-                                    &model,
-                                )
-                            })
+                        turn_reasoning_effort(
+                            self.request.reasoning_effort.as_deref(),
+                            self.config.default_reasoning_effort.as_deref(),
+                        )
+                        .map(|effort| supported_reasoning_effort(&provider_models, &model, effort))
+                        .or_else(|| {
+                            default_visible_reasoning_effort(&provider_models, provider_id, &model)
+                        })
                     },
                     parameters: crate::RequestParameters {
                         cache_key: Some(self.thread.id.to_string()),
@@ -9051,6 +9168,13 @@ impl RunnerTask {
                         result = hooks.prepare_request(self.thread.id, &mut provider_request) => result?,
                     }
                 }
+                // The names this request gives its tools on the wire, from
+                // its tools, its history and the catalog they were chosen
+                // from; the model's calls are read back to the tools' own.
+                let wire_names = Arc::new(crate::wire_names::WireNames::for_request(
+                    &provider_request,
+                    || catalog.iter().map(|tool| tool.name.as_str()),
+                ));
                 self.prepared_prompts.lock().remember(
                     self.thread.id,
                     self.turn.id,
@@ -9106,9 +9230,10 @@ impl RunnerTask {
                     biased;
                     () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
                     result = provider
-                        .stream(provider_request, self.cancel.clone())
+                        .stream(wire_names.applied(provider_request), self.cancel.clone())
                         .instrument(provider_span.clone()) => result,
                 };
+                let stream_result = stream_result.map(|stream| wire_names.read_back(stream));
                 let stream_result = match lead {
                     Some(lead) => stream_result.map(|stream| lead.watch(stream)),
                     None => stream_result,
@@ -9677,10 +9802,11 @@ impl RunnerTask {
                     self.set_status("done", None);
                     if self.depth == 0 {
                         if let Some(hooks) = &self.hooks {
+                            let call = self.hook_call(None);
                             tokio::select! {
                                 biased;
                                 () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                                () = hooks.stop(self.thread.id) => {}
+                                () = hooks.stop(&call) => {}
                             }
                             let detail = json!({
                                 "turnId": self.turn.id,
@@ -9692,13 +9818,12 @@ impl RunnerTask {
                             tokio::select! {
                                 biased;
                                 () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                                () = hooks.turn_end(self.thread.id, self.turn.id, &detail) => {}
+                                () = hooks.turn_end(&call, self.turn.id, &detail) => {}
                             }
                             let hooks = Arc::clone(hooks);
-                            let thread_id = self.thread.id;
                             tokio::spawn(async move {
                                 hooks
-                                    .notification(thread_id, "turn_completed", "Session completed")
+                                    .notification(&call, "turn_completed", "Session completed")
                                     .await;
                             });
                         }
@@ -10428,6 +10553,15 @@ impl RunnerTask {
                     })
             })
             .collect::<CoreResult<Vec<_>>>()?;
+        // A tool the model names as providers were sent it is the tool it
+        // stands for (see `crate::wire_names`).
+        let definitions = self.tools.list();
+        let names =
+            crate::wire_names::WireNames::new(definitions.iter().map(|tool| tool.name.as_str()));
+        let queries: Vec<String> = queries
+            .iter()
+            .map(|query| names.own(query).to_owned())
+            .collect();
         let catalog = self
             .last_tool_catalog
             .lock()
@@ -10438,7 +10572,7 @@ impl RunnerTask {
                 "lazy tool loading is not active for this provider round".into(),
             ));
         }
-        let matched = search_deferred_tools(&self.tools.list(), &catalog, &queries);
+        let matched = search_deferred_tools(&definitions, &catalog, &queries);
         let loaded = self.promote_tools(matched);
         let value = load_tool_result(&loaded, &catalog);
         Ok(ToolOutput {
@@ -10510,7 +10644,7 @@ impl RunnerTask {
             let _ = self.promote_tools([name.to_owned()]);
         }
         if name == "question" {
-            return self.question_call(call_id, arguments).await;
+            return self.question_call(agent, call_id, arguments).await;
         }
         if name == "task" {
             let execution_gate = tool_execution_gate(&self.tool_execution_gates, name);
@@ -10565,11 +10699,12 @@ impl RunnerTask {
         // PreToolUse hooks may block outright or force a permission outcome.
         let mut hook_permission = None;
         let mut hook_context = None;
+        let hook_call = self.hook_call(Some(agent));
         if let Some(hooks) = &self.hooks {
             let decision = tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                decision = hooks.pre_tool_use(self.thread.id, name, &arguments) => decision,
+                decision = hooks.pre_tool_use(&hook_call, name, &arguments) => decision,
             };
             if let Some(reason) = decision.block {
                 return Err(CoreError::PermissionDenied(format!(
@@ -10770,6 +10905,7 @@ impl RunnerTask {
             self.capture_snapshot().await?;
         }
         let mut execution = self.config.execution.clone();
+        execution.chat_home = self.chat_home.then(|| self.runtime_workspace.clone());
         if name == "bash"
             && let Some(hooks) = &self.hooks
         {
@@ -10790,6 +10926,18 @@ impl RunnerTask {
             );
             if executed.get("command").and_then(serde_json::Value::as_str) == Some(snippet.shown) {
                 executed["command"] = json!(snippet.run);
+            }
+            // The command waits for its snippet's whole output. In a turn a
+            // person can stop (their client says so) it waits as long as the
+            // snippet runs, a test suite or a long build; anything else (a
+            // schedule, a script, a client that does not say) keeps the
+            // deadline.
+            if self.request.attended
+                && !self.unattended
+                && executed.get("timeout").is_none()
+                && executed.get("timeout_ms").is_none()
+            {
+                execution.shell_timeout_ms = 0;
             }
         }
         let result = if matches!(name, "todo" | "todowrite") {
@@ -10840,18 +10988,12 @@ impl RunnerTask {
             );
         }
         if let Some(hooks) = &self.hooks {
-            let context = tokio::select! {
+            let decision = tokio::select! {
                 biased;
-                () = self.cancel.cancelled() => None,
-                context = hooks.post_tool_use(self.thread.id, name, &arguments, &output.text, false) => context,
+                () = self.cancel.cancelled() => crate::HookDecision::default(),
+                decision = hooks.post_tool_use(&hook_call, name, &arguments, &output.text, false) => decision,
             };
-            if let Some(context) = context {
-                use std::fmt::Write as _;
-                let _ = write!(
-                    output.text,
-                    "\n\n<hook-context>\n{context}\n</hook-context>"
-                );
-            }
+            append_post_tool_hooks(&mut output.text, decision);
         }
         Ok(output)
     }
@@ -10908,9 +11050,7 @@ impl RunnerTask {
             engine.add_grant(rule);
         }
         if let Some(custom) = self.custom_agent(agent) {
-            for rule in custom.permissions {
-                engine.add_rule(rule);
-            }
+            custom.apply_permissions(&mut engine);
         }
         engine.add_inherited_ceiling(self.inherited_ceilings.iter().cloned());
         engine
@@ -11020,8 +11160,8 @@ impl RunnerTask {
                 && hook_may_remember(plan)
                 && !self.approval_modes.is_auto(self.thread.id).await)
                 .then_some(plan.always.as_slice());
-            match permission_hook_answer(hooks.as_ref(), self.thread.id, plan, always, detail).await
-            {
+            let call = self.hook_call(Some(agent));
+            match permission_hook_answer(hooks.as_ref(), &call, plan, always, detail).await {
                 HookAnswer::Refused(feedback) => {
                     return Ok(PermissionResolution::rejected(Some(feedback)));
                 }
@@ -11264,11 +11404,11 @@ impl RunnerTask {
             self.set_status("waiting_permission", Some(tool));
             if let Some(hooks) = &self.hooks {
                 let hooks = Arc::clone(hooks);
-                let thread_id = self.thread.id;
+                let call = self.hook_call(None);
                 let message = format!("Permission needed: {operation}");
                 tokio::spawn(async move {
                     hooks
-                        .notification(thread_id, "permission_prompt", &message)
+                        .notification(&call, "permission_prompt", &message)
                         .await;
                 });
             }
@@ -11485,18 +11625,20 @@ impl RunnerTask {
     /// after it is answered, with the answer as its output.
     async fn question_call(
         &self,
+        agent: &str,
         call_id: &str,
         mut arguments: serde_json::Value,
     ) -> CoreResult<ToolOutput> {
         use std::fmt::Write as _;
         let mut answers = None;
         let mut hook_context = None;
+        let hook_call = self.hook_call(Some(agent));
         if let Some(hooks) = &self.hooks {
             self.set_status("tool", Some(("question", call_id)));
             let decision = tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                decision = hooks.pre_tool_use(self.thread.id, "question", &arguments) => decision,
+                decision = hooks.pre_tool_use(&hook_call, "question", &arguments) => decision,
             };
             if let Some(reason) = decision.block {
                 return Err(CoreError::PermissionDenied(format!(
@@ -11553,17 +11695,12 @@ impl RunnerTask {
             );
         }
         if let Some(hooks) = &self.hooks {
-            let context = tokio::select! {
+            let decision = tokio::select! {
                 biased;
-                () = self.cancel.cancelled() => None,
-                context = hooks.post_tool_use(self.thread.id, "question", &arguments, &output.text, false) => context,
+                () = self.cancel.cancelled() => crate::HookDecision::default(),
+                decision = hooks.post_tool_use(&hook_call, "question", &arguments, &output.text, false) => decision,
             };
-            if let Some(context) = context {
-                let _ = write!(
-                    output.text,
-                    "\n\n<hook-context>\n{context}\n</hook-context>"
-                );
-            }
+            append_post_tool_hooks(&mut output.text, decision);
         }
         Ok(output)
     }
@@ -11806,6 +11943,7 @@ impl RunnerTask {
                                 attachments: Vec::new(),
                                 resources: Vec::new(),
                                 synthetic: false,
+                                ..Default::default()
                             },
                         )
                         .await?;
@@ -11895,6 +12033,7 @@ impl RunnerTask {
             },
             tools,
             command: None,
+            attended: self.request.attended,
         };
         let (turn, user, _) = self
             .repository
@@ -11968,6 +12107,7 @@ impl RunnerTask {
             command: None,
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(self.skill_rules.lock().clone()),
+            instructions_in_context: crate::instructions::InContext::default(),
             cancel: cancel.clone(),
             // The child's folder is its parent's.
             workspace: self.workspace.clone(),
@@ -12260,6 +12400,7 @@ impl RunnerTask {
                             attachments: Vec::new(),
                             resources: Vec::new(),
                             synthetic: true,
+                            ..Default::default()
                         },
                         task.delivery_auto_approve,
                         task.delivery_unattended,
@@ -13099,7 +13240,7 @@ async fn generate_title(
     let cancel = CancellationToken::new();
     let _cancel = cancel.clone().drop_guard();
     let text = tokio::time::timeout(std::time::Duration::from_secs(300), async {
-        let mut stream = provider.stream(request, cancel).await?;
+        let mut stream = crate::wire_names::stream(provider.as_ref(), request, &[], cancel).await?;
         let mut title = String::new();
         while let Some(event) = stream.next().await {
             if let ProviderEvent::TextDelta(delta) = event? {
@@ -13518,7 +13659,7 @@ async fn summarize_context(
     let mut stream = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(CoreError::Cancelled),
-        result = provider.stream(request, cancel.clone()) => result?,
+        result = crate::wire_names::stream(provider.as_ref(), request, &[], cancel.clone()) => result?,
     };
     let mut text = String::new();
     let mut finished = false;
@@ -13607,6 +13748,14 @@ fn model_metadata<'a>(
     })
 }
 
+/// A model's context window when its metadata states one. A catalog that
+/// lists 0 says nothing about the model; taken as the limit, it would
+/// compact every round and fill the context meter at once.
+fn stated_window(info: Option<&haarness_protocol::ModelInfo>) -> Option<u64> {
+    info.and_then(|info| info.context_window)
+        .filter(|window| *window > 0)
+}
+
 /// Match Haarness's ordinary OpenAI GPT-5 default: ask for balanced reasoning
 /// so the Responses API can return a visible reasoning summary even when the
 /// user did not choose an explicit `/reasoning` variant. Other providers and
@@ -13632,6 +13781,26 @@ fn default_visible_reasoning_effort(
         .then(|| "medium".to_owned())
 }
 
+/// A configured `defaults.reasoning_effort` that names a level: an empty value
+/// or the model's own default configures nothing.
+fn configured_reasoning_effort(configured: Option<&str>) -> Option<&str> {
+    configured.filter(|effort| {
+        !effort.trim().is_empty() && *effort != haarness_protocol::MODEL_DEFAULT_EFFORT
+    })
+}
+
+/// The effort a turn asks for before it is fitted to the model: the request's
+/// own level, else the configured default. A request that names the model's
+/// default ([`haarness_protocol::MODEL_DEFAULT_EFFORT`]) skips the configured
+/// one, so the turn runs as it would with nothing configured.
+fn turn_reasoning_effort(requested: Option<&str>, configured: Option<&str>) -> Option<String> {
+    match requested {
+        Some(haarness_protocol::MODEL_DEFAULT_EFFORT) => None,
+        Some(effort) => Some(effort.to_owned()),
+        None => configured_reasoning_effort(configured).map(str::to_owned),
+    }
+}
+
 /// A chat keeps its effort when it switches model, and configured defaults name
 /// any level, but providers answer 400 to a level a model lacks (`none` on
 /// GPT-6.1 Sol, `minimal` on Claude). Use the nearest level the model lists,
@@ -13641,31 +13810,12 @@ fn supported_reasoning_effort(
     requested: &str,
     effort: String,
 ) -> String {
-    let Some(metadata) =
-        model_metadata(models, requested).filter(|model| !model.reasoning_efforts.is_empty())
-    else {
-        return effort;
-    };
-    if metadata.reasoning_efforts.contains(&effort) {
-        return effort;
-    }
-    let rank = |level: &str| {
-        haarness_protocol::REASONING_EFFORTS
-            .iter()
-            .position(|known| *known == level)
-            // `ultra` and other levels beyond `max` rank as the strongest.
-            .unwrap_or(haarness_protocol::REASONING_EFFORTS.len())
-    };
-    let wanted = rank(&effort);
-    metadata
-        .reasoning_efforts
-        .iter()
-        .min_by_key(|level| {
-            let rank = rank(level);
-            (rank.abs_diff(wanted), std::cmp::Reverse(rank))
+    let fitted = model_metadata(models, requested)
+        .and_then(|model| {
+            haarness_protocol::nearest_reasoning_effort(&model.reasoning_efforts, &effort)
         })
-        .cloned()
-        .unwrap_or(effort)
+        .map(str::to_owned);
+    fitted.unwrap_or(effort)
 }
 
 /// Resolve the symbolic Ultracode choice at execution time. The model catalog
@@ -13764,6 +13914,9 @@ struct ShellReadings {
     limited: Mutex<HashMap<String, String>>,
     /// The line is too large to read: see [`AskPlan::evaluate`].
     unreadable: bool,
+    /// The line names a file where Haarness keeps sign-ins (a literal path
+    /// a command is given, or a redirect): see [`AskPlan::evaluate`].
+    credentials: bool,
 }
 
 impl ShellReadings {
@@ -13796,6 +13949,9 @@ impl ShellReadings {
             covered: Mutex::new(HashMap::new()),
             limited: Mutex::new(HashMap::new()),
             unreadable: analysis.unreadable,
+            credentials: analysis.paths.iter().any(|named| {
+                named.file && crate::permissions::is_credential_store_path(&named.path)
+            }),
         }
     }
 
@@ -13889,6 +14045,19 @@ impl AskPlan {
                 matched: Some(rule),
                 protected: decision == PermissionDecision::Ask,
                 configured: true,
+            };
+        }
+        // A line that names a file where Haarness keeps sign-ins asks a
+        // person every time unless a rule refuses it, as a read of one does.
+        if shell.credentials
+            && evaluation.decision != PermissionDecision::Deny
+            && shell.index.contains_key(pattern)
+        {
+            return crate::permissions::Evaluation {
+                decision: PermissionDecision::Ask,
+                matched: Some(crate::permissions::CREDENTIAL_READ_RULE.into()),
+                protected: true,
+                configured: false,
             };
         }
         evaluation
@@ -14031,7 +14200,7 @@ enum HookAnswer {
 /// call did and `always` offered it.
 async fn permission_hook_answer(
     hooks: &dyn crate::HookPort,
-    thread: ThreadId,
+    call: &crate::HookCall,
     plan: &AskPlan,
     always: Option<&[String]>,
     detail: &serde_json::Value,
@@ -14053,7 +14222,7 @@ async fn permission_hook_answer(
     let mut remembered = always.is_some();
     for (patterns, input) in calls {
         let decision = hooks
-            .permission_request(thread, &plan.permission, &patterns, always, &input)
+            .permission_request(call, &plan.permission, &patterns, always, &input)
             .await;
         remembered &= decision.always;
         if let Some(reason) = decision.block {
@@ -14073,7 +14242,7 @@ async fn permission_hook_answer(
                     .is_some_and(|updated| updated != &input) =>
             {
                 tracing::info!(
-                    %thread,
+                    thread = %call.thread,
                     permission = %plan.permission,
                     "a PermissionRequest hook allowed a rewritten input; asking instead"
                 );
@@ -14500,6 +14669,39 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         }
         let mut plans = Vec::new();
         if !external_patterns.is_empty() {
+            // A folder that holds the project is asked about by the paths
+            // the line names in it.
+            let mut asked = Vec::new();
+            for folder in &external_patterns {
+                let named: Vec<_> = analysis
+                    .paths
+                    .iter()
+                    .filter(|named| named.outside.as_ref() == Some(folder))
+                    .collect();
+                let patterns = if named.is_empty() {
+                    vec![outside_pattern(workspace, folder, None)]
+                } else {
+                    named
+                        .iter()
+                        .map(|named| {
+                            let kind = if named.file {
+                                Named::File
+                            } else if named.literal {
+                                Named::Folder
+                            } else {
+                                Named::Any
+                            };
+                            outside_pattern(workspace, folder, Some((&named.path, kind)))
+                        })
+                        .collect()
+                };
+                for pattern in patterns {
+                    if !asked.contains(&pattern) {
+                        asked.push(pattern);
+                    }
+                }
+            }
+            let external_patterns = asked;
             plans.push(AskPlan {
                 permission: "external_directory".into(),
                 patterns: external_patterns.clone(),
@@ -14537,6 +14739,15 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         let leads_outside =
             file_target.is_some_and(|target| crate::permissions::names_inside(workspace, target));
         for (pattern, path) in external_requests {
+            // A request names a file unless it asks about the path's own
+            // folder (a listing or a search of it).
+            let own = format!("{}/*", path.to_string_lossy().trim_end_matches(['/', '\\']));
+            let kind = if pattern == own {
+                Named::Folder
+            } else {
+                Named::File
+            };
+            let pattern = outside_pattern(workspace, &pattern, Some((&path, kind)));
             if leads_outside {
                 resolved.push((pattern.clone(), path.to_string_lossy().into_owned()));
             }
@@ -15010,6 +15221,256 @@ mod shell_reading_tests {
     }
 
     #[test]
+    fn a_line_that_names_where_sign_ins_are_kept_asks_a_person_every_time() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let root =
+            std::env::temp_dir().join(format!("haarness-shell-sign-ins-{}", uuid::Uuid::now_v7()));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(root.join("auth.json"), "{}").unwrap();
+        crate::permissions::record_credential_store(root.join("auth.json"), false);
+        let store = root.join("auth.json");
+        let allowed = engine(&[("bash:*", Allow), ("*", Allow)]);
+        // The verdicts of a tool call's patterns other than allow, each with
+        // whether only a person answers it.
+        let asks = |name: &str, arguments: serde_json::Value, workspace: &Path| {
+            let mut asks = Vec::new();
+            for plan in ask_plans(name, &arguments, workspace) {
+                for pattern in &plan.patterns {
+                    let evaluation = plan.evaluate(&allowed, pattern);
+                    if evaluation.decision != Allow {
+                        asks.push((evaluation.decision, evaluation.protected));
+                    }
+                }
+            }
+            asks
+        };
+        let bash = |command: &str, workspace: &Path| {
+            asks("bash", json!({ "command": command }), workspace)
+        };
+        for command in [
+            format!("cat {}", store.display()),
+            format!("git status && cat < '{}'", store.display()),
+            "cp ../auth.json /tmp/keys && echo done".to_owned(),
+            format!("echo x > {}", root.join("auth.json.lock").display()),
+            // Any program given its path.
+            format!("jq . {}", store.display()),
+            format!("head -3 '{}' | base64", store.display()),
+        ] {
+            let found = bash(&command, &project);
+            assert!(found.contains(&(Ask, true)), "{command}: {found:?}");
+            assert!(!found.contains(&(Ask, false)), "{command}: {found:?}");
+        }
+        // Where the project holds it (a project at the home folder).
+        assert!(bash("cat auth.json", &root).contains(&(Ask, true)));
+        // A read of it, also through a link of another name.
+        assert!(
+            asks(
+                "read",
+                json!({ "path": store.display().to_string() }),
+                &project
+            )
+            .contains(&(Ask, true))
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&store, project.join("notes.txt")).unwrap();
+            assert!(asks("read", json!({ "path": "notes.txt" }), &project).contains(&(Ask, true)));
+            assert!(bash("cat notes.txt", &project).contains(&(Ask, true)));
+        }
+        // A deny still refuses it; other lines, and a project's own
+        // `auth.json`, are unchanged.
+        let plan = ask_plans(
+            "bash",
+            &json!({ "command": format!("cat {}", store.display()) }),
+            &project,
+        )
+        .into_iter()
+        .find(|plan| plan.permission == "bash")
+        .unwrap();
+        let denied = engine(&[("bash:cat *", Deny)]);
+        assert_eq!(plan.evaluate(&denied, &plan.patterns[0]).decision, Deny);
+        std::fs::write(project.join("auth.json"), "{}").unwrap();
+        for command in [
+            "cat auth.json",
+            "jq . auth.json",
+            "cat README.md",
+            "cat \"$KEYS\"",
+        ] {
+            assert_eq!(bash(command, &project), Vec::new(), "{command}");
+        }
+        assert_eq!(
+            asks("read", json!({ "path": "auth.json" }), &project),
+            Vec::new()
+        );
+        // A program that only looks at it decides as any line does (here,
+        // from the project that holds it); one that changes it still asks a
+        // person.
+        for command in [
+            "ls -l auth.json",
+            "stat auth.json",
+            "test -f auth.json && echo yes",
+            "[ -s auth.json ]",
+            "readlink auth.json; realpath auth.json",
+        ] {
+            assert_eq!(bash(command, &root), Vec::new(), "{command}");
+        }
+        // `file` and `du` can be told to read a file they are given.
+        for command in [
+            "chmod 644 auth.json",
+            "ls -l auth.json && head auth.json",
+            "file -f auth.json",
+            "file -m auth.json /dev/null",
+            "du --files0-from=auth.json",
+            "du -h auth.json",
+        ] {
+            assert!(bash(command, &root).contains(&(Ask, true)), "{command}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn always_on_a_folder_that_holds_the_project_remembers_only_the_files_asked_about() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let made = std::env::temp_dir().join(format!("haarness-holding-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(made.join("home/work/app")).unwrap();
+        std::fs::create_dir_all(made.join("home/.ssh")).unwrap();
+        std::fs::create_dir_all(made.join("home/other")).unwrap();
+        std::fs::write(made.join("home/.gitconfig"), "[user]\n").unwrap();
+        let home = made.join("home").canonicalize().unwrap();
+        let project = home.join("work/app");
+        let file = |name: &str| home.join(name).display().to_string();
+        let folder = |name: &str| format!("{}/*", home.join(name).display());
+        let outside = |name: &str, arguments: serde_json::Value| {
+            ask_plans(name, &arguments, &project)
+                .into_iter()
+                .find(|plan| plan.permission == "external_directory")
+                .unwrap()
+        };
+        let bash = |command: &str| outside("bash", json!({ "command": command }));
+        // A file in a folder that holds the project is asked about, and
+        // remembered, by itself.
+        for plan in [
+            bash("cat ../../.gitconfig"),
+            bash("echo x >> ../../.gitconfig"),
+            outside("read", json!({ "path": file(".gitconfig") })),
+            outside("edit", json!({ "path": "../../.gitconfig" })),
+        ] {
+            assert_eq!(plan.patterns, vec![file(".gitconfig")]);
+            assert_eq!(
+                plan.always_rules(),
+                vec![format!("external_directory:{}", file(".gitconfig"))]
+            );
+        }
+        let two = bash("cp ../../.gitconfig ../../.zshrc ../../other/");
+        assert_eq!(
+            two.patterns,
+            vec![file(".gitconfig"), file(".zshrc"), folder("other")]
+        );
+        assert_eq!(two.always, two.patterns);
+        // What it remembers opens that file and nothing else beside the
+        // project: not `.ssh`, not another file.
+        let mut remembered = PermissionEngine::build_defaults();
+        for rule in bash("cat ../../.gitconfig").always_rules() {
+            remembered.add_grant(PermissionRule {
+                pattern: rule,
+                decision: Allow,
+            });
+        }
+        let verdict = |engine: &PermissionEngine, plan: &AskPlan| {
+            plan.patterns
+                .iter()
+                .map(|pattern| plan.evaluate(engine, pattern).decision)
+                .max_by_key(|decision| match decision {
+                    Allow => 0,
+                    Ask => 1,
+                    Deny => 2,
+                })
+                .unwrap()
+        };
+        assert_eq!(verdict(&remembered, &bash("cat ../../.gitconfig")), Allow);
+        for plan in [
+            bash("cat ../../.ssh/id_ed25519"),
+            bash("cat ../../.netrc"),
+            outside("read", json!({ "path": file(".ssh/id_ed25519") })),
+        ] {
+            assert_eq!(verdict(&remembered, &plan), Ask, "{:?}", plan.patterns);
+        }
+        // A folder that does not hold the project is remembered whole, as
+        // before.
+        let other = bash("cat ../../other/notes.txt");
+        assert_eq!(other.patterns, vec![folder("other")]);
+        assert_eq!(other.always, other.patterns);
+        // Named as a folder, it is the folder alone: remembered, that opens
+        // no file in it.
+        let itself = format!("{}/", home.display());
+        for plan in [
+            bash("cd ../.. && ls"),
+            outside("list", json!({ "path": home.display().to_string() })),
+            outside("grep", json!({ "pattern": "x", "path": "../.." })),
+        ] {
+            assert_eq!(plan.patterns, vec![itself.clone()]);
+            assert_eq!(plan.always, plan.patterns);
+        }
+        // A path that may be any file in it (a dynamic part, a wildcard) is
+        // asked about as the whole folder, as before.
+        let any = [
+            bash("cat ../../$NAME"),
+            bash("F=.netrc; cat ../../$F"),
+            bash("cat ../../.n*"),
+            bash("cat ../../.netr?"),
+            bash("cat '../../a*b'"),
+            outside("read", json!({ "path": "../../.n*" })),
+        ];
+        for plan in &any {
+            assert_eq!(
+                plan.patterns,
+                vec![format!("{}/*", home.display())],
+                "{:?}",
+                plan.patterns
+            );
+        }
+        let mut folder_only = PermissionEngine::build_defaults();
+        folder_only.add_grant(PermissionRule {
+            pattern: format!("external_directory:{itself}"),
+            decision: Allow,
+        });
+        assert_eq!(verdict(&folder_only, &bash("cd ../.. && pwd")), Allow);
+        for plan in [
+            bash("cat ../../.gitconfig"),
+            bash("cat ../../.ssh/id_ed25519"),
+        ]
+        .iter()
+        .chain(&any)
+        {
+            assert_eq!(verdict(&folder_only, plan), Ask, "{:?}", plan.patterns);
+        }
+        // A rule about the folder, or an Always an earlier version saved
+        // for it, still decides its files.
+        let whole = format!("external_directory:{}", home.join("*").display());
+        for decision in [Allow, Deny] {
+            let mut configured = PermissionEngine::build_defaults();
+            configured.add_rule(PermissionRule {
+                pattern: whole.clone(),
+                decision,
+            });
+            assert_eq!(
+                verdict(&configured, &bash("cat ../../.gitconfig")),
+                decision
+            );
+        }
+        let mut saved = PermissionEngine::build_defaults();
+        saved.add_grant(PermissionRule {
+            pattern: whole,
+            decision: Allow,
+        });
+        for plan in [bash("cat ../../.netrc"), bash("cd ../.. && ls")] {
+            assert_eq!(verdict(&saved, &plan), Allow, "{:?}", plan.patterns);
+        }
+        std::fs::remove_dir_all(&made).unwrap();
+    }
+
+    #[test]
     fn a_command_a_limit_stopped_reading_is_refused_by_a_deny_and_asked_by_an_ask() {
         use PermissionDecision::{Allow, Ask, Deny};
         let padded = format!("bash -c '{}rm x'", "true; ".repeat(300 * 1024 / 6));
@@ -15188,6 +15649,67 @@ fn external_path_request(
     Some((pattern, path))
 }
 
+/// What a path a call names outside the project is, for
+/// [`outside_pattern`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Named {
+    /// A file, written in full.
+    File,
+    /// The folder itself, written in full.
+    Folder,
+    /// A path with a dynamic part (`~/$f`) or a wildcard (`~/.n*`): it may
+    /// be any file in the folder.
+    Any,
+}
+
+/// The pattern an `external_directory` ask about `folder` (a glob such as
+/// `/home/me/*`) evaluates and Always remembers, for the path the call names
+/// there, when known. A folder that holds the project (`~` for
+/// `~/work/app`) is asked about by that path instead: remembering the folder
+/// would open everything in it, the project's neighbours (`~/.ssh`)
+/// included, for every later chat. A file is its own path, and the folder
+/// itself is the folder alone (`/home/me/`), which a rule for the folder
+/// still meets but which reaches no file in it. A path that may be any file
+/// there stays the whole folder, as before: only a rule or an Always for
+/// all of it answers that, and the card says so.
+fn outside_pattern(workspace: &Path, folder: &str, named: Option<(&Path, Named)>) -> String {
+    let Some(path) = folder
+        .strip_suffix("/*")
+        .map(|path| if path.is_empty() { "/" } else { path })
+        .map(Path::new)
+        .filter(|path| holds_project(workspace, path))
+    else {
+        return folder.to_owned();
+    };
+    let alone = || format!("{}/", path.to_string_lossy().trim_end_matches(['/', '\\']));
+    match named {
+        Some((file, Named::File)) => {
+            let file = file.to_string_lossy().into_owned();
+            if file.contains(['*', '?', '[']) {
+                folder.to_owned()
+            } else {
+                file
+            }
+        }
+        Some((_, Named::Any)) => folder.to_owned(),
+        Some((_, Named::Folder)) | None => alone(),
+    }
+}
+
+/// Whether `folder`, outside the project, holds it: the project folder, as
+/// written or where it really is, lies inside `folder`, as written or where
+/// it really is.
+fn holds_project(workspace: &Path, folder: &Path) -> bool {
+    let folders = [Some(folder.to_path_buf()), folder.canonicalize().ok()];
+    let projects = [Some(workspace.to_path_buf()), workspace.canonicalize().ok()];
+    folders.iter().flatten().any(|folder| {
+        projects
+            .iter()
+            .flatten()
+            .any(|project| project != folder && project.starts_with(folder))
+    })
+}
+
 fn external_path_requests(
     name: &str,
     arguments: &serde_json::Value,
@@ -15349,6 +15871,34 @@ mod tests {
         ProviderMessage, hook_question_answer, parse_goal_criteria_selection, provider_messages,
         question_request, resolve_pending_question, subagent_title,
     };
+
+    #[test]
+    fn what_hooks_add_after_a_tool_is_kept_to_a_bound_that_says_so() {
+        let mut output = "exit: 2\n".to_owned();
+        super::append_post_tool_hooks(
+            &mut output,
+            crate::HookDecision {
+                context: Some("formatted".into()),
+                block: Some(format!("{}é", "x".repeat(super::HOOK_TEXT_CHARS + 41))),
+                ..crate::HookDecision::default()
+            },
+        );
+        let expected = format!(
+            "exit: 2\n\n\n<hook-context>\nformatted\n</hook-context>\n\n<hook-feedback>\n{}… (42 more characters not shown)\n</hook-feedback>",
+            "x".repeat(super::HOOK_TEXT_CHARS)
+        );
+        assert_eq!(output, expected);
+        let one_over = "y".repeat(super::HOOK_TEXT_CHARS + 1);
+        assert_eq!(
+            super::clip_hook_text(&one_over),
+            format!(
+                "{}… (1 more character not shown)",
+                "y".repeat(super::HOOK_TEXT_CHARS)
+            )
+        );
+        let at_the_bound = "z".repeat(super::HOOK_TEXT_CHARS);
+        assert_eq!(super::clip_hook_text(&at_the_bound), at_the_bound);
+    }
 
     #[test]
     fn goal_criteria_selection_handles_headless_multi_custom_and_cancel() {
@@ -17643,6 +18193,24 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_naming_the_model_default_skips_the_configured_effort() {
+        use super::turn_reasoning_effort as effort;
+        // Nothing named: the configured level, as before.
+        assert_eq!(effort(None, Some("high")).as_deref(), Some("high"));
+        assert_eq!(effort(None, None), None);
+        // The model's own default wins over the configured level.
+        assert_eq!(effort(Some("default"), Some("high")), None);
+        assert_eq!(effort(Some("default"), None), None);
+        assert_eq!(effort(Some("low"), Some("high")).as_deref(), Some("low"));
+        // A configured value that names no level configures nothing, so it is
+        // never fitted to the model's strongest level.
+        assert_eq!(effort(None, Some("default")), None);
+        assert_eq!(effort(None, Some(" ")), None);
+        assert_eq!(super::configured_reasoning_effort(Some("default")), None);
+        assert_eq!(super::configured_reasoning_effort(Some("max")), Some("max"));
+    }
+
+    #[test]
     fn cost_math_uses_per_million_pricing() {
         let pricing = haarness_protocol::ModelPricing {
             input: 3.0,
@@ -17935,7 +18503,7 @@ mod tests {
         impl crate::HookPort for DenyHome {
             async fn pre_tool_use(
                 &self,
-                _: ThreadId,
+                _: &crate::HookCall,
                 _: &str,
                 _: &serde_json::Value,
             ) -> crate::HookDecision {
@@ -17943,20 +18511,24 @@ mod tests {
             }
             async fn post_tool_use(
                 &self,
-                _: ThreadId,
+                _: &crate::HookCall,
                 _: &str,
                 _: &serde_json::Value,
                 _: &str,
                 _: bool,
-            ) -> Option<String> {
-                None
+            ) -> crate::HookDecision {
+                crate::HookDecision::default()
             }
-            async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> crate::HookDecision {
+            async fn user_prompt_submit(
+                &self,
+                _: &crate::HookCall,
+                _: &str,
+            ) -> crate::HookDecision {
                 crate::HookDecision::default()
             }
             async fn permission_request(
                 &self,
-                _: ThreadId,
+                _: &crate::HookCall,
                 _: &str,
                 patterns: &[String],
                 _: Option<&[String]>,
@@ -17976,7 +18548,7 @@ mod tests {
                     ..crate::HookDecision::default()
                 }
             }
-            async fn stop(&self, _: ThreadId) {}
+            async fn stop(&self, _: &crate::HookCall) {}
         }
         let root =
             std::env::temp_dir().join(format!("haarness-hook-home-{}", uuid::Uuid::now_v7()));
@@ -17987,6 +18559,7 @@ mod tests {
         let workspace = workspace.canonicalize().unwrap();
         let _home = crate::permissions::TestHome::set(&home);
         let hook = DenyHome(home.clone(), parking_lot::Mutex::new(Vec::new()));
+        let call = crate::HookCall::new(ThreadId::new());
         for (tool, arguments) in [
             ("read", json!({"path":"~/notes.txt"})),
             ("write", json!({"path":"~/notes.txt","content":"x"})),
@@ -17995,8 +18568,7 @@ mod tests {
             let plan = plans.last().unwrap();
             // The card and an Always answer keep the path as written.
             assert_eq!(plan.patterns, vec!["~/notes.txt"], "{tool}");
-            let answer =
-                super::permission_hook_answer(&hook, ThreadId::new(), plan, None, &arguments).await;
+            let answer = super::permission_hook_answer(&hook, &call, plan, None, &arguments).await;
             assert!(matches!(answer, super::HookAnswer::Refused(_)), "{tool}");
         }
         let calls = hook.1.lock().clone();
@@ -18012,7 +18584,7 @@ mod tests {
         let plans = super::ask_plans("read", &json!({"path":"src/lib.rs"}), &workspace);
         let answer = super::permission_hook_answer(
             &hook,
-            ThreadId::new(),
+            &call,
             plans.last().unwrap(),
             None,
             &json!({"path":"src/lib.rs"}),

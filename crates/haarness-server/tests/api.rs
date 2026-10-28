@@ -2336,6 +2336,7 @@ fn turn_request(text: &str) -> StartTurnRequest {
         reasoning_effort: None,
         tools: None,
         command: None,
+        ..Default::default()
     }
 }
 
@@ -3218,6 +3219,7 @@ async fn authenticated_rest_turn_runs_end_to_end() {
             reasoning_effort: None,
             tools: None,
             command: None,
+            ..Default::default()
         })
         .send()
         .await
@@ -3663,6 +3665,233 @@ async fn reasoning_effort_reaches_the_provider() {
         requests.lock().unwrap()[0].reasoning_effort.as_deref(),
         Some("high")
     );
+}
+
+/// A configured `defaults.reasoning_effort` runs every turn that names no
+/// effort; a turn that names the model's default runs without one, and so do
+/// the turns that keep the chat's latest effort, such as a queued prompt.
+#[tokio::test]
+async fn a_turn_naming_the_model_default_effort_skips_the_configured_one() {
+    let provider = Capturing::with_reasoning_efforts(&["low", "medium", "high"]);
+    let requests = provider.requests.clone();
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+        std::env::temp_dir(),
+        String::new(),
+        RuntimeConfig {
+            default_reasoning_effort: Some("high".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(runtime.default_reasoning_effort().as_deref(), Some("high"));
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let last_effort = || {
+        requests
+            .lock()
+            .unwrap()
+            .last()
+            .expect("a provider request")
+            .reasoning_effort
+            .clone()
+    };
+
+    let turn = runtime
+        .start_turn(thread.id, turn_request("configured"))
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    assert_eq!(last_effort().as_deref(), Some("high"));
+
+    let mut request = turn_request("model default");
+    request.reasoning_effort = Some("default".into());
+    let turn = runtime.start_turn(thread.id, request).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    assert_eq!(last_effort(), None);
+
+    runtime
+        .queue_input(
+            thread.id,
+            haarness_protocol::QueueInputRequest {
+                preview: None,
+                reasoning_effort: None,
+                delivery: haarness_protocol::InputDelivery::Queue,
+                request_id: RequestId::new(),
+                text: "queued after the model default".into(),
+                attachments: Vec::new(),
+                resources: Vec::new(),
+                synthetic: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    wait_drained(&runtime, thread.id).await;
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert_eq!(
+        last_effort(),
+        None,
+        "a queued prompt keeps the model default"
+    );
+
+    let mut request = turn_request("named level");
+    request.reasoning_effort = Some("low".into());
+    let turn = runtime.start_turn(thread.id, request).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    assert_eq!(last_effort().as_deref(), Some("low"));
+}
+
+/// `/v1/info` names the configured effort only when there is one, and a turn
+/// may name the model's default; anything else off the scale is refused.
+#[tokio::test]
+async fn info_reports_the_configured_effort_and_turns_accept_the_model_default() {
+    async fn server(
+        configured: Option<&str>,
+    ) -> (
+        haarness_server::ServerHandle,
+        String,
+        Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
+    ) {
+        let provider = Capturing::with_reasoning_efforts(&["low", "high"]);
+        let requests = provider.requests.clone();
+        let runtime = Arc::new(AgentRuntime::with_config(
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            Arc::new(StaticProviderRegistry::new(vec![
+                Arc::new(provider) as Arc<dyn ModelProvider>
+            ])),
+            Arc::new(EmptyToolRegistry),
+            EventBus::new(64),
+            std::env::temp_dir(),
+            String::new(),
+            RuntimeConfig {
+                default_reasoning_effort: configured.map(str::to_owned),
+                ..Default::default()
+            },
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let handle = serve(
+            listener,
+            "effort-token",
+            ServerState {
+                browser: None,
+                management: None,
+                runtime,
+                mcp: Arc::new(NoMcp),
+                skills: Arc::new(NoSkills),
+                plugins: None,
+                workflows: None,
+                workspaces: None,
+                workspace_id: None,
+                workspace: std::env::temp_dir(),
+                project_trusted: false,
+                language: None,
+            },
+        )
+        .await
+        .unwrap();
+        let base = format!("http://{}", handle.address);
+        (handle, base, requests)
+    }
+    let client = reqwest::Client::builder()
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                "Bearer effort-token".parse().unwrap(),
+            );
+            headers
+        })
+        .build()
+        .unwrap();
+
+    let (handle, base, _) = server(None).await;
+    let info: Value = client
+        .get(format!("{base}/v1/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        info.get("defaultReasoningEffort").is_none(),
+        "nothing configured, nothing named: {info}"
+    );
+    handle.shutdown().await.unwrap();
+
+    let (handle, base, requests) = server(Some("high")).await;
+    let info: ServerInfo = client
+        .get(format!("{base}/v1/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info.default_reasoning_effort.as_deref(), Some("high"));
+    let thread: Thread = client
+        .post(format!("{base}/v1/threads"))
+        .json(&CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let start = |effort: &str| {
+        client
+            .post(format!("{base}/v1/threads/{}/turns", thread.id))
+            .json(&serde_json::json!({
+                "requestId": RequestId::new(),
+                "text": "effort",
+                "attachments": [],
+                "reasoningEffort": effort,
+            }))
+            .send()
+    };
+    let refused = start("deepest").await.unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
+    let turn: Turn = start("default")
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let finished: Turn = client
+        .get(format!("{base}/v1/turns/{}/wait?timeout_ms=5000", turn.id))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(finished.status, TurnStatus::Completed);
+    assert_eq!(
+        requests.lock().unwrap().last().unwrap().reasoning_effort,
+        None
+    );
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -5151,6 +5380,7 @@ async fn queued_input_during_summarization_cancels_compaction_until_exact_delive
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -5490,6 +5720,7 @@ async fn rest_compaction_rejects_active_turn_and_preserves_queued_steering() {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -6392,6 +6623,7 @@ async fn duplicate_request_id_is_not_replayed() {
         reasoning_effort: None,
         tools: None,
         command: None,
+        ..Default::default()
     };
     let first = runtime
         .start_turn(thread.id, request.clone())
@@ -9477,6 +9709,7 @@ async fn queued_message_during_text_stream_runs_in_a_follow_up_round() {
                 attachments: vec![],
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -9546,6 +9779,7 @@ async fn queued_message_steers_into_running_turn() {
                 attachments: vec![],
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -9638,6 +9872,7 @@ async fn queue_input_on_idle_thread_starts_a_turn() {
                 attachments: vec![],
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -9853,8 +10088,10 @@ async fn redirects_outside_the_workspace_ask_even_when_bash_is_allowed() {
     wait_pending_permissions(&runtime, 1).await;
     let pending = runtime.pending_permissions();
     assert_eq!(pending[0].permission, "external_directory");
+    // The temporary folder holds the project, so the ask names the file
+    // itself rather than everything beside the project.
     assert!(
-        pending[0].patterns[0].ends_with("/*"),
+        pending[0].patterns[0].ends_with("/haarness-extdir-target.txt"),
         "{:?}",
         pending[0].patterns
     );
@@ -10897,6 +11134,7 @@ async fn queued_goal_steering_tool_followup_keeps_current_doctrine() {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -11588,6 +11826,7 @@ async fn replacing_a_goal_mid_turn_resets_the_goal_boundary() {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await
@@ -11871,6 +12110,86 @@ async fn pre_tool_use_hook_blocks_and_post_tool_use_annotates() {
                 if !is_error && output.contains("reviewed by hook"))),
         "PostToolUse context reached the tool result"
     );
+}
+
+/// A `PostToolUse` hook that exits 2 cannot undo the call: what it printed
+/// reaches the model after the tool's own result, which stays as it was.
+#[tokio::test]
+async fn a_post_tool_use_hook_that_exits_two_reaches_the_model_after_the_result() {
+    let workspace = std::env::temp_dir();
+    let provider = Capturing::default();
+    let requests = provider.requests.clone();
+    let hooks = haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(&serde_json::json!({
+            "PostToolUse": [{"matcher": "Bash", "hooks": [
+                {"command": "echo 'lint: 2 warnings in src/lib.rs' >&2; exit 2"},
+            ]}],
+        })),
+        workspace.clone(),
+    );
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+        EventBus::new(256),
+        workspace.clone(),
+        String::new(),
+        haarness_core::RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..haarness_core::RuntimeConfig::default()
+        },
+    )
+    .with_hooks(Arc::new(hooks));
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(r#"!tool bash {"command":"echo built"}"#),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let feedback = "\n\n<hook-feedback>\nlint: 2 warnings in src/lib.rs\n</hook-feedback>";
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let (output, is_error) = items
+        .iter()
+        .find_map(|item| match &item.data {
+            haarness_protocol::ItemData::ToolResult {
+                output, is_error, ..
+            } => Some((output.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("the bash call has a result");
+    assert!(!is_error, "{output}");
+    let result = output
+        .strip_suffix(feedback)
+        .unwrap_or_else(|| panic!("{output}"));
+    assert!(result.contains("built"), "{output}");
+    // The next request carries it to the model.
+    let requests = requests.lock().unwrap();
+    let sent = requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            ProviderMessage::ToolResult { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .expect("the follow-up request carries the tool result");
+    assert!(sent.ends_with(feedback), "{sent}");
 }
 
 #[tokio::test]
@@ -12322,6 +12641,7 @@ fn deferred_request(text: &str) -> haarness_protocol::QueueInputRequest {
         attachments: vec![],
         resources: Vec::new(),
         synthetic: false,
+        ..Default::default()
     }
 }
 fn deferred_runtime(provider: DeferredGate, store: Arc<SqliteStore>) -> AgentRuntime {
@@ -13042,6 +13362,15 @@ mod permission_script;
 #[path = "cases/chat_folders.rs"]
 mod chat_folders;
 
+#[path = "cases/instructions_in_view.rs"]
+mod instructions_in_view;
+
+#[path = "cases/definition_snippets.rs"]
+mod definition_snippets;
+
+#[path = "cases/zero_window.rs"]
+mod zero_window;
+
 #[tokio::test]
 async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     let workspace =
@@ -13733,6 +14062,7 @@ fn queued(text: &str, effort: Option<&str>) -> haarness_protocol::QueueInputRequ
         attachments: Vec::new(),
         resources: Vec::new(),
         synthetic: false,
+        ..Default::default()
     }
 }
 

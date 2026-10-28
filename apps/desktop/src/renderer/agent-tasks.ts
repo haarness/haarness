@@ -1,4 +1,5 @@
 import type { Item, ItemData, Turn } from "@haarness/sdk";
+import { withoutEscapes } from "./display-text";
 
 type Data<K extends ItemData["type"]> = Extract<ItemData, { type: K }>;
 export interface AgentTask {
@@ -65,6 +66,12 @@ export function agentTasks(items: Item[]) {
     if (turn) task.checkpoint = checkpoints.get(turn);
   }
   return tasks;
+}
+
+/** A failed task's error as its row shows it, without the escape sequences a
+ * tool may have left in it; empty when the task did not fail. */
+export function agentTaskError(task: AgentTask) {
+  return task.result?.is_error ? withoutEscapes(task.result.output) : "";
 }
 
 export function agentTaskStatus(task: AgentTask, progress?: TaskProgress) {

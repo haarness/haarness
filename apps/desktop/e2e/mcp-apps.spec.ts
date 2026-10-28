@@ -322,6 +322,14 @@ test("the page cannot call tools, read other resources, reach undeclared hosts o
   await expect(frame.locator("#status")).toHaveText("read error An app may read only ui:// resources of its own server.");
   await frame.getByRole("button", { name: "Fetch undeclared" }).click();
   await expect(frame.locator("#status")).toHaveText("blocked connect-src");
+  // A host declared without a scheme is in the policy as https, so the
+  // request leaves the page (and fails: the host does not exist).
+  const declared = await frame.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute("content");
+  expect(declared).toContain("connect-src https://api.weather.example https://live.weather.example;");
+  await frame.getByRole("button", { name: "Fetch declared" }).click();
+  await expect(frame.locator("#status")).toHaveText("fetch failed");
+  await page.waitForTimeout(500);
+  await expect(frame.locator("#status")).toHaveText("fetch failed");
   // The page-only tool never reached the model's tool list either.
   expect((await client.mcpTools("app")).map((tool) => tool.name).sort()).toEqual([
     "mcp__app__forge",

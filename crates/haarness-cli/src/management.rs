@@ -432,6 +432,25 @@ impl ManagementService {
         }
     }
 
+    /// `input` with each tool of its `tools` that the model named the way
+    /// providers saw it (as it was sent the tools) under the tool's own name,
+    /// so an agent the model writes covers the tools it meant.
+    fn with_own_tool_names(&self, input: &Value) -> Value {
+        let Some(tools) = input.get("tools").and_then(Value::as_object) else {
+            return input.clone();
+        };
+        let snapshot = self.mcp.tool_snapshot();
+        let names = haarness_core::wire_names::WireNames::new(
+            snapshot.iter().map(|tool| tool.name.as_str()),
+        );
+        if names.is_empty() {
+            return input.clone();
+        }
+        let mut input = input.clone();
+        input["tools"] = Value::Object(names.own_keys(tools.clone()).into_iter().collect());
+        input
+    }
+
     fn agent(&self, input: &Value) -> Result<Value> {
         let action = required_string(input, "action")?;
         if let Some(name) = optional_string(input, "name") {
@@ -1377,6 +1396,7 @@ impl ManagementService {
                         attachments: Vec::new(),
                         resources: Vec::new(),
                         synthetic: false,
+                        ..Default::default()
                     },
                 )
                 .await
@@ -1402,6 +1422,7 @@ impl ManagementService {
                         attachments: Vec::new(),
                         resources: Vec::new(),
                         synthetic: false,
+                        ..Default::default()
                     },
                 )
                 .await
@@ -1425,6 +1446,7 @@ impl ManagementService {
                         reasoning_effort: None,
                         tools: None,
                         command: None,
+                        ..Default::default()
                     },
                 )
                 .await
@@ -1592,6 +1614,7 @@ impl ManagementService {
                         reasoning_effort: None,
                         tools: None,
                         command: None,
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -1955,7 +1978,7 @@ impl ManagementRegistry for ManagementService {
             }
             "capabilities" => self.capability_request(&arguments).await,
             "skill" => self.skill(&arguments).await,
-            "agent" => self.agent(&arguments),
+            "agent" => self.agent(&self.with_own_tool_names(&arguments)),
             "plugin" => self.plugin(&arguments),
             "mcp" => self.mcp(&arguments).await,
             "command" => self.command(&arguments),
@@ -2935,6 +2958,48 @@ mod tests {
             absolutize(workspace, Path::new("/elsewhere/guide")),
             Path::new("/elsewhere/guide")
         );
+    }
+
+    /// An agent the model writes names MCP tools the way providers saw
+    /// them; the agent covers the tools themselves.
+    #[tokio::test]
+    async fn an_agent_the_model_writes_covers_the_tools_it_names() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-agent-wire-names-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mcp = Arc::new(NativeMcpRegistry::default());
+        let config: haarness_protocol::McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "stdio",
+            "command": "python3",
+            "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/../haarness-mcp/tests/fixtures/names.py")],
+            "env": {"LABEL": "Docs Server", "TOOLS": "[\"files.read\"]"},
+            "enabled": true
+        }))
+        .unwrap();
+        assert_eq!(
+            mcp.configure("Docs Server", config).await.unwrap().status,
+            "connected"
+        );
+        let service = ManagementService::new(
+            Paths::new(Some(&root.join("home"))).unwrap(),
+            root.clone(),
+            true,
+            Arc::new(FilesystemSkillRegistry::new(vec![])),
+            mcp.clone(),
+        );
+        let written = service.with_own_tool_names(&json!({
+            "action": "create",
+            "tools": {"mcp__Docs_Server__files_read": false, "read": true, "mcp__Docs_Server__*": false}
+        }));
+        // A pattern matches the tools' own names, as everywhere else.
+        assert_eq!(
+            written["tools"],
+            json!({"mcp__Docs Server__files.read": false, "read": true, "mcp__Docs_Server__*": false})
+        );
+        mcp.disconnect("Docs Server").await.unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

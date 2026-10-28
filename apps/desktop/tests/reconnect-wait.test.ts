@@ -4,6 +4,7 @@ import {
   createReconnectWait,
   createWakeSlots,
   isWake,
+  serverRestarted,
 } from "../src/renderer/reconnect-wait";
 
 test("a stream that ends as soon as it opens waits longer each time, up to 30 s", () => {
@@ -72,4 +73,11 @@ test("only Desktop's wake notice counts as a wake", () => {
     false,
   );
   assert.equal(isWake({ kind: "server", data: "resume" }), false);
+});
+
+test("a reconnect to another run of the server reads what the window knows of it again", () => {
+  assert.equal(serverRestarted("first", "first"), false);
+  assert.equal(serverRestarted("first", "second"), true);
+  // A project that has not opened yet has nothing to read again.
+  assert.equal(serverRestarted(undefined, "second"), false);
 });

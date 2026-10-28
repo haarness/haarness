@@ -26,6 +26,8 @@ import { watchOpenImages } from "./ImageViewer";
 import { Icon } from "./ui";
 import { requestReview } from "./Review";
 import { Shimmer } from "./Shimmer";
+import { SpelledOut, SpelledText } from "./SpelledOut";
+import { turnsDirection } from "./display-text";
 import { useApp } from "./state";
 import { appsOff, loadMcpServers, mcpServersKnown, readOnlyServer, setApps } from "./mcp-servers";
 import { markSelection, selectedByClick, type SelectionMark } from "./selection-click";
@@ -41,6 +43,7 @@ import {
   toolInput,
   toolName,
   toolTitle,
+  imageName,
   toolFailed,
   toolVerb,
   ranInChrome,
@@ -215,7 +218,7 @@ export function ToolActivity(props: {
             <strong>{verb()}</strong>
           </Show>
           <span class="tool-target" title={toolTitle(props.args, shape().target)}>
-            {shape().target}
+            <SpelledText text={shape().target} />
           </span>
           <Show when={answer()}>
             <span class="tool-answer" title={answer()}>
@@ -274,7 +277,11 @@ export function ToolActivity(props: {
                         </Show>
                       </div>
                       <Show when={input().text}>
-                        <pre class="tool-input">{input().text}</pre>
+                        <pre class="tool-input">
+                          {/* What the call was given reads as on an approval
+                              card: what would not show is a quiet code. */}
+                          <SpelledOut text={input().text} />
+                        </pre>
                       </Show>
                       <Show
                         when={props.result}
@@ -294,7 +301,7 @@ export function ToolActivity(props: {
                         </Show>
                       </Show>
                       <Show when={image()} keyed>
-                        {(found) => <ReadImage image={found} alt={(shape().target ?? "").split(/[\\/]/).pop() ?? ""} />}
+                        {(found) => <ReadImage image={found} alt={imageName(props.args)} />}
                       </Show>
                     </div>
                   }
@@ -450,6 +457,9 @@ export function ChangePreview(props: {
   showPath?: boolean;
   /** Opens the change's file in Review. */
   review?: () => void;
+  /** On an approval card: a direction override or isolate in a line reads
+   * as a quiet code, so the change cannot read as something it is not. */
+  directions?: boolean;
 }) {
   const rows = createMemo(() => changeRows(props.change));
   const shown = () => rows().slice(0, CHANGE_PREVIEW_LINES);
@@ -457,7 +467,9 @@ export function ChangePreview(props: {
   return (
     <div class="change-preview">
       <Show when={props.showPath && props.change.path}>
-        <div class="change-path">{props.change.path}</div>
+        <div class="change-path">
+          <SpelledOut text={props.change.path} />
+        </div>
       </Show>
       <div class="change-lines">
         <For each={shown()}>
@@ -468,7 +480,11 @@ export function ChangePreview(props: {
               <span class="diff-sign">
                 {row.kind === "add" ? "+" : row.kind === "remove" ? "−" : " "}
               </span>
-              <code>{row.text || " "}</code>
+              <code>
+                <Show when={props.directions} fallback={row.text || " "}>
+                  <SpelledOut text={row.text || " "} shows={turnsDirection} />
+                </Show>
+              </code>
             </div>
           )}
         </For>

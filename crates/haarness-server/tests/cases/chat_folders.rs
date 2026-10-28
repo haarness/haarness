@@ -28,6 +28,13 @@ impl Fixture {
     /// A runtime over the project folder whose chats' own folders are
     /// checkpointed (as the CLI composes it), and the requests its model got.
     fn runtime(&self) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<ProviderRequest>>>) {
+        self.runtime_with(|database| haarness_store::SqliteSnapshotFolders::open(database))
+    }
+
+    fn runtime_with(
+        &self,
+        folders: fn(&std::path::Path) -> haarness_store::SqliteSnapshotFolders,
+    ) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<ProviderRequest>>>) {
         let database = self.root.join("db.sqlite");
         let provider = Capturing::default();
         let requests = provider.requests.clone();
@@ -45,15 +52,16 @@ impl Fixture {
                 ..RuntimeConfig::default()
             },
         )
-        .with_folder_snapshots(Arc::new(haarness_store::SqliteSnapshotFolders::open(
-            &database,
-        )));
+        .with_folder_snapshots(Arc::new(folders(&database)));
         (runtime, requests)
     }
 
-    /// The same runtime, run as the chat home.
+    /// The same runtime, run as the chat home (whose chats' folders the CLI
+    /// checkpoints standing alone).
     fn chat_home(&self) -> (AgentRuntime, Arc<std::sync::Mutex<Vec<ProviderRequest>>>) {
-        let (runtime, requests) = self.runtime();
+        let (runtime, requests) = self.runtime_with(|database| {
+            haarness_store::SqliteSnapshotFolders::open_in_chat_home(database)
+        });
         (runtime.as_chat_home(), requests)
     }
 }
@@ -113,6 +121,223 @@ async fn last_result(runtime: &AgentRuntime, thread: ThreadId, name: &str) -> St
 
 fn folder(thread: &Thread) -> PathBuf {
     PathBuf::from(thread.directory.as_deref().expect("the chat has a folder"))
+}
+
+/// Hooks that write one line per run to `log`: where they ran, the project
+/// folder they got in their environment and as a placeholder, then their
+/// payload.
+#[cfg(unix)]
+fn recording_hooks(
+    project: &std::path::Path,
+    log: &std::path::Path,
+) -> haarness_server::ConfiguredHooks {
+    let record = format!(
+        r#"printf '%s|%s|%s|' "$(pwd -P)" "$CLAUDE_PROJECT_DIR" "${{CLAUDE_PROJECT_DIR}}" >> '{log}'; cat >> '{log}'; echo >> '{log}'"#,
+        log = log.display()
+    );
+    let group = json!([{"hooks": [{"command": record}]}]);
+    haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(&json!({
+            "SessionStart": group, "UserPromptSubmit": group, "PreToolUse": group,
+            "PostToolUse": group, "Stop": group, "SessionEnd": group,
+        })),
+        project.to_path_buf(),
+    )
+}
+
+/// Checks the runs `log` holds for `thread`: their events in order, each
+/// run's folder (also its `cwd`) and the project folder it was told, and the
+/// agent named where one acts.
+#[cfg(unix)]
+fn assert_hook_runs(
+    log: &std::path::Path,
+    thread: &Thread,
+    expected: &[(&str, &PathBuf, &PathBuf)],
+) {
+    let written = std::fs::read_to_string(log).unwrap();
+    let runs: Vec<(Vec<&str>, Value)> = written
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(4, '|').collect();
+            let payload: Value = serde_json::from_str(parts[3]).unwrap();
+            (payload["session_id"] == json!(thread.id)).then(|| (parts[..3].to_vec(), payload))
+        })
+        .collect();
+    let events: Vec<&str> = runs
+        .iter()
+        .map(|(_, payload)| payload["hook_event_name"].as_str().unwrap())
+        .collect();
+    let expected_events: Vec<&str> = expected.iter().map(|(event, _, _)| *event).collect();
+    assert_eq!(events, expected_events, "{}", thread.title);
+    for ((folders, payload), (_, cwd, told)) in runs.iter().zip(expected) {
+        let (cwd, told) = (cwd.display().to_string(), told.display().to_string());
+        assert_eq!(
+            folders,
+            &[cwd.as_str(), told.as_str(), told.as_str()],
+            "{payload}"
+        );
+        assert_eq!(payload["cwd"], json!(cwd), "{payload}");
+        let named = matches!(
+            payload["hook_event_name"].as_str(),
+            Some("SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse")
+        );
+        assert_eq!(payload.get("agent").is_some(), named, "{payload}");
+        if named {
+            assert_eq!(payload["agent"], json!(thread.agent), "{payload}");
+        }
+    }
+}
+
+/// The update that archives a chat.
+#[cfg(unix)]
+fn archived() -> haarness_protocol::UpdateThreadRequest {
+    haarness_protocol::UpdateThreadRequest {
+        title: None,
+        archived: Some(true),
+        agent: None,
+        provider: None,
+        model: None,
+        ultracode: None,
+    }
+}
+
+/// On a project's server, a chat with a folder of its own runs its hooks
+/// there, from its start to its tools, a person's own command, the end of
+/// its turns and its archiving, with the folder as their `cwd`; they are told
+/// the server's project folder, where its hook scripts are, and the agent
+/// where one acts. An ordinary chat's hooks run in the project folder, as do
+/// those of a chat whose folder is gone, which nothing makes again for them.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_chats_hooks_run_in_its_own_folder() {
+    let fixture = Fixture::new();
+    let log = fixture.root.join("hooks.log");
+    let (runtime, _) = fixture.runtime();
+    let runtime = runtime.with_hooks(Arc::new(recording_hooks(&fixture.workspace, &log)));
+    let own = chat(&runtime, Some("2026-10-28/notes")).await.unwrap();
+    let plain = chat(&runtime, None).await.unwrap();
+    let gone = chat(&runtime, Some("2026-10-28/gone")).await.unwrap();
+    for thread in [&own, &plain] {
+        turn(&runtime, thread.id, &pwd()).await;
+    }
+    let ran = last_result(&runtime, own.id, "bash").await;
+    assert!(ran.contains(&folder(&own).display().to_string()), "{ran}");
+    runtime.run_shell(own.id, "pwd -P".into()).await.unwrap();
+    std::fs::remove_dir(folder(&gone)).unwrap();
+    for thread in [&own, &gone] {
+        runtime.update_thread(thread.id, archived()).await.unwrap();
+    }
+    let (own_folder, project) = (folder(&own), fixture.workspace.clone());
+    let in_own = |event| (event, &own_folder, &project);
+    assert_hook_runs(
+        &log,
+        &own,
+        &[
+            in_own("SessionStart"),
+            in_own("UserPromptSubmit"),
+            in_own("PreToolUse"),
+            in_own("PostToolUse"),
+            in_own("Stop"),
+            in_own("PreToolUse"),
+            in_own("PostToolUse"),
+            in_own("SessionEnd"),
+        ],
+    );
+    let in_project = |event| (event, &project, &project);
+    assert_hook_runs(
+        &log,
+        &plain,
+        &[
+            in_project("SessionStart"),
+            in_project("UserPromptSubmit"),
+            in_project("PreToolUse"),
+            in_project("PostToolUse"),
+            in_project("Stop"),
+        ],
+    );
+    let gone_folder = folder(&gone);
+    assert_hook_runs(
+        &log,
+        &gone,
+        &[
+            ("SessionStart", &gone_folder, &project),
+            in_project("SessionEnd"),
+        ],
+    );
+}
+
+/// On the chat home a chat's folder is the only project it has: its hooks
+/// run there and are told it as the project folder too.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_chat_home_chats_hooks_take_its_folder_as_their_project() {
+    let fixture = Fixture::new();
+    let log = fixture.root.join("hooks.log");
+    let (runtime, _) = fixture.chat_home();
+    let runtime = runtime.with_hooks(Arc::new(recording_hooks(&fixture.workspace, &log)));
+    let thread = chat(&runtime, None).await.unwrap();
+    turn(&runtime, thread.id, &pwd()).await;
+    runtime.run_shell(thread.id, "pwd -P".into()).await.unwrap();
+    runtime.update_thread(thread.id, archived()).await.unwrap();
+    let own = folder(&thread);
+    assert!(own.starts_with(&fixture.workspace) && own != fixture.workspace);
+    let mine = |event| (event, &own, &own);
+    assert_hook_runs(
+        &log,
+        &thread,
+        &[
+            mine("SessionStart"),
+            mine("UserPromptSubmit"),
+            mine("PreToolUse"),
+            mine("PostToolUse"),
+            mine("Stop"),
+            mine("PreToolUse"),
+            mine("PostToolUse"),
+            mine("SessionEnd"),
+        ],
+    );
+}
+
+/// A chat's folder deleted while a turn runs (here by the turn's own
+/// `UserPromptSubmit` hook, after the turn made it again) cannot hold the
+/// turn's later hooks: they run in the project folder, so a `PreToolUse`
+/// guard still refuses the write it guards against.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_guard_still_refuses_after_the_chats_folder_goes_mid_turn() {
+    let fixture = Fixture::new();
+    let (doomed, log) = (
+        fixture.workspace.join("2026-10-28/doomed"),
+        fixture.root.join("guard.log"),
+    );
+    let remove = format!("rmdir '{}'", doomed.display());
+    let guard = format!(
+        "pwd -P >> '{log}'; echo 'guard: no writes' >&2; exit 2",
+        log = log.display()
+    );
+    let hooks = haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(&json!({
+            "UserPromptSubmit": [{"hooks": [{"command": remove}]}],
+            "PreToolUse": [{"matcher": "write", "hooks": [{"command": guard}]}],
+        })),
+        fixture.workspace.clone(),
+    );
+    let (runtime, _) = fixture.runtime();
+    let runtime = runtime.with_hooks(Arc::new(hooks));
+    let thread = chat(&runtime, Some("2026-10-28/doomed")).await.unwrap();
+    assert_eq!(folder(&thread), doomed);
+    let write = json!({"path": "notes.md", "content": "x"});
+    turn(&runtime, thread.id, &format!("!tool write {write}")).await;
+    assert!(!doomed.exists(), "the folder went during the turn");
+    let refused = last_result(&runtime, thread.id, "write").await;
+    assert!(refused.contains("guard: no writes"), "{refused}");
+    let ran_in = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        ran_in.trim_end(),
+        fixture.workspace.display().to_string(),
+        "the guard ran in the project folder"
+    );
+    assert!(!fixture.workspace.join("notes.md").exists());
 }
 
 #[tokio::test]
@@ -1081,6 +1306,98 @@ async fn served(
     .await
     .unwrap();
     (format!("http://{}", handle.address), handle)
+}
+
+/// The chat home under a repository whose `.gitignore` hides everything (a
+/// home folder kept in Git): a chat's search, `@` file search and Undo still
+/// see its files, and the repository above does not make its dependency
+/// folders searchable.
+#[tokio::test]
+async fn ignore_files_above_the_chat_home_hide_nothing_from_its_chats() {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.root.join(".git")).unwrap();
+    std::fs::write(fixture.root.join(".gitignore"), "*\n").unwrap();
+    let (runtime, _) = fixture.chat_home();
+    let a = chat(&runtime, None).await.unwrap();
+    turn(
+        &runtime,
+        a.id,
+        r#"!tool write {"path":"plan.md","content":"needle"}"#,
+    )
+    .await;
+    // Undo's checkpoints hold the file.
+    let review = runtime.diff_last_turn(a.id).await.unwrap();
+    assert_eq!(
+        review
+            .iter()
+            .map(|file| file.file.as_str())
+            .collect::<Vec<_>>(),
+        ["plan.md"]
+    );
+    turn(&runtime, a.id, r#"!tool grep {"pattern":"needle"}"#).await;
+    let found = last_result(&runtime, a.id, "grep").await;
+    assert!(found.contains("plan.md"), "{found}");
+    // A person's own search there (a workflow's too) as well.
+    let found = runtime
+        .run_direct_tool(
+            a.id,
+            "grep",
+            json!({"pattern": "needle"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .output
+        .text;
+    assert!(found.contains("plan.md"), "{found}");
+    // A search of a subfolder leaves out what the chat's folder leaves out,
+    // the model's and a person's alike.
+    std::fs::create_dir_all(folder(&a).join("sub")).unwrap();
+    std::fs::write(folder(&a).join(".ignore"), "*.log\n").unwrap();
+    std::fs::write(folder(&a).join("sub/a.log"), "needle").unwrap();
+    std::fs::write(folder(&a).join("sub/b.txt"), "needle").unwrap();
+    // As grep writes it on this system.
+    let kept = std::path::Path::new("sub")
+        .join("b.txt")
+        .display()
+        .to_string();
+    turn(
+        &runtime,
+        a.id,
+        r#"!tool grep {"pattern":"needle","path":"sub"}"#,
+    )
+    .await;
+    let found = last_result(&runtime, a.id, "grep").await;
+    assert!(found.contains(&kept) && !found.contains("a.log"), "{found}");
+    let found = runtime
+        .run_direct_tool(
+            a.id,
+            "grep",
+            json!({"pattern": "needle", "path": "sub"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .output
+        .text;
+    assert!(found.contains(&kept) && !found.contains("a.log"), "{found}");
+
+    std::fs::create_dir_all(folder(&a).join("node_modules/dep")).unwrap();
+    std::fs::write(folder(&a).join("node_modules/dep/plan.js"), "").unwrap();
+    let (base, _handle) = served(&fixture, runtime).await;
+    let found: Vec<String> = reqwest::Client::new()
+        .get(format!(
+            "{base}/v1/files/search?q=plan&limit=50&threadId={}",
+            a.id
+        ))
+        .bearer_auth("fixture-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(found, ["plan.md"]);
 }
 
 #[tokio::test]

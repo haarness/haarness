@@ -46,6 +46,9 @@ pub struct JsonLayers {
     pub goal_max_turns: Option<u32>,
     /// Ordered permission rules, already compiled.
     pub rules: Vec<PermissionRule>,
+    /// How many of `rules`, from the start, the system folder and the
+    /// global files set: see [`Self::global_rules`].
+    pub(crate) global_rule_count: usize,
     /// MCP servers by name (trust-gated ones only included when trusted).
     pub mcp: BTreeMap<String, McpConfigureRequest>,
     /// The servers of `mcp` whose entry in effect is the system folder's.
@@ -162,6 +165,7 @@ pub fn load_layers_with_system(
         apply_json_config(&mut layers, &config_dir.join(name), true);
     }
     let global_providers = layers.native.providers.clone();
+    layers.global_rule_count = layers.rules.len();
     layers.project = true;
     // Project files override global defaults; nested worktree layers override ancestors.
     for directory in crate::layout::project_directories(workspace)
@@ -219,7 +223,7 @@ pub fn load_layers_with_system(
     }
 
     // Resource overrides use the same global -> ancestor -> project ordering.
-    let resources = crate::layout::resource_roots(config_dir, home, workspace, trust);
+    let resources = crate::layout::resource_roots_scoped(config_dir, home, workspace, trust);
     let compat = super::claude_compat(&layers.native);
     // The system folder's commands, skills and agents come first, so every
     // other root replaces one of the same name.
@@ -229,7 +233,7 @@ pub fn load_layers_with_system(
     // Claude Code roots are compatibility imports: they load before native
     // roots so a Haarness resource with the same name wins.
     if compat.any() {
-        for directory in claude_directories(home, workspace, trust) {
+        for (directory, project) in claude_directories(home, workspace, trust) {
             if compat.commands() {
                 let commands = directory.join("commands");
                 discover_commands(
@@ -250,6 +254,7 @@ pub fn load_layers_with_system(
                     &agents,
                     None,
                     true,
+                    project,
                 );
             }
             if compat.skills() {
@@ -262,8 +267,24 @@ pub fn load_layers_with_system(
             }
         }
     }
+    // A project's own local plugins, whose agents are the project's (not
+    // those in the person's `~/.haarness` when a project folder is home).
+    let persons: Vec<(PathBuf, bool)> = home
+        .map(|home| (home.join(".haarness"), false))
+        .into_iter()
+        .collect();
+    let project_plugins: Vec<PathBuf> = crate::layout::project_directories(workspace)
+        .into_iter()
+        .filter(|_| trust)
+        .map(|directory| directory.join(".haarness"))
+        .filter(|folder| !crate::layout::persons_folder(&persons, folder))
+        .map(|folder| folder.join("plugins"))
+        .collect();
     for root in plugin_roots {
         let plugin = plugin_name(root);
+        let project = project_plugins
+            .iter()
+            .any(|folder| root.starts_with(folder));
         for directory in haarness_core::definitions::component_paths(root, "commands") {
             discover_commands(
                 &mut layers.commands,
@@ -289,10 +310,11 @@ pub fn load_layers_with_system(
                 &directory,
                 &directory,
                 plugin.as_deref(),
+                project,
             );
         }
     }
-    for root in &resources {
+    for (root, project) in &resources {
         for name in ["command", "commands"] {
             let directory = root.join(name);
             discover_commands(
@@ -320,6 +342,7 @@ pub fn load_layers_with_system(
                 &directory,
                 &directory,
                 None,
+                *project,
             );
         }
     }
@@ -408,6 +431,7 @@ pub fn load_layers_with_system(
         .unwrap_or_default();
     read_rules.extend(layers.rules.iter().cloned());
     let mut read_rules = haarness_core::PermissionEngine::new(read_rules);
+    read_rules.set_floor(layers.global_rules().iter().cloned());
     read_rules.set_workspace(workspace);
     let denied = |file: &Path| {
         (read_rules.evaluate(&format!("read:{}", file.display()))
@@ -415,6 +439,12 @@ pub fn load_layers_with_system(
             .then_some("a read rule denies it")
     };
     for (file, trusted) in local_files {
+        // Said to the person too, as a remote file that cannot be read is.
+        if let Some(reason) = instruction_files::file_left_out(&file, workspace, trusted, &denied) {
+            layers
+                .notices
+                .push(format!("skipped instructions {}: {reason}", file.display()));
+        }
         if let Some(content) = instruction_files::read_with_imports(
             &file,
             workspace,
@@ -487,6 +517,7 @@ fn discover_system_resources(layers: &mut JsonLayers, base: &crate::layout::Syst
                 &file,
                 &directory,
                 None,
+                false,
             );
         }
     }
@@ -507,17 +538,21 @@ pub fn system_definitions(
     (layers.agents, layers.commands)
 }
 
-/// `~/.claude` and every project `.claude` directory (worktree root first).
-fn claude_directories(home: Option<&Path>, workspace: &Path, trust: bool) -> Vec<PathBuf> {
+/// `~/.claude` and every project `.claude` directory (worktree root first),
+/// each with whether it is the project's: `~/.claude` stays the person's
+/// when a project folder is the home folder.
+fn claude_directories(home: Option<&Path>, workspace: &Path, trust: bool) -> Vec<(PathBuf, bool)> {
     let mut directories = Vec::new();
     if let Some(home) = home {
-        directories.push(home.join(".claude"));
+        directories.push((home.join(".claude"), false));
     }
     for directory in crate::layout::project_directories(workspace)
         .into_iter()
         .filter(|_| trust)
     {
-        directories.push(directory.join(".claude"));
+        let folder = directory.join(".claude");
+        let project = !crate::layout::persons_folder(&directories, &folder);
+        directories.push((folder, project));
     }
     directories
 }
@@ -835,6 +870,17 @@ fn valid_path_component(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+impl JsonLayers {
+    /// The rules the system folder and the person's global files set, in
+    /// order, before any project's: a call they deny stays denied whatever a
+    /// project's files or a project's agent say
+    /// (`RuntimeConfig::global_rules`).
+    #[must_use]
+    pub fn global_rules(&self) -> &[PermissionRule] {
+        &self.rules[..self.global_rule_count.min(self.rules.len())]
+    }
 }
 
 /// A project's file may make approvals stricter, never looser: its Yolo
@@ -1200,6 +1246,7 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
                         .get("variant")
                         .and_then(Value::as_str)
                         .map(str::to_owned),
+                    project: layers.project,
                 },
             );
         }
@@ -1674,6 +1721,25 @@ fn upsert_agent(agents: &mut Vec<CustomAgent>, agent: CustomAgent) {
     }
 }
 
+/// Whether a command or agent file is a link to a file Haarness keeps out of
+/// every prompt (where it keeps sign-ins, a secret-named file): its text
+/// would become a prompt nobody is asked about, so it is skipped and
+/// reported.
+fn left_out_definition(path: &Path, kind: &str, notices: &mut Vec<String>) -> bool {
+    if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return false;
+    }
+    let Some(reason) = path
+        .canonicalize()
+        .ok()
+        .and_then(|real| haarness_core::instructions::left_out(&real, None, &|_| None))
+    else {
+        return false;
+    };
+    notices.push(format!("skipped {kind} {}: {reason}", path.display()));
+    true
+}
+
 /// A definition file whose frontmatter does not parse is skipped and reported,
 /// so a command, skill or agent that never appears has a recorded cause.
 fn definition_markdown<'a>(
@@ -1720,7 +1786,9 @@ fn discover_commands(
             discover_commands(commands, notices, &path, base, plugin);
             continue;
         }
-        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("md")
+            || left_out_definition(&path, "command", notices)
+        {
             continue;
         }
         let Ok(content) = fs::read_to_string(&path) else {
@@ -1867,14 +1935,17 @@ fn discover_agents(
     root: &Path,
     base: &Path,
     plugin: Option<&str>,
+    project: bool,
 ) {
-    discover_agents_with(agents, notices, root, base, plugin, false);
+    discover_agents_with(agents, notices, root, base, plugin, false, project);
 }
 
 /// `claude` normalises Claude Code agent frontmatter: `allowed-tools` as a
 /// fallback for `tools`, colour names, and `model: inherit` meaning no pin
 /// (the `sonnet`/`opus`/`haiku`/`fable` families and bare Claude ids such as
-/// `claude-sonnet-5-5` resolve at dispatch time).
+/// `claude-sonnet-5-5` resolve at dispatch time). `project`: the folder is
+/// one of the project's (see [`CustomAgent::project`]).
+#[allow(clippy::too_many_arguments)]
 fn discover_agents_with(
     agents: &mut Vec<CustomAgent>,
     notices: &mut Vec<String>,
@@ -1882,6 +1953,7 @@ fn discover_agents_with(
     base: &Path,
     plugin: Option<&str>,
     claude: bool,
+    project: bool,
 ) {
     let paths = if root.is_file() {
         vec![root.to_path_buf()]
@@ -1895,10 +1967,12 @@ fn discover_agents_with(
     };
     for path in paths {
         if path.is_dir() {
-            discover_agents_with(agents, notices, &path, base, plugin, claude);
+            discover_agents_with(agents, notices, &path, base, plugin, claude, project);
             continue;
         }
-        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("md")
+            || left_out_definition(&path, "agent", notices)
+        {
             continue;
         }
         let Ok(content) = fs::read_to_string(&path) else {
@@ -1985,6 +2059,7 @@ fn discover_agents_with(
                 temperature: number("temperature"),
                 top_p: number("top_p"),
                 variant: front.get("variant").cloned(),
+                project,
             },
         );
     }
@@ -2899,6 +2974,213 @@ mod tests {
     }
 
     #[test]
+    fn instruction_imports_never_bring_in_where_haarness_keeps_sign_ins() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-sign-ins-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        // A project at the home folder, which holds the data folder.
+        let home = root.join("home");
+        let data = home.join(".local/share/haarness");
+        for dir in [config.clone(), home.join(".git"), data.clone()] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let store = data.join("auth.json");
+        fs::write(&store, r#"{"fixture":{"key":"SIGN_IN_SECRET"}}"#).unwrap();
+        fs::write(home.join("auth.json"), "OWN_FILE_BODY").unwrap();
+        haarness_core::record_credential_store(store.clone(), false);
+        fs::write(
+            home.join("AGENTS.md"),
+            "@.local/share/haarness/auth.json\n@auth.json\n",
+        )
+        .unwrap();
+        // The global file is trusted with paths outside the project too.
+        fs::write(config.join("AGENTS.md"), format!("@{}\n", store.display())).unwrap();
+        let layers = load_layers(&config, None, &home, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        assert!(!instructions.contains("SIGN_IN_SECRET"), "{instructions}");
+        assert!(instructions.contains("OWN_FILE_BODY"), "{instructions}");
+        for reference in [
+            ".local/share/haarness/auth.json".to_owned(),
+            store.display().to_string(),
+        ] {
+            assert!(
+                instructions.contains(&format!(
+                    "[Instruction import omitted: {reference} (Haarness keeps sign-ins there)]"
+                )),
+                "{instructions}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn instruction_files_named_by_a_project_or_a_link_never_bring_in_sign_ins() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-files-out-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let home = root.join("home");
+        let project = root.join("project");
+        let own = root.join("own");
+        for dir in [
+            config.clone(),
+            home.join(".st/data"),
+            home.join(".ssh"),
+            project.join(".git"),
+            own.join(".git"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let store = home.join(".st/data/auth.json");
+        let older = home.join(".st/auth.json");
+        fs::write(&store, "SIGN_IN_SECRET").unwrap();
+        fs::write(&older, "OLDER_SIGN_IN_SECRET").unwrap();
+        fs::write(home.join(".ssh/id_ed25519"), "KEY_SECRET").unwrap();
+        haarness_core::record_credential_store(store.clone(), false);
+        haarness_core::record_credential_store(older.clone(), false);
+        fs::write(config.join("AGENTS.md"), "GLOBAL_BODY").unwrap();
+        fs::write(
+            config.join("haarness.json"),
+            format!(
+                r#"{{"permission":{{"read":{{"{}/*":"deny","*AGENTS.md":"deny"}}}}}}"#,
+                home.join(".ssh").display()
+            ),
+        )
+        .unwrap();
+        // The project names a store and a key by `instructions`, and its
+        // AGENTS.md is a link to another store.
+        fs::write(
+            project.join("haarness.json"),
+            format!(
+                r#"{{"instructions":["~/.st/data/auth.json","~/.ssh/id_ed25519","{}"]}}"#,
+                store.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&older, project.join("AGENTS.md")).unwrap();
+        let layers = load_layers(&config, Some(&home), &project, true, &[]);
+        // The person is told too.
+        assert!(
+            layers.notices.contains(&format!(
+                "skipped instructions {}: Haarness keeps sign-ins there",
+                store.display()
+            )),
+            "{:?}",
+            layers.notices
+        );
+        let instructions = layers.instructions.expect("instructions");
+        for hidden in ["SIGN_IN_SECRET", "KEY_SECRET"] {
+            assert!(!instructions.contains(hidden), "{instructions}");
+        }
+        // The person's own file still loads, a read rule about it or not.
+        assert!(instructions.contains("GLOBAL_BODY"), "{instructions}");
+        assert!(
+            instructions.contains(&format!(
+                "[Instruction file omitted: {} (Haarness keeps sign-ins there)]",
+                store.display()
+            )),
+            "{instructions}"
+        );
+        assert!(
+            instructions.contains("(a read rule denies it)]"),
+            "{instructions}"
+        );
+        #[cfg(unix)]
+        assert!(
+            instructions.contains(&format!(
+                "[Instruction file omitted: {} (Haarness keeps sign-ins there)]",
+                project.join("AGENTS.md").display()
+            )),
+            "{instructions}"
+        );
+        // A project's own AGENTS.md loads as before under a read rule that
+        // covers it.
+        fs::write(own.join("AGENTS.md"), "OWN_PROJECT_BODY").unwrap();
+        let layers = load_layers(&config, Some(&home), &own, true, &[]);
+        assert!(
+            layers
+                .instructions
+                .expect("instructions")
+                .contains("OWN_PROJECT_BODY")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_command_or_agent_that_is_a_link_to_sign_ins_or_a_secret_is_skipped() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-definition-links-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let data = root.join("data");
+        let project = root.join("project");
+        for dir in [
+            config.clone(),
+            data.clone(),
+            project.join(".git"),
+            project.join(".haarness/commands"),
+            project.join(".haarness/agents"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let store = data.join("auth.json");
+        fs::write(&store, "SIGN_IN_SECRET").unwrap();
+        fs::write(project.join(".env"), "ENV_SECRET").unwrap();
+        haarness_core::record_credential_store(store.clone(), false);
+        fs::write(project.join(".haarness/commands/plain.md"), "PLAIN_COMMAND").unwrap();
+        fs::write(project.join(".haarness/agents/plain.md"), "PLAIN_AGENT").unwrap();
+        let mut skipped = Vec::new();
+        #[cfg(unix)]
+        for kind in ["commands", "agents"] {
+            for (name, target) in [("notes", &store), ("settings", &project.join(".env"))] {
+                let link = project.join(format!(".haarness/{kind}/{name}.md"));
+                std::os::unix::fs::symlink(target, &link).unwrap();
+                skipped.push(link);
+            }
+        }
+        let layers = load_layers(&config, None, &project, true, &[]);
+        let names = |kind: &str| -> Vec<String> {
+            if kind == "commands" {
+                layers
+                    .commands
+                    .iter()
+                    .map(|command| command.name.clone())
+                    .collect()
+            } else {
+                layers.agents.iter().map(|agent| agent.id.clone()).collect()
+            }
+        };
+        for kind in ["commands", "agents"] {
+            assert!(names(kind).contains(&"plain".to_owned()), "{kind}");
+            for name in ["notes", "settings"] {
+                assert!(!names(kind).contains(&name.to_owned()), "{kind} {name}");
+            }
+        }
+        for link in skipped {
+            let kind = if link.to_string_lossy().contains("/commands/") {
+                "command"
+            } else {
+                "agent"
+            };
+            assert!(
+                layers
+                    .notices
+                    .iter()
+                    .any(|notice| notice
+                        .starts_with(&format!("skipped {kind} {}: ", link.display()))),
+                "{:?}",
+                layers.notices
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn remote_instruction_urls_hide_their_credentials_in_the_prompt_and_notices() {
         let root = std::env::temp_dir().join(format!(
             "haarness-instruction-credentials-{}",
@@ -3778,14 +4060,21 @@ mod tests {
         let layers = load_layers(&config, None, &child, true, &[]);
         assert!(layers.errors.is_empty(), "{:?}", layers.errors);
         assert_eq!(
-            layers.native.defaults.unwrap().model.as_deref(),
+            layers.native.defaults.clone().unwrap().model.as_deref(),
             Some("child")
         );
         assert!(layers.native.providers["fixture"].enabled);
+        // The project's rules still follow the global ones, but never
+        // reopen the global deny.
         assert_eq!(
             layers.rules.last().unwrap().decision,
             PermissionDecision::Allow
         );
+        assert_eq!(
+            layers.global_rules(),
+            [rule("bash:*", PermissionDecision::Deny)]
+        );
+        assert_eq!(decide(&layers, None, "bash:ls"), PermissionDecision::Deny);
         assert_eq!(
             layers
                 .agents
@@ -3807,12 +4096,260 @@ mod tests {
         fs::remove_file(child.join(".haarness/haarness.jsonc")).unwrap();
         let layers = load_layers(&config, None, &child, true, &[]);
         assert_eq!(
-            layers.native.defaults.unwrap().model.as_deref(),
+            layers.native.defaults.clone().unwrap().model.as_deref(),
             Some("project")
         );
         assert_eq!(
             layers.rules.last().unwrap().decision,
             PermissionDecision::Ask
+        );
+        assert_eq!(decide(&layers, None, "bash:ls"), PermissionDecision::Deny);
+        // A global ask is not held: the project's rule decides it.
+        fs::write(
+            config.join("haarness.json"),
+            r#"{"model":"echo/global","permission":{"bash":"ask"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            child.join(".haarness/haarness.json"),
+            r#"{"permission":{"bash":"allow"}}"#,
+        )
+        .unwrap();
+        let layers = load_layers(&config, None, &child, true, &[]);
+        assert_eq!(decide(&layers, None, "bash:ls"), PermissionDecision::Allow);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn rule(pattern: &str, decision: PermissionDecision) -> PermissionRule {
+        PermissionRule {
+            pattern: pattern.into(),
+            decision,
+        }
+    }
+
+    /// How a chat under `agent` decides `operation` with these layers, as
+    /// the runtime builds its rules.
+    fn decide(layers: &JsonLayers, agent: Option<&str>, operation: &str) -> PermissionDecision {
+        let config = haarness_core::RuntimeConfig {
+            base_rules: layers.rules.clone(),
+            global_rules: layers.global_rules().to_vec(),
+            custom_agents: layers.agents.clone(),
+            ..Default::default()
+        };
+        let mut engine = config.permission_defaults(agent.unwrap_or("build"), "");
+        for rule in &config.base_rules {
+            engine.add_rule(rule.clone());
+        }
+        if let Some(custom) = agent.and_then(|agent| config.custom_agent(agent)) {
+            custom.apply_permissions(&mut engine);
+        }
+        engine.evaluate(operation)
+    }
+
+    #[test]
+    fn the_persons_agents_stay_theirs_when_a_project_folder_is_the_home_folder() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-home-agents-{}", uuid::Uuid::now_v7()));
+        let config = root.join("config");
+        let home = root.join("home");
+        let app = home.join("work/app");
+        for dir in [
+            config.clone(),
+            home.join(".git"),
+            home.join(".claude/agents"),
+            home.join(".haarness/agents"),
+            home.join(".opencode/agents"),
+            home.join(".haarness/plugins/kit/agents"),
+            app.join(".haarness/agents"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(
+            config.join("haarness.json"),
+            r#"{"compatibility":{"claude_code":{"agents":true}},"permission":{"bash":{"rm *":"deny"}}}"#,
+        )
+        .unwrap();
+        let agent = "---\npermission: {\"bash\":{\"rm *\":\"allow\"}}\n---\nClean.";
+        for (folder, name) in [
+            (home.join(".claude/agents"), "cleaner"),
+            (home.join(".haarness/agents"), "sweeper"),
+            (home.join(".opencode/agents"), "opener"),
+            (home.join(".haarness/plugins/kit/agents"), "kept"),
+            (app.join(".haarness/agents"), "cloned"),
+        ] {
+            fs::write(folder.join(format!("{name}.md")), agent).unwrap();
+        }
+        let plugins = [home.join(".haarness/plugins/kit")];
+        // A Git repository of dotfiles at the home folder, and a project at
+        // the home folder itself.
+        for (workspace, cloned) in [(&app, true), (&home, false)] {
+            let layers = load_layers(&config, Some(&home), workspace, true, &plugins);
+            assert!(layers.errors.is_empty(), "{:?}", layers.errors);
+            for name in ["cleaner", "sweeper", "opener", "kit:kept"] {
+                let agent = layers
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == name)
+                    .unwrap_or_else(|| panic!("{name} not loaded"));
+                assert!(!agent.project, "{name} in {}", workspace.display());
+                assert_eq!(
+                    decide(&layers, Some(name), "bash:rm -rf x"),
+                    PermissionDecision::Allow,
+                    "{name} in {}",
+                    workspace.display()
+                );
+            }
+            if cloned {
+                assert_eq!(
+                    decide(&layers, Some("cloned"), "bash:rm -rf x"),
+                    PermissionDecision::Deny
+                );
+            }
+            assert_eq!(
+                decide(&layers, None, "bash:rm -rf x"),
+                PermissionDecision::Deny
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_project_tightens_but_never_reopens_a_deny_of_the_system_folder_or_global_files() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-deny-floor-{}", uuid::Uuid::now_v7()));
+        let base = root.join("system");
+        let config = root.join("config");
+        let project = root.join("project");
+        for dir in [
+            base.join("agents"),
+            config.join("agents"),
+            project.join(".git"),
+            project.join(".haarness/agents"),
+            project.join(".claude/agents"),
+            project.join(".haarness/plugins/kit/agents"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(
+            base.join("haarness.json"),
+            r#"{"permission":{"bash":{"curl *":"deny"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            config.join("haarness.json"),
+            r#"{"compatibility":{"claude_code":{"agents":true}},"permission":{"bash":{"rm *":"deny","git push *":"ask","rm -rf build":"allow"},"edit":{"secrets/*":"deny"},"webfetch":"deny"},
+                "agent":{"cleaner":{"prompt":"Clean.","permission":{"bash":{"rm *":"allow"}}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            config.join("agents/sweeper.md"),
+            "---\npermission: {\"bash\":{\"curl *\":\"allow\"}}\n---\nSweep.",
+        )
+        .unwrap();
+        fs::write(
+            project.join("haarness.json"),
+            r#"{"permission":{"bash":{"*":"allow","git push *":"allow","ls *":"ask"},"edit":"allow","webfetch":"allow"},
+                "agent":{"opener":{"prompt":"Open.","permission":{"bash":{"rm *":"allow"}}}}}"#,
+        )
+        .unwrap();
+        for (folder, name) in [
+            (project.join(".haarness/agents"), "markdown"),
+            (project.join(".claude/agents"), "claude"),
+            (project.join(".haarness/plugins/kit/agents"), "plugged"),
+        ] {
+            fs::write(
+                folder.join(format!("{name}.md")),
+                "---\npermission: {\"bash\":{\"rm *\":\"allow\",\"curl *\":\"allow\"}}\n---\nOpen.",
+            )
+            .unwrap();
+        }
+        let system = crate::layout::SystemFolder::at(base.clone(), &project);
+        let plugins = [project.join(".haarness/plugins/kit")];
+        let layers =
+            load_layers_with_system(&config, Some(&system), None, &project, true, &plugins);
+        assert!(layers.errors.is_empty(), "{:?}", layers.errors);
+        // A deny of the system folder or the global files holds for the
+        // project, whatever pattern it uses, and for every project agent.
+        for agent in [
+            None,
+            Some("opener"),
+            Some("markdown"),
+            Some("claude"),
+            Some("kit:plugged"),
+        ] {
+            assert!(
+                layers
+                    .agents
+                    .iter()
+                    .any(|known| Some(known.id.as_str()) == agent)
+                    || agent.is_none(),
+                "{agent:?} not loaded: {:?}",
+                layers
+                    .agents
+                    .iter()
+                    .map(|known| &known.id)
+                    .collect::<Vec<_>>()
+            );
+            for operation in [
+                "bash:rm -rf src",
+                "bash:curl https://example.test",
+                "edit:secrets/key",
+            ] {
+                assert_eq!(
+                    decide(&layers, agent, operation),
+                    PermissionDecision::Deny,
+                    "{agent:?} {operation}"
+                );
+            }
+        }
+        // The person's own later allow still lifts their own deny, and their
+        // own agents' rules still do.
+        assert_eq!(
+            decide(&layers, None, "bash:rm -rf build"),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            decide(&layers, Some("cleaner"), "bash:rm -rf src"),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            decide(&layers, Some("sweeper"), "bash:curl https://example.test"),
+            PermissionDecision::Allow
+        );
+        // Everything else keeps the order: the project's allow answers a
+        // global ask, its ask tightens a global allow, and its allow opens
+        // what nobody denied.
+        assert_eq!(
+            decide(&layers, None, "bash:git push origin"),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            decide(&layers, None, "bash:ls -la"),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            decide(&layers, None, "edit:src/main.rs"),
+            PermissionDecision::Allow
+        );
+        // A whole tool the person turned off stays off, out of the list too.
+        let engine = {
+            let config = haarness_core::RuntimeConfig {
+                global_rules: layers.global_rules().to_vec(),
+                ..Default::default()
+            };
+            let mut engine = config.permission_defaults("build", "");
+            for rule in &layers.rules {
+                engine.add_rule(rule.clone());
+            }
+            engine
+        };
+        assert!(engine.hides_tool("webfetch"));
+        assert!(!engine.hides_tool("bash"));
+        assert!(
+            layers
+                .agents
+                .iter()
+                .all(|agent| agent.project == !matches!(agent.id.as_str(), "cleaner" | "sweeper"))
         );
         fs::remove_dir_all(root).unwrap();
     }

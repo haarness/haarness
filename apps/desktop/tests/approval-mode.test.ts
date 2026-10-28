@@ -227,6 +227,19 @@ test("always rules read as plain words, never as stored permission patterns", ()
     "Anything in …/desktop-onboarding/projects",
   );
   assert.equal(say("external_directory", "external_directory:*"), "Any folder outside the project");
+  // A file beside the project, or the folder holding it alone, is
+  // remembered by itself, and says so.
+  assert.equal(say("external_directory", "external_directory:/Users/me/.gitconfig"), "…/me/.gitconfig");
+  assert.equal(say("external_directory", "external_directory:/Users/me/"), "…/Users/me");
+  // A long folder gives way; the file's name stays whole.
+  assert.equal(
+    say("external_directory", "external_directory:/private/tmp/haarness-permission-parity-ui-AbcoJS/beside.txt"),
+    "…/haarness-pe…/beside.txt",
+  );
+  assert.equal(
+    say("external_directory", "external_directory:/srv/a-file-name-longer-than-the-line.json"),
+    "…/a-file-name-longer-than-the-line.json",
+  );
   assert.equal(say("bash", "bash:git push *"), "Commands starting with git push");
   assert.equal(say("bash", "bash:*"), "Every command");
   assert.equal(say("edit", "edit:*"), "Every file edit");

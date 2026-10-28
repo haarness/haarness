@@ -13,7 +13,7 @@ pub enum InputDelivery {
     Queue,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingInput {
     /// The submitting client's preview support. `None` keeps the chat's
@@ -21,13 +21,18 @@ pub struct PendingInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<bool>,
     /// Reasoning effort chosen with the message. `None` keeps the effort of
-    /// the chat's latest prompt.
+    /// the chat's latest prompt; `default` runs it at the model's own default
+    /// over a configured level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     pub id: RequestId,
     pub text: String,
     #[serde(default)]
     pub attachments: Vec<String>,
+    /// Queued by a person who can stop the turn it starts (see
+    /// `StartTurnRequest::attended`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attended: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]

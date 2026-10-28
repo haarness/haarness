@@ -67,6 +67,38 @@ pub const THREAD_DIRECTORY_CAPABILITY: &str = "thread-directory.v1";
 pub const REASONING_EFFORTS: [&str; 7] =
     ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// The reasoning effort a turn names to run at the model's own default when
+/// the configuration names a level (`defaults.reasoning_effort`): without it,
+/// a turn that names no effort runs at the configured one. Servers that report
+/// [`ServerInfo::default_reasoning_effort`] accept it; clients send it only to
+/// them.
+pub const MODEL_DEFAULT_EFFORT: &str = "default";
+
+/// The level of `levels` closest to `effort` on [`REASONING_EFFORTS`], the
+/// stronger one on a tie, as a model with these levels runs a turn that asks
+/// for `effort`; `effort` itself when the model lists it. Levels outside the
+/// scale (`ultra`) rank as the strongest. `None` when `levels` is empty.
+#[must_use]
+pub fn nearest_reasoning_effort<'a>(levels: &'a [String], effort: &str) -> Option<&'a str> {
+    if let Some(level) = levels.iter().find(|level| *level == effort) {
+        return Some(level);
+    }
+    let rank = |level: &str| {
+        REASONING_EFFORTS
+            .iter()
+            .position(|known| *known == level)
+            .unwrap_or(REASONING_EFFORTS.len())
+    };
+    let wanted = rank(effort);
+    levels
+        .iter()
+        .min_by_key(|level| {
+            let rank = rank(level);
+            (rank.abs_diff(wanted), std::cmp::Reverse(rank))
+        })
+        .map(String::as_str)
+}
+
 macro_rules! id_type {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
@@ -613,7 +645,7 @@ pub struct UpdateThreadRequest {
     pub ultracode: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StartTurnRequest {
     pub request_id: RequestId,
@@ -638,6 +670,9 @@ pub struct StartTurnRequest {
     pub agent: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// A reasoning level (`none` to `max`), `ultracode`, or `default` for the
+    /// model's own default over a configured level. Omitted, the turn runs at
+    /// the configured `defaults.reasoning_effort`, if any.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     /// Per-turn tool visibility and execution policy. Missing names retain
@@ -650,6 +685,15 @@ pub struct StartTurnRequest {
     /// frontmatter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// A person is in this conversation and can stop the turn: Desktop, the
+    /// terminal UI and an editor over ACP send it with every message and
+    /// command. A command's or skill's `` !`…` `` snippet in such a turn, and
+    /// in the subagents it starts, runs until it ends or the turn is stopped.
+    /// Without it (a script, Haarness Cloud, an older client) a snippet keeps
+    /// the `execution.shell_timeout_ms` deadline, as a scheduled run's always
+    /// does. Nothing else depends on it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attended: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -794,6 +838,12 @@ pub struct ServerInfo {
     /// exists; absent on older servers, whose new chats start in Auto.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_approval_mode: Option<ApprovalMode>,
+    /// The reasoning effort a turn that names none runs at
+    /// (`defaults.reasoning_effort`), so a client can show it as the current
+    /// level; absent when none is configured, and on older servers. A turn
+    /// names `default` to run at the model's own default instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_effort: Option<String>,
     /// The server's process id, so a local client that found this server in a
     /// runtime record can tell it from another process on a reused port.
     #[serde(default)]
@@ -963,7 +1013,7 @@ pub struct CommandInfo {
 /// `StartTurnRequest::command`, this contract can dispatch both configured
 /// prompt templates and durable workflows without overloading the stable turn
 /// endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecuteCommandRequest {
     #[serde(default)]
@@ -997,6 +1047,10 @@ pub struct ExecuteCommandRequest {
     pub wait: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// A person can stop the turn a prompt command starts (see
+    /// [`StartTurnRequest::attended`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attended: bool,
 }
 
 /// Tagged result of the shared command dispatcher. Prompt commands create a
@@ -1291,7 +1345,7 @@ pub struct ThreadActivity {
 /// User input against a thread that may already have a running turn. When a
 /// turn is active the text is persisted immediately and steered into that
 /// turn's next provider round; otherwise a normal turn starts.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueInputRequest {
     /// Whether the submitting client can show sandboxed file previews. Text
@@ -1300,7 +1354,8 @@ pub struct QueueInputRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<bool>,
     /// Reasoning effort for a turn this input starts. `None` keeps the
-    /// effort of the chat's latest prompt.
+    /// effort of the chat's latest prompt; `default` runs it at the model's
+    /// own default over a configured level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     /// Steer by default for compatibility; queue waits for an idle boundary.
@@ -1318,6 +1373,10 @@ pub struct QueueInputRequest {
     /// surfaces but still delivered to the provider.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub synthetic: bool,
+    /// A person can stop the turn this input starts, now or once it leaves
+    /// the queue (see [`StartTurnRequest::attended`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attended: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1617,6 +1676,23 @@ mod tests {
         assert!(info.context_window.is_none());
         assert!(info.pricing.is_none());
         assert!(info.reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn the_nearest_effort_a_model_lists_is_the_one_it_runs() {
+        let levels = ["low", "medium", "high"].map(str::to_owned);
+        let nearest = |effort| super::nearest_reasoning_effort(&levels, effort);
+        assert_eq!(nearest("medium"), Some("medium"));
+        assert_eq!(nearest("none"), Some("low"));
+        assert_eq!(nearest("max"), Some("high"));
+        assert_eq!(nearest("ultra"), Some("high"));
+        // A tie takes the stronger level.
+        let gapped = ["low", "high"].map(str::to_owned);
+        assert_eq!(
+            super::nearest_reasoning_effort(&gapped, "medium"),
+            Some("high")
+        );
+        assert_eq!(super::nearest_reasoning_effort(&[], "high"), None);
     }
 
     #[test]
