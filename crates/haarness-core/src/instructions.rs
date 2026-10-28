@@ -301,8 +301,9 @@ pub type ImportFilter<'a> = &'a dyn Fn(&Path) -> Option<&'static str>;
 /// line that referenced them. Targets outside the workspace are only
 /// followed when `trusted` (global configuration); references that do not
 /// name an existing file are left as written. A secret-named file (`.env`),
-/// or one `omit` refuses, is never read: an `[Instruction import omitted: …]`
-/// line takes its place, as nothing asks before instructions load.
+/// a file where Haarness keeps sign-ins, or one `omit` refuses, is never
+/// read: an `[Instruction import omitted: …]` line takes its place, as
+/// nothing asks before instructions load.
 #[must_use]
 pub fn read_with_imports(
     path: &Path,
@@ -336,6 +337,10 @@ fn omitted(canonical: &Path, workspace: Option<&Path>, scope: &Scope<'_>) -> Opt
         .unwrap_or(canonical);
     if crate::is_secret_path(relative) {
         return Some("it is a secret file");
+    }
+    // A read of one asks a person, and nobody is asked here.
+    if crate::is_credential_store_path(canonical) {
+        return Some("Haarness keeps sign-ins there");
     }
     (scope.omit)(canonical)
 }

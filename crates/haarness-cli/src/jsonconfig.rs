@@ -2945,6 +2945,48 @@ mod tests {
     }
 
     #[test]
+    fn instruction_imports_never_bring_in_where_haarness_keeps_sign_ins() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-sign-ins-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        // A project at the home folder, which holds the data folder.
+        let home = root.join("home");
+        let data = home.join(".local/share/haarness");
+        for dir in [config.clone(), home.join(".git"), data.clone()] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let store = data.join("auth.json");
+        fs::write(&store, r#"{"fixture":{"key":"SIGN_IN_SECRET"}}"#).unwrap();
+        fs::write(home.join("auth.json"), "OWN_FILE_BODY").unwrap();
+        haarness_core::record_credential_store(store.clone(), false);
+        fs::write(
+            home.join("AGENTS.md"),
+            "@.local/share/haarness/auth.json\n@auth.json\n",
+        )
+        .unwrap();
+        // The global file is trusted with paths outside the project too.
+        fs::write(config.join("AGENTS.md"), format!("@{}\n", store.display())).unwrap();
+        let layers = load_layers(&config, None, &home, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        assert!(!instructions.contains("SIGN_IN_SECRET"), "{instructions}");
+        assert!(instructions.contains("OWN_FILE_BODY"), "{instructions}");
+        for reference in [
+            ".local/share/haarness/auth.json".to_owned(),
+            store.display().to_string(),
+        ] {
+            assert!(
+                instructions.contains(&format!(
+                    "[Instruction import omitted: {reference} (Haarness keeps sign-ins there)]"
+                )),
+                "{instructions}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn remote_instruction_urls_hide_their_credentials_in_the_prompt_and_notices() {
         let root = std::env::temp_dir().join(format!(
             "haarness-instruction-credentials-{}",
