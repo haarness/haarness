@@ -17,8 +17,9 @@
 //! carry `{"decision": "block", "reason", "additionalContext",
 //! "hookSpecificOutput": {"permissionDecision": "allow"|"deny"|"ask"}}`; a
 //! `PermissionRequest` hook answers with `hookSpecificOutput.decision`
-//! (`{"behavior": "allow", "always": true}` answers Always). After a tool ran,
-//! a block is the hook's feedback, which the model reads after the result.
+//! (`{"behavior": "allow", "always": true}` answers Always). From a
+//! `PostToolUse` or `PostToolUseFailure` hook, which runs once the tool ran, a
+//! block is feedback, which the model reads after the result.
 //!
 //! Events: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
 //! `UserPromptSubmit`, `PermissionRequest`, `Stop`, `SessionStart`,
