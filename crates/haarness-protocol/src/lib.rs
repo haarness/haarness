@@ -1341,7 +1341,8 @@ pub struct QueueInputRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<bool>,
     /// Reasoning effort for a turn this input starts. `None` keeps the
-    /// effort of the chat's latest prompt.
+    /// effort of the chat's latest prompt; `default` runs it at the model's
+    /// own default over a configured level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     /// Steer by default for compatibility; queue waits for an idle boundary.
