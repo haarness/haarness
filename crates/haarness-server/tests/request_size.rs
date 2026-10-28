@@ -424,7 +424,7 @@ async fn a_request_still_too_large_after_compacting_ends_the_turn_with_one_summa
         let error = done.error.unwrap();
         assert_eq!(
             error,
-            "Size fixture refused this request as too large, even after the chat was compacted. The files in this chat are too large to send together: continue in a new chat, or with smaller files."
+            "This chat is too large for Size fixture to take in one request, even after compacting: continue in a new chat, or attach smaller files."
         );
         let items = fixture.runtime.items(thread, None).await.unwrap();
         let errors = items
@@ -542,7 +542,7 @@ async fn two_pdfs_read_in_one_turn_that_no_request_carries_end_it_without_reread
     assert!(
         done.error
             .unwrap()
-            .ends_with("even after the chat was compacted. The files in this chat are too large to send together: continue in a new chat, or with smaller files.")
+            .ends_with("even after compacting: continue in a new chat, or attach smaller files.")
     );
     assert_eq!(*fixture.provider.reads.lock().unwrap(), 2);
     assert_eq!(fixture.summaries(), 1);
@@ -583,7 +583,7 @@ async fn bedrock_and_gemini_refusals_of_the_requests_bytes_compact_once_too() {
         assert_eq!(fixture.summaries(), 1, "{refusal}");
         assert_eq!(
             done.error.unwrap(),
-            "Size fixture refused this request as too large, even after the chat was compacted. The files in this chat are too large to send together: continue in a new chat, or with smaller files."
+            "This chat is too large for Size fixture to take in one request, even after compacting: continue in a new chat, or attach smaller files."
         );
     }
 }
@@ -600,7 +600,7 @@ async fn where_the_chat_cannot_compact_a_refusal_of_its_bytes_still_says_what_to
     assert_eq!(fixture.summaries(), 0);
     assert_eq!(
         done.error.unwrap(),
-        "Size fixture refused this request as too large. The files in this chat are too large to send together: continue in a new chat, or with smaller files."
+        "This chat is too large for Size fixture to take in one request: continue in a new chat, or attach smaller files."
     );
 }
 

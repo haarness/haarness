@@ -923,22 +923,22 @@ fn advised_wait(text: &str) -> Option<std::time::Duration> {
     parsed.then(|| std::time::Duration::from_secs_f64(seconds))
 }
 
+/// How a rate limit or quota is worded. Such a refusal can also speak of too
+/// many tokens or a request too large; compacting cannot answer it.
+const RATE_LIMITED: [&str; 5] = [
+    "rate limit",
+    "too many requests",
+    "throttl",
+    "per minute",
+    "quota",
+];
+
 fn is_provider_context_overflow(error: &CoreError) -> bool {
     let CoreError::Provider(message) = error else {
         return false;
     };
     let message = message.to_ascii_lowercase();
-    // Rate limits also speak of too many tokens; compacting cannot fix them.
-    if [
-        "rate limit",
-        "too many requests",
-        "throttl",
-        "per minute",
-        "quota",
-    ]
-    .iter()
-    .any(|marker| message.contains(marker))
-    {
+    if RATE_LIMITED.iter().any(|marker| message.contains(marker)) {
         return false;
     }
     // Phrasings collected across providers and local servers (after
@@ -1039,6 +1039,7 @@ fn is_provider_oversized_request(error: &CoreError) -> bool {
             "input is too long",
         ]
         .iter()
+        .chain(&RATE_LIMITED)
         .any(|marker| message.contains(marker))
 }
 
@@ -1257,7 +1258,7 @@ fn image_volume_refusal(message: &str) -> Option<ImageVolume> {
 /// actionable failure. Providers use several JSON shapes for the same error;
 /// extract their human message/code before falling back to bounded plain text.
 fn user_facing_error(error: &CoreError) -> String {
-    describe_failure(error, None)
+    describe_failure(error, None, false)
 }
 
 /// How a turn whose prompt a `UserPromptSubmit` hook blocked fails:
@@ -1288,22 +1289,37 @@ pub fn refusal_reason(error: &CoreError) -> String {
 }
 
 /// `describe_error`, except that a request the provider refused for its size
-/// in bytes says what to do instead of repeating the 413: what makes a
-/// request that large is the files in the chat, which compacting does not
-/// always take out (a file the model read stays in the turns it keeps).
-fn describe_failure(error: &CoreError, provider: Option<&str>) -> String {
+/// in bytes is said plainly instead of repeating the 413. With `advice`, for
+/// the person, it also says what to do: the chat as a whole is what is too
+/// large (its files, the ones the model read among them, or its text behind
+/// a small limit), which compacting does not always make smaller. Without,
+/// for a model that started the work, it only says what happened.
+fn describe_failure(error: &CoreError, provider: Option<&str>, advice: bool) -> String {
     if let CoreError::Provider(raw) = error
         && is_provider_oversized_request(error)
     {
-        let compacted = if raw.starts_with(STILL_TOO_LARGE) {
-            ", even after the chat was compacted"
+        let compacted = raw.starts_with(STILL_TOO_LARGE);
+        return if advice {
+            format!(
+                "This chat is too large for {} to take in one request{}: continue in a new chat, or attach smaller files.",
+                provider.unwrap_or("the provider"),
+                if compacted {
+                    ", even after compacting"
+                } else {
+                    ""
+                }
+            )
         } else {
-            ""
+            format!(
+                "{} refused this request as too large{}.",
+                provider.unwrap_or("The provider"),
+                if compacted {
+                    ", even after the chat was compacted"
+                } else {
+                    ""
+                }
+            )
         };
-        return format!(
-            "{} refused this request as too large{compacted}. The files in this chat are too large to send together: continue in a new chat, or with smaller files.",
-            provider.unwrap_or("The provider")
-        );
     }
     describe_error(error, provider)
 }
@@ -8061,7 +8077,8 @@ impl RunnerTask {
             .providers
             .get(&self.turn.provider)
             .map(|provider| provider.info().name);
-        describe_failure(error, name.as_deref())
+        // A child agent's failure is read by the model that started it.
+        describe_failure(error, name.as_deref(), self.depth == 0)
     }
 
     /// An agent's definition: this turn's own from its snapshot, any other
@@ -17377,6 +17394,10 @@ mod tests {
             "HTTP 413 Payload Too Large: maximum context length exceeded",
             "Request too large for gpt-4o on tokens per min (TPM): Limit 30000, Requested 50000.",
             "HTTP 400 Bad Request: messages: text content blocks must be non-empty",
+            // A gateway's request rate, worded as a request too large.
+            "HTTP 413 Payload Too Large: rate limit exceeded, retry later",
+            "HTTP 413 Request Entity Too Large: daily quota used up",
+            "Payload too large: more than 60 requests per minute",
         ] {
             assert!(!oversized(message), "{message}");
         }
@@ -17387,16 +17408,20 @@ mod tests {
         assert!(oversized(
             r#"Bedrock returned 413 Payload Too Large: {"message":"Request Entity Too Large"}"#
         ));
-        // Where the turn could not compact (a child agent, compaction off),
+        // Where the turn could not compact (compaction off, input queued),
         // the refusal says what to do rather than repeat the 413.
         let refusal = CoreError::Provider(
             "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes."
                 .into(),
         );
-        let advice = "The files in this chat are too large to send together: continue in a new chat, or with smaller files.";
         assert_eq!(
-            super::describe_failure(&refusal, Some("Anthropic")),
-            format!("Anthropic refused this request as too large. {advice}")
+            super::describe_failure(&refusal, Some("Anthropic"), true),
+            "This chat is too large for Anthropic to take in one request: continue in a new chat, or attach smaller files."
+        );
+        // The model that started a child agent reads only what happened.
+        assert_eq!(
+            super::describe_failure(&refusal, Some("Anthropic"), false),
+            "Anthropic refused this request as too large."
         );
         // A notice of left-out images keeps the provider's own words.
         assert_eq!(
@@ -17411,16 +17436,12 @@ mod tests {
                 .contains("Request exceeds the maximum allowed number of bytes")
         );
         assert_eq!(
-            super::describe_failure(&ended, Some("Anthropic")),
-            format!(
-                "Anthropic refused this request as too large, even after the chat was compacted. {advice}"
-            )
+            super::describe_failure(&ended, None, true),
+            "This chat is too large for the provider to take in one request, even after compacting: continue in a new chat, or attach smaller files."
         );
         assert_eq!(
             super::user_facing_error(&ended),
-            format!(
-                "The provider refused this request as too large, even after the chat was compacted. {advice}"
-            )
+            "The provider refused this request as too large, even after the chat was compacted."
         );
         for error in [
             ended,
@@ -17435,7 +17456,8 @@ mod tests {
         assert_eq!(
             super::describe_failure(
                 &CoreError::Provider("prompt is too long: 210000 tokens > 200000 maximum".into()),
-                None
+                None,
+                true
             ),
             "Provider error: prompt is too long: 210000 tokens > 200000 maximum"
         );
