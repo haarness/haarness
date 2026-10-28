@@ -8,6 +8,7 @@
 //! into ones every provider reads (see [`crate::images`]); a message's media
 //! stays within [`MAX_INLINE_MEDIA_BYTES`].
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -406,9 +407,16 @@ pub fn sent_bytes(source: &str) -> usize {
 /// A stored message as a model receives it: text files are appended to the
 /// message, and media that can no longer be read (an upload folder deleted
 /// since) is named instead of failing the turn. So is media that would take
-/// the message past [`MAX_INLINE_MEDIA_BYTES`]: stored before that was
-/// refused, or a file that grew since, it would fail every turn after it.
-pub fn for_model(content: String, attachments: Vec<String>) -> (String, Vec<String>) {
+/// the message past [`MAX_INLINE_MEDIA_BYTES`], and a PDF that does not hold
+/// one: stored before either was refused, or a file changed since (grown, or
+/// an LFS pointer after a checkout), it would fail every turn after it.
+/// Sources a provider refused (their [`fingerprint`]s in `omitted`) pass
+/// through for the caller to leave out, and take no room.
+pub fn for_model<S: std::hash::BuildHasher>(
+    content: String,
+    attachments: Vec<String>,
+    omitted: &HashSet<String, S>,
+) -> (String, Vec<String>) {
     let mut content = content;
     let mut media = Vec::new();
     let mut carried = 0_u64;
@@ -426,11 +434,24 @@ pub fn for_model(content: String, attachments: Vec<String>) -> (String, Vec<Stri
         carried = total;
         true
     };
+    let refused = |source: &str| !omitted.is_empty() && omitted.contains(&fingerprint(source));
+    let not_a_pdf = |content: &mut String, label: &str| {
+        let _ = write!(
+            content,
+            "\n[Attachment {label} left out: it does not hold a readable PDF]"
+        );
+    };
     for source in attachments {
         if let Some(data) = source.strip_prefix("data:") {
             match DataUrl::parse(data) {
                 Ok(url) if is_supported_media_mime(url.mime_type) => {
-                    if fits(&mut content, &url.name(), url.decoded_len()) {
+                    if refused(&source) {
+                        media.push(source);
+                    } else if url.mime_type == "application/pdf"
+                        && !url.head().is_some_and(|head| starts_like_pdf(&head))
+                    {
+                        not_a_pdf(&mut content, &url.name());
+                    } else if fits(&mut content, &url.name(), url.decoded_len()) {
                         media.push(source);
                     }
                 }
@@ -461,19 +482,22 @@ pub fn for_model(content: String, attachments: Vec<String>) -> (String, Vec<Stri
             media.push(source);
             continue;
         }
-        let size = local_path(&source)
-            .and_then(|path| std::fs::metadata(path).ok())
-            .filter(std::fs::Metadata::is_file)
-            .map(|metadata| metadata.len());
-        match size {
-            Some(size) => {
-                if fits(&mut content, &source, size) {
-                    media.push(source);
-                }
-            }
-            None => {
-                let _ = write!(content, "\n[Attachment {source} is no longer available]");
-            }
+        let file = local_path(&source).and_then(|path| {
+            let metadata = std::fs::metadata(&path).ok()?;
+            metadata.is_file().then_some((path, metadata.len()))
+        });
+        let Some((path, size)) = file else {
+            let _ = write!(content, "\n[Attachment {source} is no longer available]");
+            continue;
+        };
+        if refused(&source) {
+            media.push(source);
+        } else if media_mime_for_path(&path) == Some("application/pdf")
+            && !read_at_most(&path, PDF_HEADER_WINDOW).is_ok_and(|head| starts_like_pdf(&head))
+        {
+            not_a_pdf(&mut content, &source);
+        } else if fits(&mut content, &source, size) {
+            media.push(source);
         }
     }
     (content, media)
@@ -503,6 +527,16 @@ impl<'a> DataUrl<'a> {
             parameters,
             encoded,
         })
+    }
+
+    /// The payload's first bytes, as many as a PDF's header may lie within,
+    /// decoded without the rest.
+    fn head(&self) -> Option<Vec<u8>> {
+        let encoded = self
+            .encoded
+            .get(..PDF_HEADER_WINDOW.div_ceil(3) * 4)
+            .unwrap_or(self.encoded);
+        STANDARD.decode(encoded).ok()
     }
 
     /// The payload's length once decoded, without decoding it.
@@ -726,7 +760,7 @@ mod tests {
         let json = data_url("application/json", Some("a.json"), b"{\"a\":1}");
         let untyped = data_url("application/octet-stream", Some("Makefile"), b"all:\n");
         let admitted = admit(vec![notes, json, untyped], Path::new("/")).unwrap();
-        let (content, media) = for_model("Read these".into(), admitted);
+        let (content, media) = for_model("Read these".into(), admitted, &HashSet::new());
         assert!(media.is_empty());
         assert!(content.starts_with("Read these"));
         assert!(
@@ -777,6 +811,7 @@ mod tests {
                 "/nonexistent/upload/shot.png".into(),
                 data_url("image/png", None, b"x"),
             ],
+            &HashSet::new(),
         );
         assert_eq!(media.len(), 1);
         assert!(
@@ -883,7 +918,7 @@ mod tests {
         let admitted = admit(vec!["design.pdf".into(), "late.pdf".into()], &dir).unwrap();
         assert!(admitted[0].starts_with("data:text/plain;name=design.pdf;base64,"));
         assert_eq!(admitted[1], dir.join("late.pdf").to_string_lossy());
-        let (content, media) = for_model("What is this?".into(), admitted);
+        let (content, media) = for_model("What is this?".into(), admitted, &HashSet::new());
         assert!(content.contains("<attached-file name=\"design.pdf\">\nversion https://git-lfs"));
         assert_eq!(media.len(), 1);
         let error = admit(vec!["blob.pdf".into()], &dir).unwrap_err();
@@ -932,9 +967,11 @@ mod tests {
         // Stored before such media was refused, or a file that grew since.
         let big = dir.join("scan.pdf");
         sparse_pdf(&big, 21 * MIB);
+        let mut old = b"%PDF-1.7\n".to_vec();
+        old.resize(21 * 1024 * 1024, 0);
         let inline = format!(
             "data:application/pdf;name=old.pdf;base64,{}",
-            STANDARD.encode(vec![0_u8; 21 * 1024 * 1024])
+            STANDARD.encode(old)
         );
         let small = dir.join("small.pdf");
         sparse_pdf(&small, MIB);
@@ -943,6 +980,7 @@ mod tests {
         let (content, media) = for_model(
             "Read these".into(),
             vec![big.clone(), inline, small.clone()],
+            &HashSet::new(),
         );
         assert_eq!(media, vec![small.clone()]);
         assert!(
@@ -952,7 +990,7 @@ mod tests {
             "{content}"
         );
         assert!(
-            content.contains("[Attachment old.pdf left out"),
+            content.contains("[Attachment old.pdf left out: it would bring"),
             "{content}"
         );
 
@@ -965,7 +1003,11 @@ mod tests {
             one.to_string_lossy().into_owned(),
             two.to_string_lossy().into_owned(),
         );
-        let (content, media) = for_model(String::new(), vec![one.clone(), two.clone()]);
+        let (content, media) = for_model(
+            String::new(),
+            vec![one.clone(), two.clone()],
+            &HashSet::new(),
+        );
         assert_eq!(media, vec![one]);
         assert!(
             content.contains(&format!(
@@ -973,6 +1015,48 @@ mod tests {
             )),
             "{content}"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn media_a_provider_refused_takes_no_room() {
+        let dir = std::env::temp_dir().join(format!("haarness-attach-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let one = dir.join("one.pdf").to_string_lossy().into_owned();
+        let two = dir.join("two.pdf").to_string_lossy().into_owned();
+        sparse_pdf(Path::new(&one), 12 * MIB);
+        sparse_pdf(Path::new(&two), 12 * MIB);
+        // The caller leaves `one` out, so `two` fits.
+        let omitted = HashSet::from([fingerprint(&one)]);
+        let (content, media) = for_model(String::new(), vec![one.clone(), two.clone()], &omitted);
+        assert_eq!(media, vec![one, two]);
+        assert!(!content.contains("left out"), "{content}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_stored_pdf_that_no_longer_holds_one_reaches_the_model_as_a_note() {
+        let dir = std::env::temp_dir().join(format!("haarness-attach-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Admitted as a PDF, then a checkout made it an LFS pointer.
+        let design = dir.join("design.pdf");
+        std::fs::write(&design, b"%PDF-1.4\n%%EOF\n").unwrap();
+        let stored = admit(vec!["design.pdf".into()], &dir).unwrap();
+        std::fs::write(&design, "version https://git-lfs.github.com/spec/v1\n").unwrap();
+        let mut sources = stored.clone();
+        sources.push(data_url("application/pdf", Some("old.pdf"), b"not a pdf"));
+        sources.push(data_url("application/pdf", Some("real.pdf"), b"%PDF-1.4\n"));
+        let (content, media) = for_model("Read these".into(), sources, &HashSet::new());
+        assert_eq!(media.len(), 1);
+        assert!(media[0].contains("name=real.pdf"));
+        assert!(
+            content.contains(&format!(
+                "[Attachment {} left out: it does not hold a readable PDF]",
+                stored[0]
+            )),
+            "{content}"
+        );
+        assert!(content.contains("[Attachment old.pdf left out: it does not hold a readable PDF]"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

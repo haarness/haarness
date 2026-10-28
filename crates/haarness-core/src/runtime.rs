@@ -13458,7 +13458,7 @@ fn provider_messages_with_origins(
                     (content, attachments)
                 } else {
                     let (content, attachments) =
-                        crate::attachments::for_model(content, attachments);
+                        crate::attachments::for_model(content, attachments, &omitted);
                     without_omitted(content, attachments, &omitted)
                 };
                 let message = if attachments.is_empty() || replayed_after_compaction {
@@ -13542,8 +13542,11 @@ fn provider_messages_with_origins(
             } => valid_calls.get(&call_id).cloned().map(|name| {
                 // A tool's image is a file it saw; one deleted since is named
                 // instead of failing every later request.
-                let (output, attachments) =
-                    crate::attachments::for_model(output, tool_output_attachments(&metadata));
+                let (output, attachments) = crate::attachments::for_model(
+                    output,
+                    tool_output_attachments(&metadata),
+                    &omitted,
+                );
                 let (output, attachments) = without_omitted(output, attachments, &omitted);
                 ProviderMessage::ToolResult {
                     call_id,
