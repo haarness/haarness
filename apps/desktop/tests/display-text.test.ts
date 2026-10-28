@@ -8,6 +8,10 @@ import { agentTaskError, type AgentTask } from "../src/renderer/agent-tasks";
 import { followRun } from "../src/renderer/command-result";
 import type { WorkflowRun } from "@haarness/sdk";
 
+/** `expected` with each `\u{…}` code set apart as plain text sets it: between
+ * a left-to-right isolate and its end. */
+const isolated = (expected: string) => expected.replace(/\\u\{[0-9A-F]+\}/g, (code) => "\u2066" + code + "\u2069");
+
 test("colours, titles and cursor moves leave only their text", () => {
   for (const [raw, shown] of [
     ["\u001b[32mok\u001b[39m", "ok"],
@@ -76,12 +80,12 @@ test("an approval shows what is invisible in it as quiet codes", () => {
     { text: "\\u{202E}", code: true },
     { text: "fdp.sh", code: false },
   ]);
-  assert.equal(spelledOutText("cd dist\r\nrm -r *"), "cd dist\\u{D}\nrm -r *");
-  assert.equal(spelledOutText("x\u001b[1Ay"), "x\\u{1B}[1Ay");
-  assert.equal(spelledOutText("p​q⁧r﻿s\u{e0070}"), "p\\u{200B}q\\u{2067}r\\u{FEFF}s\\u{E0070}");
-  assert.equal(spelledOutText("a b­c"), "a\\u{2029}b\\u{AD}c");
+  assert.equal(spelledOutText("cd dist\r\nrm -r *"), isolated("cd dist\\u{D}\nrm -r *"));
+  assert.equal(spelledOutText("x\u001b[1Ay"), isolated("x\\u{1B}[1Ay"));
+  assert.equal(spelledOutText("p​q⁧r﻿s\u{e0070}"), isolated("p\\u{200B}q\\u{2067}r\\u{FEFF}s\\u{E0070}"));
+  assert.equal(spelledOutText("a b­c"), isolated("a\\u{2029}b\\u{AD}c"));
   // Tags that spell no flag show.
-  assert.equal(spelledOutText("🏴\u{e0061}\u{e007f}"), "🏴\\u{E0061}\\u{E007F}");
+  assert.equal(spelledOutText("🏴\u{e0061}\u{e007f}"), isolated("🏴\\u{E0061}\\u{E007F}"));
 });
 
 test("a row shows a command's and a server's text without their escapes", () => {
@@ -104,8 +108,8 @@ test("a row shows a command's and a server's text without their escapes", () => 
 test("a row and its Shell panel show a command's invisible characters as codes, on one line", () => {
   const args = { command: "cat report‮fdp.sh​ && cd dist\r\nrm -r cache" };
   const target = toolTarget(args);
-  assert.equal(target, "cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D} rm -r cache");
-  assert.equal(toolTitle(args, target), "cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D}\nrm -r cache");
+  assert.equal(target, isolated("cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D} rm -r cache"));
+  assert.equal(toolTitle(args, target), isolated("cat report\\u{202E}fdp.sh\\u{200B} && cd dist\\u{D}\nrm -r cache"));
   // The Shell panel draws the command as written, through its quiet codes.
   assert.deepEqual(toolInput("bash", args), { label: "Shell", text: "$ " + args.command, context: "" });
   // An ordinary command is unchanged.
@@ -162,16 +166,16 @@ test("an edit on its card shows only what turns a line's direction as a code", (
 
 test("every kind of row target shows what would not show as a code", () => {
   const target = (name: string, args: unknown) => describeTool(name, args).target;
-  assert.equal(target("grep", { pattern: "todo\u202e", path: "src\u200b" }), "todo\\u{202E} in src\\u{200B}");
-  assert.equal(target("glob", { pattern: "*.js\u2066" }), "*.js\\u{2066}");
+  assert.equal(target("grep", { pattern: "todo\u202e", path: "src\u200b" }), isolated("todo\\u{202E} in src\\u{200B}"));
+  assert.equal(target("glob", { pattern: "*.js\u2066" }), isolated("*.js\\u{2066}"));
   assert.equal(
     target("apply_patch", { input: "*** Begin Patch\n*** Update File: src/notes\u202etxt.js\n@@\n-a\n+b\n*** End Patch" }),
-    "src/notes\\u{202E}txt.js",
+    isolated("src/notes\\u{202E}txt.js"),
   );
-  assert.equal(target("mcp_resource_read", { uri: "file:///a\u202eb" }), "file:///a\\u{202E}b");
-  assert.equal(target("mcp_resource_list", { server: "docs\u200b" }), "docs\\u{200B}");
-  assert.equal(target("websearch", { query: "news\u202e today" }), "news\\u{202E} today");
-  assert.equal(target("load_tool", { queries: ["a\u2067"] }), "a\\u{2067}");
+  assert.equal(target("mcp_resource_read", { uri: "file:///a\u202eb" }), isolated("file:///a\\u{202E}b"));
+  assert.equal(target("mcp_resource_list", { server: "docs\u200b" }), isolated("docs\\u{200B}"));
+  assert.equal(target("websearch", { query: "news\u202e today" }), isolated("news\\u{202E} today"));
+  assert.equal(target("load_tool", { queries: ["a\u2067"] }), isolated("a\\u{2067}"));
   // Ordinary targets read as before.
   assert.equal(target("grep", { pattern: "TODO", path: "src" }), "TODO in src");
   assert.equal(target("websearch", { query: "مرحبا بالعالم" }), "مرحبا بالعالم");
@@ -189,4 +193,11 @@ test("a failed workflow's error reads without the escape sequences its program w
     followRun({ title: "/nightly", text: "", run: run.id }, run).text,
     "Workflow nightly failed.\nchild stderr: error: lint failed\nRun ID: 0190-run",
   );
+});
+
+test("a code in plain text stays one left-to-right piece beside right-to-left words", () => {
+  // Without the isolate, `ملف\u{200F}` in a right-to-left line reads `u{200F}\ملف`.
+  assert.equal(spelledOutText("ملف‏.txt"), "ملف⁦\\u{200F}⁩.txt");
+  // Text with nothing to spell out gains nothing.
+  assert.equal(spelledOutText("ملف.txt"), "ملف.txt");
 });

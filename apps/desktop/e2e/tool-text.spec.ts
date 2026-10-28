@@ -50,6 +50,23 @@ async function quietness(element: Locator) {
     return { quieter: code !== getComputedStyle(element).color };
   });
 }
+/** How `element`'s first code is set apart: on a chip of the theme's word
+ * tint, as one left-to-right isolate. */
+async function chip(element: Locator) {
+  return element.evaluate((element) => {
+    const code = getComputedStyle(element.querySelector(".spelled-code")!);
+    const probe = document.createElement("span");
+    probe.style.background = "var(--word-change)";
+    element.append(probe);
+    const tint = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return { tinted: code.backgroundColor === tint, bidi: code.unicodeBidi, direction: code.direction };
+  });
+}
+const CHIP = { tinted: true, bidi: "isolate", direction: "ltr" };
+/** `expected` with each `\u{…}` code between a left-to-right isolate and its
+ * end, as plain text such as a row's target sets it apart. */
+const isolated = (expected: string) => expected.replace(/\\u\{[0-9A-F]+\}/g, (code) => "\u2066" + code + "\u2069");
 
 test.beforeAll(async () => {
   test.setTimeout(120000);
@@ -143,6 +160,7 @@ test("an approval shows what is invisible in a command as quiet codes, right to 
   });
   expect(colors.code).toBe(colors.muted);
   expect(colors.code).not.toBe(colors.text);
+  expect(await chip(subject)).toEqual(CHIP);
   await pictures("approval-codes", card);
   await page.evaluate(() => (window as any).haarness.preferences({ language: "ar" }));
   try {
@@ -154,7 +172,7 @@ test("an approval shows what is invisible in a command as quiet codes, right to 
   }
   // The call's row waiting on the card shows the same codes, on one line.
   await expect(page.locator(".tool-target").last()).toHaveText(
-    "echo report\\u{202E}fdp.sh\\u{200B} && printf done\\u{D} printf more > ran.txt",
+    isolated("echo report\\u{202E}fdp.sh\\u{200B} && printf done\\u{D} printf more > ran.txt"),
   );
   await pictures("approval-row", page.locator("details.tool-call").last());
   // The answer is the request's own: denied as asked, nothing ran.
@@ -190,7 +208,8 @@ test("an edit's card shows what turns a changed line around as a quiet code, and
   // Right-to-left text and its mark belong to the file: no code there.
   await expect(changes).toContainText('const greeting = "مرحبا\u200f";');
   expect(await changes.textContent()).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/);
-  expect(await quietness(changes.locator(".diff-line.add").first())).toEqual({ quieter: true });
+  // In a changed line a code keeps the line's color, on its chip.
+  expect(await chip(changes.locator(".diff-line.add").first())).toEqual(CHIP);
   await pictures("approval-edit", card);
   await page.getByRole("button", { name: "Deny", exact: true }).click();
   await idle();

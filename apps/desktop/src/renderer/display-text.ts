@@ -240,9 +240,12 @@ export function spelledOutParts(
 }
 
 /** `text` with each character `showsAsCode` names written as its code, for
- * places that take plain text (a row's target, a menu's detail line). */
+ * places that take plain text (a row's target, a menu's detail line). Each
+ * code sits between a left-to-right isolate and its end (U+2066, U+2069), as
+ * `.spelled-code` sets it apart, so right-to-left text around it cannot pull
+ * its backslash and braces apart. */
 export function spelledOutText(text: string): string {
   return spelledOutParts(text)
-    .map((part) => part.text)
+    .map((part) => (part.code ? "\u2066" + part.text + "\u2069" : part.text))
     .join("");
 }
