@@ -264,9 +264,10 @@ pub(crate) fn spelled_out(text: &str) -> String {
     with_codes(text, shows_as_code, push_code)
 }
 
-/// Opens and closes a code in [`marked`] text. Both are format characters,
-/// so `text` itself can no longer hold one there, and they take no cell
-/// wherever text is measured or wrapped.
+/// Open and close a code in [`marked`] text. Both are format characters
+/// that take no cell wherever text is measured or wrapped. The text's own
+/// are never left in it: [`marked`] writes them as codes, and
+/// [`marked_directions`] leaves them out.
 const CODE_START: char = '\u{2061}';
 const CODE_END: char = '\u{2062}';
 
@@ -279,10 +280,21 @@ pub(crate) fn marked(text: &str) -> String {
 }
 
 /// [`marked`] for the lines of a file an edit changes: only what
-/// [`turns_direction`] names is a code there.
+/// [`turns_direction`] names is a code there. A function application or
+/// invisible times of the file's own (U+2061, U+2062, as a formula copied
+/// from a word processor holds them) shows nothing either way, so it is
+/// left out rather than read as a marker.
 #[must_use]
 pub(crate) fn marked_directions(text: &str) -> String {
-    with_codes(text, turns_direction, push_marked)
+    with_codes(
+        text,
+        |character| turns_direction(character) || matches!(character, CODE_START | CODE_END),
+        |shown, character| {
+            if turns_direction(character) {
+                push_marked(shown, character);
+            }
+        },
+    )
 }
 
 fn push_marked(shown: &mut String, character: char) {
@@ -458,6 +470,20 @@ mod tests {
         for text in ["مرحبا\u{200f} بالعالم", "a\u{200b}b\tc", "שלום"] {
             assert_eq!(marked_directions(text), text);
         }
+        // A formula's invisible function application is no marker: the
+        // `x` after it is not drawn as a code.
+        let formula = marked_directions("y = sin\u{2061}x");
+        let mut in_code = false;
+        let spans = marked_spans(
+            &formula,
+            Color::rgb(1, 1, 1),
+            Color::rgb(2, 2, 2),
+            Color::rgb(3, 3, 3),
+            &mut in_code,
+        );
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!(spans[0].text, "y = sinx");
+        assert!(!in_code);
     }
 
     #[test]
