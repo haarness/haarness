@@ -1780,7 +1780,7 @@
   "{count} more lines": "{count} satır daha",
   "rejected": "reddedildi",
   "Approvals changed in another window · ctrl+y to switch": "Onaylar başka bir pencerede değişti · geçiş için ctrl+y",
-  "Could not keep approvals · ctrl+y to switch": "Onaylar korunamadı · geçiş için ctrl+y",
+  "Could not keep {mode}": "{mode} modu korunamadı",
   "Share usage statistics": "Kullanım istatistiklerini paylaş",
   "Diagnostics": "Tanılama",
   "This computer's Haarness logs as a zip, with known secrets removed, to share when something goes wrong.": "Bu bilgisayardaki Haarness günlükleri, bilinen gizli bilgiler çıkarılmış bir zip olarak; bir sorun olduğunda paylaşmak için.",
