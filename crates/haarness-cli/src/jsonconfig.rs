@@ -1715,6 +1715,25 @@ fn upsert_agent(agents: &mut Vec<CustomAgent>, agent: CustomAgent) {
     }
 }
 
+/// Whether a command or agent file is a link to a file Haarness keeps out of
+/// every prompt (where it keeps sign-ins, a secret-named file): its text
+/// would become a prompt nobody is asked about, so it is skipped and
+/// reported.
+fn left_out_definition(path: &Path, kind: &str, notices: &mut Vec<String>) -> bool {
+    if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return false;
+    }
+    let Some(reason) = path
+        .canonicalize()
+        .ok()
+        .and_then(|real| haarness_core::instructions::left_out(&real, None, &|_| None))
+    else {
+        return false;
+    };
+    notices.push(format!("skipped {kind} {}: {reason}", path.display()));
+    true
+}
+
 /// A definition file whose frontmatter does not parse is skipped and reported,
 /// so a command, skill or agent that never appears has a recorded cause.
 fn definition_markdown<'a>(
@@ -1761,7 +1780,9 @@ fn discover_commands(
             discover_commands(commands, notices, &path, base, plugin);
             continue;
         }
-        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("md")
+            || left_out_definition(&path, "command", notices)
+        {
             continue;
         }
         let Ok(content) = fs::read_to_string(&path) else {
@@ -1943,7 +1964,9 @@ fn discover_agents_with(
             discover_agents_with(agents, notices, &path, base, plugin, claude, project);
             continue;
         }
-        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("md")
+            || left_out_definition(&path, "agent", notices)
+        {
             continue;
         }
         let Ok(content) = fs::read_to_string(&path) else {
@@ -3069,6 +3092,76 @@ mod tests {
                 .expect("instructions")
                 .contains("OWN_PROJECT_BODY")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_command_or_agent_that_is_a_link_to_sign_ins_or_a_secret_is_skipped() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-definition-links-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let data = root.join("data");
+        let project = root.join("project");
+        for dir in [
+            config.clone(),
+            data.clone(),
+            project.join(".git"),
+            project.join(".haarness/commands"),
+            project.join(".haarness/agents"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let store = data.join("auth.json");
+        fs::write(&store, "SIGN_IN_SECRET").unwrap();
+        fs::write(project.join(".env"), "ENV_SECRET").unwrap();
+        haarness_core::record_credential_store(store.clone(), false);
+        fs::write(project.join(".haarness/commands/plain.md"), "PLAIN_COMMAND").unwrap();
+        fs::write(project.join(".haarness/agents/plain.md"), "PLAIN_AGENT").unwrap();
+        let mut skipped = Vec::new();
+        #[cfg(unix)]
+        for kind in ["commands", "agents"] {
+            for (name, target) in [("notes", &store), ("settings", &project.join(".env"))] {
+                let link = project.join(format!(".haarness/{kind}/{name}.md"));
+                std::os::unix::fs::symlink(target, &link).unwrap();
+                skipped.push(link);
+            }
+        }
+        let layers = load_layers(&config, None, &project, true, &[]);
+        let names = |kind: &str| -> Vec<String> {
+            if kind == "commands" {
+                layers
+                    .commands
+                    .iter()
+                    .map(|command| command.name.clone())
+                    .collect()
+            } else {
+                layers.agents.iter().map(|agent| agent.id.clone()).collect()
+            }
+        };
+        for kind in ["commands", "agents"] {
+            assert!(names(kind).contains(&"plain".to_owned()), "{kind}");
+            for name in ["notes", "settings"] {
+                assert!(!names(kind).contains(&name.to_owned()), "{kind} {name}");
+            }
+        }
+        for link in skipped {
+            let kind = if link.to_string_lossy().contains("/commands/") {
+                "command"
+            } else {
+                "agent"
+            };
+            assert!(
+                layers
+                    .notices
+                    .iter()
+                    .any(|notice| notice
+                        .starts_with(&format!("skipped {kind} {}: ", link.display()))),
+                "{:?}",
+                layers.notices
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
