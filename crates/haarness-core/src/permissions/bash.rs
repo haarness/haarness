@@ -78,6 +78,8 @@ pub struct NamedPath {
     pub path: PathBuf,
     /// It is a file written in full: no dynamic part, and not a folder.
     pub file: bool,
+    /// It is written in full: no dynamic part.
+    pub literal: bool,
     /// The folder of [`BashAnalysis::external_dirs`] it asks about, when
     /// it is outside the project.
     pub outside: Option<String>,
@@ -1543,6 +1545,7 @@ impl Reader<'_> {
         };
         self.analysis.paths.push(NamedPath {
             file: complete && !path.is_dir(),
+            literal: complete,
             path,
             outside: outside.map(glob),
         });

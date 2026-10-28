@@ -14524,7 +14524,14 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                     named
                         .iter()
                         .map(|named| {
-                            outside_pattern(workspace, folder, Some((&named.path, named.file)))
+                            let kind = if named.file {
+                                Named::File
+                            } else if named.literal {
+                                Named::Folder
+                            } else {
+                                Named::Any
+                            };
+                            outside_pattern(workspace, folder, Some((&named.path, kind)))
                         })
                         .collect()
                 };
@@ -14575,8 +14582,12 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             // A request names a file unless it asks about the path's own
             // folder (a listing or a search of it).
             let own = format!("{}/*", path.to_string_lossy().trim_end_matches(['/', '\\']));
-            let file = pattern != own;
-            let pattern = outside_pattern(workspace, &pattern, Some((&path, file)));
+            let kind = if pattern == own {
+                Named::Folder
+            } else {
+                Named::File
+            };
+            let pattern = outside_pattern(workspace, &pattern, Some((&path, kind)));
             if leads_outside {
                 resolved.push((pattern.clone(), path.to_string_lossy().into_owned()));
             }
@@ -15222,18 +15233,34 @@ mod shell_reading_tests {
         let other = bash("cat ../../other/notes.txt");
         assert_eq!(other.patterns, vec![folder("other")]);
         assert_eq!(other.always, other.patterns);
-        // Named as a folder, or by a path with a dynamic part or a wildcard,
-        // it is the folder alone: remembered, that opens no file in it.
+        // Named as a folder, it is the folder alone: remembered, that opens
+        // no file in it.
         let itself = format!("{}/", home.display());
         for plan in [
             bash("cd ../.. && ls"),
-            bash("cat ../../$NAME"),
-            bash("cat '../../a*b'"),
             outside("list", json!({ "path": home.display().to_string() })),
             outside("grep", json!({ "pattern": "x", "path": "../.." })),
         ] {
             assert_eq!(plan.patterns, vec![itself.clone()]);
             assert_eq!(plan.always, plan.patterns);
+        }
+        // A path that may be any file in it (a dynamic part, a wildcard) is
+        // asked about as the whole folder, as before.
+        let any = [
+            bash("cat ../../$NAME"),
+            bash("F=.netrc; cat ../../$F"),
+            bash("cat ../../.n*"),
+            bash("cat ../../.netr?"),
+            bash("cat '../../a*b'"),
+            outside("read", json!({ "path": "../../.n*" })),
+        ];
+        for plan in &any {
+            assert_eq!(
+                plan.patterns,
+                vec![format!("{}/*", home.display())],
+                "{:?}",
+                plan.patterns
+            );
         }
         let mut folder_only = PermissionEngine::build_defaults();
         folder_only.add_grant(PermissionRule {
@@ -15244,8 +15271,11 @@ mod shell_reading_tests {
         for plan in [
             bash("cat ../../.gitconfig"),
             bash("cat ../../.ssh/id_ed25519"),
-        ] {
-            assert_eq!(verdict(&folder_only, &plan), Ask, "{:?}", plan.patterns);
+        ]
+        .iter()
+        .chain(&any)
+        {
+            assert_eq!(verdict(&folder_only, plan), Ask, "{:?}", plan.patterns);
         }
         // A rule about the folder, or an Always an earlier version saved
         // for it, still decides its files.
@@ -15451,17 +15481,30 @@ fn external_path_request(
     Some((pattern, path))
 }
 
+/// What a path a call names outside the project is, for
+/// [`outside_pattern`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Named {
+    /// A file, written in full.
+    File,
+    /// The folder itself, written in full.
+    Folder,
+    /// A path with a dynamic part (`~/$f`) or a wildcard (`~/.n*`): it may
+    /// be any file in the folder.
+    Any,
+}
+
 /// The pattern an `external_directory` ask about `folder` (a glob such as
 /// `/home/me/*`) evaluates and Always remembers, for the path the call names
-/// there, when known, with whether it is a file. A folder that holds the
-/// project (`~` for `~/work/app`) is asked about by that path instead:
-/// remembering the folder would open everything in it, the project's
-/// neighbours (`~/.ssh`) included, for every later chat. A file is its own
-/// path; the folder itself, a path with a dynamic part (whose literal start
-/// names the folder) and a name with a wildcard are the folder alone
-/// (`/home/me/`), which a rule for the folder still meets but which reaches
-/// no file in it.
-fn outside_pattern(workspace: &Path, folder: &str, named: Option<(&Path, bool)>) -> String {
+/// there, when known. A folder that holds the project (`~` for
+/// `~/work/app`) is asked about by that path instead: remembering the folder
+/// would open everything in it, the project's neighbours (`~/.ssh`)
+/// included, for every later chat. A file is its own path, and the folder
+/// itself is the folder alone (`/home/me/`), which a rule for the folder
+/// still meets but which reaches no file in it. A path that may be any file
+/// there stays the whole folder, as before: only a rule or an Always for
+/// all of it answers that, and the card says so.
+fn outside_pattern(workspace: &Path, folder: &str, named: Option<(&Path, Named)>) -> String {
     let Some(path) = folder
         .strip_suffix("/*")
         .map(|path| if path.is_empty() { "/" } else { path })
@@ -15470,11 +15513,19 @@ fn outside_pattern(workspace: &Path, folder: &str, named: Option<(&Path, bool)>)
     else {
         return folder.to_owned();
     };
-    named
-        .filter(|(_, file)| *file)
-        .map(|(file, _)| file.to_string_lossy().into_owned())
-        .filter(|file| !file.contains(['*', '?']))
-        .unwrap_or_else(|| format!("{}/", path.to_string_lossy().trim_end_matches(['/', '\\'])))
+    let alone = || format!("{}/", path.to_string_lossy().trim_end_matches(['/', '\\']));
+    match named {
+        Some((file, Named::File)) => {
+            let file = file.to_string_lossy().into_owned();
+            if file.contains(['*', '?', '[']) {
+                folder.to_owned()
+            } else {
+                file
+            }
+        }
+        Some((_, Named::Any)) => folder.to_owned(),
+        Some((_, Named::Folder)) | None => alone(),
+    }
 }
 
 /// Whether `folder`, outside the project, holds it: the project folder, as
