@@ -4,9 +4,11 @@
  * Such text can carry terminal escape sequences (colours, cursor moves, a
  * window title) and other control characters, which a page shows as
  * `[31m` or `]0;title` fragments, so output loses its sequences whole
- * (`withoutEscapes`). The text itself is never changed: what is stored, and
- * what the model reads, stay as written. The TUI reads such text the same
- * way.
+ * (`withoutEscapes`). An approval card is read for what will run, so nothing
+ * on it may be hidden or reordered: there the invisible characters show as
+ * codes such as `\u{1B}` instead (`literalParts`, `literalText`). Neither
+ * changes the text itself: what is stored, and what the model reads, stay as
+ * written. The TUI reads such text the same way.
  */
 
 const ESC = 0x1b;
@@ -137,4 +139,99 @@ export function withoutEscapes(text: string): string {
   let shown = "";
   for (const code of out) if (!control(code) || kept(code)) shown += String.fromCodePoint(code);
   return shown;
+}
+
+/**
+ * Whether an approval card shows the character at `code` as a code: a
+ * control character but tab and line feed (a carriage return always, also
+ * at the end of a line, where a shell keeps it in the word before it: `cd
+ * dist` then CR LF goes into a folder named `dist` and a carriage return),
+ * an invisible format character or another default-ignorable one, such as
+ * the direction marks, overrides and isolates that reorder what is shown
+ * and the zero-width spaces that hide a difference, and the line and
+ * paragraph separators. The zero-width joiner and non-joiner and the
+ * variation selectors of emoji and ideographs (U+FE00–U+FE0F,
+ * U+E0100–U+E01EF) stay, and so do the format characters that draw a
+ * visible sign (U+0600–U+0605, U+06DD): emoji and scripts need them.
+ */
+export function showsAsCode(code: number): boolean {
+  if (code < 0xad) return control(code) && code !== 0x09 && code !== 0x0a;
+  if (control(code)) return true;
+  return INVISIBLE.some(([from, to]) => code >= from && code <= to);
+}
+
+/** Invisible format and other default-ignorable code points, as inclusive
+ * ranges. */
+const INVISIBLE: ReadonlyArray<readonly [number, number]> = [
+  [0xad, 0xad],
+  [0x34f, 0x34f],
+  [0x61c, 0x61c],
+  [0x115f, 0x1160],
+  [0x17b4, 0x17b5],
+  [0x180b, 0x180f],
+  [0x200b, 0x200b],
+  [0x200e, 0x200f],
+  [0x2028, 0x202e],
+  [0x2060, 0x206f],
+  [0x3164, 0x3164],
+  [0xfeff, 0xfeff],
+  [0xffa0, 0xffa0],
+  [0xfff0, 0xfffb],
+  [0x13430, 0x1343f],
+  [0x1bca0, 0x1bca3],
+  [0x1d173, 0x1d17a],
+  [0xe0000, 0xe00ff],
+  [0xe01f0, 0xe0fff],
+];
+
+/** The flags of England, Scotland and Wales are a black flag followed by
+ * tag characters that spell the region and a cancel tag. Those tags draw the
+ * flag, so they stay; every other tag character is a code. */
+const BLACK_FLAG = 0x1f3f4;
+const FLAG_TAGS = [
+  "\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}",
+  "\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}",
+  "\u{e0067}\u{e0062}\u{e0077}\u{e006c}\u{e0073}\u{e007f}",
+];
+
+/** A character as a code a reader can see: `\u{1B}`. */
+const codeOf = (code: number) => `\\u{${code.toString(16).toUpperCase()}}`;
+
+/** `text` cut into what shows as written and the codes `showsAsCode` names,
+ * for a card that draws the codes quieter than the text around them. */
+export function literalParts(text: string): { text: string; code: boolean }[] {
+  let any = false;
+  for (const character of text)
+    if (showsAsCode(character.codePointAt(0)!)) {
+      any = true;
+      break;
+    }
+  if (!any) return [{ text, code: false }];
+  const parts: { text: string; code: boolean }[] = [];
+  let run = "";
+  for (let index = 0; index < text.length; ) {
+    const code = text.codePointAt(index)!;
+    const character = String.fromCodePoint(code);
+    index += character.length;
+    const tags = code === BLACK_FLAG ? FLAG_TAGS.find((tags) => text.startsWith(tags, index)) : undefined;
+    if (tags) {
+      run += character + tags;
+      index += tags.length;
+    } else if (!showsAsCode(code)) run += character;
+    else {
+      if (run) parts.push({ text: run, code: false });
+      run = "";
+      parts.push({ text: codeOf(code), code: true });
+    }
+  }
+  if (run) parts.push({ text: run, code: false });
+  return parts;
+}
+
+/** `text` with each character `showsAsCode` names written as its code, for
+ * places that take plain text (a row's target, a menu's detail line). */
+export function literalText(text: string): string {
+  return literalParts(text)
+    .map((part) => part.text)
+    .join("");
 }
