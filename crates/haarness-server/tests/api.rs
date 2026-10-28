@@ -9853,8 +9853,10 @@ async fn redirects_outside_the_workspace_ask_even_when_bash_is_allowed() {
     wait_pending_permissions(&runtime, 1).await;
     let pending = runtime.pending_permissions();
     assert_eq!(pending[0].permission, "external_directory");
+    // The temporary folder holds the project, so the ask names the file
+    // itself rather than everything beside the project.
     assert!(
-        pending[0].patterns[0].ends_with("/*"),
+        pending[0].patterns[0].ends_with("/haarness-extdir-target.txt"),
         "{:?}",
         pending[0].patterns
     );

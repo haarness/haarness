@@ -14509,6 +14509,32 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         }
         let mut plans = Vec::new();
         if !external_patterns.is_empty() {
+            // A folder that holds the project is asked about by the paths
+            // the line names in it.
+            let mut asked = Vec::new();
+            for folder in &external_patterns {
+                let named: Vec<_> = analysis
+                    .paths
+                    .iter()
+                    .filter(|named| named.outside.as_ref() == Some(folder))
+                    .collect();
+                let patterns = if named.is_empty() {
+                    vec![outside_pattern(workspace, folder, None)]
+                } else {
+                    named
+                        .iter()
+                        .map(|named| {
+                            outside_pattern(workspace, folder, Some((&named.path, named.file)))
+                        })
+                        .collect()
+                };
+                for pattern in patterns {
+                    if !asked.contains(&pattern) {
+                        asked.push(pattern);
+                    }
+                }
+            }
+            let external_patterns = asked;
             plans.push(AskPlan {
                 permission: "external_directory".into(),
                 patterns: external_patterns.clone(),
@@ -14546,6 +14572,11 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         let leads_outside =
             file_target.is_some_and(|target| crate::permissions::names_inside(workspace, target));
         for (pattern, path) in external_requests {
+            // A request names a file unless it asks about the path's own
+            // folder (a listing or a search of it).
+            let own = format!("{}/*", path.to_string_lossy().trim_end_matches(['/', '\\']));
+            let file = pattern != own;
+            let pattern = outside_pattern(workspace, &pattern, Some((&path, file)));
             if leads_outside {
                 resolved.push((pattern.clone(), path.to_string_lossy().into_owned()));
             }
@@ -15105,6 +15136,128 @@ mod shell_reading_tests {
     }
 
     #[test]
+    fn always_on_a_folder_that_holds_the_project_remembers_only_the_files_asked_about() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let made = std::env::temp_dir().join(format!("haarness-holding-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(made.join("home/work/app")).unwrap();
+        std::fs::create_dir_all(made.join("home/.ssh")).unwrap();
+        std::fs::create_dir_all(made.join("home/other")).unwrap();
+        std::fs::write(made.join("home/.gitconfig"), "[user]\n").unwrap();
+        let home = made.join("home").canonicalize().unwrap();
+        let project = home.join("work/app");
+        let file = |name: &str| home.join(name).display().to_string();
+        let folder = |name: &str| format!("{}/*", home.join(name).display());
+        let outside = |name: &str, arguments: serde_json::Value| {
+            ask_plans(name, &arguments, &project)
+                .into_iter()
+                .find(|plan| plan.permission == "external_directory")
+                .unwrap()
+        };
+        let bash = |command: &str| outside("bash", json!({ "command": command }));
+        // A file in a folder that holds the project is asked about, and
+        // remembered, by itself.
+        for plan in [
+            bash("cat ../../.gitconfig"),
+            bash("echo x >> ../../.gitconfig"),
+            outside("read", json!({ "path": file(".gitconfig") })),
+            outside("edit", json!({ "path": "../../.gitconfig" })),
+        ] {
+            assert_eq!(plan.patterns, vec![file(".gitconfig")]);
+            assert_eq!(
+                plan.always_rules(),
+                vec![format!("external_directory:{}", file(".gitconfig"))]
+            );
+        }
+        let two = bash("cp ../../.gitconfig ../../.zshrc ../../other/");
+        assert_eq!(
+            two.patterns,
+            vec![file(".gitconfig"), file(".zshrc"), folder("other")]
+        );
+        assert_eq!(two.always, two.patterns);
+        // What it remembers opens that file and nothing else beside the
+        // project: not `.ssh`, not another file.
+        let mut remembered = PermissionEngine::build_defaults();
+        for rule in bash("cat ../../.gitconfig").always_rules() {
+            remembered.add_grant(PermissionRule {
+                pattern: rule,
+                decision: Allow,
+            });
+        }
+        let verdict = |engine: &PermissionEngine, plan: &AskPlan| {
+            plan.patterns
+                .iter()
+                .map(|pattern| plan.evaluate(engine, pattern).decision)
+                .max_by_key(|decision| match decision {
+                    Allow => 0,
+                    Ask => 1,
+                    Deny => 2,
+                })
+                .unwrap()
+        };
+        assert_eq!(verdict(&remembered, &bash("cat ../../.gitconfig")), Allow);
+        for plan in [
+            bash("cat ../../.ssh/id_ed25519"),
+            bash("cat ../../.netrc"),
+            outside("read", json!({ "path": file(".ssh/id_ed25519") })),
+        ] {
+            assert_eq!(verdict(&remembered, &plan), Ask, "{:?}", plan.patterns);
+        }
+        // A folder that does not hold the project is remembered whole, as
+        // before.
+        let other = bash("cat ../../other/notes.txt");
+        assert_eq!(other.patterns, vec![folder("other")]);
+        assert_eq!(other.always, other.patterns);
+        // Named as a folder, or by a path with a dynamic part or a wildcard,
+        // it is the folder alone: remembered, that opens no file in it.
+        let itself = format!("{}/", home.display());
+        for plan in [
+            bash("cd ../.. && ls"),
+            bash("cat ../../$NAME"),
+            bash("cat '../../a*b'"),
+            outside("list", json!({ "path": home.display().to_string() })),
+            outside("grep", json!({ "pattern": "x", "path": "../.." })),
+        ] {
+            assert_eq!(plan.patterns, vec![itself.clone()]);
+            assert_eq!(plan.always, plan.patterns);
+        }
+        let mut folder_only = PermissionEngine::build_defaults();
+        folder_only.add_grant(PermissionRule {
+            pattern: format!("external_directory:{itself}"),
+            decision: Allow,
+        });
+        assert_eq!(verdict(&folder_only, &bash("cd ../.. && pwd")), Allow);
+        for plan in [
+            bash("cat ../../.gitconfig"),
+            bash("cat ../../.ssh/id_ed25519"),
+        ] {
+            assert_eq!(verdict(&folder_only, &plan), Ask, "{:?}", plan.patterns);
+        }
+        // A rule about the folder, or an Always an earlier version saved
+        // for it, still decides its files.
+        let whole = format!("external_directory:{}", home.join("*").display());
+        for decision in [Allow, Deny] {
+            let mut configured = PermissionEngine::build_defaults();
+            configured.add_rule(PermissionRule {
+                pattern: whole.clone(),
+                decision,
+            });
+            assert_eq!(
+                verdict(&configured, &bash("cat ../../.gitconfig")),
+                decision
+            );
+        }
+        let mut saved = PermissionEngine::build_defaults();
+        saved.add_grant(PermissionRule {
+            pattern: whole,
+            decision: Allow,
+        });
+        for plan in [bash("cat ../../.netrc"), bash("cd ../.. && ls")] {
+            assert_eq!(verdict(&saved, &plan), Allow, "{:?}", plan.patterns);
+        }
+        std::fs::remove_dir_all(&made).unwrap();
+    }
+
+    #[test]
     fn a_command_a_limit_stopped_reading_is_refused_by_a_deny_and_asked_by_an_ask() {
         use PermissionDecision::{Allow, Ask, Deny};
         let padded = format!("bash -c '{}rm x'", "true; ".repeat(300 * 1024 / 6));
@@ -15281,6 +15434,46 @@ fn external_path_request(
         directory.to_string_lossy().trim_end_matches(['/', '\\'])
     );
     Some((pattern, path))
+}
+
+/// The pattern an `external_directory` ask about `folder` (a glob such as
+/// `/home/me/*`) evaluates and Always remembers, for the path the call names
+/// there, when known, with whether it is a file. A folder that holds the
+/// project (`~` for `~/work/app`) is asked about by that path instead:
+/// remembering the folder would open everything in it, the project's
+/// neighbours (`~/.ssh`) included, for every later chat. A file is its own
+/// path; the folder itself, a path with a dynamic part (whose literal start
+/// names the folder) and a name with a wildcard are the folder alone
+/// (`/home/me/`), which a rule for the folder still meets but which reaches
+/// no file in it.
+fn outside_pattern(workspace: &Path, folder: &str, named: Option<(&Path, bool)>) -> String {
+    let Some(path) = folder
+        .strip_suffix("/*")
+        .map(|path| if path.is_empty() { "/" } else { path })
+        .map(Path::new)
+        .filter(|path| holds_project(workspace, path))
+    else {
+        return folder.to_owned();
+    };
+    named
+        .filter(|(_, file)| *file)
+        .map(|(file, _)| file.to_string_lossy().into_owned())
+        .filter(|file| !file.contains(['*', '?']))
+        .unwrap_or_else(|| format!("{}/", path.to_string_lossy().trim_end_matches(['/', '\\'])))
+}
+
+/// Whether `folder`, outside the project, holds it: the project folder, as
+/// written or where it really is, lies inside `folder`, as written or where
+/// it really is.
+fn holds_project(workspace: &Path, folder: &Path) -> bool {
+    let folders = [Some(folder.to_path_buf()), folder.canonicalize().ok()];
+    let projects = [Some(workspace.to_path_buf()), workspace.canonicalize().ok()];
+    folders.iter().flatten().any(|folder| {
+        projects
+            .iter()
+            .flatten()
+            .any(|project| project != folder && project.starts_with(folder))
+    })
 }
 
 fn external_path_requests(

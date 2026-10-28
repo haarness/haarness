@@ -21,17 +21,24 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
 8. sign_ins: a `cat`, `jq` or `read` of the data folder's `auth.json` asks a person every time, with no
    Always, also with `--yolo` and from a project that holds the data folder; a search of the folder
    leaves the file out, and a project's own `auth.json` reads as before.
+9. holding_always: through a server, Always on `cat ~/.gitconfig` from a project under the home folder
+   remembers that file alone (saved for the folder), and Always on `cd ~ && ls` the home folder alone, so
+   both run again without asking while `cat ~/.ssh/config` and `cat ~/.netrc` still ask.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
-toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins). No model is called; nothing outside the
-fixture is touched.
+toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins, holding_always). No model is
+called; nothing outside the fixture is touched.
 """
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.request
+import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -274,9 +281,114 @@ def case_sign_ins():
            'project holding it); a search leaves it out; the project\'s own auth.json reads as before')
 
 
+def connect(env, folder):
+    """The server of `folder`, started as Desktop starts it: its address and token."""
+    result = subprocess.run([str(BINARY), '--workspace', str(folder), 'desktop'], env=env, input='{"action":"connect"}',
+                            capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(result.stdout)
+
+
+def api(server, path, body=None):
+    request = urllib.request.Request(server['url'] + '/v1' + path,
+                                     data=None if body is None else json.dumps(body).encode(),
+                                     headers={'Authorization': 'Bearer ' + server['token'],
+                                              'Content-Type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=40) as response:
+        raw = response.read()
+        return json.loads(raw) if raw else None
+
+
+def until(predicate, label, timeout=45):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = predicate()
+        if found:
+            return found
+        time.sleep(.15)
+    raise AssertionError(label)
+
+
+def case_holding_always():
+    """Always on a file in a folder that holds the project remembers that file alone."""
+    _, env = environment('holding-always')
+    home = Path(env['HOME'])
+    folder = home / 'work' / 'app'
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'haarness.json').write_text(json.dumps({'model': 'echo/echo-1', **REVIEW}))
+    subprocess.run(['git', 'init', '-q', str(folder)], check=True)
+    (home / '.gitconfig').write_text('[user]\n\tname = Fixture\n')
+    (home / '.netrc').write_text('machine example.test\n')
+    (home / '.ssh').mkdir(exist_ok=True)
+    (home / '.ssh' / 'config').write_text('Host fixture\n')
+    real = home.resolve()
+    try:
+        server = connect(env, folder)
+        thread = api(server, '/threads', {'title': 'Holding folder proof', 'provider': 'echo', 'model': 'echo-1'})
+
+        def turn(command):
+            started = api(server, f'/threads/{thread["id"]}/turns',
+                          {'requestId': str(uuid.uuid4()), 'text': '!tool bash ' + json.dumps({'command': command})})
+            return started['id']
+
+        def asked():
+            return until(lambda: api(server, '/permissions'), 'no request came')
+
+        def finished(turn_id):
+            until(lambda: api(server, f'/turns/{turn_id}')['status'] not in ('running', 'queued'), 'turn did not end')
+            assert not api(server, '/permissions'), 'a request is still waiting'
+
+        def answer(request, decision):
+            api(server, f'/permissions/{request["permissionId"]}', {'decision': decision})
+
+        turn_id = turn('cat ~/.gitconfig')
+        request = asked()[0]
+        exact = str(real / '.gitconfig')
+        assert request['permission'] == 'external_directory', request
+        assert request['patterns'] == [exact], request
+        assert request['alwaysPatterns'] == [f'external_directory:{exact}'], request
+        assert request.get('allowAlways') is not False, request
+        answer(request, 'always_workspace')
+        finished(turn_id)
+        # The same file again runs without a question.
+        turn_id = turn('cat ~/.gitconfig')
+        time.sleep(1)
+        finished(turn_id)
+        # The folder itself is asked about, and remembered, alone.
+        turn_id = turn('cd ~ && ls -a')
+        request = asked()[0]
+        assert request['patterns'] == [f'{real}/'], request
+        assert request['alwaysPatterns'] == [f'external_directory:{real}/'], request
+        answer(request, 'always_workspace')
+        finished(turn_id)
+        turn_id = turn('cd ~ && ls -a')
+        time.sleep(1)
+        finished(turn_id)
+        # Every file beside the project not asked about still asks.
+        for command, pattern in [('cat ~/.ssh/config', str(real / '.ssh') + '/*'),
+                                 ('cat ~/.netrc', str(real / '.netrc'))]:
+            turn_id = turn(command)
+            request = asked()[0]
+            assert request['patterns'] == [pattern], (command, request)
+            answer(request, 'reject')
+            finished(turn_id)
+    finally:
+        stop(env, folder)
+    saved = set()
+    for database in (root / 'holding-always' / 'data').rglob('haarness.db'):
+        with sqlite3.connect(database) as db:
+            try:
+                saved |= {row[0] for row in db.execute('SELECT pattern FROM permission_rules')}
+            except sqlite3.OperationalError:
+                pass
+    assert saved == {f'external_directory:{real / ".gitconfig"}', f'external_directory:{real}/'}, saved
+    passed('Always on cat ~/.gitconfig from a project under the home folder saves that file alone, and on cd ~ '
+           'the folder alone; ~/.ssh/config and ~/.netrc still ask')
+
+
 CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
          'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev,
-         'action_case': case_action_case, 'sign_ins': case_sign_ins}
+         'action_case': case_action_case, 'sign_ins': case_sign_ins, 'holding_always': case_holding_always}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
