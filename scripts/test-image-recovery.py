@@ -9,7 +9,11 @@ prompt bytes; the TUI shows the notice. A chat with more screenshots than the
 provider takes in one request sends the newest: past Anthropic's 32 MB the
 oldest are noted before the request goes, in steps that keep the prompt
 prefix between them; a provider that refuses more than 20 images gets the
-newest after one refusal, and the TUI says the oldest are left out.
+newest after one refusal, and the TUI says the oldest are left out. Media
+past the 20 MiB a message carries (a PDF alone or two together, by path or
+inline) is refused before it is stored and the chat goes on; one stored
+that is over it now reaches the model as a note instead of failing every
+turn.
 """
 import base64
 import http.server
@@ -23,6 +27,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 import zlib
@@ -42,6 +47,7 @@ REJECT = 'REJECT_IMAGES'
 CAP_IMAGES = 'CAP_IMAGES'
 CAP_BYTES = 'CAP_BYTES'
 MOST_BYTES = 32 * 1024 * 1024
+MIB = 1024 * 1024
 
 
 def run(args, **kwargs):
@@ -116,6 +122,19 @@ def image_data(body):
                 if item.get('type') == 'image':
                     found.append(item['source']['data'])
     return found
+
+
+def documents(body):
+    """How many PDF document blocks a request carries."""
+    return sum(1 for message in body.get('messages', []) if isinstance(message.get('content'), list)
+               for block in message['content'] if block.get('type') == 'document')
+
+
+def sparse_pdf(path, size):
+    """A file of `size` bytes that starts like a PDF, without writing them all."""
+    with open(path, 'wb') as handle:
+        handle.write(b'%PDF-1.7\n')
+        handle.truncate(size)
 
 
 def first_text(body):
@@ -374,7 +393,50 @@ try:
                     'leftOut': left_out, 'retried': refused_round})
     print(f'PASS image count: the oldest {len(left_out)} left out, the newest reached the model', flush=True)
 
-    # 7. The TUI shows both notices in the transcript.
+    # 7. Media past the 20 MiB a message carries is refused before it is
+    # stored, so it never reaches the provider, and the chat goes on.
+    def refused(thread, text, attachments):
+        try:
+            api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': text, 'attachments': attachments})
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())['message']
+        raise AssertionError(f'{text!r} was admitted')
+    media = api('/threads', {'title': 'Large media', 'provider': 'anthropic', 'model': 'claude-sonnet-4-6'})['id']
+    scan = workspace / 'scan.pdf'
+    sparse_pdf(scan, 21 * MIB)
+    offset = len(REQUESTS)
+    status, message = refused(media, 'Summarise this scan', [str(scan)])
+    assert status == 400 and message.endswith('scan.pdf is 21 MiB, over the 20 MiB limit for media in one message'), message
+    inline = 'data:application/pdf;name=scan.pdf;base64,' + base64.b64encode(scan.read_bytes()).decode()
+    status, message = refused(media, 'Summarise this scan', [inline])
+    assert status == 400 and 'scan.pdf is 21 MiB' in message, message
+    first, second = workspace / 'part-1.pdf', workspace / 'part-2.pdf'
+    sparse_pdf(first, 12 * MIB)
+    sparse_pdf(second, 12 * MIB)
+    status, message = refused(media, 'Compare these', [str(first), str(second)])
+    assert status == 400 and message.endswith('The attachments come to 24 MiB, over the 20 MiB limit for media in one message'), message
+    assert len(REQUESTS) == offset, 'a refused message reached the provider'
+    state, sent = turn(media, 'Compare these', [str(first)])
+    assert state['status'] == 'completed' and len(sent) == 1 and documents(sent[0]) == 1, (state, len(sent))
+    results.append({'check': 'media over 20 MiB refused before it is stored, by path, inline and together',
+                    'refusal': message})
+    print('PASS large media: refused before it is stored, the chat goes on', flush=True)
+
+    # 8. A chat whose stored file is over the limit now (stored before the
+    # refusal existed, or grown since) sends a note instead, so its turns
+    # complete rather than all failing.
+    sparse_pdf(first, 21 * MIB)
+    state, sent = turn(media, 'And the second half?')
+    assert state['status'] == 'completed', state
+    assert len(sent) == 1 and documents(sent[0]) == 0, (len(sent), documents(sent[0]))
+    note = json.dumps(sent[0]['messages'])
+    assert f'[Attachment {first} left out' in note and 'over the 20 MiB limit for one message' in note, note[:2000]
+    state, sent = turn(media, 'Thanks')
+    assert state['status'] == 'completed' and len(sent) == 1, state
+    results.append({'check': 'a stored PDF over the limit becomes a note and the chat recovers'})
+    print('PASS broken chat recovers: a note instead of the PDF', flush=True)
+
+    # 9. The TUI shows both notices in the transcript.
     def pane(name):
         return run(['tmux', '-L', socket, 'capture-pane', '-p', '-J', '-S', '-200', '-t', name])
 

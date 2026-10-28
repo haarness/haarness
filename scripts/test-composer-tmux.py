@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The TUI's composer features in a real tmux pane, on the echo provider:
-long pastes (its own and Desktop's), slash commands shown as typed, and the
-thinking display (Compact, Show, Hide). Pane captures, with their colours,
-go to COMPOSER_TMUX_EVIDENCE."""
+long pastes (its own and Desktop's), slash commands shown as typed, the
+thinking display (Compact, Show, Hide), and a file over a message's media
+limit picked with @, refused with the draft kept. Pane captures, with their
+colours, go to COMPOSER_TMUX_EVIDENCE."""
 import json
 import os
 import shlex
@@ -201,6 +202,31 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
         keys("C-t")
         until(lambda: "Thinking display: Compact" in pane(), "Ctrl+T did not cycle back to Compact")
         checks.append("Thinking: one Thinking · <newest line> row, ▹ Thought for Ns that a click opens, Ctrl+T Compact → Show → Hide → Compact, kept across launches")
+
+        # A PDF over the 20 MiB a message carries, picked with @: the server
+        # refuses it in plain words, and the draft and its attachment stay.
+        drops = root / "drops"
+        drops.mkdir()
+        with open(drops / "scan.pdf", "wb") as handle:
+            handle.write(b"%PDF-1.7\n")
+            handle.truncate(21 * 1024 * 1024)
+
+        def items():
+            return [item for chat in api("/threads") for item in api(f"/threads/{chat['id']}/items")]
+
+        before = len(items())
+        text(f"Summarise @{drops}/scan")
+        until(lambda: "scan.pdf" in pane(), "the large PDF was not offered")
+        keys("Tab")
+        until(lambda: "scan.pdf" in composer() and "@" not in composer(), "the large PDF was not attached")
+        keys("Enter")
+        until(lambda: "scan.pdf is 21 MiB, over the 20 MiB" in pane(), "the refusal of the large PDF did not show")
+        screen("large-pdf-refused")
+        assert "Summarise" in composer() and "scan.pdf" in composer(), composer()
+        assert len(items()) == before, "a refused message was stored"
+        keys("C-u")
+        keys("BSpace")
+        checks.append("A 21 MiB PDF picked with @ is refused in plain words; the draft and its attachment stay")
         for check in checks:
             print("ok -", check)
         print(f"evidence: {EVIDENCE}")
