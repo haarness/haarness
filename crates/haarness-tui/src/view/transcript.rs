@@ -9,7 +9,7 @@
 use std::borrow::Cow;
 
 use haarness_opentui::{Line, Span, attr};
-use haarness_protocol::{FileDiff, FileDiffStatus, Item, ItemData};
+use haarness_protocol::{FileDiff, FileDiffStatus, Item, ItemData, ItemId};
 
 use crate::diff::{render_added, render_diff};
 use crate::markdown::render_markdown;
@@ -586,9 +586,37 @@ fn failed_exit(name: &str, metadata: &serde_json::Value) -> Option<i64> {
 /// line for the model; the row's status already says how the command ended.
 /// Colours, titles and other escape sequences a command or server wrote go
 /// whole, where the terminal would otherwise show their `[31m` remains; the
-/// model still reads the output as it was written.
-fn displayed_output<'a>(name: &str, output: &'a str, metadata: &serde_json::Value) -> Cow<'a, str> {
-    crate::escapes::without_escapes(without_exit_line(name, output, metadata))
+/// model still reads the output as it was written. Worked out once per
+/// result (`item`), as a row reads it several times a frame.
+fn shown_output<'a>(
+    app: &App,
+    item: ItemId,
+    name: &str,
+    output: &'a str,
+    metadata: &serde_json::Value,
+) -> Shown<'a> {
+    let tail = without_exit_line(name, output, metadata);
+    let cleaned = app.cached_shown_output(item, || match crate::escapes::without_escapes(tail) {
+        Cow::Borrowed(_) => None,
+        Cow::Owned(text) => Some(text.into()),
+    });
+    cleaned.map_or(Shown::Stored(tail), Shown::Cleaned)
+}
+
+/// [`shown_output`]: the stored text, or the cleaned copy kept for it.
+enum Shown<'a> {
+    Stored(&'a str),
+    Cleaned(std::rc::Rc<str>),
+}
+
+impl std::ops::Deref for Shown<'_> {
+    type Target = str;
+    fn deref(&self) -> &str {
+        match self {
+            Shown::Stored(text) => text,
+            Shown::Cleaned(text) => text,
+        }
+    }
 }
 
 fn without_exit_line<'a>(name: &str, output: &'a str, metadata: &serde_json::Value) -> &'a str {
@@ -636,14 +664,14 @@ fn has_mcp_app(result: &ItemData, servers: &[haarness_protocol::McpServerInfo]) 
 /// command that exited non-zero) stay visible, and so does the output of a
 /// command the person ran themselves; `/tools show` and per-row expansion
 /// reveal successful details.
-fn folds_into_call_row(app: &App, result: &ItemData) -> bool {
+fn folds_into_call_row(app: &App, result: &Item) -> bool {
     let ItemData::ToolResult {
         call_id,
         name,
         output,
         is_error,
         metadata,
-    } = result
+    } = &result.data
     else {
         return false;
     };
@@ -651,7 +679,7 @@ fn folds_into_call_row(app: &App, result: &ItemData) -> bool {
         && failed_exit(name, metadata).is_none()
         && !is_user_shell(call_id)
         && !app.tool_details
-        && (empty_result_label(&displayed_output(name, output, metadata)).is_none()
+        && (empty_result_label(&shown_output(app, result.id, name, output, metadata)).is_none()
             || file_diff_count(metadata) > 0)
 }
 
@@ -1122,9 +1150,9 @@ fn render_tool_result(
     };
     let theme = &app.theme;
     let failed = *is_error || failed_exit(name, metadata).is_some();
-    let folds = folds_into_call_row(app, &item.data);
-    let output = displayed_output(name, output, metadata);
-    let output = output.as_ref();
+    let folds = folds_into_call_row(app, item);
+    let output = shown_output(app, item.id, name, output, metadata);
+    let output: &str = &output;
 
     let expanded = app.expanded.contains(&item.id);
 
@@ -2131,7 +2159,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         format!("  ·  {total} {agents}")
                     }
                 };
-                let compact_result = result.filter(|item| folds_into_call_row(app, &item.data));
+                let compact_result = result.filter(|item| folds_into_call_row(app, item));
                 // Keep ordinary successful activity rows quiet: the tool name,
                 // primary argument, and status dot already communicate what
                 // happened, while the tagged row remains available to expand.
@@ -2156,8 +2184,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     if *is_error {
                         return String::new();
                     }
-                    let output = displayed_output(name, output, metadata);
-                    let output = output.as_ref();
+                    let output = shown_output(app, item.id, name, output, metadata);
+                    let output: &str = &output;
                     let (files, added, removed) =
                         app.cached_diff_stat(item.id, || file_diff_stat(metadata));
                     if files > 0 && compact_result.is_some() {

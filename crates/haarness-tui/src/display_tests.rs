@@ -378,3 +378,47 @@ fn a_patch_row_names_its_file_with_codes() {
     );
     assert!(!text.contains('\u{202e}'), "{text:?}");
 }
+
+/// A result's output is cleaned once and kept: the row reads the kept text
+/// on later frames rather than cleaning the stored output again.
+#[test]
+fn a_result_is_cleaned_once_and_read_from_then_on() {
+    let thread = fixture_thread();
+    let items = vec![
+        tool_call(
+            1,
+            &thread,
+            "run-1",
+            "bash",
+            serde_json::json!({"command": "make"}),
+        ),
+        tool_result(
+            2,
+            &thread,
+            "run-1",
+            "bash",
+            "exit: 1\n\u{1b}[31mbuild failed\u{1b}[39m",
+            false,
+            serde_json::json!({"exit": 1}),
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = false;
+    let text = frame_text(&app, (100, 20));
+    assert!(text.contains("build failed"), "{text}");
+    let id = app.items[1].id;
+    assert_eq!(
+        app.shown_outputs
+            .borrow()
+            .get(&id)
+            .cloned()
+            .flatten()
+            .as_deref(),
+        Some("build failed")
+    );
+    app.shown_outputs
+        .borrow_mut()
+        .insert(id, Some("kept from the first frame".into()));
+    let text = frame_text(&app, (100, 20));
+    assert!(text.contains("kept from the first frame"), "{text}");
+}
