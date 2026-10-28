@@ -4,6 +4,10 @@
 use std::{fs, path::Path, process::Command};
 
 fn haarness(root: &Path, args: &[&str]) -> std::process::Output {
+    haarness_with(root, args, &[])
+}
+
+fn haarness_with(root: &Path, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
     let home = root.join("home");
     Command::new(env!("CARGO_BIN_EXE_haarness"))
         .args([
@@ -24,6 +28,7 @@ fn haarness(root: &Path, args: &[&str]) -> std::process::Output {
         .env("HAARNESS_TELEMETRY", "0")
         .env("HAARNESS_CLOUD_API_URL", "http://127.0.0.1:9")
         .env("RUST_LOG", "warn")
+        .envs(env.iter().copied())
         .output()
         .unwrap()
 }
@@ -125,5 +130,52 @@ fn the_server_s_own_folder_is_narrowed_at_start_too() {
         .unwrap();
     let mode = fs::metadata(&server).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o700);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A schedule that is written but not registered
+/// (`HAARNESS_SCHEDULE_SKIP_INSTALL`) stays in the data root, and the run it
+/// defines carries the variable too: started natively by a test, it
+/// registers nothing either.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn the_run_of_an_unregistered_schedule_registers_nothing_either() {
+    let root = std::env::temp_dir().join(format!("haarness-schedule-{}", uuid::Uuid::now_v7()));
+    for folder in ["home", "workspace", "data"] {
+        fs::create_dir_all(root.join(folder)).unwrap();
+    }
+    let root = root.canonicalize().unwrap();
+    let output = haarness_with(
+        &root,
+        &[
+            "schedule",
+            "add",
+            "--name",
+            "fixture",
+            "--prompt",
+            "fixture",
+            "--model",
+            "echo/echo-1",
+            "--every",
+            "1h",
+        ],
+        &[("HAARNESS_SCHEDULE_SKIP_INSTALL", "1")],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let id = stdout.split_whitespace().next().unwrap();
+    let definition = if cfg!(target_os = "macos") {
+        format!("data/config/scheduler/launchd/dev.haarness.schedule.{id}.plist")
+    } else {
+        format!("data/config/scheduler/systemd/haarness-schedule-{id}.service")
+    };
+    let definition = fs::read_to_string(root.join(definition)).unwrap();
+    assert!(
+        definition.contains("HAARNESS_SCHEDULE_SKIP_INSTALL"),
+        "{definition}"
+    );
+    for folder in ["home/Library/LaunchAgents", "home/.config/systemd"] {
+        assert!(!root.join(folder).exists(), "{folder}");
+    }
     fs::remove_dir_all(root).unwrap();
 }

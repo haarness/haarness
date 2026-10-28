@@ -58,7 +58,8 @@ isolated install never shares the person's schedules. The native entry carries t
 it was created with (`HAARNESS_HOME`, `HAARNESS_DATA_DIR`, the `XDG_*` folders). `HAARNESS_HOME` and
 `HAARNESS_DATA_DIR` do not move the launchd and systemd folders, which the operating system reads.
 Setting `HAARNESS_SCHEDULE_SKIP_INSTALL=1` writes definitions without registering them with the
-operating system, and puts the launchd and systemd ones in `<config>/scheduler/launchd/` and
+operating system (the run a definition starts carries the variable too, so a run a test starts
+natively registers nothing either), and puts the launchd and systemd ones in `<config>/scheduler/launchd/` and
 `<config>/scheduler/systemd/` instead, where neither loads them at the next login. This is how the
 end-to-end scripts and the Desktop specs test schedules (`scripts/e2e_env.py`,
 `apps/desktop/playwright.config.ts` and `apps/desktop/e2e/fixtures/isolated-env.ts` set it); a spec
