@@ -26,6 +26,12 @@ shows comes from that server over REST and SSE, and quitting it never stops the 
   events into it, keeping events of the open chat and of its child agents.
 - `input/`: keys (`mod.rs`), the composer (`composer.rs`) and the mouse (`mouse.rs`). A key either
   changes state, runs a slash command or calls the API.
+- `file_search.rs`: the `@` list's file search, off the key path. Each edit of an `@` query asks the
+  server again and drops the search before it; the list shows the newest answer once it comes, while
+  the prompt still holds its query, so a slow server or a folder that does not answer never holds up
+  typing. Tab and Enter give the answer to what was just typed half a second to come before they
+  pick. A picked row is what the server said it is (a folder ends with `/`); the TUI never looks for
+  it on its own disk.
 - `view/`: frame composition (header, transcript, sidebar, menus, approval cards, composer), drawn into
   OpenTUI buffers. Hit regions recorded while drawing route mouse clicks.
 - `commands.rs`: the slash-command catalog and dispatch. `management.rs` renders the server-authored

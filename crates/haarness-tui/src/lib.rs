@@ -8,6 +8,7 @@ mod connect;
 mod diff;
 mod diffview;
 mod escapes;
+mod file_search;
 mod highlight;
 mod input;
 mod input_queue;
@@ -677,6 +678,8 @@ async fn run_with_client(
     // and messages that mention some, sent off the loop while they are read.
     let (resources_tx, mut resources_rx) = tokio::sync::mpsc::channel(16);
     app.resources_tx = Some(resources_tx);
+    // The `@` list's file search answers off the key path too.
+    app.file_search.background = true;
     let (sends_tx, mut sends_rx) = tokio::sync::mpsc::channel(4);
     app.sends_tx = Some(sends_tx.clone());
     // Side chat answers being written, applied as they arrive.
@@ -728,6 +731,7 @@ async fn run_with_client(
                     app.resources_tx = Some(sender);
                     app.sends_tx = Some(sends_tx.clone());
                     app.side.sender = Some(side_tx.clone());
+                    app.file_search.background = true;
                     force_redraw = true;
                 }
                 Err(error) => {
@@ -1093,6 +1097,9 @@ async fn run_with_client(
             Some(message) = side_rx.recv() => app.side_message(message),
             Some(version) = update_rx.recv() => app.update_available = Some(version),
             Some(update) = resources_rx.recv() => app.resources_arrived(update),
+            (query, files) = app.file_search.answer(), if app.file_search.is_pending() => {
+                app.files_found(&query, files);
+            },
             Some(sent) = sends_rx.recv() => app.mentions_sent(sent, Some(&client)).await,
             Some(listed) = catalog_rx.recv() => {
                 match listed {
