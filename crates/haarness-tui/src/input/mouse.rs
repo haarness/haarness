@@ -355,7 +355,7 @@ async fn activate_menu_row(app: &mut App, index: usize, client: &ApiClient) -> R
         return Ok(AppAction::Continue);
     }
     if crate::input::apply_mention(app, client) {
-        crate::input::refresh_mentions(app, client).await;
+        crate::input::refresh_mentions(app, client);
     }
     Ok(AppAction::Continue)
 }

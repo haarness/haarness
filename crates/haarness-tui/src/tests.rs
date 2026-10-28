@@ -21582,7 +21582,8 @@ async fn at_mentions_complete_subagents_and_attach_a_delegation() {
     );
     let client = offline_client();
     app.composer.set_text("@ex".into());
-    crate::input::refresh_mentions(&mut app, &client).await;
+    crate::input::refresh_mentions(&mut app, &client);
+    crate::file_search::answered(&mut app, &client).await;
     assert_eq!(
         app.mention_suggestions,
         vec!["agent://explore".to_owned(), "agent://expert".to_owned()],
