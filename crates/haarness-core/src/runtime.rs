@@ -1784,18 +1784,14 @@ impl AgentRuntime {
 
     /// Whom hooks about chat `thread` run for outside a turn: the chat,
     /// `agent` when one acts, and its own folder when it has one. Nothing is
-    /// made for them: a folder that is gone, or that a link stands in for, is
-    /// left out, and they run in the project folder as before.
+    /// made for them: a folder that a link stands in for is left out, and
+    /// one that is gone is left to the hooks, which then run in the project
+    /// folder, as they do when it goes during a turn.
     async fn hook_call(&self, thread: &Thread, agent: Option<&str>) -> crate::HookCall {
-        let mut folder = None;
-        if thread.directory.is_some()
-            && let Ok(found) = self.thread_workspace(thread, FolderAccess::Read).await
-            && tokio::fs::metadata(&found)
-                .await
-                .is_ok_and(|found| found.is_dir())
-        {
-            folder = Some(found);
-        }
+        let folder = match thread.directory {
+            Some(_) => self.thread_workspace(thread, FolderAccess::Read).await.ok(),
+            None => None,
+        };
         crate::HookCall {
             thread: thread.id,
             agent: agent.map(str::to_owned),

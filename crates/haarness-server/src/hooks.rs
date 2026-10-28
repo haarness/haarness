@@ -175,21 +175,30 @@ impl ConfiguredHooks {
     /// and get the server's project folder, where its hook scripts are,
     /// except on the chat home, where a chat's folder is its only project.
     /// Neither keeps Windows' `\\?\` prefix, which a hook would read as part
-    /// of the path.
+    /// of the path. A chat's folder that is gone (deleted while a turn runs)
+    /// cannot hold a hook, which then runs in the project folder rather than
+    /// not at all: a guard that cannot start would let everything through.
     fn folders<'a>(&'a self, call: Option<&'a HookCall>) -> Folders<'a> {
         let project = dunce::simplified(&self.workspace);
+        let in_project = Folders {
+            cwd: project,
+            project,
+            chat_folder_gone: false,
+        };
         match call.and_then(|call| Some((call.folder.as_deref()?, call.folder_is_project))) {
+            Some((folder, _)) if !folder.is_dir() => Folders {
+                chat_folder_gone: true,
+                ..in_project
+            },
             Some((folder, folder_is_project)) => {
                 let cwd = dunce::simplified(folder);
                 Folders {
                     cwd,
                     project: if folder_is_project { cwd } else { project },
+                    chat_folder_gone: false,
                 }
             }
-            None => Folders {
-                cwd: project,
-                project,
-            },
+            None => in_project,
         }
     }
 
@@ -220,6 +229,15 @@ impl ConfiguredHooks {
                 .env("CLAUDE_PLUGIN_DATA", root.join(".data"));
         }
         let label = HookLabel::new(entry, payload);
+        if folders.chat_folder_gone {
+            tracing::warn!(
+                event = %label.event,
+                session = label.session.as_deref(),
+                tool = label.tool.as_deref(),
+                program = %label.program,
+                "hook ran in the project folder: its chat's folder is gone"
+            );
+        }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -654,6 +672,8 @@ fn is_after_tool(event: &str) -> bool {
 struct Folders<'a> {
     cwd: &'a Path,
     project: &'a Path,
+    /// The chat's own folder was gone, so `cwd` is the project folder.
+    chat_folder_gone: bool,
 }
 
 #[derive(Default)]
@@ -2632,20 +2652,70 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn hooks_get_their_folders_without_the_verbatim_prefix() {
-        let hooks = ConfiguredHooks::new(Vec::new(), PathBuf::from(r"\\?\C:\Chat folders"));
+        let made =
+            std::env::temp_dir().join(format!("haarness-hook-verbatim-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(made.join("2026-10-28").join("notes")).unwrap();
+        // std's canonical form, as the chat folders are kept, is verbatim.
+        let project = made.canonicalize().unwrap();
+        let folder = project.join("2026-10-28").join("notes");
+        assert!(folder.to_string_lossy().starts_with(r"\\?\"), "{folder:?}");
+        let hooks = ConfiguredHooks::new(Vec::new(), project.clone());
         let mut call = HookCall {
-            folder: Some(PathBuf::from(r"\\?\C:\Chat folders\2026-10-28\notes")),
+            folder: Some(folder.clone()),
             ..HookCall::new(ThreadId::new())
         };
+        let plain = |path: &Path| dunce::simplified(path).to_path_buf();
         let folders = hooks.folders(Some(&call));
-        assert_eq!(folders.cwd, Path::new(r"C:\Chat folders\2026-10-28\notes"));
-        assert_eq!(folders.project, Path::new(r"C:\Chat folders"));
+        assert_eq!(folders.cwd, plain(&folder));
+        assert_eq!(folders.project, plain(&project));
         call.folder_is_project = true;
-        assert_eq!(
-            hooks.folders(Some(&call)).project,
-            Path::new(r"C:\Chat folders\2026-10-28\notes")
+        assert_eq!(hooks.folders(Some(&call)).project, plain(&folder));
+        assert_eq!(hooks.folders(None).cwd, plain(&project));
+        for path in [folders.cwd, folders.project] {
+            assert!(!path.to_string_lossy().starts_with(r"\\?\"), "{path:?}");
+        }
+        std::fs::remove_dir_all(&made).unwrap();
+    }
+
+    /// A chat's folder that is gone when a hook starts (deleted while a turn
+    /// runs) leaves the hook to run in the project folder, which its `cwd`
+    /// names, so a guard still guards; the log says why.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_whose_chat_folder_is_gone_runs_in_the_project_folder() {
+        let (capture, _guard) = Capture::install();
+        let root = std::env::temp_dir().join(format!(
+            "haarness-hook-gone-folder-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let (project, log) = (root.join("home"), root.join("guard.log"));
+        let guard = format!(
+            r#"printf '%s|' "$(pwd -P)" >> '{log}'; cat >> '{log}'; echo 'guard: no writes' >&2; exit 2"#,
+            log = log.display()
         );
-        assert_eq!(hooks.folders(None).cwd, Path::new(r"C:\Chat folders"));
+        let hooks = ConfiguredHooks::new(
+            ConfiguredHooks::parse_block(&json!({"PreToolUse": [{"hooks": [{"command": guard}]}]})),
+            project.clone(),
+        );
+        let call = HookCall {
+            folder: Some(project.join("2026-10-28/gone")),
+            ..HookCall::new(ThreadId::new())
+        };
+        let decision = hooks
+            .pre_tool_use(&call, "write", &json!({"path": "notes.md"}))
+            .await;
+        let written = std::fs::read_to_string(&log).unwrap_or_default();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(decision.block.as_deref(), Some("guard: no writes"));
+        let (ran_in, payload) = written.trim_end().split_once('|').expect("the guard ran");
+        let payload: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(ran_in, project.display().to_string());
+        assert_eq!(payload["cwd"], json!(project));
+        let moved = capture.matching("hook ran in the project folder: its chat's folder is gone");
+        assert_eq!(moved.len(), 1, "{:?}", capture.lines());
+        assert!(moved[0].starts_with("WARN ") && moved[0].contains(" event=PreToolUse"));
     }
 
     fn entry(command: &str, args: &[&str], shell: Option<&str>) -> HookEntry {
