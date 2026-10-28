@@ -38,6 +38,11 @@ use haarness_tui::api::{ApiClient, SubscriptionEvent};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+/// How long setting a session up waits for one of its MCP servers to start
+/// before leaving the rest of that start to the server (see
+/// `Service::start_mcp`).
+const MCP_START_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub struct Config {
     pub client: ApiClient,
     pub workspace: PathBuf,
@@ -455,17 +460,49 @@ impl Service {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(name.clone());
-            if fresh {
-                if let Err(error) = self.client.configure_mcp(&name, &config).await {
-                    self.mcp
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .remove(&name);
-                    return Err(internal(error));
-                }
+            if fresh && let Err(error) = self.start_mcp(&name, &config).await {
+                self.mcp
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&name);
+                // A server that did not start stays stopped: an editor
+                // retrying the session configures it again under the new
+                // chat's name, and this one would serve every chat.
+                let _ = self.client.disconnect_mcp(&name).await;
+                return Err(internal(error));
             }
         }
         Ok(())
+    }
+
+    /// Configure `name` and wait for its start for a moment at most. A
+    /// server still starting then (a first `npx -y` download) is configured
+    /// as far as the session is concerned: its start goes on on the server,
+    /// and the session's first prompt waits for it.
+    async fn start_mcp(&self, name: &str, config: &McpConfigureRequest) -> Result<()> {
+        match tokio::time::timeout(MCP_START_WAIT, self.client.configure_mcp(name, config)).await {
+            Ok(configured) => configured.map(drop),
+            Err(_) => {
+                let servers = self.client.mcp().await?;
+                match servers.iter().find(|server| server.name == name) {
+                    Some(server)
+                        if matches!(server.status.as_str(), "connecting" | "connected") =>
+                    {
+                        Ok(())
+                    }
+                    Some(server) => anyhow::bail!(
+                        "MCP server {name} did not start ({}{})",
+                        server.status,
+                        server
+                            .detail
+                            .as_deref()
+                            .map(|detail| format!(": {detail}"))
+                            .unwrap_or_default()
+                    ),
+                    None => anyhow::bail!("MCP server {name} was not configured"),
+                }
+            }
+        }
     }
 
     /// The client's request for `asked`. The answer arrives through the

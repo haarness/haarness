@@ -1003,3 +1003,98 @@ async fn a_prompt_a_hook_blocks_is_refused_with_the_hooks_reason() {
     assert!(status.success(), "Haarness ACP process failed");
     daemon_guard.stop().await;
 }
+
+/// `python3` as an absolute path: ACP takes a stdio server's command as one.
+fn python3() -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|folder| folder.join("python3"))
+        .find(|path| path.is_file())
+        .expect("python3 on PATH")
+}
+
+/// An editor's session with an MCP server slow to start (a first `npx -y`
+/// download) is set up at once rather than failing when the editor stops
+/// waiting: the server goes on starting and the first prompt waits for it.
+/// One that cannot start fails the session and is left stopped, so an editor
+/// retrying it does not leave a server behind for every chat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_with_a_server_slow_to_start_is_set_up_at_once() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, _) =
+        acp_session(&directory).await;
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../haarness-mcp/tests/fixtures/recovery.py"
+    );
+    let server = |name: &str, command: PathBuf, delay: &str| {
+        json!({"name": name, "command": command, "args": [fixture],
+               "env": [{"name": "INIT_DELAY", "value": delay},
+                       {"name": "CALL_LOG", "value": directory.0.join("calls")}]})
+    };
+    let started = std::time::Instant::now();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":10, "method":"session/new",
+               "params":{"cwd":workspace, "mcpServers":[server("slow", python3(), "6")]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let created = receive_response(&mut lines, &mut stdin, 10, &mut messages).await;
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_secs(5),
+        "session/new took {waited:?}"
+    );
+    let session = created["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{created}"))
+        .to_owned();
+    let tool = format!("mcp__acp-{}-slow__ping", &session[..8]);
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":11, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":format!("!tool {tool} {{}}")}]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let answered = receive_response(&mut lines, &mut stdin, 11, &mut messages).await;
+    assert_eq!(answered["result"]["stopReason"], "end_turn", "{answered}");
+    assert!(
+        messages
+            .iter()
+            .filter_map(|message| update_text(message, "agent_message_chunk"))
+            .any(|text| text == format!("Tool {tool} => pong")),
+        "the first prompt did not get the server's tool: {messages:?}"
+    );
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":12, "method":"session/new",
+               "params":{"cwd":workspace,
+                         "mcpServers":[server("broken", PathBuf::from("/usr/bin/false"), "0")]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let refused = receive_response(&mut lines, &mut stdin, 12, &mut messages).await;
+    assert!(refused.get("error").is_some(), "{refused}");
+    let listed = base_command(&workspace, &data, &directory.0.join("home"))
+        .args(["mcp", "list"])
+        .output()
+        .await
+        .expect("list MCP servers");
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    let broken = listed
+        .lines()
+        .find(|line| line.contains("-broken\t"))
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert!(broken.contains("\tdisconnected"), "{broken}");
+
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    daemon_guard.stop().await;
+}

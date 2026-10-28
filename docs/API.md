@@ -274,8 +274,10 @@ so a script's first message is offered the tools a later one would be; Stop
 ends the wait, and a turn begun once those starts ended never waits. A
 request to such a server (its tools, a tool call, a resource or prompt
 request) waits for it too. A server configured through `POST /v1/mcp/{name}`
-(as an editor's ACP session does) is on such a start as well. Every start
-runs on its own: a client that gives up on
+(as an editor's ACP session does) is on such a start as well; ACP takes a
+server still starting after 2 seconds as configured, so the session is set
+up at once and its first prompt waits for the server, and leaves one that
+failed disconnected. Every start runs on its own: a client that gives up on
 `configure` or `reconnect` leaves it running. A `reconnect` during a start
 that has run less than 30 seconds waits for that start instead of beginning
 another; one that has run longer may be hung, so `reconnect` stops it and
