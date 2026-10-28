@@ -445,7 +445,9 @@ pub fn resource_roots(
 }
 
 /// [`resource_roots`], each with whether it is one of the project's own
-/// folders rather than the person's.
+/// folders rather than the person's. A project folder that is the home
+/// folder (a project, or a Git repository of dotfiles, at `~`) lists the
+/// person's folders again: they stay the person's.
 pub fn resource_roots_scoped(
     config: &Path,
     home: Option<&Path>,
@@ -461,9 +463,22 @@ pub fn resource_roots_scoped(
         .into_iter()
         .filter(|_| project_config)
     {
-        roots.extend([".opencode", ".haarness"].map(|name| (directory.join(name), true)));
+        for name in [".opencode", ".haarness"] {
+            let root = directory.join(name);
+            let project = !persons_folder(&roots, &root);
+            roots.push((root, project));
+        }
     }
     roots
+}
+
+/// Whether `folder` is one of `listed` that is the person's, as written or
+/// where it really is.
+pub(crate) fn persons_folder(listed: &[(PathBuf, bool)], folder: &Path) -> bool {
+    let real = folder.canonicalize().ok();
+    listed.iter().any(|(known, project)| {
+        !project && (known == folder || real.is_some() && known.canonicalize().ok() == real)
+    })
 }
 
 #[cfg(test)]

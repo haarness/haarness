@@ -267,11 +267,18 @@ pub fn load_layers_with_system(
             }
         }
     }
-    // A project's own local plugins, whose agents are the project's.
+    // A project's own local plugins, whose agents are the project's (not
+    // those in the person's `~/.haarness` when a project folder is home).
+    let persons: Vec<(PathBuf, bool)> = home
+        .map(|home| (home.join(".haarness"), false))
+        .into_iter()
+        .collect();
     let project_plugins: Vec<PathBuf> = crate::layout::project_directories(workspace)
         .into_iter()
         .filter(|_| trust)
-        .map(|directory| directory.join(".haarness/plugins"))
+        .map(|directory| directory.join(".haarness"))
+        .filter(|folder| !crate::layout::persons_folder(&persons, folder))
+        .map(|folder| folder.join("plugins"))
         .collect();
     for root in plugin_roots {
         let plugin = plugin_name(root);
@@ -526,7 +533,8 @@ pub fn system_definitions(
 }
 
 /// `~/.claude` and every project `.claude` directory (worktree root first),
-/// each with whether it is the project's.
+/// each with whether it is the project's: `~/.claude` stays the person's
+/// when a project folder is the home folder.
 fn claude_directories(home: Option<&Path>, workspace: &Path, trust: bool) -> Vec<(PathBuf, bool)> {
     let mut directories = Vec::new();
     if let Some(home) = home {
@@ -536,7 +544,9 @@ fn claude_directories(home: Option<&Path>, workspace: &Path, trust: bool) -> Vec
         .into_iter()
         .filter(|_| trust)
     {
-        directories.push((directory.join(".claude"), true));
+        let folder = directory.join(".claude");
+        let project = !crate::layout::persons_folder(&directories, &folder);
+        directories.push((folder, project));
     }
     directories
 }
@@ -3898,6 +3908,73 @@ mod tests {
             custom.apply_permissions(&mut engine);
         }
         engine.evaluate(operation)
+    }
+
+    #[test]
+    fn the_persons_agents_stay_theirs_when_a_project_folder_is_the_home_folder() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-home-agents-{}", uuid::Uuid::now_v7()));
+        let config = root.join("config");
+        let home = root.join("home");
+        let app = home.join("work/app");
+        for dir in [
+            config.clone(),
+            home.join(".git"),
+            home.join(".claude/agents"),
+            home.join(".haarness/agents"),
+            home.join(".opencode/agents"),
+            home.join(".haarness/plugins/kit/agents"),
+            app.join(".haarness/agents"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(
+            config.join("haarness.json"),
+            r#"{"compatibility":{"claude_code":{"agents":true}},"permission":{"bash":{"rm *":"deny"}}}"#,
+        )
+        .unwrap();
+        let agent = "---\npermission: {\"bash\":{\"rm *\":\"allow\"}}\n---\nClean.";
+        for (folder, name) in [
+            (home.join(".claude/agents"), "cleaner"),
+            (home.join(".haarness/agents"), "sweeper"),
+            (home.join(".opencode/agents"), "opener"),
+            (home.join(".haarness/plugins/kit/agents"), "kept"),
+            (app.join(".haarness/agents"), "cloned"),
+        ] {
+            fs::write(folder.join(format!("{name}.md")), agent).unwrap();
+        }
+        let plugins = [home.join(".haarness/plugins/kit")];
+        // A Git repository of dotfiles at the home folder, and a project at
+        // the home folder itself.
+        for (workspace, cloned) in [(&app, true), (&home, false)] {
+            let layers = load_layers(&config, Some(&home), workspace, true, &plugins);
+            assert!(layers.errors.is_empty(), "{:?}", layers.errors);
+            for name in ["cleaner", "sweeper", "opener", "kit:kept"] {
+                let agent = layers
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == name)
+                    .unwrap_or_else(|| panic!("{name} not loaded"));
+                assert!(!agent.project, "{name} in {}", workspace.display());
+                assert_eq!(
+                    decide(&layers, Some(name), "bash:rm -rf x"),
+                    PermissionDecision::Allow,
+                    "{name} in {}",
+                    workspace.display()
+                );
+            }
+            if cloned {
+                assert_eq!(
+                    decide(&layers, Some("cloned"), "bash:rm -rf x"),
+                    PermissionDecision::Deny
+                );
+            }
+            assert_eq!(
+                decide(&layers, None, "bash:rm -rf x"),
+                PermissionDecision::Deny
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
