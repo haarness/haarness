@@ -3,36 +3,42 @@
 //! shown when it comes, and only while the prompt still holds the query it
 //! answers. A search that is slow or never answers (a folder on an offline
 //! network volume, a server far off or busy) never holds up typing: the list
-//! shows the last answer until a newer one comes. Before the first, it
-//! shows the agents that match the query typed, or nothing (rather than
-//! "No matches").
+//! shows the last answer until a newer one comes ("No matches" included).
+//! Before the first answer for an `@`, it shows the agents that match the
+//! query typed, or nothing (rather than "No matches").
 //!
 //! Tab and Enter pick only from rows that answer the query typed. Pressed
 //! while that answer is on its way, the key is held and handled as soon as
 //! the answer is shown, as if it had come at once; what is typed meanwhile
-//! waits behind it and follows in order. Esc or a click lets the held key
-//! go, as does a wait past [`QUEUED_AT_MOST`] once something waits behind
-//! it. Up, Down and Esc treat the list as open while its files are on their
-//! way.
+//! waits behind it and follows in order. Esc, Ctrl+C or a click lets the
+//! held key go, as does a search that fails and a wait past
+//! [`QUEUED_AT_MOST`] once something waits behind it. Up, Down and Esc treat
+//! the list as open while its files are on their way.
 use crate::{api::ApiClient, state::App};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
 /// How long what is typed behind a held Tab or Enter waits for it; then the
-/// held key is let go and what was typed is handled.
-const QUEUED_AT_MOST: Duration = Duration::from_secs(2);
+/// held key is let go and what was typed is handled. Room for a path
+/// completion that takes its full time (a folder, then its links) over a
+/// slow connection.
+const QUEUED_AT_MOST: Duration = Duration::from_secs(4);
 
 /// The search on its way, if any, what the list shows, and a held key.
 #[derive(Default)]
 pub(crate) struct FileSearch {
-    /// The `@` query asked about, and the task asking.
-    pending: Option<(String, JoinHandle<Vec<String>>)>,
+    /// The `@` query asked about, and the task asking: no files when the
+    /// search failed.
+    pending: Option<(String, JoinHandle<Option<Vec<String>>>)>,
     /// The `@` query the rows of the list answer.
     shown: Option<String>,
     /// The list shows only the agents that match while the first answer is
     /// on its way: each edit shows those of the query typed.
     agents_only: bool,
+    /// The last answer for this `@` had no rows: its "No matches" stays
+    /// until the next one comes.
+    no_matches: bool,
     /// A Tab or Enter pressed while the answer to the query typed was on its
     /// way, handled once it is shown.
     held: Option<KeyEvent>,
@@ -63,14 +69,26 @@ impl FileSearch {
         }
     }
 
-    /// The query and files of the search on its way, once it answers;
-    /// never while none is on its way. Dropped before then, the search goes
-    /// on.
-    pub(crate) async fn answer(&mut self) -> (String, Vec<String>) {
+    /// The list closed: the next `@` starts afresh.
+    pub(crate) fn closed(&mut self) {
+        self.stop();
+        self.no_matches = false;
+    }
+
+    /// Whether the list draws nothing for now: it has no rows, and the first
+    /// answer for this `@` is on its way.
+    pub(crate) fn waiting_for_first_answer(&self, rows: usize) -> bool {
+        rows == 0 && self.is_pending() && !self.no_matches
+    }
+
+    /// The query and files of the search on its way, once it answers (no
+    /// files when it failed); never while none is on its way. Dropped
+    /// before then, the search goes on.
+    pub(crate) async fn answer(&mut self) -> (String, Option<Vec<String>>) {
         let Some((_, task)) = &mut self.pending else {
             return std::future::pending().await;
         };
-        let files = task.await.unwrap_or_default();
+        let files = task.await.ok().flatten();
         let query = self
             .pending
             .take()
@@ -80,9 +98,9 @@ impl FileSearch {
     }
 
     /// Every terminal event passes here first. Without a held key it is
-    /// handled now. Behind one, a key or a paste waits; Esc or a click lets
-    /// the held key go and comes after what waited; anything else (a
-    /// resize, the pointer moving) is handled now.
+    /// handled now. Behind one, a key or a paste waits; Esc, Ctrl+C or a
+    /// click lets the held key go and comes after what waited; anything else
+    /// (a resize, the pointer moving) is handled now.
     pub(crate) fn pass(&mut self, event: Event) -> Pass {
         if self.held.is_none() {
             return Pass::Now(event);
@@ -92,7 +110,13 @@ impl FileSearch {
         }
         match &event {
             Event::Key(key) if key.kind == KeyEventKind::Release => Pass::Now(event),
-            Event::Key(key) if key.code == KeyCode::Esc => Pass::Later(self.let_go(Some(event))),
+            Event::Key(key)
+                if key.code == KeyCode::Esc
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)) =>
+            {
+                Pass::Later(self.let_go(Some(event)))
+            }
             Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(_)) => {
                 Pass::Later(self.let_go(Some(event)))
             }
@@ -136,7 +160,7 @@ pub(crate) fn search(app: &mut App, client: &ApiClient, query: String) {
     let asking = {
         let client = client.clone();
         let path = path.to_owned();
-        async move { client.search_files(&path, 8).await.unwrap_or_default() }
+        async move { client.search_files(&path, 8).await.ok() }
     };
     app.file_search.stop();
     app.selection = 0;
@@ -218,6 +242,7 @@ impl App {
         // MCP resources follow agents and files, so a server with many
         // never pushes files down.
         suggestions.extend(crate::resource_mentions::suggestions(self, query));
+        self.file_search.no_matches = suggestions.is_empty();
         self.mention_suggestions = suggestions;
         self.file_search.shown = Some(query.to_owned());
         self.file_search.agents_only = false;
@@ -226,12 +251,16 @@ impl App {
         self.select_wanted();
     }
 
-    /// A search off the key path answered `query` with `files`: shown while
-    /// the prompt still holds that query. Returns what the event loop
-    /// handles next, in order: the Tab or Enter held for this answer, when it
-    /// was shown, then what was typed behind it. A row the person moved to
-    /// since stays highlighted where the new list puts it.
-    pub(crate) fn files_found(&mut self, query: &str, files: Vec<String>) -> Vec<Event> {
+    /// A search off the key path answered `query` with `files` (none when
+    /// it failed): shown while the prompt still holds that query. Returns
+    /// what the event loop handles next, in order: the Tab or Enter held for
+    /// this answer, when it was shown and the search did not fail (a send or
+    /// an agent switch must never land long after the press), then what was
+    /// typed behind it. A row the person moved to since stays highlighted
+    /// where the new list puts it.
+    pub(crate) fn files_found(&mut self, query: &str, files: Option<Vec<String>>) -> Vec<Event> {
+        let failed = files.is_none();
+        let files = files.unwrap_or_default();
         let shown = !self.shell_mode
             && !self.composer.text().starts_with('/')
             && self
@@ -254,7 +283,10 @@ impl App {
         // Only to the prompt it was pressed in: never to a dialog or an
         // approval card that took the keyboard since.
         let held = self.file_search.held.take().filter(|_| {
-            shown && matches!(self.overlay, crate::state::Overlay::None) && !self.permission_focus
+            shown
+                && !failed
+                && matches!(self.overlay, crate::state::Overlay::None)
+                && !self.permission_focus
         });
         let mut next: Vec<Event> = held.map(Event::Key).into_iter().collect();
         next.extend(self.file_search.let_go(None));
@@ -354,10 +386,10 @@ mod tests {
     }
 
     /// A server whose file search answers a query `./x…` with the folders
-    /// `./x…/` and `./x-other/` only after [`SLOW`], `none` with no files,
-    /// never a query holding `slow`, and any other at once with
-    /// `<query>.md`; that starts a turn when asked to; and that answers
-    /// anything else with `[]`.
+    /// `./x…/` and `./x-other/` only after [`SLOW`], `none…` with no files,
+    /// `fail…` not at all (it closes the connection), never a query holding
+    /// `slow`, and any other at once with `<query>.md`; that starts a turn
+    /// when asked to; and that answers anything else with `[]`.
     async fn searching() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -400,7 +432,9 @@ mod tests {
                             tokio::time::sleep(SLOW).await;
                             format!(r#"["{query}/", "./x-other/"]"#)
                         }
-                        Some("none") => "[]".to_owned(),
+                        Some(query) if query.starts_with("none") => "[]".to_owned(),
+                        // The search fails: the connection closes unanswered.
+                        Some(query) if query.starts_with("fail") => return,
                         Some(query) => format!(r#"["{query}.md"]"#),
                         None if text.starts_with("POST /v1/threads/")
                             && text.contains("/turns ") =>
@@ -602,6 +636,62 @@ mod tests {
         assert!(app.file_search.held.is_none());
     }
 
+    /// Ctrl+C lets a held Tab go at once, as Esc does: what was typed
+    /// before it still comes, then the draft is cleared.
+    #[tokio::test]
+    async fn ctrl_c_lets_a_held_tab_go() {
+        let mut app = app();
+        let client = ApiClient::new(&searching().await, "token").unwrap();
+        typed(&mut app, &client, "@./xa").await;
+        press(&mut app, &client, KeyCode::Tab).await;
+        typed(&mut app, &client, "b").await;
+        let cancel = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        handle(&mut app, &client, vec![Event::Key(cancel)]).await;
+        assert!(app.file_search.held.is_none());
+        assert_eq!(app.composer.text(), "");
+        assert_eq!(app.agent(), "build");
+    }
+
+    /// A search that fails lets the held key go instead of handling it: a
+    /// send or an agent switch never lands long after the press.
+    #[tokio::test]
+    async fn a_failed_search_drops_the_held_key() {
+        let mut app = app();
+        let client = ApiClient::new(&searching().await, "token").unwrap();
+        typed(&mut app, &client, "hi @fail").await;
+        press(&mut app, &client, KeyCode::Enter).await;
+        answered(&mut app, &client).await;
+        assert_eq!(app.composer.text(), "hi @fail", "the message was sent");
+
+        typed(&mut app, &client, "s").await;
+        press(&mut app, &client, KeyCode::Tab).await;
+        typed(&mut app, &client, "!").await;
+        answered(&mut app, &client).await;
+        assert_eq!(app.composer.text(), "hi @fails!");
+        assert_eq!(app.agent(), "build");
+    }
+
+    /// After an answer with no files, "No matches" stays while the next
+    /// answer for that `@` is on its way, as rows do; a new `@` starts
+    /// afresh.
+    #[tokio::test]
+    async fn no_matches_stays_until_the_next_answer() {
+        let mut app = app();
+        app.agents.retain(|agent| agent.id != "explore");
+        let client = ApiClient::new(&searching().await, "token").unwrap();
+        typed(&mut app, &client, "@none").await;
+        answered(&mut app, &client).await;
+        assert!(screen(&app).contains("No matches"));
+        typed(&mut app, &client, "x").await;
+        assert!(app.file_search.is_pending());
+        assert!(screen(&app).contains("No matches"));
+        answered(&mut app, &client).await;
+
+        typed(&mut app, &client, " @slow").await;
+        let fresh = screen(&app);
+        assert!(!fresh.contains("No matches"), "{fresh}");
+    }
+
     /// `@` text no list was opened for (it came back from history, was
     /// pasted, or the cursor moved into it) leaves Enter and Tab as they
     /// are without a list: Enter sends, Tab switches the agent.
@@ -709,10 +799,13 @@ mod tests {
     fn an_answer_shows_only_while_the_prompt_holds_its_query() {
         let mut app = app();
         app.composer.set_text("@new".into());
-        assert!(app.files_found("old", vec!["old.md".into()]).is_empty());
+        assert!(
+            app.files_found("old", Some(vec!["old.md".into()]))
+                .is_empty()
+        );
         assert!(app.mention_suggestions.is_empty());
         assert!(
-            app.files_found("new", vec!["new.md".into(), "news.md".into()])
+            app.files_found("new", Some(vec!["new.md".into(), "news.md".into()]))
                 .is_empty()
         );
         assert_eq!(app.mention_suggestions, ["new.md", "news.md"]);
@@ -721,12 +814,12 @@ mod tests {
         // A row the person moved to stays highlighted where the new list
         // puts it.
         app.move_selection(1);
-        let _ = app.files_found("new", vec!["renewed.md".into(), "news.md".into()]);
+        let _ = app.files_found("new", Some(vec!["renewed.md".into(), "news.md".into()]));
         assert_eq!(app.mention_suggestions[app.selection], "news.md");
 
         // Nothing shows once the query has gone.
         app.composer.set_text("plain".into());
-        let _ = app.files_found("new", vec!["later.md".into()]);
+        let _ = app.files_found("new", Some(vec!["later.md".into()]));
         assert_eq!(app.mention_suggestions, ["renewed.md", "news.md"]);
     }
 
