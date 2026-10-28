@@ -95,6 +95,30 @@ test("nested agents complete with one slot and secret reads still require approv
   await proof("linked-secret-names-its-target");await page.getByRole("button",{name:"Deny",exact:true}).click();await idle();expect(errors).toEqual([]);
 });
 
+test("Always on a file beside the project names that file, never the folder holding the project",async()=>{
+  await choose(main);await session();
+  await writeFile(join(root,"beside.txt"),"BESIDE_PROOF");
+  await send('!tool read {"path":"../beside.txt"}');
+  await expect(page.locator(".approval .prompt-title")).toContainText("Access a folder outside this project");
+  await page.getByRole("button",{name:"Always allow",exact:true}).click();
+  const folder=page.getByRole("menuitem",{name:"Always for this folder",exact:true});
+  await expect(folder).toHaveAttribute("aria-description",/beside\.txt$/);
+  await expect(folder).not.toContainText("Anything in");
+  for(const scheme of ["light","dark"] as const){
+    await app.evaluate(({nativeTheme},value)=>{nativeTheme.themeSource=value;},scheme);
+    await page.emulateMedia({colorScheme:scheme});
+    await expect.poll(()=>page.evaluate(()=>matchMedia("(prefers-color-scheme: dark)").matches)).toBe(scheme==="dark");
+    await page.waitForTimeout(300);await proof(`beside-file-always-${scheme}`);
+  }
+  await app.evaluate(({nativeTheme})=>{nativeTheme.themeSource="system";});await page.emulateMedia({colorScheme:null});
+  await folder.click();await idle();
+  await expect(page.locator(".transcript")).toContainText("BESIDE_PROOF");
+  // Remembered by itself: the same file reads again without a question.
+  await send('!tool read {"path":"../beside.txt"}');await idle();
+  await expect(page.getByRole("button",{name:"Allow once",exact:true})).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 test("larger media survives a real drop, draft reload and server submission",async()=>{
   await session();
   const transfer=await page.evaluateHandle(()=>{

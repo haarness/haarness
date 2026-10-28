@@ -110,6 +110,46 @@ def tool_results(items):
     return [item["data"] for item in items if item["data"]["type"] == "tool_result"]
 
 
+def global_deny_floor():
+    """A project's file or agent tightens the person's rules but never reopens their deny."""
+    floor = root / "deny-floor"
+    place, floor_home, floor_state = floor / "project", floor / "home", floor / "state"
+    for folder in [place / ".haarness/agents", floor_home, floor_state / "config"]:
+        folder.mkdir(parents=True, exist_ok=True)
+    run("git", "init", "-q", place)
+    write(floor_state / "config/haarness.json", json.dumps({"permission": {"bash": {
+        "rm *": "deny", "rm -rf build*": "allow", "echo held*": "deny", "echo asked*": "ask"}}}))
+    write(place / "haarness.json", json.dumps({"model": "echo/echo-1", "defaults": {"approval_mode": "review"},
+        "permission": {"bash": {"*": "allow", "rm -rf victim*": "allow"}},
+        "agent": {"opener": {"prompt": "Open.", "permission": {"bash": {"rm *": "allow"}}}}}))
+    write(place / ".haarness/agents/sweeper.md", '---\npermission: {"bash": {"rm *": "allow"}}\n---\nSweep.')
+    floor_env = {**env, "HOME": str(floor_home), "HAARNESS_HOME": str(floor_home), "HAARNESS_DATA_DIR": str(floor_state)}
+
+    def bash(command, *flags):
+        result = subprocess.run([str(binary), "--workspace", str(place), "run", *flags,
+                                 "!tool bash " + json.dumps({"command": command})],
+                                env=floor_env, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        return result.stdout + result.stderr
+
+    try:
+        for flags in [(), ("--agent", "opener"), ("--agent", "sweeper"), ("--yolo",)]:
+            (place / "victim").mkdir(exist_ok=True)
+            output = bash("rm -rf victim", *flags)
+            check(f"A project {' '.join(flags) or 'file'} cannot reopen the person's rm deny",
+                  "is denied by permission rule 'bash:rm *'" in output and (place / "victim").is_dir())
+        output = bash("echo held here")
+        check("A project's allow for every command leaves the person's other deny in force",
+              "is denied by permission rule 'bash:echo held*'" in output)
+        (place / "build").mkdir(exist_ok=True)
+        output = bash("rm -rf build && echo gone")
+        check("The person's own later allow still lifts their deny", "gone" in output and not (place / "build").exists())
+        output = bash("echo asked here")
+        check("A project's allow still answers the person's ask", "asked here" in output and "Stopped" not in output)
+    finally:
+        subprocess.run([str(binary), "--workspace", str(place), "serve", "--stop"], env=floor_env,
+                       capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+
+
 for folder in [project, other, home, state / "config"]:
     folder.mkdir(parents=True, exist_ok=True)
 for folder in [project, other]:
@@ -265,6 +305,8 @@ try:
         check(("Attached" if attached else "Local") + " TUI replies with default project configuration")
         run("tmux", "kill-session", "-t", session)
         sessions.remove(session)
+
+    global_deny_floor()
 
     if "--live" in sys.argv:
         key = os.environ.get("OPENAI_API_KEY")

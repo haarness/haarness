@@ -246,10 +246,13 @@ export function describeAlwaysRule(
       : rule;
   if (permission === "agent_switch") return t("Only this agent, in this chat");
   if (permission === "external_directory") {
-    const folder = pattern.replace(/[/\\]\*$/, "");
-    return folder === "*"
-      ? t("Any folder outside the project")
-      : t("Anything in {folder}", { folder: words.shortPath(folder) });
+    if (pattern === "*") return t("Any folder outside the project");
+    // An outside folder that holds the project is remembered by the path
+    // asked about: the folder alone (`/home/me/`), or a file in it, whose
+    // whole name shows while its folder gives way.
+    if (/[/\\]$/.test(pattern)) return words.shortPath(pattern.replace(/[/\\]+$/, "") || "/");
+    if (!/[/\\]\*$/.test(pattern)) return fileInFolder(pattern);
+    return t("Anything in {folder}", { folder: words.shortPath(pattern.replace(/[/\\]\*$/, "")) });
   }
   if (pattern === "*")
     return everyRequest[permission]
@@ -263,6 +266,19 @@ export function describeAlwaysRule(
   if (permission === "media_generate" && pattern === "video:*")
     return t("Any video generation");
   return pattern;
+}
+
+/** A file's path in about as many characters as a menu line holds: its
+ * whole name, after as much of its folder's name as fits. */
+function fileInFolder(path: string): string {
+  const parts = path.split(/[/\\]/).filter(Boolean);
+  const name = parts.pop() ?? path;
+  const folder = parts.at(-1);
+  if (!folder) return "/" + name;
+  const room = 22 - Array.from(name).length;
+  if (room < 2) return "…/" + name;
+  const shown = Array.from(folder).length <= room ? folder : Array.from(folder).slice(0, room - 1).join("") + "…";
+  return (parts.length > 1 ? "…/" : "/") + shown + "/" + name;
 }
 
 /** `text` (a path, an error) set apart from the sentence around it, so a

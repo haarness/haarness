@@ -36,6 +36,25 @@ pub struct CustomAgent {
     pub top_p: Option<f32>,
     /// Default model variant name. Parsed and stored, but not yet applied.
     pub variant: Option<String>,
+    /// Defined in a project's own files (its configuration, its agent
+    /// folders or its local plugins) rather than by the person or the
+    /// system folder: its rules never reopen what their rules deny.
+    pub project: bool,
+}
+
+impl CustomAgent {
+    /// Add this agent's own rules after the configured ones. Those of an
+    /// agent the person or the system folder defines join the floor too, so
+    /// its allow still lifts their deny for this agent, as it always did; a
+    /// project's agent's rules never do (see `PermissionEngine::set_floor`).
+    pub fn apply_permissions(&self, engine: &mut crate::PermissionEngine) {
+        for rule in &self.permissions {
+            if !self.project {
+                engine.add_floor_rule(rule.clone());
+            }
+            engine.add_rule(rule.clone());
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +71,12 @@ pub struct RuntimeConfig {
     /// Ordered permission rules appended after the agent profile's defaults
     /// (last match wins).
     pub base_rules: Vec<PermissionRule>,
+    /// The rules of `base_rules` the system folder and the person's global
+    /// files set, in order: a call they deny stays denied whatever a
+    /// project's files or a project's agent add after them. Empty when the
+    /// composition root keeps no such distinction, so every rule then decides
+    /// in one list.
+    pub global_rules: Vec<PermissionRule>,
     /// "Always for this workspace" answers. Like session approvals they settle
     /// what the rules leave as a question and never reopen a configured deny.
     pub granted_rules: Vec<PermissionRule>,
@@ -108,6 +133,7 @@ impl RuntimeConfig {
         } else {
             crate::PermissionEngine::build_defaults()
         };
+        engine.set_floor(self.global_rules.iter().cloned());
         if agent == "plan" {
             for name in &self.execution.plan_read_tools {
                 engine.add_ceiling(crate::PermissionRule {
