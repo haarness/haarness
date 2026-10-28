@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt as _;
 
 pub(crate) const LIST: &str = "mcp_resource_list";
 pub(crate) const READ: &str = "mcp_resource_read";
@@ -461,13 +462,12 @@ async fn cut(text: String, room: usize, directory: &Path) -> CoreResult<String> 
             kept -= 1;
         }
     }
-    tokio::fs::create_dir_all(directory)
+    let error = |error: std::io::Error| CoreError::Tool(error.to_string());
+    let (path, mut file) = crate::data_folder::new_private_file(directory, "resource")
         .await
-        .map_err(|error| CoreError::Tool(error.to_string()))?;
-    let path = directory.join(format!("resource_{}.txt", uuid::Uuid::now_v7()));
-    tokio::fs::write(&path, &text)
-        .await
-        .map_err(|error| CoreError::Tool(error.to_string()))?;
+        .map_err(error)?;
+    file.write_all(text.as_bytes()).await.map_err(error)?;
+    file.flush().await.map_err(error)?;
     Ok(format!(
         "{}\n[Only the first {kept} of {} bytes are here: a message holds up to 50 KiB of one resource and 128 KiB of all it mentions. The whole resource is saved at {}; read it there with offset/limit.]",
         text[..kept].trim_end(),
@@ -744,6 +744,30 @@ mod tests {
             ),
             "{missing}"
         );
+    }
+
+    /// The whole of a long mentioned resource is saved for this user alone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_long_mention_is_saved_for_its_owner_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let saved = std::env::temp_dir().join(format!("haarness-mention-{}", uuid::Uuid::now_v7()));
+        let body = cut("line\n".repeat(30_000), MENTION_BYTES, &saved)
+            .await
+            .unwrap();
+        let path = body
+            .split("The whole resource is saved at ")
+            .nth(1)
+            .and_then(|rest| rest.split("; read it there").next())
+            .unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(Path::new(path)), 0o600, "{path}");
+        assert_eq!(mode(&saved), 0o700);
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "line\n".repeat(30_000)
+        );
+        std::fs::remove_dir_all(saved).unwrap();
     }
 
     #[tokio::test]
