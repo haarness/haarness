@@ -6,17 +6,23 @@ and other xterm-style terminals send) and macOS Terminal's Option+Up (`ESC ESC [
 written to the pane as bytes), with a draft in the prompt and over an approval card
 that holds the keyboard. Then other chats ask for an approval and an answer: the
 session list leads with them, marked, keeps its cursor on its chat while a request
-arrives and lets them go when answered elsewhere. A private tmux server and temporary
+arrives and lets them go when answered elsewhere. A chat whose history read fails (a
+proxy fails it once) is not opened, and the drafts of both chats stay. A private tmux server and temporary
 HAARNESS_HOME/DATA_DIR keep it away from anything already running; captures (text and
 `capture-pane -e`, the list in the dark and light palettes) and a report go to
 TUI_NAVIGATION_EVIDENCE (default /tmp/haarness-tui-navigation).
 """
+import http.client
+import http.server
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -350,6 +356,90 @@ with tempfile.TemporaryDirectory(prefix="haarness-navigation-") as directory:
         screen("shortcuts-settled")
         config.write_text(base)
         checks.append("A shortcut from config.toml wins over a new default quietly; what did not apply is named by label, /keybinds settles it, keeps a newer Haarness's entry and saves only the change")
+
+        # A chat whose history cannot be read, through a proxy that fails that
+        # one read: the TUI stays where it was, its draft too, and the other
+        # chat's draft is there when it does open.
+        upstream = urllib.parse.urlsplit(connection["url"])
+        failing, failed = set(), []
+
+        class Proxy(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def forward(self):
+                read = re.fullmatch(r"/v1/threads/([^/?]+)/items", self.path)
+                if self.command == "GET" and read and read.group(1) in failing:
+                    failing.discard(read.group(1))
+                    failed.append(read.group(1))
+                    body = json.dumps({"code": "storage", "message": "database is locked", "retryable": True}).encode()
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                length = int(self.headers.get("Content-Length") or 0)
+                server = http.client.HTTPConnection(upstream.hostname, upstream.port)
+                server.request(
+                    self.command,
+                    self.path,
+                    self.rfile.read(length) if length else None,
+                    {key: value for key, value in self.headers.items() if key.lower() not in ("host", "connection")},
+                )
+                response = server.getresponse()
+                self.send_response(response.status)
+                for key, value in response.getheaders():
+                    if key.lower() not in ("connection", "content-length", "transfer-encoding"):
+                        self.send_header(key, value)
+                self.end_headers()
+                # The event stream too: whatever arrives goes on at once.
+                while chunk := response.read1(65536):
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                server.close()
+
+            do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = forward
+
+        proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+        threading.Thread(target=proxy.serve_forever, daemon=True).start()
+        proxied = "proxied"
+        tmux("new-session", "-d", "-x", "100", "-y", "30", "-s", proxied, pane_command(
+            dict(env, HAARNESS_SERVER_TOKEN=connection["token"]),
+            [BINARY, "attach", f"http://127.0.0.1:{proxy.server_port}", "--thread", quiet],
+        ))
+
+        def seen():
+            return tmux("capture-pane", "-p", "-t", proxied)
+
+        def open_chat(title):
+            if "Sessions" not in seen():
+                tmux("send-keys", "-t", proxied, "C-l")
+                until(lambda: "Sessions" in seen(), "the session list did not open over the proxy")
+            tmux("send-keys", "-l", "-t", proxied, title)
+            time.sleep(.3)
+            tmux("send-keys", "-t", proxied, "Enter")
+
+        until(lambda: "nothing to wait for" in seen(), "the TUI did not attach through the proxy")
+        tmux("send-keys", "-l", "-t", proxied, "PROXY-DRAFT kept for later")
+        open_chat("Late approval")
+        until(lambda: "echo late" in seen() and "PROXY-DRAFT" not in seen(), "the late chat did not open")
+        failing.add(quiet)
+        open_chat("Quiet chat")
+        until(lambda: failed, "the quiet chat's history was not asked for")
+        time.sleep(1)
+        (EVIDENCE / "unread-history.txt").write_text(seen())
+        assert "nothing to wait for" not in seen() and "PROXY-DRAFT" not in seen(), seen()
+        tmux("send-keys", "-t", proxied, "Escape")
+        tmux("send-keys", "-l", "-t", proxied, "LATE-DRAFT typed meanwhile")
+        open_chat("Quiet chat")
+        until(lambda: "nothing to wait for" in seen() and "PROXY-DRAFT kept for later" in seen(), "the quiet chat's draft was lost")
+        (EVIDENCE / "unread-history-recovered.txt").write_text(seen())
+        open_chat("Late approval")
+        until(lambda: "LATE-DRAFT typed meanwhile" in seen(), "the late chat's draft was lost")
+        tmux("kill-session", "-t", proxied)
+        proxy.shutdown()
+        checks.append("A chat whose history read fails is not opened; its draft is there on the next try and the open chat keeps its own")
 
         (EVIDENCE / "results.json").write_text(json.dumps({"checks": checks, "status": "passed"}, indent=2))
         print("PASS: " + "\nPASS: ".join(checks))

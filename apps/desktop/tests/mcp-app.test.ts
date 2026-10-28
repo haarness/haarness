@@ -165,6 +165,45 @@ test("only host sources reach the page's policy, and no network is the default",
   });
 });
 
+test("a declared host without a scheme is an https source, checked like one with a scheme", () => {
+  assert.deepEqual(
+    sources([
+      "cdn.example.com",
+      "*.example.com",
+      "CDN.Example.org:8443/lib/",
+      "cdn.example.net:443",
+      "8.8.8.8",
+      "self.example.net",
+      "https://cdn.example.com",
+      "wss://stream.example.net",
+    ]),
+    [
+      "https://cdn.example.com",
+      "https://*.example.com",
+      "https://cdn.example.org:8443/lib/",
+      "https://cdn.example.net",
+      "https://8.8.8.8",
+      "https://self.example.net",
+      "wss://stream.example.net",
+    ],
+  );
+  // What would be refused with a scheme is refused without one, and words
+  // that are not hosts stay out.
+  for (const host of [
+    "localhost", "localhost:3000", "app.localhost", "printer.local", "127.0.0.1", "127.0.0.1:8080", "0x7f.1",
+    "2130706433", "10.0.0.5", "192.168.1.10:3000", "127.0.0.1.nip.io", "*.co.uk", "*.github.io", "*.com", "*", "*.*",
+    "intranet", "self", "none", "unsafe-inline", "strict-dynamic", "sha256-q1w2e3", "nonce-r4nd0m", "data:", "blob:",
+    "javascript:alert(1)", "user@cdn.example.com", "user:secret@cdn.example.com", "user:1@cdn.example.com",
+    "cdn.example.com:99999", "cdn.example.com:*", "cdn.example.com:", "*.", "cdn.example.com?key=1",
+    "cdn.example.com/#x", "cdn.example.com/?key=1", ".example.com", "[::1]", "cdn.example.com https://mirror.example.org",
+  ])
+    assert.deepEqual(sources([host]), [], host);
+  const meta = { csp: { connectDomains: ["data.example.org"], resourceDomains: ["*.static.example.net", "localhost:3000"] } };
+  assert.ok(policy(meta).includes("connect-src https://data.example.org;"), policy(meta));
+  assert.ok(policy(meta).includes("script-src 'self' 'unsafe-inline' https://*.static.example.net;"), policy(meta));
+  assert.deepEqual(granted(meta).connectDomains, ["https://data.example.org"]);
+});
+
 test("the page document starts with its policy and the host script, after its doctype", () => {
   const html = document('<!DOCTYPE html><html><head><title>x</title></head><body><script>run()</script></body></html>', {
     csp: { connectDomains: ['https://a.example"><script>alert(1)</script>'] },

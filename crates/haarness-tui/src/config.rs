@@ -135,7 +135,17 @@ fn adopt_legacy_files(target: &std::path::Path, legacy: &std::path::Path) {
 #[cfg(test)]
 #[allow(clippy::unnecessary_wraps)] // same signature as outside tests, where it may be unknown
 fn current_config_dir() -> Option<PathBuf> {
-    Some(test_config_dir().to_path_buf())
+    THREAD_CONFIG_DIR
+        .with_borrow(Clone::clone)
+        .or_else(|| Some(test_config_dir().to_path_buf()))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A folder for one test's thread alone, for a test that breaks the TUI's
+    /// files or must not see what the tests running beside it save.
+    pub(crate) static THREAD_CONFIG_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(not(test))]
@@ -471,21 +481,41 @@ pub fn load_diff_preferences() -> crate::diffview::DiffPreferences {
     }
 }
 
-pub fn save_diff_preferences(preferences: crate::diffview::DiffPreferences) {
-    save_state(move |state| {
-        state.diff = DiffViewState {
-            context_step: preferences.context_step,
-            layout: preferences.layout.map(|layout| {
-                match layout {
-                    crate::diffview::DiffLayout::Split => "split",
-                    crate::diffview::DiffLayout::Unified => "unified",
-                }
-                .to_owned()
-            }),
-            tree_visible: preferences.tree_visible,
-            single_file: preferences.single_file,
-        };
-    });
+/// Save the review-viewer choices that differ from `opened`, what the viewer
+/// started with. The others stay as saved: another TUI on the same folder may
+/// have changed them since, and writing this viewer's whole set would undo it.
+pub fn save_diff_preferences(
+    opened: crate::diffview::DiffPreferences,
+    preferences: crate::diffview::DiffPreferences,
+) {
+    if opened != preferences {
+        save_state(move |state| change_diff_view(&mut state.diff, opened, preferences));
+    }
+}
+
+fn change_diff_view(
+    saved: &mut DiffViewState,
+    opened: crate::diffview::DiffPreferences,
+    preferences: crate::diffview::DiffPreferences,
+) {
+    if preferences.context_step != opened.context_step {
+        saved.context_step = preferences.context_step;
+    }
+    if preferences.layout != opened.layout {
+        saved.layout = preferences.layout.map(|layout| {
+            match layout {
+                crate::diffview::DiffLayout::Split => "split",
+                crate::diffview::DiffLayout::Unified => "unified",
+            }
+            .to_owned()
+        });
+    }
+    if preferences.tree_visible != opened.tree_visible {
+        saved.tree_visible = preferences.tree_visible;
+    }
+    if preferences.single_file != opened.single_file {
+        saved.single_file = preferences.single_file;
+    }
 }
 
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -495,52 +525,157 @@ pub struct ThreadViewState {
     pub expanded: Vec<String>,
 }
 
+const STATE_FILE: &str = "tui-state.toml";
+/// Held by whichever TUI is saving `tui-state.toml`. The state file itself
+/// is replaced on every save, so a lock on it would not outlast one. The
+/// system lets go of it when its holder exits, crashed or not.
+const STATE_LOCK: &str = "tui-state.lock";
+/// How long a save waits for another TUI's. A save holds the lock only while
+/// it reads and rewrites a small file, so a holder this slow is stuck (a
+/// suspended terminal): the save then goes ahead without the lock, and a
+/// stuck holder holds this TUI up for this long at most.
+const STATE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub fn load_state() -> TuiState {
     let Some(directory) = config_dir() else {
         return TuiState::default();
     };
-    std::fs::read_to_string(directory.join("tui-state.toml"))
-        .ok()
-        .and_then(|content| toml::from_str(&content).ok())
-        .unwrap_or_default()
+    read_state(&directory.join(STATE_FILE)).unwrap_or_default()
 }
 
-/// Load-modify-write so independent fields never clobber each other.
-pub fn save_state(update: impl FnOnce(&mut TuiState)) {
+/// The state saved at `path`: the defaults when there is none or it is not
+/// a state file (the next save replaces a broken one), an error when it is
+/// there but could not be read. A symbolic link whose file is missing reads
+/// as none when the folder it leads to is there, and the next save makes the
+/// file there; one whose folder is missing too (a dotfiles folder not there
+/// now) could not be read, as a save could not keep the link.
+fn read_state(path: &std::path::Path) -> std::io::Result<TuiState> {
+    match std::fs::read(path) {
+        Ok(body) => Ok(std::str::from_utf8(&body)
+            .ok()
+            .and_then(|content| toml::from_str(content).ok())
+            .unwrap_or_default()),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && link_target(path)
+                    .is_none_or(|target| target.parent().is_some_and(std::path::Path::is_dir)) =>
+        {
+            Ok(TuiState::default())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Where the symbolic link at `path` leads, following one link after
+/// another, or `None` when `path` is not a link. The file there may be
+/// missing, which is why the links are read rather than resolved.
+fn link_target(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let is_link = |path: &std::path::Path| {
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    };
+    if !is_link(path) {
+        return None;
+    }
+    let mut target = path.to_path_buf();
+    // Links that lead round in a loop are not followed for ever.
+    for _ in 0..40 {
+        if !is_link(&target) {
+            break;
+        }
+        let next = std::fs::read_link(&target).ok()?;
+        // A relative link is read from the folder the link is in.
+        target = match target.parent() {
+            Some(folder) => folder.join(next),
+            None => next,
+        };
+    }
+    Some(target)
+}
+
+/// Load-modify-write so independent fields never clobber each other, nor
+/// what another TUI on the same folder saved since this one started. Whether
+/// the change was saved: not when there is no configuration folder, or the
+/// file could not be read or written.
+pub fn save_state(update: impl FnOnce(&mut TuiState)) -> bool {
+    config_dir().is_some_and(|directory| save_state_in(&directory, STATE_LOCK_WAIT, update))
+}
+
+fn save_state_in(
+    directory: &std::path::Path,
+    wait: std::time::Duration,
+    update: impl FnOnce(&mut TuiState),
+) -> bool {
     // Each save reads, changes and rewrites the whole file: one at a time,
-    // so two changes made together (a test run's threads) both land.
+    // so two changes made together (a test run's threads) both land. The
+    // lock beside the file keeps every TUI on this folder to the same rule.
     static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _saving = SAVING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(directory) = config_dir() else {
-        return;
+    let _ = std::fs::create_dir_all(directory);
+    let _lock = lock_state(directory, wait);
+    let path = directory.join(STATE_FILE);
+    let mut state = match read_state(&path) {
+        Ok(state) => state,
+        // Writing now would replace every setting in the file with this one.
+        Err(error) => {
+            tracing::warn!(path = %path.display(), "TUI state not saved: {error}");
+            return false;
+        }
     };
-    let mut state = load_state();
     update(&mut state);
-    let _ = std::fs::create_dir_all(&directory);
-    if let Ok(body) = toml::to_string(&state) {
-        write_whole(&directory.join("tui-state.toml"), &body);
+    toml::to_string(&state).is_ok_and(|body| write_whole(&path, &body))
+}
+
+/// The state lock, held until the file returned is dropped. `None` when the
+/// folder cannot hold one or another TUI kept it past `wait`: the save then
+/// goes ahead without it, as one did before there was a lock.
+fn lock_state(directory: &std::path::Path, wait: std::time::Duration) -> Option<std::fs::File> {
+    use fs2::FileExt as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    // Only this user's TUIs may take it, so no one else can hold up a save.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options.open(directory.join(STATE_LOCK)).ok()?;
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Some(lock),
+            Err(error)
+                if error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
     }
 }
 
 /// Write `body` to `path` so that a read never finds it half written: beside
 /// it, then moved into place. A file kept elsewhere through a symbolic link
 /// (a dotfiles folder) is written where the link leads, and the link stays.
-fn write_whole(path: &std::path::Path, body: &str) {
-    let target = std::fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        .then(|| std::fs::canonicalize(path).ok())
-        .flatten()
+/// Whether it was written.
+fn write_whole(path: &std::path::Path, body: &str) -> bool {
+    // A link whose file is missing cannot be resolved, only read.
+    let target = link_target(path)
+        .map(|target| std::fs::canonicalize(path).unwrap_or(target))
         .unwrap_or_else(|| path.to_path_buf());
     let name = target.file_name().map_or_else(
         || "tui-state.toml".into(),
         |name| name.to_string_lossy().into_owned(),
     );
     let partial = target.with_file_name(format!("{name}.{}.partial", std::process::id()));
-    if std::fs::write(&partial, body).is_err() || std::fs::rename(&partial, &target).is_err() {
+    let written =
+        std::fs::write(&partial, body).is_ok() && std::fs::rename(&partial, &target).is_ok();
+    if !written {
         let _ = std::fs::remove_file(&partial);
     }
+    written
 }
 
 /// The persisted theme selection (`tui-state.toml`), then the `[tui]` section
@@ -807,10 +942,178 @@ fn overlay(base: toml::Value, over: toml::Value) -> toml::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackgroundMode, UnreadTheme, add_theme_entries, adopt_legacy_files, merge_tui_settings,
-        parse_background_mode, resolve_config_dir, write_whole,
+        BackgroundMode, STATE_FILE, STATE_LOCK, STATE_LOCK_WAIT, UnreadTheme, add_theme_entries,
+        adopt_legacy_files, merge_tui_settings, parse_background_mode, read_state,
+        resolve_config_dir, save_state_in, write_whole,
     };
     use std::path::PathBuf;
+
+    /// A save waits while another TUI holds the state lock, then starts from
+    /// what that one wrote rather than from what it read before.
+    #[test]
+    fn a_state_save_waits_for_another_tui_and_keeps_what_it_saved() {
+        use fs2::FileExt as _;
+        let directory =
+            std::env::temp_dir().join(format!("haarness-state-lock-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(directory.join(STATE_LOCK))
+            .unwrap();
+        held.lock_exclusive().unwrap();
+        let saving = std::thread::spawn({
+            let directory = directory.clone();
+            move || {
+                save_state_in(&directory, STATE_LOCK_WAIT, |state| {
+                    state.sidebar = Some(false)
+                })
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!saving.is_finished());
+        assert!(!directory.join(STATE_FILE).exists());
+        std::fs::write(directory.join(STATE_FILE), "theme = \"other\"\n").unwrap();
+        drop(held);
+        saving.join().unwrap();
+        let state = read_state(&directory.join(STATE_FILE)).unwrap();
+        assert_eq!(state.theme.as_deref(), Some("other"));
+        assert_eq!(state.sidebar, Some(false));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A TUI that keeps the state lock (a suspended one) holds a save up for
+    /// the wait only, never for good: the change is saved without the lock.
+    /// The lock file a TUI leaves behind, crashed or not, holds up nothing.
+    #[test]
+    fn a_state_lock_kept_by_a_stuck_tui_never_holds_a_save_for_good() {
+        use fs2::FileExt as _;
+        let directory =
+            std::env::temp_dir().join(format!("haarness-state-stuck-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let wait = std::time::Duration::from_millis(400);
+        save_state_in(&directory, wait, |state| state.theme = Some("first".into()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(directory.join(STATE_LOCK))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        }
+        let held = std::fs::File::open(directory.join(STATE_LOCK)).unwrap();
+        held.lock_exclusive().unwrap();
+        let saving = std::thread::spawn({
+            let directory = directory.clone();
+            move || {
+                let started = std::time::Instant::now();
+                save_state_in(&directory, wait, |state| state.sidebar = Some(false));
+                started.elapsed()
+            }
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !saving.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(saving.is_finished(), "the save still waits for the lock");
+        let took = saving.join().unwrap();
+        assert!(took >= wait, "{took:?}");
+        let state = read_state(&directory.join(STATE_FILE)).unwrap();
+        assert_eq!(
+            (state.theme.as_deref(), state.sidebar),
+            (Some("first"), Some(false))
+        );
+        drop(held);
+        // The lock alone is timed: a save also waits for this process's
+        // other saves, which a test running beside this one may be making.
+        let started = std::time::Instant::now();
+        let lock = super::lock_state(&directory, wait);
+        assert!(
+            lock.is_some() && started.elapsed() < wait,
+            "{:?}",
+            started.elapsed()
+        );
+        drop(lock);
+        assert!(save_state_in(&directory, wait, |state| state.sidebar = Some(true)));
+        assert_eq!(
+            read_state(&directory.join(STATE_FILE)).unwrap().sidebar,
+            Some(true)
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A state file that is there but cannot be read is left as it is, not
+    /// replaced by the defaults plus one change; one that is not a state file
+    /// is replaced, and a missing one is made.
+    #[cfg(unix)]
+    #[test]
+    fn a_state_file_that_cannot_be_read_is_not_saved_over() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory =
+            std::env::temp_dir().join(format!("haarness-state-read-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(STATE_FILE);
+        assert!(save_state_in(&directory, STATE_LOCK_WAIT, |state| {
+            state.theme = Some("kept".into())
+        }));
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(read_state(&path).unwrap().theme.as_deref(), Some("kept"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Permissions do not stop a superuser, who reads the file anyway.
+        let unreadable = std::fs::read(&path).is_err();
+        let saved_over = save_state_in(&directory, STATE_LOCK_WAIT, |state| {
+            state.sidebar = Some(false)
+        });
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        if unreadable {
+            assert!(!saved_over);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        }
+        std::fs::write(&path, "theme = [\n").unwrap();
+        assert!(save_state_in(&directory, STATE_LOCK_WAIT, |state| {
+            state.sidebar = Some(false)
+        }));
+        let state = read_state(&path).unwrap();
+        assert_eq!((state.theme, state.sidebar), (None, Some(false)));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A dotfiles link whose file is missing stays a link: while the folder
+    /// it leads to is missing too nothing is saved over it, and once that
+    /// folder is there a save makes the file through the link (a relative
+    /// one read from the link's own folder).
+    #[cfg(unix)]
+    #[test]
+    fn a_state_link_whose_file_is_missing_stays_a_link() {
+        let directory =
+            std::env::temp_dir().join(format!("haarness-state-link-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let link = directory.join(STATE_FILE);
+        std::os::unix::fs::symlink(PathBuf::from("dotfiles").join(STATE_FILE), &link).unwrap();
+        let is_link = || {
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        };
+        let saved_without_folder = save_state_in(&directory, STATE_LOCK_WAIT, |state| {
+            state.sidebar = Some(false)
+        });
+        let kept_without_folder = is_link();
+        std::fs::create_dir(directory.join("dotfiles")).unwrap();
+        let saved_with_folder = save_state_in(&directory, STATE_LOCK_WAIT, |state| {
+            state.theme = Some("through".into())
+        });
+        let kept_with_folder = is_link();
+        let written = read_state(&directory.join("dotfiles").join(STATE_FILE)).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(!saved_without_folder && kept_without_folder);
+        assert!(saved_with_folder && kept_with_folder);
+        assert_eq!(written.theme.as_deref(), Some("through"));
+    }
 
     /// A theme file that is not one is returned with the first line of why,
     /// for a notice, and the other themes still load. Nothing is printed: the
@@ -860,7 +1163,7 @@ mod tests {
         std::fs::write(&target, "old").unwrap();
         let link = config.join("tui-state.toml");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        write_whole(&link, "sidebar = false\n");
+        assert!(write_whole(&link, "sidebar = false\n"));
         assert!(
             std::fs::symlink_metadata(&link)
                 .unwrap()
@@ -873,7 +1176,7 @@ mod tests {
         );
         // A write that cannot land leaves nothing beside the file.
         let missing = root.join("gone").join("tui-state.toml");
-        write_whole(&missing, "x");
+        assert!(!write_whole(&missing, "x"));
         for folder in [&dotfiles, &config] {
             let names: Vec<_> = std::fs::read_dir(folder)
                 .unwrap()

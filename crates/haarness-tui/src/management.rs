@@ -11,6 +11,9 @@ use serde_json::{Value, json};
 /// moves to a separate page.
 pub(crate) const PREFACE_LINES: usize = 4;
 
+/// Said when `/keybinds` could not save: the shortcuts apply all the same.
+const UNSAVED_SHORTCUTS: &str = "Shortcuts not saved · kept until you quit";
+
 /// What a shared link on a loopback address can and cannot do.
 pub(crate) const SHARE_ONLY_HERE: &str = "Links from this server only open on this computer, while Haarness runs here. To work on this chat with someone else, use /remote-control.";
 
@@ -78,8 +81,33 @@ impl App {
         } else if resource == "stash" {
             self.stash_view(input)?
         } else if resource == "keybinds" {
-            let view = crate::keybindings::view(input)?;
+            // A kept shortcut whose key another TUI has taken since is
+            // dropped first, so the form and this TUI agree.
+            crate::keybindings::lay_over_unsaved(
+                &mut crate::keybindings::load().0,
+                &mut self.unsaved.keybindings,
+            );
+            let (view, saving) = crate::keybindings::view(input, &self.unsaved.keybindings)?;
+            match saving {
+                crate::keybindings::Saving::NotSaved(changed) => {
+                    self.unsaved.keybindings = changed;
+                    self.notice = UNSAVED_SHORTCUTS.into();
+                }
+                crate::keybindings::Saving::Saved => {
+                    self.unsaved.keybindings.clear();
+                    if self.notice == UNSAVED_SHORTCUTS {
+                        self.notice.clear();
+                    }
+                }
+                crate::keybindings::Saving::None => {}
+            }
+            // What is saved now, another TUI's changes included, with this
+            // one's that no save could write yet.
             self.keybindings = crate::keybindings::load().0;
+            crate::keybindings::lay_over_unsaved(
+                &mut self.keybindings,
+                &mut self.unsaved.keybindings,
+            );
             view
         } else {
             serde_json::from_value(client.manage(resource, input).await?)?
