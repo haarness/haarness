@@ -12,6 +12,9 @@
 - Reasoning: a custom OpenAI-compatible server that streams `reasoning` gets it back in that field
   with the tool call in the next request.
 - Matchers: `/hooks` in the TUI marks a SessionEnd hook for `clear` as never running.
+- After a tool ran: a PostToolUse hook that exits 2 cannot undo the call; its stderr follows the
+  tool's result, reaches the model in the next request (a mock server records it) and shows in the
+  TUI. A person's rejected `!` command runs PostToolUseFailure hooks, told that event's name.
 Every daemon runs on isolated data under one temporary root and is stopped at the end.
 """
 import json, os, pathlib, shlex, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request, uuid
@@ -117,7 +120,7 @@ class Mock(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        self.reply(200, json.dumps({'data': [{'id': 'thinker'}, {'id': 'limited'}]}))
+        self.reply(200, json.dumps({'data': [{'id': 'thinker'}, {'id': 'limited'}, {'id': 'linter'}]}))
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
@@ -126,6 +129,10 @@ class Mock(BaseHTTPRequestHandler):
             return self.reply(429, json.dumps({'error': {'message': 'Rate limit reached for requests', 'type': 'requests'}}))
         if any(m['role'] == 'tool' for m in body['messages']):
             chunks = [{'choices': [{'delta': {'content': 'Listed.'}}]}, {'choices': [{'delta': {}, 'finish_reason': 'stop'}]}]
+        elif body['model'] == 'linter':
+            chunks = [{'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'call_lint', 'function': {
+                          'name': 'bash', 'arguments': json.dumps({'command': 'echo lint-me'})}}]}}]},
+                      {'choices': [{'delta': {}, 'finish_reason': 'tool_calls'}]}]
         else:
             chunks = [{'choices': [{'delta': {'reasoning': 'List the folder '}}]},
                       {'choices': [{'delta': {'reasoning': 'before answering.'}}]},
@@ -162,6 +169,12 @@ elif event == 'PreToolUse' and data['tool_input'].get('prompt') == 'Which test s
     say({'updatedInput': dict(data['tool_input'], answers=[['Unit tests']])})
 elif event == 'StopFailure':
     print('{}')
+elif event == 'PostToolUse' and 'lint-me' in data['tool_input'].get('command', ''):
+    print('lint: 2 warnings in notes.md', file=sys.stderr)
+    sys.exit(2)
+elif event == 'PostToolUseFailure':
+    print('refusal noted by ' + event, file=sys.stderr)
+    sys.exit(2)
 ''')
     command = shlex.join(['python3', str(hook), str(log)])
     group = lambda matcher: [{'matcher': matcher, 'hooks': [{'type': 'command', 'command': command}]}]
@@ -177,7 +190,7 @@ bash="ask"
 protocol="openai-chat-completions"
 name="Mock"
 base_url="http://127.0.0.1:{mock.server_address[1]}/v1"
-models=["thinker","limited"]
+models=["thinker","limited","linter"]
 requires_auth=false
 reasoning=true
 tools=true
@@ -185,7 +198,7 @@ tools=true
     write(ws / 'haarness.json', json.dumps({'hooks': {
         'PermissionRequest': group('*'), 'PreToolUse': group('question'),
         'StopFailure': group('rate_limit') + group('provider') + group('billing_error'),
-        'SessionEnd': group('clear')}}, indent=1))
+        'SessionEnd': group('clear'), 'PostToolUse': group('Bash'), 'PostToolUseFailure': group('Bash')}}, indent=1))
     c = connect(ws)
     env['HAARNESS_SERVER_TOKEN'] = c.get('token', '')
     entries = lambda event: [json.loads(line) for line in log.read_text().splitlines() if line and json.loads(line)['hook_event_name'] == event] if log.exists() else []
@@ -253,6 +266,39 @@ tools=true
     assistant = next(m for m in follow[-1]['messages'] if m.get('tool_calls'))
     check('the server gets its reasoning back in the field it used',
           assistant.get('reasoning') == 'List the folder before answering.' and 'reasoning_content' not in assistant, assistant)
+
+    # --- After a tool ran -----------------------------------------------------------------
+    feedback = '\n\n<hook-feedback>\nlint: 2 warnings in notes.md\n</hook-feedback>'
+    linter = Chat(c, 'Linter', 'mock', 'linter')
+    t = linter.turn('Lint the notes')
+    check('the linted turn completes', linter.finish(t)['status'] == 'completed')
+    linted = linter.results('bash')[-1]
+    check('the exit-2 stderr follows the tool result, which stays as it was', not linted['is_error']
+          and linted['output'] == 'exit: 0\nlint-me\n' + feedback, linted)
+    follow = [r for r in requests if r['model'] == 'linter' and any(m['role'] == 'tool' for m in r['messages'])]
+    sent = next(m for m in follow[-1]['messages'] if m['role'] == 'tool')['content']
+    sent = sent if isinstance(sent, str) else ''.join(part.get('text', '') for part in sent)
+    check('the next request carries the feedback to the model', sent.endswith(feedback), sent)
+    posted = [e for e in entries('PostToolUse') if e['session_id'] == linter.thread['id']]
+    check('the PostToolUse hook was told its event, the tool and the agent', len(posted) == 1
+          and posted[0]['tool_name'] == 'bash' and posted[0]['agent'] == linter.thread['agent'], posted)
+    t = chat.turn('!tool bash ' + json.dumps({'command': 'echo lint-me'}))
+    check('the echo turn with the lint hook completes', chat.finish(t)['status'] == 'completed')
+    until(lambda: 'lint: 2 warnings in notes.md' in capture(), 'TUI shows the hook feedback')
+    (root / 'tui-hook-feedback.txt').write_text(capture())
+    check('the TUI shows the feedback under the tool output', '<hook-feedback>' in capture(), capture())
+    # A person's own command, rejected: the call failed, and PostToolUseFailure hooks say so.
+    api(c, '/threads/' + chat.thread['id'] + '/shell', {'command': 'touch refused.txt'})
+    pending = until(lambda: api(c, '/permissions'), 'the shell command asks')[0]
+    api(c, '/permissions/' + pending['permissionId'], {'decision': 'reject'})
+    failed = until(lambda: [e for e in entries('PostToolUseFailure') if e['session_id'] == chat.thread['id']], 'PostToolUseFailure')
+    check('a rejected command runs PostToolUseFailure hooks under that name', len(failed) == 1
+          and failed[0]['hook_event_name'] == 'PostToolUseFailure' and failed[0]['tool_name'] == 'bash'
+          and failed[0]['tool_response']['is_error'] is True and failed[0]['error'], failed)
+    refused = until(lambda: [r for r in chat.results('bash') if r['is_error']], 'the refused result')[-1]
+    check('its feedback follows the failed result', refused['output'].endswith(
+        '\n\n<hook-feedback>\nrefusal noted by PostToolUseFailure\n</hook-feedback>')
+          and not (ws / 'refused.txt').exists(), refused)
 
     # --- Matchers in /hooks ---------------------------------------------------------------
     tmux('send-keys', '-t', session, '/hooks', 'Enter')
