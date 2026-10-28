@@ -177,7 +177,8 @@ impl ConfiguredHooks {
     /// Neither keeps Windows' `\\?\` prefix, which a hook would read as part
     /// of the path. A chat's folder that is gone (deleted while a turn runs)
     /// cannot hold a hook, which then runs in the project folder rather than
-    /// not at all: a guard that cannot start would let everything through.
+    /// not at all: a guard that cannot start would let everything through
+    /// (see [`Self::run`] for a folder that is there but cannot be entered).
     fn folders<'a>(&'a self, call: Option<&'a HookCall>) -> Folders<'a> {
         let project = dunce::simplified(&self.workspace);
         let in_project = Folders {
@@ -204,41 +205,30 @@ impl ConfiguredHooks {
 
     async fn run(&self, entry: &HookEntry, payload: &Value, folders: Folders<'_>) -> HookOutcome {
         use tokio::io::AsyncWriteExt as _;
-        use tokio::process::Command;
-        let (program, arguments) = hook_invocation(entry, folders.project);
-        let mut command = Command::new(program);
-        command.args(arguments);
-        for name in haarness_core::private_env_names() {
-            command.env_remove(name);
-        }
-        command
-            .current_dir(folders.cwd)
-            .env("HAARNESS_PROJECT_DIR", folders.project)
-            .env("OPENCODE_PROJECT_DIR", folders.project)
-            .env("CLAUDE_PROJECT_DIR", folders.project)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        if let Some(root) = &entry.plugin_root {
-            command
-                .env("HAARNESS_PLUGIN_ROOT", root)
-                .env("CLAUDE_PLUGIN_ROOT", root)
-                .env("OPENCODE_PLUGIN_ROOT", root)
-                .env("HAARNESS_PLUGIN_DATA", root.join(".data"))
-                .env("CLAUDE_PLUGIN_DATA", root.join(".data"));
-        }
         let label = HookLabel::new(entry, payload);
         if folders.chat_folder_gone {
-            tracing::warn!(
-                event = %label.event,
-                session = label.session.as_deref(),
-                tool = label.tool.as_deref(),
-                program = %label.program,
-                "hook ran in the project folder: its chat's folder is gone"
-            );
+            label.moved();
         }
-        let mut child = match command.spawn() {
+        // A chat's folder can be there and still not be entered (it lost its
+        // search permission, or an earlier hook of the same event deleted
+        // it): the hook then starts in the project folder, which its `cwd`
+        // names, rather than not at all.
+        let in_project = Folders {
+            chat_folder_gone: true,
+            ..self.folders(None)
+        };
+        let moved;
+        let (payload, spawned) = match hook_command(entry, folders).spawn() {
+            Err(_) if folders.cwd != in_project.cwd => {
+                label.moved();
+                let mut payload = payload.clone();
+                payload["cwd"] = json!(in_project.cwd);
+                moved = payload;
+                (&moved, hook_command(entry, in_project).spawn())
+            }
+            spawned => (payload, spawned),
+        };
+        let mut child = match spawned {
             Ok(child) => child,
             Err(error) => {
                 tracing::warn!(
@@ -496,6 +486,35 @@ impl ConfiguredHooks {
             combined.permission == Some(PermissionDecision::Allow) && always == Some(true);
         combined
     }
+}
+
+/// The process for `entry`, started in `folders.cwd` and told
+/// `folders.project` as its project folder.
+fn hook_command(entry: &HookEntry, folders: Folders<'_>) -> tokio::process::Command {
+    let (program, arguments) = hook_invocation(entry, folders.project);
+    let mut command = tokio::process::Command::new(program);
+    command.args(arguments);
+    for name in haarness_core::private_env_names() {
+        command.env_remove(name);
+    }
+    command
+        .current_dir(folders.cwd)
+        .env("HAARNESS_PROJECT_DIR", folders.project)
+        .env("OPENCODE_PROJECT_DIR", folders.project)
+        .env("CLAUDE_PROJECT_DIR", folders.project)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(root) = &entry.plugin_root {
+        command
+            .env("HAARNESS_PLUGIN_ROOT", root)
+            .env("CLAUDE_PLUGIN_ROOT", root)
+            .env("OPENCODE_PLUGIN_ROOT", root)
+            .env("HAARNESS_PLUGIN_DATA", root.join(".data"))
+            .env("CLAUDE_PLUGIN_DATA", root.join(".data"));
+    }
+    command
 }
 
 /// The program a hook runs and its arguments. A shell reads the placeholders
@@ -770,6 +789,18 @@ impl HookLabel {
             asynchronous = asynchronous.then_some(true),
             stderr = (!stderr.is_empty()).then_some(stderr.as_str()),
             "hook command failed"
+        );
+    }
+
+    /// One WARN per hook that ran in the project folder because it could not
+    /// start in its chat's own folder.
+    fn moved(&self) {
+        tracing::warn!(
+            event = %self.event,
+            session = self.session.as_deref(),
+            tool = self.tool.as_deref(),
+            program = %self.program,
+            "hook ran in the project folder: it could not start in its chat's folder"
         );
     }
 
@@ -2718,9 +2749,81 @@ mod tests {
         let payload: Value = serde_json::from_str(payload).unwrap();
         assert_eq!(ran_in, project.display().to_string());
         assert_eq!(payload["cwd"], json!(project));
-        let moved = capture.matching("hook ran in the project folder: its chat's folder is gone");
+        let moved = capture
+            .matching("hook ran in the project folder: it could not start in its chat's folder");
         assert_eq!(moved.len(), 1, "{:?}", capture.lines());
         assert!(moved[0].starts_with("WARN ") && moved[0].contains(" event=PreToolUse"));
+    }
+
+    /// A chat's folder that is there but cannot be entered (no search
+    /// permission), or that an earlier hook of the same event deleted, fails
+    /// the hook's start there; it starts again in the project folder, which
+    /// its `cwd` then names, so a guard still guards.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_that_cannot_start_in_its_chat_folder_starts_in_the_project_folder() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (capture, _guard) = Capture::install();
+        let root = std::env::temp_dir().join(format!(
+            "haarness-hook-closed-folder-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(root.join("home/2026-10-28")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let project = root.join("home");
+        let (closed, deleted) = (
+            project.join("2026-10-28/closed"),
+            project.join("2026-10-28/deleted"),
+        );
+        let log = root.join("guard.log");
+        let guard = format!(
+            r#"printf '%s|' "$(pwd -P)" >> '{log}'; cat >> '{log}'; echo >> '{log}'; echo 'guard: no writes' >&2; exit 2"#,
+            log = log.display()
+        );
+        // The first hook of the event deletes the folder the second was to
+        // start in.
+        let remove = format!("rmdir '{}'", deleted.display());
+        let hooks = ConfiguredHooks::new(
+            ConfiguredHooks::parse_block(&json!({"PreToolUse": [
+                {"matcher": "write", "hooks": [{"command": guard}]},
+                {"matcher": "edit", "hooks": [{"command": remove}, {"command": guard}]},
+            ]})),
+            project.clone(),
+        );
+        std::fs::create_dir(&closed).unwrap();
+        std::fs::create_dir(&deleted).unwrap();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let call = |folder: &Path| HookCall {
+            folder: Some(folder.to_path_buf()),
+            ..HookCall::new(ThreadId::new())
+        };
+        let input = json!({"path": "notes.md"});
+        let refused = [
+            hooks.pre_tool_use(&call(&closed), "write", &input).await,
+            hooks.pre_tool_use(&call(&deleted), "edit", &input).await,
+        ];
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let written = std::fs::read_to_string(&log).unwrap_or_default();
+        std::fs::remove_dir_all(&root).unwrap();
+        for decision in &refused {
+            assert_eq!(decision.block.as_deref(), Some("guard: no writes"));
+        }
+        let runs: Vec<(&str, Value)> = written
+            .lines()
+            .map(|line| {
+                let (ran_in, payload) = line.split_once('|').unwrap();
+                (ran_in, serde_json::from_str(payload).unwrap())
+            })
+            .collect();
+        assert_eq!(runs.len(), 2, "{written}");
+        for (ran_in, payload) in &runs {
+            assert_eq!(*ran_in, project.display().to_string(), "{payload}");
+            assert_eq!(payload["cwd"], json!(project), "{payload}");
+        }
+        let moved = capture
+            .matching("hook ran in the project folder: it could not start in its chat's folder");
+        assert_eq!(moved.len(), 2, "{:?}", capture.lines());
+        assert!(capture.matching("hook failed to spawn").is_empty());
     }
 
     fn entry(command: &str, args: &[&str], shell: Option<&str>) -> HookEntry {
