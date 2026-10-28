@@ -191,8 +191,9 @@ where
 
 /// Auto mode activates once deferring optional schemas saves the configured
 /// minimum. For small-context models, 2% of the window is allowed to lower
-/// that floor (never below 512 tokens). Missing context metadata leaves the
-/// full catalog visible; operators can explicitly select `always`.
+/// that floor (never below 512 tokens). Missing context metadata, or a
+/// window listed as 0, leaves the full catalog visible; operators can
+/// explicitly select `always`.
 #[must_use]
 pub fn lazy_active(
     mode: LazyToolMode,
@@ -204,10 +205,12 @@ pub fn lazy_active(
     match mode {
         LazyToolMode::Off => false,
         LazyToolMode::Always => deferred_tokens > 0,
-        LazyToolMode::Auto => context_window.is_some_and(|window| {
-            let threshold = min_saved_tokens.min((window / 50).max(512));
-            deferred_tokens.saturating_sub(loader_tokens) >= threshold
-        }),
+        LazyToolMode::Auto => context_window
+            .filter(|window| *window > 0)
+            .is_some_and(|window| {
+                let threshold = min_saved_tokens.min((window / 50).max(512));
+                deferred_tokens.saturating_sub(loader_tokens) >= threshold
+            }),
     }
 }
 
@@ -550,5 +553,13 @@ mod tests {
             489,
         ));
         assert!(lazy_active(LazyToolMode::Always, 512, None, 1, 10_000));
+    }
+
+    #[test]
+    fn auto_mode_reads_a_window_of_0_as_unknown() {
+        // As small a window as there is would defer these schemas.
+        assert!(lazy_active(LazyToolMode::Auto, 4_000, Some(1), 600, 50));
+        assert!(!lazy_active(LazyToolMode::Auto, 4_000, None, 600, 50));
+        assert!(!lazy_active(LazyToolMode::Auto, 4_000, Some(0), 600, 50));
     }
 }
