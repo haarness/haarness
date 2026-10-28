@@ -196,8 +196,10 @@
   margin: var(--s3) 0 0 auto;
   min-height: 28px;
 }
-/* Marks the level the configuration sets, quietly, beside its name. */
+/* Marks the level the configuration sets, quietly, beside its name. Its own
+   box drops the space before the word, which is there for screen readers. */
 .reasoning-default {
+  display: inline-block;
   margin-inline-start: var(--s1);
   color: var(--muted);
   font-size: var(--ui-xs);

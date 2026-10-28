@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   carriedReasoning,
   nearestReasoning,
+  offeredReasoning,
   reasoningChoice,
   reasoningLevels,
   requestedReasoning,
@@ -70,6 +71,27 @@ test("a configured level is the one in use until another is chosen, and Model de
   assert.equal(carriedReasoning("default", levels), "");
   assert.equal(carriedReasoning("xhigh", levels, "high"), "");
   assert.equal(carriedReasoning("high", levels), "high");
+});
+
+test("a model that lists no levels is offered the configured one, which the server sends it as written", () => {
+  assert.deepEqual(offeredReasoning([], "high"), ["high"]);
+  assert.deepEqual(offeredReasoning(undefined, "ultra"), ["ultra"]);
+  assert.deepEqual(offeredReasoning([], undefined), []);
+  assert.deepEqual(offeredReasoning(["low"], "high"), ["low"]);
+  const configured = reasoningChoice("", [], "high");
+  assert.deepEqual(configured.steps, ["default", "high"]);
+  assert.equal(configured.current, "high");
+  assert.equal(configured.index, 1);
+  assert.equal(configured.configured, true);
+  const model = reasoningChoice("default", [], "high");
+  assert.equal(model.current, "");
+  assert.equal(model.index, 0);
+  // Nothing configured: no levels, as before.
+  assert.deepEqual(reasoningChoice("", []).steps, [""]);
+  // A pick of that level stands on such a model, and goes with a move to one.
+  assert.equal(carriedReasoning("high", [], "high"), "high");
+  assert.equal(carriedReasoning("high", [], undefined), "");
+  assert.equal(carriedReasoning("low", [], "high"), "");
 });
 
 test("the model's default is named only to a server that configures a level", () => {

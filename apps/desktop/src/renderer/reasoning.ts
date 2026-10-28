@@ -55,7 +55,7 @@ export function reasoningChoice(
   levels?: readonly string[] | null,
   configured?: string | null,
 ) {
-  const known = reasoningLevels(levels);
+  const known = offeredReasoning(levels, configured);
   const fitted = configured ? nearestReasoning(configured, known) : "";
   // Over a configured level the model's default is a choice of its own;
   // without one, no choice means it.
@@ -76,8 +76,18 @@ export function reasoningChoice(
     configured: !!fitted && current === fitted && !unavailable,
   };
 }
-/** The choice that stands for a model with `levels`: a level it lists, and
- * the model's own default, which every model has, while a level is
+/** The levels the reasoning control offers for a model with `levels`: those,
+ * or, when it lists none, the `configured` level, which the server sends it
+ * as written. */
+export function offeredReasoning(
+  levels?: readonly string[] | null,
+  configured?: string | null,
+) {
+  const known = reasoningLevels(levels);
+  return known.length || !configured ? known : [configured];
+}
+/** The choice that stands for a model with `levels`: a level it is offered,
+ * and the model's own default, which every model has, while a level is
  * `configured` for it to override; "" otherwise. */
 export function carriedReasoning(
   effort: string,
@@ -85,7 +95,7 @@ export function carriedReasoning(
   configured?: string | null,
 ) {
   if (effort === MODEL_DEFAULT_EFFORT) return configured ? effort : "";
-  return validReasoning(effort, levels);
+  return validReasoning(effort, offeredReasoning(levels, configured));
 }
 /** The `reasoningEffort` a request names for the choice `effort`, if any: the
  * model's own default only to a server that configures a level. */

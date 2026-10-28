@@ -5,9 +5,9 @@ import { Icon } from "./icons";
 import type { ModelOption } from "./provider-model-options";
 import {
   carriedReasoning,
+  offeredReasoning,
   reasoningChoice,
   reasoningLabel,
-  reasoningLevels,
 } from "./reasoning";
 import "./model-picker.css";
 
@@ -30,7 +30,8 @@ export function ModelPicker(props: {
   const [busy, setBusy] = createSignal(false);
   const selected = () =>
     props.options.find((option) => String(option.value) === props.value);
-  const levels = () => reasoningLevels(selected()?.reasoningEfforts);
+  const levels = () =>
+    offeredReasoning(selected()?.reasoningEfforts, props.configured);
   const effort = () => props.effort ?? "";
   const choice = createMemo(() =>
     reasoningChoice(effort(), levels(), props.configured),
@@ -88,18 +89,27 @@ export function ModelPicker(props: {
                     ? t("{name} (unavailable)", { name: t(reasoningLabel(effort())) })
                     : t(reasoningLabel(valid()))}
                   <Show when={choice().configured}>
-                    <span class="reasoning-default">{t("default")}</span>
+                    <span class="reasoning-default">
+                      {" "}
+                      {t("default")}
+                    </span>
                   </Show>
                 </strong>
                 <small>{selected()?.label ?? props.value}</small>
               </div>
+              {/* Reset clears the choice: back to the configured level when
+                  there is one, else to the model's own default. */}
               <button
                 type="button"
                 class="icon-button"
-                aria-label={t("Reset reasoning to model default")}
-                title={t("Use model default")}
-                disabled={(!valid() && !unavailable()) || busy() || props.disabled}
-                onClick={() => props.onEffortChange?.(choice().modelDefault)}
+                aria-label={t(
+                  props.configured
+                    ? "Reset to default"
+                    : "Reset reasoning to model default",
+                )}
+                title={t(props.configured ? "Reset to default" : "Use model default")}
+                disabled={!effort() || busy() || props.disabled}
+                onClick={() => props.onEffortChange?.("")}
               >
                 <Icon name="refresh" size="md" />
               </button>

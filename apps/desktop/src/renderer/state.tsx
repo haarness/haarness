@@ -2358,6 +2358,12 @@ function createApp(saved?: Preferences) {
     await window.haarness.storage(key, pending);
     const noteKey = sessionKey(connection, thread.id);
     set("commandNotes", noteKey, undefined);
+    // A slash command runs at the effort a message would.
+    const reasoningEffort = requestedReasoning(
+      effort,
+      state.connection?.info.defaultReasoningEffort,
+    );
+    const reasoning = reasoningEffort ? { reasoningEffort } : {};
     const input = {
       delivery,
       preview: true,
@@ -2366,9 +2372,7 @@ function createApp(saved?: Preferences) {
       attachments,
       ...mentioned,
       requestId: pending.requestId,
-      ...(requestedReasoning(effort, state.connection?.info.defaultReasoningEffort)
-        ? { reasoningEffort: effort }
-        : {}),
+      ...reasoning,
     };
     if (pending.method === "executeCommand" && command) {
       const response = await targetApi<T.CommandExecutionResponse>(
@@ -2379,6 +2383,7 @@ function createApp(saved?: Preferences) {
           tools: { preview: true },
           arguments: promptWithContext(command[2], context),
           ...mentioned,
+          ...reasoning,
           requestId: pending.requestId,
         },
       );
