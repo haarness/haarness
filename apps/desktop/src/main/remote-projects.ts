@@ -42,8 +42,12 @@ async function hostRequest<T>(
 }
 
 /** A refused request as the SDK reports one, for a request Desktop sends
- * itself: the server's code and message, or only the status when the body
- * is not Haarness's (a proxy's text or page, nothing at all). */
+ * itself: the server's code and message. A request the server refused in
+ * plain text (its file routes: "Path must be relative to the workspace")
+ * keeps that sentence. Otherwise only the status, when the body is not
+ * Haarness's (a proxy's text or page, nothing at all, any 5xx in plain
+ * text), or for a 401, whose "Authentication required" is the same for every
+ * refused credential and never says that what was sent was refused. */
 export async function responseFailure(response: Response): Promise<ApiError> {
   const text = await response.text().catch(() => "");
   let body: unknown = text;
@@ -54,10 +58,12 @@ export async function responseFailure(response: Response): Promise<ApiError> {
   }
   const outer = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
   const record = outer.error && typeof outer.error === "object" ? (outer.error as Record<string, unknown>) : outer;
+  const { status } = response;
+  const plain = typeof body === "string" && status >= 400 && status < 500 && status !== 401 ? body.trim().slice(0, 300) : "";
   return new ApiError(
-    response.status,
+    status,
     String(record.code ?? "http_error"),
-    String(record.message ?? record.error ?? `HTTP ${response.status}`),
+    String(record.message ?? record.error ?? (plain || `HTTP ${status}`)),
     record.retryable === true,
     body,
   );

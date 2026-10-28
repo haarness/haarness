@@ -1878,6 +1878,7 @@
   "You don't have access to this.": "Nemate pristup ovome.",
   "This is no longer available. It may have been removed.": "Ovo više nije dostupno. Možda je uklonjeno.",
   "This is too large to send.": "Ovo je preveliko za slanje.",
+  "The server refused the token or password. Check it, then try again.": "Server je odbio token ili lozinku. Provjerite ih, pa pokušajte ponovo.",
   "That didn't go through. Try again.": "To nije uspjelo. Pokušajte ponovo.",
   "Sign-in could not start. Another sign-in is still waiting on this computer. Finish or close it, then try again.": "Prijava nije mogla početi. Druga prijava još čeka na ovom računaru. Završite je ili zatvorite, pa pokušajte ponovo.",
   "A port is busy. Something else on this computer is using a port Haarness needs. Close it, then try again.": "Port je zauzet. Nešto drugo na ovom računaru koristi port koji Haarness treba. Zatvorite to, pa pokušajte ponovo.",

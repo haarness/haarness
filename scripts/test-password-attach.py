@@ -70,6 +70,7 @@ for mode, password in [('anonymous', ''), ('password', '日本:attach-password')
             failed = subprocess.run([str(binary), '--workspace', str(local), 'run', '--attach', url, '--provider', 'echo', '--model', 'echo-1', 'must-not-run'],
                                     env={**env, 'HAARNESS_SERVER_PASSWORD': 'wrong-password'}, capture_output=True, text=True, timeout=20)
             assert failed.returncode != 0 and 'wrong-password' not in failed.stderr, failed.stderr
+            assert 'The server refused the token or password.' in failed.stderr, failed.stderr
         args = ['env', *[key + '=' + value for key, value in env.items() if key.startswith('HAARNESS_')], str(binary), '--workspace', str(local), '--session', thread, 'tui', '--attach', url]
         def launch(): tmux('new-session', '-d', '-x', '150', '-y', '42', '-s', session, shlex.join(args))
         launch()
