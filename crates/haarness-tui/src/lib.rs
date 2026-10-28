@@ -906,7 +906,7 @@ async fn run_with_client(
                         if app.permission_focus {
                             app.release_permission_focus(true);
                         }
-                        match crate::media::paths_from_paste(&text) {
+                        match crate::media::paths_from_paste(&text, &app.attachments) {
                             Ok(Some(paths)) => {
                                 let added = app.add_attachments(paths);
                                 app.notice = format!(

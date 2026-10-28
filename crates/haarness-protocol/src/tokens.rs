@@ -86,7 +86,7 @@ const CALIBRATION_RANGE: (f64, f64) = (0.75, 1.5);
 const HEADER_BYTES: usize = 256 * 1024;
 
 /// Attachments above this are never sent inline, so they are not read.
-const MAX_MEDIA_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_MEDIA_BYTES: u64 = crate::MAX_INLINE_MEDIA_BYTES as u64;
 
 impl Tokenizer {
     /// Family for a model id as any provider names it: `claude-sonnet-5-5`,

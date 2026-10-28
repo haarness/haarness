@@ -60,6 +60,11 @@ pub const THREAD_CREATE_ID_CAPABILITY: &str = "thread-create-id.v1";
 /// [`Thread::directory`] and [`PtyCreateRequest::directory`]. Older servers
 /// ignore an unknown `directory` and create a chat in the project folder.
 pub const THREAD_DIRECTORY_CAPABILITY: &str = "thread-directory.v1";
+/// The most media (images, PDFs, audio, video) one message sends a provider
+/// inline, all its attachments together. Providers refuse a request past it,
+/// and a chat sends its stored attachments with every later request, so the
+/// server refuses a message over it and clients check it before sending.
+pub const MAX_INLINE_MEDIA_BYTES: usize = 20 * 1024 * 1024;
 /// Reasoning-effort names Haarness can send to a provider, lightest first.
 /// Model catalogs advertise a per-model subset of this scale; a tier outside
 /// it is a provider-app setting the public request APIs reject, so it never

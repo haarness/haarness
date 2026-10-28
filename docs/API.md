@@ -519,6 +519,15 @@ with the reason.
 An attachment or tool image whose file is deleted later is named in the message
 ("no longer available") instead of failing every later request.
 
+A message carries at most 20 MiB of media, its images as stored and its PDFs,
+audio and video together (text files do not count), the most providers take
+inline. Since a stored message is sent again with every later request of its
+chat, turn and queued-input requests refuse more with `400` naming the size and
+the limit ("scan.pdf is 21 MiB, over the 20 MiB limit for media in one
+message"). A stored attachment that would take its message past the limit (one
+an older server stored, or a file that has grown since) is sent as a one-line
+note naming it instead, so the chat's later turns complete.
+
 A long chat can hold more images than a provider takes in one request. Before
 each request the runtime counts the images it would send, as the base64 the
 provider receives. Where a message takes them past the provider's limit, the

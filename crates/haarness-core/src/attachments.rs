@@ -5,12 +5,16 @@
 //! attach any file a person would share. Anything else is refused before the
 //! message is stored: a stored attachment the provider rejects would fail
 //! every later turn of that chat. Images are checked by their bytes and made
-//! into ones every provider reads (see [`crate::images`]).
+//! into ones every provider reads (see [`crate::images`]); a message's media
+//! stays within [`MAX_INLINE_MEDIA_BYTES`].
 
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+pub use haarness_protocol::MAX_INLINE_MEDIA_BYTES;
 
 use crate::{CoreError, CoreResult};
 
@@ -84,12 +88,25 @@ pub fn is_supported_media_mime(mime_type: &str) -> bool {
 /// Checks a new message's attachments. Images are made into ones every
 /// provider reads, other media stays as sent; a text file named by path is
 /// carried as a text data URL, so the message keeps it even if the file
-/// changes; anything a model cannot read is refused.
+/// changes; anything a model cannot read is refused, and so is media past
+/// [`MAX_INLINE_MEDIA_BYTES`], one file or all of them together.
 pub fn admit(attachments: Vec<String>, workspace: &Path) -> CoreResult<Vec<String>> {
-    attachments
+    let admitted = attachments
         .into_iter()
         .map(|source| admit_one(source, workspace))
-        .collect()
+        .collect::<CoreResult<Vec<_>>>()?;
+    let total = admitted
+        .iter()
+        .filter_map(|source| media_bytes(source))
+        .fold(0_u64, u64::saturating_add);
+    if total > MAX_INLINE_MEDIA_BYTES as u64 {
+        return Err(CoreError::Invalid(format!(
+            "The attachments come to {}, over the {} limit for media in one message",
+            mebibytes(total),
+            mebibytes(MAX_INLINE_MEDIA_BYTES as u64)
+        )));
+    }
+    Ok(admitted)
 }
 
 /// [`admit`] on a blocking thread: converting an image is CPU work.
@@ -116,6 +133,10 @@ fn admit_one(source: String, workspace: &Path) -> CoreResult<String> {
             });
         }
         if is_supported_media_mime(url.mime_type) {
+            let size = url.decoded_len();
+            if size > MAX_INLINE_MEDIA_BYTES as u64 {
+                return Err(over_limit(&url.name(), size));
+            }
             return Ok(source);
         }
         let bytes = url.bytes()?;
@@ -172,6 +193,9 @@ fn admit_one(source: String, workspace: &Path) -> CoreResult<String> {
         return admit_image(bytes, Some(name), keep_path);
     }
     if mime_type.is_some() {
+        if metadata.len() > MAX_INLINE_MEDIA_BYTES as u64 {
+            return Err(over_limit(&name, metadata.len()));
+        }
         return Ok(stored());
     }
     if usize::try_from(metadata.len()).unwrap_or(usize::MAX) > MAX_TEXT_ATTACHMENT_BYTES {
@@ -225,6 +249,32 @@ fn admit_image(
 fn read(path: &Path, name: &str) -> CoreResult<Vec<u8>> {
     std::fs::read(path)
         .map_err(|error| CoreError::Invalid(format!("cannot read attachment {name}: {error}")))
+}
+
+/// A file's bytes up to one past `limit`: more than `limit` says the file is
+/// over it (it may have grown since it was measured) without reading it all.
+pub fn read_at_most(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// The bytes a provider loads for a stored media source: a media data URL's
+/// payload or a file's length. `None` for a text file, which reaches the
+/// model as text, and for a file that is gone.
+fn media_bytes(source: &str) -> Option<u64> {
+    if let Some(data) = source.strip_prefix("data:") {
+        return DataUrl::parse(data)
+            .ok()
+            .filter(|url| is_supported_media_mime(url.mime_type))
+            .map(|url| url.decoded_len());
+    }
+    local_path(source)
+        .and_then(|path| std::fs::metadata(path).ok())
+        .filter(std::fs::Metadata::is_file)
+        .map(|metadata| metadata.len())
 }
 
 /// A stable identity for a stored attachment source (a path or a data URL),
@@ -299,14 +349,35 @@ pub fn sent_bytes(source: &str) -> usize {
 
 /// A stored message as a model receives it: text files are appended to the
 /// message, and media that can no longer be read (an upload folder deleted
-/// since) is named instead of failing the turn.
+/// since) is named instead of failing the turn. So is media that would take
+/// the message past [`MAX_INLINE_MEDIA_BYTES`]: stored before that was
+/// refused, or a file that grew since, it would fail every turn after it.
 pub fn for_model(content: String, attachments: Vec<String>) -> (String, Vec<String>) {
     let mut content = content;
     let mut media = Vec::new();
+    let mut carried = 0_u64;
+    let mut fits = |content: &mut String, label: &str, size: u64| {
+        let total = carried.saturating_add(size);
+        if total > MAX_INLINE_MEDIA_BYTES as u64 {
+            let _ = write!(
+                content,
+                "\n[Attachment {label} left out: it would bring this message's media to {}, over the {} limit for one message]",
+                mebibytes(total),
+                mebibytes(MAX_INLINE_MEDIA_BYTES as u64)
+            );
+            return false;
+        }
+        carried = total;
+        true
+    };
     for source in attachments {
         if let Some(data) = source.strip_prefix("data:") {
             match DataUrl::parse(data) {
-                Ok(url) if is_supported_media_mime(url.mime_type) => media.push(source),
+                Ok(url) if is_supported_media_mime(url.mime_type) => {
+                    if fits(&mut content, &url.name(), url.decoded_len()) {
+                        media.push(source);
+                    }
+                }
                 Ok(url) => {
                     let name = url.name();
                     match url
@@ -330,11 +401,23 @@ pub fn for_model(content: String, attachments: Vec<String>) -> (String, Vec<Stri
             }
             continue;
         }
-        let readable = local_path(&source).is_some_and(|path| path.is_file());
-        if readable || source.starts_with("http://") || source.starts_with("https://") {
+        if source.starts_with("http://") || source.starts_with("https://") {
             media.push(source);
-        } else {
-            let _ = write!(content, "\n[Attachment {source} is no longer available]");
+            continue;
+        }
+        let size = local_path(&source)
+            .and_then(|path| std::fs::metadata(path).ok())
+            .filter(std::fs::Metadata::is_file)
+            .map(|metadata| metadata.len());
+        match size {
+            Some(size) => {
+                if fits(&mut content, &source, size) {
+                    media.push(source);
+                }
+            }
+            None => {
+                let _ = write!(content, "\n[Attachment {source} is no longer available]");
+            }
         }
     }
     (content, media)
@@ -364,6 +447,17 @@ impl<'a> DataUrl<'a> {
             parameters,
             encoded,
         })
+    }
+
+    /// The payload's length once decoded, without decoding it.
+    fn decoded_len(&self) -> u64 {
+        let padding = self
+            .encoded
+            .bytes()
+            .rev()
+            .take_while(|&byte| byte == b'=')
+            .count();
+        u64::try_from((self.encoded.len() / 4 * 3).saturating_sub(padding)).unwrap_or(u64::MAX)
     }
 
     fn bytes(&self) -> CoreResult<Vec<u8>> {
@@ -429,6 +523,25 @@ fn unsupported(name: &str) -> CoreError {
     CoreError::Invalid(format!(
         "{name} cannot be attached: attach an image, PDF, audio, video or text file"
     ))
+}
+
+fn over_limit(name: &str, size: u64) -> CoreError {
+    CoreError::Invalid(format!(
+        "{name} is {}, over the {} limit for media in one message",
+        mebibytes(size),
+        mebibytes(MAX_INLINE_MEDIA_BYTES as u64)
+    ))
+}
+
+/// A size in MiB as a person reads it: whole ones bare ("20 MiB"), others to
+/// a tenth rounded up, so a file just over a limit never reads as at it.
+fn mebibytes(bytes: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    if bytes.is_multiple_of(MIB) {
+        return format!("{} MiB", bytes / MIB);
+    }
+    let tenths = bytes.saturating_mul(10).div_ceil(MIB);
+    format!("{}.{} MiB", tenths / 10, tenths % 10)
 }
 
 fn too_large(name: &str) -> CoreError {
@@ -622,5 +735,144 @@ mod tests {
                 .to_string()
                 .contains("limit")
         );
+    }
+
+    /// A sparse file of `size` bytes that starts like a PDF.
+    fn sparse_pdf(path: &Path, size: u64) {
+        let mut file = std::fs::File::create(path).unwrap();
+        std::io::Write::write_all(&mut file, b"%PDF-1.7\n").unwrap();
+        file.set_len(size).unwrap();
+    }
+
+    const MIB: u64 = 1024 * 1024;
+
+    #[test]
+    fn media_over_the_message_limit_is_refused_by_path_and_data_url() {
+        let dir = std::env::temp_dir().join(format!("haarness-attach-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        sparse_pdf(&dir.join("scan.pdf"), 21 * MIB);
+        let error = admit(vec!["scan.pdf".into()], &dir).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid request: scan.pdf is 21 MiB, over the 20 MiB limit for media in one message"
+        );
+        let encoded = data_url(
+            "application/pdf",
+            Some("scan.pdf"),
+            &std::fs::read(dir.join("scan.pdf")).unwrap(),
+        );
+        let error = admit(vec![encoded], &dir).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("scan.pdf is 21 MiB, over the 20 MiB limit"),
+            "{error}"
+        );
+        // Just over reads as over, never as the limit itself.
+        let audio = dir.join("call.mp3");
+        std::fs::File::create(&audio)
+            .unwrap()
+            .set_len(20 * MIB + 1)
+            .unwrap();
+        let error = admit(vec!["call.mp3".into()], &dir).unwrap_err();
+        assert!(
+            error.to_string().contains("call.mp3 is 20.1 MiB"),
+            "{error}"
+        );
+        // At the limit it is admitted.
+        sparse_pdf(&dir.join("whole.pdf"), 20 * MIB);
+        assert!(admit(vec!["whole.pdf".into()], &dir).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn media_that_fits_alone_but_not_together_is_refused() {
+        let dir = std::env::temp_dir().join(format!("haarness-attach-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        sparse_pdf(&dir.join("one.pdf"), 12 * MIB);
+        sparse_pdf(&dir.join("two.pdf"), 12 * MIB);
+        assert!(admit(vec!["one.pdf".into()], &dir).is_ok());
+        let error = admit(vec!["one.pdf".into(), "two.pdf".into()], &dir).unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "The attachments come to 24 MiB, over the 20 MiB limit for media in one message"
+            ),
+            "{error}"
+        );
+        // One by path and one inline count alike; a text file does not count.
+        let inline = data_url("video/mp4", Some("clip.mp4"), &vec![0; 9 * 1024 * 1024]);
+        let notes = data_url("text/plain", Some("notes.txt"), b"plain notes\n");
+        assert!(admit(vec!["one.pdf".into(), notes.clone()], &dir).is_ok());
+        assert!(admit(vec!["one.pdf".into(), inline, notes], &dir).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stored_media_over_the_limit_reaches_the_model_as_a_note() {
+        let dir = std::env::temp_dir().join(format!("haarness-attach-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Stored before such media was refused, or a file that grew since.
+        let big = dir.join("scan.pdf");
+        sparse_pdf(&big, 21 * MIB);
+        let inline = format!(
+            "data:application/pdf;name=old.pdf;base64,{}",
+            STANDARD.encode(vec![0_u8; 21 * 1024 * 1024])
+        );
+        let small = dir.join("small.pdf");
+        sparse_pdf(&small, MIB);
+        let big = big.to_string_lossy().into_owned();
+        let small = small.to_string_lossy().into_owned();
+        let (content, media) = for_model(
+            "Read these".into(),
+            vec![big.clone(), inline, small.clone()],
+        );
+        assert_eq!(media, vec![small.clone()]);
+        assert!(
+            content.contains(&format!(
+                "[Attachment {big} left out: it would bring this message's media to 21 MiB, over the 20 MiB limit for one message]"
+            )),
+            "{content}"
+        );
+        assert!(
+            content.contains("[Attachment old.pdf left out"),
+            "{content}"
+        );
+
+        // Two that fit alone: the first is sent, the second named.
+        let one = dir.join("one.pdf");
+        let two = dir.join("two.pdf");
+        sparse_pdf(&one, 12 * MIB);
+        sparse_pdf(&two, 12 * MIB);
+        let (one, two) = (
+            one.to_string_lossy().into_owned(),
+            two.to_string_lossy().into_owned(),
+        );
+        let (content, media) = for_model(String::new(), vec![one.clone(), two.clone()]);
+        assert_eq!(media, vec![one]);
+        assert!(
+            content.contains(&format!(
+                "[Attachment {two} left out: it would bring this message's media to 24 MiB"
+            )),
+            "{content}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_read_stops_one_byte_past_its_limit() {
+        let dir = std::env::temp_dir().join(format!("haarness-attach-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("grown.pdf");
+        sparse_pdf(&file, 4096);
+        assert_eq!(read_at_most(&file, 100).unwrap().len(), 101);
+        assert_eq!(read_at_most(&file, 8192).unwrap().len(), 4096);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sizes_read_in_mebibytes() {
+        assert_eq!(mebibytes(20 * MIB), "20 MiB");
+        assert_eq!(mebibytes(20 * MIB + 1), "20.1 MiB");
+        assert_eq!(mebibytes(24 * MIB + MIB / 2), "24.5 MiB");
     }
 }
