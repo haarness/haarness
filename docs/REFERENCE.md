@@ -204,7 +204,11 @@ refuses it and stops, naming what was asked: allow it with a permission rule,
 or pass `--yolo`. `haarness run --auto` without a terminal instead refuses each
 request that still needs a person and goes on, stopping after five refusals in
 a row; it exits with status 3 when it finished but refused any (see
-[Auto approvals](AUTO-APPROVALS.md)). After an ungraceful server/process failure,
+[Auto approvals](AUTO-APPROVALS.md)). A command's or skill's `` !`…` ``
+snippet in a run keeps the `execution.shell_timeout_ms` deadline, so one that
+hangs fails the run instead of holding it until the job is cancelled; in the
+terminal UI, Desktop and an editor over ACP, where you can stop it, a snippet
+runs until it finishes. After an ungraceful server/process failure,
 Haarness preserves recorded transcript work and marks orphaned effects
 interrupted; it never blindly replays shell, edit, or other side-effecting tools.
 Any active goal is restored as paused—not falsely pursuing—until new user input
@@ -456,7 +460,8 @@ line longer than 2000 characters shows its first 2000 and ends in
 50 KB, whatever `limit` asks, and then ends with `(stopped at 50 KB; read on
 with offset=N)` (or `2000 lines`); a read whose `limit` (2000 when none is
 given) ends before the file does ends with `(more lines follow; read on with
-offset=N)`. Text that is not UTF-8 (a
+offset=N)`. An offset at or past the end returns `(the file has N lines, so
+offset M is past its end)` instead of nothing. Text that is not UTF-8 (a
 Latin-1 file) shows `�` for what does not decode, with a note that `edit`
 cannot change it and `write` would replace those bytes (`edit` and `multiedit`
 refuse it as not UTF-8 text). A file with a NUL byte in its first 8 KiB counts
@@ -466,7 +471,9 @@ meets one that is not is refused (`… holds binary data, not text`). A folder, 
 `edit` and `multiedit` give an `old` of several lines those ends when it does
 not occur as written (one that does, a stretch of LF lines, keeps its own), and
 the lines `new` adds end as the line `old` is found in does: CRLF there, LF in
-an LF stretch or a CSV cell holding bare LF; two matches still refuse the edit. Direct prompt attachments use a 20 MiB aggregate limit; Gemini retains
+an LF stretch or a CSV cell holding bare LF; two matches still refuse the edit.
+An `edit` whose `old` is empty is refused with a pointer to `write` (an empty
+file still takes its first text that way). Direct prompt attachments use a 20 MiB aggregate limit; Gemini retains
 its 10 MiB aggregate adapter budget for inline request overhead. OpenAI,
 Anthropic, and Bedrock accept PDF/images; Gemini accepts PDF/image/audio/video.
 OpenAI-compatible Chat endpoints receive their native file, image, or MP3/WAV
@@ -647,7 +654,7 @@ reasoning = false
 images = false
 video = false                # generic Chat Completions video=true is rejected
 tools = true
-context_window = 131072
+context_window = 131072       # 0 counts as unknown: the model's own window applies
 max_output_tokens = 16384
 
 # Use the native Anthropic Messages wire against a custom commercial gateway.

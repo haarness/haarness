@@ -262,6 +262,7 @@ async fn execute_goal_manager(
                 // configured prompt-command resolver would reject the reserved
                 // builtin as an unknown configured command.
                 command: None,
+                attended: request.attended,
             },
         )
         .await?;
@@ -344,6 +345,7 @@ async fn execute_prompt_command(
                 reasoning_effort: request.reasoning_effort,
                 tools: request.tools,
                 command: Some(resolved.info.name),
+                attended: request.attended,
             },
         )
         .await?;

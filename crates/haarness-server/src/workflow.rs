@@ -601,6 +601,7 @@ impl WorkflowRuntimeAdapter {
                     // `tools: { workflow: true }` on that agent call.
                     tools: Some(workflow_agent_tools(input.tools.as_ref())),
                     command: None,
+                    ..Default::default()
                 },
                 input.schema.clone(),
             )
@@ -2325,6 +2326,7 @@ mod tests {
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await

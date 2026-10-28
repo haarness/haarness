@@ -2449,6 +2449,7 @@ impl AgentRuntime {
                             id: request.request_id,
                             text: request.text,
                             attachments: request.attachments,
+                            attended: request.attended,
                         },
                     )
                     .await?;
@@ -2468,6 +2469,7 @@ impl AgentRuntime {
                         id: request.request_id,
                         text: request.text,
                         attachments: request.attachments,
+                        attended: request.attended,
                     },
                 )
                 .await?;
@@ -2535,6 +2537,7 @@ impl AgentRuntime {
                             .preview
                             .map(|preview| HashMap::from([("preview".into(), preview)])),
                         command: None,
+                        attended: input.attended,
                     },
                     Vec::new(),
                     None,
@@ -2710,6 +2713,7 @@ impl AgentRuntime {
                         },
                         tools: tools.clone(),
                         command: None,
+                        attended: request.attended,
                     },
                     Vec::new(),
                     None,
@@ -3049,7 +3053,7 @@ impl AgentRuntime {
             items.retain(|item| item.sequence <= revert.sequence);
         }
         let models = self.components().providers.models(&thread.provider);
-        let window = model_metadata(&models, &thread.model).and_then(|info| info.context_window);
+        let window = stated_window(model_metadata(&models, &thread.model));
         Ok(ContextUsage {
             estimate: tokens::context(&items, Tokenizer::for_model(&thread.model)),
             window,
@@ -3521,6 +3525,7 @@ impl AgentRuntime {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: true,
+                ..Default::default()
             },
             false,
             false,
@@ -3571,6 +3576,7 @@ impl AgentRuntime {
                             attachments: Vec::new(),
                             resources: Vec::new(),
                             synthetic: true,
+                            ..Default::default()
                         };
                         self.append_queued_input(&chat, active.id, &request).await?;
                         return CoreResult::Ok("steered into the turn that started meanwhile");
@@ -3827,9 +3833,7 @@ impl AgentRuntime {
         let metadata = model_metadata(&models, model);
         compaction_input_limit(
             &components.config.compaction,
-            metadata
-                .and_then(|info| info.context_window)
-                .unwrap_or(128_000),
+            stated_window(metadata).unwrap_or(128_000),
             metadata.and_then(|info| info.max_output_tokens),
         )
     }
@@ -6300,6 +6304,7 @@ impl AgentRuntime {
             command: prepared_command,
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(Vec::new()),
+            instructions_in_context: crate::instructions::InContext::default(),
             cancel,
             workspace,
             runtime_workspace: self.workspace.clone(),
@@ -6397,6 +6402,7 @@ impl AgentRuntime {
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: true,
+                ..Default::default()
             };
             if let Err(error) = self
                 .queue_input_with_options(
@@ -6794,6 +6800,9 @@ struct RunnerTask {
     /// run`, ACP) still has a person to ask, and so does anyone who later
     /// types in that chat or a fork of it.
     unattended: bool,
+    /// The nested instruction files this turn's model can see, set from the
+    /// history each provider round sends.
+    instructions_in_context: crate::instructions::InContext,
 }
 
 struct TurnToolInvoker {
@@ -6829,6 +6838,9 @@ impl crate::ToolInvoker for TurnToolInvoker {
     }
     fn read_rules(&self) -> Option<PermissionEngine> {
         Some(self.runner.permission_engine_for_tool(&self.agent, "read"))
+    }
+    fn instructions_in_context(&self) -> Option<crate::instructions::InContext> {
+        Some(Arc::clone(&self.runner.instructions_in_context))
     }
     fn delegable_agents(&self) -> Vec<String> {
         self.runner
@@ -8377,9 +8389,7 @@ impl RunnerTask {
         let metadata = model_metadata(&models, model);
         let input_limit = compaction_input_limit(
             &self.config.compaction,
-            metadata
-                .and_then(|info| info.context_window)
-                .unwrap_or(128_000),
+            stated_window(metadata).unwrap_or(128_000),
             metadata.and_then(|info| info.max_output_tokens),
         );
         let item = self
@@ -8716,9 +8726,7 @@ impl RunnerTask {
                 {
                     let provider_models = self.providers.models(provider_id);
                     let model_info = model_metadata(&provider_models, &model);
-                    let context_window = model_info
-                        .and_then(|info| info.context_window)
-                        .unwrap_or(128_000);
+                    let context_window = stated_window(model_info).unwrap_or(128_000);
                     let budget = compaction_input_limit(
                         &self.config.compaction,
                         context_window,
@@ -8822,6 +8830,11 @@ impl RunnerTask {
                 }
                 let current_attachments =
                     crate::image_budget::turn_attachments(&items, Some(self.turn.id));
+                // A nested instruction file whose read result compaction or
+                // an undo removed is no longer in view: the next read below
+                // its folder attaches it again.
+                *self.instructions_in_context.lock() =
+                    crate::instructions::attached(provider_visible_items(&items));
                 let (mut messages, origins) = provider_messages_with_origins(items);
                 let source_messages = messages.clone();
                 let image_limits = provider.image_limits(&model);
@@ -10791,6 +10804,18 @@ impl RunnerTask {
             if executed.get("command").and_then(serde_json::Value::as_str) == Some(snippet.shown) {
                 executed["command"] = json!(snippet.run);
             }
+            // The command waits for its snippet's whole output. In a turn a
+            // person can stop (their client says so) it waits as long as the
+            // snippet runs, a test suite or a long build; anything else (a
+            // schedule, a script, a client that does not say) keeps the
+            // deadline.
+            if self.request.attended
+                && !self.unattended
+                && executed.get("timeout").is_none()
+                && executed.get("timeout_ms").is_none()
+            {
+                execution.shell_timeout_ms = 0;
+            }
         }
         let result = if matches!(name, "todo" | "todowrite") {
             self.record_todo(&arguments).await.map(plain_tool_output)
@@ -11806,6 +11831,7 @@ impl RunnerTask {
                                 attachments: Vec::new(),
                                 resources: Vec::new(),
                                 synthetic: false,
+                                ..Default::default()
                             },
                         )
                         .await?;
@@ -11895,6 +11921,7 @@ impl RunnerTask {
             },
             tools,
             command: None,
+            attended: self.request.attended,
         };
         let (turn, user, _) = self
             .repository
@@ -11968,6 +11995,7 @@ impl RunnerTask {
             command: None,
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(self.skill_rules.lock().clone()),
+            instructions_in_context: crate::instructions::InContext::default(),
             cancel: cancel.clone(),
             // The child's folder is its parent's.
             workspace: self.workspace.clone(),
@@ -12260,6 +12288,7 @@ impl RunnerTask {
                             attachments: Vec::new(),
                             resources: Vec::new(),
                             synthetic: true,
+                            ..Default::default()
                         },
                         task.delivery_auto_approve,
                         task.delivery_unattended,
@@ -13605,6 +13634,14 @@ fn model_metadata<'a>(
             })
             .max_by_key(|info| info.id.len())
     })
+}
+
+/// A model's context window when its metadata states one. A catalog that
+/// lists 0 says nothing about the model; taken as the limit, it would
+/// compact every round and fill the context meter at once.
+fn stated_window(info: Option<&haarness_protocol::ModelInfo>) -> Option<u64> {
+    info.and_then(|info| info.context_window)
+        .filter(|window| *window > 0)
 }
 
 /// Match Haarness's ordinary OpenAI GPT-5 default: ask for balanced reasoning

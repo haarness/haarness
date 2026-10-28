@@ -465,9 +465,11 @@ fn copilot_model(entry: &serde_json::Value) -> Option<ModelInfo> {
             .and_then(|value| value.get("tool_calls"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true),
+        // A listed 0 says nothing about the model.
         context_window: entry
             .pointer("/capabilities/limits/max_context_window_tokens")
-            .and_then(serde_json::Value::as_u64),
+            .and_then(serde_json::Value::as_u64)
+            .filter(|window| *window > 0),
         max_output_tokens: entry
             .pointer("/capabilities/limits/max_output_tokens")
             .and_then(serde_json::Value::as_u64),
@@ -727,6 +729,12 @@ mod tests {
         assert!(model.images);
         assert_eq!(model.context_window, Some(200_000));
         assert_eq!(model.max_output_tokens, Some(32_000));
+        let unknown = copilot_model(&serde_json::json!({
+            "id":"gpt-5-test",
+            "capabilities":{"limits":{"max_context_window_tokens":0}}
+        }))
+        .unwrap();
+        assert_eq!(unknown.context_window, None, "a listed 0 is no window");
 
         let provider = CopilotProvider::new(
             instance("github-copilot", "https://example.test".into(), "token"),

@@ -235,6 +235,7 @@ async fn a_steers_retry_that_checked_before_its_turn_was_stored_gets_that_turn()
         attachments: Vec::new(),
         resources: Vec::new(),
         synthetic: false,
+        ..Default::default()
     };
     let started = runtime.queue_input(thread.id, steer.clone()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), provider.first_started.acquire())

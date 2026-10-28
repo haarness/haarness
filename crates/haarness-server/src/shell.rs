@@ -95,8 +95,17 @@ pub(crate) async fn run(
     let mut stderr = child.stderr.take().expect("piped stderr");
     let mut tail = Vec::new();
     let mut stdout_tail = Vec::new();
+    let mut stdout_total = 0usize;
     let mut total = 0usize;
     let mut lines = 0usize;
+    // A command with no deadline can print until it is stopped (`npm run
+    // dev`, `tail -f`): its saved output keeps only its start.
+    let save_limit = if timeout_ms == 0 {
+        SAVED_WITHOUT_DEADLINE
+    } else {
+        usize::MAX
+    };
+    let mut saved = 0usize;
     let execution = async {
         // Heap buffers keep this future small enough to await unboxed.
         let mut out = vec![0u8; 8192];
@@ -109,6 +118,7 @@ pub(crate) async fn run(
                 value = stdout.read(&mut out), if !out_done => {
                     let n = value.map_err(error)?; out_done = n == 0;
                     stdout_tail.extend_from_slice(&out[..n]);
+                    stdout_total += n;
                     if stdout_tail.len() > 50 * 1024 { stdout_tail.drain(..stdout_tail.len() - 50 * 1024); }
                     &out[..n]
                 },
@@ -119,7 +129,11 @@ pub(crate) async fn run(
             };
             total += bytes.len();
             lines += newlines(bytes);
-            file.write_all(bytes).await.map_err(error)?;
+            let room = save_limit.saturating_sub(saved).min(bytes.len());
+            if room > 0 {
+                file.write_all(&bytes[..room]).await.map_err(error)?;
+                saved += room;
+            }
             tail.extend_from_slice(bytes);
             if tail.len() > 50 * 1024 {
                 tail.drain(..tail.len() - 50 * 1024);
@@ -153,7 +167,13 @@ pub(crate) async fn run(
         .rev()
         .collect::<Vec<_>>()
         .join("\n");
-    let stdout_text = String::from_utf8_lossy(&stdout_tail);
+    // Cut by bytes, the kept stdout can start inside a character.
+    let stdout_kept = if stdout_total > stdout_tail.len() {
+        whole_characters(&stdout_tail)
+    } else {
+        &stdout_tail
+    };
+    let stdout_text = String::from_utf8_lossy(stdout_kept);
     let stdout_preview = stdout_text
         .lines()
         .rev()
@@ -163,10 +183,31 @@ pub(crate) async fn run(
         .rev()
         .collect::<Vec<_>>()
         .join("\n");
-    let mut metadata = json!({"exit":exit,"truncated":truncated,"stdout": if stdout_text.lines().count() > 2000 { stdout_preview.as_str() } else { stdout_text.as_ref() }});
-    let notice = if truncated {
+    let stdout_lines = stdout_text.lines().count();
+    let mut metadata = json!({"exit":exit,"truncated":truncated,"stdout": if stdout_lines > 2000 { stdout_preview.as_str() } else { stdout_text.as_ref() }});
+    // `stdout` holds only its end: a definition's snippet says so and names
+    // the file, kept for it even when the output itself fits (2001 lines
+    // with no final newline).
+    let stdout_cut = stdout_total > stdout_tail.len() || stdout_lines > 2000;
+    if stdout_cut {
+        metadata["stdoutCut"] = json!(true);
+    }
+    let notice = if truncated || stdout_cut {
         metadata["outputPath"] = json!(path);
-        format!("Full output saved to: {}\n", path.display())
+        if saved < total {
+            metadata["outputSavedBytes"] = json!(saved);
+        }
+        if !truncated {
+            String::new()
+        } else if saved < total {
+            format!(
+                "First {} MiB of the output saved to: {}\n",
+                SAVED_WITHOUT_DEADLINE / (1024 * 1024),
+                path.display()
+            )
+        } else {
+            format!("Full output saved to: {}\n", path.display())
+        }
     } else {
         drop(file);
         let _ = tokio::fs::remove_file(&path).await;
@@ -183,6 +224,20 @@ pub(crate) async fn run(
         ),
         metadata,
     })
+}
+
+/// What a command without a deadline saves of its output, from the start;
+/// the end it shows is kept apart. 64 MiB, as much as a request body.
+pub(crate) const SAVED_WITHOUT_DEADLINE: usize = 64 * 1024 * 1024;
+
+/// `bytes` without the continuation bytes of a character cut off before it.
+fn whole_characters(bytes: &[u8]) -> &[u8] {
+    let partial = bytes
+        .iter()
+        .take(3)
+        .take_while(|byte| **byte & 0xC0 == 0x80)
+        .count();
+    &bytes[partial..]
 }
 
 /// Marks a command the agent runs as an agent's (`AGENT`, `AI_AGENT`, and
@@ -300,6 +355,94 @@ mod tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn stdout_says_when_only_its_end_was_kept() {
+        let root = fixture();
+        let stdout = |command: &'static str| {
+            let root = root.clone();
+            async move {
+                run(
+                    command,
+                    &root,
+                    0,
+                    &CancellationToken::new(),
+                    &root,
+                    &BTreeMap::new(),
+                    None,
+                )
+                .await
+                .unwrap()
+                .metadata
+            }
+        };
+        // Within both limits: as it was, with no flag.
+        let whole = stdout("seq 2000").await;
+        assert_eq!(whole["stdout"].as_str().unwrap().lines().count(), 2000);
+        assert!(whole.get("stdoutCut").is_none(), "{whole}");
+        // Over the line limit: its last 2000 lines.
+        let lines = stdout("seq 3000").await;
+        let kept = lines["stdout"].as_str().unwrap();
+        assert!(
+            kept.starts_with("1001\n") && kept.ends_with("\n3000"),
+            "{kept:.20}"
+        );
+        assert_eq!(lines["stdoutCut"], true);
+        // 2001 lines with no final newline fit the output's limits, which
+        // count newlines, yet stdout keeps 2000 of them: the file that holds
+        // all of it stays for the note to name.
+        let unended = stdout("seq 2000; printf 2001").await;
+        assert_eq!(unended["stdoutCut"], true);
+        assert_eq!(unended["truncated"], false);
+        let saved = std::fs::read_to_string(unended["outputPath"].as_str().unwrap()).unwrap();
+        assert!(saved.starts_with("1\n2\n") && saved.ends_with("\n2001"));
+        // Over the byte limit on a line of two-byte characters, cut at an odd
+        // byte: the kept text starts on a whole character.
+        let bytes =
+            stdout("i=0; while [ $i -lt 30001 ]; do printf 'é'; i=$((i+1)); done; printf x").await;
+        let kept = bytes["stdout"].as_str().unwrap();
+        assert_eq!(bytes["stdoutCut"], true);
+        let head = kept.chars().take(4).collect::<String>();
+        assert!(kept.starts_with('é') && kept.ends_with('x'), "{head:?}");
+        assert!(!kept.contains('\u{fffd}'));
+        // Errors alone past the limit leave stdout whole.
+        let errors = stdout("seq 3000 >&2; printf done").await;
+        assert_eq!(errors["stdout"], "done");
+        assert!(errors.get("stdoutCut").is_none(), "{errors}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_command_without_a_deadline_saves_only_the_start_of_its_output() {
+        let root = fixture();
+        let past = SAVED_WITHOUT_DEADLINE + 1024 * 1024;
+        let output = run(
+            &format!("yes 0123456789 | head -c {past}"),
+            &root,
+            0,
+            &CancellationToken::new(),
+            &root,
+            &BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let path = output.metadata["outputPath"].as_str().unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().len(),
+            SAVED_WITHOUT_DEADLINE as u64
+        );
+        assert_eq!(output.metadata["outputSavedBytes"], SAVED_WITHOUT_DEADLINE);
+        assert!(
+            output
+                .text
+                .contains(&format!("First 64 MiB of the output saved to: {path}")),
+            "{:.200}",
+            output.text
+        );
+        // Its end is still what the command shows.
+        assert!(output.text.ends_with("0123456789"), "{:.200}", output.text);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn a_command_reads_multibyte_text_as_characters_without_a_locale() {
         let root = fixture();

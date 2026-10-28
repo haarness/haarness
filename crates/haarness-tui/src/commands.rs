@@ -2541,6 +2541,7 @@ impl App {
                     .find(|p| p.id == self.thread.provider)
                     .and_then(|p| p.models.iter().find(|m| m.id == self.thread.model))
                     .and_then(|m| m.context_window)
+                    .filter(|window| *window > 0)
                 {
                     lines.push(format!("Context window: {window} tokens"));
                 }
@@ -4033,6 +4034,7 @@ impl App {
                     tools: None,
                     wait: false,
                     timeout_ms: None,
+                    ..Default::default()
                 },
             )
             .await?;
@@ -4110,6 +4112,7 @@ impl App {
             // Desktop chat's preview tool out of terminal turns.
             tools: Some(std::collections::HashMap::from([("preview".into(), false)])),
             command: None,
+            ..Default::default()
         };
         if !request.resources.is_empty() {
             let mentions = request.resources.clone();
@@ -4297,6 +4300,7 @@ impl App {
             attachments,
             resources,
             synthetic: false,
+            ..Default::default()
         };
         if !request.resources.is_empty() {
             let mentions = request.resources.clone();

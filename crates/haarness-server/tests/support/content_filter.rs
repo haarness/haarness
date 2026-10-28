@@ -79,6 +79,7 @@ async fn filtered_turn_preserves_partial_output_and_usage_without_tools_or_queue
                 attachments: vec![],
                 resources: Vec::new(),
                 synthetic: false,
+                ..Default::default()
             },
         )
         .await

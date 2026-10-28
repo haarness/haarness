@@ -132,6 +132,7 @@ impl Fixture {
                     reasoning_effort: None,
                     tools: None,
                     command: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -743,6 +744,7 @@ async fn a_permission_request_hook_allowing_other_input_leaves_the_prompt_to_the
                 reasoning_effort: None,
                 tools: None,
                 command: None,
+                ..Default::default()
             },
         )
         .await
@@ -1023,6 +1025,7 @@ async fn a_permission_request_hook_cannot_answer_always_for_an_edit_of_haarness_
                 reasoning_effort: None,
                 tools: None,
                 command: None,
+                ..Default::default()
             },
         )
         .await
@@ -1181,6 +1184,7 @@ async fn answers_that_do_not_fit_leave_the_question_to_the_person() {
                 reasoning_effort: None,
                 tools: None,
                 command: None,
+                ..Default::default()
             },
         )
         .await
