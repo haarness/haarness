@@ -1616,7 +1616,9 @@ fn canonical_directory(path: &Path) -> Result<PathBuf> {
 /// Where Haarness keeps its files, as this process sees it. A scheduled run is
 /// started by launchd, systemd or Task Scheduler with none of the creating
 /// shell's environment, so it gets these to use the same install: the same
-/// schedules, chats, credentials and Cloud sign-in.
+/// schedules, chats, credentials and Cloud sign-in. A run of a schedule
+/// that was not registered (`HAARNESS_SCHEDULE_SKIP_INSTALL`, which a test
+/// may still start natively) registers nothing either.
 fn storage_environment() -> Vec<(&'static str, String)> {
     [
         "HAARNESS_HOME",
@@ -1626,6 +1628,7 @@ fn storage_environment() -> Vec<(&'static str, String)> {
         "XDG_DATA_HOME",
         "XDG_CACHE_HOME",
         "XDG_STATE_HOME",
+        "HAARNESS_SCHEDULE_SKIP_INSTALL",
     ]
     .into_iter()
     .filter_map(|key| {
