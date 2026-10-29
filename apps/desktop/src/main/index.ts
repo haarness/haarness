@@ -2098,6 +2098,15 @@ function menu() {
             click: (_item, win) => action("stop-response", win),
           },
           {
+            // The window's chat lets its running commands and subagents go on
+            // in the background; no key until the person gives it one.
+            label: t("Send to background"),
+            accelerator: data().preferences.shortcuts.background
+              ? data().preferences.shortcuts.background.replace(/\bMod\b/g, "CmdOrCtrl")
+              : undefined,
+            click: (_item, win) => action("send-to-background", win),
+          },
+          {
             label: t("Open project") + "…",
             accelerator: "CmdOrCtrl+O",
             click: () => action("open"),

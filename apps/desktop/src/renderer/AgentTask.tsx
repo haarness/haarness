@@ -3,7 +3,8 @@ import { ProviderLabel } from "./ProviderIcon";
 import { modelName } from "../model-names";
 import { toolActivity } from "./transcript";
 import { Shimmer } from "./Shimmer";
-import { Show, createMemo, createSignal } from "solid-js";
+import { Show, createMemo, createSignal, onCleanup } from "solid-js";
+import { commandsOffered } from "./background-work";
 import type { Turn } from "@haarness/sdk";
 import { useApp } from "./state";
 import { Icon } from "./ui";
@@ -35,12 +36,12 @@ export function AgentTask(props: { task: Task }) {
     text(args().description) ||
     child()?.title ||
     text(args().prompt) ||
-    "Agent task";
+    t("Agent task");
   const agent = () => {
     const id =
       child()?.agent || text(args().agent) || text(args().subagent_type);
     return (
-      app.state.agents.find((agent) => agent.id === id)?.name || id || "Agent"
+      app.state.agents.find((agent) => agent.id === id)?.name || id || t("Agent")
     );
   };
   const turn = () =>
@@ -61,14 +62,14 @@ export function AgentTask(props: { task: Task }) {
   });
   const label = () =>
     ({
-      completed: "Completed",
-      stopped: "Stopped",
-      failed: "Failed",
-      approval: "Needs approval",
-      question: "Needs an answer",
-      starting: "Starting…",
-      background: "Working in background",
-      running: "Working",
+      completed: t("Completed"),
+      stopped: t("Stopped"),
+      failed: t("Failed"),
+      approval: t("Needs approval"),
+      question: t("Needs an answer"),
+      starting: t("Starting…"),
+      background: t("Working in background"),
+      running: t("Working"),
     })[status()];
   const working = () =>
     ["starting", "running", "background"].includes(status());
@@ -96,6 +97,32 @@ export function AgentTask(props: { task: Task }) {
       setStopping(false);
     }
   };
+  // A foreground subagent its parent waits for can go on in the background,
+  // so the reply carries on (servers with background-commands.v1).
+  const offered = commandsOffered();
+  const [moving, setMoving] = createSignal(false);
+  const movable = () => offered() && status() === "running" && !!active() && !!childId();
+  const move = async () => {
+    if (!movable() || moving()) return;
+    setMoving(true);
+    try {
+      await app.api("promoteBackgroundTasks", props.task.item.threadId, {
+        childThreadId: childId(),
+      });
+    } finally {
+      setMoving(false);
+    }
+  };
+  /** The width the row keeps free for Send to background beside Stop. */
+  const [room, setRoom] = createSignal(0);
+  const measure = (element: HTMLElement) => {
+    const observer = new ResizeObserver(() => setRoom(element.offsetWidth));
+    observer.observe(element);
+    onCleanup(() => {
+      observer.disconnect();
+      setRoom(0);
+    });
+  };
   const detail = () => {
     if (!working()) return "";
     const name = progress()?.lastTool;
@@ -110,7 +137,7 @@ export function AgentTask(props: { task: Task }) {
         data-status={status()}
         data-child-id={childId()}
         disabled={!childId()}
-        aria-label={`${childId() ? "Open agent task" : "Agent task"}: ${title()}`}
+        aria-label={`${childId() ? t("Open agent task") : t("Agent task")}: ${title()}`}
         aria-description={label()}
         onClick={() => app.run(() => app.choose(childId()!))}
       >
@@ -152,6 +179,13 @@ export function AgentTask(props: { task: Task }) {
             </Show>
           </span>
         </span>
+        <Show when={room()}>
+          <span
+            class="agent-task-room"
+            style={{ width: `calc(${room()}px + var(--s1) - var(--s3))` }}
+            aria-hidden="true"
+          />
+        </Show>
         <span class="agent-task-status" title={label()} aria-hidden="true">
           <Show when={status() === "completed"}>
             <Icon name="check" size="xs" />
@@ -165,6 +199,18 @@ export function AgentTask(props: { task: Task }) {
         </span>
         <Icon name="chevron" size="xs" class="agent-task-chevron" />
       </button>
+      <Show when={movable()}>
+        <button
+          ref={measure}
+          type="button"
+          class="agent-task-send"
+          aria-label={`${t("Send to background")}: ${title()}`}
+          disabled={moving()}
+          onClick={() => void app.run(move)}
+        >
+          {t("Send to background")}
+        </button>
+      </Show>
       <Show when={active()}>
         <button
           type="button"

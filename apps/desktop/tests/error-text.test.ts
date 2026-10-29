@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ApiError, TransportError } from "@haarness/sdk";
-import { cancelled, errorText, errorTextLine, failureDetail, failureMessage } from "../src/renderer/error-text";
+import { cancelled, conflictAnswer, errorText, errorTextLine, failureDetail, failureMessage, notFoundAnswer } from "../src/renderer/error-text";
 
 test("server layer prefixes never reach the reader", () => {
   assert.deepEqual(errorText(new Error("tool error: /tmp/does-not-exist does not exist")), {
@@ -171,4 +171,33 @@ test("main hands the window copy only the error could choose, on one line", () =
   );
   assert.equal(failureMessage(new DOMException("This operation was aborted", "AbortError")), "This operation was aborted");
   assert.equal(errorTextLine(errorText("tool error: Model sign-in failed: gpt-5.1 needs a paid plan")), "Model sign-in failed: gpt-5.1 needs a paid plan");
+});
+
+test("only the server's answer that something does not exist reads as not found", () => {
+  // The server's own words, a bare status, and what main says for one.
+  assert.equal(notFoundAnswer(new Error("not found: command cmd-4f2a")), true);
+  assert.equal(notFoundAnswer(new Error("HTTP 404")), true);
+  assert.equal(notFoundAnswer(new Error("410 Gone")), true);
+  assert.equal(notFoundAnswer(new Error(failureMessage(Object.assign(new Error(""), { name: "ApiError", status: 404 })))), true);
+  assert.equal(notFoundAnswer(Object.assign(new Error("x"), { status: 404 })), true);
+  // A computer offline through the relay, a workspace asleep, the network.
+  assert.equal(notFoundAnswer(new Error("conflict: the computer is offline")), false);
+  assert.equal(notFoundAnswer(new Error("HTTP 409")), false);
+  assert.equal(notFoundAnswer(new Error("invalid request: the workspace is asleep")), false);
+  assert.equal(notFoundAnswer(new Error("fetch failed")), false);
+});
+
+test("a refusal that conflicts with how things stand reads as one, and keeps its reason across the window", () => {
+  const refused = Object.assign(new Error("conflict: this chat runs as many commands in the background as it may"), {
+    name: "ApiError",
+    status: 409,
+  });
+  // Main hands the window the server's words as they were.
+  assert.equal(failureMessage(refused), refused.message);
+  assert.equal(conflictAnswer(new Error(failureMessage(refused))), true);
+  assert.equal(conflictAnswer(new Error("HTTP 409")), true);
+  assert.equal(conflictAnswer(new Error("not found: command cmd-1")), false);
+  // A computer offline through the relay says so in plain words instead.
+  const offline = Object.assign(new Error("computer offline"), { name: "ApiError", status: 409 });
+  assert.equal(conflictAnswer(new Error(failureMessage(offline, { relay: true }))), false);
 });
