@@ -62,6 +62,8 @@ const CHECKPOINT_TAIL_BYTES: usize = 4 * 1024;
 const ANNOUNCE_AFTER: Duration = Duration::from_secs(2);
 /// At most one `command.output` event per command in this time.
 const OUTPUT_EVENT_EVERY: Duration = Duration::from_secs(1);
+/// How much of an unfinished line a later search for a match reads again.
+const MATCH_OVERLAP: usize = 4 * 1024;
 /// How long a stopped command's end is awaited before the stop answers.
 const STOP_SETTLE: Duration = Duration::from_secs(5);
 
@@ -1567,7 +1569,10 @@ async fn wait_for(
 }
 
 /// The first line from `cursor` that matches `pattern`, and where a later
-/// search goes on from (the start of the last line, which may still grow).
+/// search goes on from. A line ends at a line break or a carriage return
+/// (a progress bar redrawing its line). The last, unfinished line is read
+/// again by the next search, at most its last [`MATCH_OVERLAP`] bytes, so a
+/// line that never ends is not searched from its start each time.
 async fn search(
     entry: &CommandEntry,
     pattern: &regex::Regex,
@@ -1583,8 +1588,8 @@ async fn search(
             .map_err(|error| CoreError::Tool(error.to_string()))?;
         let text = page.text();
         let mut consumed = 0;
-        for line in text.split_inclusive('\n') {
-            let complete = line.ends_with('\n');
+        for line in text.split_inclusive(['\n', '\r']) {
+            let complete = line.ends_with(['\n', '\r']);
             let line_text = line.trim_end_matches(['\n', '\r']);
             if pattern.is_match(line_text) {
                 return Ok((Some(line_text.chars().take(500).collect()), page.end));
@@ -1593,12 +1598,12 @@ async fn search(
                 consumed += line.len();
             }
         }
-        let next = page.start + consumed as u64;
+        let unfinished = page.start + consumed as u64;
+        let next = unfinished.max(page.end.saturating_sub(MATCH_OVERLAP as u64));
         if page.end >= page.size || page.end == page.start {
             return Ok((None, next));
         }
-        // A line longer than a page: go on past it.
-        at = if next > page.start { next } else { page.end };
+        at = next.max(page.start + 1);
     }
 }
 
@@ -2076,6 +2081,33 @@ mod tests {
         let shown = second.split("Output:\n").nth(1).unwrap();
         assert!(resumed.starts_with(&shown[..40]), "{shown:.80}");
         assert!(cursor_of(&second) > next);
+    }
+
+    #[tokio::test]
+    async fn a_match_reads_progress_lines_and_never_rescans_a_long_line_from_its_start() {
+        let dir = fixture();
+        let registry = Arc::new(ShellCommands::default());
+        let (entry, output, _end) = started(dir.path(), &registry, ThreadId::new()).await;
+        // A progress bar redraws its line with a carriage return.
+        output
+            .append(b"progress 10%\rprogress 100%\rdone in 3s\n")
+            .await
+            .unwrap();
+        let pattern = regex::Regex::new("^done").unwrap();
+        let (found, _) = search(&entry, &pattern, 0).await.unwrap();
+        assert_eq!(found.as_deref(), Some("done in 3s"));
+        // A line that never ends: the next search starts near its end,
+        // not at its start again.
+        let start = output.size();
+        output.append(&vec![b'.'; 2 * 1024 * 1024]).await.unwrap();
+        let missing = regex::Regex::new("never").unwrap();
+        let (found, next) = search(&entry, &missing, start).await.unwrap();
+        assert!(found.is_none());
+        assert!(
+            next >= output.size() - MATCH_OVERLAP as u64,
+            "{next} of {}",
+            output.size()
+        );
     }
 
     #[tokio::test]
