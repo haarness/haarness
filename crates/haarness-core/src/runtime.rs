@@ -5420,14 +5420,15 @@ impl AgentRuntime {
         {
             execution.shell_env = hooks.shell_env(thread_id, &workspace).await;
         }
-        // A fetch judges a redirect it would follow by the rules it was
-        // checked under, an Always given just now included, as in a turn.
-        let invoker = (name == "webfetch").then(|| {
+        // A fetch judges a redirect it would follow, and a search the files
+        // it lists, by the rules the call was checked under (built for this
+        // tool, as a turn's are), an Always given just now included.
+        let invoker = DIRECT_RULE_TOOLS.contains(&name).then(|| {
             let mut rules = engine.clone();
             for rule in self.session_rules.lock().iter().cloned() {
                 rules.add_grant(rule);
             }
-            Arc::new(DirectFetchRules(rules)) as Arc<dyn crate::ToolInvoker>
+            Arc::new(DirectRules(rules)) as Arc<dyn crate::ToolInvoker>
         });
         let (mut output, is_error) = match allowed {
             Ok(()) => {
@@ -7056,12 +7057,20 @@ struct TurnToolInvoker {
     sequence: std::sync::atomic::AtomicUsize,
 }
 
-/// What a fetch run outside a turn (a workflow's or a person's own call)
-/// may ask of its caller: only the webfetch rules it was checked under.
-struct DirectFetchRules(PermissionEngine);
+/// What a fetch or a search run outside a turn (a workflow's or a person's
+/// own call) may ask of its caller: only the rules it was checked under.
+struct DirectRules(PermissionEngine);
+
+/// The tools run outside a turn that ask their caller for rules: those that
+/// read [`crate::ToolInvoker::read_rules`] or
+/// [`crate::ToolInvoker::webfetch_rules`] and nothing else of it.
+const DIRECT_RULE_TOOLS: [&str; 3] = ["webfetch", "grep", "glob"];
 
 #[async_trait::async_trait]
-impl crate::ToolInvoker for DirectFetchRules {
+impl crate::ToolInvoker for DirectRules {
+    fn read_rules(&self) -> Option<PermissionEngine> {
+        Some(self.0.clone())
+    }
     fn webfetch_rules(&self) -> Option<PermissionEngine> {
         Some(self.0.clone())
     }
