@@ -373,15 +373,19 @@ runs on, and when it ends the chat gets a hidden user message, as for a
 background subagent, which starts a turn when the chat is idle:
 `<command id="…" state="exited|stopped|timed_out|interrupted" exit="N" signal="SIGTERM">`
 with a `<summary>`, the last 40 lines of its output (at most 8 KiB) in
-`<command_output>` and the file that keeps all of it in `<output_file>`. A
+`<command_output>` and, when its output is more than the server keeps in
+memory, the file that keeps it in `<output_file>`, readable by you alone and
+removed ten minutes after the command ended. A
 foreground command moves to the background while it runs when a person sends
 it there, or by itself after `execution.shell_move_after_ms` in a turn whose
 client sent `followsBackground: true` with `/turns`, `/input` (kept with a
 queued message until it runs) or `/commands`; the turns its background results
-start keep it. Desktop, the terminal UI, the phone and web apps and
-`haarness run --wait-background` send it. Without it (an SDK script, an editor
-over ACP, `haarness run` without waiting, a scheduled run, an older client) a
-foreground command never moves by itself and keeps its deadline, as before.
+start keep it. Desktop, the terminal UI and the phone and web apps send it.
+Without it (an SDK script, an editor over ACP, `haarness run`, a scheduled
+run, an older client) a foreground command never moves by itself and keeps
+its deadline, as before, and a command the agent starts in the background is
+stopped `execution.shell_timeout_ms` after it started, also when the agent
+gave a `timeout` of 0.
 A subagent's commands never move, and its background commands stop without a
 message when its turn ends. A person's own `!` command and a workflow's
 `shell()` never go to the background. The agent reads a command's output, lists
@@ -453,9 +457,11 @@ carries `{id, size}`, at most once a second per command, when it printed more
 
 The result of every agent `bash` call carries `metadata.command`:
 `{id, background, startedAt}` (a call that ran out of time or was stopped
-answers with an error instead; its command is still listed), and `metadata.leftovers: true` when the command
-ended while processes it started (`server &`) still ran and were stopped with
-it; any `bash` call, a person's too, no longer waits for those. Once a command
+answers with an error instead; its command is still listed), and
+`metadata.leftovers: true` when the command ended while processes it started
+(`server &`) still held its output open and were stopped with it, with
+`leftoversRunning: true` too when some were out of its process group's reach
+and run on; any `bash` call, a person's too, no longer waits for those. Once a command
 has ended, `deliversNotice` says whether its end was told to its chat: not for
 one the agent stopped itself, or one stopped with its chat, its subagent's turn
 or Haarness. Hooks get `Notification` events `command_moved` (with
