@@ -2165,3 +2165,45 @@ async fn scrolling_back_while_a_read_from_the_end_is_on_its_way_keeps_the_text()
         "{rows:#?}"
     );
 }
+
+#[tokio::test]
+async fn subagents_that_moved_are_said_when_the_cap_held_every_command_back() {
+    let thread = fixture_thread();
+    let promoted = serde_json::json!([{
+        "parentThreadId": thread.id,
+        "parentTurnId": TurnId::new(),
+        "callId": "call-t",
+        "childThreadId": ThreadId::new(),
+        "childTurnId": TurnId::new(),
+        "agent": "explore",
+        "description": "audit",
+        "background": true,
+        "startedAt": Utc::now(),
+    }]);
+    let (client, _) = recording_server(move |line, _| {
+        if line.contains("/commands/background") {
+            (
+                "409 Conflict",
+                serde_json::json!({"code": "conflict", "message": "This chat already runs 16 commands in the background", "retryable": false})
+                    .to_string(),
+            )
+        } else {
+            ("200 OK", promoted.to_string())
+        }
+    })
+    .await;
+    let mut app = app_on(&thread, vec![]);
+    app.active_turn = Some(TurnId::new());
+    let action = crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        &client,
+    )
+    .await;
+    assert!(action.is_ok());
+    assert_eq!(
+        app.notice,
+        "Subagent moved to background · completion will return here · This chat already runs 16 commands in the background"
+    );
+    assert!(app.notification_toast.is_none(), "something moved: no card");
+}
