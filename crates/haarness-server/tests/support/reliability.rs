@@ -395,6 +395,84 @@ async fn reliability_connection_cut_after_a_tool_call_closes_it_without_running_
 }
 
 #[tokio::test]
+async fn reliability_connection_cut_after_the_response_finished_loses_nothing() {
+    // A text answer: one request, nothing to continue.
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![vec![
+            Ok(text("whole answer")),
+            Ok(usage()),
+            Ok(finish("stop")),
+            cut(CUTS[0]),
+        ]],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("finished then cut"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(
+        |item| matches!(&item.data, ItemData::AssistantMessage {text} if text == "whole answer")
+    ));
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, ItemData::Error { .. }))
+    );
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+
+    // A finished response's tool calls run as usual.
+    let call = ProviderEvent::ToolCall {
+        call_id: "finished-call".into(),
+        name: "bash".into(),
+        arguments: serde_json::json!({"command":"printf ran >> ran.txt"}),
+        provider_metadata: Value::Null,
+    };
+    let (directory, runtime, provider, _) = setup_streams(
+        vec![
+            vec![Ok(call), Ok(finish("tool_calls")), cut(CUTS[1])],
+            vec![Ok(text("after the call")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("finished call then cut"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        std::fs::read_to_string(directory.join("ran.txt")).unwrap(),
+        "ran"
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert!(requests[1].messages.iter().any(|message| matches!(message,
+        ProviderMessage::ToolResult {call_id,is_error:false,..} if call_id == "finished-call")));
+    assert!(!recovery_note(&requests[1]));
+    drop(requests);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
 async fn reliability_connection_cut_every_time_fails_after_the_recoveries() {
     let (directory, runtime, provider, hooks) = setup_streams(
         vec![vec![Ok(text("partial")), cut(CUTS[0])]],

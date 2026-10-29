@@ -9530,6 +9530,14 @@ impl RunnerTask {
                     let event = match event {
                         Ok(event) => event,
                         Err(error_value) => {
+                            // Some providers keep reading after the event that
+                            // finishes a response (Gemini's finish reason, the
+                            // Responses API's `response.completed`): a cut then
+                            // loses nothing, and the round stands as finished.
+                            if finished && is_stream_cut(&error_value) {
+                                tracing::debug!(thread = %self.thread.id, error = %error_value, "connection broke after the response finished");
+                                break;
+                            }
                             record_span_error(&provider_span, &error_value);
                             // Providers check images before they answer, so a
                             // refusal arrives before anything was streamed.
