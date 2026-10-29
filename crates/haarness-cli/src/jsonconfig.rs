@@ -27,6 +27,8 @@ use std::time::Duration;
 
 use haarness_core::instructions::{self as instruction_files, ImportBudget};
 
+mod instruction_walk;
+
 use anyhow::Result;
 use haarness_core::{CustomAgent, PermissionDecision, PermissionRule};
 use haarness_protocol::{CommandInfo, McpConfigureRequest};
@@ -407,7 +409,7 @@ pub fn load_layers_with_system(
             urls.push(entry.clone());
             continue;
         }
-        for file in instruction_entry_files(entry, home, workspace, trust) {
+        for file in instruction_entry_files(entry, home, workspace, trust, &mut layers.notices) {
             let Ok(canonical) = file.canonicalize() else {
                 continue;
             };
@@ -622,18 +624,33 @@ fn trusted_instruction_roots(config_dir: &Path, home: Option<&Path>) -> Vec<Path
 /// Files named by one `instructions` entry: `~/` and absolute entries are
 /// globbed in place; relative entries glob upward from the workspace to the
 /// worktree root and are skipped when project
-/// configuration is disabled.
+/// configuration is disabled. A glob walks within bounds (see
+/// [`instruction_walk`]), and `notices` says when one ended early.
 fn instruction_entry_files(
     entry: &str,
     home: Option<&Path>,
     workspace: &Path,
     trust: bool,
+    notices: &mut Vec<String>,
 ) -> Vec<PathBuf> {
-    let files = |pattern: String| {
-        glob::glob(&pattern)
+    let configured = entry;
+    let mut files = |pattern: String| {
+        let found = instruction_walk::walk(&pattern);
+        let base = found.base.display();
+        match found.cut {
+            Some(instruction_walk::Cut::Deep) => notices.push(format!(
+                "instructions {configured}: looked no deeper than {} folders below {base}",
+                instruction_walk::LEVELS
+            )),
+            Some(instruction_walk::Cut::Large) => notices.push(format!(
+                "instructions {configured}: stopped after looking at {} entries below {base}",
+                instruction_walk::ENTRIES
+            )),
+            None => {}
+        }
+        found
+            .paths
             .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
             .filter(|path| path.is_file())
             .collect::<Vec<_>>()
     };
@@ -3345,6 +3362,183 @@ mod tests {
         let instructions = global_only.instructions.unwrap();
         assert!(instructions.contains("HOME_RULES"));
         assert!(!instructions.contains("APP_DOCS"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn instruction_globs_match_what_glob_matches_in_an_ordinary_tree() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-walk-{}",
+            uuid::Uuid::now_v7()
+        ));
+        // A folder name with glob's own characters, escaped as an entry's
+        // folder is.
+        let notes = root.join("notes [x]*?");
+        for file in [
+            "AGENTS.md",
+            "a.md",
+            "abc.md",
+            "aXc.md",
+            "b.txt",
+            "c.md",
+            ".hidden.md",
+            ".config/x.md",
+            "docs/style.md",
+            "docs/b.md",
+            "docs/guide/deep.md",
+            "b/docs/x.md",
+            "sub/AGENTS.md",
+            "sub/inner/AGENTS.md",
+            "d1/d2/d3/d4/d5/d6/d7/d8/eight.md",
+        ] {
+            let path = notes.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, file).unwrap();
+        }
+        fs::create_dir_all(notes.join("empty")).unwrap();
+        let escaped = glob::Pattern::escape(&notes.to_string_lossy());
+        for pattern in [
+            "**/*.md",
+            "docs/*.md",
+            "*/AGENTS.md",
+            "**/docs/*.md",
+            "**/AGENTS.md",
+            "**/guide/**/*.md",
+            ".*",
+            "**",
+            "**/",
+            "*",
+            "a?c.md",
+            "[ab]*.md",
+            "[!a]*.md",
+            "**/.config/*.md",
+            "docs/**",
+            "missing/*.md",
+            "AGENTS.md",
+            "d1/**/eight.md",
+        ] {
+            let pattern = format!("{escaped}/{pattern}");
+            let globbed: Vec<PathBuf> = glob::glob(&pattern)
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect();
+            let walked = instruction_walk::walk(&pattern);
+            assert_eq!(walked.paths, globbed, "{pattern}");
+            assert_eq!(walked.cut, None, "{pattern}");
+            assert!(walked.base.starts_with(&notes), "{pattern}");
+        }
+        // A pattern glob refuses matches nothing, as before.
+        assert!(glob::glob(&format!("{escaped}/a***")).is_err());
+        assert!(
+            instruction_walk::walk(&format!("{escaped}/a***"))
+                .paths
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn instruction_globs_through_folder_links_end_and_say_when_cut_short() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-links-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let home = root.join("home");
+        let notes = home.join("notes");
+        let workspace = root.join("project");
+        let deep = "l1/l2/l3/l4/l5/l6/l7/l8/l9/deep.md";
+        for file in [
+            "notes/top.md",
+            "notes/a/note.md",
+            "notes/l1/l2/l3/l4/l5/l6/l7/l8/eight.md",
+            &format!("notes/{deep}"),
+            "elsewhere/far.md",
+            "elsewhere/other.md",
+            "elsewhere/single.md",
+        ] {
+            let path = home.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, file).unwrap();
+        }
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        // Two links back up the tree: `glob` walked them for good.
+        std::os::unix::fs::symlink("..", notes.join("a/up")).unwrap();
+        std::os::unix::fs::symlink(".", notes.join("a/self")).unwrap();
+        std::os::unix::fs::symlink("../elsewhere", notes.join("away")).unwrap();
+        std::os::unix::fs::symlink("../elsewhere/single.md", notes.join("linked.md")).unwrap();
+        fs::write(
+            config.join("haarness.json"),
+            serde_json::json!({"instructions": ["~/notes/**/*.md", "~/notes/*/far.md"]})
+                .to_string(),
+        )
+        .unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (config_dir, home_dir) = (config.clone(), home.clone());
+        std::thread::spawn(move || {
+            let _ = sender.send(load_layers(
+                &config_dir,
+                Some(&home_dir),
+                &workspace,
+                true,
+                &[],
+            ));
+        });
+        let layers = receiver
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the configuration loads");
+        let found = &layers.instruction_files;
+        for expected in [
+            "notes/top.md",
+            "notes/a/note.md",
+            "notes/l1/l2/l3/l4/l5/l6/l7/l8/eight.md",
+            // A linked file matches, and a one-level `*` enters a linked
+            // folder, as before.
+            "notes/linked.md",
+            "notes/away/far.md",
+        ] {
+            assert!(
+                found.contains(&home.join(expected)),
+                "{expected}: {found:?}"
+            );
+        }
+        // A `**` enters no linked folder and reads 8 folders down at most.
+        for left_out in [format!("notes/{deep}"), "notes/away/other.md".into()] {
+            assert!(
+                !found.contains(&home.join(&left_out)),
+                "{left_out}: {found:?}"
+            );
+        }
+        assert!(
+            !found.iter().any(|file| file
+                .components()
+                .any(|part| part.as_os_str() == "up" || part.as_os_str() == "self")),
+            "{found:?}"
+        );
+        let cut = format!(
+            "instructions ~/notes/**/*.md: looked no deeper than 8 folders below {}",
+            notes.display()
+        );
+        assert_eq!(
+            layers
+                .notices
+                .iter()
+                .filter(|notice| **notice == cut)
+                .count(),
+            1,
+            "{:?}",
+            layers.notices
+        );
+        // A walk stops at its budget of entries, with what it found so far.
+        let pattern = format!(
+            "{}/**/*.md",
+            glob::Pattern::escape(&notes.to_string_lossy())
+        );
+        let walked = instruction_walk::walk_within(&pattern, 8, 3);
+        assert_eq!(walked.cut, Some(instruction_walk::Cut::Large));
+        assert!(walked.paths.len() < 3, "{:?}", walked.paths);
         fs::remove_dir_all(root).unwrap();
     }
 
