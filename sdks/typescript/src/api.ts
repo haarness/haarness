@@ -297,6 +297,26 @@ export class Api extends Transport {
   executeCommand(id: string, body: T.ExecuteCommandRequest, options: RequestOptions = {}): Promise<T.CommandExecutionResponse> {
     return this.request("POST", `/v1/threads/${this.segment(id)}/commands`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /v1/threads/{id}/commands */
+  listShellCommands(id: string, options: RequestOptions = {}): Promise<Array<T.ShellCommandInfo>> {
+    return this.request("GET", `/v1/threads/${this.segment(id)}/commands`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /v1/threads/{id}/commands/background */
+  backgroundShellCommands(id: string, query: T.BackgroundCommandsQuery = {}, options: RequestOptions = {}): Promise<Array<T.ShellCommandInfo>> {
+    return this.request("POST", `/v1/threads/${this.segment(id)}/commands/background`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /v1/threads/{id}/commands/{command} */
+  getShellCommand(id: string, command: string, options: RequestOptions = {}): Promise<T.ShellCommandInfo> {
+    return this.request("GET", `/v1/threads/${this.segment(id)}/commands/${this.segment(command)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /v1/threads/{id}/commands/{command}/output */
+  readShellCommandOutput(id: string, command: string, query: T.ShellCommandOutputQuery = {}, options: RequestOptions = {}): Promise<T.ShellCommandOutput> {
+    return this.request("GET", `/v1/threads/${this.segment(id)}/commands/${this.segment(command)}/output`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /v1/threads/{id}/commands/{command}/stop */
+  stopShellCommand(id: string, command: string, options: RequestOptions = {}): Promise<T.ShellCommandInfo> {
+    return this.request("POST", `/v1/threads/${this.segment(id)}/commands/${this.segment(command)}/stop`, { binaryBody: false, binaryResponse: false, ...options });
+  }
   /** POST /v1/threads/{id}/input */
   queueInput(id: string, body: T.QueueInputRequest, options: RequestOptions = {}): Promise<T.QueueInputResponse> {
     return this.request("POST", `/v1/threads/${this.segment(id)}/input`, { body, binaryBody: false, binaryResponse: false, ...options });
@@ -380,6 +400,10 @@ export class Api extends Transport {
   /** GET /v1/turns/active */
   activeTurns(options: RequestOptions = {}): Promise<Array<T.Turn>> {
     return this.request("GET", `/v1/turns/active`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /v1/commands/active */
+  activeShellCommands(options: RequestOptions = {}): Promise<Array<T.ShellCommandInfo>> {
+    return this.request("GET", `/v1/commands/active`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/turns/{id} */
   getTurn(id: string, options: RequestOptions = {}): Promise<T.Turn> {

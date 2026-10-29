@@ -33,6 +33,10 @@ pub struct PendingInput {
     /// `StartTurnRequest::attended`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub attended: bool,
+    /// Queued by a client that follows background work up (see
+    /// `StartTurnRequest::follows_background`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub follows_background: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]

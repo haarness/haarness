@@ -402,6 +402,7 @@ fn sanitize_item(item: &mut Item) {
             *output = redact(output, "tool-output", item.id);
             *metadata = redacted_value("tool-metadata", item.id, metadata);
         }
+        ItemData::CommandState { tail, .. } => *tail = redact(tail, "command-output", item.id),
         ItemData::McpAction { server, detail, .. } => {
             *server = redact(server, "mcp-server", item.id);
             *detail = redacted_value("mcp-detail", item.id, detail);

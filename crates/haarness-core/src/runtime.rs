@@ -18,8 +18,8 @@ use haarness_protocol::{
     GoalUpdatedEvent, GoalVerdict, Item, ItemData, ItemId, PendingPermissionInfo,
     PendingQuestionInfo, PermissionReply, PermissionReplyDecision, QuestionReply,
     QueueInputRequest, QueueInputResponse, RequestId, SessionArchive, SessionArchiveImportResult,
-    StartTurnRequest, Thread, ThreadActivity, ThreadId, TodoCheckpoint, TodoEntry,
-    ToolCatalogResponse, Turn, TurnId, TurnStatus, UpdateThreadRequest,
+    ShellCommandInfo, ShellCommandOutput, StartTurnRequest, Thread, ThreadActivity, ThreadId,
+    TodoCheckpoint, TodoEntry, ToolCatalogResponse, Turn, TurnId, TurnStatus, UpdateThreadRequest,
 };
 use parking_lot::{Mutex, RwLock};
 use serde_json::json;
@@ -1651,6 +1651,8 @@ pub struct AgentRuntime {
     subagents: SubagentSlots,
     background_tasks: Arc<BackgroundTasks>,
     background_ledger: Arc<BackgroundLedger>,
+    /// The agents' shell commands, foreground and background, of every chat.
+    shell_commands: Arc<crate::background_commands::ShellCommands>,
     memory_context: Arc<RwLock<String>>,
     live_commands: Arc<RwLock<Vec<haarness_protocol::CommandInfo>>>,
     live_agents: Arc<RwLock<Vec<crate::CustomAgent>>>,
@@ -1812,6 +1814,7 @@ impl AgentRuntime {
             subagents: Arc::new(Mutex::new(HashMap::new())),
             background_tasks: Arc::new(DashMap::new()),
             background_ledger: Arc::new(BackgroundLedger::default()),
+            shell_commands: Arc::default(),
             memory_context: Arc::new(RwLock::new(String::new())),
             live_commands: Arc::new(RwLock::new(commands)),
             live_agents: Arc::new(RwLock::new(agents)),
@@ -2651,6 +2654,7 @@ impl AgentRuntime {
                             text: request.text,
                             attachments: request.attachments,
                             attended: request.attended,
+                            follows_background: request.follows_background,
                         },
                     )
                     .await?;
@@ -2671,6 +2675,7 @@ impl AgentRuntime {
                         text: request.text,
                         attachments: request.attachments,
                         attended: request.attended,
+                        follows_background: request.follows_background,
                     },
                 )
                 .await?;
@@ -2739,6 +2744,7 @@ impl AgentRuntime {
                             .map(|preview| HashMap::from([("preview".into(), preview)])),
                         command: None,
                         attended: input.attended,
+                        follows_background: input.follows_background,
                     },
                     Vec::new(),
                     None,
@@ -2939,6 +2945,7 @@ impl AgentRuntime {
                         tools: tools.clone(),
                         command: None,
                         attended: request.attended,
+                        follows_background: request.follows_background,
                     },
                     Vec::new(),
                     None,
@@ -3713,14 +3720,112 @@ impl AgentRuntime {
             Some(turn) => Some(self.repository.get_turn(turn).await?),
             None => None,
         };
+        let background_commands = self
+            .shell_commands
+            .running_in_background(&self.thread_tree_ids(id).await?);
         // Last: a turn that started and ended between two reads of a chat
         // that looks quiet is the newest here.
         let last_turn = self.repository.last_turn(id).await?;
         Ok(ThreadActivity {
             active_turn,
             background,
+            background_commands,
             last_turn,
         })
+    }
+
+    /// The agents' shell commands in `thread` and the chats under it:
+    /// running ones first, then those that ended in the last ten minutes.
+    pub async fn shell_commands(&self, thread: ThreadId) -> CoreResult<Vec<ShellCommandInfo>> {
+        let threads = self.thread_tree_ids(thread).await?;
+        Ok(self.shell_commands.list(Some(&threads)))
+    }
+
+    /// Running shell commands of every chat.
+    #[must_use]
+    pub fn active_shell_commands(&self) -> Vec<ShellCommandInfo> {
+        self.shell_commands
+            .list(None)
+            .into_iter()
+            .filter(|info| info.state.is_live())
+            .collect()
+    }
+
+    /// The command `id` of `thread` or a chat under it.
+    async fn shell_command_entry(
+        &self,
+        thread: ThreadId,
+        id: &str,
+    ) -> CoreResult<Arc<crate::background_commands::CommandEntry>> {
+        let threads = self.thread_tree_ids(thread).await?;
+        self.shell_commands
+            .get(id)
+            .filter(|entry| threads.contains(&entry.info().thread_id))
+            .ok_or_else(|| CoreError::NotFound(format!("command {id}")))
+    }
+
+    /// The command `id` of `thread` or a chat under it.
+    pub async fn shell_command(&self, thread: ThreadId, id: &str) -> CoreResult<ShellCommandInfo> {
+        Ok(self.shell_command_entry(thread, id).await?.info())
+    }
+
+    /// A page of what the command `id` printed: from `cursor` (from its
+    /// start when `None`), or its last `limit` bytes with `tail`; at most
+    /// `limit` bytes (64 KiB when `None`, 1 MiB at most).
+    pub async fn shell_command_output(
+        &self,
+        thread: ThreadId,
+        id: &str,
+        cursor: Option<u64>,
+        limit: Option<u64>,
+        tail: bool,
+    ) -> CoreResult<ShellCommandOutput> {
+        let info = self.shell_command_entry(thread, id).await?.info();
+        let _ = (limit, tail);
+        let cursor = cursor.unwrap_or(0).min(info.output_bytes);
+        Ok(ShellCommandOutput {
+            text: String::new(),
+            start: cursor,
+            cursor,
+            size: info.output_bytes,
+            more: false,
+            settled: !info.state.is_live(),
+            state: info.state,
+            exit_code: info.exit_code,
+        })
+    }
+
+    /// Stop the command `id` of `thread` or a chat under it, for a person.
+    /// It reads `stopping` until its process has exited, then `stopped`;
+    /// stopping a command that already ended changes nothing.
+    pub async fn stop_shell_command(
+        &self,
+        thread: ThreadId,
+        id: &str,
+    ) -> CoreResult<ShellCommandInfo> {
+        Ok(self.shell_command_entry(thread, id).await?.info())
+    }
+
+    /// Send `thread`'s running foreground commands (the one `id` when given)
+    /// to the background, for a person. A command that cannot move (a
+    /// subagent's, one already ended) is a conflict when it was named, and
+    /// left out otherwise.
+    pub async fn background_shell_commands(
+        &self,
+        thread: ThreadId,
+        id: Option<&str>,
+    ) -> CoreResult<Vec<ShellCommandInfo>> {
+        if let Some(id) = id {
+            let info = self.shell_command_entry(thread, id).await?.info();
+            if !info.background {
+                return Err(CoreError::Conflict(format!(
+                    "command {id} cannot move to the background"
+                )));
+            }
+            return Ok(vec![info]);
+        }
+        self.thread_tree_ids(thread).await?;
+        Ok(Vec::new())
     }
 
     /// Let the background count read the workflow runs a thread launched
@@ -6559,6 +6664,7 @@ impl AgentRuntime {
             subagents: self.subagents.clone(),
             background_tasks: self.background_tasks.clone(),
             background_ledger: self.background_ledger.clone(),
+            shell_commands: self.shell_commands.clone(),
             depth: 0,
             root_thread_id: root,
             parent: None,
@@ -6976,6 +7082,7 @@ struct RunnerTask {
     subagents: SubagentSlots,
     background_tasks: Arc<BackgroundTasks>,
     background_ledger: Arc<BackgroundLedger>,
+    shell_commands: Arc<crate::background_commands::ShellCommands>,
     depth: u8,
     /// Root of this turn's conversation; equals `thread.id` unless this is a
     /// child-agent turn.
@@ -12253,6 +12360,9 @@ impl RunnerTask {
             tools,
             command: None,
             attended: self.request.attended,
+            // A subagent's commands never move to the background by
+            // themselves: its parent waits for its answer, not for a person.
+            follows_background: false,
         };
         let (turn, user, _) = self
             .repository
@@ -12345,6 +12455,7 @@ impl RunnerTask {
             subagents: self.subagents.clone(),
             background_tasks: self.background_tasks.clone(),
             background_ledger: self.background_ledger.clone(),
+            shell_commands: self.shell_commands.clone(),
             depth: self.depth + 1,
             root_thread_id: self.root_thread_id,
             parent: Some(ParentLink {
@@ -12681,6 +12792,7 @@ impl RunnerTask {
             subagents: self.subagents.clone(),
             background_tasks: self.background_tasks.clone(),
             background_ledger: self.background_ledger.clone(),
+            shell_commands: self.shell_commands.clone(),
             memory_context: self.memory_context.clone(),
             live_commands: self.live_commands.clone(),
             live_agents: self.live_agents.clone(),
