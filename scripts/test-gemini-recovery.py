@@ -128,8 +128,9 @@ with tempfile.TemporaryDirectory(prefix='haarness-gemini-recovery-',
     home.mkdir()
     (workspace / '.haarness').mkdir(parents=True)
     (workspace / 'sample.txt').write_text('GEMINI_FILE_PROOF\n')
+    # Chats start in Auto; Review shows in the TUI once it is up.
     (workspace / '.haarness/config.toml').write_text(
-        f'[defaults]\nprovider="gemini"\nmodel="{MODEL}"\n[permissions]\nread="allow"\n[lsp]\nenabled=false\n')
+        f'[defaults]\nprovider="gemini"\nmodel="{MODEL}"\napproval_mode="review"\n[permissions]\nread="allow"\n[lsp]\nenabled=false\n')
     run(['git', 'init', '-q', str(workspace)])
     env = {**ISOLATED, 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home), 'HAARNESS_HOME': str(home),
            'HAARNESS_DATA_DIR': str(root / 'data'), 'USER': os.environ.get('USER', 'fixture'),
