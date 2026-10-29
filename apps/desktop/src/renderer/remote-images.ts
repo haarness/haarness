@@ -1,11 +1,12 @@
 /*
  * Images a reply links to on another host. The page's CSP loads none of
- * them, so `![x](https://host/?d=secret)` tells that host nothing: Markdown
- * shows a placeholder naming the host with a "Load image from <host>"
- * button, and only that click fetches the image, in the main process
- * (main/remote-image.ts), as a data URL. Loaded images are kept for their
- * chat in memory, so a reply drawn again shows them at once; a restart
- * forgets them.
+ * them (it allows only Haarness Cloud, for marketplace icons, and Markdown
+ * never puts a remote address in an `<img>`), so `![x](https://host/?d=secret)`
+ * tells that host nothing: Markdown shows a placeholder naming the host with
+ * a "Load image from <host>" button, and only that click fetches the image,
+ * in the main process (main/remote-image.ts), as a data URL. Loaded images
+ * are kept for their chat in memory, so a reply drawn again shows them at
+ * once; a restart forgets them.
  */
 
 /** The host an image source would be fetched from, or undefined for one that stays in the page. */

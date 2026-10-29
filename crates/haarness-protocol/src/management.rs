@@ -7,6 +7,10 @@ use utoipa::ToSchema;
 #[serde(rename_all = "camelCase")]
 pub struct ManagementView {
     pub title: String,
+    /// A square image drawn beside the title, as an absolute https URL.
+    /// Clients that show text only leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     /// Structured resource state for clients that render their own controls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
@@ -27,6 +31,10 @@ pub struct ManagementEntry {
     pub request: Value,
     #[serde(default)]
     pub confirm: Option<String>,
+    /// A square image drawn beside the label, as an absolute https URL.
+    /// Clients that show text only leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]

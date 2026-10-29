@@ -86,11 +86,15 @@ def main():
         base=f"http://127.0.0.1:{catalog.server_port}"
         threading.Thread(target=catalog.serve_forever,daemon=True).start()
         env["HAARNESS_CLOUD_API_URL"]=base
+        # Cloud's public host, where resource icons live; only icons there are passed on.
+        icons="https://cloud.fixture.test/icons"
+        env["HAARNESS_CLOUD_WEB_ORIGIN"]="https://cloud.fixture.test"
         (home/".npmrc").write_text("registry="+base+"\n")
         ids={}
         for kind in ("skill","agent","plugin","mcp","extension"):
             rid,vid=str(uuid.uuid4()),str(uuid.uuid4());ids[kind]=rid;name="proof-"+kind
-            resource={"id":rid,"kind":kind,"slug":name,"name":name,"summary":"Fixture","visibility":"public","publisher":{"slug":"fixtures","displayName":"Fixtures"}}
+            resource={"id":rid,"kind":kind,"slug":name,"name":name,"summary":"Fixture","visibility":"public","publisher":{"slug":"fixtures","displayName":"Fixtures"},
+                      "iconUrl":"https://elsewhere.example/agent.png" if kind=="agent" else f"{icons}/{kind}.png"}
             install={kind:{}}
             if kind=="mcp": install={"mcp":{"config":{"type":"remote","url":"https://learn.microsoft.com/api/mcp"},"env_placeholders":[]}}
             if kind=="extension": install={"extension":{"extension_type":"core","npm_spec":"marketplace-fixture@1.0.0","integrity":integrity}}
@@ -157,6 +161,17 @@ def main():
                 request=urllib.request.Request(url+path,data=None if body is None else json.dumps(body).encode(),headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"})
                 with urllib.request.urlopen(request,timeout=15) as response:return json.load(response)
             wait(lambda: api("/v1/info"),"server start")
+            # Icons on Cloud reach the search rows, the install form, the receipts and the
+            # installed list; the one on another host never does.
+            expected={f"proof-{kind}":None if kind=="agent" else f"{icons}/{kind}.png" for kind in ids}
+            rows=api("/v1/manage/marketplace-ui",{"action":"search"})["entries"]
+            assert {e["label"].split(" · ")[0]:e.get("icon") for e in rows if e["request"].get("action")=="inspect"}==expected,rows
+            assert api("/v1/manage/marketplace-ui",{"action":"inspect","id":ids["skill"]})["icon"]==f"{icons}/skill.png"
+            assert "icon" not in api("/v1/manage/marketplace-ui",{"action":"inspect","id":ids["agent"]})
+            receipts=marketplace("installed")
+            assert {f"proof-{r['kind']}":r.get("iconUrl") for r in receipts}==expected,receipts
+            rows=api("/v1/manage/marketplace-ui",{"action":"installed"})["entries"]
+            assert sorted(e["icon"] for e in rows if "icon" in e)==sorted(v for v in expected.values() if v),rows
             def has(path,key,name):return any(x.get(key)==name for x in api(path))
             wait(lambda:has("/v1/skills","name","proof-skill"),"skill reload")
             assert has("/v1/agents","id","proof-agent")
