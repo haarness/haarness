@@ -1547,7 +1547,35 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
         return "Provider rate limit or quota reached. Wait and retry, or check the account quota."
             .into();
     }
+    if let Some(reason) = refusal_reason_text(raw) {
+        return format!(
+            "{} rejected the request: {reason}",
+            provider.unwrap_or("The provider")
+        );
+    }
     format!("Provider error: {}", clean_error_text(raw, 600))
+}
+
+/// The provider's own words in a refusal it answered with a 4xx status,
+/// `HTTP 400 Bad Request: [code] reason`, without the status line and code,
+/// which the log keeps: Haarness Router writes them for people ("Provider
+/// Gemini is not set up on this router: set GEMINI_API_KEY …"), as most APIs
+/// do. `None` without a status line or a reason.
+fn refusal_reason_text(raw: &str) -> Option<String> {
+    let status = raw.strip_prefix("HTTP ")?.get(..3)?;
+    if !status.starts_with('4') || !status.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let (_, reason) = raw.split_once(": ")?;
+    let reason = reason.trim();
+    if let Some((message, _, _)) = provider_error_fields(reason) {
+        return Some(clean_error_text(&message, 600)).filter(|reason| !reason.is_empty());
+    }
+    let reason = reason
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once("] "))
+        .map_or(reason, |(_, rest)| rest);
+    Some(clean_error_text(reason, 600)).filter(|reason| !reason.is_empty())
 }
 
 /// A provider refusing requests from where this computer is: OpenAI's
@@ -18099,7 +18127,7 @@ mod tests {
         // A notice of left-out images keeps the provider's own words.
         assert_eq!(
             super::describe_error(&refusal, None),
-            "Provider error: HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes."
+            "The provider rejected the request: Request exceeds the maximum allowed number of bytes."
         );
         // Refused again after compacting, it says so.
         let ended = super::still_too_large(refusal);
@@ -20352,6 +20380,54 @@ mod tests {
             ),
             "Anthropic is not connected. Connect it with an API key or by signing in, then try again."
         );
+    }
+
+    #[test]
+    fn a_refusal_in_the_providers_own_words_reads_without_its_status_line_and_code() {
+        // As a Haarness Router answers a model whose provider has no key there.
+        let refused = CoreError::Provider(
+            "HTTP 400 Bad Request: [provider_not_configured] Provider Gemini is not set up on this router: set GEMINI_API_KEY or GOOGLE_API_KEY where the router runs, then restart it.".into(),
+        );
+        assert_eq!(
+            super::describe_error(&refused, Some("Haarness Router")),
+            "Haarness Router rejected the request: Provider Gemini is not set up on this router: set GEMINI_API_KEY or GOOGLE_API_KEY where the router runs, then restart it."
+        );
+        assert_eq!(
+            super::user_facing_error(&CoreError::Provider(
+                "HTTP 404 Not Found: The model `gpt-0` does not exist.".into()
+            )),
+            "The provider rejected the request: The model `gpt-0` does not exist."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    r#"HTTP 422 Unprocessable Entity: {"error":{"message":"temperature must be at most 2."}}"#.into()
+                ),
+                Some("Mistral")
+            ),
+            "Mistral rejected the request: temperature must be at most 2."
+        );
+        // A status line with no reason, a server error and a refusal of the
+        // key keep their own wording.
+        for (raw, shown) in [
+            (
+                "HTTP 400 Bad Request",
+                "Provider error: HTTP 400 Bad Request",
+            ),
+            (
+                "HTTP 500 Internal Server Error: [server_error] Something broke.",
+                "Provider error: HTTP 500 Internal Server Error: [server_error] Something broke.",
+            ),
+            (
+                "HTTP 401 Unauthorized: [invalid_api_key] Incorrect API key provided.",
+                "The provider rejected the API key or sign-in (Incorrect API key provided). Connect it again to replace it.",
+            ),
+        ] {
+            assert_eq!(
+                super::user_facing_error(&CoreError::Provider(raw.into())),
+                shown
+            );
+        }
     }
 
     #[test]
