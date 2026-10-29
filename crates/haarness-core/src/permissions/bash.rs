@@ -1466,7 +1466,7 @@ impl Reader<'_> {
                 }
                 let rest = after_settings(options.rest, name == "sudo");
                 // `-D` and `--chdir` choose the folder; a login shell's `-i`
-                // the user's home, which is not known.
+                // the user's home and `-R` a new root, which are not known.
                 let sudo = name == "sudo";
                 let folders: Vec<&Given<'_, '_>> = if sudo {
                     options.all(&["D", "chdir"]).collect()
@@ -1474,7 +1474,11 @@ impl Reader<'_> {
                     Vec::new()
                 };
                 let mut folder = self.wrapper_folder(&folders, source);
-                if sudo && options.flags.contains('i') {
+                if sudo
+                    && (options.flags.contains('i')
+                        || options.value("R").is_some()
+                        || options.value("chroot").is_some())
+                {
                     folder = Moved::Unknown;
                 }
                 if rest.is_empty() {
@@ -2868,6 +2872,7 @@ const SUDO_LONG: &[&str] = &[
     "type",
     "command-timeout",
     "other-user",
+    "chroot",
 ];
 
 /// A wrapper's own options, read the way getopt reads them.
@@ -2897,15 +2902,29 @@ struct Given<'s, 't> {
 impl<'s, 't> Options<'s, 't> {
     /// `valued` short options take a value (the rest of their cluster or the
     /// next word), `optional` ones only the rest of their cluster, and
-    /// `long` ones the next word unless written `--name=value`. A word with
-    /// an expansion is an option only when it names one before it, whose
-    /// value the expansion is part of (`--chdir="$d"`, `-C"$d"`).
+    /// `long` ones the next word unless written `--name=value`; a long name
+    /// may be shortened to its start (`--chd` for `--chdir`), as getopt
+    /// takes it. A word with an expansion is an option only when it names
+    /// one before it, whose value the expansion is part of (`--chdir="$d"`,
+    /// `-C"$d"`).
     fn read(words: &'s [Word<'t>], valued: &str, optional: &str, long: &[&str]) -> Self {
         let mut options = Self {
             rest: words,
             flags: String::new(),
             values: Vec::new(),
         };
+        // The long option a name stands for: the one it names in full, or
+        // the only one it starts. A start shared by several takes a value
+        // too: getopt refuses it, and nothing runs.
+        let full = |name: &str| {
+            let mut found = long.iter().filter(|long| long.starts_with(name));
+            match (found.next(), found.next()) {
+                _ if long.contains(&name) => name.to_owned(),
+                (Some(long), None) => (*long).to_owned(),
+                _ => name.to_owned(),
+            }
+        };
+        let takes = |name: &str| !name.is_empty() && long.iter().any(|long| long.starts_with(name));
         let mut index = 0;
         while let Some(word) = words.get(index) {
             let value = word.value.as_str();
@@ -2926,17 +2945,17 @@ impl<'s, 't> Options<'s, 't> {
                 match name.split_once('=') {
                     Some((name, given)) if 2 + name.len() < written => {
                         options.values.push(Given {
-                            name: name.into(),
+                            name: full(name),
                             value: given.into(),
                             word: Some(word),
                             attached: true,
                         });
                     }
-                    None if word.literal && long.contains(&name) => {
+                    None if word.literal && takes(name) => {
                         index += 1;
                         let next = words.get(index);
                         options.values.push(Given {
-                            name: name.into(),
+                            name: full(name),
                             value: next.map(|word| word.value.clone()).unwrap_or_default(),
                             word: next,
                             attached: false,
@@ -3016,7 +3035,7 @@ impl<'s, 't> Options<'s, 't> {
     /// (see [`sets_variable`]), after which it reads options again: `sudo
     /// A=1 -u root rm x` runs `rm x` as root.
     fn sudo(words: &'s [Word<'t>]) -> Self {
-        let read = |words: &'s [Word<'t>]| Self::read(words, "ugpCDrtTU", "", SUDO_LONG);
+        let read = |words: &'s [Word<'t>]| Self::read(words, "ugpCDRrtTU", "", SUDO_LONG);
         let mut options = read(words);
         loop {
             let rest = after_settings(options.rest, true);
@@ -4835,10 +4854,9 @@ impl Line<'_> {
                         return None;
                     }
                     elsewhere |= options.flags.contains('i')
-                        || options
-                            .value("D")
-                            .or_else(|| options.value("chdir"))
-                            .is_some();
+                        || ["D", "chdir", "R", "chroot"]
+                            .iter()
+                            .any(|name| options.value(name).is_some());
                     rest = options.rest;
                     trusted &= rest.len() == arguments.len();
                 }
@@ -7582,6 +7600,13 @@ mod wrappers {
             "sudo --user=\"$U\" rm -rf ~/x",
             "doas A=1 rm -rf ~/x",
             "timeout --signal=\"$S\" 5 rm -rf ~/x",
+            // A root of its own, and long options shortened as getopt
+            // takes them.
+            "sudo -R /jail rm -rf ~/x",
+            "sudo --chroot=/jail rm -rf ~/x",
+            "sudo --us root rm -rf ~/x",
+            "env --chd /tmp rm -rf ~/x",
+            "env --unset=X --chd=/tmp rm -rf ~/x",
             "coproc rm -rf ~/x",
             "coproc A=1 rm -rf ~/x",
             "coproc { rm -rf ~/x; }",
@@ -7694,6 +7719,10 @@ mod wrappers {
                 "cd \"$HOME\" && cat .ssh/id_rsa",
             ),
             ("env --chdir=\"$TMPDIR\" cat x", "cd \"$TMPDIR\" && cat x"),
+            (
+                "env --chd /tmp cat haarness-no-such-file",
+                "cd /tmp && cat haarness-no-such-file",
+            ),
             ("env -C nosuch cat ../x", "cd nosuch && cat ../x"),
             ("env -C .. cat x", "cd .. && cat x"),
         ] {
@@ -7794,6 +7823,7 @@ mod wrappers {
             // folder is not placed either.
             "env -C \"$D\" env -C src cat ../README.md",
             "sudo -i env -C src cat ../README.md",
+            "sudo -R /jail env -C src cat ../README.md",
             "find . -execdir env -C src cat ../README.md \\;",
         ] {
             assert_eq!(
