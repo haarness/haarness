@@ -11,8 +11,11 @@ import { stopChatHome } from "./fixtures/chat-home";
 // Icons live on Haarness Cloud's public host. The catalog fixture names that
 // host as its web origin, and the app's own requests to it are answered here,
 // so nothing reaches production.
-const ICONS = "https://haarness.ai/fixture-icons";
-const ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#4f7cff"/><path d="M9 16h14M16 9v14" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg>`;
+const ICONS = "https://haarness.ai/api/v1/marketplace/fixture-icons";
+// A dark mark on a transparent ground, as many vendor logos are, and an
+// avatar that fills its square.
+const MARK = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><path d="M32 6 58 52H6Z" fill="#111"/><circle cx="32" cy="38" r="8" fill="#fff"/></svg>`;
+const AVATAR = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" fill="#e8613c"/><circle cx="32" cy="26" r="11" fill="#fff"/><path d="M12 64a20 20 0 0 1 40 0Z" fill="#fff"/></svg>`;
 
 test("Marketplace and plugin settings install, disable and remove a scoped resource", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "haarness-desktop-marketplace-")));
@@ -23,6 +26,7 @@ test("Marketplace and plugin settings install, disable and remove a scoped resou
   // One icon that does not load, one from another host (left out by the
   // server), and one resource without any: none shows an empty frame.
   const others = [
+    { ...resource, id: randomUUID(), slug: "avatar-icon", name: "Avatar icon", iconUrl: `${ICONS}/avatar.svg` },
     { ...resource, id: randomUUID(), slug: "broken-icon", name: "Broken icon", iconUrl: `${ICONS}/missing.svg` },
     { ...resource, id: randomUUID(), slug: "foreign-icon", name: "Foreign icon", iconUrl: "https://elsewhere.example/icon.svg" },
     { ...resource, id: randomUUID(), slug: "no-icon", name: "No icon", iconUrl: null },
@@ -45,14 +49,18 @@ test("Marketplace and plugin settings install, disable and remove a scoped resou
     client = new Haarness({ baseUrl: endpoint.url, token: endpoint.token });
     app = await electron.launch({ args: ["."], env, timeout: 120000 });
     const page = await app.firstWindow();
-    await app.evaluate(({ protocol, net }, [icons, icon]) => {
+    // Answered as images. Unlike answers from the network, which the app's
+    // page may read as it shows them, these are not, so here the copy
+    // fetched in CORS mode is what tells the avatar from the mark.
+    await app.evaluate(({ protocol, net }, [icons, mark, avatar]) => {
       protocol.handle("https", (request) => {
         if (!request.url.startsWith(icons + "/")) return net.fetch(request, { bypassCustomProtocolHandlers: true });
-        return request.url === icons + "/proof.svg"
-          ? new Response(icon, { headers: { "content-type": "image/svg+xml" } })
+        const body = { [icons + "/proof.svg"]: mark, [icons + "/avatar.svg"]: avatar }[request.url];
+        return body
+          ? new Response(body, { headers: { "content-type": "image/svg+xml", "x-content-type-options": "nosniff" } })
           : new Response("missing", { status: 404 });
       });
-    }, [ICONS, ICON]);
+    }, [ICONS, MARK, AVATAR]);
     await app.evaluate(({ dialog }, directory) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] }); }, workspace);
     await page.getByRole("button", { name: "Open another project", exact: true }).click();
     await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
@@ -60,16 +68,32 @@ test("Marketplace and plugin settings install, disable and remove a scoped resou
     const settings = page.getByRole("dialog", { name: "Settings", exact: true });
     await settings.getByRole("button", { name: "Marketplace", exact: true }).click();
     const row = (name: string) => settings.getByRole("button", { name, exact: true });
-    const loaded = (image: ReturnType<typeof settings.locator>) =>
-      image.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth > 0 && element.classList.contains("loaded"));
-    const proofIcon = row("Desktop proof · mcp · private").locator("img.management-icon");
+    const loaded = (tile: ReturnType<typeof settings.locator>) =>
+      tile.evaluate((element) => {
+        const image = element.querySelector("img");
+        return !!image && image.complete && image.naturalWidth > 0 && element.classList.contains("loaded");
+      });
+    // The tile's ground and the image's share of it.
+    const fit = (tile: ReturnType<typeof settings.locator>) =>
+      tile.evaluate((element) => ({
+        ground: getComputedStyle(element).backgroundColor,
+        share: Math.round((element.querySelector("img")!.getBoundingClientRect().width / element.clientWidth) * 100),
+      }));
+    const proofTile = row("Desktop proof · mcp · private").locator(".management-icon");
+    const proofIcon = proofTile.locator("img");
     await expect(proofIcon).toHaveAttribute("src", `${ICONS}/proof.svg`);
     await expect(proofIcon).toHaveAttribute("alt", "");
     await expect(proofIcon).toHaveAttribute("loading", "lazy");
-    await expect.poll(() => loaded(proofIcon)).toBe(true);
+    await expect.poll(() => loaded(proofTile)).toBe(true);
+    // The avatar fills its tile once measured; the transparent mark keeps a margin.
+    const avatarTile = row("Avatar icon · mcp · private").locator(".management-icon");
+    await expect(avatarTile).toHaveClass(/\bfills\b/);
+    expect(await fit(avatarTile)).toEqual({ ground: "rgb(253, 252, 250)", share: 100 });
+    await expect(proofTile).not.toHaveClass(/\bfills\b/);
+    expect((await fit(proofTile)).share).toBeLessThan(85);
     // The failed icon is taken away; the others never had one to show.
     for (const name of ["Broken icon", "Foreign icon", "No icon"])
-      await expect(row(`${name} · mcp · private`).locator("img")).toHaveCount(0);
+      await expect(row(`${name} · mcp · private`).locator(".management-icon, img")).toHaveCount(0);
     // Labels line up whether or not their row has an icon.
     const left = async (name: string) => (await row(name).locator(".management-entry-label").boundingBox())!.x;
     expect(await left("No icon · mcp · private")).toBe(await left("Desktop proof · mcp · private"));
@@ -85,16 +109,18 @@ test("Marketplace and plugin settings install, disable and remove a scoped resou
           }),
       ),
     ).toBe("img-src");
+    // The same light tile in both themes.
     for (const scheme of ["light", "dark"] as const) {
       await app.evaluate(({ nativeTheme }, value) => { nativeTheme.themeSource = value; }, scheme);
       await page.emulateMedia({ colorScheme: scheme });
       await expect.poll(() => page.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)).toBe(scheme === "dark");
       await page.waitForTimeout(300);
+      expect((await fit(proofTile)).ground).toBe("rgb(253, 252, 250)");
       await settings.screenshot({ path: test.info().outputPath(`marketplace-icons-${scheme}.png`) });
     }
     await row("Desktop proof · mcp · private").click();
-    const titleIcon = settings.locator("img.management-title-icon");
-    await expect(titleIcon).toHaveAttribute("src", `${ICONS}/proof.svg`);
+    const titleIcon = settings.locator(".management-title-icon");
+    await expect(titleIcon.locator("img")).toHaveAttribute("src", `${ICONS}/proof.svg`);
     await expect.poll(() => loaded(titleIcon)).toBe(true);
     await expect(settings.getByLabel("Installation scope")).toBeVisible();
     await page.waitForTimeout(300);
@@ -110,7 +136,7 @@ test("Marketplace and plugin settings install, disable and remove a scoped resou
     await settings.getByRole("button", { name: "Installed resources", exact: true }).click();
     // The installed list shows the icon its receipt recorded, once.
     // Its first row, the switch, whichever way the Plugins page left it.
-    const installedIcon = settings.getByRole("button", { name: /^(Enable|Disable) desktop-proof$/ }).locator("img.management-icon");
+    const installedIcon = settings.getByRole("button", { name: /^(Enable|Disable) desktop-proof$/ }).locator(".management-icon");
     await expect.poll(() => loaded(installedIcon)).toBe(true);
     await expect(settings.locator(".management-entries img")).toHaveCount(1);
     await page.waitForTimeout(300);

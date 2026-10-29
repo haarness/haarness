@@ -72,8 +72,10 @@ install refuses to overwrite a resource of the same name that it did not install
 https address on the Cloud the catalog comes from (the API origin or the configured web origin);
 anything else is dropped. Search rows and the install form carry it as `icon` in their
 `marketplace-ui` view, and an install or update records it in the receipt, so **Installed
-resources** shows it on the resource's first row without asking the catalog. Desktop draws it as a
-small rounded square and draws nothing when there is none or it does not load; its page loads images
+resources** shows it on the resource's first row without asking the catalog. Desktop draws it on a
+small rounded near-white tile in both themes, since many vendor logos are dark marks on a
+transparent ground: such a logo keeps a margin inside the tile, and an image whose corners are
+opaque fills it. It draws nothing when there is no icon or it does not load. Its page loads images
 only from `https://haarness.ai` and the https Cloud named in `HAARNESS_CLOUD_API_URL` or
 `HAARNESS_CLOUD_WEB_ORIGIN` when it is built. The TUI shows the same rows without icons.
 
