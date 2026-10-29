@@ -698,7 +698,7 @@ pub async fn marketplace_install(
             ..entry
         });
         config.enabled = true;
-        let receipt = json!({"id":manifest["resource"]["id"],"kind":"extension","name":name,"publisher":manifest["resource"]["publisher"],"slug":manifest["resource"]["slug"],"scope":if local {"local"} else {"global"},"path":source,"packageRoot":package_root,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":crate::marketplace::tree_digest(&package_root)?,"restartRequired":false});
+        let receipt = json!({"id":manifest["resource"]["id"],"kind":"extension","name":name,"publisher":manifest["resource"]["publisher"],"slug":manifest["resource"]["slug"],"scope":if local {"local"} else {"global"},"path":source,"packageRoot":package_root,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":crate::marketplace::tree_digest(&package_root)?,"autoUpdate":crate::marketplace::auto_update_choice(input, old),"restartRequired":false});
         save(&path, &config)?;
         if let Err(error) =
             haarness_profiles::write(receipt_file, &serde_json::to_vec_pretty(&receipt)?, true)

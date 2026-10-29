@@ -3,6 +3,10 @@
 
 Runs actual Bun/npm, ZIP installs and hot reload, without publishing packages or
 using user configuration. Public provider/Chrome proof lives in Cloud verification.
+Then automatic updates: new versions published in the fixture catalog reach installs
+that follow them, through `check-updates` and through a server's background round
+(HAARNESS_AUTO_UPDATE_INTERVAL_SECS=60, so that part waits about a minute), while a
+pinned install stays where it is.
 """
 import base64
 import hashlib
@@ -41,7 +45,7 @@ def main():
         for p in (workspace, home, data): p.mkdir()
         env = {k:v for k,v in os.environ.items() if k in ("PATH", "TMPDIR", "LANG", "TERM", "HAARNESS_BUN")}
         env.update(HOME=str(home), HAARNESS_TEST_PROVIDER="1", RUST_LOG="warn", **ISOLATED)
-        resources, manifests, artifacts = {}, {}, {}
+        resources, manifests, artifacts, history = {}, {}, {}, {}
         files = {
             "skill": {"SKILL.md": "---\nname: proof-skill\ndescription: marketplace skill proof\n---\nRead references/proof.txt.\n", "references/proof.txt": "MARKETPLACE_SUPPORT_FILE"},
             "agent": {"proof-agent.md": "---\ndescription: marketplace verifier\nmode: all\n---\nVerify marketplace proof."},
@@ -71,9 +75,10 @@ def main():
                 else:
                     rid=path.split("/resources/")[-1].split("/")[0]
                     if rid not in resources: self.send_error(404);return
-                    if path.endswith("/install-manifest"): payload=manifests[rid]
+                    if path.endswith("/install-manifest"):
+                        payload=history[rid][int(query["version"][0])] if query.get("version") else manifests[rid]
                     elif path.endswith("/versions"): payload={"items":[manifests[rid]["version"]]}
-                    else: payload={**resources[rid],"versions":[manifests[rid]["version"]]}
+                    else: payload={**resources[rid],"versions":[manifests[rid]["version"]],"activeVersion":manifests[rid]["version"]}
                 body=payload if isinstance(payload,bytes) else json.dumps(payload).encode()
                 self.send_response(200);self.send_header("content-type","application/octet-stream" if isinstance(payload,bytes) else "application/json");self.send_header("content-length",str(len(body)));self.end_headers();self.wfile.write(body)
 
@@ -93,7 +98,17 @@ def main():
             manifest={"manifestVersion":1,"resource":resource,"version":version,"compatibility":{},"capabilities":{},"install":install,"lock":{"resourceId":rid,"versionId":vid}}
             if kind in files:
                 body=zip_bytes(files[kind]);artifacts[rid]=body;manifest["artifact"]={"url":base+"/artifacts/"+rid,"sha256":hashlib.sha256(body).hexdigest(),"sizeBytes":len(body)}
-            resources[rid]=resource;manifests[rid]=manifest
+            resources[rid]=resource;manifests[rid]=manifest;history[rid]={1:manifest}
+        def publish_skill(slug,number,text,rid=None):
+            """Version `number` of the skill `slug`, now the active one; a new resource without `rid`."""
+            rid=rid or str(uuid.uuid4());vid=str(uuid.uuid4())
+            resource={"id":rid,"kind":"skill","slug":slug,"name":slug,"summary":"Fixture","visibility":"public","publisher":{"slug":"fixtures","displayName":"Fixtures"}}
+            body=zip_bytes({"SKILL.md":f"---\nname: {slug}\ndescription: automatic update proof\n---\n{text}\n"});artifacts[vid]=body
+            version={"id":vid,"number":number,"status":"approved","yanked":False}
+            manifest={"manifestVersion":1,"resource":resource,"version":version,"compatibility":{},"capabilities":{},"install":{"skill":{}},"lock":{"resourceId":rid,"versionId":vid},
+                      "artifact":{"url":base+"/artifacts/"+vid,"sha256":hashlib.sha256(body).hexdigest(),"sizeBytes":len(body)}}
+            resources[rid]=resource;manifests[rid]=manifest;history.setdefault(rid,{})[number]=manifest
+            return rid
         prefix=[str(BIN),"--workspace",str(workspace),"--data-dir",str(data),"--trust-project"]
         def run(*args,ok=True,trust=True):
             selected_prefix=prefix if trust else [*(arg for arg in prefix if arg != "--trust-project"), "--disable-project-config"]
@@ -167,6 +182,82 @@ def main():
             leftovers=[p for p in data.rglob("extensions/packages/*") if p.parent.name=="packages"]
             assert not leftovers,leftovers
             print("PASS all five kinds: catalog/collections/detail/versions, verified install, Bun integrity-before-execution, executable tool, live disable/update/enable/remove, restart persistence, no package left behind")
+            process.terminate();process.wait(timeout=20);process=None
+
+            # Automatic updates. An install of the latest version follows new ones;
+            # one that names its version, or says --no-auto-update, stays put.
+            follow=publish_skill("proof-follow",1,"FOLLOW_ONE")
+            local=publish_skill("proof-local",1,"LOCAL_ONE")
+            pinned=publish_skill("proof-pinned",1,"PINNED_ONE")
+            optout=publish_skill("proof-optout",1,"OPTOUT_ONE")
+            run("marketplace","install","skill",follow,"--global")
+            run("marketplace","install","skill",local,"--local")
+            run("marketplace","install","skill",pinned,"--local","--version","1")
+            run("marketplace","install","skill",optout,"--global","--no-auto-update")
+            def receipt(rid): return next(r for r in marketplace("installed") if r["id"]==rid)
+            def text(rid): return (Path(receipt(rid)["path"])/"SKILL.md").read_text()
+            assert [receipt(r)["autoUpdate"] for r in (follow,local,pinned,optout)]==[True,True,False,False]
+            listing=run("marketplace","installed").stdout
+            assert "proof-follow\tskill\tversion 1\tall projects\tupdates automatically" in listing,listing
+            assert "proof-pinned\tskill\tversion 1\tthis project\tpinned" in listing,listing
+            assert run("marketplace","check-updates").stdout.strip()=="Checked 2 resources: all are up to date."
+            for rid,slug in ((follow,"proof-follow"),(local,"proof-local"),(pinned,"proof-pinned"),(optout,"proof-optout")):
+                publish_skill(slug,2,slug.split("-")[1].upper()+"_TWO",rid)
+            out=run("marketplace","check-updates").stdout
+            assert "Updated proof-follow to version 2." in out and "Updated proof-local to version 2." in out,out
+            assert "FOLLOW_TWO" in text(follow) and "LOCAL_TWO" in text(local)
+            assert "PINNED_ONE" in text(pinned) and "OPTOUT_ONE" in text(optout)
+            # Turned off and on again from the CLI; the receipt says which.
+            assert "stays on version 2" in run("marketplace","auto-update",local,"--local","--off").stdout
+            assert receipt(local)["autoUpdate"] is False
+            run("marketplace","auto-update",local,"--local")
+            assert receipt(local)["autoUpdate"] is True
+
+            # A Git plugin marketplace, registered from a repository that gets a new
+            # commit before the server's round.
+            upstream,bare=root/"plugins-upstream",root/"plugins-upstream.git"
+            def git(*args,cwd=upstream): subprocess.run(["git","-c","init.defaultBranch=main","-c","user.name=Fixture","-c","user.email=fixture@example.invalid",*args],cwd=cwd,check=True,capture_output=True)
+            def plugin_commit(text,message):
+                (upstream/"kit/commands").mkdir(parents=True,exist_ok=True)
+                (upstream/"kit/.claude-plugin").mkdir(parents=True,exist_ok=True)
+                (upstream/".claude-plugin").mkdir(exist_ok=True)
+                (upstream/".claude-plugin/marketplace.json").write_text(json.dumps({"name":"git-fixture","plugins":[{"name":"kit","source":"./kit"}]}))
+                (upstream/"kit/.claude-plugin/plugin.json").write_text('{"name":"kit"}')
+                (upstream/"kit/commands/proof.md").write_text(text)
+                git("add","-A");git("commit","-qm",message);git("push","-q","origin","HEAD:main")
+            upstream.mkdir();git("init","-q","--bare",str(bare),cwd=root);git("init","-q");git("remote","add","origin",str(bare))
+            plugin_commit("GIT_PLUGIN_ONE","one")
+            assert "registered" in run("plugin","marketplace","add",f"file://{bare}").stdout
+            run("plugin","install","kit@git-fixture")
+            assert "is up to date" in run("plugin","marketplace","update","git-fixture").stdout
+            kit=next(p for p in json.loads(run("marketplace","request",json.dumps({"action":"plugin_marketplaces"})).stdout) if p["name"]=="git-fixture")
+            assert kit["type"]=="git" and kit["autoUpdate"] is True,kit
+            kit_command=next(data.rglob("cache/git-fixture/kit/commands/proof.md"))
+            plugin_commit("GIT_PLUGIN_TWO","two")
+
+            # The server's own round, a minute after it starts.
+            publish_skill("proof-follow",3,"FOLLOW_THREE",follow)
+            publish_skill("proof-local",3,"LOCAL_THREE",local)
+            publish_skill("proof-pinned",3,"PINNED_THREE",pinned)
+            server_env={**env,"HAARNESS_AUTO_UPDATE_INTERVAL_SECS":"60"}
+            # A round an earlier server of this run did would hold this one off.
+            for stamp in root.rglob(".auto-update-checked"): stamp.unlink()
+            started=time.time()
+            process=subprocess.Popen([*prefix,"serve","--host","127.0.0.1","--port",str(port),"--token",token],env=server_env,stdout=log,stderr=log)
+            wait(lambda: api("/v1/info"),"server start for automatic updates")
+            assert "FOLLOW_TWO" in text(follow) and kit_command.read_text()=="GIT_PLUGIN_ONE","no round before the first interval"
+            for _ in range(240):
+                if "FOLLOW_THREE" in text(follow) and "LOCAL_THREE" in text(local) and kit_command.read_text()=="GIT_PLUGIN_TWO": break
+                time.sleep(.5)
+            else: raise AssertionError("the server's round did not install the new versions")
+            took=time.time()-started
+            assert 50<took<110,took
+            assert receipt(follow)["version"]["number"]==3 and receipt(local)["version"]["number"]==3
+            assert "PINNED_ONE" in text(pinned) and "OPTOUT_ONE" in text(optout)
+            assert (workspace/".haarness/marketplace/.auto-update-checked").is_file()
+            # The updated skill reaches the runtime too.
+            wait(lambda: has("/v1/skills","name","proof-follow"),"updated skill loaded")
+            print(f"PASS automatic updates: check-updates installs new versions of installs that follow them, the server's round did so (and fetched a Git plugin marketplace's new commit) {took:.0f}s after start, pinned and opted-out installs stayed")
         finally:
             if process: process.terminate();process.wait(timeout=20)
             catalog.shutdown()

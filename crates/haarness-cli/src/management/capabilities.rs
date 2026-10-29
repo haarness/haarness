@@ -95,7 +95,14 @@ impl ManagementService {
         } else if kind == "plugin"
             && matches!(
                 action,
-                "install" | "marketplace" | "update" | "enable" | "disable" | "remove"
+                "install"
+                    | "marketplace"
+                    | "marketplace_update"
+                    | "marketplace_auto_update"
+                    | "update"
+                    | "enable"
+                    | "disable"
+                    | "remove"
             )
         {
             let service = plugins::PluginService::new(
@@ -170,7 +177,45 @@ impl ManagementService {
             return self.marketplace_installed();
         }
         if action == "plugin_marketplaces" {
-            return Ok(plugins::marketplace_catalog(&self.paths.data));
+            let data = self.paths.data.clone();
+            return Ok(
+                tokio::task::spawn_blocking(move || plugins::marketplace_catalog(&data)).await?,
+            );
+        }
+        if action == "update_plugin_marketplace" {
+            let data = self.paths.data.clone();
+            let name = input["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned);
+            let refreshed = tokio::task::spawn_blocking(move || match name {
+                Some(name) => plugins::marketplace_update(&data, &name).map(|one| vec![one]),
+                None => Ok(plugins::marketplace_update_all(&data, false)),
+            })
+            .await??;
+            if refreshed.iter().any(plugins::MarketplaceRefresh::changed) {
+                self.capabilities_changed("plugin", "marketplace_update");
+            }
+            return Ok(json!({"marketplaces":refreshed,"restartRequired":false}));
+        }
+        if action == "plugin_marketplace_auto_update" {
+            let data = self.paths.data.clone();
+            let name = required_string(input, "name")?.to_owned();
+            let enabled = input["enabled"]
+                .as_bool()
+                .context("Say whether it updates automatically: enabled true or false")?;
+            let source = tokio::task::spawn_blocking(move || {
+                plugins::marketplace_auto_update(&data, &name, enabled)
+            })
+            .await??;
+            return Ok(json!({
+                "name": input["name"],
+                "source": haarness_core::redact::url(&source.source),
+                "autoUpdate": source.auto_update,
+                "commit": source.commit,
+                "updatedAt": source.updated_at,
+            }));
         }
         // Claude Code plugin marketplaces use the same plugin service as
         // `/plugin` in the TUI and Desktop's Plugins page.
@@ -208,6 +253,24 @@ impl ManagementService {
             "search" | "detail" | "versions" | "collections" | "manifest"
         ) {
             return crate::marketplace::fetch(input).await;
+        }
+        if action == "check_updates" {
+            ensure!(
+                input["scope"].is_null()
+                    || matches!(input["scope"].as_str(), Some("local" | "global")),
+                "Scope must be local or global"
+            );
+            let (summary, changed) = crate::marketplace::check_updates(
+                &self.paths,
+                &self.workspace,
+                self.trust_project,
+                input["scope"].as_str(),
+            )
+            .await?;
+            if changed {
+                self.capabilities_changed("marketplace", "update");
+            }
+            return Ok(summary);
         }
         if matches!(action, "install" | "update") {
             let manifest = if action == "install" && input.get("manifest").is_some() {
@@ -266,6 +329,18 @@ impl ManagementService {
         );
         let receipt = rows[0];
         let id = receipt["id"].as_str().context("Invalid receipt id")?;
+        if action == "auto_update" {
+            let enabled = input["enabled"]
+                .as_bool()
+                .context("Say whether it updates automatically: enabled true or false")?;
+            // Only the receipt changes; nothing the runtime loads does.
+            return crate::marketplace::set_auto_update(
+                &self.paths,
+                &self.workspace,
+                receipt,
+                enabled,
+            );
+        }
         ensure!(
             matches!(action, "enable" | "disable" | "remove"),
             "Unsupported marketplace action"
@@ -337,6 +412,83 @@ impl ManagementService {
         }
         self.capabilities_changed(kind, action);
         Ok(json!({"id":id,"action":action,"restartRequired":false}))
+    }
+
+    /// One background round (see `auto_update`): what is installed for all
+    /// projects and the Git plugin marketplaces once per interval on this
+    /// computer, then this project's own installs once per interval. Nothing
+    /// here fails the server; a round that cannot reach the network says so
+    /// at info level and waits for the next one.
+    pub(crate) async fn automatic_update_round(&self, every: std::time::Duration) {
+        use crate::auto_update::{STAMP, claim};
+        let data = self.paths.data.clone();
+        let claimed = |stamp: PathBuf| {
+            let data = data.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    claim(&data, &stamp, every, std::time::SystemTime::now())
+                })
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|claimed| claimed)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(error = %format!("{error:#}"), "automatic update round skipped");
+                    false
+                })
+            }
+        };
+        let mut changed = false;
+        let check = async |scope: &str| match crate::marketplace::check_updates(
+            &self.paths,
+            &self.workspace,
+            self.trust_project,
+            Some(scope),
+        )
+        .await
+        {
+            Ok((summary, updated)) => {
+                tracing::debug!(%summary, scope, "automatic update round");
+                updated
+            }
+            Err(error) => {
+                tracing::info!(error = %format!("{error:#}"), scope, "automatic update round failed");
+                false
+            }
+        };
+        if claimed(data.join(STAMP)).await {
+            changed |= check("global").await;
+            let refreshed = tokio::task::spawn_blocking({
+                let data = data.clone();
+                move || plugins::marketplace_update_all(&data, true)
+            })
+            .await
+            .unwrap_or_default();
+            for refresh in &refreshed {
+                if let Some(error) = &refresh.error {
+                    tracing::info!(marketplace = %refresh.name, %error, "plugin marketplace not refreshed");
+                } else if refresh.changed() {
+                    tracing::info!(marketplace = %refresh.name, plugins = ?refresh.plugins, "plugin marketplace refreshed");
+                }
+                changed |= refresh.changed();
+            }
+        }
+        // A project's stamp is written only where it has installs that
+        // follow new versions, so other projects get no new file.
+        let project = crate::marketplace::receipt_root(&self.paths, &self.workspace, true);
+        let follows = self.trust_project
+            && crate::marketplace::installed(&self.paths, &self.workspace, true).is_ok_and(
+                |rows| {
+                    rows.as_array().into_iter().flatten().any(|row| {
+                        row["scope"] == "local" && crate::marketplace::follows_new_versions(row)
+                    })
+                },
+            );
+        if follows && claimed(project.join(STAMP)).await {
+            changed |= check("local").await;
+        }
+        if changed {
+            self.capabilities_changed("marketplace", "update");
+        }
     }
 
     fn capabilities_changed(&self, kind: &str, action: &str) {
