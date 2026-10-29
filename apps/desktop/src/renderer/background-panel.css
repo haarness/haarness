@@ -1,0 +1,30 @@
+/* Still running (BackgroundPanel): laid out as the Context panel is, its rows
+   the chat's own. */
+.background-work {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--s5);
+  font-size: var(--ui-sm);
+}
+.background-empty {
+  margin: 0;
+  color: var(--muted);
+}
+.background-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+.background-item {
+  position: relative;
+}
+/* Ended a moment ago: still there to read, out of the way of what runs. */
+.background-item.ended {
+  opacity: 0.55;
+  transition: opacity var(--fast) var(--ease);
+}
+.background-item.ended:hover,
+.background-item.ended:focus-within {
+  opacity: 1;
+}

@@ -673,6 +673,56 @@ html[dir="rtl"] .tool-target {
   color: var(--accent);
   opacity: 1;
 }
+/* A command in the background says how it stands at rest: how long it has
+   run, then how it ended. */
+.tool-state {
+  flex: none;
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.tool-state[data-tone="failed"] {
+  color: var(--danger);
+}
+/* A running command's Stop and Send to background sit beside its summary,
+   not in it, so pressing one never opens the row; the summary keeps their
+   width free before its chevron (`.tool-controls-room`). They are placed
+   over the row's first line from the block that holds it. */
+.message:has(> .tool-controls) {
+  position: relative;
+}
+.tool-controls-room {
+  flex: none;
+}
+.tool-controls {
+  position: absolute;
+  top: 0;
+  inset-inline-end: calc(var(--s2) * 2 + 12px);
+  height: var(--icon-button);
+  display: flex;
+  align-items: center;
+  gap: var(--s0);
+}
+.tool-action {
+  min-height: 0;
+  height: var(--control-sm);
+  padding: 0 var(--s2);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.tool-action:hover:not(:disabled),
+.tool-stop:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.tool-stop {
+  border-radius: var(--r-sm);
+}
 .tool-chevron {
   flex: none;
   color: var(--faint);
@@ -987,6 +1037,39 @@ html[dir="rtl"] .tool-target {
 }
 .agent-task-stop .icon {
   fill: currentColor;
+}
+/* Send to background, before Stop; the row keeps its width free
+   (`.agent-task-room`) so the title never runs under it. */
+.agent-task-send {
+  position: absolute;
+  inset-inline-end: calc(var(--s3) * 2 + 12px + var(--icon-button) + var(--s1));
+  top: 50%;
+  margin-top: calc(var(--control-sm) / -2);
+  min-height: 0;
+  height: var(--control-sm);
+  padding: 0 var(--s2);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.agent-task-send:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.agent-task-room {
+  flex: none;
+}
+/* While it shows, the row keeps its height: what the agent is doing is cut
+   short rather than wrapping to a line of its own. */
+.agent-task:has(.agent-task-room) .agent-task-meta {
+  flex-wrap: nowrap;
+}
+.agent-task:has(.agent-task-room) .agent-task-model {
+  flex: none;
 }
 .agent-task-stop:hover:not(:disabled) {
   border-color: var(--muted);

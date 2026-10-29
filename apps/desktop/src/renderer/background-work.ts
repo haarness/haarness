@@ -1,0 +1,180 @@
+/*
+ * The open chat's work in the background, live: its agent's shell commands
+ * and its subagents. The rows in the transcript, the title bar's count and the
+ * Still running panel all read it from here, so they always agree.
+ */
+import { createEffect, createMemo, createSignal, on, onCleanup, untrack } from "solid-js";
+import { reconcile } from "solid-js/store";
+import type { ShellCommandInfo } from "@haarness/sdk";
+import { agentTasks, agentTaskStatus } from "./agent-tasks";
+import { conversationRoot } from "../thread-kinds";
+import { useApp } from "./state";
+import {
+  BACKGROUND_COMMANDS,
+  createOutputFollow,
+  laterCommand,
+  liveCommand,
+  type FollowView,
+  type OutputPage,
+} from "./shell-commands";
+
+/** How long an ended command or subagent stays in the list, greyed. The
+ * server lists ended commands for as long. */
+export const RECENTLY_ENDED_MS = 10 * 60_000;
+
+const [clock, setClock] = createSignal(Date.now());
+let ticking = 0;
+let ticker: ReturnType<typeof setInterval> | undefined;
+/** The time, ticking every second while some caller has `live` work on screen. */
+export function liveClock(live: () => boolean) {
+  createEffect(() => {
+    if (!live()) return;
+    if (!ticking++) {
+      setClock(Date.now());
+      ticker = setInterval(() => setClock(Date.now()), 1000);
+    }
+    onCleanup(() => {
+      if (!--ticking) clearInterval(ticker);
+    });
+  });
+  return clock;
+}
+
+/** The server lists, follows, stops and moves this project's commands. */
+export function commandsOffered() {
+  const app = useApp();
+  return () => !!app.state.connection?.info.capabilities.includes(BACKGROUND_COMMANDS);
+}
+
+/**
+ * The output of command `id` of chat `thread`, followed while `active` (an
+ * open row): the end of what it printed first, then what it prints, read when
+ * the server says it printed more or changed state. Undefined until the first
+ * read lands.
+ */
+export function followCommand(input: {
+  id: () => string | undefined;
+  thread: () => string | undefined;
+  active: () => boolean;
+}) {
+  const app = useApp();
+  const [view, setView] = createSignal<FollowView>();
+  createEffect(
+    on(
+      () => [input.active(), input.id(), input.thread(), app.state.connection?.id] as const,
+      ([active, id, thread, connection]) => {
+        setView(undefined);
+        if (!active || !id || !thread || !connection) return;
+        const follow = createOutputFollow({
+          read: (query) =>
+            window.haarness.api<OutputPage>(connection, "readShellCommandOutput", [thread, id, query]),
+          update: setView,
+        });
+        follow.wake();
+        createEffect(
+          on(
+            () => [app.state.commandOutput[id], app.state.shellCommands[id]?.state],
+            () => follow.wake(),
+            { defer: true },
+          ),
+        );
+        onCleanup(follow.dispose);
+      },
+    ),
+  );
+  return view;
+}
+
+/** Keeps a command's answer from a stop or a move, unless an event already
+ * brought newer news of it. */
+function remember(app: ReturnType<typeof useApp>, connection: string, commands: ShellCommandInfo[]) {
+  if (app.state.connection?.id !== connection) return;
+  for (const command of commands) {
+    const known = app.state.shellCommands[command.id];
+    const next = laterCommand(known, command);
+    if (next !== known) app.set("shellCommands", command.id, reconcile(next));
+  }
+}
+
+/** Stops a command with the processes it started; it reads Stopping… until
+ * it has exited. */
+export async function stopCommand(app: ReturnType<typeof useApp>, command: ShellCommandInfo) {
+  const connection = app.state.connection!.id;
+  const answer = await app.api<ShellCommandInfo>("stopShellCommand", command.threadId, command.id);
+  remember(app, connection, [answer]);
+}
+
+/** Sends one running foreground command, or every one of the chat's, to the
+ * background; its reply goes on without waiting for it. */
+export async function backgroundCommands(app: ReturnType<typeof useApp>, thread: string, command?: string) {
+  const connection = app.state.connection!.id;
+  const moved = await app.api<ShellCommandInfo[]>(
+    "backgroundShellCommands",
+    thread,
+    command ? { commandId: command } : {},
+  );
+  remember(app, connection, moved);
+}
+
+/**
+ * The open chat's background work: its commands in the background (running
+ * ones, then those that ended lately), its subagents working in the
+ * background, and how many of each still run. A subagent seen in the
+ * background stays listed for a while once it ends, as a command does.
+ */
+export function backgroundWork() {
+  const app = useApp();
+  const offered = commandsOffered();
+  const root = createMemo(() =>
+    app.state.selected ? conversationRoot(app.state.threads, app.state.selected) : "",
+  );
+  const commands = createMemo(() => {
+    if (!offered() || !root()) return [];
+    const mine = Object.values(app.state.shellCommands).filter(
+      (command) => command.background && command.rootThreadId === root(),
+    );
+    const running = mine
+      .filter((command) => liveCommand(command.state))
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    const now = Date.now();
+    const ended = mine
+      .filter(
+        (command) =>
+          !liveCommand(command.state) &&
+          (!command.endedAt || now - Date.parse(command.endedAt) < RECENTLY_ENDED_MS),
+      )
+      .sort((a, b) => (b.endedAt ?? "").localeCompare(a.endedAt ?? ""));
+    return [...running, ...ended];
+  });
+  const tasks = createMemo(() => [...agentTasks(app.state.items).values()]);
+  /** Subagents seen working in the background, and when they were last seen so. */
+  const [seen, setSeen] = createSignal(new Map<string, number>());
+  const status = (key: string) => {
+    const task = tasks().find((item) => item.key === key);
+    return task ? agentTaskStatus(task, app.state.tasks?.[task.key]) : undefined;
+  };
+  createEffect(() => {
+    const working = tasks().filter((task) => agentTaskStatus(task, app.state.tasks?.[task.key]) === "background");
+    if (!working.length) return;
+    const next = new Map(untrack(seen));
+    const now = Date.now();
+    for (const task of working) next.set(`${app.state.selected}:${task.key}`, now);
+    setSeen(next);
+  });
+  const subagents = createMemo(() => {
+    if (!offered()) return [];
+    const now = Date.now();
+    return tasks().filter((task) => {
+      const state = status(task.key);
+      if (state === "background") return true;
+      const at = seen().get(`${app.state.selected}:${task.key}`);
+      return at !== undefined && now - at < RECENTLY_ENDED_MS && ["completed", "failed", "stopped"].includes(state ?? "");
+    });
+  });
+  const running = createMemo(
+    () =>
+      commands().filter((command) => liveCommand(command.state)).length +
+      subagents().filter((task) => status(task.key) === "background").length,
+  );
+  return { commands, subagents, running, status };
+}

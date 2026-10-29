@@ -17,6 +17,7 @@
 import type { Component, JSX } from "solid-js";
 import { Dynamic } from "solid-js/web";
 
+import Activity from "lucide-solid/icons/activity";
 import Archive from "lucide-solid/icons/archive";
 import ArchiveRestore from "lucide-solid/icons/archive-restore";
 import ArrowDown from "lucide-solid/icons/arrow-down";
@@ -195,6 +196,8 @@ const catalog = {
   /** Guidance sent into the work under way. */
   steer: CornerDownRight,
   stop: Square,
+  /** Work that goes on in the background (Still running). */
+  running: Activity,
   // Approvals: Review asks you; Auto answers what is safe; Yolo approves
   // everything. Three drawings, so the pill reads the same with only its
   // icon, in any colour; Yolo's bolt is the one every client draws.

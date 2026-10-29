@@ -84,6 +84,35 @@
   margin: 0 var(--s1);
   background: var(--hairline);
 }
+/* "2 in background": the open chat's work in the background, while there is
+   some. A quiet pill like the message box's; it opens Still running. */
+.background-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  min-height: 0;
+  height: var(--control-sm);
+  padding: 0 var(--s2);
+  margin-inline-end: var(--s1);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.background-pill svg {
+  color: var(--primary);
+}
+.background-pill:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.background-pill.active {
+  background: var(--selected);
+  color: var(--text);
+}
 
 /* ----------------------------------------------------------------- sidebar */
 .app-body {
@@ -1449,6 +1478,12 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
 .session-status.waiting {
   background: var(--accent);
   opacity: 1;
+}
+/* Done, with work left in the background (a dev server, a watcher): a steady
+   ring, where a reply at work blinks a dot. */
+.session-status.background {
+  box-sizing: border-box;
+  border: 1.5px solid var(--primary);
 }
 
 .session-label {
