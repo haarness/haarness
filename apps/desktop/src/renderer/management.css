@@ -133,3 +133,67 @@
 .management-panel fieldset > .management-actions:not(:empty) {
   margin-block-start: var(--s4);
 }
+/* A resource's own icon, on the same light tile in both themes: vendor logos
+   are drawn for white paper, and a dark mark on a transparent ground would
+   vanish on the dark theme. Such a logo keeps a margin inside the tile; an
+   image that fills its square fills the tile. The tile fades in once its
+   image has loaded and is simply absent when there is none. */
+.management-icon,
+.management-title-icon {
+  flex: none;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--icon-tile);
+  /* The edge is the hairline alone, so an avatar that fills the tile gets
+     no light ring on the dark theme. */
+  background-clip: padding-box;
+  border: 1px solid var(--hairline);
+  opacity: 0;
+  transition: opacity var(--slow) var(--ease);
+}
+.management-icon.loaded,
+.management-title-icon.loaded {
+  opacity: 1;
+}
+.management-icon > img,
+.management-title-icon > img {
+  display: block;
+  width: 78%;
+  height: 78%;
+  object-fit: contain;
+}
+.management-icon.fills > img,
+.management-title-icon.fills > img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.management-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+}
+.management-title-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-md);
+}
+/* When any row has an icon, every row keeps its width, so the labels of a
+   list line up whether or not each one has a picture. */
+.management-entries.with-icons .management-entry {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  column-gap: var(--s3);
+  row-gap: 2px;
+  align-items: center;
+}
+.management-entries.with-icons .management-entry-icon {
+  grid-row: 1 / span 2;
+  display: flex;
+}
+.management-entries.with-icons .management-entry-label,
+.management-entries.with-icons .management-entry-description {
+  grid-column: 2;
+}

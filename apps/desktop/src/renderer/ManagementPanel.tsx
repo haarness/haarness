@@ -17,7 +17,99 @@ import { Select } from "./Select";
 import { ProviderLabel } from "./ProviderIcon";
 import { ErrorNotice } from "./ui";
 import { cancelled } from "./error-text";
+import {
+  cornersOpaque,
+  iconFailed,
+  iconFills,
+  iconMeasured,
+  iconSource,
+  iconUnmeasured,
+  rowsHaveIcons,
+} from "./entry-icon";
 import "./management.css";
+
+/** Whether a loaded image's corners are opaque; `undefined` when the page may not read its pixels. */
+function cornersOf(image: HTMLImageElement) {
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 8;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return undefined;
+    context.drawImage(image, 0, 0, 8, 8);
+    return cornersOpaque(context.getImageData(0, 0, 8, 8).data, 8);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether the icon at `src`, shown as `image`, fills its square. The app's
+ * page reads the shown image directly; where it may not, a copy is fetched in
+ * CORS mode, which works once the server allows it. Unreadable, the icon
+ * keeps its margin.
+ */
+function measureFill(src: string, image: HTMLImageElement) {
+  const direct = cornersOf(image);
+  if (direct !== undefined) return Promise.resolve(direct);
+  return new Promise<boolean | undefined>((done) => {
+    const copy = new Image();
+    copy.crossOrigin = "anonymous";
+    copy.referrerPolicy = "no-referrer";
+    copy.onload = () => done(cornersOf(copy));
+    copy.onerror = () => done(undefined);
+    copy.src = src;
+  });
+}
+
+/**
+ * The square image a view names beside its title or a row, on a light tile
+ * in both themes. It fades in once loaded; missing, refused by the page's
+ * CSP or failing to load, it is gone, never a broken-image box.
+ */
+function EntryIcon(props: { icon?: string | null; class: string; onFail?: () => void }) {
+  const [loaded, setLoaded] = createSignal(false);
+  const [broken, setBroken] = createSignal(false);
+  const [measured, setMeasured] = createSignal(0);
+  const fills = (src: string) => {
+    void measured();
+    return iconFills(src);
+  };
+  let measuring = false;
+  const shown = (src: string, image: HTMLImageElement) => {
+    setLoaded(true);
+    if (measuring || !iconUnmeasured(src)) return;
+    measuring = true;
+    void measureFill(src, image).then((filled) => {
+      iconMeasured(src, filled);
+      setMeasured((count) => count + 1);
+    });
+  };
+  return (
+    <Show when={!broken() && iconSource(props.icon)} keyed>
+      {(src) => (
+        <span class={props.class} classList={{ loaded: loaded(), fills: fills(src) }}>
+          <img
+            src={src}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            referrerpolicy="no-referrer"
+            draggable={false}
+            ref={(image) => {
+              if (image.complete && image.naturalWidth > 0) shown(src, image);
+            }}
+            onLoad={(event) => shown(src, event.currentTarget)}
+            onError={() => {
+              iconFailed(src);
+              setBroken(true);
+              props.onFail?.();
+            }}
+          />
+        </span>
+      )}
+    </Show>
+  );
+}
 
 /** A sentence reads as text; JSON, commands and paths keep the code face. */
 const prose = (line: string) =>
@@ -54,6 +146,12 @@ export function ManagementPanel(props: {
   // The list a "Back to list" returns to; on that list the button goes nowhere.
   const [rootTitle, setRootTitle] = createSignal<string>();
   const [atRoot, setAtRoot] = createSignal(false);
+  // A row's icon that fails may leave the list with none to line up.
+  const [iconFailures, setIconFailures] = createSignal(0);
+  const withIcons = (view: ManagementView) => {
+    void iconFailures();
+    return rowsHaveIcons(view.entries?.filter((entry) => entry.description) ?? []);
+  };
   let generation = 0;
   onCleanup(() => {
     generation++;
@@ -175,6 +273,7 @@ export function ManagementPanel(props: {
               when={!atRoot() || props.rootHeading !== false}
             >
               <header class="management-card-heading">
+                <EntryIcon icon={current.icon} class="management-title-icon" />
                 <h3>{current.title}</h3>
                 <Show when={!atRoot()}>
                   <button
@@ -290,7 +389,10 @@ export function ManagementPanel(props: {
                 </button>
               </Show>
               <Show when={current.entries?.some((entry) => entry.description)}>
-                <div class="management-entries">
+                <div
+                  class="management-entries"
+                  classList={{ "with-icons": withIcons(current) }}
+                >
                   <For each={current.entries?.filter((entry) => entry.description)}>
                     {(entry) => (
                       <button
@@ -301,6 +403,15 @@ export function ManagementPanel(props: {
                         data-setting={entrySetting(entry)}
                         onClick={() => activate(entry)}
                       >
+                        <Show when={withIcons(current)}>
+                          <span class="management-entry-icon" aria-hidden="true">
+                            <EntryIcon
+                              icon={entry.icon}
+                              class="management-icon"
+                              onFail={() => setIconFailures(iconFailures() + 1)}
+                            />
+                          </span>
+                        </Show>
                         <span class="management-entry-label">
                           <Show when={provider(entry)} fallback={entry.label}>
                             <ProviderLabel provider={provider(entry)}>

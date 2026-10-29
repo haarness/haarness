@@ -88,6 +88,7 @@ fn entry(label: impl Into<String>, description: impl Into<String>, request: Valu
         description: description.into(),
         request,
         confirm: None,
+        icon: None,
     }
 }
 fn destructive(label: &str, request: Value) -> Entry {
@@ -219,6 +220,179 @@ fn usage_statistics_view(status: Value, input: &Value) -> View {
         data: Some(status),
         ..View::default()
     }
+}
+
+/// The install form for `manifest`: what the resource can do, where it
+/// goes and the values it asks for, under its name and icon.
+fn install_form(manifest: &Value, input: &Value, origins: &[reqwest::Url]) -> View {
+    let resource = &manifest["resource"];
+    let mut lines = vec![format!(
+        "{} · version {} · {}",
+        text(resource, "kind"),
+        manifest["version"]["number"],
+        text(resource, "publisher")
+    )];
+    // Say what the resource can do in words rather than raw JSON.
+    let capabilities = &manifest["capabilities"];
+    let listed = |key: &str| {
+        capabilities[key]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|items| !items.is_empty())
+    };
+    for (flag, line) in [
+        ("executable", "Runs programs on this computer"),
+        ("shell", "Runs shell commands"),
+        ("network", "Uses the network"),
+    ] {
+        if capabilities[flag] == true {
+            lines.push(line.into());
+        }
+    }
+    for (key, label) in [
+        ("mcp", "MCP servers"),
+        ("hooks", "Hooks"),
+        ("secrets", "Asks for"),
+    ] {
+        if let Some(items) = listed(key) {
+            lines.push(format!("{label}: {items}"));
+        }
+    }
+    let mut fields = vec![choice(
+        "scope",
+        "Installation scope",
+        "local",
+        &["local", "global"],
+    )];
+    // One field per value an MCP server asks for; each installer
+    // supplies their own, and secrets stay masked.
+    for placeholder in manifest["install"]["mcp"]["env_placeholders"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let name = text(placeholder, "name");
+        if name.is_empty() {
+            continue;
+        }
+        let description = text(placeholder, "description");
+        let mut value = field(
+            &format!("value:{name}"),
+            &if description.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{name} · {description}")
+            },
+            "",
+            placeholder["required"] != false,
+        );
+        let upper = name.to_ascii_uppercase();
+        value.secret = ["KEY", "TOKEN", "SECRET", "PASSWORD"]
+            .iter()
+            .any(|word| upper.contains(word));
+        fields.push(value);
+    }
+    View {
+        title: format!("Install {}", text(resource, "name")),
+        icon: crate::marketplace::icon_on(resource, origins),
+        lines,
+        fields,
+        // The version shown is the one installed. Picked from the
+        // listing (the latest), it follows new versions afterwards.
+        submit: Some(
+            json!({"action":"install","id":input["id"],"version":manifest["version"]["number"],"autoUpdate":input["version"].is_null()}),
+        ),
+        ..View::default()
+    }
+}
+/// A search result, which opens its install form.
+fn search_entry(row: &Value, origins: &[reqwest::Url]) -> Entry {
+    Entry {
+        icon: crate::marketplace::icon_on(row, origins),
+        ..entry(
+            format!(
+                "{} · {} · {}",
+                text(row, "name"),
+                text(row, "kind"),
+                text(row, "visibility")
+            ),
+            text(row, "summary"),
+            json!({"action":"inspect","id":row["id"]}),
+        )
+    }
+}
+/// One installed resource's rows: the switch that says how it is set up,
+/// under the resource's icon, then its update and removal.
+fn installed_entries(row: &Value, origins: &[reqwest::Url]) -> Vec<Entry> {
+    let name = text(row, "name");
+    let enabled = row["enabled"] != false;
+    let automatic = crate::marketplace::follows_new_versions(row);
+    let version = &row["version"]["number"];
+    // The version once, and how it changes: on its own, held
+    // back by local edits, or only when asked.
+    let details = format!(
+        "{} · {} · {} · {}{}",
+        text(row, "kind"),
+        if row["scope"] == "local" {
+            "this project"
+        } else {
+            "all projects"
+        },
+        if automatic {
+            format!("version {version}")
+        } else {
+            format!("pinned to version {version}")
+        },
+        if enabled { "on" } else { "off" },
+        match (automatic, row["updateHeld"].is_string()) {
+            (true, true) => " · has local edits, so automatic updates wait",
+            (true, false) => " · updates automatically",
+            _ => "",
+        }
+    );
+    let request = |action: &str| json!({"action":action,"id":row["id"],"scope":row["scope"],"name":row["name"]});
+    // Only the toggle that applies: the state is in the description.
+    let toggle = if enabled { "disable" } else { "enable" };
+    let mut follow = request("auto_update");
+    follow["enabled"] = json!(!automatic);
+    let mut remove = entry(format!("Remove {name}"), "Uninstall it", request("remove"));
+    remove.confirm = Some(format!("Remove {name}?"));
+    vec![
+        Entry {
+            // The icon heads the resource's rows once.
+            icon: crate::marketplace::icon_on(row, origins),
+            ..entry(
+                format!("{} {name}", if enabled { "Disable" } else { "Enable" }),
+                details,
+                request(toggle),
+            )
+        },
+        entry(
+            format!("Update {name}"),
+            "Install the latest version",
+            request("update"),
+        ),
+        if automatic {
+            entry(
+                format!("Stop automatic updates for {name}"),
+                format!("Stay on version {version}"),
+                follow,
+            )
+        } else {
+            entry(
+                format!("Update {name} automatically"),
+                "Install new versions when they are published",
+                follow,
+            )
+        },
+        remove,
+    ]
 }
 
 impl ManagementService {
@@ -625,96 +799,14 @@ impl ManagementService {
 
     async fn marketplace_view(&self, input: &Value) -> Result<View> {
         let action = text(input, "action");
+        let origins = crate::marketplace::icon_origins();
         if action == "inspect" {
             let manifest = self
                 .marketplace_request(
                     &json!({"action":"manifest","id":input["id"],"version":input["version"]}),
                 )
                 .await?;
-            let resource = &manifest["resource"];
-            let mut lines = vec![format!(
-                "{} · version {} · {}",
-                text(resource, "kind"),
-                manifest["version"]["number"],
-                text(resource, "publisher")
-            )];
-            // Say what the resource can do in words rather than raw JSON.
-            let capabilities = &manifest["capabilities"];
-            let listed = |key: &str| {
-                capabilities[key]
-                    .as_array()
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .filter(|items| !items.is_empty())
-            };
-            for (flag, line) in [
-                ("executable", "Runs programs on this computer"),
-                ("shell", "Runs shell commands"),
-                ("network", "Uses the network"),
-            ] {
-                if capabilities[flag] == true {
-                    lines.push(line.into());
-                }
-            }
-            for (key, label) in [
-                ("mcp", "MCP servers"),
-                ("hooks", "Hooks"),
-                ("secrets", "Asks for"),
-            ] {
-                if let Some(items) = listed(key) {
-                    lines.push(format!("{label}: {items}"));
-                }
-            }
-            let mut fields = vec![choice(
-                "scope",
-                "Installation scope",
-                "local",
-                &["local", "global"],
-            )];
-            // One field per value an MCP server asks for; each installer
-            // supplies their own, and secrets stay masked.
-            for placeholder in manifest["install"]["mcp"]["env_placeholders"]
-                .as_array()
-                .into_iter()
-                .flatten()
-            {
-                let name = text(placeholder, "name");
-                if name.is_empty() {
-                    continue;
-                }
-                let description = text(placeholder, "description");
-                let mut value = field(
-                    &format!("value:{name}"),
-                    &if description.is_empty() {
-                        name.to_owned()
-                    } else {
-                        format!("{name} · {description}")
-                    },
-                    "",
-                    placeholder["required"] != false,
-                );
-                let upper = name.to_ascii_uppercase();
-                value.secret = ["KEY", "TOKEN", "SECRET", "PASSWORD"]
-                    .iter()
-                    .any(|word| upper.contains(word));
-                fields.push(value);
-            }
-            return Ok(View {
-                title: format!("Install {}", text(resource, "name")),
-                lines,
-                fields,
-                // The version shown is the one installed. Picked from the
-                // listing (the latest), it follows new versions afterwards.
-                submit: Some(
-                    json!({"action":"install","id":input["id"],"version":manifest["version"]["number"],"autoUpdate":input["version"].is_null()}),
-                ),
-                ..View::default()
-            });
+            return Ok(install_form(&manifest, input, &origins));
         }
         let mut notice = None;
         if matches!(
@@ -775,63 +867,7 @@ impl ManagementService {
                     .push("Nothing is installed from the marketplace yet.".into());
             }
             for row in installed.as_array().into_iter().flatten() {
-                let name = text(row, "name");
-                let enabled = row["enabled"] != false;
-                let automatic = crate::marketplace::follows_new_versions(row);
-                let version = &row["version"]["number"];
-                // The version once, and how it changes: on its own, held
-                // back by local edits, or only when asked.
-                let details = format!(
-                    "{} · {} · {} · {}{}",
-                    text(row, "kind"),
-                    if row["scope"] == "local" {
-                        "this project"
-                    } else {
-                        "all projects"
-                    },
-                    if automatic {
-                        format!("version {version}")
-                    } else {
-                        format!("pinned to version {version}")
-                    },
-                    if enabled { "on" } else { "off" },
-                    match (automatic, row["updateHeld"].is_string()) {
-                        (true, true) => " · has local edits, so automatic updates wait",
-                        (true, false) => " · updates automatically",
-                        _ => "",
-                    }
-                );
-                let request = |action: &str| json!({"action":action,"id":row["id"],"scope":row["scope"],"name":row["name"]});
-                // Only the toggle that applies: the state is in the description.
-                let toggle = if enabled { "disable" } else { "enable" };
-                view.entries.push(entry(
-                    format!("{} {name}", if enabled { "Disable" } else { "Enable" }),
-                    details,
-                    request(toggle),
-                ));
-                view.entries.push(entry(
-                    format!("Update {name}"),
-                    "Install the latest version",
-                    request("update"),
-                ));
-                let mut follow = request("auto_update");
-                follow["enabled"] = json!(!automatic);
-                view.entries.push(if automatic {
-                    entry(
-                        format!("Stop automatic updates for {name}"),
-                        format!("Stay on version {version}"),
-                        follow,
-                    )
-                } else {
-                    entry(
-                        format!("Update {name} automatically"),
-                        "Install new versions when they are published",
-                        follow,
-                    )
-                });
-                let mut remove = entry(format!("Remove {name}"), "Uninstall it", request("remove"));
-                remove.confirm = Some(format!("Remove {name}?"));
-                view.entries.push(remove);
+                view.entries.extend(installed_entries(row, &origins));
             }
         } else {
             // Offline or Cloud down: say so, and keep installed resources reachable.
@@ -847,16 +883,7 @@ impl ManagementService {
             {
                 Ok(page) => {
                     for row in page["items"].as_array().into_iter().flatten() {
-                        view.entries.push(entry(
-                            format!(
-                                "{} · {} · {}",
-                                text(row, "name"),
-                                text(row, "kind"),
-                                text(row, "visibility")
-                            ),
-                            text(row, "summary"),
-                            json!({"action":"inspect","id":row["id"]}),
-                        ));
+                        view.entries.push(search_entry(row, &origins));
                     }
                     if page["nextCursor"].is_string() {
                         view.entries.push(entry("Next page","",json!({"action":"search","q":input["q"],"kind":kind,"cursor":page["nextCursor"]})));
@@ -2341,12 +2368,13 @@ fn router_form(input: &Value, needs_key: bool) -> View {
             "The connection is checked and saved on this Haarness server. localhost refers to this server.".into(),
             if needs_key { "This router requires an access key. Enter it to connect.".into() } else { "Your provider API keys stay on the router.".into() }],
         entries: vec![entry(if advanced { "Hide advanced" } else { "Advanced" }, "Connection name and project scope", advanced_request)],
+        ..View::default()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::replace_label;
+    use super::{install_form, installed_entries, replace_label, search_entry};
     use serde_json::{Value, json};
     use std::fs;
 
@@ -2554,6 +2582,112 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
                 .unwrap();
         assert_eq!(receipt["autoUpdate"], false);
         assert!(receipt["updateHeld"].is_null());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Search results, the install form and installed rows carry the icon
+    /// Cloud lists for a resource, only from Cloud itself, and say nothing of
+    /// one that is missing.
+    #[test]
+    fn marketplace_rows_carry_icons_from_haarness_cloud_only() {
+        let origins = [reqwest::Url::parse("https://cloud.fixture.test/").unwrap()];
+        let icon = "https://cloud.fixture.test/icons/demo.png";
+        let row = json!({"id":"r1","name":"Demo","kind":"skill","visibility":"public","summary":"Proof","iconUrl":icon});
+        let listed = serde_json::to_value(search_entry(&row, &origins)).unwrap();
+        assert_eq!(listed["label"], "Demo · skill · public");
+        assert_eq!(listed["icon"], icon);
+        for other in [
+            json!({"iconUrl":null}),
+            json!({"iconUrl":"https://elsewhere.example/icons/demo.png"}),
+            json!({"iconUrl":"http://cloud.fixture.test/icons/demo.png"}),
+        ] {
+            let mut row = row.clone();
+            row["iconUrl"] = other["iconUrl"].clone();
+            let listed = serde_json::to_value(search_entry(&row, &origins)).unwrap();
+            // Left out, not null: text-only clients see what they always did.
+            assert!(listed.get("icon").is_none(), "{listed}");
+        }
+        let mut no_field = row.clone();
+        no_field.as_object_mut().unwrap().remove("iconUrl");
+        assert!(search_entry(&no_field, &origins).icon.is_none());
+
+        let manifest = json!({"resource":{"name":"Demo","kind":"skill","iconUrl":icon},"version":{"number":2}});
+        let form = install_form(&manifest, &json!({"id":"r1"}), &origins);
+        assert_eq!(form.title, "Install Demo");
+        assert_eq!(form.icon.as_deref(), Some(icon));
+        let foreign = json!({"resource":{"name":"Demo","iconUrl":"https://elsewhere.example/x.png"},"version":{"number":2}});
+        let form =
+            serde_json::to_value(install_form(&foreign, &json!({"id":"r1"}), &origins)).unwrap();
+        assert!(form.get("icon").is_none(), "{form}");
+
+        // One icon heads an installed resource's rows; a receipt from before
+        // icons has none.
+        let receipt = json!({"id":"r1","name":"demo","kind":"skill","scope":"local","version":{"number":2},"iconUrl":icon});
+        let rows = installed_entries(&receipt, &origins);
+        assert_eq!(rows[0].label, "Disable demo");
+        assert_eq!(rows[0].icon.as_deref(), Some(icon));
+        assert!(rows[1..].iter().all(|row| row.icon.is_none()));
+        let mut old = receipt.clone();
+        old.as_object_mut().unwrap().remove("iconUrl");
+        assert!(
+            installed_entries(&old, &origins)
+                .iter()
+                .all(|row| row.icon.is_none())
+        );
+    }
+
+    /// The installed list reads the icon from the receipt, so it shows with
+    /// no catalog request.
+    #[tokio::test]
+    async fn the_installed_list_shows_the_icon_its_receipt_recorded() {
+        use std::sync::Arc;
+        let root = std::env::temp_dir().join(format!("haarness-ui-icon-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let paths = crate::Paths::new(Some(&root.join("home"))).unwrap();
+        let workspace = root.join("workspace");
+        let skill = workspace.join(".haarness/skills/demo");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\ndescription: Demo\n---\nDemo\n",
+        )
+        .unwrap();
+        let id = uuid::Uuid::now_v7();
+        let receipts = workspace.join(".haarness/marketplace");
+        fs::create_dir_all(&receipts).unwrap();
+        let icon = "https://cloud.fixture.test/icons/demo.png";
+        fs::write(
+            receipts.join(format!("{id}.json")),
+            json!({"id":id,"kind":"skill","name":"demo","slug":"demo","scope":"local","path":skill,
+                "version":{"id":"00000000-0000-0000-0000-000000000003","number":3},"iconUrl":icon,
+                "installedDigest":crate::marketplace::tree_digest(&skill).unwrap()})
+            .to_string(),
+        )
+        .unwrap();
+        crate::marketplace::TEST_ICON_ORIGINS.set(Some(vec![
+            reqwest::Url::parse("https://cloud.fixture.test/").unwrap(),
+        ]));
+        let skills: Arc<dyn haarness_core::SkillRegistry> = Arc::new(
+            haarness_server::FilesystemSkillRegistry::new(vec![(paths.skills.clone(), true)]),
+        );
+        let mcp = Arc::new(haarness_mcp::NativeMcpRegistry::with_auth_dir(
+            paths.data.join("mcp-oauth"),
+        ));
+        let service =
+            crate::management::ManagementService::new(paths, workspace.clone(), true, skills, mcp);
+        let listed = service
+            .ui_request("marketplace-ui", &json!({"action":"installed"}))
+            .await
+            .unwrap();
+        let icons: Vec<_> = listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| Some((entry["label"].as_str()?, entry.get("icon")?)))
+            .collect();
+        assert_eq!(icons, [("Disable demo", &json!(icon))]);
+        crate::marketplace::TEST_ICON_ORIGINS.set(None);
         fs::remove_dir_all(root).unwrap();
     }
 }

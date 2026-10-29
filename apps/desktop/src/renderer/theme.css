@@ -105,6 +105,10 @@
 
   --shadow-1: 0 1px 2px #00000026, 0 6px 20px -6px #0000003d;
   --shadow-2: 0 2px 6px #0000002e, 0 24px 60px -12px #00000059;
+
+  /* The ground under images made for white paper, such as vendor logos:
+     the same near-white in every theme and palette. */
+  --icon-tile: #fdfcfa;
 }
 /* No colour scheme until the app has applied the theme: the window's own
    background, the saved theme's page colour, shows through until then. */
