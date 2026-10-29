@@ -479,6 +479,12 @@ fn normalize_task_state(item: &mut Item) {
     {
         *state = "interrupted".into();
     }
+    // An imported chat runs none of the commands it holds.
+    if let ItemData::CommandState { state, .. } = &mut item.data
+        && state.is_live()
+    {
+        *state = haarness_protocol::ShellCommandState::Interrupted;
+    }
 }
 
 fn pause_imported_goal(mut goal: GoalState) -> GoalState {
