@@ -9,14 +9,18 @@ import type {
   EventEnvelope,
   PendingPermissionInfo,
   PendingQuestionInfo,
+  ShellCommandInfo,
 } from "@haarness/sdk";
 import type { Bridge, Connection } from "../shared";
+import { BACKGROUND_COMMANDS, liveCommand } from "./shell-commands";
 
 interface Overview {
   threads: Thread[];
   turns: Turn[];
   permissions: PendingPermissionInfo[];
   questions: PendingQuestionInfo[];
+  /** The agents' shell commands running in its chats. */
+  commands: ShellCommandInfo[];
   /** The server answers for chats in Auto itself. */
   shared: boolean;
   loaded: boolean;
@@ -34,7 +38,7 @@ export function createProjectOverview(input: {
   expanded: () => boolean;
   active: () => boolean;
   snapshot: () =>
-    | Pick<Overview, "threads" | "turns" | "permissions" | "questions">
+    | Pick<Overview, "threads" | "turns" | "permissions" | "questions" | "commands">
     | undefined;
   bridge: Bridge;
   connect: (id: string) => Promise<Connection | null>;
@@ -44,6 +48,7 @@ export function createProjectOverview(input: {
     turns: [],
     permissions: [],
     questions: [],
+    commands: [],
     shared: false,
     loaded: false,
     live: false,
@@ -158,6 +163,12 @@ export function createProjectOverview(input: {
             set("turns", (turns) =>
               turns.filter((turn) => turn.id !== value.turnId),
             );
+          } else if (value.type === "command.updated") {
+            const command = value.payload as ShellCommandInfo;
+            set("commands", (commands) => [
+              ...commands.filter((item) => item.id !== command.id),
+              ...(liveCommand(command.state) ? [command] : []),
+            ]);
           }
         };
         const link = createOverviewLink({
@@ -165,17 +176,21 @@ export function createProjectOverview(input: {
           bridge: input.bridge,
           connect: input.connect,
           async snapshot(info) {
-            const [threads, turns, permissions, questions] = await Promise.all([
+            const [threads, turns, permissions, questions, commands] = await Promise.all([
               api<Thread[]>("listThreads", [{ archived: true }]),
               api<Turn[]>("activeTurns"),
               api<PendingPermissionInfo[]>("listPermissions"),
               api<PendingQuestionInfo[]>("listQuestions"),
+              info.capabilities.includes(BACKGROUND_COMMANDS)
+                ? api<ShellCommandInfo[]>("activeShellCommands").catch(() => [])
+                : [],
             ]);
             return () => {
               set("threads", reconcile(threads, { key: "id" }));
               set("turns", turns);
               set("permissions", permissions);
               set("questions", questions);
+              set("commands", commands);
               set("shared", info.capabilities.includes("approval-mode.v1"));
               set("live", true);
             };

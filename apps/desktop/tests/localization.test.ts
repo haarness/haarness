@@ -103,6 +103,20 @@ test("every renderer t() key is in the shared catalog", async () => {
   assert.deepEqual([...missing], []);
 });
 
+// A delegation row's state, fallback title and accessible name showed English
+// in every language: its words were plain literals, never passed to t().
+test("a delegation row's words go through t()", async () => {
+  const source = await readFile(new URL("../src/renderer/AgentTask.tsx", import.meta.url), "utf8");
+  for (const key of [
+    "Completed", "Stopped", "Failed", "Needs approval", "Needs an answer",
+    "Starting…", "Working in background", "Working", "Agent task", "Open agent task", "Agent",
+  ]) {
+    assert.ok(source.includes(`t("${key}")`), key);
+    assert.ok(Object.hasOwn(dictionaries.en, key), key);
+  }
+  assert.doesNotMatch(source, /:\s*"(?:Completed|Stopped|Failed|Working[^"]*|Starting…|Needs [^"]+)"/);
+});
+
 // Text set on a DOM node by hand never passes a render site that translates
 // it (the fenced-code Copy button showed English in every language).
 test("renderer text set imperatively goes through t()", async () => {
@@ -181,7 +195,7 @@ test("keys translated through a variable are in the catalog", () => {
     "Pick an element", "Adds part of the browser's page to your message",
     // Settings rows SettingRow translates, and the save dialog's labels from the main process.
     "Diagnostics", "Detailed logging", "Export logs", "Export", "Zip archive",
-    "Browser", "Review", "Terminal", "Context",
+    "Browser", "Review", "Terminal", "Context", "Still running",
     "Browse and test websites with Haarness", "Browse and edit project files",
     "Inspect changes and compare diffs", "Run commands in this project",
     "Inspect chat tokens, cache and context",

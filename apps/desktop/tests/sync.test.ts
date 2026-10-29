@@ -216,3 +216,52 @@ test("requests announced again are each updated where they stand in the queue", 
     ["One.", "Two."],
   );
 });
+
+test("command reports keep each command whole and never take it back to running", () => {
+  const [state, set] = createStore<Live>({
+    selected: "thread",
+    threads: [],
+    items: [],
+    turns: [],
+    streams: {},
+    permissions: [],
+    questions: [],
+  });
+  let eventId = 0;
+  const event = (type: string, payload: unknown) =>
+    reduceEvent(state, set, {
+      eventId: ++eventId,
+      type,
+      payload,
+      threadId: "thread",
+      turnId: "turn",
+      serverInstanceId: "instance",
+    } as EventEnvelope);
+  const command = {
+    id: "c1",
+    threadId: "thread",
+    rootThreadId: "thread",
+    turnId: "turn",
+    callId: "call",
+    command: "npm test",
+    background: false,
+    state: "running",
+    startedAt: "2026-10-29T10:00:00Z",
+    movesAt: "2026-10-29T10:01:00Z",
+    outputBytes: 0,
+    deliversNotice: false,
+  };
+  event("command.updated", command);
+  assert.equal(state.shellCommands?.c1.movesAt, "2026-10-29T10:01:00Z");
+  // Moved: the report leaves its move time out, and the store does too.
+  const { movesAt: _moved, ...rest } = command;
+  event("command.updated", { ...rest, background: true, movedBy: "limit", backgroundAt: "2026-10-29T10:01:00Z" });
+  assert.equal(state.shellCommands?.c1.background, true);
+  assert.equal(state.shellCommands?.c1.movesAt, undefined);
+  event("command.output", { id: "c1", size: 120 });
+  event("command.output", { id: "c1", size: 480 });
+  assert.equal(state.commandOutput?.c1, 480);
+  event("command.updated", { ...rest, background: true, state: "stopped", endedBy: "person" });
+  event("command.updated", { ...rest, background: true, state: "running" });
+  assert.equal(state.shellCommands?.c1.state, "stopped");
+});

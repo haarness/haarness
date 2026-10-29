@@ -225,6 +225,29 @@ export function errorText(error: unknown, options: { relay?: boolean } = {}): Er
   return { message: sentence(text), known: false };
 }
 
+/**
+ * The server answered that what was asked for does not exist (404, 410):
+ * its own "not found: …", a bare status, or the words main gives a bare
+ * status in a window. A computer that is offline or a workspace asleep is
+ * not that answer.
+ */
+export function notFoundAnswer(error: unknown) {
+  const status = failure(error).status;
+  if (status === 404 || status === 410) return true;
+  const text = (error instanceof Error ? error.message : String(error ?? "")).trim();
+  if (/^not found: /i.test(text) || text === sentences.gone) return true;
+  const said = statusLine(text)?.status;
+  return said === 404 || said === 410;
+}
+
+/** The server refused what was asked as conflicting with how things stand
+ * (409): its own "conflict: …" or a bare status. */
+export function conflictAnswer(error: unknown) {
+  if (failure(error).status === 409) return true;
+  const text = (error instanceof Error ? error.message : String(error ?? "")).trim();
+  return /^conflict: /i.test(text) || statusLine(text)?.status === 409;
+}
+
 /** A failure on one line, for a surface without room for a title: an English
  * catalog key when `known`, as `errorText` says. */
 export const errorTextLine = (text: ErrorText) =>
