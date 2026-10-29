@@ -585,6 +585,9 @@ impl App {
         let parents: Vec<ThreadId> = std::iter::once(self.thread.id)
             .chain((chat != self.thread.id).then_some(chat))
             .collect();
+        // Why every command was held back, in the server's words (the chat
+        // runs as many in the background as it may).
+        let mut held_back = None;
         let (subagents, moved) = if named.is_empty() {
             let mut subagents = 0;
             for parent in &parents {
@@ -593,14 +596,12 @@ impl App {
             let moved = if commands {
                 match client.send_commands_to_background(chat, None).await {
                     Ok(moved) => moved.len(),
-                    // The chat runs as many commands there as it may: the
-                    // server says so in its own words.
                     Err(error)
                         if crate::api::refusal_status(&error)
                             == Some(reqwest::StatusCode::CONFLICT) =>
                     {
-                        self.refuse_move(error.to_string());
-                        return Ok(());
+                        held_back = Some(error.to_string());
+                        0
                     }
                     Err(error) => return Err(error),
                 }
@@ -643,6 +644,10 @@ impl App {
             .of(chat)
             .iter()
             .any(|info| info.state.is_live() && !info.background && info.thread_id == chat);
+        if let Some(held_back) = held_back.as_ref().filter(|_| subagents == 0) {
+            self.refuse_move(held_back.clone());
+            return Ok(());
+        }
         let refused = match (subagents, moved) {
             (0, 0) if commands && waiting_on_command => {
                 Some(self.language.text("Nothing could move to the background"))
@@ -669,6 +674,11 @@ impl App {
                 &[("count", &(subagents + moved).to_string())],
             ),
         };
+        // Subagents moved while every command was held back: what moved, and
+        // quietly why the commands did not.
+        if let Some(held_back) = held_back {
+            self.notice = format!("{} · {held_back}", self.notice);
+        }
         Ok(())
     }
 
