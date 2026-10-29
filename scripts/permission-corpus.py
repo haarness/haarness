@@ -114,6 +114,8 @@ CORPUS = [
     'sudo -D"$HOME" cat .ssh/id_rsa', "sudo -D ~/.ssh -s <<'EOF'\ncat id_rsa\nEOF", 'echo "cat id_rsa" | sudo -D ~/.ssh -s',
     'env -C "$D" env -C src cat ../README.md', 'sudo -i env -C src cat ../README.md', 'sudo -R /jail rm -rf victim',
     'sudo --us root rm -rf victim', 'env --chd /tmp rm -rf victim', 'cat() { cat a; } >> log.txt; cat',
+    'xargs --max-l rm -rf < list.txt', 'xargs --eo rm -rf < list.txt', 'xargs --max-lines rm -rf < list.txt',
+    'xargs --eof rm -rf < list.txt', 'xargs -i rm -rf {} < list.txt', 'xargs -n 1 rm -f < files.txt',
     # Lines of assignments
     'A=1 B=2\nnpm test', 'PORT=3000 HOST=0.0.0.0\nnpm start', 'A=1\n! cat ../outside/x', 'A=1 B=2\n! rm -rf victim',
     'A=1\nif true; then rm -rf victim; fi', 'A=1 B=2\n{ rm -rf victim; }', 'A=1 B=2 # note\nrm -rf victim',
