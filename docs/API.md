@@ -473,7 +473,10 @@ ends: `{call_id, command_id, state, exit_code?, signal?, tail, started_at,
 ended_at?, moved_by?}`, `tail` being the end of its output (at most 4 KiB).
 After a restart a command the last such item shows running reads
 `interrupted`: the chat gets a hidden notice and an `error` item saying so,
-and no turn starts by itself.
+and no turn starts by itself. `interrupted` means only that: Haarness
+stopped while the command ran. A fork and an imported session archive leave
+out the checkpoint of a command still running (the copied `bash` result
+still names it), and keep those of ended ones.
 
 A background result (a subagent's or a workflow run's) that its chat cannot
 take as input is kept the same way instead of being lost: when the chat's
