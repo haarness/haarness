@@ -456,8 +456,12 @@ impl CommandPolicy {
         let explicit = timeout_ms.map(|ms| (ms > 0).then(|| millis(ms)));
         let deadline = (settings.shell_timeout_ms > 0).then(|| millis(settings.shell_timeout_ms));
         let interactive = follows && !subagent;
-        let move_after = (interactive && explicit.is_none() && settings.shell_move_after_ms > 0)
-            .then(|| millis(settings.shell_move_after_ms));
+        // A deadline that comes before the move wins, as it always did.
+        let move_after = (interactive
+            && explicit.is_none()
+            && settings.shell_move_after_ms > 0
+            && deadline.is_none_or(|deadline| millis(settings.shell_move_after_ms) < deadline))
+        .then(|| millis(settings.shell_move_after_ms));
         let foreground_deadline = match explicit {
             Some(limit) => limit,
             // A command that moves is never stopped for running long in the
@@ -562,6 +566,9 @@ pub(crate) struct CommandEntry {
     wake: Notify,
     /// Clients were told of it (`command.updated`).
     announced: AtomicBool,
+    /// It stayed in the foreground because its chat ran as many commands
+    /// in the background as it may.
+    held: AtomicBool,
 }
 
 impl CommandEntry {
@@ -639,6 +646,7 @@ impl CommandEntry {
                     });
                     true
                 });
+                self.held.store(true, Ordering::SeqCst);
                 self.wake.notify_one();
                 if self.announced.load(Ordering::SeqCst) {
                     self.publish();
@@ -1331,6 +1339,7 @@ impl ShellCall {
             released: watch::Sender::new(false),
             wake: Notify::new(),
             announced: AtomicBool::new(false),
+            held: AtomicBool::new(false),
         });
         call.commands.forget_ended();
         call.commands
@@ -1376,6 +1385,16 @@ impl ShellCall {
         }
         let end = entry.process.end.borrow().clone().unwrap_or_default();
         if current.state == ShellCommandState::TimedOut {
+            if entry.held.load(Ordering::SeqCst) {
+                let ran = current
+                    .ended_at
+                    .map_or(0, |ended| (ended - current.started_at).num_milliseconds());
+                return Err(CoreError::Tool(format!(
+                    "command timed out after {ran} ms: this chat already ran as many commands in the background as execution.shell_background_per_chat allows ({}), so it stayed in the foreground with its deadline; output saved to {}",
+                    call.settings.shell_background_per_chat,
+                    entry.process.output.path().display()
+                )));
+            }
             return Err(CoreError::Tool(format!(
                 "command timed out after {} ms; output saved to {}",
                 request.timeout_ms.unwrap_or(call.settings.shell_timeout_ms),
@@ -2390,6 +2409,7 @@ mod tests {
                 released: watch::Sender::new(false),
                 wake: Notify::new(),
                 announced: AtomicBool::new(false),
+                held: AtomicBool::new(false),
             })
         };
         for (id, thread, state, ended) in [

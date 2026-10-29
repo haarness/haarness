@@ -1286,3 +1286,62 @@ async fn a_command_already_stopping_when_haarness_stops_records_its_end() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(notices(&runtime, thread).await.is_empty());
 }
+
+#[tokio::test]
+async fn a_command_held_at_the_cap_says_so_and_a_deadline_before_the_move_wins() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_background_per_chat = 1;
+        settings.shell_move_after_ms = 300;
+        settings.shell_timeout_ms = 1_200;
+    });
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let server = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 5"}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let (text, _) = last_result(&runtime, thread).await;
+    assert!(text.contains("timed out after"), "{text}");
+    assert!(text.contains("shell_background_per_chat"), "{text}");
+    runtime.stop_shell_command(thread, &server).await.unwrap();
+
+    // A deadline shorter than the time to move: the command never moves,
+    // it times out as it always did.
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_move_after_ms = 1_500;
+        settings.shell_timeout_ms = 500;
+    });
+    let thread = chat(&runtime, None).await;
+    let began = std::time::Instant::now();
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 3"}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert!(text.contains("timed out after 500 ms"), "{text} {metadata}");
+    assert!(
+        began.elapsed() < Duration::from_millis(1_400),
+        "{:?}",
+        began.elapsed()
+    );
+}
