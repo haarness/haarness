@@ -280,6 +280,7 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         moved: 0,
         unplaced: false,
         folder: None,
+        here: None,
     };
     if !reader.read(command, Depth::default()) {
         return fallback(command);
@@ -647,8 +648,14 @@ struct Reader<'w> {
     unplaced: bool,
     /// Where the relative paths being checked start when a plain `cd`
     /// earlier in the line's `&&` chain moved the shell (see
-    /// [`chain_folders`]); [`Self::start`] otherwise.
+    /// [`chain_folders`]) or a wrapper runs the command elsewhere (see
+    /// [`Self::wrapper_folder`]); [`Self::start`] otherwise.
     folder: Option<Rc<Path>>,
+    /// Where the written command being unwrapped runs when a plain `cd`
+    /// earlier in the line's `&&` chain moved the shell: what a wrapper's
+    /// relative folder starts from. The command it runs is read from where
+    /// the shell started unless the wrapper names a folder.
+    here: Option<Rc<Path>>,
 }
 
 /// The written command whose standard input a program reads.
@@ -686,6 +693,18 @@ struct Depth {
     text: u8,
     /// Wrappers and strings around it, together.
     hops: u8,
+}
+
+/// Where a wrapper runs the command it is given: see
+/// [`Reader::wrapper_folder`].
+enum Moved {
+    /// Where the wrapper itself runs: it names no folder.
+    No,
+    /// Where nobody can tell (`env -C "$d"`, `sudo -i`): its relative paths
+    /// are read from where the shell started.
+    Unknown,
+    /// In this folder.
+    To(Rc<Path>),
 }
 
 /// One word of a command: its program or an argument.
@@ -873,6 +892,10 @@ impl Reader<'_> {
             }
         }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
+        // Text run again is read from where the shell started; the folders
+        // of the reading around it are its own again afterwards.
+        let outer_folder = self.folder.take();
+        let outer_here = self.here.take();
         let continued = command.contains("\\\n");
         // The written command each command node is read for, by where the
         // node starts.
@@ -919,7 +942,8 @@ impl Reader<'_> {
             // Words written after a redirect (`rm 2>&1 -rf ~/x`) or a
             // here-document operator are the command's too.
             let (words, carried) = command_words(node, parent, command);
-            self.folder = folders.get(&node.id()).cloned();
+            let here = folders.get(&node.id()).cloned();
+            self.folder.clone_from(&here);
             self.check_paths(&words, command);
             self.folder = None;
             if depth.text == 0 {
@@ -966,7 +990,9 @@ impl Reader<'_> {
                 wrappers: &wrappers,
                 documents: &documents,
             };
+            self.here = here;
             self.unwrap(&words, Some(stdin), command, depth);
+            self.here = None;
             if let Some(lines) = parent.and_then(|statement| hidden.get(&statement.id())) {
                 for line in lines {
                     self.nested(line, depth);
@@ -1074,6 +1100,8 @@ impl Reader<'_> {
                 push_unique(&mut self.analysis.external_dirs, glob(&dir));
             }
         }
+        self.folder = outer_folder;
+        self.here = outer_here;
         true
     }
 
@@ -1239,6 +1267,69 @@ impl Reader<'_> {
         }
     }
 
+    /// Where a wrapper runs the command it is given (`env -C`, `sudo -D`).
+    /// Each folder it names is checked like a `cd`'s, from where the wrapper
+    /// runs. The command's relative paths then start in the last one when it
+    /// is plain (see [`plain`]) and there now, else where the shell started,
+    /// as after `cd "$d"`.
+    fn wrapper_folder(&mut self, folders: &[&Given<'_, '_>], source: &str) -> Moved {
+        if folders.is_empty() {
+            return Moved::No;
+        }
+        let base: Rc<Path> = self
+            .folder
+            .clone()
+            .or_else(|| self.here.clone())
+            .unwrap_or_else(|| Rc::from(self.start));
+        let outer = self.folder.replace(Rc::clone(&base));
+        let mut last = Vec::new();
+        for given in folders {
+            last = given_paths(given, source);
+            for path in &last {
+                self.check_folder("cd", &path.raw, &path.value, path.complete);
+            }
+        }
+        self.folder = outer;
+        let [path] = last.as_slice() else {
+            return Moved::Unknown;
+        };
+        if !path.complete || !plain(&path.value) {
+            return Moved::Unknown;
+        }
+        let target =
+            home_expansion(&path.raw, &path.value).unwrap_or_else(|| PathBuf::from(&path.value));
+        let next = base.join(target);
+        if next.as_os_str().len() > MAX_PLACED_BYTES || !next.is_dir() {
+            return Moved::Unknown;
+        }
+        Moved::To(Rc::from(next))
+    }
+
+    /// [`Self::invocation`] of what a wrapper runs, where
+    /// [`Self::wrapper_folder`] found it runs.
+    fn moved_invocation(
+        &mut self,
+        moved: Moved,
+        words: &[Word<'_>],
+        stdin: Option<Stdin<'_, '_>>,
+        source: &str,
+        depth: Depth,
+    ) {
+        let folder = match moved {
+            Moved::No => {
+                self.invocation(words, stdin, source, depth);
+                return;
+            }
+            Moved::Unknown => None,
+            Moved::To(folder) => Some(folder),
+        };
+        let outer = std::mem::replace(&mut self.folder, folder);
+        self.moved += 1;
+        self.invocation(words, stdin, source, depth);
+        self.moved -= 1;
+        self.folder = outer;
+    }
+
     /// A command that a wrapper runs, read like one written on its own.
     fn invocation(
         &mut self,
@@ -1327,6 +1418,8 @@ impl Reader<'_> {
                     "",
                     &["unset", "chdir", "split-string", "argv0"],
                 );
+                let folders: Vec<&Given<'_, '_>> = options.all(&["C", "chdir"]).collect();
+                let folder = self.wrapper_folder(&folders, source);
                 if let Some(split) = options.value("S").or_else(|| options.value("split-string")) {
                     // `env -S` splits its text into words, options and
                     // assignments included, and goes on with the words
@@ -1335,10 +1428,7 @@ impl Reader<'_> {
                         options.rest.iter().map(|word| word.raw.as_str()).collect();
                     self.nested(&format!("env {split} {}", rest.join(" ")), depth);
                 } else {
-                    let moved = options.value("C").is_some() || options.value("chdir").is_some();
-                    self.moved += u32::from(moved);
-                    self.invocation(env_command(options.rest), stdin, source, depth);
-                    self.moved -= u32::from(moved);
+                    self.moved_invocation(folder, env_command(options.rest), stdin, source, depth);
                 }
             }
             "sudo" | "doas" => {
@@ -1360,14 +1450,19 @@ impl Reader<'_> {
                     }
                     return;
                 }
-                // `-D`, `--chdir` and a login shell's `-i` choose the folder.
-                let moved = name == "sudo"
-                    && (options.value("D").is_some()
-                        || options.value("chdir").is_some()
-                        || options.flags.contains('i'));
-                self.moved += u32::from(moved);
-                self.invocation(rest, stdin, source, depth);
-                self.moved -= u32::from(moved);
+                // `-D` and `--chdir` choose the folder; a login shell's `-i`
+                // the user's home, which is not known.
+                let folders: Vec<&Given<'_, '_>> = if name == "sudo" {
+                    options.all(&["D", "chdir"]).collect()
+                } else {
+                    Vec::new()
+                };
+                let folder = if name == "sudo" && options.flags.contains('i') {
+                    Moved::Unknown
+                } else {
+                    self.wrapper_folder(&folders, source)
+                };
+                self.moved_invocation(folder, rest, stdin, source, depth);
             }
             "coproc" => {
                 // `coproc [NAME] { …; }`, `coproc [NAME] ( … )` or `coproc
@@ -2221,6 +2316,45 @@ fn expanded(word: &Word<'_>, source: &str) -> Vec<Path_> {
     }
 }
 
+/// The paths an option's value stands for, as [`expanded`] reads a word. A
+/// value written in the option's own word (`-Cdir`, `--chdir=dir`) gets no
+/// `~` expansion from the shell, and only its literal start is known once
+/// an expansion follows (`--chdir=/tmp/$d`).
+fn given_paths(given: &Given<'_, '_>, source: &str) -> Vec<Path_> {
+    let Some(word) = given.word else {
+        return Vec::new();
+    };
+    if !given.attached {
+        return expanded(word, source);
+    }
+    // The option's own text before the value, which no `~` follows: the
+    // paths keep it in front, as written.
+    let prefix = &word.value[..word.value.len() - given.value.len()];
+    if brace_list(&word.raw) {
+        return expanded(word, source)
+            .into_iter()
+            .filter_map(|path| {
+                let value = path.value.strip_prefix(prefix)?.to_owned();
+                Some(Path_ {
+                    raw: format!("{prefix}{value}"),
+                    value,
+                    complete: path.complete,
+                })
+            })
+            .collect();
+    }
+    let known = if word.literal {
+        given.value.len()
+    } else {
+        given.value.find(['$', '`']).unwrap_or(given.value.len())
+    };
+    vec![Path_ {
+        raw: word.raw.clone(),
+        value: given.value[..known].to_owned(),
+        complete: word.literal,
+    }]
+}
+
 /// How many words a brace list may expand to before it is too many to read.
 const BRACE_WORDS: usize = 64;
 
@@ -2667,15 +2801,21 @@ struct Options<'s, 't> {
     /// Short options given without a value.
     flags: String,
     /// Options given with a value, in order.
-    values: Vec<Given>,
+    values: Vec<Given<'s, 't>>,
 }
 
 /// An option given with a value.
-struct Given {
+struct Given<'s, 't> {
     /// Its short letter or long name.
     name: String,
     /// The value, as the program receives it (expansions as written).
     value: String,
+    /// The word that holds the value: the option's own when the value is
+    /// written in it (`-Cdir`, `--chdir=dir`), else the word after it
+    /// (`None` past the last word).
+    word: Option<&'s Word<'t>>,
+    /// The value is written in the option's own word.
+    attached: bool,
 }
 
 impl<'s, 't> Options<'s, 't> {
@@ -2712,6 +2852,8 @@ impl<'s, 't> Options<'s, 't> {
                         options.values.push(Given {
                             name: name.into(),
                             value: given.into(),
+                            word: Some(word),
+                            attached: true,
                         });
                     }
                     None if word.literal && long.contains(&name) => {
@@ -2720,6 +2862,8 @@ impl<'s, 't> Options<'s, 't> {
                         options.values.push(Given {
                             name: name.into(),
                             value: next.map(|word| word.value.clone()).unwrap_or_default(),
+                            word: next,
+                            attached: false,
                         });
                     }
                     None if word.literal => {}
@@ -2736,8 +2880,6 @@ impl<'s, 't> Options<'s, 't> {
             };
             let mut flags = String::new();
             let mut given = None;
-            // The value is the next word.
-            let mut apart = false;
             for (at, letter) in cluster.char_indices() {
                 if 1 + at >= written {
                     break;
@@ -2748,14 +2890,17 @@ impl<'s, 't> Options<'s, 't> {
                     given = Some(Given {
                         name: letter.into(),
                         value: next.map(|word| word.value.clone()).unwrap_or_default(),
+                        word: next,
+                        attached: false,
                     });
-                    apart = true;
                     break;
                 }
                 if valued.contains(letter) || optional.contains(letter) {
                     given = Some(Given {
                         name: letter.into(),
                         value: attached.to_owned(),
+                        word: Some(word),
+                        attached: true,
                     });
                     break;
                 }
@@ -2766,9 +2911,12 @@ impl<'s, 't> Options<'s, 't> {
             if !word.literal && given.is_none() {
                 break;
             }
-            index += 1 + usize::from(apart);
+            index += 1;
             options.flags.push_str(&flags);
-            options.values.extend(given);
+            if let Some(given) = given {
+                index += usize::from(!given.attached);
+                options.values.push(given);
+            }
         }
         options.rest = &words[index.min(words.len())..];
         options
@@ -2779,6 +2927,13 @@ impl<'s, 't> Options<'s, 't> {
             .iter()
             .find(|given| given.name == name)
             .map(|given| given.value.as_str())
+    }
+
+    /// Every value given to one of the options `names`, in order.
+    fn all<'a>(&'a self, names: &'a [&str]) -> impl Iterator<Item = &'a Given<'s, 't>> {
+        self.values
+            .iter()
+            .filter(move |given| names.contains(&given.name.as_str()))
     }
 
     /// `sudo`'s options, and the variables it is given to set among them
@@ -4919,9 +5074,12 @@ fn outputs_to_literal(redirect: tree_sitter::Node<'_>, source: &str) -> bool {
 /// home folder) and no `..` part, which the shell takes off the folder's
 /// name where a file is read through its links.
 fn plain_path(word: &Word<'_>) -> bool {
-    let value = word.value.as_str();
-    word.literal
-        && !value.is_empty()
+    word.literal && plain(&word.value)
+}
+
+/// The value of a [`plain_path`].
+fn plain(value: &str) -> bool {
+    !value.is_empty()
         && !value.starts_with('-')
         && !value.contains(['$', '`', '*', '?', '[', '{', '\\'])
         && !value.chars().any(char::is_control)
@@ -7300,8 +7458,8 @@ mod here_document_backquotes {
     }
 }
 
-/// Commands a wrapper or one of the shell's own words runs, read after the
-/// variables they set.
+/// Commands a wrapper or one of the shell's own words runs: read after the
+/// variables they set, and judged from the folder a wrapper chooses.
 #[cfg(test)]
 mod wrappers {
     use super::*;
@@ -7380,6 +7538,96 @@ mod wrappers {
         ] {
             assert!(!reaches_rm(command, &workspace), "{command}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_folder_a_wrapper_runs_its_command_in_is_checked_and_read_from() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-wrapper-folder-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("sub/deeper")).unwrap();
+        std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
+        let parent = vec![glob(&root.canonicalize().unwrap())];
+        // Read as after a plain `cd` that opens an `&&` chain: the folder
+        // checked like the `cd`'s, the command's relative paths from there
+        // when it is plain and there, else from where the shell started.
+        for (wrapped, chained) in [
+            ("env -C ~/.ssh cat id_rsa", "cd ~/.ssh && cat id_rsa"),
+            (
+                "env --chdir=/tmp cat haarness-no-such-file",
+                "cd /tmp && cat haarness-no-such-file",
+            ),
+            (
+                "sudo -D /tmp cat haarness-no-such-file",
+                "cd /tmp && cat haarness-no-such-file",
+            ),
+            (
+                "sudo --chdir /tmp cat haarness-no-such-file",
+                "cd /tmp && cat haarness-no-such-file",
+            ),
+            ("env -C sub cat ../../x", "cd sub && cat ../../x"),
+            ("env -C sub cat ../README.md", "cd sub && cat ../README.md"),
+            ("env -Csub cat ../README.md", "cd sub && cat ../README.md"),
+            (
+                "env --chdir=sub cat ../README.md",
+                "cd sub && cat ../README.md",
+            ),
+            (
+                "env -C sub/deeper cat ../../README.md",
+                "cd sub/deeper && cat ../../README.md",
+            ),
+            (
+                "cd sub && env -C deeper cat ../../README.md",
+                "cd sub && cd deeper && cat ../../README.md",
+            ),
+            (
+                "sudo -D sub env -C deeper cat ../../README.md",
+                "cd sub && cd deeper && cat ../../README.md",
+            ),
+            ("env -C \"$D\" cat ../x", "cd \"$D\" && cat ../x"),
+            ("env -C nosuch cat ../x", "cd nosuch && cat ../x"),
+            ("env -C .. cat x", "cd .. && cat x"),
+        ] {
+            assert_eq!(
+                analyze(wrapped, &workspace).external_dirs,
+                analyze(chained, &workspace).external_dirs,
+                "{wrapped}"
+            );
+        }
+        assert!(
+            !analyze("env -C ~/.ssh cat id_rsa", &workspace)
+                .external_dirs
+                .is_empty()
+        );
+        assert!(
+            analyze("env -C sub cat ../README.md", &workspace)
+                .external_dirs
+                .is_empty()
+        );
+        assert_eq!(
+            analyze("env -C sub cat ../../x", &workspace).external_dirs,
+            parent
+        );
+        // The shell expands no `~` inside an option's own word: that folder
+        // is named `~`, in the project.
+        for command in ["env -C~/x cat y", "env --chdir=~/x cat y"] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        // Text run again, or split by `env -S`, is read from where the shell
+        // started, as before; the folder is still checked.
+        assert_eq!(
+            analyze("env -C ~/.ssh -S 'cat id_rsa'", &workspace).external_dirs,
+            analyze("cd ~/.ssh", &workspace).external_dirs
+        );
+        assert_eq!(
+            analyze("env -C sub bash -c 'cat ../README.md'", &workspace).external_dirs,
+            parent
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
