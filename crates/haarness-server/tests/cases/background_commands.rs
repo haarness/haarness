@@ -138,3 +138,579 @@ async fn the_command_routes_answer_for_a_chat_and_stay_inside_a_published_chat()
     }
     handle.shutdown().await.unwrap();
 }
+
+/// A folder of the test's own, removed with it.
+struct Workspace(std::path::PathBuf);
+impl Workspace {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "haarness-background-commands-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path.canonicalize().unwrap())
+    }
+}
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A runtime over the scripted provider whose agents may run any command,
+/// with `execution` settings changed by `settings`.
+fn commands_runtime(
+    workspace: &std::path::Path,
+    settings: impl FnOnce(&mut haarness_core::ExecutionSettings),
+) -> (Arc<AgentRuntime>, Capturing) {
+    let provider = Capturing::default();
+    let mut config = haarness_core::RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..haarness_core::RuntimeConfig::default()
+    };
+    config.base_rules.push(haarness_core::PermissionRule {
+        pattern: "*".into(),
+        decision: haarness_core::PermissionDecision::Allow,
+    });
+    config.execution.shell_stop_grace_ms = 300;
+    settings(&mut config.execution);
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(NativeToolRegistry::new(workspace.to_path_buf())),
+        EventBus::new(4096),
+        workspace.to_path_buf(),
+        String::new(),
+        config,
+    );
+    (Arc::new(runtime), provider)
+}
+
+/// A turn running `script`, from a client that follows background work
+/// up when `follows`.
+async fn scripted(
+    runtime: &AgentRuntime,
+    thread: ThreadId,
+    script: &str,
+    follows: bool,
+) -> haarness_protocol::Turn {
+    let mut request = turn_request(script);
+    request.follows_background = follows;
+    runtime.start_turn(thread, request).await.unwrap()
+}
+
+/// The result the chat's last `bash`-family call got.
+async fn last_result(runtime: &AgentRuntime, thread: ThreadId) -> (String, Value) {
+    runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find_map(|item| match item.data {
+            haarness_protocol::ItemData::ToolResult {
+                output, metadata, ..
+            } => Some((output, metadata)),
+            _ => None,
+        })
+        .expect("a tool result")
+}
+
+/// Wait until `check` holds for the chat's command `id`.
+async fn command_until(
+    runtime: &AgentRuntime,
+    thread: ThreadId,
+    id: &str,
+    check: impl Fn(&ShellCommandInfo) -> bool,
+) -> ShellCommandInfo {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let info = runtime.shell_command(thread, id).await.unwrap();
+            if check(&info) {
+                return info;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("command {id} never got there"))
+}
+
+/// The hidden notices the chat holds.
+async fn notices(runtime: &AgentRuntime, thread: ThreadId) -> Vec<String> {
+    runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            haarness_protocol::ItemData::UserMessage {
+                text,
+                synthetic: true,
+                ..
+            } if text.starts_with("<command ") => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The command checkpoints the chat holds, as (id, state).
+async fn checkpoints(
+    runtime: &AgentRuntime,
+    thread: ThreadId,
+) -> Vec<(String, haarness_protocol::ShellCommandState)> {
+    runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            haarness_protocol::ItemData::CommandState {
+                command_id, state, ..
+            } => Some((command_id, state)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_command_started_in_the_background_returns_at_once_and_tells_its_chat_when_it_ends() {
+    use haarness_protocol::ShellCommandState as State;
+    let workspace = Workspace::new();
+    let (runtime, provider) = commands_runtime(&workspace.0, |_| {});
+    let events = runtime.events().subscribe(None);
+    let mut events = events.receiver;
+    let thread = chat(&runtime, None).await;
+    let started = std::time::Instant::now();
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"printf 'ready\n'; sleep 3; printf 'done\n'; exit 3","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    // The call answered before the command could have ended.
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert!(text.contains("runs in the background"), "{text}");
+    assert_eq!(metadata["command"]["background"], true, "{metadata}");
+    let id = metadata["command"]["id"].as_str().unwrap().to_owned();
+    assert!(text.contains(&id), "{text}");
+    let running = runtime.shell_command(thread, &id).await.unwrap();
+    assert!(running.background && running.state.is_live());
+    assert_eq!(
+        running.moved_by,
+        Some(haarness_protocol::ShellCommandMovedBy::Agent)
+    );
+    assert!(running.delivers_notice);
+    assert_eq!(
+        runtime
+            .thread_activity(thread)
+            .await
+            .unwrap()
+            .background_commands,
+        1
+    );
+    let ended = command_until(&runtime, thread, &id, |info| !info.state.is_live()).await;
+    assert_eq!((ended.state, ended.exit_code), (State::Exited, Some(3)));
+    // Its end reaches the chat as a turn of its own, after its call's result.
+    let told = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let told = notices(&runtime, thread).await;
+            if !told.is_empty() && runtime.active_turn(thread).await.unwrap().is_none() {
+                return told;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(
+        told[0].starts_with(&format!(
+            "<command id=\"{id}\" state=\"exited\" exit=\"3\">"
+        )),
+        "{}",
+        told[0]
+    );
+    assert!(told[0].contains("ready\ndone"), "{}", told[0]);
+    assert!(
+        provider
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| format!("{:?}", request.messages).contains("exited with code 3")),
+        "the model read the notice"
+    );
+    assert_eq!(
+        checkpoints(&runtime, thread).await,
+        [(id.clone(), State::Running), (id.clone(), State::Exited)]
+    );
+    assert_eq!(
+        runtime
+            .thread_activity(thread)
+            .await
+            .unwrap()
+            .background_commands,
+        0
+    );
+    // Clients followed it: an update when it started, and when it ended.
+    let mut updates = Vec::new();
+    let mut printed = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if event.event_type == "command.updated" {
+            updates.push(event.payload["state"].as_str().unwrap().to_owned());
+        } else if event.event_type == "command.output" {
+            assert_eq!(event.payload["id"], id.as_str());
+            assert_eq!(event.thread_id, Some(thread));
+            printed.push(event.payload["size"].as_u64().unwrap());
+        }
+    }
+    assert_eq!(updates.first().map(String::as_str), Some("running"));
+    assert_eq!(updates.last().map(String::as_str), Some("exited"));
+    // Output arrives as sizes, never text, and no more than once a second.
+    assert!(!printed.is_empty() && printed.len() <= 4, "{printed:?}");
+    assert!(
+        printed.windows(2).all(|pair| pair[0] < pair[1]),
+        "{printed:?}"
+    );
+    // Its whole output stays readable for a while, by cursor.
+    let page = runtime
+        .shell_command_output(thread, &id, Some(0), Some(6), false)
+        .await
+        .unwrap();
+    assert_eq!((page.text.as_str(), page.cursor), ("ready\n", 6));
+    assert!(page.more && page.settled);
+    let rest = runtime
+        .shell_command_output(thread, &id, Some(page.cursor), None, false)
+        .await
+        .unwrap();
+    assert_eq!(rest.text, "done\n");
+    assert!(!rest.more);
+    let end = runtime
+        .shell_command_output(thread, &id, None, Some(5), true)
+        .await
+        .unwrap();
+    assert_eq!(end.text, "done\n");
+}
+
+#[tokio::test]
+async fn a_long_foreground_command_moves_to_the_background_only_where_a_client_follows() {
+    use haarness_protocol::{ShellCommandMovedBy, ShellCommandState as State};
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_move_after_ms = 400;
+    });
+    let thread = chat(&runtime, None).await;
+    let script = r#"!tool bash {"command":"printf 'started\n'; sleep 2; printf 'finished\n'"}"#;
+    // A client that follows background work up: the reply goes on.
+    let turn = scripted(&runtime, thread, script, true).await;
+    let finished = wait_done(&runtime, &turn).await;
+    assert_eq!(finished.status, TurnStatus::Completed);
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert!(text.contains("moved to the background"), "{text}");
+    assert!(text.contains("started"), "{text}");
+    let id = metadata["command"]["id"].as_str().unwrap().to_owned();
+    let moved = runtime.shell_command(thread, &id).await.unwrap();
+    assert_eq!(moved.moved_by, Some(ShellCommandMovedBy::Limit));
+    assert!(moved.background && moved.background_at.is_some());
+    let ended = command_until(&runtime, thread, &id, |info| !info.state.is_live()).await;
+    assert_eq!((ended.state, ended.exit_code), (State::Exited, Some(0)));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while notices(&runtime, thread).await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Anywhere else nothing moves: the call waits as it always did.
+    let other = chat(&runtime, None).await;
+    let turn = scripted(&runtime, other, script, false).await;
+    wait_done(&runtime, &turn).await;
+    let (text, metadata) = last_result(&runtime, other).await;
+    assert!(text.starts_with("exit: 0\n"), "{text}");
+    assert!(text.contains("finished"), "{text}");
+    assert_eq!(metadata["command"]["background"], false);
+    assert!(notices(&runtime, other).await.is_empty());
+    assert!(checkpoints(&runtime, other).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_person_moves_and_stops_a_command_and_the_agent_is_told() {
+    use haarness_protocol::{ShellCommandEndedBy, ShellCommandMovedBy, ShellCommandState as State};
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |_| {});
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"printf 'serving\n'; sleep 30"}"#,
+        false,
+    )
+    .await;
+    let id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(info) = runtime.shell_commands(thread).await.unwrap().pop() {
+                return info.id;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let moved = runtime
+        .background_shell_commands(thread, None)
+        .await
+        .unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].moved_by, Some(ShellCommandMovedBy::Person));
+    wait_done(&runtime, &turn).await;
+    let (text, _) = last_result(&runtime, thread).await;
+    assert!(
+        text.contains("the person sent it to the background"),
+        "{text}"
+    );
+    // Moving it again is refused; so is an unknown command.
+    assert!(matches!(
+        runtime.background_shell_commands(thread, Some(&id)).await,
+        Err(haarness_core::CoreError::Conflict(_))
+    ));
+    let stopping = runtime.stop_shell_command(thread, &id).await.unwrap();
+    assert!(matches!(stopping.state, State::Stopping | State::Stopped));
+    let stopped = command_until(&runtime, thread, &id, |info| !info.state.is_live()).await;
+    assert_eq!(stopped.state, State::Stopped);
+    assert_eq!(stopped.ended_by, Some(ShellCommandEndedBy::Person));
+    assert_eq!(stopped.signal.as_deref(), Some("SIGINT"));
+    // A second stop changes nothing.
+    assert_eq!(
+        runtime.stop_shell_command(thread, &id).await.unwrap().state,
+        State::Stopped
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while notices(&runtime, thread).await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let told = notices(&runtime, thread).await;
+    assert!(
+        told[0].contains("state=\"stopped\"") && told[0].contains("stopped by the person"),
+        "{}",
+        told[0]
+    );
+}
+
+#[tokio::test]
+async fn a_stop_during_a_reply_spares_background_commands_and_a_stop_when_idle_ends_them() {
+    use haarness_protocol::{ShellCommandEndedBy, ShellCommandState as State};
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |_| {});
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let background = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30"}"#,
+        true,
+    )
+    .await;
+    let foreground = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(info) = runtime
+                .shell_commands(thread)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|info| !info.background)
+            {
+                return info.id;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    runtime.interrupt_thread_tree(thread).await.unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Interrupted
+    );
+    let stopped = command_until(&runtime, thread, &foreground, |info| !info.state.is_live()).await;
+    assert_eq!(stopped.ended_by, Some(ShellCommandEndedBy::TurnEnded));
+    assert!(
+        runtime
+            .shell_command(thread, &background)
+            .await
+            .unwrap()
+            .state
+            .is_live(),
+        "the dev server survives a change of course"
+    );
+    // A composer's Stop that lands after the reply ended (it asks to answer
+    // steering) leaves them running too.
+    runtime
+        .interrupt_thread_tree_with(thread, true)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        runtime
+            .shell_command(thread, &background)
+            .await
+            .unwrap()
+            .state
+            .is_live(),
+        "a late click on Stop leaves the dev server running"
+    );
+    // An explicit stop with nothing running ends the rest, without telling
+    // the agent.
+    runtime.interrupt_thread_tree(thread).await.unwrap();
+    let ended = command_until(&runtime, thread, &background, |info| !info.state.is_live()).await;
+    assert_eq!(
+        (ended.state, ended.ended_by),
+        (State::Stopped, Some(ShellCommandEndedBy::ChatStopped))
+    );
+    assert!(!ended.delivers_notice);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(notices(&runtime, thread).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_subagents_background_command_stops_untold_when_its_turn_ends() {
+    use haarness_protocol::{ShellCommandEndedBy, ShellCommandState as State};
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |_| {});
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool task {"prompt":"!tool bash {\"command\":\"sleep 30\",\"run_in_background\":true}","description":"Starts a server"}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let commands = runtime.shell_commands(thread).await.unwrap();
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    let command = &commands[0];
+    assert_ne!(command.thread_id, thread);
+    assert_eq!(command.root_thread_id, thread);
+    assert_eq!(
+        (command.state, command.ended_by),
+        (State::Stopped, Some(ShellCommandEndedBy::TurnEnded))
+    );
+    assert!(!command.delivers_notice);
+    assert!(notices(&runtime, command.thread_id).await.is_empty());
+    assert!(notices(&runtime, thread).await.is_empty());
+}
+
+#[tokio::test]
+async fn the_agent_reads_waits_for_and_stops_its_commands() {
+    use haarness_protocol::ShellCommandState as State;
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |_| {});
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"printf 'Server READY on 3000\n'; sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let id = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    command_until(&runtime, thread, &id, |info| info.output_bytes > 0).await;
+    // The line was printed before the call; a wait still finds it, and a
+    // leading (?i) ignores case.
+    let turn = scripted(
+        &runtime,
+        thread,
+        &format!(
+            r#"!tool bash_output {{"id":"{id}","wait_seconds":5,"until":"match","pattern":"(?i)ready on \\d+"}}"#
+        ),
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert!(text.contains("Matched: Server READY on 3000"), "{text}");
+    assert_eq!(metadata["command"]["id"], id.as_str());
+    // Without an id it lists the chat's commands.
+    let turn = scripted(&runtime, thread, "!tool bash_output {}", true).await;
+    wait_done(&runtime, &turn).await;
+    assert!(last_result(&runtime, thread).await.0.contains(&id));
+    let turn = scripted(
+        &runtime,
+        thread,
+        &format!(r#"!tool bash_stop {{"id":"{id}"}}"#),
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let (text, _) = last_result(&runtime, thread).await;
+    assert!(text.contains("was stopped"), "{text}");
+    let info = runtime.shell_command(thread, &id).await.unwrap();
+    assert_eq!(info.state, State::Stopped);
+    // The agent stopped it itself: no notice follows.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(notices(&runtime, thread).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_chat_runs_no_more_background_commands_than_its_cap_and_archiving_stops_them() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_background_per_chat = 1;
+    });
+    let thread = chat(&runtime, None).await;
+    let start = r#"!tool bash {"command":"sleep 30","run_in_background":true}"#;
+    let turn = scripted(&runtime, thread, start, true).await;
+    wait_done(&runtime, &turn).await;
+    let turn = scripted(&runtime, thread, start, true).await;
+    wait_done(&runtime, &turn).await;
+    let (text, _) = last_result(&runtime, thread).await;
+    assert!(text.contains("already runs 1 commands"), "{text}");
+    assert_eq!(runtime.shell_commands(thread).await.unwrap().len(), 1);
+    runtime
+        .update_thread(
+            thread,
+            haarness_protocol::UpdateThreadRequest {
+                title: None,
+                archived: Some(true),
+                agent: None,
+                provider: None,
+                model: None,
+                ultracode: None,
+            },
+        )
+        .await
+        .unwrap();
+    let id = runtime.shell_commands(thread).await.unwrap()[0].id.clone();
+    let stopped = command_until(&runtime, thread, &id, |info| !info.state.is_live()).await;
+    assert_eq!(
+        stopped.ended_by,
+        Some(haarness_protocol::ShellCommandEndedBy::ChatStopped)
+    );
+}

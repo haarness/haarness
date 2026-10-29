@@ -83,8 +83,12 @@ Every native entry runs the hidden command
    permission prompts on their own and cannot use the question tool, since nobody is there to answer.
    Requests only a person can answer, such as a site in the user's Chrome, fail at once instead of
    waiting ([Chrome approvals](PERMISSIONS-AND-EXECUTION.md#chrome-approvals)).
-5. When the turn ends it records **success** or **failed** with the chat and turn ids, the answer or
-   the error. A one-shot schedule then disables itself.
+5. A shell command the agent ran in the background is waited for (it stops at the `timeout` the agent
+   gave or `execution.shell_timeout_ms`, even when the agent gave none), and so is the turn its end
+   starts; a foreground command never moves there by itself in a scheduled run.
+6. When the turn ends it records **success** or **failed** with the chat and turn ids, the answer or
+   the error (with what the agent said when its commands ended). A one-shot schedule then disables
+   itself.
 
 Credentials are read from the normal `haarness auth` store or the environment when the run starts;
 none are written into the native entry.

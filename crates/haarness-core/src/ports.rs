@@ -114,6 +114,24 @@ pub struct StrandedTask {
 /// What recovery records in the chat that launched a [`StrandedTask`].
 pub type StrandedReport<'a> = dyn Fn(&StrandedTask) -> Vec<ItemData> + Send + Sync + 'a;
 
+/// A shell command in the background that a chat's record shows still
+/// running after a restart: the server stopped while it ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrandedCommand {
+    pub thread_id: ThreadId,
+    /// The turn whose call started it.
+    pub turn_id: Option<TurnId>,
+    pub call_id: String,
+    pub command_id: String,
+    /// The line it ran, from its call.
+    pub command: String,
+    /// The end of its output its last checkpoint kept.
+    pub tail: String,
+}
+
+/// What recovery records in the chat of a [`StrandedCommand`].
+pub type StrandedCommandReport<'a> = dyn Fn(&StrandedCommand) -> Vec<ItemData> + Send + Sync + 'a;
+
 #[async_trait]
 pub trait ThreadRepository: Send + Sync {
     /// Export one root thread and its complete descendant tree as a portable
@@ -351,6 +369,17 @@ pub trait ThreadRepository: Send + Sync {
         _report: &StrandedReport<'_>,
     ) -> CoreResult<(u64, Vec<Item>)> {
         Ok((self.recover_interrupted().await?, Vec::new()))
+    }
+    /// Record as `interrupted` every shell command whose last checkpoint
+    /// shows it still running in the background, and, in a chat that is
+    /// not archived, not a subagent's and not told yet, `report`'s items, in
+    /// one step. Returns the items written. A repository that does not
+    /// keep command checkpoints records none.
+    async fn recover_interrupted_commands(
+        &self,
+        _report: &StrandedCommandReport<'_>,
+    ) -> CoreResult<Vec<Item>> {
+        Ok(Vec::new())
     }
     /// Standing goal + loop configuration for a thread (absent by default).
     async fn thread_extras(
@@ -1034,6 +1063,18 @@ pub trait HookPort: Send + Sync {
     /// Attention-worthy moments: a pending permission prompt or a completed
     /// turn (`Notification`). Observational only; never awaited on the hot path.
     async fn notification(&self, _call: &HookCall, _kind: &str, _message: &str) {}
+    /// A notification about a shell command (`command_moved`,
+    /// `command_time_limit`) with its `detail` fields (`command_id`,
+    /// `reason`, `elapsed_ms`); never its text or output.
+    async fn command_notification(
+        &self,
+        call: &HookCall,
+        kind: &str,
+        message: &str,
+        _detail: &Value,
+    ) {
+        self.notification(call, kind, message).await;
+    }
     /// A new configuration generation became active (`ConfigChange`).
     async fn config_change(&self, _detail: &Value) {}
     /// A slash command is about to expand (`command.execute.before`). A block

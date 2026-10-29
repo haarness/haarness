@@ -1473,6 +1473,13 @@ fn title(name: &str, arguments: &Value) -> String {
         "bash" => arguments["command"]
             .as_str()
             .map_or_else(|| "Run command".into(), |command| format!("Run {command}")),
+        "bash_output" => arguments["id"].as_str().map_or_else(
+            || "List commands".into(),
+            |id| format!("Read the output of {id}"),
+        ),
+        "bash_stop" => arguments["id"]
+            .as_str()
+            .map_or_else(|| "Stop command".into(), |id| format!("Stop {id}")),
         "read" => arguments["path"]
             .as_str()
             .map_or_else(|| "Read file".into(), |path| format!("Read {path}")),
@@ -1485,10 +1492,10 @@ fn title(name: &str, arguments: &Value) -> String {
 
 fn tool_kind(name: &str) -> ToolKind {
     match name {
-        "read" | "list" => ToolKind::Read,
+        "read" | "list" | "bash_output" => ToolKind::Read,
         "write" | "edit" | "multiedit" | "apply_patch" => ToolKind::Edit,
         "glob" | "grep" | "memory_search" | "session_search" => ToolKind::Search,
-        "bash" | "execute" => ToolKind::Execute,
+        "bash" | "execute" | "bash_stop" => ToolKind::Execute,
         "webfetch" => ToolKind::Fetch,
         "todowrite" | "task" | "goal" => ToolKind::Think,
         _ => ToolKind::Other,
@@ -1834,6 +1841,8 @@ mod tests {
         assert_eq!(tool_kind("read"), ToolKind::Read);
         assert_eq!(tool_kind("apply_patch"), ToolKind::Edit);
         assert_eq!(tool_kind("bash"), ToolKind::Execute);
+        assert_eq!(tool_kind("bash_output"), ToolKind::Read);
+        assert_eq!(tool_kind("bash_stop"), ToolKind::Execute);
         assert_eq!(
             title("read", &json!({"path":"src/main.rs"})),
             "Read src/main.rs"
