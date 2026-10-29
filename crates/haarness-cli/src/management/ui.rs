@@ -312,8 +312,8 @@ impl ManagementService {
                 crate::router_connection::ConnectResult::NeedsKey => output(router_form(input, true)),
                 crate::router_connection::ConnectResult::Connected { name, models, .. } => output(View {
                     title: "Router connected".into(),
-                    lines: vec![format!("{name} · Self-hosted · {models} models available"),
-                        "Models refresh automatically. Open the model picker to choose one.".into(),
+                    lines: vec![if models == 0 { format!("{name} · Self-hosted · no models yet") } else { format!("{name} · Self-hosted · {models} models available") },
+                        if models == 0 { crate::router_connection::NO_MODELS_YET.into() } else { "Models refresh automatically. Open the model picker to choose one.".into() },
                         "Saved on this Haarness server. If a turn is running, the connection becomes available when it finishes.".into()],
                     entries: vec![entry("Connect another router", "", json!({"action":"router_form"})), entry("Back to providers", "", json!({"action":"view"}))],
                     ..View::default()
