@@ -1639,3 +1639,59 @@ async fn parity_searches_leave_out_files_a_read_rule_denies_in_turns_and_direct_
     assert!(read.is_error, "{}", read.output.text);
     assert!(!read.output.text.contains("needle"), "{}", read.output.text);
 }
+
+#[tokio::test]
+async fn parity_searches_leave_out_files_an_active_skill_denies_reading() {
+    let fixture = Fixture::new();
+    for (file, text) in [
+        ("private/key.txt", "needle private"),
+        ("public/readme.md", "needle public"),
+    ] {
+        let path = fixture.0.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let mut config = RuntimeConfig::default();
+    for (name, call) in [
+        ("search-grep", json!({"pattern": "needle", "path": "."})),
+        ("search-glob", json!({"pattern": "**/*.*"})),
+    ] {
+        let tool = name.trim_start_matches("search-");
+        config.commands.push(haarness_protocol::CommandInfo {
+            execution: haarness_protocol::DefinitionExecution {
+                disallowed_tools: vec!["Read(private/*)".into()],
+                ..haarness_protocol::DefinitionExecution::default()
+            },
+            name: name.into(),
+            description: "search without the private folder".into(),
+            source: None,
+            agent: None,
+            model: None,
+            argument_hint: None,
+            template: format!("!tool {tool} {call}"),
+            plugin: None,
+        });
+    }
+    let runtime = runtime(&fixture.0, config, None);
+    let thread = echo_thread(&runtime).await;
+    for name in ["search-grep", "search-glob"] {
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                StartTurnRequest {
+                    command: Some(name.into()),
+                    ..turn_request("")
+                },
+            )
+            .await
+            .unwrap();
+        assert_success(&runtime, &thread, &turn).await;
+        let (output, _) = tool_outputs(&runtime, &thread).await.pop().unwrap();
+        assert!(output.contains("public/readme.md"), "{name}: {output}");
+        assert!(!output.contains("key.txt"), "{name}: {output}");
+        assert!(
+            output.ends_with("(skipped 1 file a read rule denies)"),
+            "{name}: {output}"
+        );
+    }
+}
