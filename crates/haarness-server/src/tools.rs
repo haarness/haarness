@@ -1411,10 +1411,12 @@ struct FetchRules {
 
 /// Why a fetch does not follow a redirect to `to` that a fetch of `from`
 /// met, or `None` when it does. A redirect off the address asked for is not
-/// followed (see [`redirect_leaves`]), nor is one on it that the call's
-/// rules would deny or ask about, so an allowed address cannot lead past a
-/// denied one: the fetch returns the new address, and fetching that is the
-/// model's next call, checked against the rules like any other.
+/// followed (see [`redirect_leaves`]), nor is one on it whose new address
+/// the call's rules do not let it reach (see
+/// [`haarness_core::webfetch_redirect_verdict`]), so an allowed address
+/// cannot lead past a denied one: the fetch returns the new address, and
+/// fetching that is the model's next call, checked against the rules like
+/// any other.
 fn redirect_stop(
     from: &url::Url,
     to: &url::Url,

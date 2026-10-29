@@ -5427,7 +5427,7 @@ impl AgentRuntime {
             for rule in self.session_rules.lock().iter().cloned() {
                 rules.add_grant(rule);
             }
-            Arc::new(FetchRules(rules)) as Arc<dyn crate::ToolInvoker>
+            Arc::new(DirectFetchRules(rules)) as Arc<dyn crate::ToolInvoker>
         });
         let (mut output, is_error) = match allowed {
             Ok(()) => {
@@ -7058,10 +7058,10 @@ struct TurnToolInvoker {
 
 /// What a fetch run outside a turn (a workflow's or a person's own call)
 /// may ask of its caller: only the webfetch rules it was checked under.
-struct FetchRules(PermissionEngine);
+struct DirectFetchRules(PermissionEngine);
 
 #[async_trait::async_trait]
-impl crate::ToolInvoker for FetchRules {
+impl crate::ToolInvoker for DirectFetchRules {
     fn webfetch_rules(&self) -> Option<PermissionEngine> {
         Some(self.0.clone())
     }
