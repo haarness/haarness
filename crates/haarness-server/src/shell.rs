@@ -277,20 +277,12 @@ async fn pump(mut pump: Pump) {
                 None => std::future::pending().await,
             }
         };
-        // Reads first: a pipe that closed with the command is seen closed
-        // before the quiet time can be taken for something holding it.
+        // The command's end first, so output that never stops cannot hide
+        // it; then reads, so a pipe that closed with the command is seen
+        // closed before the quiet time can be taken for something holding
+        // it; the quiet time last.
         let (bytes, from_stdout) = tokio::select! {
             biased;
-            read = pump.stdout.read(&mut out), if out_open => match read {
-                Ok(0) => { out_open = false; continue; }
-                Ok(n) => (&out[..n], true),
-                Err(error) => { failure = Some(error.to_string()); out_open = false; continue; }
-            },
-            read = pump.stderr.read(&mut err), if err_open => match read {
-                Ok(0) => { err_open = false; continue; }
-                Ok(n) => (&err[..n], false),
-                Err(error) => { failure = Some(error.to_string()); err_open = false; continue; }
-            },
             waited = pump.child.wait(), if status.is_none() => {
                 match waited {
                     Ok(waited) => status = Some(waited),
@@ -302,6 +294,16 @@ async fn pump(mut pump: Pump) {
                 ended_at = Some(tokio::time::Instant::now());
                 continue;
             }
+            read = pump.stdout.read(&mut out), if out_open => match read {
+                Ok(0) => { out_open = false; continue; }
+                Ok(n) => (&out[..n], true),
+                Err(error) => { failure = Some(error.to_string()); out_open = false; continue; }
+            },
+            read = pump.stderr.read(&mut err), if err_open => match read {
+                Ok(0) => { err_open = false; continue; }
+                Ok(n) => (&err[..n], false),
+                Err(error) => { failure = Some(error.to_string()); err_open = false; continue; }
+            },
             () = sleep => {
                 if stopped_leftovers.is_some() {
                     // Something outside the group still holds the output
@@ -994,22 +996,37 @@ mod tests {
     #[tokio::test]
     async fn a_process_that_keeps_printing_after_the_command_ended_is_stopped() {
         let root = fixture();
-        let output = tokio::time::timeout(
-            Duration::from_secs(15),
-            run(
-                "yes printing & echo started",
-                &root,
-                0,
-                &CancellationToken::new(),
-                &root,
-                &BTreeMap::new(),
-                None,
-            ),
-        )
-        .await
-        .expect("the call returns")
-        .unwrap();
-        assert_eq!(output.metadata["leftovers"], true);
+        // Its output never stops while the command runs on (`sleep 1`):
+        // the command's end is still seen.
+        for command in [
+            "yes printing & echo started",
+            "yes printing & sleep 1; echo started",
+        ] {
+            let began = std::time::Instant::now();
+            let output = tokio::time::timeout(
+                Duration::from_secs(15),
+                run(
+                    command,
+                    &root,
+                    0,
+                    &CancellationToken::new(),
+                    &root,
+                    &BTreeMap::new(),
+                    None,
+                ),
+            )
+            .await
+            .expect("the call returns")
+            .unwrap();
+            assert_eq!(output.metadata["leftovers"], true, "{command}");
+            assert_eq!(output.metadata["exit"], 0, "{command}");
+            // Its end, then two seconds at most for what it left.
+            assert!(
+                began.elapsed() < Duration::from_millis(3_800),
+                "{command}: {:?}",
+                began.elapsed()
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
