@@ -1431,12 +1431,7 @@ impl Reader<'_> {
                 self.script(text, depth);
             }
             "env" => {
-                let options = Options::read(
-                    arguments,
-                    "uCPSa",
-                    "",
-                    &["unset", "chdir", "split-string", "argv0"],
-                );
+                let options = Options::with(arguments, "uCPSa", "", ENV_LONG);
                 let folders: Vec<&Given<'_, '_>> = options.all(&["C", "chdir"]).collect();
                 let folder = self.wrapper_folder(&folders, source);
                 if let Some(split) = options.value("S").or_else(|| options.value("split-string")) {
@@ -1458,7 +1453,7 @@ impl Reader<'_> {
                     Options::sudo(arguments)
                 } else {
                     // `doas -C` names a configuration file.
-                    Options::read(arguments, "uC", "", SUDO_LONG)
+                    Options::with(arguments, "uC", "", SUDO_LONG)
                 };
                 // `sudo -e` edits files, `-l` and `-V` list.
                 if name == "sudo" && options.flags.contains(['e', 'l', 'V']) {
@@ -1605,21 +1600,7 @@ impl Reader<'_> {
                 self.invocation(options.rest, stdin, source, depth);
             }
             "xargs" => {
-                let options = Options::read(
-                    arguments,
-                    "InPLsdEaJRS",
-                    "ile",
-                    &[
-                        "max-args",
-                        "max-procs",
-                        "max-lines",
-                        "max-chars",
-                        "delimiter",
-                        "eof",
-                        "arg-file",
-                        "process-slot-var",
-                    ],
-                );
+                let options = Options::xargs(arguments);
                 // The command reads no input of the written command's.
                 self.invocation(options.rest, None, source, depth);
             }
@@ -2043,39 +2024,7 @@ impl Reader<'_> {
             // `xargs rm`: the paths come from its input, where nobody can
             // place them.
             "xargs" => {
-                let valued = [
-                    "-a",
-                    "-d",
-                    "-E",
-                    "-e",
-                    "-I",
-                    "-i",
-                    "-L",
-                    "-l",
-                    "-n",
-                    "-P",
-                    "-s",
-                    "--arg-file",
-                    "--delimiter",
-                    "--eof",
-                    "--replace",
-                    "--max-lines",
-                    "--max-args",
-                    "--max-procs",
-                    "--max-chars",
-                    "--process-slot-var",
-                ];
-                let mut skip = false;
-                let program = arguments.iter().find(|word| {
-                    if std::mem::take(&mut skip) {
-                        return false;
-                    }
-                    if word.value.starts_with('-') {
-                        skip = valued.contains(&word.value.as_str());
-                        return false;
-                    }
-                    true
-                });
+                let program = Options::xargs(arguments).rest.first();
                 if let Some(program) =
                     program.filter(|word| DESTROYERS.contains(&program_name(&word.value).as_str()))
                 {
@@ -2860,20 +2809,91 @@ fn program_name(value: &str) -> String {
     }
 }
 
+/// A wrapper's long options that take a value, as getopt reads them.
+#[derive(Clone, Copy, Default)]
+struct Long<'a> {
+    /// They take the next word as their value unless written
+    /// `--name=value`.
+    valued: &'a [&'a str],
+    /// They take a value only written `--name=value` (`xargs --eof=x`):
+    /// `--eof` alone takes none.
+    joined: &'a [&'a str],
+}
+
+/// What a long option takes, as getopt finds it by its name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Takes {
+    /// The next word, unless written `--name=value`.
+    Next,
+    /// A value only after `=`.
+    Joined,
+    /// None, or the name is no option the wrapper has.
+    Nothing,
+}
+
+impl Long<'_> {
+    /// The option `name` stands for and what it takes: the one it names in
+    /// full, or the only one it starts (`--chd` for `--chdir`). A start
+    /// several share is refused by getopt, and nothing runs; it takes the
+    /// next word when one of them does.
+    fn find(self, name: &str) -> (String, Takes) {
+        let options = self
+            .valued
+            .iter()
+            .map(|long| (*long, Takes::Next))
+            .chain(self.joined.iter().map(|long| (*long, Takes::Joined)));
+        if let Some((_, takes)) = options.clone().find(|(long, _)| *long == name) {
+            return (name.to_owned(), takes);
+        }
+        let found: Vec<_> = options
+            .filter(|(long, _)| !name.is_empty() && long.starts_with(name))
+            .collect();
+        match found.as_slice() {
+            [(long, takes)] => ((*long).to_owned(), *takes),
+            several if several.iter().any(|(_, takes)| *takes == Takes::Next) => {
+                (name.to_owned(), Takes::Next)
+            }
+            _ => (name.to_owned(), Takes::Nothing),
+        }
+    }
+}
+
 /// The long options of `sudo` (and, read alike, `doas`) that take a value.
-const SUDO_LONG: &[&str] = &[
-    "user",
-    "group",
-    "host",
-    "prompt",
-    "close-from",
-    "chdir",
-    "role",
-    "type",
-    "command-timeout",
-    "other-user",
-    "chroot",
-];
+const SUDO_LONG: Long<'static> = Long {
+    valued: &[
+        "user",
+        "group",
+        "host",
+        "prompt",
+        "close-from",
+        "chdir",
+        "role",
+        "type",
+        "command-timeout",
+        "other-user",
+        "chroot",
+    ],
+    joined: &["preserve-env"],
+};
+
+/// The long options of `env` that take a value.
+const ENV_LONG: Long<'static> = Long {
+    valued: &["unset", "chdir", "split-string", "argv0"],
+    joined: &["default-signal", "ignore-signal", "block-signal"],
+};
+
+/// The long options of `xargs` that take a value.
+const XARGS_LONG: Long<'static> = Long {
+    valued: &[
+        "max-args",
+        "max-procs",
+        "max-chars",
+        "delimiter",
+        "arg-file",
+        "process-slot-var",
+    ],
+    joined: &["eof", "max-lines", "replace"],
+};
 
 /// A wrapper's own options, read the way getopt reads them.
 struct Options<'s, 't> {
@@ -2900,31 +2920,32 @@ struct Given<'s, 't> {
 }
 
 impl<'s, 't> Options<'s, 't> {
-    /// `valued` short options take a value (the rest of their cluster or the
-    /// next word), `optional` ones only the rest of their cluster, and
-    /// `long` ones the next word unless written `--name=value`; a long name
-    /// may be shortened to its start (`--chd` for `--chdir`), as getopt
-    /// takes it. A word with an expansion is an option only when it names
-    /// one before it, whose value the expansion is part of (`--chdir="$d"`,
-    /// `-C"$d"`).
+    /// [`Self::with`] for a wrapper whose `long` options all take the next
+    /// word unless written `--name=value`.
     fn read(words: &'s [Word<'t>], valued: &str, optional: &str, long: &[&str]) -> Self {
+        Self::with(
+            words,
+            valued,
+            optional,
+            Long {
+                valued: long,
+                joined: &[],
+            },
+        )
+    }
+
+    /// `valued` short options take a value (the rest of their cluster or the
+    /// next word), `optional` ones only the rest of their cluster, and long
+    /// ones what [`Long::find`] says; a long name may be shortened to its
+    /// start (`--chd` for `--chdir`), as getopt takes it. A word with an
+    /// expansion is an option only when it names one before it, whose value
+    /// the expansion is part of (`--chdir="$d"`, `-C"$d"`).
+    fn with(words: &'s [Word<'t>], valued: &str, optional: &str, long: Long<'_>) -> Self {
         let mut options = Self {
             rest: words,
             flags: String::new(),
             values: Vec::new(),
         };
-        // The long option a name stands for: the one it names in full, or
-        // the only one it starts. A start shared by several takes a value
-        // too: getopt refuses it, and nothing runs.
-        let full = |name: &str| {
-            let mut found = long.iter().filter(|long| long.starts_with(name));
-            match (found.next(), found.next()) {
-                _ if long.contains(&name) => name.to_owned(),
-                (Some(long), None) => (*long).to_owned(),
-                _ => name.to_owned(),
-            }
-        };
-        let takes = |name: &str| !name.is_empty() && long.iter().any(|long| long.starts_with(name));
         let mut index = 0;
         while let Some(word) = words.get(index) {
             let value = word.value.as_str();
@@ -2945,17 +2966,17 @@ impl<'s, 't> Options<'s, 't> {
                 match name.split_once('=') {
                     Some((name, given)) if 2 + name.len() < written => {
                         options.values.push(Given {
-                            name: full(name),
+                            name: long.find(name).0,
                             value: given.into(),
                             word: Some(word),
                             attached: true,
                         });
                     }
-                    None if word.literal && takes(name) => {
+                    None if word.literal && long.find(name).1 == Takes::Next => {
                         index += 1;
                         let next = words.get(index);
                         options.values.push(Given {
-                            name: full(name),
+                            name: long.find(name).0,
                             value: next.map(|word| word.value.clone()).unwrap_or_default(),
                             word: next,
                             attached: false,
@@ -3035,7 +3056,7 @@ impl<'s, 't> Options<'s, 't> {
     /// (see [`sets_variable`]), after which it reads options again: `sudo
     /// A=1 -u root rm x` runs `rm x` as root.
     fn sudo(words: &'s [Word<'t>]) -> Self {
-        let read = |words: &'s [Word<'t>]| Self::read(words, "ugpCDRrtTU", "", SUDO_LONG);
+        let read = |words: &'s [Word<'t>]| Self::with(words, "ugpCDRrtTU", "", SUDO_LONG);
         let mut options = read(words);
         loop {
             let rest = after_settings(options.rest, true);
@@ -3047,6 +3068,12 @@ impl<'s, 't> Options<'s, 't> {
             options.values.extend(more.values);
             options.rest = more.rest;
         }
+    }
+
+    /// `xargs`'s options: `-e`, `-i`, `-l` and their long names take a
+    /// value only written in the same word.
+    fn xargs(words: &'s [Word<'t>]) -> Self {
+        Self::with(words, "InPLsdEaJRS", "ile", XARGS_LONG)
     }
 }
 
@@ -4861,12 +4888,7 @@ impl Line<'_> {
                     trusted &= rest.len() == arguments.len();
                 }
                 "env" => {
-                    let options = Options::read(
-                        arguments,
-                        "uCPSa",
-                        "",
-                        &["unset", "chdir", "split-string", "argv0"],
-                    );
+                    let options = Options::with(arguments, "uCPSa", "", ENV_LONG);
                     // `env -S` runs text.
                     if options
                         .value("S")
@@ -7648,6 +7670,46 @@ mod wrappers {
             "env $(echo A=1) rm x",
         ] {
             assert!(!reaches_rm(command, &workspace), "{command}");
+        }
+    }
+
+    #[test]
+    fn options_that_take_a_value_only_after_equals_leave_the_command_read() {
+        let workspace = workspace();
+        // `xargs --eof`, `--max-lines`, `--replace` (and `-e`, `-l`, `-i`),
+        // `env --default-signal` and the like, and `sudo --preserve-env`
+        // take a value only written `--name=value`, also shortened.
+        for command in [
+            "xargs --max-l rm -rf < list.txt",
+            "xargs --eo rm -rf < list.txt",
+            "xargs --max-lines rm -rf < list.txt",
+            "xargs --eof rm -rf < list.txt",
+            "xargs --replace rm -rf {} < list.txt",
+            "xargs --max-lines=2 --eof=END rm -rf < list.txt",
+            "xargs -i rm -rf {} < list.txt",
+            "xargs -l rm -rf < list.txt",
+            "env --default-signal rm -rf x",
+            "env --block rm -rf x",
+            "sudo --preserve-env rm -rf x",
+            "sudo --preserve-env=PATH rm -rf x",
+            // A value in the next word, as before.
+            "xargs -n 1 rm -rf < list.txt",
+            "xargs --max-args 1 rm -rf < list.txt",
+            "xargs --max-a 1 rm -rf < list.txt",
+            "xargs -I {} rm -rf {} < list.txt",
+            "xargs --delimiter , rm -rf < list.txt",
+        ] {
+            assert!(reaches_rm(command, &workspace), "{command}");
+            // Auto's reviewer is told xargs deletes what its input names.
+            if command.starts_with("xargs") {
+                let deletions = analyze(command, &workspace).deletions;
+                assert!(
+                    deletions
+                        .iter()
+                        .any(|deletion| deletion.raw == "xargs rm" && !deletion.complete),
+                    "{command}: {deletions:?}"
+                );
+            }
         }
     }
 
