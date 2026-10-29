@@ -35,12 +35,12 @@ export function AgentTask(props: { task: Task }) {
     text(args().description) ||
     child()?.title ||
     text(args().prompt) ||
-    "Agent task";
+    t("Agent task");
   const agent = () => {
     const id =
       child()?.agent || text(args().agent) || text(args().subagent_type);
     return (
-      app.state.agents.find((agent) => agent.id === id)?.name || id || "Agent"
+      app.state.agents.find((agent) => agent.id === id)?.name || id || t("Agent")
     );
   };
   const turn = () =>
@@ -61,14 +61,14 @@ export function AgentTask(props: { task: Task }) {
   });
   const label = () =>
     ({
-      completed: "Completed",
-      stopped: "Stopped",
-      failed: "Failed",
-      approval: "Needs approval",
-      question: "Needs an answer",
-      starting: "Starting…",
-      background: "Working in background",
-      running: "Working",
+      completed: t("Completed"),
+      stopped: t("Stopped"),
+      failed: t("Failed"),
+      approval: t("Needs approval"),
+      question: t("Needs an answer"),
+      starting: t("Starting…"),
+      background: t("Working in background"),
+      running: t("Working"),
     })[status()];
   const working = () =>
     ["starting", "running", "background"].includes(status());
@@ -110,7 +110,7 @@ export function AgentTask(props: { task: Task }) {
         data-status={status()}
         data-child-id={childId()}
         disabled={!childId()}
-        aria-label={`${childId() ? "Open agent task" : "Agent task"}: ${title()}`}
+        aria-label={`${childId() ? t("Open agent task") : t("Agent task")}: ${title()}`}
         aria-description={label()}
         onClick={() => app.run(() => app.choose(childId()!))}
       >
