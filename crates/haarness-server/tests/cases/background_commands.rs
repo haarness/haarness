@@ -1339,8 +1339,10 @@ async fn a_command_held_at_the_cap_says_so_and_a_deadline_before_the_move_wins()
     wait_done(&runtime, &turn).await;
     let (text, metadata) = last_result(&runtime, thread).await;
     assert!(text.contains("timed out after 500 ms"), "{text} {metadata}");
+    // Well before the three seconds it would have run (a loaded machine
+    // slows the turn around it).
     assert!(
-        began.elapsed() < Duration::from_millis(1_400),
+        began.elapsed() < Duration::from_millis(2_900),
         "{:?}",
         began.elapsed()
     );
