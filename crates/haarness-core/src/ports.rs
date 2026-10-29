@@ -722,6 +722,20 @@ pub trait ToolInvoker: Send + Sync {
     fn read_rules(&self) -> Option<crate::PermissionEngine> {
         None
     }
+    /// The rules a search (`grep`, `glob`) leaves files out by: the read
+    /// rules, with what an active skill or command's `disallowed-tools`
+    /// denies reading. Unlike [`Self::read_rules`], which also judges the
+    /// definition's own `@` references, they hold for every search of the
+    /// turn after it starts.
+    fn search_read_rules(&self) -> Option<crate::PermissionEngine> {
+        self.read_rules()
+    }
+    /// The rules this call's agent fetches pages under, so a fetch judges a
+    /// redirect on the address it asked for by the same rules as the address
+    /// itself (see [`crate::webfetch_redirect_verdict`]).
+    fn webfetch_rules(&self) -> Option<crate::PermissionEngine> {
+        None
+    }
     /// The nested instruction files this call's model can already see, for
     /// `read` to attach each one only while it is out of view. `None`
     /// outside an agent's turn, where the tool keeps its own record.

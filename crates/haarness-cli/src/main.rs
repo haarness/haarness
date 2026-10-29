@@ -7266,6 +7266,8 @@ struct HotReloadCandidate {
     formatter: haarness_language::FormatterConfig,
     memory_context: String,
     notices: Vec<String>,
+    /// Logged as warnings (see `jsonconfig::JsonLayers::warnings`).
+    warnings: Vec<String>,
     watch: ReloadWatch,
 }
 
@@ -7449,6 +7451,7 @@ impl HotReloadController {
             memory_context,
             watch: ReloadWatch::from_layers(&sources.json_layers),
             notices,
+            warnings: sources.json_layers.warnings.clone(),
         })
     }
 
@@ -7618,6 +7621,9 @@ impl HotReloadController {
                 });
                 for notice in &candidate.notices {
                     tracing::info!("config: {notice}");
+                }
+                for warning in &candidate.warnings {
+                    tracing::warn!("config: {warning}");
                 }
                 if let Some(hooks) = candidate.hooks.clone() {
                     let detail = json!({"source": "reload", "cwd": self.workspace});
@@ -8120,6 +8126,9 @@ async fn application_at(
     } = sources;
     for notice in migration_notices.iter().chain(&json_layers.notices) {
         tracing::info!("config: {notice}");
+    }
+    for warning in &json_layers.warnings {
+        tracing::warn!("config: {warning}");
     }
     for error in &json_layers.errors {
         tracing::warn!("config: {error}");
