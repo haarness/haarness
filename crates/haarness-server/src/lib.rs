@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod bounded_glob;
 pub mod browser;
 pub mod browser_policy;
 mod cloud_tools;

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Instruction globs end to end: an `instructions` glob that crosses link loops loads at once.
 
-A mock Anthropic Messages server records what a real `haarness run` sends. The person's notes hold
-two links back up their own tree (`a/up -> ..`, `a/self -> .`), a link to a folder elsewhere, a link
-to a file, and folders nine deep; the project's docs hold a loop too. The script proves that:
+A mock Anthropic Messages server records what a real `haarness run` sends. The person's handbook holds
+two links back up its own tree (`team/up -> ..`, `team/here -> .`), a link to a folder kept elsewhere,
+a link to a file, a version control folder and a cache folder of many files; the project's docs hold
+a loop too. The script proves that:
 
-1. `haarness run` with `"instructions": ["~/notes/**/*.md"]` and a project's `"docs/**/*.md"`
-   answers within seconds, and its prompt carries the files those globs match: the linked file and
-   a file 8 folders down, but nothing through the links back up, the linked folder or deeper;
-2. the log says the walk stopped 8 folders below `~/notes`;
+1. `haarness run` with `"instructions": ["~/handbook/**/RULES.md"]` and a project's
+   `"docs/**/*.md"` answers within seconds, and its prompt carries each file those globs match once:
+   the linked folder's and the linked file included, nothing from the version control folder;
+2. the log has no warning about a glob that stopped early;
 3. the terminal UI opens on the same configuration and answers a message (echo provider, tmux).
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-instruction-globs.py
@@ -96,20 +97,23 @@ def system(body):
 
 
 try:
-    notes = home / "notes"
+    handbook = home / "handbook"
     marks = {
-        "notes/top.md": "MARK_TOP", "notes/a/note.md": "MARK_NOTE",
-        "notes/l1/l2/l3/l4/l5/l6/l7/l8/eight.md": "MARK_EIGHT",
-        "notes/l1/l2/l3/l4/l5/l6/l7/l8/l9/deep.md": "MARK_DEEP",
-        "elsewhere/other.md": "MARK_AWAY", "elsewhere/single.md": "MARK_LINKED_FILE",
+        "handbook/RULES.md": "MARK_TOP", "handbook/team/RULES.md": "MARK_TEAM",
+        "handbook/team/oncall/RULES.md": "MARK_ONCALL", "handbook/.git/RULES.md": "MARK_VCS",
+        "elsewhere/legal/RULES.md": "MARK_LINKED_FOLDER", "elsewhere/RULES.md": "MARK_LINKED_FILE",
     }
     for name, mark in marks.items():
         write(home / name, mark + "\n")
-    os.symlink("..", notes / "a/up")
-    os.symlink(".", notes / "a/self")
-    os.symlink("../elsewhere", notes / "away")
-    os.symlink("../elsewhere/single.md", notes / "linked.md")
-    write(data / "config/haarness.json", json.dumps({"instructions": ["~/notes/**/*.md"]}))
+    (handbook / ".cache").mkdir()
+    for index in range(5000):
+        (handbook / f".cache/{index:05}.bin").write_bytes(b"")
+    os.symlink("..", handbook / "team/up")
+    os.symlink(".", handbook / "team/here")
+    os.symlink("../elsewhere/legal", handbook / "legal")
+    (handbook / "linked").mkdir()
+    os.symlink("../../elsewhere/RULES.md", handbook / "linked/RULES.md")
+    write(data / "config/haarness.json", json.dumps({"instructions": ["~/handbook/**/RULES.md"]}))
     project.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(project)], check=True)
     write(project / ".haarness/config.toml", f'[defaults]\nprovider="anthropic"\nmodel="{MODEL}"\n[lsp]\nenabled=false\n')
@@ -125,16 +129,14 @@ try:
     assert answer.returncode == 0, answer.stdout + answer.stderr
     turn = next(body for body in REQUESTS if body.get("tools"))
     prompt = system(turn)
-    for mark in ["MARK_TOP", "MARK_NOTE", "MARK_EIGHT", "MARK_LINKED_FILE", "MARK_PROJECT_DOC"]:
+    for mark in ["MARK_TOP", "MARK_TEAM", "MARK_ONCALL", "MARK_LINKED_FOLDER", "MARK_LINKED_FILE", "MARK_PROJECT_DOC"]:
         assert prompt.count(mark) == 1, (mark, prompt[-3000:])
-    for mark in ["MARK_DEEP", "MARK_AWAY"]:
-        assert mark not in prompt, (mark, prompt[-3000:])
-    check(f"`haarness run` answers in {elapsed:.1f} s with the files the globs match, none through a loop, "
-          "a linked folder or past 8 folders")
+    assert "MARK_VCS" not in prompt, prompt[-3000:]
+    check(f"`haarness run` answers in {elapsed:.1f} s with each file the globs match once, a linked folder's "
+          "and a linked file's included, none from a version control folder")
 
     logs = "".join(path.read_text(errors="replace") for path in data.rglob("haarness.log*") if path.is_file())
-    notice = f"instructions ~/notes/**/*.md: looked no deeper than 8 folders below {notes}"
-    check("the log says where the walk stopped", notice in logs)
+    check("the log has no warning about a glob that stopped early", "stopped after reading" not in logs)
 
     # The person's glob loads for any project: a plain one, on the echo provider.
     plain = root / "plain"
