@@ -397,6 +397,53 @@ pub async fn catalog(path: &str, query: &[(&str, String)]) -> Result<Value> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+/// Where a resource's icon may come from: the Cloud service this computer
+/// reads the catalog from and the web origin it serves pages on.
+pub(crate) fn icon_origins() -> Vec<reqwest::Url> {
+    #[cfg(test)]
+    if let Some(origins) = TEST_ICON_ORIGINS.with_borrow(Clone::clone) {
+        return origins;
+    }
+    let mut origins = Vec::new();
+    if let Ok(config) = haarness_account::Config::from_env() {
+        if let Ok(web) = config.web_origin() {
+            origins.push(web);
+        }
+        origins.push(config.api_url);
+    }
+    // A Cloud workspace reads its account's catalog from an address of its own.
+    if let Some(url) = std::env::var("HAARNESS_CLOUD_MARKETPLACE_URL")
+        .ok()
+        .and_then(|url| reqwest::Url::parse(&url).ok())
+    {
+        origins.push(url);
+    }
+    origins
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The Cloud a test stands in for, in place of the environment's.
+    pub(crate) static TEST_ICON_ORIGINS: std::cell::RefCell<Option<Vec<reqwest::Url>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The `iconUrl` of a catalog resource or install receipt, kept only when it
+/// is an https address on one of `origins`, so a listing never makes a client
+/// load an image from anywhere else.
+pub(crate) fn icon_on(resource: &Value, origins: &[reqwest::Url]) -> Option<String> {
+    let text = resource["iconUrl"].as_str()?;
+    let url = reqwest::Url::parse(text).ok()?;
+    let allowed = text.len() <= 2048
+        && url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && origins
+            .iter()
+            .any(|origin| origin.scheme() == "https" && origin.origin() == url.origin());
+    allowed.then(|| url.into())
+}
+
 /// Whether a person's install or update request names a version by number
 /// and leaves automatic updates unsaid (an automatic update names the
 /// version it replaces, and a manifest given in full is installed as it is).
@@ -969,7 +1016,7 @@ pub async fn install(
             if target.exists() { ensure!(old["installedDigest"] == tree_digest(&target)?, "Resource was modified locally; preserve your edits before updating"); }
         }
         let digest = tree_digest(&source)?;
-        let receipt = json!({"id":id,"kind":kind,"name":name,"publisher":manifest["resource"]["publisher"],"slug":slug,"scope":if local {"local"} else {"global"},"path":target,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":digest,"pluginName":if kind=="mcp" {Some(format!("mcp-{name}"))} else if kind=="plugin" {Some(name.to_owned())} else {None},"autoUpdate":auto_update_choice(input, old.as_ref()),"restartRequired":false});
+        let receipt = json!({"id":id,"kind":kind,"name":name,"publisher":manifest["resource"]["publisher"],"slug":slug,"scope":if local {"local"} else {"global"},"path":target,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":digest,"iconUrl":icon_on(&manifest["resource"], &icon_origins()),"pluginName":if kind=="mcp" {Some(format!("mcp-{name}"))} else if kind=="plugin" {Some(name.to_owned())} else {None},"autoUpdate":auto_update_choice(input, old.as_ref()),"restartRequired":false});
         fs::create_dir_all(target.parent().context("Target parent")?)?;
         let backup = stage.join("previous");
         let existed = target.exists();
@@ -1407,6 +1454,111 @@ mod tests {
                 .to_string()
                 .starts_with("Sign in to Haarness")
         );
+    }
+
+    #[test]
+    fn only_https_icons_on_haarness_cloud_are_kept() {
+        let origins = [
+            reqwest::Url::parse("https://cloud.fixture.test/").unwrap(),
+            reqwest::Url::parse("https://web.fixture.test:8443/").unwrap(),
+            reqwest::Url::parse("http://127.0.0.1:18080/").unwrap(),
+        ];
+        let icon = |url: Value| icon_on(&json!({"iconUrl":url}), &origins);
+        assert_eq!(
+            icon(json!("https://cloud.fixture.test/icons/demo.png")).as_deref(),
+            Some("https://cloud.fixture.test/icons/demo.png")
+        );
+        assert_eq!(
+            icon(json!("https://CLOUD.fixture.test:443/icons/demo.webp?v=2")).as_deref(),
+            Some("https://cloud.fixture.test/icons/demo.webp?v=2")
+        );
+        assert_eq!(
+            icon(json!("https://web.fixture.test:8443/icons/demo.svg")).as_deref(),
+            Some("https://web.fixture.test:8443/icons/demo.svg")
+        );
+        assert_eq!(icon_on(&json!({}), &origins), None);
+        for refused in [
+            json!(null),
+            json!(42),
+            json!(""),
+            json!("/icons/demo.png"),
+            json!("http://cloud.fixture.test/icons/demo.png"),
+            json!("https://elsewhere.example/icons/demo.png"),
+            json!("https://cloud.fixture.test.elsewhere.example/demo.png"),
+            json!("https://web.fixture.test/icons/demo.png"),
+            json!("https://someone@cloud.fixture.test/icons/demo.png"),
+            json!("data:image/png;base64,AAAA"),
+            // A local Cloud on plain HTTP lends its origin to no icon.
+            json!("http://127.0.0.1:18080/icons/demo.png"),
+            json!("https://127.0.0.1:18080/icons/demo.png"),
+            json!(format!("https://cloud.fixture.test/{}", "a".repeat(2100))),
+        ] {
+            assert_eq!(icon(refused.clone()), None, "{refused}");
+        }
+        assert_eq!(
+            icon_on(
+                &json!({"iconUrl":"https://cloud.fixture.test/icons/demo.png"}),
+                &[]
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn an_install_records_the_icon_its_listing_had() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-marketplace-icon-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let paths = Paths::new(Some(&root.join("home"))).unwrap();
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        TEST_ICON_ORIGINS.set(Some(vec![
+            reqwest::Url::parse("https://cloud.fixture.test/").unwrap(),
+        ]));
+        let bytes = archive(&[(
+            "demo/SKILL.md",
+            "---\nname: demo\ndescription: Proof\n---\nProof.\n",
+        )]);
+        let (mut manifest, server) = manifest("skill", bytes).await;
+        let input = json!({"scope":"local"});
+        let receipt = |id: &Value| -> Value {
+            let file = receipt_root(&paths, &workspace, true)
+                .join(format!("{}.json", id.as_str().unwrap()));
+            serde_json::from_slice(&fs::read(file).unwrap()).unwrap()
+        };
+        manifest["resource"]["iconUrl"] = json!("https://cloud.fixture.test/icons/demo.png");
+        let first = install(&paths, &workspace, true, &manifest, &input)
+            .await
+            .unwrap();
+        assert_eq!(
+            first["iconUrl"],
+            "https://cloud.fixture.test/icons/demo.png"
+        );
+        assert_eq!(
+            receipt(&first["id"])["iconUrl"],
+            "https://cloud.fixture.test/icons/demo.png"
+        );
+        // An update records the icon the new version's listing has, and
+        // never one from another host.
+        manifest["resource"]["iconUrl"] = json!("https://elsewhere.example/icons/demo.png");
+        install(&paths, &workspace, true, &manifest, &input)
+            .await
+            .unwrap();
+        assert!(receipt(&first["id"])["iconUrl"].is_null());
+        manifest["resource"]
+            .as_object_mut()
+            .unwrap()
+            .remove("iconUrl");
+        install(&paths, &workspace, true, &manifest, &input)
+            .await
+            .unwrap();
+        assert!(receipt(&first["id"])["iconUrl"].is_null());
+        TEST_ICON_ORIGINS.set(None);
+        server.abort();
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn archive(files: &[(&str, &str)]) -> Vec<u8> {
