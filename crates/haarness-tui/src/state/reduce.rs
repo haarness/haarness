@@ -356,6 +356,11 @@ impl App {
             }
         }
         self.follow_waiting(&event);
+        // Commands are followed in every chat: the session list says which
+        // chats have work running in the background.
+        if self.follow_shell_command(&event) {
+            return Ok(());
+        }
         let on_current = event.thread_id == Some(self.thread.id);
         let in_root = event.root_thread_id == Some(self.root_thread_id);
         // A workflow dashboard is a global run catalog, so keep its rows live

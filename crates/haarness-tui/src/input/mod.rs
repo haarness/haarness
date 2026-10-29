@@ -619,7 +619,7 @@ pub async fn handle_key_at(
             } else {
                 app.notice = "Press Ctrl+C again to interrupt".into();
             }
-        } else if app.root_descendant_active_count() > 0 {
+        } else if app.root_descendant_active_count() > 0 || app.background_command_count() > 0 {
             let target = InterruptTarget::Session(app.root_thread_id);
             if confirm(&mut app.ctrl_c_action, target) {
                 request_interrupt(app, client, target);
@@ -777,6 +777,12 @@ pub async fn handle_key_at(
             app.toggle_nearest_fold();
             return Ok(AppAction::Continue);
         }
+        // Watching a child agent work is when sending it on is wanted: the
+        // key moves the conversation's foreground work, as it does there.
+        if action == Some(crate::background::BACKGROUND_ACTION) {
+            app.send_to_background("", client).await?;
+            return Ok(AppAction::Continue);
+        }
         app.composer.clear();
         app.attachments.clear();
         app.mention_suggestions.clear();
@@ -835,6 +841,12 @@ pub async fn handle_key_at(
         }
         if presses_fold_key(app, key) {
             app.toggle_nearest_fold();
+            return Ok(AppAction::Continue);
+        }
+        if crate::keybindings::resolve(&app.keybindings, key)
+            == Some(crate::background::BACKGROUND_ACTION)
+        {
+            app.send_to_background("", client).await?;
             return Ok(AppAction::Continue);
         }
         let id = question.question_id;
@@ -1159,7 +1171,7 @@ pub async fn handle_key_at(
                 } else {
                     app.notice = "Press Esc again to interrupt".into();
                 }
-            } else if app.root_descendant_active_count() > 0 {
+            } else if app.root_descendant_active_count() > 0 || app.background_command_count() > 0 {
                 app.ctrl_c_action = None;
                 let target = InterruptTarget::Session(app.root_thread_id);
                 if confirm(&mut app.escape_interrupt, target) {
@@ -1848,6 +1860,10 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
     }
     if matches!(app.overlay, Overlay::SideChat) {
         return Ok(app.handle_side_key(key, client));
+    }
+    if matches!(app.overlay, Overlay::CommandOutput) {
+        app.command_output_key(key, client).await?;
+        return Ok(AppAction::Continue);
     }
     if matches!(app.overlay, Overlay::RemoteControl) {
         match key.code {
