@@ -4,6 +4,8 @@ import type { Item, ItemData, ShellCommandInfo } from "@haarness/sdk";
 import {
   commandCheckpoints,
   commandForCall,
+  commandLines,
+  stepCallId,
   commandStatus,
   commandView,
   createOutputFollow,
@@ -112,6 +114,14 @@ test("a row knows its command from the server first, then the chat's checkpoint,
   // A foreground command the server reports while it runs, before any result.
   const running = commandView({ info: info({ background: false, movedBy: undefined }) });
   assert.deepEqual([running?.background, running?.state], [false, "running"]);
+  // Once the server has listed the chat's commands without it, a checkpoint
+  // that says it runs is from before (a fork copies them): not live.
+  const copied = commandView({ checkpoint: checkpoint("running"), forgotten: true });
+  assert.deepEqual([copied?.background, copied?.state], [true, undefined]);
+  const kept = commandView({ checkpoint: checkpoint("exited", { exit_code: 0 }), forgotten: true });
+  assert.equal(kept?.state, "exited");
+  // What the server reports always wins.
+  assert.equal(commandView({ info: info(), checkpoint: checkpoint("running"), forgotten: true })?.state, "running");
   // Nothing about a command: an older server's row stays as it was.
   assert.equal(commandView({ result: { metadata: { exit: 0 } } }), undefined);
   assert.equal(commandView({}), undefined);
@@ -132,6 +142,37 @@ test("checkpoints are read per call, the latest one winning, and a row finds its
   assert.equal(commandForCall(commands, { callId: "other", turnId: "turn" })?.id, "c2");
   assert.equal(commandForCall(commands, { id: "c1", callId: "other", turnId: "turn" })?.id, "c1");
   assert.equal(commandForCall(commands, { callId: "call", turnId: "another" }), undefined);
+});
+
+test("a batch's steps are numbered after it, and each command's line is known by its id", () => {
+  assert.equal(stepCallId("call_7", 0), "call_7:1");
+  assert.equal(stepCallId("call_7", 2), "call_7:3");
+  const items = [
+    item(1, { type: "tool_call", call_id: "a", name: "bash", arguments: { command: "npm run dev", run_in_background: true } }),
+    item(2, { type: "tool_result", call_id: "a", name: "bash", is_error: false, output: "note", metadata: { command: { id: "c1", background: true } } }),
+    item(3, {
+      type: "tool_call",
+      call_id: "b",
+      name: "batch",
+      arguments: { tool_calls: [{ tool: "read", parameters: { path: "a" } }, { tool: "bash", parameters: { command: "cargo watch" } }] },
+    }),
+    item(4, {
+      type: "tool_result",
+      call_id: "b",
+      name: "batch",
+      is_error: false,
+      output: "{}",
+      metadata: { results: [{ tool: "read", output: "x" }, { tool: "bash", output: "note", metadata: { command: { id: "c2", background: true } } }] },
+    }),
+    // A call id reused by a later turn is another call.
+    item(5, { type: "tool_call", call_id: "a", name: "bash", arguments: { command: "ls" } }, "later"),
+    item(6, { type: "tool_result", call_id: "a", name: "bash", is_error: false, output: "x", metadata: { command: { id: "c3", background: false } } }, "later"),
+  ];
+  const lines = commandLines(items);
+  assert.equal(lines.get("c1"), "npm run dev");
+  assert.equal(lines.get("c2"), "cargo watch");
+  assert.equal(lines.get("c3"), "ls");
+  assert.equal(lines.size, 3);
 });
 
 test("a late report never brings an ended command back or takes it out of the background", () => {
@@ -307,6 +348,8 @@ test("a command the server no longer has stops the follow; other failures try ag
     read: server.read,
     update: (view) => views.push(view),
     timer: { set: (run) => timers.push(run), clear: () => {} },
+    // As Desktop asks: does the chat's list still hold it?
+    gone: async (error) => /not found/.test(String(error)),
   });
   server.fail(new Error("Gateway hiccup"));
   follow.wake();
@@ -326,6 +369,41 @@ test("a command the server no longer has stops the follow; other failures try ag
   follow.wake();
   await settle();
   assert.equal(server.reads.length, count);
+  follow.dispose();
+});
+
+test("a computer offline or a workspace asleep never wipes what was read, however long it lasts", async () => {
+  const server = fakeServer();
+  const views: FollowView[] = [];
+  const timers: (() => void)[] = [];
+  let asked = 0;
+  const follow = createOutputFollow({
+    read: server.read,
+    update: (view) => views.push(view),
+    timer: { set: (run) => timers.push(run), clear: () => {} },
+    // The list cannot be read either: it is passing.
+    gone: async () => {
+      asked++;
+      return false;
+    },
+  });
+  server.print("serving\n");
+  follow.wake();
+  await settle();
+  for (let attempt = 0; attempt < 12; attempt++) {
+    server.fail(new Error(attempt % 2 ? "409 conflict: the computer is offline" : "400: the workspace is asleep"));
+    timers.shift()!();
+    await settle();
+  }
+  assert.equal(asked, 12);
+  assert.equal(views.length, 1);
+  assert.equal(views[0].gone, false);
+  assert.equal(views[0].text, "serving\n");
+  // It comes back and reads on from where it was.
+  server.print("still here\n");
+  timers.shift()!();
+  await settle();
+  assert.equal(views.at(-1)?.text, "serving\nstill here\n");
   follow.dispose();
 });
 

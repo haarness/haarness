@@ -20,6 +20,7 @@ import {
   liveCommand,
   ranFor,
   screenText,
+  stepCallId,
   type CommandCheckpoint,
 } from "./shell-commands";
 import {
@@ -93,6 +94,10 @@ export function ToolActivity(props: {
   call?: { threadId: string; turnId?: string | null; callId: string };
   /** The last checkpoint its chat keeps of its command in the background. */
   checkpoint?: CommandCheckpoint;
+  /** The last checkpoint of a `batch` step's command, by the step's call id. */
+  checkpointFor?: (callId: string) => CommandCheckpoint | undefined;
+  /** A command's line by its id, from the chat's own calls. */
+  commandLine?: (id: string) => string | undefined;
   /** A command listed on its own (Still running), without a call row. */
   command?: ShellCommandInfo;
 }) {
@@ -125,24 +130,59 @@ export function ToolActivity(props: {
     const own = shape().target;
     if (own || !["bash_output", "bash_stop"].includes(toolName(props.name))) return own;
     const id = (props.args as { id?: unknown } | undefined)?.id;
-    const line = typeof id === "string" ? store.state.shellCommands[id]?.command : undefined;
+    // Once the server has forgotten it, the chat's own call still names it.
+    const line = typeof id === "string" ? (store.state.shellCommands[id]?.command ?? props.commandLine?.(id)) : undefined;
     return line ? toolTarget({ command: line }) : "";
   };
   // A shell command the server reports (`background-commands.v1`): one in
   // the background, or a foreground one while it runs. Its row says how it
   // stands, follows its output and can stop it or send it to the background.
   const offered = commandsOffered();
-  const shell = () => toolName(props.name) === "bash" && !props.nested;
+  // A batch's step is one when its batch says which call it is.
+  const shell = () => toolName(props.name) === "bash" && (!props.nested || !!props.call);
+  const ref = createMemo(() => commandRef(props.result?.metadata));
   const info = createMemo(() => {
-    if (props.command) return store.state.shellCommands[props.command.id] ?? props.command;
-    if (!shell() || !offered()) return undefined;
-    const ref = commandRef(props.result?.metadata);
-    if (ref) return store.state.shellCommands[ref.id];
-    return props.call ? commandForCall(Object.values(store.state.shellCommands), props.call) : undefined;
+    const found = props.command
+      ? (store.state.shellCommands[props.command.id] ?? props.command)
+      : !shell() || !offered()
+        ? undefined
+        : ref()
+          ? store.state.shellCommands[ref()!.id]
+          : props.call
+            ? commandForCall(Object.values(store.state.shellCommands), props.call)
+            : undefined;
+    // A row shows its own chat's command: a fork's copied row is not the
+    // original's, which runs on in the chat it was forked from.
+    if (!found || store.state.commandsGone[found.id]) return undefined;
+    return props.call && found.threadId !== props.call.threadId ? undefined : found;
   });
+  /** A batch with a step whose command runs on in the background says so
+   * while it does; the step itself, opened, says how it stands. */
+  const stepsInBackground = () => {
+    const call = props.call;
+    if (!batch().length || !call || !offered()) return false;
+    return Object.values(store.state.shellCommands).some(
+      (command) =>
+        command.turnId === call.turnId &&
+        command.threadId === call.threadId &&
+        command.callId.startsWith(call.callId + ":") &&
+        command.background &&
+        liveCommand(command.state) &&
+        !store.state.commandsGone[command.id],
+    );
+  };
+  /** The server no longer has the command this row's checkpoint names. */
+  const forgotten = () => {
+    const id = props.checkpoint?.command_id ?? ref()?.id;
+    return (
+      !info() &&
+      !!id &&
+      (!!store.state.commandsGone[id] || (!!props.call && !!store.state.commandsListed[props.call.threadId]))
+    );
+  };
   const command = createMemo(() =>
     shell() || props.command
-      ? commandView({ result: props.result, info: info(), checkpoint: props.checkpoint })
+      ? commandView({ result: props.result, info: info(), checkpoint: props.checkpoint, forgotten: forgotten() })
       : undefined,
   );
   /** The call returned while its command ran on: the result is only the
@@ -282,7 +322,8 @@ export function ToolActivity(props: {
   const liveOutput = () => {
     if (!background() && !following()) return undefined;
     const view = followed();
-    if (view && !view.gone) return view;
+    // What was read stays, also once the server has let the command go.
+    if (view && (!view.gone || view.read)) return view;
     // Not followed (the server no longer lists it): its last checkpoint.
     if (!commandLive() || view?.gone)
       return { text: screenText(command()?.tail ?? ""), read: true, cut: false };
@@ -413,7 +454,7 @@ export function ToolActivity(props: {
         <Show when={answeredByHook(props.name, props.result)}>
           <span class="tool-chip">{t("Answered by hook")}</span>
         </Show>
-        <Show when={background() && !props.command}>
+        <Show when={(background() && !props.command) || stepsInBackground()}>
           <span class="tool-chip" title={movedAfter()}>
             {t("In background")}
           </span>
@@ -555,14 +596,20 @@ export function ToolActivity(props: {
           >
             <div class="tool-children">
               <Index each={batch()}>
-                {(step) => (
-                  <ToolActivity
-                    name={step().name}
-                    args={step().args}
-                    result={step().result}
-                    nested
-                    settled={!!props.result}
-                  />
+                {(step, index) => (
+                  // A step's own Stop sits beside it, as a call's does.
+                  <div class="tool-step">
+                    <ToolActivity
+                      name={step().name}
+                      args={step().args}
+                      result={step().result}
+                      nested
+                      settled={!!props.result}
+                      call={props.call && { ...props.call, callId: stepCallId(props.call.callId, index) }}
+                      checkpoint={props.call && props.checkpointFor?.(stepCallId(props.call.callId, index))}
+                      commandLine={props.commandLine}
+                    />
+                  </div>
                 )}
               </Index>
             </div>

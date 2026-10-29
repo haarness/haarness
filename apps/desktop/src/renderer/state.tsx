@@ -124,6 +124,11 @@ export type Pane = "chat" | "files" | "diff";
 interface State extends Live {
   shellCommands: Record<string, T.ShellCommandInfo>;
   commandOutput: Record<string, number>;
+  /** Chats whose commands the server has listed since the project opened:
+   * a command of theirs it did not list is no longer running. */
+  commandsListed: Record<string, boolean>;
+  /** Commands the server answered it no longer has. */
+  commandsGone: Record<string, boolean>;
   modelRecents: ModelKey[];
   /** This device's mode for new chats per project, and per-chat choices
    * for servers that predate shared approval modes. */
@@ -259,6 +264,8 @@ function createApp(saved?: Preferences) {
     reviews: {},
     shellCommands: {},
     commandOutput: {},
+    commandsListed: {},
+    commandsGone: {},
     providers: [],
     agents: [],
     commands: [],
@@ -675,6 +682,7 @@ function createApp(saved?: Preferences) {
     const current = generation;
     const journal: T.EventEnvelope[] = [];
     journals.add(journal);
+    const listed = state.selected;
     try {
       const values = await Promise.all([
         api<T.Thread[]>("listThreads", { archived: true }),
@@ -683,7 +691,7 @@ function createApp(saved?: Preferences) {
         api<T.PendingQuestionInfo[]>("listQuestions"),
         // A failed read leaves the commands as they were: rows still show
         // what their chat's checkpoints say.
-        readShellCommands(state.selected).catch(() => undefined),
+        readShellCommands(listed).catch(() => undefined),
       ]);
       if (current !== generation) return;
       batch(() => {
@@ -691,11 +699,14 @@ function createApp(saved?: Preferences) {
         set("turns", reconcile(values[1], { key: "id" }));
         set("permissions", values[2]);
         set("questions", values[3]);
-        if (values[4])
+        if (values[4]) {
           set(
             "shellCommands",
             reconcile(Object.fromEntries(values[4].map((command) => [command.id, command]))),
           );
+          if (listed && state.connection?.info.capabilities.includes(BACKGROUND_COMMANDS))
+            set("commandsListed", listed, true);
+        }
         // Replay before painting so an old snapshot cannot briefly hide a live
         // activity or approval, then recreate it from the newer events.
         for (const event of journal)
@@ -763,6 +774,7 @@ function createApp(saved?: Preferences) {
               const next = laterCommand(known, command);
               if (next !== known) set("shellCommands", command.id, reconcile(next));
             }
+            set("commandsListed", id, true);
           });
         })
         .catch(() => {});
@@ -1354,6 +1366,8 @@ function createApp(saved?: Preferences) {
       set("tasks", {});
       set("shellCommands", {});
       set("commandOutput", {});
+      set("commandsListed", {});
+      set("commandsGone", {});
       set("providers", []);
       set("agents", []);
       set("commands", []);
@@ -1719,7 +1733,7 @@ function createApp(saved?: Preferences) {
           live === state ? Object.values(state.shellCommands) : (indexes()[location.id]?.commands ?? []);
         const background = new Set(
           commands
-            .filter((command) => command.background && liveCommand(command.state))
+            .filter((command) => command.background && liveCommand(command.state) && !state.commandsGone[command.id])
             .map((command) => command.rootThreadId),
         );
         return (live?.threads ?? []).map((thread) => ({
@@ -2034,6 +2048,8 @@ function createApp(saved?: Preferences) {
         set("tasks", {});
         set("shellCommands", {});
         set("commandOutput", {});
+        set("commandsListed", {});
+        set("commandsGone", {});
         set("connection", reconcile(view));
         set("activeServer", serverKey(view));
         set("permissions", []);

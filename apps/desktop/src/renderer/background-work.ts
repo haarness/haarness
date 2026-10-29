@@ -47,6 +47,22 @@ export function commandsOffered() {
 }
 
 /**
+ * Whether the server no longer has command `id` of chat `thread`, after a
+ * request about it failed: it answers the chat's list without it. A failure
+ * that is not the server's answer (the computer offline through the relay,
+ * a Cloud workspace asleep, the network) leaves that list unread too, and
+ * reads as passing: the row keeps what it showed.
+ */
+export async function commandGone(connection: string, thread: string, id: string) {
+  try {
+    const listed = await window.haarness.api<ShellCommandInfo[]>(connection, "listShellCommands", [thread]);
+    return !listed.some((command) => command.id === id);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The output of command `id` of chat `thread`, followed while `active` (an
  * open row): the end of what it printed first, then what it prints, read when
  * the server says it printed more or changed state. Undefined until the first
@@ -68,7 +84,12 @@ export function followCommand(input: {
         const follow = createOutputFollow({
           read: (query) =>
             window.haarness.api<OutputPage>(connection, "readShellCommandOutput", [thread, id, query]),
-          update: setView,
+          update: (next) => {
+            setView(next);
+            // Every row of it settles, not only this one.
+            if (next.gone && app.state.connection?.id === connection) app.set("commandsGone", id, true);
+          },
+          gone: () => commandGone(connection, thread, id),
         });
         follow.wake();
         createEffect(
@@ -100,7 +121,17 @@ function remember(app: ReturnType<typeof useApp>, connection: string, commands: 
  * it has exited. */
 export async function stopCommand(app: ReturnType<typeof useApp>, command: ShellCommandInfo) {
   const connection = app.state.connection!.id;
-  const answer = await app.api<ShellCommandInfo>("stopShellCommand", command.threadId, command.id);
+  let answer: ShellCommandInfo;
+  try {
+    answer = await app.api<ShellCommandInfo>("stopShellCommand", command.threadId, command.id);
+  } catch (error) {
+    // Already gone from the server: there is nothing left to stop.
+    if (await commandGone(connection, command.threadId, command.id)) {
+      if (app.state.connection?.id === connection) app.set("commandsGone", command.id, true);
+      return;
+    }
+    throw error;
+  }
   remember(app, connection, [answer]);
 }
 
@@ -131,7 +162,7 @@ export function backgroundWork() {
   const commands = createMemo(() => {
     if (!offered() || !root()) return [];
     const mine = Object.values(app.state.shellCommands).filter(
-      (command) => command.background && command.rootThreadId === root(),
+      (command) => command.background && command.rootThreadId === root() && !app.state.commandsGone[command.id],
     );
     const running = mine
       .filter((command) => liveCommand(command.state))
