@@ -298,7 +298,7 @@ try:
     idle()
     time.sleep(0.5)
     keys("Escape")
-    until(lambda: "again to stop session work" in pane(), "the first Esc did not arm the stop")
+    until(lambda: "Press Esc again to stop 1 command in background" in pane(), "the first Esc did not say what it stops")
     keys("Escape")
     row_reads("esc-stops", "in background · stopped", timeout=20)
     assert command_with(thread, "esc-stops")["state"] == "stopped"
@@ -332,6 +332,33 @@ try:
     screen("15-batch-step")
     ok("a shell step of a batch reads in background under the batch row")
 
+    # Progress without newlines, far past what the view keeps: the view keeps showing the newest.
+    prompt(tool("bash", {"command": ": progress; i=0; while :; do i=$((i+1)); printf 'progress %08d\\r' $i; done",
+                         "run_in_background": True}))
+    row_reads("progress", "in background · ")
+    idle()
+    time.sleep(2)
+    # Where the row is now: the reply below it may have moved it.
+    index, line = row_reads("progress", "in background · ")
+    click(line.index("bash"), index)
+    until(lambda: pane().startswith(" bash "), "the progress output did not open")
+
+    def newest():
+        return next((line[:MAIN].strip() for line in pane().splitlines()[2:]
+                     if line.strip().startswith("progress ")), None)
+    seen = set()
+    for _ in range(8):
+        time.sleep(1)
+        seen.add(newest())
+    progress = command_with(thread, "progress")
+    assert progress["outputBytes"] > 2 * 1024 * 1024, progress
+    assert len(seen - {None}) >= 6, f"the view stopped following: {seen}"
+    screen("16-progress-follows")
+    keys("s")
+    until(lambda: "in background · stopped" in pane().splitlines()[0], "the progress command did not stop", timeout=20)
+    keys("q")
+    ok("progress without newlines keeps the output view following past 2 MiB")
+
     # The views in the light palette and in Arabic, reopened on the same chat.
     config = root / "data" / "config" / "config.toml"
     resume = pane_command(env, [BINARY, "--workspace", project, "--trust-project", "-s", thread])
@@ -356,6 +383,15 @@ try:
             prompt("/language en")
     config.unlink()
     ok("the chat and the output view render in the dark and light palettes and in Arabic")
+
+    # Ctrl+C twice still quits; the server keeps the command in the background running.
+    keys("C-c")
+    until(lambda: "Press Ctrl+C again to quit" in pane(), "the first Ctrl+C did not offer to quit")
+    keys("C-c")
+    until(lambda: subprocess.run(["tmux", "-L", SOCKET, "has-session", "-t", SESSION],
+                                 capture_output=True, env=env).returncode != 0, "Ctrl+C twice did not quit")
+    assert command_with(thread, "survives")["state"] == "running", commands(thread)
+    ok("Ctrl+C twice quits while a command runs in the background, which keeps running")
 finally:
     if connection:
         for chat in api("/threads") or []:
