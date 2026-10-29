@@ -98,6 +98,8 @@ CORPUS = [
     # Multi-line scripts
     'set -e\nnpm ci\nnpm run build\nnpm test', 'for f in src/*.rs; do wc -l "$f"; done',
     'if [ -f .env ]; then echo yes; fi', 'npm test\r\nnpm run build',
+    # Function definitions
+    'cat() { echo x; } > notes.md; cat', 'f() { git status; }; f',
     # Files
     'rm -rf node_modules && npm install', 'rm -rf ~/Library/Caches/foo', 'cat ~/.zshrc', 'cat ../outside/secret',
     'cp .env.example .env', 'mv build dist', 'chmod +x run.sh && ./run.sh', 'bash run.sh', 'sudo rm -rf /tmp/x',
