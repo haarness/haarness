@@ -297,9 +297,19 @@ impl CommandOutput {
     /// earliest byte that is.
     pub async fn read(&self, cursor: u64, limit: usize) -> std::io::Result<OutputPage> {
         let page = self.read_bytes(cursor, limit.max(1) as u64).await?;
-        // A limit smaller than the character at the cursor still gets it.
+        // A limit smaller than the character at the cursor still gets it,
+        // and only it.
         if page.bytes.is_empty() && page.end < page.size {
-            return self.read_bytes(page.start, 4).await;
+            let mut page = self.read_bytes(page.start, 4).await?;
+            let length = match page.bytes.first() {
+                Some(0xC2..=0xDF) => 2,
+                Some(0xE0..=0xEF) => 3,
+                Some(0xF0..=0xF4) => 4,
+                _ => 1,
+            };
+            page.bytes.truncate(length);
+            page.end = page.start + page.bytes.len() as u64;
+            return Ok(page);
         }
         Ok(page)
     }
@@ -1536,6 +1546,13 @@ pub(crate) async fn bash_output(
         .map_err(|error| CoreError::Tool(error.to_string()))?;
     let more_than_shown = page.end < page.size;
     let mut text = page.text();
+    // The newest part starts on a whole line when it can.
+    if from > cursor
+        && let Some(line) = text.find('\n')
+        && line + 1 < text.len()
+    {
+        text.drain(..=line);
+    }
     let mut lines_left_out = false;
     if let Some(lines) = arguments
         .get("tail_lines")
@@ -1904,8 +1921,10 @@ mod tests {
         // A limit that ends inside é stops before it.
         let page = output.read(0, 2).await.unwrap();
         assert_eq!((page.text().as_str(), page.start, page.end), ("a", 0, 1));
+        let page = output.read(page.end, 1).await.unwrap();
+        assert_eq!((page.text().as_str(), page.end), ("é", 3));
         let page = output.read(page.end, 10).await.unwrap();
-        assert_eq!((page.text().as_str(), page.end, page.size), ("éb", 4, 4));
+        assert_eq!((page.text().as_str(), page.end, page.size), ("b", 4, 4));
         // A cursor inside a character that is no longer kept starts at the
         // next whole one.
         let dir2 = fixture();
@@ -2147,6 +2166,9 @@ mod tests {
         // Without a cursor: the newest output, and where the rest starts.
         let latest = read(json!({"id": id})).await;
         assert!(latest.contains("line-1999"), "{latest:.300}");
+        // It starts on a whole line.
+        let shown = latest.split("Output:\n").nth(1).unwrap();
+        assert!(shown.starts_with("line-"), "{shown:.80}");
         let from = latest
             .split("read from cursor ")
             .nth(1)
