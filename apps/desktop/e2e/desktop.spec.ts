@@ -12712,6 +12712,8 @@ test("self-hosted router completes a live Desktop tool round trip", async () => 
   await settings.getByRole("button", { name: "Close settings", exact: true }).click();
   await newSession();
   await selectValue(page.getByRole("combobox", { name: "Model", exact: true }), `${providerId}/openai/gpt-6-astra`);
+  // The pill shows the router's own mark, not the neutral one Haarness Cloud shares.
+  await expect(page.getByRole("combobox", { name: "Model", exact: true }).locator("[data-provider-icon]")).toHaveAttribute("data-provider-icon", "router");
   await writeFile(join(workspace, "router-proof.txt"), "The marker is desktop-router-7392.\n");
   await send("Read router-proof.txt using the read tool. Reply with exactly the marker from the file. Do not use other tools.");
   await expect(page.locator(".transcript")).toContainText("desktop-router-7392", { timeout: 90000 });

@@ -1,5 +1,5 @@
 import { Show, type ParentProps } from "solid-js";
-import { providerBrand } from "../provider-brands";
+import { isRouterConnection, providerBrand } from "../provider-brands";
 import { Icon, type IconSize } from "./icons";
 import "./provider-icons.css";
 
@@ -15,17 +15,20 @@ export function ProviderIcon(props: {
   size?: IconSize;
 }) {
   const brand = () => providerBrand(props.provider);
+  const router = () => isRouterConnection(props.provider);
   const url = () => assets[`../assets/providers/${brand()}.svg`];
   return (
     <span
       class="provider-icon"
-      data-provider-icon={brand() ?? "generic"}
+      data-provider-icon={brand() ?? (router() ? "router" : "generic")}
       data-size={props.size ?? "md"}
       aria-hidden="true"
     >
       <Show
         when={url()}
-        fallback={<Icon name="cloud" size={props.size ?? "md"} />}
+        fallback={
+          <Icon name={router() ? "layers" : "cloud"} size={props.size ?? "md"} />
+        }
       >
         <span
           class="provider-icon-mask"
