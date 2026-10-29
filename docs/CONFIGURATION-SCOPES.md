@@ -92,6 +92,8 @@ The `instructions` key in `haarness.json{,c}` and its legacy filename aliases ap
 
 Files under the global configuration directory or the supported home resource roots may import from outside the workspace; everything else is bounded like project `AGENTS.md`. Relative entries are ignored when project configuration is turned off.
 
+Globs take `*`, `?`, `[…]` and `**` (a `*` also matches a name that starts with a dot). A `**` follows linked folders, so `~/handbook/**/RULES.md` also reads a `handbook/legal` that links to a folder kept elsewhere, but for each `**` of the entry it reads each real folder once: a link back up the tree (`handbook/team/up -> ..`), or to a folder that `**` already read by another path, is not entered again, so no link can keep a configuration load walking. A linked file matches like any file. A `**` does not go into version control folders (`.git`, `.hg`, `.svn`, `.bzr`, `.jj`, `_darcs`, `CVS`); a pattern that names one (`docs/.git/*.md`) still reads it. As a safety net, one entry reads at most 1,000,000 files and folders; an entry that reaches that uses the files it found until then, and the log says so as a warning (`config: instructions …: stopped after reading 1000000 folder entries; …`).
+
 When a `read` returns a file inside a workspace subdirectory, every `AGENTS.md` between that directory and the workspace root that the system prompt does not already carry is appended to the tool result once while the agent can see it (at most twenty files at a time, 40 KiB each). When compaction summarizes the result that carried a file, or an undo removes it, the next read below that folder appends the file again.
 
 ## Claude Code compatibility

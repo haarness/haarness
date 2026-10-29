@@ -75,6 +75,9 @@ pub struct JsonLayers {
     pub agent_directories: Vec<PathBuf>,
     /// Human-readable notes (migrations, skipped files) for logs.
     pub notices: Vec<String>,
+    /// Notes worth a warning in the logs: what a person configured that was
+    /// only partly read.
+    pub warnings: Vec<String>,
     /// Existing JSON/JSONC inputs that could not be read or parsed. Startup
     /// may report and continue for compatibility; hot reload rejects the
     /// whole candidate and retains the last-known-good generation.
@@ -413,7 +416,7 @@ pub fn load_layers_with_system(
             urls.push(entry.clone());
             continue;
         }
-        for file in instruction_entry_files(entry, home, workspace, trust) {
+        for file in instruction_entry_files(entry, home, workspace, trust, &mut layers.warnings) {
             let Ok(canonical) = file.canonicalize() else {
                 continue;
             };
@@ -629,23 +632,39 @@ fn trusted_instruction_roots(config_dir: &Path, home: Option<&Path>) -> Vec<Path
         .collect()
 }
 
+/// How many folder entries one `instructions` glob reads at most: a safety
+/// net far above any folder of instructions (a cache folder beside them
+/// included), never a limit an ordinary entry meets.
+const INSTRUCTION_GLOB_ENTRIES: usize = 1_000_000;
+
 /// Files named by one `instructions` entry: `~/` and absolute entries are
 /// globbed in place; relative entries glob upward from the workspace to the
 /// worktree root and are skipped when project
-/// configuration is disabled.
+/// configuration is disabled. A `**` reads each folder once, so a link back
+/// up the tree cannot keep it walking (see [`haarness_server::bounded_glob`]),
+/// and `warnings` says when an entry reached its budget.
 fn instruction_entry_files(
     entry: &str,
     home: Option<&Path>,
     workspace: &Path,
     trust: bool,
+    warnings: &mut Vec<String>,
 ) -> Vec<PathBuf> {
-    let files = |pattern: String| {
-        glob::glob(&pattern)
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .filter(|path| path.is_file())
-            .collect::<Vec<_>>()
+    use haarness_server::bounded_glob::{Cut, Links, Walk};
+    let configured = entry;
+    let mut files = |pattern: String| {
+        let Ok(walk) = Walk::new(&pattern) else {
+            return Vec::new();
+        };
+        let mut walk = walk.entries(INSTRUCTION_GLOB_ENTRIES).links(Links::Once);
+        let files: Vec<PathBuf> = walk.by_ref().filter(|path| path.is_file()).collect();
+        if walk.cut() == Some(Cut::Large) {
+            warnings.push(format!(
+                "instructions {configured}: stopped after reading {INSTRUCTION_GLOB_ENTRIES} \
+                 folder entries; only the files found by then are used"
+            ));
+        }
+        files
     };
     let entry = match entry.strip_prefix("~/") {
         Some(rest) => {
@@ -3355,6 +3374,76 @@ mod tests {
         let instructions = global_only.instructions.unwrap();
         assert!(instructions.contains("HOME_RULES"));
         assert!(!instructions.contains("APP_DOCS"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn instruction_globs_follow_links_without_going_round_and_skip_nothing_beside_a_large_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-links-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let home = root.join("home");
+        let handbook = home.join("handbook");
+        let workspace = root.join("project");
+        for file in [
+            "handbook/RULES.md",
+            "handbook/team/RULES.md",
+            "handbook/team/oncall/RULES.md",
+            "handbook/.git/RULES.md",
+            "shared/legal/RULES.md",
+        ] {
+            let path = home.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, file).unwrap();
+        }
+        // A cache folder far larger than the rules beside it.
+        fs::create_dir_all(handbook.join(".cache")).unwrap();
+        for index in 0..11_000 {
+            fs::write(handbook.join(format!(".cache/{index:05}.bin")), "").unwrap();
+        }
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        // Two links back up the tree, which `glob` walked for good, and a
+        // folder kept elsewhere.
+        std::os::unix::fs::symlink("..", handbook.join("team/up")).unwrap();
+        std::os::unix::fs::symlink(".", handbook.join("team/here")).unwrap();
+        std::os::unix::fs::symlink("../shared/legal", handbook.join("legal")).unwrap();
+        fs::write(
+            config.join("haarness.json"),
+            serde_json::json!({"instructions": ["~/handbook/**/RULES.md"]}).to_string(),
+        )
+        .unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (config_dir, home_dir) = (config.clone(), home.clone());
+        std::thread::spawn(move || {
+            let _ = sender.send(load_layers(
+                &config_dir,
+                Some(&home_dir),
+                &workspace,
+                true,
+                &[],
+            ));
+        });
+        let layers = receiver
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the configuration loads");
+        // Every rules file once, the linked folder's included; nothing in
+        // the version control folder.
+        assert_eq!(
+            layers.instruction_files[2..],
+            [
+                handbook.join("RULES.md"),
+                handbook.join("legal/RULES.md"),
+                handbook.join("team/RULES.md"),
+                handbook.join("team/oncall/RULES.md"),
+            ],
+            "{:?}",
+            layers.instruction_files
+        );
+        assert!(layers.warnings.is_empty(), "{:?}", layers.warnings);
         fs::remove_dir_all(root).unwrap();
     }
 
