@@ -861,6 +861,37 @@ fn is_provider_transient(error: &CoreError) -> bool {
     .any(|marker| message.contains(marker))
 }
 
+/// How a response that broke off in transit is worded: reqwest's errors for
+/// a body that could not be read to its end (whatever the cause beneath,
+/// a reset or an HTTP/2 stream error), hyper's and the system's words for a
+/// connection cut partway, and a Haarness router's for an upstream that
+/// fell silent while it relayed the answer.
+const STREAM_CUT: [&str; 5] = [
+    "request or response body error",
+    "error decoding response body",
+    "connection reset",
+    "connection closed before message completed",
+    "stream became idle",
+];
+
+/// Whether a response stopped because its connection broke or fell silent,
+/// not because the provider reported an error. After output has begun, such
+/// a cut is continued like a response cut short; an error the provider sent
+/// itself (an error event, which arrives as JSON) still fails the turn.
+fn is_stream_cut(error: &CoreError) -> bool {
+    let CoreError::Provider(message) = error else {
+        return false;
+    };
+    if crate::stream_stall_silence(error).is_some() {
+        return true;
+    }
+    if provider_error_fields(message).is_some() {
+        return false;
+    }
+    let message = message.to_ascii_lowercase();
+    STREAM_CUT.iter().any(|marker| message.contains(marker))
+}
+
 /// Retries for a transient provider failure before any output, waiting 2,
 /// 4, 8 then 16 seconds.
 const TRANSIENT_RETRIES: u8 = 4;
@@ -9516,12 +9547,12 @@ impl RunnerTask {
                                     .await?;
                                 continue 'provider_round;
                             }
-                            // A provider that falls silent after it began is
-                            // recovered like a response cut short.
-                            let stalled = saw_provider_event
-                                && crate::stream_stall_silence(&error_value).is_some();
+                            // A response that broke off after it began (its
+                            // connection was cut, or the provider fell silent)
+                            // is recovered like a response cut short.
+                            let cut = saw_provider_event && is_stream_cut(&error_value);
                             blocked = Some(match error_value {
-                                CoreError::Provider(message) if stalled => {
+                                CoreError::Provider(message) if cut => {
                                     CoreError::ProviderIncomplete(message)
                                 }
                                 error_value => error_value,
@@ -19405,6 +19436,37 @@ mod tests {
         assert_eq!(resolved.turn_id, Some(first_turn));
         assert_eq!(resolved.payload["questionId"], "question-1");
         assert_eq!(resolved.payload["resolution"], "answered");
+    }
+
+    #[test]
+    fn a_broken_connection_is_a_cut_but_an_error_the_provider_sent_is_not() {
+        let provider = |message: &str| CoreError::Provider(message.into());
+        for cut in [
+            // reqwest's words for a body read that failed, with its cause.
+            "request or response body error: connection reset by peer (os error 54)",
+            "request or response body error: error reading a body from connection: stream error received: unexpected internal error encountered",
+            "error decoding response body: connection closed before message completed",
+            "request or response body error: unexpected EOF during chunk size line",
+            // A Haarness router whose upstream fell silent, or broke off.
+            "upstream stream became idle",
+            "upstream stream failed: error decoding response body",
+            "the provider sent nothing for 5 minutes",
+        ] {
+            assert!(super::is_stream_cut(&provider(cut)), "{cut}");
+        }
+        for failed in [
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            r#"{"type":"response.failed","response":{"error":{"code":"server_error","message":"The connection reset while processing."}}}"#,
+            "invalid SSE JSON: EOF while parsing an object at line 1 column 12",
+            "HTTP 400 Bad Request: invalid tool schema",
+            "provider returned a tool call without a call ID or name",
+        ] {
+            assert!(!super::is_stream_cut(&provider(failed)), "{failed}");
+        }
+        assert!(!super::is_stream_cut(&CoreError::ProviderIncomplete(
+            "connection reset".into()
+        )));
+        assert!(!super::is_stream_cut(&CoreError::Cancelled));
     }
 
     #[test]
