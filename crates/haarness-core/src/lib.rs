@@ -41,7 +41,8 @@ pub use agents::{
 pub use auto_review::AutoReviewSettings;
 pub use background::{BackgroundHandoff, BackgroundProbe};
 pub use background_commands::{
-    CommandOutput, CommandProcess, CommandRequest, CommandRun, OUTPUT_SAVED_LIMIT,
+    BACKGROUND_FILE_PREFIX, CommandOutput, CommandProcess, CommandRequest, CommandRun,
+    OUTPUT_SAVED_LIMIT,
     OUTPUT_TAIL_KEPT, OutputPage, ProcessControl, ProcessEnd, ShellCall, StopSignal,
     spoken_duration, whole_end, whole_start,
 };

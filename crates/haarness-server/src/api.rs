@@ -145,6 +145,10 @@ pub async fn serve_with_host(
     .await
 }
 
+/// The output files of gone processes' background commands are swept once
+/// per process, by the first server it starts.
+static SWEPT_COMMAND_FILES: std::sync::Once = std::sync::Once::new();
+
 // Retain the same async startup API as serve for existing callers.
 #[allow(clippy::unused_async)]
 pub async fn serve_with_access(
@@ -166,6 +170,20 @@ pub async fn serve_with_access(
                 .map_or(0, |workflows| workflows.pending_deliveries(thread))
         }));
     }
+    // Output files of commands in the background that a gone process left
+    // (a crash, more output than memory kept): once per process.
+    SWEPT_COMMAND_FILES.call_once(|| {
+        let folder = crate::tools::tool_output_dir();
+        tokio::task::spawn_blocking(move || {
+            let removed = crate::shell::sweep_background_files(&folder);
+            if removed > 0 {
+                tracing::info!(
+                    removed,
+                    "removed output files of commands a gone process left"
+                );
+            }
+        });
+    });
     let language = state.language.clone();
     let ptys = Arc::new(PtyManager::new(
         state.workspace.clone(),

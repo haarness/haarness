@@ -596,6 +596,61 @@ async fn ended_output(
     ToolOutput { text, metadata }
 }
 
+/// Remove the output files of commands that ran in the background in a
+/// Haarness process that is gone (a crash, a shutdown that stopped them
+/// with more output than memory kept): only `background-<pid>-…` files of
+/// `folder`, whose process no longer runs. Those of this process, and of
+/// one still running, stay. Unix only: elsewhere nothing is removed.
+pub(crate) fn sweep_background_files(folder: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(haarness_core::BACKGROUND_FILE_PREFIX))
+        else {
+            continue;
+        };
+        let Some(pid) = rest
+            .split_once('-')
+            .and_then(|(pid, _)| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == std::process::id() || process_runs(pid) {
+            continue;
+        }
+        if entry.file_type().is_ok_and(|kind| kind.is_file())
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Whether process `pid` runs (or cannot be told not to).
+fn process_runs(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = i32::try_from(pid) else {
+            return true;
+        };
+        !matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+            Err(nix::errno::Errno::ESRCH)
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 /// The last `count` lines of `text`.
 fn last_lines(text: &str, count: usize) -> String {
     text.lines()
@@ -1026,6 +1081,28 @@ mod tests {
                 "{command}: {:?}",
                 began.elapsed()
             );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_the_files_of_background_commands_of_a_gone_process_are_swept() {
+        let root = fixture();
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let gone_pid = gone.id();
+        gone.wait().unwrap();
+        let names = [
+            format!("background-{gone_pid}-tool_a.txt"),
+            format!("background-{}-tool_b.txt", std::process::id()),
+            "tool_c.txt".to_owned(),
+            "background-notapid-tool_d.txt".to_owned(),
+        ];
+        for name in &names {
+            std::fs::write(root.join(name), "output").unwrap();
+        }
+        assert_eq!(sweep_background_files(&root), 1);
+        for (index, name) in names.iter().enumerate() {
+            assert_eq!(root.join(name).exists(), index != 0, "{name}");
         }
         std::fs::remove_dir_all(root).unwrap();
     }
