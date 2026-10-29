@@ -7058,7 +7058,8 @@ struct TurnToolInvoker {
 }
 
 /// `rules` bounded by an active skill's: what its `disallowed-tools` denies
-/// refuses the call, so it refuses a redirect there too.
+/// refuses the call, so it refuses a redirect there too, and a search leaves
+/// out a file it denies reading.
 fn with_skill_rules(mut rules: PermissionEngine, skill: Vec<PermissionRule>) -> PermissionEngine {
     rules.add_inherited_ceiling([skill]);
     rules
@@ -7119,7 +7120,10 @@ impl crate::ToolInvoker for TurnToolInvoker {
         Some(self.runner.workspace.to_string_lossy().into_owned())
     }
     fn read_rules(&self) -> Option<PermissionEngine> {
-        Some(self.runner.permission_engine_for_tool(&self.agent, "read"))
+        Some(with_skill_rules(
+            self.runner.permission_engine_for_tool(&self.agent, "read"),
+            self.runner.skill_rules.lock().clone(),
+        ))
     }
     fn webfetch_rules(&self) -> Option<PermissionEngine> {
         Some(with_skill_rules(
