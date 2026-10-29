@@ -1475,6 +1475,26 @@ impl Reader<'_> {
                 };
                 self.invocation(after_shell_assignments(rest), stdin, source, depth);
             }
+            // The shell's own words the parser leaves as a program where a
+            // line trips it (`! { rm x; }`, `coproc while …; do rm x; done`,
+            // or a line of assignments before one: `A=1 B=2`, then `! rm x`):
+            // what follows them is a command.
+            _ if matches!(
+                program.raw.as_str(),
+                "{" | "!" | "if" | "then" | "elif" | "else" | "while" | "until" | "do"
+            ) =>
+            {
+                self.invocation(after_shell_assignments(arguments), stdin, source, depth);
+            }
+            // `function f { …; }` after a line of assignments: the first
+            // command of its body.
+            _ if program.raw == "function" => {
+                if let [_, open, rest @ ..] = arguments
+                    && opens_group(open)
+                {
+                    self.invocation(rest, stdin, source, depth);
+                }
+            }
             "su" => {
                 if let Some(text) = su_command(arguments) {
                     self.nested(&text, depth);
@@ -7502,6 +7522,7 @@ mod wrappers {
             "coproc A=1 rm -rf ~/x",
             "coproc { rm -rf ~/x; }",
             "coproc NAME { rm -rf ~/x; }",
+            "coproc while true; do rm -rf ~/x; done",
         ] {
             let analysis = analyze(command, &workspace);
             assert!(reaches_rm(command, &workspace), "{command}: {analysis:?}");
@@ -7628,6 +7649,61 @@ mod wrappers {
             parent
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_command_after_a_line_of_assignments_is_read() {
+        let workspace = workspace();
+        // The parser runs a line of two or more assignments into the command
+        // on the next line, named by the shell's word that starts it (`!`,
+        // `{`, `function`); one assignment is a line of its own.
+        for command in [
+            "A=1 B=2\n! rm -rf victim",
+            "A=1 B=2\n{ rm -rf victim; }",
+            "A=1 B=2 C=3\n  ! rm -rf victim | cat",
+            "A=1 B=2\nfunction f { rm -rf victim; }",
+            "A=1 B=2\nif true; then rm -rf victim; fi",
+            "A=1\n! rm -rf victim",
+            "A=1\nif true; then rm -rf victim; fi",
+            "! { rm -rf victim; }",
+        ] {
+            let patterns = analyze(command, &workspace).patterns;
+            assert!(
+                patterns.contains(&"rm -rf victim".to_owned()),
+                "{command:?}: {patterns:?}"
+            );
+        }
+        let outside = analyze("cat ../x", &workspace).external_dirs;
+        assert!(!outside.is_empty());
+        for command in [
+            "A=1\n! cat ../x",
+            "A=1 B=2\n! cat ../x",
+            "A=1 B=2\n{ cat ../x; }",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                outside,
+                "{command:?}"
+            );
+        }
+        // As before: assignments on the command's own line or joined to it,
+        // a line of assignments before a command (a rule for the command
+        // alone does not open it), and here-document text.
+        for (command, patterns) in [
+            ("A=1 rm x", vec!["A=1 rm x", "rm x"]),
+            ("A=1 \\\nrm x", vec!["A=1 \\\nrm x", "rm x", "A=1 rm x"]),
+            ("A=1 B=2\nnpm test", vec!["A=1 B=2\nnpm test", "npm test"]),
+            (
+                "cat <<EOF\nA=1 B=2\n! rm -rf victim\nEOF",
+                vec!["cat <<EOF\nA=1 B=2\n! rm -rf victim\nEOF"],
+            ),
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).patterns,
+                patterns,
+                "{command:?}"
+            );
+        }
     }
 }
 
