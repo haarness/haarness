@@ -395,6 +395,52 @@ async fn reliability_connection_cut_after_a_tool_call_closes_it_without_running_
 }
 
 #[tokio::test]
+async fn reliability_connection_cut_before_any_output_sends_the_request_again() {
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            // What a chunked body that ends early reads as, which nothing
+            // retried before.
+            vec![
+                Ok(ProviderEvent::ContentStarted),
+                cut("error decoding response body: unexpected EOF during chunk size line"),
+            ],
+            vec![Ok(text("answered")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("cut first"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    let requests = provider.requests.lock().unwrap();
+    // Nothing reached the person, so the same request is sent again.
+    assert!(!recovery_note(&requests[1]));
+    assert_eq!(
+        serde_json::to_value(&requests[0].messages).unwrap(),
+        serde_json::to_value(&requests[1].messages).unwrap()
+    );
+    drop(requests);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, ItemData::Error { .. }))
+    );
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
 async fn reliability_connection_cut_after_the_response_finished_loses_nothing() {
     // A text answer: one request, nothing to continue.
     let (directory, runtime, provider, hooks) = setup_streams(

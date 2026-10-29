@@ -837,9 +837,10 @@ fn is_provider_transient(error: &CoreError) -> bool {
     if is_provider_usage_limit(error) {
         return false;
     }
-    // A provider that sent nothing for the configured limit: its request was
-    // closed, and another may well be answered.
-    if crate::stream_stall_silence(error).is_some() {
+    // A provider that sent nothing for the configured limit, or a connection
+    // that broke before anything reached the person: another request may
+    // well be answered.
+    if is_stream_cut(error) {
         return true;
     }
     let message = message.to_ascii_lowercase();
@@ -19519,6 +19520,14 @@ mod tests {
             "HTTP 529: overloaded_error",
             "HTTP 502 Bad Gateway",
             "error sending request for url (https://api.example/v1/messages)",
+            // A connection that broke while the response began, wrapped as
+            // reqwest's body error whatever broke it (a reset, Windows'
+            // 10054, an HTTP/2 stream error), or a router's silent upstream.
+            "request or response body error: connection reset by peer (os error 54)",
+            "request or response body error: An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "request or response body error: error reading a body from connection: stream error received: unexpected internal error encountered",
+            "error decoding response body: unexpected EOF during chunk size line",
+            "upstream stream became idle",
         ] {
             assert!(
                 super::is_provider_transient(&provider(retried)),
