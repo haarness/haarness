@@ -375,7 +375,8 @@ background subagent, which starts a turn when the chat is idle:
 with a `<summary>`, the last 40 lines of its output (at most 8 KiB) in
 `<command_output>` and, when its output is more than the server keeps in
 memory, the file that keeps it in `<output_file>`, readable by you alone and
-removed ten minutes after the command ended. A
+removed ten minutes after the command ended (or, when Haarness stopped while
+it ran, by the next Haarness that starts). A
 foreground command moves to the background while it runs when a person sends
 it there, or by itself after `execution.shell_move_after_ms` in a turn whose
 client sent `followsBackground: true` with `/turns`, `/input` (kept with a
@@ -390,7 +391,7 @@ A subagent's commands never move, and its background commands stop without a
 message when its turn ends. A person's own `!` command and a workflow's
 `shell()` never go to the background. The agent reads a command's output, lists
 the chat's commands or waits for one with the `bash_output` tool and stops one
-with `bash_stop`; both are always offered.
+with `bash_stop`; both are offered wherever `bash` is.
 
 Each command is a `ShellCommandInfo`: `id`, `threadId` (the chat whose agent
 ran it), `rootThreadId`, `turnId` and `callId` (the `bash` call that started

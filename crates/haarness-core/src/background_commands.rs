@@ -45,6 +45,9 @@ pub const OUTPUT_TAIL_KEPT: usize = 64 * 1024;
 /// What a command in the background, or one without a deadline, saves of its
 /// output, from the start. 64 MiB, as much as a request body.
 pub const OUTPUT_SAVED_LIMIT: u64 = 64 * 1024 * 1024;
+/// How the output file of a command in the background is named: then
+/// the id of the process that ran it, a dash and the file's first name.
+pub const BACKGROUND_FILE_PREFIX: &str = "background-";
 /// How much of the command line a command reports.
 const COMMAND_TEXT_LIMIT: usize = 8 * 1024;
 /// A page of output when the reader names no limit, and the most it may name.
@@ -140,7 +143,9 @@ pub struct CommandProcess {
 /// kept in memory ([`OUTPUT_TAIL_KEPT`]), so a long-running command's middle
 /// can be dropped.
 pub struct CommandOutput {
-    path: PathBuf,
+    /// Where the file is: renamed once the command runs in the background
+    /// (see [`BACKGROUND_FILE_PREFIX`]).
+    path: Mutex<PathBuf>,
     state: Mutex<OutputState>,
     size: watch::Sender<u64>,
     file: tokio::sync::Mutex<Option<tokio::fs::File>>,
@@ -177,7 +182,7 @@ impl CommandOutput {
     #[must_use]
     pub fn new(path: PathBuf, file: tokio::fs::File, save_limit: u64) -> Self {
         Self {
-            path,
+            path: Mutex::new(path),
             state: Mutex::new(OutputState {
                 size: 0,
                 saved: 0,
@@ -250,8 +255,32 @@ impl CommandOutput {
     }
 
     #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> PathBuf {
+        self.path.lock().clone()
+    }
+
+    /// Name the file as a command in the background's, `background-<this
+    /// process's id>-<its name>`, so a later start can tell it from the
+    /// output files results name and remove it once its process is gone.
+    /// Where an open file cannot be renamed (Windows) it keeps its name.
+    pub fn mark_background(&self) {
+        if !self.state.lock().file_kept {
+            return;
+        }
+        let mut path = self.path.lock();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return;
+        };
+        if name.starts_with(BACKGROUND_FILE_PREFIX) {
+            return;
+        }
+        let renamed = path.with_file_name(format!(
+            "{BACKGROUND_FILE_PREFIX}{}-{name}",
+            std::process::id()
+        ));
+        if std::fs::rename(&*path, &renamed).is_ok() {
+            *path = renamed;
+        }
     }
 
     /// Whether the file is still there.
@@ -277,7 +306,7 @@ impl CommandOutput {
             state.file_kept = false;
         }
         drop(self.file.lock().await.take());
-        let _ = tokio::fs::remove_file(&self.path).await;
+        let _ = tokio::fs::remove_file(self.path()).await;
         true
     }
 
@@ -346,7 +375,7 @@ impl CommandOutput {
             state.tail[from.min(to)..to].to_vec()
         } else {
             let to = end.min(saved);
-            let mut file = tokio::fs::File::open(&self.path).await?;
+            let mut file = tokio::fs::File::open(self.path()).await?;
             file.seek(std::io::SeekFrom::Start(start)).await?;
             let mut bytes = vec![0; usize::try_from(to - start).unwrap_or(0)];
             file.read_exact(&mut bytes).await?;
@@ -712,6 +741,7 @@ impl CommandEntry {
             return Err(refused);
         }
         self.process.output.limit_saving(OUTPUT_SAVED_LIMIT);
+        self.process.output.mark_background();
         self.wake.notify_one();
         Ok(())
     }
@@ -1005,7 +1035,7 @@ impl CommandEntry {
         self.process
             .output
             .file_kept()
-            .then(|| self.process.output.path().to_path_buf())
+            .then(|| self.process.output.path())
     }
 
     /// The hidden message its chat gets when it ends in the background.
@@ -1172,7 +1202,7 @@ impl ShellCommands {
             let info = entry.info.borrow();
             let keep = info.state.is_live() || info.ended_at.is_none_or(|ended| ended > cutoff);
             if !keep && info.background && entry.process.output.file_kept() {
-                files.push(entry.process.output.path().to_path_buf());
+                files.push(entry.process.output.path());
             }
             keep
         });
@@ -1370,6 +1400,7 @@ impl ShellCall {
         };
         if request.background {
             process.output.limit_saving(OUTPUT_SAVED_LIMIT);
+            process.output.mark_background();
         }
         let entry = Arc::new(CommandEntry {
             info: watch::Sender::new(info.clone()),
@@ -2323,6 +2354,17 @@ mod tests {
         large.settled(Duration::from_secs(2)).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(output.path().exists());
+        // Named as a background command's, for a later start to find.
+        let name = output
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with(&format!("{BACKGROUND_FILE_PREFIX}{}-", std::process::id())),
+            "{name}"
+        );
         large.info.send_modify(|info| {
             info.ended_at = Some(Utc::now() - chrono::Duration::minutes(11));
         });
