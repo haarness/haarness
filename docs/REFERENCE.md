@@ -385,7 +385,9 @@ subagent's result does). The agent reads a command's output, lists the chat's
 commands or waits for one with `bash_output` (until it ends, prints nothing for
 a while, or prints a line matching a pattern, searching from where it last
 read) and stops one with `bash_stop` (interrupt, terminate, then kill,
-`execution.shell_stop_grace_ms` apart, with every process it started). Its
+`execution.shell_stop_grace_ms` apart, with every process it started; on
+Windows the first two steps only ask the command's windows to close, which a
+console program does not heed, so it ends with the kill). Its
 instructions say to run servers, watchers and multi-minute builds or test
 suites this way, and never to leave a process running with a trailing `&` or
 `nohup`. Any shell command, yours too, ends with its shell: something it
