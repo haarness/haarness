@@ -1,6 +1,7 @@
 //! Frame composition: header, transcript window, menus, composer.
 
 pub mod approval;
+pub mod command_output;
 pub mod composer;
 pub mod diffview;
 pub mod frame;
@@ -228,6 +229,14 @@ impl App {
             && height >= 12
         {
             let (lines, hits) = diffview::frame(self, viewer, width, height);
+            return self.finish_frame(lines, hits, height);
+        }
+        // A command's output is a place too, at any size.
+        if matches!(self.overlay, Overlay::CommandOutput)
+            && let Some(view) = &self.command_view
+        {
+            let (mut lines, mut hits) = command_output::frame(self, view, width, height);
+            apply_toast(self, &mut lines, &mut hits, width, height);
             return self.finish_frame(lines, hits, height);
         }
         // The side chat is a place too, at any size: its box must stay usable.

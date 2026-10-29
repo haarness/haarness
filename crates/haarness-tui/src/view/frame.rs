@@ -15,6 +15,9 @@ pub enum HitTarget {
     TaskOpen(String),
     /// Open the durable workflow run referenced by a workflow tool row.
     WorkflowOpen(WorkflowId),
+    /// Open a shell command's output, by its id (command rows, the
+    /// sidebar's `background` section).
+    CommandOpen(String),
     /// Return from a child-agent thread to its parent conversation.
     ChildParent,
     /// Move to the previous child-agent thread in the current sibling set.
