@@ -1169,3 +1169,315 @@ async fn a_chat_at_its_cap_keeps_a_long_command_in_the_foreground() {
     assert_eq!(metadata["command"]["background"], false);
     runtime.stop_shell_command(thread, &server).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_command_a_person_moves_after_the_deadline_gets_its_limit_from_the_move() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_timeout_ms = 600;
+    });
+    let thread = chat(&runtime, None).await;
+    // No deadline in the foreground (timeout 0), in a chat nothing follows
+    // up; it has run past the configured deadline when a person moves it.
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30","timeout":0}"#,
+        false,
+    )
+    .await;
+    let id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(info) = runtime.shell_commands(thread).await.unwrap().pop() {
+                return info.id;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let moved = runtime
+        .background_shell_commands(thread, Some(&id))
+        .await
+        .unwrap();
+    let stops_at = moved[0].stops_at.expect("a limit in the background");
+    assert!(stops_at > chrono::Utc::now(), "{moved:?}");
+    wait_done(&runtime, &turn).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        runtime
+            .shell_command(thread, &id)
+            .await
+            .unwrap()
+            .state
+            .is_live(),
+        "a move must not stop it"
+    );
+    runtime.stop_shell_command(thread, &id).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_command_ends_when_its_shell_does_though_what_it_left_never_stops_printing() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |_| {});
+    let thread = chat(&runtime, None).await;
+    let began = std::time::Instant::now();
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"yes printing & sleep 1; echo started","timeout":20000}"#,
+        false,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert!(
+        began.elapsed() < Duration::from_secs(8),
+        "{:?}",
+        began.elapsed()
+    );
+    assert!(text.starts_with("exit: 0"), "{text:.200}");
+    assert_eq!(metadata["leftovers"], true);
+    if let Some(path) = metadata["outputPath"].as_str() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[tokio::test]
+async fn a_command_already_stopping_when_the_server_stops_records_its_end() {
+    use haarness_protocol::ShellCommandState as State;
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_stop_grace_ms = 30_000;
+    });
+    let handle = activity_server(runtime.clone(), None, &workspace.0).await;
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"trap '' INT; printf ready; sleep 60","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let id = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    command_until(&runtime, thread, &id, |info| info.output_bytes > 0).await;
+    // A person stops it; it ignores the interrupt, its grace is long, and
+    // the server stops meanwhile.
+    runtime.stop_shell_command(thread, &id).await.unwrap();
+    let began = std::time::Instant::now();
+    handle.shutdown().await.unwrap();
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        began.elapsed()
+    );
+    // The server waited for it to end, and its end is recorded: the next
+    // start does not call it cut off.
+    assert!(
+        !runtime
+            .shell_command(thread, &id)
+            .await
+            .unwrap()
+            .state
+            .is_live()
+    );
+    assert_eq!(
+        checkpoints(&runtime, thread).await,
+        [(id.clone(), State::Running), (id.clone(), State::Stopped)]
+    );
+    runtime.recover().await.unwrap();
+    assert_eq!(checkpoints(&runtime, thread).await.len(), 2);
+    assert!(notices(&runtime, thread).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_command_held_at_the_cap_says_so_and_a_deadline_before_the_move_wins() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_background_per_chat = 1;
+        settings.shell_move_after_ms = 300;
+        settings.shell_timeout_ms = 1_200;
+    });
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let server = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 5"}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let (text, _) = last_result(&runtime, thread).await;
+    assert!(text.contains("timed out after"), "{text}");
+    assert!(text.contains("shell_background_per_chat"), "{text}");
+    runtime.stop_shell_command(thread, &server).await.unwrap();
+
+    // A deadline shorter than the time to move: the command never moves,
+    // it times out as it always did.
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_move_after_ms = 1_500;
+        settings.shell_timeout_ms = 500;
+    });
+    let thread = chat(&runtime, None).await;
+    let began = std::time::Instant::now();
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 3"}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert!(text.contains("timed out after 500 ms"), "{text} {metadata}");
+    // Well before the three seconds it would have run (a loaded machine
+    // slows the turn around it).
+    assert!(
+        began.elapsed() < Duration::from_millis(2_900),
+        "{:?}",
+        began.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_move_that_cannot_happen_says_why_in_plain_words() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_background_per_chat = 1;
+    });
+    let handle = activity_server(runtime.clone(), None, &workspace.0).await;
+    let base = format!("http://{}", handle.address);
+    let refusal = |path: String| {
+        let base = base.clone();
+        async move {
+            let response = reqwest::Client::new()
+                .post(format!("{base}/v1/{path}"))
+                .bearer_auth("activity-token")
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: Value = response.json().await.unwrap();
+            (
+                status,
+                body["message"].as_str().unwrap_or_default().to_owned(),
+            )
+        }
+    };
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let server = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let conflict = reqwest::StatusCode::CONFLICT;
+    assert_eq!(
+        refusal(format!(
+            "threads/{thread}/commands/background?commandId={server}"
+        ))
+        .await,
+        (
+            conflict,
+            "That command already runs in the background.".to_owned()
+        )
+    );
+    // A foreground command while the chat is at its cap: moving all moves
+    // nothing, and says why.
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30"}"#,
+        false,
+    )
+    .await;
+    let held = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(info) = runtime
+                .shell_commands(thread)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|info| !info.background)
+            {
+                return info.id;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        refusal(format!("threads/{thread}/commands/background")).await,
+        (
+            conflict,
+            "This chat already runs 1 command in the background.".to_owned()
+        )
+    );
+    runtime.stop_shell_command(thread, &held).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    command_until(&runtime, thread, &held, |info| !info.state.is_live()).await;
+    assert_eq!(
+        refusal(format!(
+            "threads/{thread}/commands/background?commandId={held}"
+        ))
+        .await,
+        (conflict, "That command has already ended.".to_owned())
+    );
+    runtime.stop_shell_command(thread, &server).await.unwrap();
+    // A subagent's foreground command.
+    let other = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        other,
+        r#"!tool task {"prompt":"!tool bash {\"command\":\"sleep 30\"}","description":"Waits"}"#,
+        true,
+    )
+    .await;
+    let child = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(info) = runtime.shell_commands(other).await.unwrap().pop() {
+                return info.id;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        refusal(format!(
+            "threads/{other}/commands/background?commandId={child}"
+        ))
+        .await,
+        (
+            conflict,
+            "A subagent's command stays with its subagent.".to_owned()
+        )
+    );
+    runtime.interrupt_thread_tree(other).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    handle.shutdown().await.unwrap();
+}

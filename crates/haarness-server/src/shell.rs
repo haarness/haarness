@@ -277,20 +277,12 @@ async fn pump(mut pump: Pump) {
                 None => std::future::pending().await,
             }
         };
-        // Reads first: a pipe that closed with the command is seen closed
-        // before the quiet time can be taken for something holding it.
+        // The command's end first, so output that never stops cannot hide
+        // it; then reads, so a pipe that closed with the command is seen
+        // closed before the quiet time can be taken for something holding
+        // it; the quiet time last.
         let (bytes, from_stdout) = tokio::select! {
             biased;
-            read = pump.stdout.read(&mut out), if out_open => match read {
-                Ok(0) => { out_open = false; continue; }
-                Ok(n) => (&out[..n], true),
-                Err(error) => { failure = Some(error.to_string()); out_open = false; continue; }
-            },
-            read = pump.stderr.read(&mut err), if err_open => match read {
-                Ok(0) => { err_open = false; continue; }
-                Ok(n) => (&err[..n], false),
-                Err(error) => { failure = Some(error.to_string()); err_open = false; continue; }
-            },
             waited = pump.child.wait(), if status.is_none() => {
                 match waited {
                     Ok(waited) => status = Some(waited),
@@ -302,6 +294,16 @@ async fn pump(mut pump: Pump) {
                 ended_at = Some(tokio::time::Instant::now());
                 continue;
             }
+            read = pump.stdout.read(&mut out), if out_open => match read {
+                Ok(0) => { out_open = false; continue; }
+                Ok(n) => (&out[..n], true),
+                Err(error) => { failure = Some(error.to_string()); out_open = false; continue; }
+            },
+            read = pump.stderr.read(&mut err), if err_open => match read {
+                Ok(0) => { err_open = false; continue; }
+                Ok(n) => (&err[..n], false),
+                Err(error) => { failure = Some(error.to_string()); err_open = false; continue; }
+            },
             () = sleep => {
                 if stopped_leftovers.is_some() {
                     // Something outside the group still holds the output
@@ -592,6 +594,61 @@ async fn ended_output(
         }
     }
     ToolOutput { text, metadata }
+}
+
+/// Remove the output files of commands that ran in the background in a
+/// Haarness process that is gone (a crash, a shutdown that stopped them
+/// with more output than memory kept): only `background-<pid>-…` files of
+/// `folder`, whose process no longer runs. Those of this process, and of
+/// one still running, stay. Unix only: elsewhere nothing is removed.
+pub(crate) fn sweep_background_files(folder: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(haarness_core::BACKGROUND_FILE_PREFIX))
+        else {
+            continue;
+        };
+        let Some(pid) = rest
+            .split_once('-')
+            .and_then(|(pid, _)| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == std::process::id() || process_runs(pid) {
+            continue;
+        }
+        if entry.file_type().is_ok_and(|kind| kind.is_file())
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Whether process `pid` runs (or cannot be told not to).
+fn process_runs(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = i32::try_from(pid) else {
+            return true;
+        };
+        !matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+            Err(nix::errno::Errno::ESRCH)
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
 }
 
 /// The last `count` lines of `text`.
@@ -994,22 +1051,60 @@ mod tests {
     #[tokio::test]
     async fn a_process_that_keeps_printing_after_the_command_ended_is_stopped() {
         let root = fixture();
-        let output = tokio::time::timeout(
-            Duration::from_secs(15),
-            run(
-                "yes printing & echo started",
-                &root,
-                0,
-                &CancellationToken::new(),
-                &root,
-                &BTreeMap::new(),
-                None,
-            ),
-        )
-        .await
-        .expect("the call returns")
-        .unwrap();
-        assert_eq!(output.metadata["leftovers"], true);
+        // Its output never stops while the command runs on (`sleep 1`):
+        // the command's end is still seen.
+        for command in [
+            "yes printing & echo started",
+            "yes printing & sleep 1; echo started",
+        ] {
+            let began = std::time::Instant::now();
+            let output = tokio::time::timeout(
+                Duration::from_secs(15),
+                run(
+                    command,
+                    &root,
+                    0,
+                    &CancellationToken::new(),
+                    &root,
+                    &BTreeMap::new(),
+                    None,
+                ),
+            )
+            .await
+            .expect("the call returns")
+            .unwrap();
+            assert_eq!(output.metadata["leftovers"], true, "{command}");
+            assert_eq!(output.metadata["exit"], 0, "{command}");
+            // Its end, then two seconds at most for what it left (with room
+            // for a loaded machine), not the outer limit.
+            assert!(
+                began.elapsed() < Duration::from_secs(10),
+                "{command}: {:?}",
+                began.elapsed()
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_the_files_of_background_commands_of_a_gone_process_are_swept() {
+        let root = fixture();
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let gone_pid = gone.id();
+        gone.wait().unwrap();
+        let names = [
+            format!("background-{gone_pid}-tool_a.txt"),
+            format!("background-{}-tool_b.txt", std::process::id()),
+            "tool_c.txt".to_owned(),
+            "background-notapid-tool_d.txt".to_owned(),
+        ];
+        for name in &names {
+            std::fs::write(root.join(name), "output").unwrap();
+        }
+        assert_eq!(sweep_background_files(&root), 1);
+        for (index, name) in names.iter().enumerate() {
+            assert_eq!(root.join(name).exists(), index != 0, "{name}");
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
