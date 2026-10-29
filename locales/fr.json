@@ -2922,6 +2922,7 @@
   "{count} moved to background · results will return here": "{count} passés en arrière-plan · les résultats reviendront ici",
   "This command can't move to the background": "Cette commande ne peut pas passer en arrière-plan",
   "stopped what it left running": "ce qu’elle a laissé tourner a été arrêté",
+  "left processes running": "a laissé des processus en cours",
   "Press Esc again to stop 1 command in background": "Appuyez de nouveau sur Échap pour arrêter 1 commande en arrière-plan",
   "Press Esc again to stop {count} commands in background": "Appuyez de nouveau sur Échap pour arrêter {count} commandes en arrière-plan",
   "1 tool call": "1 appel d’outil",

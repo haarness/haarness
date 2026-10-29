@@ -2922,6 +2922,7 @@
   "{count} moved to background · results will return here": "{count} pasados a segundo plano · los resultados volverán aquí",
   "This command can't move to the background": "Este comando no puede pasar a segundo plano",
   "stopped what it left running": "se detuvo lo que dejó en marcha",
+  "left processes running": "dejó procesos en marcha",
   "Press Esc again to stop 1 command in background": "Pulsa Esc otra vez para detener 1 comando en segundo plano",
   "Press Esc again to stop {count} commands in background": "Pulsa Esc otra vez para detener {count} comandos en segundo plano",
   "1 tool call": "1 llamada a herramienta",

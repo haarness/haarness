@@ -2922,6 +2922,7 @@
   "{count} moved to background · results will return here": "{count} öğe arka plana taşındı · sonuçlar buraya dönecek",
   "This command can't move to the background": "Bu komut arka plana taşınamaz",
   "stopped what it left running": "bıraktığı süreçler durduruldu",
+  "left processes running": "çalışan süreçler bıraktı",
   "Press Esc again to stop 1 command in background": "Arka plandaki 1 komutu durdurmak için Esc'ye yeniden basın",
   "Press Esc again to stop {count} commands in background": "Arka plandaki {count} komutu durdurmak için Esc'ye yeniden basın",
   "1 tool call": "1 araç çağrısı",

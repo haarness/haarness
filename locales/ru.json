@@ -2922,6 +2922,7 @@
   "{count} moved to background · results will return here": "Переведено в фон: {count} · результаты вернутся сюда",
   "This command can't move to the background": "Эту команду нельзя перевести в фон",
   "stopped what it left running": "оставленные процессы остановлены",
+  "left processes running": "оставил работающие процессы",
   "Press Esc again to stop 1 command in background": "Нажмите Esc ещё раз, чтобы остановить 1 команду в фоне",
   "Press Esc again to stop {count} commands in background": "Нажмите Esc ещё раз, чтобы остановить команды в фоне: {count}",
   "1 tool call": "вызовы инструментов: 1",

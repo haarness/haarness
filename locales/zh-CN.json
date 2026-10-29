@@ -2922,6 +2922,7 @@
   "{count} moved to background · results will return here": "{count} 项已移至后台 · 结果会返回这里",
   "This command can't move to the background": "此命令无法移至后台",
   "stopped what it left running": "已停止它留下运行的进程",
+  "left processes running": "留下了仍在运行的进程",
   "Press Esc again to stop 1 command in background": "再按一次 Esc 停止后台的 1 个命令",
   "Press Esc again to stop {count} commands in background": "再按一次 Esc 停止后台的 {count} 个命令",
   "1 tool call": "1 次工具调用",

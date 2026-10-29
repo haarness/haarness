@@ -2020,6 +2020,18 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     _ => None,
                 });
                 let result_status = result.and_then(|item| match &item.data {
+                    // A person stopped the command while the agent waited
+                    // for it: their decision, which reads as quietly as a
+                    // cancel, whatever code it ended with.
+                    ItemData::ToolResult { metadata, .. }
+                        if name == "bash"
+                            && metadata
+                                .get("stoppedBy")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("person") =>
+                    {
+                        Some("stopped")
+                    }
                     ItemData::ToolResult {
                         output, is_error, ..
                     } => Some(if *is_error && output.trim() == "operation cancelled" {
@@ -2113,7 +2125,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         None if queued => "  ○ ".into(),
                         None => format!("  {} ", spinner(app.tick)),
                         Some("failed") => "  ✗ ".into(),
-                        Some("cancelled" | "rejected" | "blocked") => "  ⊘ ".into(),
+                        Some("cancelled" | "rejected" | "blocked" | "stopped") => "  ⊘ ".into(),
                         Some(_) => "  ● ".into(),
                     },
                     |state| format!("  {} ", task_state_style(state, app.tick, theme).0),
@@ -2130,7 +2142,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         || format!("  {}", app.language.text("failed")),
                         |code| format!("  exit {code}"),
                     ),
-                    Some(state @ ("cancelled" | "rejected")) => {
+                    Some(state @ ("cancelled" | "rejected" | "stopped")) => {
                         format!("  {}", app.language.text(state))
                     }
                     Some("blocked") => {
@@ -2243,17 +2255,18 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         };
                     }
                     // What a command left running (`server &`) was stopped
-                    // when it ended, which the row says quietly.
-                    if name == "bash"
-                        && metadata
-                            .get("leftovers")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(true)
-                    {
-                        return format!(
-                            "  ·  {}",
-                            app.language.text("stopped what it left running")
-                        );
+                    // when it ended, or runs on unread (it left the
+                    // command's process group), which the row says quietly.
+                    let flag = |key: &str| {
+                        metadata.get(key).and_then(serde_json::Value::as_bool) == Some(true)
+                    };
+                    if name == "bash" && flag("leftovers") {
+                        let said = if flag("leftoversRunning") {
+                            "left processes running"
+                        } else {
+                            "stopped what it left running"
+                        };
+                        return format!("  ·  {}", app.language.text(said));
                     }
                     if let Some(label) = empty_result_label(output) {
                         return format!("  ·  {label}");
