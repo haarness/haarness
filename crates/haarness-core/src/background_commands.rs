@@ -602,6 +602,10 @@ pub(crate) trait CommandHooks: Send + Sync {
     async fn backgrounded(&self, entry: &CommandEntry, moved: Option<ShellCommandMovedBy>);
     /// It ended in the background; `notify`: its chat is told.
     async fn ended(&self, entry: &CommandEntry, notify: bool);
+    /// Its end is decided before its process has gone (Haarness stops
+    /// while a person or the agent was stopping it): record it as `state`
+    /// now.
+    async fn decided(&self, entry: &CommandEntry, state: ShellCommandState);
 }
 
 /// One command.
@@ -626,6 +630,8 @@ pub(crate) struct CommandEntry {
     /// It stayed in the foreground because its chat ran as many commands
     /// in the background as it may.
     held: AtomicBool,
+    /// Its end checkpoint is written already (see [`Self::stop_for_shutdown`]).
+    end_recorded: AtomicBool,
 }
 
 impl CommandEntry {
@@ -1005,6 +1011,46 @@ impl CommandEntry {
         if info.background {
             self.hooks.ended(self, notify).await;
         }
+    }
+
+    /// Haarness stops. A command nothing was stopping gets a quick stop and
+    /// records nothing: the next start reports it cut off. One a person or
+    /// the agent was stopping ends as they decided: that end is recorded at
+    /// once, nobody is told, and its process is killed rather than left to
+    /// its grace. Answers whether a stop began or was taken over.
+    pub(crate) async fn stop_for_shutdown(self: &Arc<Self>, grace: Duration) -> bool {
+        if !self.info.borrow().state.is_live() {
+            return false;
+        }
+        let decided = {
+            let mut stopping = self.stopping.lock();
+            match stopping.as_mut() {
+                Some(cause) if !cause.soft && !cause.taken_over => {
+                    cause.taken_over = true;
+                    cause.ended_by = ShellCommandEndedBy::Shutdown;
+                    Some(cause.state)
+                }
+                _ => None,
+            }
+        };
+        let Some(state) = decided else {
+            return self.stop(
+                ShellCommandEndedBy::Shutdown,
+                ShellCommandState::Stopped,
+                StopSequence::Graceful(grace),
+            );
+        };
+        if self.info.borrow().background {
+            self.hooks.decided(self, state).await;
+            self.end_recorded.store(true, Ordering::SeqCst);
+        }
+        self.process.control.signal(StopSignal::Kill);
+        true
+    }
+
+    /// Its end checkpoint is written already.
+    pub(crate) fn end_recorded(&self) -> bool {
+        self.end_recorded.load(Ordering::SeqCst)
     }
 
     /// Haarness stopped while it ran, and nothing else had begun to stop
@@ -1415,6 +1461,7 @@ impl ShellCall {
             wake: Notify::new(),
             announced: AtomicBool::new(false),
             held: AtomicBool::new(false),
+            end_recorded: AtomicBool::new(false),
         });
         call.commands.forget_ended();
         call.commands
@@ -1980,6 +2027,7 @@ mod tests {
         fn printed(&self, _: &ShellCommandInfo, _: u64) {}
         async fn backgrounded(&self, _: &CommandEntry, _: Option<ShellCommandMovedBy>) {}
         async fn ended(&self, _: &CommandEntry, _: bool) {}
+        async fn decided(&self, _: &CommandEntry, _: ShellCommandState) {}
     }
 
     /// A process nobody can signal.
@@ -2496,6 +2544,7 @@ mod tests {
                 wake: Notify::new(),
                 announced: AtomicBool::new(false),
                 held: AtomicBool::new(false),
+                end_recorded: AtomicBool::new(false),
             })
         };
         for (id, thread, state, ended) in [

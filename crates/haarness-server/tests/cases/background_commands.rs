@@ -1245,17 +1245,18 @@ async fn a_command_ends_when_its_shell_does_though_what_it_left_never_stops_prin
 }
 
 #[tokio::test]
-async fn a_command_already_stopping_when_haarness_stops_records_its_end() {
+async fn a_command_already_stopping_when_the_server_stops_records_its_end() {
     use haarness_protocol::ShellCommandState as State;
     let workspace = Workspace::new();
     let (runtime, _) = commands_runtime(&workspace.0, |settings| {
-        settings.shell_stop_grace_ms = 1_000;
+        settings.shell_stop_grace_ms = 30_000;
     });
+    let handle = activity_server(runtime.clone(), None, &workspace.0).await;
     let thread = chat(&runtime, None).await;
     let turn = scripted(
         &runtime,
         thread,
-        r#"!tool bash {"command":"trap '' INT; printf ready; sleep 30","run_in_background":true}"#,
+        r#"!tool bash {"command":"trap '' INT; printf ready; sleep 60","run_in_background":true}"#,
         true,
     )
     .await;
@@ -1265,25 +1266,32 @@ async fn a_command_already_stopping_when_haarness_stops_records_its_end() {
         .unwrap()
         .to_owned();
     command_until(&runtime, thread, &id, |info| info.output_bytes > 0).await;
-    // A person stops it, and Haarness stops before it has ended.
+    // A person stops it; it ignores the interrupt, its grace is long, and
+    // the server stops meanwhile.
     runtime.stop_shell_command(thread, &id).await.unwrap();
-    runtime
-        .interrupt_active_turns("Haarness stopped")
-        .await
-        .unwrap();
-    command_until(&runtime, thread, &id, |info| !info.state.is_live()).await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while checkpoints(&runtime, thread).await.len() < 2 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("its end is recorded, so a restart does not call it cut off");
+    let began = std::time::Instant::now();
+    handle.shutdown().await.unwrap();
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        began.elapsed()
+    );
+    // The server waited for it to end, and its end is recorded: the next
+    // start does not call it cut off.
+    assert!(
+        !runtime
+            .shell_command(thread, &id)
+            .await
+            .unwrap()
+            .state
+            .is_live()
+    );
     assert_eq!(
         checkpoints(&runtime, thread).await,
         [(id.clone(), State::Running), (id.clone(), State::Stopped)]
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    runtime.recover().await.unwrap();
+    assert_eq!(checkpoints(&runtime, thread).await.len(), 2);
     assert!(notices(&runtime, thread).await.is_empty());
 }
 
