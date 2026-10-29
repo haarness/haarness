@@ -725,6 +725,9 @@ struct Word<'t> {
     value: String,
     /// Whether `value` is all literal text.
     literal: bool,
+    /// How much of `value` is literal text from its start, quoted or not
+    /// (`-C` of `"-C$d"`): all of it when [`Self::literal`].
+    known: usize,
 }
 
 /// Node kinds that are a command's words.
@@ -2351,7 +2354,7 @@ fn given_paths(given: &Given<'_, '_>, source: &str) -> Vec<Path_> {
             })
             .collect();
     }
-    if !word.literal && word.node.kind() == "concatenation" {
+    if !word.literal && matches!(word.node.kind(), "concatenation" | "string") {
         let parts: Vec<_> = word.node.named_children(&mut word.node.walk()).collect();
         if let [option, first, rest @ ..] = parts.as_slice()
             && node_text(*option, source) == prefix
@@ -2708,11 +2711,26 @@ fn words<'t>(node: tree_sitter::Node<'t>, source: &str) -> Vec<Word<'t>> {
             Word {
                 node: child,
                 raw: node_text(child, source),
+                known: known(child, &value, literal, source),
                 value,
                 literal,
             }
         })
         .collect()
+}
+
+/// How much of a word's `value` (see [`unquote`]) is literal text from its
+/// start: see [`Word::known`].
+fn known(node: tree_sitter::Node<'_>, value: &str, whole: bool, source: &str) -> usize {
+    if whole {
+        return value.len();
+    }
+    let (start, _) = literal(node, source);
+    if value.starts_with(&start) {
+        start.len()
+    } else {
+        0
+    }
 }
 
 /// Words as `eval` joins them before it runs them.
@@ -2983,15 +3001,9 @@ impl<'s, 't> Options<'s, 't> {
         let mut index = 0;
         while let Some(word) = words.get(index) {
             let value = word.value.as_str();
-            // How much of the value is written out before a quote, an
-            // expansion or a backslash: what may name an option.
-            let written = if word.literal {
-                value.len()
-            } else {
-                word.raw
-                    .find(['$', '`', '\'', '"', '\\'])
-                    .unwrap_or_default()
-            };
+            // How much of the value is literal text before an expansion,
+            // quoted or not: what may name an option.
+            let written = word.known;
             if word.literal && value == "--" {
                 index += 1;
                 break;
@@ -3387,6 +3399,7 @@ fn command_words<'t>(
             list.push(Word {
                 node: child,
                 raw: node_text(child, source),
+                known: known(child, &value, literal, source),
                 value,
                 literal,
             });
@@ -7661,6 +7674,11 @@ mod wrappers {
             "sudo --user=\"$U\" rm -rf ~/x",
             "doas A=1 rm -rf ~/x",
             "timeout --signal=\"$S\" 5 rm -rf ~/x",
+            // Option text in quotes before an expansion.
+            "env \"-C$D\" rm -rf ~/x",
+            "sudo \"-u$U\" rm -rf ~/x",
+            "timeout \"-s$S\" 5 rm -rf ~/x",
+            "env \"--unset=$V\" rm -rf ~/x",
             // A root of its own, and long options shortened as getopt
             // takes them.
             "sudo -R /jail rm -rf ~/x",
@@ -7847,6 +7865,18 @@ mod wrappers {
             ),
             ("env --chdir=\"$TMPDIR\" cat x", "cd \"$TMPDIR\" && cat x"),
             (
+                "env \"-C$HOME/.ssh\" cat id_rsa",
+                "cd \"$HOME/.ssh\" && cat id_rsa",
+            ),
+            (
+                "env \"--chdir=$HOME/.ssh\" cat id_rsa",
+                "cd \"$HOME/.ssh\" && cat id_rsa",
+            ),
+            (
+                "sudo \"-D$HOME\" cat .ssh/id_rsa",
+                "cd \"$HOME\" && cat .ssh/id_rsa",
+            ),
+            (
                 "env --chd /tmp cat haarness-no-such-file",
                 "cd /tmp && cat haarness-no-such-file",
             ),
@@ -7863,6 +7893,7 @@ mod wrappers {
             "env -C ~/.ssh cat id_rsa",
             "env --chdir=$HOME/.ssh cat id_rsa",
             "sudo -D\"$HOME\" cat .ssh/id_rsa",
+            "env \"-C$HOME/.ssh\" cat id_rsa",
         ] {
             assert!(
                 !analyze(command, &workspace).external_dirs.is_empty(),
