@@ -204,6 +204,32 @@ export function moveRefusal(message: string) {
   return /[.!?]$/.test(sentence) ? sentence : sentence + ".";
 }
 
+/**
+ * What a person is told after asking to send the chat's running commands
+ * and subagents to the background together (each its own request; one
+ * not asked is undefined). Anything that moved makes it no failure: a part
+ * that was refused (the chat's limit held every command back) is a `note`
+ * then. Only when nothing moved is the refusal an `error`. Commands asked
+ * for that none of moved without a refusal (a server that answers an empty
+ * list when its limit holds them all) read as `heldBack`.
+ */
+export function sentOutcome(input: {
+  commands?: PromiseSettledResult<unknown[] | undefined>;
+  subagents?: PromiseSettledResult<unknown[] | undefined>;
+  heldBack: unknown;
+}): { error?: unknown; note?: unknown } {
+  const moved = [input.commands, input.subagents].reduce(
+    (count, result) => count + (result?.status === "fulfilled" ? (result.value?.length ?? 0) : 0),
+    0,
+  );
+  const failure = (result?: PromiseSettledResult<unknown>) =>
+    result?.status === "rejected" ? (result.reason as unknown) : undefined;
+  const none = input.commands?.status === "fulfilled" && !input.commands.value?.length;
+  const refused = failure(input.commands) ?? (none ? input.heldBack : undefined) ?? failure(input.subagents);
+  if (refused === undefined) return {};
+  return moved ? { note: refused } : { error: refused };
+}
+
 /** A `batch` step's own call id: the steps' calls are numbered from 1 after
  * the batch's (`call:1`, `call:2`). */
 export const stepCallId = (batch: string, index: number) => `${batch}:${index + 1}`;

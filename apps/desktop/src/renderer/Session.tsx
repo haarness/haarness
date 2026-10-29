@@ -72,7 +72,7 @@ import { carriedReasoning } from "./reasoning";
 import { AgentTask } from "./AgentTask";
 import { Shimmer } from "./Shimmer";
 import { agentTasks, agentTaskStatus, taskKey, type AgentTask as Task } from "./agent-tasks";
-import { commandCheckpoints, commandLines, type CommandCheckpoint } from "./shell-commands";
+import { commandCheckpoints, commandLines, sentOutcome, type CommandCheckpoint } from "./shell-commands";
 import { backgroundCommands, commandsOffered } from "./background-work";
 import { createDictation } from "./dictation";
 import { FolderPicker } from "./FolderPicker";
@@ -1346,10 +1346,22 @@ export function Session() {
     if (!canSendToBackground() || sending()) return;
     setSending(true);
     try {
-      await Promise.all([
-        movableCommands() ? backgroundCommands(app, thread) : undefined,
-        movableSubagents() ? app.api("promoteBackgroundTasks", thread, {}) : undefined,
+      const askCommands = movableCommands();
+      const askSubagents = movableSubagents();
+      const [commands, subagents] = await Promise.allSettled([
+        askCommands ? backgroundCommands(app, thread) : undefined,
+        askSubagents ? app.api<T.BackgroundTaskInfo[]>("promoteBackgroundTasks", thread, {}) : undefined,
       ]);
+      // Subagents went while the chat's limit held every command back: that
+      // is said quietly, as no failure.
+      const outcome = sentOutcome({
+        commands: askCommands ? commands : undefined,
+        subagents: askSubagents ? subagents : undefined,
+        heldBack: new Error(t("This chat can't send more commands to the background right now.")),
+      });
+      if (outcome.error !== undefined) throw outcome.error;
+      if (outcome.note !== undefined)
+        app.notify(outcome.note instanceof Error ? outcome.note.message : String(outcome.note), "blocked");
     } finally {
       setSending(false);
     }
