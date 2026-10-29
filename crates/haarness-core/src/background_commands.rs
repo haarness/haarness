@@ -1107,6 +1107,30 @@ impl ShellCall {
         Self(Arc::new(inner))
     }
 
+    /// The rules for a command of this call that gave `timeout_ms`.
+    fn policy(&self, timeout_ms: Option<u64>) -> CommandPolicy {
+        CommandPolicy::new(
+            &self.0.settings,
+            self.0.follows,
+            self.0.subagent,
+            self.0.unattended,
+            timeout_ms,
+        )
+    }
+
+    /// Whether all of the command's output is saved, from the start: only
+    /// while it runs in the foreground with a deadline. Otherwise (no
+    /// deadline, or in the background) its first [`OUTPUT_SAVED_LIMIT`]
+    /// bytes are.
+    #[must_use]
+    pub fn saves_whole_output(&self, request: &CommandRequest) -> bool {
+        !request.background
+            && self
+                .policy(request.timeout_ms)
+                .foreground_deadline
+                .is_some()
+    }
+
     /// Whether the command may start; a call past the chat's cap of
     /// commands in the background is refused before anything runs.
     pub fn check_start(&self, background: bool) -> CoreResult<()> {
@@ -1141,13 +1165,7 @@ impl ShellCall {
         cancel: &CancellationToken,
     ) -> CoreResult<CommandRun> {
         let call = &self.0;
-        let policy = CommandPolicy::new(
-            &call.settings,
-            call.follows,
-            call.subagent,
-            call.unattended,
-            request.timeout_ms,
-        );
+        let policy = self.policy(request.timeout_ms);
         let started_at = Utc::now();
         let background_at = request.background.then_some(started_at);
         let mut command = request.command.clone();
