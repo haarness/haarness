@@ -109,6 +109,11 @@ CORPUS = [
     'env A+=1 rm -rf ~/x', "env 'A B=1' rm -rf ~/x", 'env A=$(pwd) rm -rf victim', 'sudo A=1 -u root rm -rf victim',
     'env - rm -rf victim', 'env --chdir="$D" rm -rf victim', 'coproc rm -rf ~/x', 'coproc NAME { rm -rf victim; }',
     '! { rm -rf victim; }',
+    'rm -rf src && ln -s ../outside src && env -C src cat ../README.md', 'true && env -C src cat ../README.md',
+    'echo x; env -C src cat ../README.md', 'cd src && env -C . cat ../README.md', 'env --chdir=$HOME/.ssh cat id_rsa',
+    'sudo -D"$HOME" cat .ssh/id_rsa', "sudo -D ~/.ssh -s <<'EOF'\ncat id_rsa\nEOF", 'echo "cat id_rsa" | sudo -D ~/.ssh -s',
+    'env -C "$D" env -C src cat ../README.md', 'sudo -i env -C src cat ../README.md', 'sudo -R /jail rm -rf victim',
+    'sudo --us root rm -rf victim', 'env --chd /tmp rm -rf victim', 'cat() { cat a; } >> log.txt; cat',
     # Lines of assignments
     'A=1 B=2\nnpm test', 'PORT=3000 HOST=0.0.0.0\nnpm start', 'A=1\n! cat ../outside/x', 'A=1 B=2\n! rm -rf victim',
     'A=1\nif true; then rm -rf victim; fi', 'A=1 B=2\n{ rm -rf victim; }', 'A=1 B=2 # note\nrm -rf victim',

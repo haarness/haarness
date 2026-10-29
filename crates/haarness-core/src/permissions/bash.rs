@@ -281,6 +281,7 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         unplaced: false,
         folder: None,
         here: None,
+        lost: false,
     };
     if !reader.read(command, Depth::default()) {
         return fallback(command);
@@ -610,6 +611,7 @@ fn joined_continuations(text: &str, within: bool) -> Option<String> {
     Some(joined)
 }
 
+#[allow(clippy::struct_excessive_bools)] // independent marks of one reading, not a state machine
 struct Reader<'w> {
     workspace: &'w Path,
     /// The folder the shell starts in: the project, or a call's `workdir`.
@@ -656,6 +658,12 @@ struct Reader<'w> {
     /// relative folder starts from. The command it runs is read from where
     /// the shell started unless the wrapper names a folder.
     here: Option<Rc<Path>>,
+    /// Where the command being read runs is not known for sure, so a folder
+    /// a wrapper names is checked but not followed: a step where a `cd`
+    /// would not be followed (see [`chain_folders`]), text run again, or
+    /// what runs behind a wrapper whose folder nobody can place (`env -C
+    /// "$d"`, `sudo -i`, `find -execdir`).
+    lost: bool,
 }
 
 /// The written command whose standard input a program reads.
@@ -870,6 +878,8 @@ impl Reader<'_> {
         // sort by position so patterns keep source order.
         command_nodes.sort_by_key(|(node, _)| node.start_byte());
         let mut folders = HashMap::new();
+        // The steps where a `cd` would be followed: none in text run again.
+        let mut open = HashSet::new();
         if depth.text == 0 {
             let mut statements = tree.root_node().walk();
             let statements: Vec<_> = tree
@@ -888,7 +898,7 @@ impl Reader<'_> {
                 && !tree.root_node().has_error()
                 && joined_continuations(command, true).is_none()
             {
-                folders = chain_folders(*statement, command, self.start);
+                (folders, open) = chain_folders(*statement, command, self.start);
             }
         }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
@@ -896,6 +906,7 @@ impl Reader<'_> {
         // of the reading around it are its own again afterwards.
         let outer_folder = self.folder.take();
         let outer_here = self.here.take();
+        let outer_lost = self.lost;
         let continued = command.contains("\\\n");
         // The written command each command node is read for, by where the
         // node starts.
@@ -991,6 +1002,7 @@ impl Reader<'_> {
                 documents: &documents,
             };
             self.here = here;
+            self.lost = !open.contains(&node.id());
             self.unwrap(&words, Some(stdin), command, depth);
             self.here = None;
             if let Some(lines) = parent.and_then(|statement| hidden.get(&statement.id())) {
@@ -1102,6 +1114,7 @@ impl Reader<'_> {
         }
         self.folder = outer_folder;
         self.here = outer_here;
+        self.lost = outer_lost;
         true
     }
 
@@ -1269,9 +1282,11 @@ impl Reader<'_> {
 
     /// Where a wrapper runs the command it is given (`env -C`, `sudo -D`).
     /// Each folder it names is checked like a `cd`'s, from where the wrapper
-    /// runs. The command's relative paths then start in the last one when it
-    /// is plain (see [`plain`]) and there now, else where the shell started,
-    /// as after `cd "$d"`.
+    /// runs. The command's relative paths then start in the last one where a
+    /// `cd` to it would be followed: the wrapper runs where that is known for
+    /// sure (see [`Self::lost`]), and the folder is one literal word that
+    /// [`plain`] takes and a folder now. Anywhere else they start where the
+    /// shell started, as after `cd "$d"`.
     fn wrapper_folder(&mut self, folders: &[&Given<'_, '_>], source: &str) -> Moved {
         if folders.is_empty() {
             return Moved::No;
@@ -1283,8 +1298,10 @@ impl Reader<'_> {
             .unwrap_or_else(|| Rc::from(self.start));
         let outer = self.folder.replace(Rc::clone(&base));
         let mut last = Vec::new();
+        let mut literal = false;
         for given in folders {
             last = given_paths(given, source);
+            literal = given.word.is_some_and(|word| word.literal);
             for path in &last {
                 self.check_folder("cd", &path.raw, &path.value, path.complete);
             }
@@ -1293,7 +1310,7 @@ impl Reader<'_> {
         let [path] = last.as_slice() else {
             return Moved::Unknown;
         };
-        if !path.complete || !plain(&path.value) {
+        if self.lost || !literal || !path.complete || !plain(&path.value) {
             return Moved::Unknown;
         }
         let target =
@@ -1315,18 +1332,20 @@ impl Reader<'_> {
         source: &str,
         depth: Depth,
     ) {
-        let folder = match moved {
+        let (folder, lost) = match moved {
             Moved::No => {
                 self.invocation(words, stdin, source, depth);
                 return;
             }
-            Moved::Unknown => None,
-            Moved::To(folder) => Some(folder),
+            Moved::Unknown => (None, true),
+            Moved::To(folder) => (Some(folder), self.lost),
         };
         let outer = std::mem::replace(&mut self.folder, folder);
+        let outer_lost = std::mem::replace(&mut self.lost, lost);
         self.moved += 1;
         self.invocation(words, stdin, source, depth);
         self.moved -= 1;
+        self.lost = outer_lost;
         self.folder = outer;
     }
 
@@ -1600,6 +1619,10 @@ impl Reader<'_> {
                         arguments[index].value.as_str(),
                         "-exec" | "-execdir" | "-ok" | "-okdir"
                     );
+                    // `-execdir` and `-okdir` run it in the folder of each
+                    // file found.
+                    let elsewhere =
+                        matches!(arguments[index].value.as_str(), "-execdir" | "-okdir");
                     index += 1;
                     if !starts {
                         continue;
@@ -1613,7 +1636,10 @@ impl Reader<'_> {
                     {
                         index += 1;
                     }
+                    let outer = self.lost;
+                    self.lost |= elsewhere;
                     self.invocation(&arguments[start..index], None, source, depth);
+                    self.lost = outer;
                 }
             }
             name if SHELLS.contains(&name) => {
@@ -3948,12 +3974,17 @@ const RUNS_IN_SHELL: &[&str] = &["time", "trap", "mapfile", "readarray", "enable
 /// rest of the line read from where the shell started, as for any line.
 /// Past [`MAX_MOVES`] or a folder of [`MAX_PLACED_BYTES`] nothing more is
 /// followed.
+///
+/// Also the steps where a `cd` would be followed, by the node id of their
+/// command: each plain step before any other step ran. A wrapper's folder is
+/// followed there only (see [`Reader::wrapper_folder`]).
 fn chain_folders(
     chain: tree_sitter::Node<'_>,
     source: &str,
     workspace: &Path,
-) -> HashMap<usize, Rc<Path>> {
+) -> (HashMap<usize, Rc<Path>>, HashSet<usize>) {
     let mut folders = HashMap::new();
+    let mut open = HashSet::new();
     let mut folder: Rc<Path> = Rc::from(workspace);
     let (mut moves, mut ran) = (0, false);
     for (node, outer) in steps(chain) {
@@ -3989,6 +4020,9 @@ fn chain_folders(
                         .count()
                         == 1
             });
+        if plain && !ran {
+            open.insert(command.id());
+        }
         match words.as_slice() {
             [program, target]
                 if plain
@@ -4020,7 +4054,7 @@ fn chain_folders(
             _ => break,
         }
     }
-    folders
+    (folders, open)
 }
 
 /// `text` kept to [`CLIPPED_PATTERN_BYTES`], with `…` when cut.
@@ -7648,6 +7682,80 @@ mod wrappers {
             analyze("env -C sub bash -c 'cat ../README.md'", &workspace).external_dirs,
             parent
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wrapper_s_folder_is_followed_only_where_a_cd_there_would_be() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-wrapper-step-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
+        let parent = vec![glob(&root.canonicalize().unwrap())];
+        // After a step that ran (it may have made `src` a link out), in a
+        // line of more than one statement, a pipeline, a step with an
+        // assignment or a substitution, and in text run again, a `cd` is not
+        // followed and neither is a wrapper's folder: the command's paths are
+        // read from where the shell started.
+        for (wrapped, chained) in [
+            (
+                "rm -rf src && ln -s ../outside src && env -C src cat ../README.md",
+                "rm -rf src && ln -s ../outside src && cd src && cat ../README.md",
+            ),
+            (
+                "true && env -C src cat ../README.md",
+                "true && cd src && cat ../README.md",
+            ),
+            (
+                "echo x; env -C src cat ../README.md",
+                "echo x; cd src && cat ../README.md",
+            ),
+            (
+                "A=1 env -C src cat ../README.md",
+                "A=1 cd src && cat ../README.md",
+            ),
+        ] {
+            let analysis = analyze(wrapped, &workspace);
+            assert_eq!(analysis.external_dirs, parent, "{wrapped}");
+            assert_eq!(
+                analysis.external_dirs,
+                analyze(chained, &workspace).external_dirs,
+                "{wrapped}"
+            );
+        }
+        for command in [
+            // A substitution runs before the wrapper, and may make `src` a
+            // link out.
+            "env -C src cat ../README.md $(true)",
+            "env -C src cat ../README.md | head",
+            "bash -c 'env -C src cat ../README.md'",
+            // Behind a wrapper whose folder nobody can place, a relative
+            // folder is not placed either.
+            "env -C \"$D\" env -C src cat ../README.md",
+            "sudo -i env -C src cat ../README.md",
+            "find . -execdir env -C src cat ../README.md \\;",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                parent,
+                "{command}"
+            );
+        }
+        // Where a `cd` would be followed, the folder is too.
+        for command in [
+            "env -C src cat ../README.md",
+            "cd src && env -C . cat ../README.md",
+            // The shell opens a redirect before the wrapper moves.
+            "env -C src cat ../README.md > out.txt",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
