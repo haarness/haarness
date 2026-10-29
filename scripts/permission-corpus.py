@@ -116,6 +116,8 @@ CORPUS = [
     'sudo --us root rm -rf victim', 'env --chd /tmp rm -rf victim', 'cat() { cat a; } >> log.txt; cat',
     'xargs --max-l rm -rf < list.txt', 'xargs --eo rm -rf < list.txt', 'xargs --max-lines rm -rf < list.txt',
     'xargs --eof rm -rf < list.txt', 'xargs -i rm -rf {} < list.txt', 'xargs -n 1 rm -f < files.txt',
+    'sudo --login env -C src cat ../README.md', "sudo --login <<'EOF'\nrm -rf victim\nEOF",
+    'echo "rm -rf victim" | sudo --shell', 'sudo -c staff rm -rf victim',
     # Lines of assignments
     'A=1 B=2\nnpm test', 'PORT=3000 HOST=0.0.0.0\nnpm start', 'A=1\n! cat ../outside/x', 'A=1 B=2\n! rm -rf victim',
     'A=1\nif true; then rm -rf victim; fi', 'A=1 B=2\n{ rm -rf victim; }', 'A=1 B=2 # note\nrm -rf victim',

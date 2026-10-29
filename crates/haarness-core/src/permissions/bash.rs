@@ -2818,6 +2818,10 @@ struct Long<'a> {
     /// They take a value only written `--name=value` (`xargs --eof=x`):
     /// `--eof` alone takes none.
     joined: &'a [&'a str],
+    /// They take none, each with the short option it stands for. Needed
+    /// where one starts like an option that takes a value (`sudo --login`
+    /// and `--login-class`), or says what the wrapper runs (`--shell`).
+    bare: &'a [(&'a str, char)],
 }
 
 /// What a long option takes, as getopt finds it by its name.
@@ -2827,6 +2831,8 @@ enum Takes {
     Next,
     /// A value only after `=`.
     Joined,
+    /// None: the short option it stands for.
+    Flag(char),
     /// None, or the name is no option the wrapper has.
     Nothing,
 }
@@ -2841,7 +2847,12 @@ impl Long<'_> {
             .valued
             .iter()
             .map(|long| (*long, Takes::Next))
-            .chain(self.joined.iter().map(|long| (*long, Takes::Joined)));
+            .chain(self.joined.iter().map(|long| (*long, Takes::Joined)))
+            .chain(
+                self.bare
+                    .iter()
+                    .map(|(long, letter)| (*long, Takes::Flag(*letter))),
+            );
         if let Some((_, takes)) = options.clone().find(|(long, _)| *long == name) {
             return (name.to_owned(), takes);
         }
@@ -2858,7 +2869,7 @@ impl Long<'_> {
     }
 }
 
-/// The long options of `sudo` (and, read alike, `doas`) that take a value.
+/// The long options of `sudo` (and, read alike, `doas`).
 const SUDO_LONG: Long<'static> = Long {
     valued: &[
         "user",
@@ -2872,14 +2883,35 @@ const SUDO_LONG: Long<'static> = Long {
         "command-timeout",
         "other-user",
         "chroot",
+        "auth-type",
+        "login-class",
     ],
     joined: &["preserve-env"],
+    bare: &[
+        ("askpass", 'A'),
+        ("background", 'b'),
+        ("bell", 'B'),
+        ("edit", 'e'),
+        ("set-home", 'H'),
+        ("help", 'h'),
+        ("login", 'i'),
+        ("remove-timestamp", 'K'),
+        ("reset-timestamp", 'k'),
+        ("list", 'l'),
+        ("non-interactive", 'n'),
+        ("preserve-groups", 'P'),
+        ("stdin", 'S'),
+        ("shell", 's'),
+        ("version", 'V'),
+        ("validate", 'v'),
+    ],
 };
 
 /// The long options of `env` that take a value.
 const ENV_LONG: Long<'static> = Long {
     valued: &["unset", "chdir", "split-string", "argv0"],
     joined: &["default-signal", "ignore-signal", "block-signal"],
+    bare: &[],
 };
 
 /// The long options of `xargs` that take a value.
@@ -2893,6 +2925,7 @@ const XARGS_LONG: Long<'static> = Long {
         "process-slot-var",
     ],
     joined: &["eof", "max-lines", "replace"],
+    bare: &[],
 };
 
 /// A wrapper's own options, read the way getopt reads them.
@@ -2930,6 +2963,7 @@ impl<'s, 't> Options<'s, 't> {
             Long {
                 valued: long,
                 joined: &[],
+                bare: &[],
             },
         )
     }
@@ -2972,17 +3006,20 @@ impl<'s, 't> Options<'s, 't> {
                             attached: true,
                         });
                     }
-                    None if word.literal && long.find(name).1 == Takes::Next => {
-                        index += 1;
-                        let next = words.get(index);
-                        options.values.push(Given {
-                            name: long.find(name).0,
-                            value: next.map(|word| word.value.clone()).unwrap_or_default(),
-                            word: next,
-                            attached: false,
-                        });
-                    }
-                    None if word.literal => {}
+                    None if word.literal => match long.find(name) {
+                        (name, Takes::Next) => {
+                            index += 1;
+                            let next = words.get(index);
+                            options.values.push(Given {
+                                name,
+                                value: next.map(|word| word.value.clone()).unwrap_or_default(),
+                                word: next,
+                                attached: false,
+                            });
+                        }
+                        (_, Takes::Flag(letter)) => options.flags.push(letter),
+                        _ => {}
+                    },
                     _ => break,
                 }
                 index += 1;
@@ -3052,11 +3089,12 @@ impl<'s, 't> Options<'s, 't> {
             .filter(move |given| names.contains(&given.name.as_str()))
     }
 
-    /// `sudo`'s options, and the variables it is given to set among them
+    /// `sudo`'s options (`--login` read as `-i`, `--shell` as `-s` and so
+    /// on), and the variables it is given to set among them
     /// (see [`sets_variable`]), after which it reads options again: `sudo
     /// A=1 -u root rm x` runs `rm x` as root.
     fn sudo(words: &'s [Word<'t>]) -> Self {
-        let read = |words: &'s [Word<'t>]| Self::with(words, "ugpCDRrtTU", "", SUDO_LONG);
+        let read = |words: &'s [Word<'t>]| Self::with(words, "aCcDgpRrTtUu", "h", SUDO_LONG);
         let mut options = read(words);
         loop {
             let rest = after_settings(options.rest, true);
@@ -7713,6 +7751,32 @@ mod wrappers {
         }
     }
 
+    #[test]
+    fn sudo_s_long_flags_are_read_as_its_short_ones() {
+        let workspace = workspace();
+        // `--login` and `--shell` (also shortened) start a shell that reads
+        // its commands from standard input; `-a` and `-c` take a value.
+        for command in [
+            "sudo --login <<'EOF'\nrm -rf victim\nEOF",
+            "echo \"rm -rf victim\" | sudo --shell",
+            "sudo --sh <<EOF\nrm -rf victim\nEOF",
+            "sudo -a pam rm -rf victim",
+            "sudo -c staff rm -rf victim",
+            "sudo --login-class staff rm -rf victim",
+        ] {
+            assert!(reaches_rm(command, &workspace), "{command}");
+        }
+        // `--edit` edits files and `--list` and `--version` list: they run
+        // nothing.
+        for command in [
+            "sudo --edit rm",
+            "sudo --list rm -rf victim",
+            "sudo --vers rm -rf victim",
+        ] {
+            assert!(!reaches_rm(command, &workspace), "{command}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_folder_a_wrapper_runs_its_command_in_is_checked_and_read_from() {
@@ -7886,6 +7950,7 @@ mod wrappers {
             // folder is not placed either.
             "env -C \"$D\" env -C src cat ../README.md",
             "sudo -i env -C src cat ../README.md",
+            "sudo --login env -C src cat ../README.md",
             "sudo -R /jail env -C src cat ../README.md",
             "find . -execdir env -C src cat ../README.md \\;",
         ] {
@@ -7927,6 +7992,7 @@ mod wrappers {
         for command in [
             "sudo -D /etc -s <<EOF\nrm -rf x\nEOF",
             "sudo -i <<EOF\nrm -rf x\nEOF",
+            "sudo --login <<EOF\nrm -rf x\nEOF",
             "env -C /etc -S 'rm -rf x'",
         ] {
             let deletions = analyze(command, &workspace).deletions;
@@ -8390,6 +8456,7 @@ mod scripts {
             "sudo -D sub ./run.sh",
             "sudo --chdir=sub ./run.sh",
             "sudo -i bash run.sh",
+            "sudo --login bash run.sh",
             // A `cd` after it changes nothing about that (the order the
             // October 23 fix kept).
             "env -C sub ./run.sh; cd .",
