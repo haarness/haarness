@@ -893,7 +893,26 @@ fn is_transport_cut(message: &str) -> bool {
         return false;
     }
     let message = message.to_ascii_lowercase();
+    // A body read to its end that is not the JSON expected ("error decoding
+    // response body: expected value at line 1 column 1", a captive portal's
+    // page) is an answer, not a cut: it fails at once.
+    if names_json_position(&message) {
+        return false;
+    }
     STREAM_CUT.iter().any(|marker| message.contains(marker))
+}
+
+/// Whether `message` names a place in a JSON text the way a JSON parser
+/// does ("at line 1 column 1").
+fn names_json_position(message: &str) -> bool {
+    message.match_indices("at line ").any(|(at, marker)| {
+        let rest = &message[at + marker.len()..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        digits > 0
+            && rest[digits..]
+                .strip_prefix(" column ")
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    })
 }
 
 /// What a tool call says when the response that carried it was cut short
@@ -19839,6 +19858,25 @@ mod tests {
             super::closed_call_reason(&missing, Some("Anthropic")),
             "Provider response ended before completion (missing completion event)."
         );
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_an_answer_not_a_cut() {
+        // A captive portal's page read whole where JSON was expected.
+        for answer in [
+            "error decoding response body: expected value at line 1 column 1",
+            "Bedrock returned error decoding response body: EOF while parsing a value at line 3 column 0",
+        ] {
+            let error = CoreError::Provider(answer.into());
+            assert!(!super::is_stream_cut(&error), "{answer}");
+            assert!(!super::is_provider_transient(&error), "{answer}");
+            assert!(super::describe_failure(&error, None, true).starts_with("Provider error: "));
+        }
+        assert!(super::names_json_position(
+            "expected value at line 12 column 40"
+        ));
+        assert!(!super::names_json_position("upstream stream became idle"));
+        assert!(!super::names_json_position("failed at line 3"));
     }
 
     #[test]
