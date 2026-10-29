@@ -1338,12 +1338,17 @@ pub fn refusal_reason(error: &CoreError) -> String {
 }
 
 /// `describe_error`, except that a request the provider refused for its size
-/// in bytes is said plainly instead of repeating the 413. With `advice`, for
-/// the person, it also says what to do: the chat as a whole is what is too
-/// large (its files, the ones the model read among them, or its text behind
-/// a small limit), which compacting does not always make smaller. Without,
-/// for a model that started the work, it only says what happened.
+/// in bytes is said plainly instead of repeating the 413, and a connection
+/// that broke once the provider had answered (`describe_cut`) in plain words.
+/// With `advice`, for the person, it also says what to do: the chat as a
+/// whole is what is too large (its files, the ones the model read among them,
+/// or its text behind a small limit), which compacting does not always make
+/// smaller. Without, for a model that started the work, it only says what
+/// happened.
 fn describe_failure(error: &CoreError, provider: Option<&str>, advice: bool) -> String {
+    if let Some(words) = describe_cut(error, provider, advice) {
+        return words;
+    }
     if let CoreError::Provider(raw) = error
         && is_provider_oversized_request(error)
     {
@@ -1373,18 +1378,44 @@ fn describe_failure(error: &CoreError, provider: Option<&str>, advice: bool) -> 
     describe_error(error, provider)
 }
 
+/// A connection that broke after the provider had answered, in plain words
+/// rather than the transport's ("error decoding response body: Connection
+/// reset by peer (os error 54)"), which the log keeps: one that kept breaking
+/// mid-answer until the recoveries ran out, or one that broke before the
+/// answer began, every time it was retried. A request that never reached the
+/// provider ("error sending request") is not one: it could not be reached.
+/// With `advice` it also says what to do. `None` for any other failure.
+fn describe_cut(error: &CoreError, provider: Option<&str>, advice: bool) -> Option<String> {
+    let name = provider.unwrap_or("the provider");
+    let (happened, next) = match error {
+        CoreError::ProviderIncomplete(inner) if is_transport_cut(inner) => (
+            format!("The connection to {name} kept breaking off mid-answer."),
+            "Check the network connection, then send a message to continue.",
+        ),
+        CoreError::Provider(raw)
+            if is_transport_cut(raw)
+                && !raw.to_ascii_lowercase().contains("error sending request") =>
+        {
+            (
+                format!("The connection to {name} broke off before it answered."),
+                "Check the network connection, then try again.",
+            )
+        }
+        _ => return None,
+    };
+    Some(if advice {
+        format!("{happened} {next}")
+    } else {
+        happened
+    })
+}
+
 /// `user_facing_error`, naming the provider (when known) that has no
 /// credentials or refused them, so the fix is clear: connect it again.
 fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
-    // A response cut short after it began, whose recoveries ran out: said in
-    // plain words, as the same failure before any output is.
+    // A provider that fell silent after it began, whose recoveries ran out,
+    // is named as silent, as it is before any output.
     if let CoreError::ProviderIncomplete(inner) = error {
-        if is_transport_cut(inner) {
-            return format!(
-                "The connection to {} kept breaking off mid-answer. Check the network connection, then send a message to continue.",
-                provider.unwrap_or("the provider")
-            );
-        }
         let silent = CoreError::Provider(inner.clone());
         if crate::stream_stall_silence(&silent).is_some() {
             return describe_error(&silent, provider);
@@ -19733,7 +19764,8 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_that_kept_breaking_is_said_in_plain_words() {
+    fn a_connection_that_broke_is_said_in_plain_words() {
+        // Broke after the answer began, until the recoveries ran out.
         for transport in [
             "error decoding response body: Connection reset by peer (os error 54)",
             "request or response body error: An existing connection was forcibly closed by the remote host. (os error 10054)",
@@ -19741,29 +19773,66 @@ mod tests {
         ] {
             let ended = CoreError::ProviderIncomplete(transport.into());
             assert_eq!(
-                super::describe_error(&ended, Some("Anthropic")),
+                super::describe_failure(&ended, Some("Anthropic"), true),
                 "The connection to Anthropic kept breaking off mid-answer. Check the network connection, then send a message to continue."
+            );
+            // A model that started the work reads what happened, no advice.
+            assert_eq!(
+                super::describe_failure(&ended, Some("Anthropic"), false),
+                "The connection to Anthropic kept breaking off mid-answer."
             );
             assert_eq!(
                 super::user_facing_error(&ended),
-                "The connection to the provider kept breaking off mid-answer. Check the network connection, then send a message to continue."
+                "The connection to the provider kept breaking off mid-answer."
             );
             assert_eq!(
                 super::closed_call_reason(&ended, Some("Anthropic")),
                 "The connection to Anthropic broke off before this call ran, so it did not run."
             );
         }
+        // Broke before the answer began, on every retry: the provider was
+        // reached, so it is not "could not reach".
+        for transport in [
+            "error decoding response body: unexpected EOF during chunk size line",
+            "request or response body error: connection reset by peer (os error 54)",
+            "request or response body error: An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "request or response body error: error reading a body from connection: stream error received: unexpected internal error encountered",
+            "upstream stream became idle",
+        ] {
+            let broke = CoreError::Provider(transport.into());
+            assert_eq!(
+                super::describe_failure(&broke, Some("Anthropic"), true),
+                "The connection to Anthropic broke off before it answered. Check the network connection, then try again."
+            );
+            assert_eq!(
+                super::describe_failure(&broke, Some("Anthropic"), false),
+                "The connection to Anthropic broke off before it answered."
+            );
+            let shown = super::describe_failure(&broke, None, true);
+            assert!(
+                !shown.contains("os error") && !shown.contains("decoding"),
+                "{shown}"
+            );
+        }
+        // A request that never reached the provider could not reach it.
+        let unreached = CoreError::Provider(
+            "error sending request for url (https://api.anthropic.com/v1/messages): connection closed before message completed".into(),
+        );
+        assert!(
+            super::describe_failure(&unreached, Some("Anthropic"), true)
+                .starts_with("Could not reach Anthropic at api.anthropic.com.")
+        );
         // A provider that fell silent after it began is named as silent.
         let silent =
             CoreError::ProviderIncomplete("the provider sent nothing for 5 minutes".into());
         assert_eq!(
-            super::describe_error(&silent, Some("Anthropic")),
+            super::describe_failure(&silent, Some("Anthropic"), true),
             "Anthropic sent nothing for 5 minutes, so the request was stopped. Try again, or check the network connection."
         );
         // Other endings keep their words.
         let missing = CoreError::ProviderIncomplete("missing completion event".into());
         assert_eq!(
-            super::describe_error(&missing, None),
+            super::describe_failure(&missing, None, true),
             "Provider response ended before completion (missing completion event)."
         );
         assert_eq!(
