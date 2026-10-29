@@ -25,6 +25,11 @@ export const BACKGROUND_COMMANDS = "background-commands.v1";
 /** The command may still print and change state. */
 export const liveCommand = (state?: string) => state === "running" || state === "stopping";
 
+/** How a command the server no longer has is remembered: by the chat that
+ * asked, since a fork names the commands of the chat it came from, which
+ * still has them. */
+export const goneKey = (thread: string, id: string) => `${thread}:${id}`;
+
 export type CommandCheckpoint = Extract<ItemData, { type: "command_state" }>;
 
 /** The last checkpoint of each command, by its call (`turn:call`, as
@@ -102,7 +107,9 @@ export interface CommandStatus {
   values?: Record<string, string>;
   tone: "live" | "done" | "failed" | "stopped";
 }
-export function commandStatus(view: Pick<CommandView, "state" | "exitCode" | "signal">): CommandStatus | undefined {
+export function commandStatus(
+  view: Pick<CommandView, "state" | "exitCode" | "signal"> & { endedAt?: string },
+): CommandStatus | undefined {
   switch (view.state) {
     case "running":
       return { key: "Running", tone: "live" };
@@ -119,7 +126,9 @@ export function commandStatus(view: Pick<CommandView, "state" | "exitCode" | "si
     case "timed_out":
       return { key: "Ran out of time", tone: "stopped" };
     case "interrupted":
-      return { key: "Cut off by a restart", tone: "stopped" };
+      // A restart records when it found the command cut off; a fork's copy
+      // of a command that runs on in the chat it came from has no end.
+      return view.endedAt ? { key: "Cut off by a restart", tone: "stopped" } : undefined;
     default:
       return undefined;
   }
@@ -158,6 +167,27 @@ export function laterCommand(current: ShellCommandInfo | undefined, incoming: Sh
   if (rank(incoming.state) < rank(current.state)) return current;
   if (current.background && !incoming.background) return current;
   return incoming;
+}
+
+/**
+ * Whether the command a row's checkpoint or result names does not run for
+ * the row's chat, when the server reports none for it there: the server
+ * answered that chat no longer has it (`gone`), listed that chat's commands
+ * without it (`listed`), or reports it as another chat's (`owner`, a fork
+ * naming the commands of the chat it came from). A row with no chat of its
+ * own (Still running) trusts what it is given.
+ */
+export function commandForgotten(input: {
+  id?: string;
+  thread?: string;
+  reported: boolean;
+  owner?: string;
+  gone: (key: string) => boolean;
+  listed: boolean;
+}) {
+  const { id, thread } = input;
+  if (input.reported || !id || !thread) return false;
+  return (!!input.owner && input.owner !== thread) || input.gone(goneKey(thread, id)) || input.listed;
 }
 
 /** A `batch` step's own call id: the steps' calls are numbered from 1 after
@@ -268,8 +298,10 @@ export const OUTPUT_KEEP = 64 * 1024;
  * cursor: when `wake` is called (Desktop calls it on `command.output` and
  * `command.updated`), at once again while the server says more is waiting,
  * and every `poll` ms while the command is live in case an event was missed.
- * It stops once the server says the output has settled. Reads never overlap:
- * a wake during one reads again after it.
+ * After a failed read it waits twice as long each time, up to `maxWait`. It
+ * stops once the server says the output has settled. Reads never overlap:
+ * a wake during one reads again after it. While `paused` (a hidden window)
+ * it reads nothing, and `resume` catches up.
  */
 export function createOutputFollow(options: {
   read: ReadOutput;
@@ -280,11 +312,14 @@ export function createOutputFollow(options: {
    * anything else (a computer offline, a workspace asleep) is passing, and
    * the output read so far stays. */
   gone?: (error: unknown) => boolean | Promise<boolean>;
+  maxWait?: number;
+  paused?: () => boolean;
   timer?: { set: (run: () => void, ms: number) => unknown; clear: (handle: unknown) => void };
 }) {
   const keep = options.keep ?? OUTPUT_KEEP;
   const poll = options.poll ?? 4000;
   const gone = options.gone ?? (() => false);
+  const maxWait = options.maxWait ?? 60_000;
   const timer = options.timer ?? {
     set: (run: () => void, ms: number) => setTimeout(run, ms),
     clear: (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -295,6 +330,10 @@ export function createOutputFollow(options: {
   let again = false;
   let disposed = false;
   let waiting: unknown;
+  /** Failed reads in a row, which space the next ones out. */
+  let failures = 0;
+  /** A read was due while paused. */
+  let owed = false;
   const view: FollowView = { text: "", read: false, cut: false, settled: false, gone: false };
   const publish = () => options.update({ ...view, text: screenText(raw) });
   /** Keeps the end of the output, from the start of a line, so a cut never
@@ -310,7 +349,7 @@ export function createOutputFollow(options: {
     timer.clear(waiting);
     waiting = undefined;
     if (disposed || view.settled || view.gone || !poll) return;
-    waiting = timer.set(wake, poll);
+    waiting = timer.set(wake, failures ? Math.min(poll * 2 ** failures, maxWait) : poll);
   }
   /** One page, added to what is kept; false when the read failed. */
   async function readPage() {
@@ -324,10 +363,11 @@ export function createOutputFollow(options: {
       if (lost) {
         view.gone = true;
         publish();
-      }
+      } else failures++;
       return undefined;
     }
     if (disposed) return undefined;
+    failures = 0;
     let text = page.text;
     if (first && page.start > 0) {
       // The end of a long output starts inside a line.
@@ -364,6 +404,13 @@ export function createOutputFollow(options: {
   }
   function wake() {
     if (disposed || view.settled || view.gone) return;
+    if (options.paused?.()) {
+      owed = true;
+      timer.clear(waiting);
+      waiting = undefined;
+      return;
+    }
+    owed = false;
     if (reading) {
       again = true;
       return;
@@ -374,6 +421,10 @@ export function createOutputFollow(options: {
   }
   return {
     wake,
+    /** Reads what was owed while paused. */
+    resume() {
+      if (owed) wake();
+    },
     dispose() {
       disposed = true;
       timer.clear(waiting);

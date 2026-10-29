@@ -8,10 +8,12 @@ import { reconcile } from "solid-js/store";
 import type { ShellCommandInfo } from "@haarness/sdk";
 import { agentTasks, agentTaskStatus } from "./agent-tasks";
 import { conversationRoot } from "../thread-kinds";
+import { notFoundAnswer } from "./error-text";
 import { useApp } from "./state";
 import {
   BACKGROUND_COMMANDS,
   createOutputFollow,
+  goneKey,
   laterCommand,
   liveCommand,
   type FollowView,
@@ -87,10 +89,16 @@ export function followCommand(input: {
           update: (next) => {
             setView(next);
             // Every row of it settles, not only this one.
-            if (next.gone && app.state.connection?.id === connection) app.set("commandsGone", id, true);
+            if (next.gone && app.state.connection?.id === connection) app.set("commandsGone", goneKey(thread, id), true);
           },
-          gone: () => commandGone(connection, thread, id),
+          // Only the server's not-found answer is worth asking about.
+          gone: (error) => (notFoundAnswer(error) ? commandGone(connection, thread, id) : false),
+          // A window nobody sees reads nothing until it shows again.
+          paused: () => document.visibilityState === "hidden",
         });
+        const shown = () => follow.resume();
+        document.addEventListener("visibilitychange", shown);
+        onCleanup(() => document.removeEventListener("visibilitychange", shown));
         follow.wake();
         createEffect(
           on(
@@ -126,8 +134,8 @@ export async function stopCommand(app: ReturnType<typeof useApp>, command: Shell
     answer = await app.api<ShellCommandInfo>("stopShellCommand", command.threadId, command.id);
   } catch (error) {
     // Already gone from the server: there is nothing left to stop.
-    if (await commandGone(connection, command.threadId, command.id)) {
-      if (app.state.connection?.id === connection) app.set("commandsGone", command.id, true);
+    if (notFoundAnswer(error) && (await commandGone(connection, command.threadId, command.id))) {
+      if (app.state.connection?.id === connection) app.set("commandsGone", goneKey(command.threadId, command.id), true);
       return;
     }
     throw error;
@@ -159,20 +167,25 @@ export function backgroundWork() {
   const root = createMemo(() =>
     app.state.selected ? conversationRoot(app.state.threads, app.state.selected) : "",
   );
+  /** A coarse clock, so what ended lately leaves the list on time; it ticks
+   * only while the list holds something that ended. */
+  const [now, setNow] = createSignal(Date.now());
   const commands = createMemo(() => {
     if (!offered() || !root()) return [];
     const mine = Object.values(app.state.shellCommands).filter(
-      (command) => command.background && command.rootThreadId === root() && !app.state.commandsGone[command.id],
+      (command) =>
+        command.background &&
+        command.rootThreadId === root() &&
+        !app.state.commandsGone[goneKey(command.threadId, command.id)],
     );
     const running = mine
       .filter((command) => liveCommand(command.state))
       .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-    const now = Date.now();
     const ended = mine
       .filter(
         (command) =>
           !liveCommand(command.state) &&
-          (!command.endedAt || now - Date.parse(command.endedAt) < RECENTLY_ENDED_MS),
+          (!command.endedAt || now() - Date.parse(command.endedAt) < RECENTLY_ENDED_MS),
       )
       .sort((a, b) => (b.endedAt ?? "").localeCompare(a.endedAt ?? ""));
     return [...running, ...ended];
@@ -192,20 +205,40 @@ export function backgroundWork() {
     for (const task of working) next.set(`${app.state.selected}:${task.key}`, now);
     setSeen(next);
   });
-  const subagents = createMemo(() => {
-    if (!offered()) return [];
-    const now = Date.now();
-    return tasks().filter((task) => {
-      const state = status(task.key);
-      if (state === "background") return true;
-      const at = seen().get(`${app.state.selected}:${task.key}`);
-      return at !== undefined && now - at < RECENTLY_ENDED_MS && ["completed", "failed", "stopped"].includes(state ?? "");
-    });
-  });
+  /** The subagents listed, by their task's key: a row keeps its place (its
+   * focus, its sweep, a stop under way) as the chat's items change. */
+  const subagents = createMemo(
+    () => {
+      if (!offered()) return [];
+      return tasks()
+        .filter((task) => {
+          const state = status(task.key);
+          if (state === "background") return true;
+          const at = seen().get(`${app.state.selected}:${task.key}`);
+          return (
+            at !== undefined &&
+            now() - at < RECENTLY_ENDED_MS &&
+            ["completed", "failed", "stopped"].includes(state ?? "")
+          );
+        })
+        .map((task) => task.key);
+    },
+    [],
+    { equals: (a, b) => a.length === b.length && a.every((key, index) => key === b[index]) },
+  );
+  const task = (key: string) => tasks().find((item) => item.key === key);
   const running = createMemo(
     () =>
       commands().filter((command) => liveCommand(command.state)).length +
-      subagents().filter((task) => status(task.key) === "background").length,
+      subagents().filter((key) => status(key) === "background").length,
   );
-  return { commands, subagents, running, status };
+  const ended = () =>
+    commands().some((command) => !liveCommand(command.state)) ||
+    subagents().some((key) => status(key) !== "background");
+  createEffect(() => {
+    if (!ended()) return;
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    onCleanup(() => clearInterval(timer));
+  });
+  return { commands, subagents, task, running, status };
 }

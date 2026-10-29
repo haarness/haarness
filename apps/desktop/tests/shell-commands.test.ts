@@ -4,6 +4,8 @@ import type { Item, ItemData, ShellCommandInfo } from "@haarness/sdk";
 import {
   commandCheckpoints,
   commandForCall,
+  commandForgotten,
+  goneKey,
   commandLines,
   stepCallId,
   commandStatus,
@@ -66,7 +68,9 @@ test("a command's state reads in the shared words, and only running and stopping
   assert.deepEqual(word({ state: "exited", signal: "SIGSEGV" }), { key: "Failed", tone: "failed" });
   assert.equal(word({ state: "stopped", exitCode: 130 })?.key, "Stopped");
   assert.equal(word({ state: "timed_out" })?.key, "Ran out of time");
-  assert.equal(word({ state: "interrupted" })?.key, "Cut off by a restart");
+  assert.equal(word({ state: "interrupted", endedAt: "2026-10-29T10:05:00Z" })?.key, "Cut off by a restart");
+  // A fork's copy of a command that runs on elsewhere was never cut off.
+  assert.equal(word({ state: "interrupted" }), undefined);
   // A state a newer server reports says nothing rather than something wrong.
   assert.equal(word({ state: "unknown" }), undefined);
   assert.equal(word({}), undefined);
@@ -142,6 +146,25 @@ test("checkpoints are read per call, the latest one winning, and a row finds its
   assert.equal(commandForCall(commands, { callId: "other", turnId: "turn" })?.id, "c2");
   assert.equal(commandForCall(commands, { id: "c1", callId: "other", turnId: "turn" })?.id, "c1");
   assert.equal(commandForCall(commands, { callId: "call", turnId: "another" }), undefined);
+});
+
+test("a fork's copy never speaks for the command of the chat it came from", () => {
+  const gone = new Set<string>();
+  const forgotten = (thread: string, patch: Partial<Parameters<typeof commandForgotten>[0]> = {}) =>
+    commandForgotten({ id: "c1", thread, reported: false, gone: (key) => gone.has(key), listed: false, ...patch });
+  // The server reports c1 as the original's: the fork's row is not live,
+  // even before the fork's own list has loaded.
+  assert.equal(forgotten("fork", { owner: "original" }), true);
+  // The fork's read of it answered not found: remembered for the fork alone.
+  gone.add(goneKey("fork", "c1"));
+  assert.equal(forgotten("fork"), true);
+  assert.equal(forgotten("original"), false);
+  assert.equal(forgotten("original", { reported: true }), false);
+  // Listed for the chat without it, or answered gone for that chat.
+  assert.equal(forgotten("other", { listed: true }), true);
+  // Not known yet anywhere and nothing listed: its checkpoint stands.
+  assert.equal(forgotten("other"), false);
+  assert.equal(commandForgotten({ thread: "fork", reported: false, gone: () => true, listed: true }), false);
 });
 
 test("a batch's steps are numbered after it, and each command's line is known by its id", () => {
@@ -404,6 +427,55 @@ test("a computer offline or a workspace asleep never wipes what was read, howeve
   timers.shift()!();
   await settle();
   assert.equal(views.at(-1)?.text, "serving\nstill here\n");
+  follow.dispose();
+});
+
+test("failed reads space the next ones out, and a hidden window reads nothing until it shows", async () => {
+  const server = fakeServer();
+  const views: FollowView[] = [];
+  const waits: number[] = [];
+  const timers: (() => void)[] = [];
+  let hidden = false;
+  const follow = createOutputFollow({
+    read: server.read,
+    update: (view) => views.push(view),
+    timer: {
+      set: (run, ms) => {
+        waits.push(ms);
+        timers.push(run);
+      },
+      clear: () => {},
+    },
+    poll: 1000,
+    maxWait: 6000,
+    paused: () => hidden,
+  });
+  server.print("a\n");
+  follow.wake();
+  await settle();
+  for (let attempt = 0; attempt < 4; attempt++) {
+    server.fail(new Error("409 conflict: the computer is offline"));
+    timers.shift()!();
+    await settle();
+  }
+  // 1 s after a read, then 2, 4 and at most 6 s after each failure.
+  assert.deepEqual(waits, [1000, 2000, 4000, 6000, 6000]);
+  timers.shift()!();
+  await settle();
+  assert.equal(waits.at(-1), 1000);
+  // Hidden: a wake or a poll reads nothing, and showing again catches up.
+  const reads = server.reads.length;
+  hidden = true;
+  server.print("b\n");
+  follow.wake();
+  timers.shift()?.();
+  await settle();
+  assert.equal(server.reads.length, reads);
+  hidden = false;
+  follow.resume();
+  await settle();
+  assert.equal(server.reads.length, reads + 1);
+  assert.equal(views.at(-1)?.text, "a\nb\n");
   follow.dispose();
 });
 

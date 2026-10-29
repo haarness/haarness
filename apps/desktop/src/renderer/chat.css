@@ -716,13 +716,20 @@ html[dir="rtl"] .tool-target {
   font-weight: 500;
   white-space: nowrap;
 }
-.tool-action:hover:not(:disabled),
-.tool-stop:hover:not(:disabled) {
+.tool-action:hover:not(:disabled) {
   background: var(--hover);
   color: var(--text);
 }
+/* A command's Stop is a delegation's (`.agent-task-stop`), so the two read
+   the same in a chat and in Still running. */
 .tool-stop {
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
+  color: var(--text);
+  background: var(--surface);
+}
+.tool-stop:hover:not(:disabled) {
+  border-color: var(--muted);
 }
 .tool-chevron {
   flex: none;
