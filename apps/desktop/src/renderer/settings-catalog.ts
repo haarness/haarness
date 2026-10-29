@@ -129,6 +129,7 @@ export const shortcutTitles: Record<string, string> = {
   promptNext: "Next prompt",
   promptFirst: "First prompt",
   promptLast: "Jump to latest",
+  background: "Send to background",
 };
 /** Composer keys work only in the message box; Tab elsewhere moves focus. */
 export const shortcutDescriptions: Record<string, string> = {

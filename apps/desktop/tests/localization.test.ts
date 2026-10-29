@@ -195,7 +195,7 @@ test("keys translated through a variable are in the catalog", () => {
     "Pick an element", "Adds part of the browser's page to your message",
     // Settings rows SettingRow translates, and the save dialog's labels from the main process.
     "Diagnostics", "Detailed logging", "Export logs", "Export", "Zip archive",
-    "Browser", "Review", "Terminal", "Context",
+    "Browser", "Review", "Terminal", "Context", "Still running",
     "Browse and test websites with Haarness", "Browse and edit project files",
     "Inspect changes and compare diffs", "Run commands in this project",
     "Inspect chat tokens, cache and context",

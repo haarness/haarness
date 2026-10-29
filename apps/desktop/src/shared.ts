@@ -150,6 +150,8 @@ export const defaults: Preferences = {
     promptNext: "Mod+ArrowDown",
     promptFirst: "Mod+Shift+ArrowUp",
     promptLast: "Mod+Shift+ArrowDown",
+    // File → Send to background has no key until the person gives it one.
+    background: "",
   },
   globalShortcut: defaultGlobalShortcut,
   language: "en",
@@ -215,6 +217,7 @@ export const optionalShortcuts = new Set([
   "promptNext",
   "promptFirst",
   "promptLast",
+  "background",
 ]);
 /**
  * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab), and later the chat, sidebar,
@@ -244,7 +247,7 @@ export function migrateTabKeys(
   return next;
 }
 /** Optional shortcuts that are native menu accelerators, not keys the page matches. */
-export const menuShortcuts = new Set(["pick"]);
+export const menuShortcuts = new Set(["pick", "background"]);
 // Menu shortcuts become native accelerators, so they need a modifier and a
 // single character. Composer, tab, chat and prompt shortcuts are matched in
 // the page and may also use a named key, such as Tab for people who want

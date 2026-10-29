@@ -190,6 +190,7 @@ export async function preferences(input: Partial<Preferences>) {
         promptNext: z.string(),
         promptFirst: z.string(),
         promptLast: z.string(),
+        background: z.string(),
       }),
       globalShortcut: z.object({
         enabled: z.boolean(),
