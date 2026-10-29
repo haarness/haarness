@@ -1,7 +1,10 @@
 /** The bodies Desktop sends for a message and a slash command. A person is
  * at the window and can stop what they start, so each says `attended`: a
  * command's or skill's `!` snippet in that turn then runs until it ends
- * instead of stopping at the shell deadline. */
+ * instead of stopping at the shell deadline. Desktop shows and follows up
+ * the chat's background work, so each also says `followsBackground`: an
+ * agent's command that runs long moves to the background instead of holding
+ * the reply (servers before `background-commands.v1` ignore it). */
 
 type Mentioned = { resources?: unknown[] };
 
@@ -24,6 +27,7 @@ export function messageBody(message: {
     requestId: message.requestId,
     ...(message.effort ? { reasoningEffort: message.effort } : {}),
     attended: true,
+    followsBackground: true,
   };
 }
 
@@ -42,5 +46,6 @@ export function commandBody(command: {
     requestId: command.requestId,
     ...(command.effort ? { reasoningEffort: command.effort } : {}),
     attended: true,
+    followsBackground: true,
   };
 }
