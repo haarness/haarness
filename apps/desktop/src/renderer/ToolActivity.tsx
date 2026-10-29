@@ -321,18 +321,33 @@ export function ToolActivity(props: {
   };
   /** The command's output while it runs or once it ran in the background,
    * read live while the row is open. */
-  // Only a command the server reports for this chat: a checkpoint alone may
-  // be a fork's copy of another chat's.
-  const following = () => !!info() && (background() || !props.result);
+  /** The row is a fork's copy of another chat's command: it has nothing of
+   * its own to show. */
+  const copied = () => {
+    if (info()) return false;
+    const id = props.checkpoint?.command_id ?? ref()?.id;
+    const owner = id ? store.state.shellCommands[id]?.threadId : undefined;
+    return (
+      (!!owner && !!props.call && owner !== props.call.threadId) ||
+      (props.checkpoint?.state === "interrupted" && !props.checkpoint.ended_at)
+    );
+  };
+  // A command the server reports for this chat, or one its checkpoint says
+  // runs while the chat's commands could not be listed; a read that finds it
+  // gone settles this chat's row alone.
+  const following = () =>
+    (!!info() && (background() || !props.result)) ||
+    (background() && commandLive() && !!props.call && !forgotten());
   const followed = followCommand({
-    id: () => info()?.id,
-    thread: () => info()?.threadId,
+    id: () => info()?.id ?? command()?.id,
+    thread: () => info()?.threadId ?? props.call?.threadId,
     active: () => open() && following(),
   });
   /** What the open row shows of a command's output: what was followed, or
    * else what its last checkpoint kept. Undefined for a foreground command,
    * whose result holds its output. */
   const liveOutput = () => {
+    if (copied()) return { text: "", read: true, cut: false, none: true };
     if (!background() && !following()) return undefined;
     const view = followed();
     // What was read stays, also once the server has let the command go.
@@ -577,9 +592,11 @@ export function ToolActivity(props: {
                           <Show
                             when={shown().text}
                             fallback={
-                              <p class="tool-empty">
-                                {shown().read ? t("No output") : t("Waiting for output…")}
-                              </p>
+                              <Show when={!("none" in shown())}>
+                                <p class="tool-empty">
+                                  {shown().read ? t("No output") : t("Waiting for output…")}
+                                </p>
+                              </Show>
                             }
                           >
                             <pre

@@ -190,6 +190,20 @@ export function commandForgotten(input: {
   return (!!input.owner && input.owner !== thread) || input.gone(goneKey(thread, id)) || input.listed;
 }
 
+/**
+ * The server's reason for refusing to move a command (409), as a person
+ * reads it: without the "conflict:" every refusal starts with, when it is
+ * one short plain sentence. Undefined for one that names ids or runs long;
+ * Desktop then says it in the interface language.
+ */
+export function moveRefusal(message: string) {
+  const text = message.trim().replace(/^conflict:\s*/i, "").trim();
+  if (!text || text.length > 120 || /[\n<>{}]/.test(text)) return undefined;
+  if (/\bcmd-\w+|[0-9a-f]{8}-[0-9a-f]{4}-|\b[0-9a-f]{12,}\b/i.test(text)) return undefined;
+  const sentence = text.charAt(0).toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(sentence) ? sentence : sentence + ".";
+}
+
 /** A `batch` step's own call id: the steps' calls are numbered from 1 after
  * the batch's (`call:1`, `call:2`). */
 export const stepCallId = (batch: string, index: number) => `${batch}:${index + 1}`;
@@ -421,6 +435,11 @@ export function createOutputFollow(options: {
   }
   return {
     wake,
+    /** The connection is back: read at once, as if nothing had failed. */
+    nudge() {
+      failures = 0;
+      wake();
+    },
     /** Reads what was owed while paused. */
     resume() {
       if (owed) wake();

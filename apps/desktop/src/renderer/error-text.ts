@@ -240,6 +240,14 @@ export function notFoundAnswer(error: unknown) {
   return said === 404 || said === 410;
 }
 
+/** The server refused what was asked as conflicting with how things stand
+ * (409): its own "conflict: …" or a bare status. */
+export function conflictAnswer(error: unknown) {
+  if (failure(error).status === 409) return true;
+  const text = (error instanceof Error ? error.message : String(error ?? "")).trim();
+  return /^conflict: /i.test(text) || statusLine(text)?.status === 409;
+}
+
 /** A failure on one line, for a surface without room for a title: an English
  * catalog key when `known`, as `errorText` says. */
 export const errorTextLine = (text: ErrorText) =>

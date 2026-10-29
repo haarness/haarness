@@ -7,6 +7,7 @@ import {
   commandForgotten,
   goneKey,
   commandLines,
+  moveRefusal,
   stepCallId,
   commandStatus,
   commandView,
@@ -476,6 +477,49 @@ test("failed reads space the next ones out, and a hidden window reads nothing un
   await settle();
   assert.equal(server.reads.length, reads + 1);
   assert.equal(views.at(-1)?.text, "a\nb\n");
+  follow.dispose();
+});
+
+test("a refused move reads as the server's plain reason, or not at all", () => {
+  assert.equal(moveRefusal("conflict: this chat runs as many commands in the background as it may"), "This chat runs as many commands in the background as it may.");
+  assert.equal(moveRefusal("Conflict: The command has already ended."), "The command has already ended.");
+  // Ids, long or structured reasons are left for Desktop to say itself.
+  assert.equal(moveRefusal("conflict: Command cmd-4f2a91 cannot move to the background: it has ended"), undefined);
+  assert.equal(moveRefusal("conflict: thread 01a18877-f7b5-7e40-9037-54d6778d66b3 is busy"), undefined);
+  assert.equal(moveRefusal("conflict: " + "it cannot move ".repeat(12)), undefined);
+  assert.equal(moveRefusal("conflict: {\"reason\":\"cap\"}"), undefined);
+  assert.equal(moveRefusal("conflict: "), undefined);
+});
+
+test("a follow that waited out failures reads at once when the connection is back", async () => {
+  const server = fakeServer();
+  const waits: number[] = [];
+  const timers: (() => void)[] = [];
+  const follow = createOutputFollow({
+    read: server.read,
+    update: () => {},
+    timer: {
+      set: (run, ms) => {
+        waits.push(ms);
+        timers.push(run);
+      },
+      clear: () => {},
+    },
+    poll: 1000,
+  });
+  follow.wake();
+  await settle();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    server.fail(new Error("409 conflict: the computer is offline"));
+    timers.shift()!();
+    await settle();
+  }
+  assert.equal(waits.at(-1), 8000);
+  const reads = server.reads.length;
+  follow.nudge();
+  await settle();
+  assert.equal(server.reads.length, reads + 1);
+  assert.equal(waits.at(-1), 1000);
   follow.dispose();
 });
 
