@@ -27,13 +27,14 @@ use haarness_protocol::{
     PendingPermissionInfo, PendingQuestionInfo, PermissionReply, PluginActionRequest, PluginInfo,
     ProviderInfo, PtyCreateRequest, PtyId, PtyInfo, PtyUpdateRequest, QuestionReply,
     QueueInputRequest, QueueInputResponse, ReviewFile, SCHEMA_VERSION, SESSION_ARCHIVE_CAPABILITY,
-    ServerInfo, SessionArchive, SessionArchiveImportRequest, SessionArchiveImportResult, SkillInfo,
-    StartTurnRequest, Thread, ThreadActivity, ThreadId, ToolCatalogResponse, ToolSettingsUpdate,
-    Turn, TurnId, UpdateThreadRequest, WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY,
-    WorkflowId, WorkflowRun, WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest,
-    WorkspaceCreateRequest, WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse,
-    WorkspaceRefsResponse, WorkspaceRemoveRequest, WorkspaceResetRequest,
-    WorkspaceResolveRefRequest, WorkspaceResolveRefResponse,
+    ServerInfo, SessionArchive, SessionArchiveImportRequest, SessionArchiveImportResult,
+    ShellCommandInfo, ShellCommandOutput, SkillInfo, StartTurnRequest, Thread, ThreadActivity,
+    ThreadId, ToolCatalogResponse, ToolSettingsUpdate, Turn, TurnId, UpdateThreadRequest,
+    WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY, WorkflowId, WorkflowRun,
+    WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest, WorkspaceCreateRequest,
+    WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse, WorkspaceRefsResponse,
+    WorkspaceRemoveRequest, WorkspaceResetRequest, WorkspaceResolveRefRequest,
+    WorkspaceResolveRefResponse,
 };
 use haarness_pty::{PtyManager, PtySubscription};
 use haarness_workflow_catalog::{CatalogError, WorkflowCatalog};
@@ -259,7 +260,22 @@ pub async fn serve_with_access(
         )
         .route(
             "/threads/{id}/commands",
-            post(execute_command).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+            post(execute_command)
+                .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
+                .get(list_shell_commands),
+        )
+        .route(
+            "/threads/{id}/commands/background",
+            post(background_shell_commands),
+        )
+        .route("/threads/{id}/commands/{command}", get(get_shell_command))
+        .route(
+            "/threads/{id}/commands/{command}/output",
+            get(read_shell_command_output),
+        )
+        .route(
+            "/threads/{id}/commands/{command}/stop",
+            post(stop_shell_command),
         )
         .route(
             "/threads/{id}/input",
@@ -298,6 +314,7 @@ pub async fn serve_with_access(
         .merge(crate::browser::routes())
         .route("/session-archives/import", post(import_session_archive))
         .route("/turns/active", get(active_turns))
+        .route("/commands/active", get(active_shell_commands))
         .route("/turns/{id}", get(get_turn))
         .route("/turns/{id}/interrupt", post(interrupt_turn))
         .route("/turns/{id}/wait", get(wait_turn))
@@ -810,6 +827,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             haarness_protocol::RESOURCE_MENTIONS_CAPABILITY.into(),
             PTY_CAPABILITY.into(),
             SESSION_ARCHIVE_CAPABILITY.into(),
+            haarness_protocol::BACKGROUND_COMMANDS_CAPABILITY.into(),
         ]
         .into_iter()
         .chain(
@@ -2847,6 +2865,73 @@ async fn promote_background_tasks(
             .promote_subagents(id, query.child_thread_id)
             .await?,
     ))
+}
+/// The agents' shell commands of a chat and the chats under it: running
+/// ones first, then those that ended in the last ten minutes.
+async fn list_shell_commands(
+    State(state): State<ServerState>,
+    Path(id): Path<ThreadId>,
+) -> ApiResult<Json<Vec<ShellCommandInfo>>> {
+    Ok(Json(state.runtime.shell_commands(id).await?))
+}
+async fn get_shell_command(
+    State(state): State<ServerState>,
+    Path((id, command)): Path<(ThreadId, String)>,
+) -> ApiResult<Json<ShellCommandInfo>> {
+    Ok(Json(state.runtime.shell_command(id, &command).await?))
+}
+/// A page of a command's output: from `cursor` (its start when absent), or
+/// with `tail=true` its last `limit` bytes; `limit` defaults to 64 KiB and
+/// is at most 1 MiB.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShellCommandOutputQuery {
+    cursor: Option<u64>,
+    limit: Option<u64>,
+    #[serde(default)]
+    tail: bool,
+}
+async fn read_shell_command_output(
+    State(state): State<ServerState>,
+    Path((id, command)): Path<(ThreadId, String)>,
+    Query(query): Query<ShellCommandOutputQuery>,
+) -> ApiResult<Json<ShellCommandOutput>> {
+    Ok(Json(
+        state
+            .runtime
+            .shell_command_output(id, &command, query.cursor, query.limit, query.tail)
+            .await?,
+    ))
+}
+/// Stop a command for a person; repeating it changes nothing.
+async fn stop_shell_command(
+    State(state): State<ServerState>,
+    Path((id, command)): Path<(ThreadId, String)>,
+) -> ApiResult<Json<ShellCommandInfo>> {
+    Ok(Json(state.runtime.stop_shell_command(id, &command).await?))
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackgroundCommandsQuery {
+    command_id: Option<String>,
+}
+/// Send a chat tree's running foreground commands, or the one named, to the
+/// background. Subagents move with `/background`.
+async fn background_shell_commands(
+    State(state): State<ServerState>,
+    Path(id): Path<ThreadId>,
+    Query(query): Query<BackgroundCommandsQuery>,
+) -> ApiResult<Json<Vec<ShellCommandInfo>>> {
+    Ok(Json(
+        state
+            .runtime
+            .background_shell_commands(id, query.command_id.as_deref())
+            .await?,
+    ))
+}
+/// Running commands of every chat, as `/turns/active` lists turns.
+async fn active_shell_commands(State(state): State<ServerState>) -> Json<Vec<ShellCommandInfo>> {
+    Json(state.runtime.active_shell_commands())
 }
 /// `resume=true` is the interactive Stop: steering the agent has not read yet
 /// gets an answer instead of being dropped. Programmatic stops omit it.

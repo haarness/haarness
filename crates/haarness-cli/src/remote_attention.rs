@@ -1307,6 +1307,7 @@ async fn activity(daemon: &Daemon, thread: ThreadId) -> Result<Activity> {
         now: ThreadActivity {
             active_turn: daemon.get(&format!("threads/{thread}/active")).await?,
             background: 0,
+            background_commands: 0,
             last_turn: None,
         },
         knows_last: false,

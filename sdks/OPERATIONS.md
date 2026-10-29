@@ -76,6 +76,11 @@
 | `pending_question` | `pendingQuestion` | `GET /v1/threads/{id}/pending-question` |
 | `start_turn` | `startTurn` | `POST /v1/threads/{id}/turns` |
 | `execute_command` | `executeCommand` | `POST /v1/threads/{id}/commands` |
+| `list_shell_commands` | `listShellCommands` | `GET /v1/threads/{id}/commands` |
+| `background_shell_commands` | `backgroundShellCommands` | `POST /v1/threads/{id}/commands/background` |
+| `get_shell_command` | `getShellCommand` | `GET /v1/threads/{id}/commands/{command}` |
+| `read_shell_command_output` | `readShellCommandOutput` | `GET /v1/threads/{id}/commands/{command}/output` |
+| `stop_shell_command` | `stopShellCommand` | `POST /v1/threads/{id}/commands/{command}/stop` |
 | `queue_input` | `queueInput` | `POST /v1/threads/{id}/input` |
 | `input_queue` | `inputQueue` | `GET /v1/threads/{id}/input/queue` |
 | `change_input_queue` | `changeInputQueue` | `POST /v1/threads/{id}/input/queue` |
@@ -98,6 +103,7 @@
 | `search_files` | `searchFiles` | `GET /v1/files/search` |
 | `import_session_archive` | `importSessionArchive` | `POST /v1/session-archives/import` |
 | `active_turns` | `activeTurns` | `GET /v1/turns/active` |
+| `active_shell_commands` | `activeShellCommands` | `GET /v1/commands/active` |
 | `get_turn` | `getTurn` | `GET /v1/turns/{id}` |
 | `interrupt_turn` | `interruptTurn` | `POST /v1/turns/{id}/interrupt` |
 | `wait_turn` | `waitTurn` | `GET /v1/turns/{id}/wait` |
