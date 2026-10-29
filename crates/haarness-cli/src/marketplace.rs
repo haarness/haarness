@@ -83,7 +83,8 @@ enum Command {
         #[arg(long)]
         no_auto_update: bool,
     },
-    /// Install another version of an installed resource.
+    /// Install another version of an installed resource. A version other
+    /// than the latest stays installed: automatic updates turn off.
     Update {
         /// Resource id, or publisher/slug.
         id: String,
@@ -93,6 +94,9 @@ enum Command {
         /// The copy installed for this project.
         #[arg(long)]
         local: bool,
+        /// Print the install record as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Install new versions of a resource when they are published, or stop.
     AutoUpdate {
@@ -193,8 +197,34 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: Args) -> Re
             }
             input
         }
-        Command::Update { id, version, local } => {
+        Command::Update {
+            id,
+            version,
+            local,
+            json: true,
+        } => {
             json!({"action":"update","id":id,"version":version,"scope":if local {"local"} else {"global"}})
+        }
+        Command::Update {
+            id,
+            version,
+            local,
+            json: false,
+        } => {
+            let receipt = service(paths, workspace, trust)
+                .await?
+                .marketplace_request(&json!({"action":"update","id":id,"version":version,"scope":if local {"local"} else {"global"}}))
+                .await?;
+            let name = receipt["name"].as_str().unwrap_or(&id);
+            let number = &receipt["version"]["number"];
+            println!("Updated {name} to version {number}.");
+            if version.is_some() && !follows_new_versions(&receipt) {
+                println!(
+                    "It is pinned to version {number}; `haarness marketplace auto-update {id}{}` follows new versions again.",
+                    if local { " --local" } else { "" }
+                );
+            }
+            return Ok(());
         }
         Command::AutoUpdate { id, off, local } => {
             let receipt = service(paths, workspace, trust)
@@ -365,6 +395,30 @@ pub async fn catalog(path: &str, query: &[(&str, String)]) -> Result<Value> {
     }
     let bytes = download(url.as_str(), 8 * 1024 * 1024).await?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// Whether a person's install or update request names a version by number
+/// and leaves automatic updates unsaid (an automatic update names the
+/// version it replaces, and a manifest given in full is installed as it is).
+pub(crate) fn names_its_version(input: &Value) -> bool {
+    !input["version"].is_null()
+        && input["autoUpdate"].is_null()
+        && input["autoUpdateFrom"].is_null()
+        && input.get("manifest").is_none()
+}
+
+/// Whether installing `manifest`'s version pins the resource: it is not the
+/// version the catalog offers now (`active`, unknown when it could not be
+/// asked), so following new versions would undo it.
+pub(crate) fn pins(manifest: &Value, active: Option<u64>) -> bool {
+    active.is_none() || active != manifest["version"]["number"].as_u64()
+}
+
+/// The number of the version the catalog offers for `id` now, if any.
+pub(crate) async fn active_version_number(id: &str) -> Result<Option<u64>> {
+    uuid::Uuid::parse_str(id)?;
+    let detail = catalog(&format!("api/v1/marketplace/resources/{id}"), &[]).await?;
+    Ok(detail["activeVersion"]["number"].as_u64())
 }
 
 pub async fn fetch(input: &Value) -> Result<Value> {
@@ -905,6 +959,9 @@ pub async fn install(
             _ => unreachable!(),
         };
         let _lock = crate::desktop::editor_lock(&paths.data, "marketplace")?;
+        // What it was when this install began may have changed while the
+        // artifact downloaded: decide on what is there now.
+        let old = receipt_now(paths, workspace, &receipt_file, old.as_ref(), input)?;
         haarness_profiles::check_path(&target)?;
         ensure!(old.is_some() || !target.exists(), "A resource already exists with this name; choose another name or remove it explicitly");
         if let Some(old) = &old {
@@ -951,7 +1008,11 @@ pub(crate) fn auto_update_choice(input: &Value, old: Option<&Value>) -> bool {
 
 /// The receipt file of `receipt`, read again and checked as `installed`
 /// checks it. Callers hold the marketplace editor lock.
-fn reread_receipt(paths: &Paths, workspace: &Path, receipt: &Value) -> Result<(PathBuf, Value)> {
+pub(crate) fn reread_receipt(
+    paths: &Paths,
+    workspace: &Path,
+    receipt: &Value,
+) -> Result<(PathBuf, Value)> {
     let id = uuid::Uuid::parse_str(receipt["id"].as_str().context("Invalid receipt id")?)?;
     let local = match receipt["scope"].as_str() {
         Some("local") => true,
@@ -968,6 +1029,50 @@ fn reread_receipt(paths: &Paths, workspace: &Path, receipt: &Value) -> Result<(P
     );
     validate_receipt(paths, workspace, &current)?;
     Ok((file, current))
+}
+
+/// The receipt at `receipt_file` as it is now, read under the marketplace
+/// editor lock just before an install writes, checked against `started`, the
+/// one the install began from. A resource removed meanwhile stays removed;
+/// an automatic update (`autoUpdateFrom` names the version it replaces) also
+/// stops when someone updated the resource or stopped its automatic updates
+/// meanwhile.
+pub(crate) fn receipt_now(
+    paths: &Paths,
+    workspace: &Path,
+    receipt_file: &Path,
+    started: Option<&Value>,
+    input: &Value,
+) -> Result<Option<Value>> {
+    let current: Option<Value> = match fs::read(receipt_file) {
+        Ok(bytes) => Some(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    match (started, &current) {
+        (Some(_), None) => bail!("It was removed while it was being updated, so it stays removed"),
+        (None, Some(_)) => bail!("It was installed meanwhile; update it instead"),
+        (Some(started), Some(current)) => {
+            validate_receipt(paths, workspace, current)?;
+            ensure!(
+                started["id"] == current["id"]
+                    && started["kind"] == current["kind"]
+                    && started["name"] == current["name"]
+                    && started["path"] == current["path"],
+                "Installation receipt does not match resource"
+            );
+        }
+        (None, None) => {}
+    }
+    if let Some(from) = input.get("autoUpdateFrom").filter(|from| !from.is_null()) {
+        ensure!(
+            current.as_ref().is_some_and(|current| {
+                current["version"]["id"] == *from && follows_new_versions(current)
+            }),
+            "It changed while it was being checked, so it was left as it is"
+        );
+    }
+    Ok(current)
 }
 
 /// Turn automatic updates on or off for one installed resource.
@@ -1127,7 +1232,7 @@ pub(crate) async fn check_updates_from(
         }
         // The exact version the detail named, so a version published
         // meanwhile is not installed unseen.
-        let input = json!({"action":"update","id":id,"kind":row["kind"],"version":active["number"],"scope":row["scope"]});
+        let input = json!({"action":"update","id":id,"kind":row["kind"],"version":active["number"],"scope":row["scope"],"autoUpdateFrom":row["version"]["id"]});
         let result = async {
             let manifest = reader.manifest(&input).await?;
             ensure!(
@@ -1912,6 +2017,149 @@ mod tests {
                 .unwrap()
                 .contains("follows two")
         );
+        for server in servers {
+            server.abort();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_version_named_by_number_that_is_not_the_latest_is_pinned() {
+        let version = |number: u64| json!({"version":{"number":number}});
+        // A rollback stays where it was put.
+        assert!(names_its_version(&json!({"action":"update","version":1})));
+        assert!(pins(&version(1), Some(2)));
+        // The latest by number follows as before; unknown counts as a rollback.
+        assert!(!pins(&version(2), Some(2)));
+        assert!(pins(&version(2), None));
+        // Said outright, by an automatic update, or with no version: left alone.
+        assert!(!names_its_version(&json!({"version":1,"autoUpdate":true})));
+        assert!(!names_its_version(
+            &json!({"version":1,"autoUpdateFrom":"x"})
+        ));
+        assert!(!names_its_version(&json!({"action":"update"})));
+        assert!(!names_its_version(&json!({"version":1,"manifest":{}})));
+    }
+
+    /// Like `manifest`, with the artifact answered only after `delay`, so a
+    /// change made meanwhile lands while the install is under way.
+    async fn slow_manifest(
+        bytes: Vec<u8>,
+        delay: Duration,
+    ) -> (Value, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let size = bytes.len();
+        let app = axum::Router::new().route(
+            "/artifact",
+            axum::routing::get(move || {
+                let bytes = bytes.clone();
+                async move {
+                    tokio::time::sleep(delay).await;
+                    bytes
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let id = uuid::Uuid::now_v7();
+        let version = uuid::Uuid::now_v7();
+        (
+            json!({"manifestVersion":1,"resource":{"id":id,"kind":"skill","slug":"demo","name":"Demo"},"version":{"id":version,"number":2,"status":"approved","yanked":false},"compatibility":{"platforms":[]},"capabilities":{},"artifact":{"url":format!("http://{address}/artifact"),"sizeBytes":size,"sha256":sha},"install":{"skill":{}},"lock":{"resourceId":id,"versionId":version}}),
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn an_update_under_way_respects_a_removal_or_a_switch_made_meanwhile() {
+        use std::sync::Arc;
+        let root =
+            std::env::temp_dir().join(format!("haarness-receipt-race-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let paths = Paths::new(Some(&root.join("home"))).unwrap();
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let skills: Arc<dyn haarness_core::SkillRegistry> = Arc::new(
+            haarness_server::FilesystemSkillRegistry::new(vec![(paths.skills.clone(), true)]),
+        );
+        let mcp = Arc::new(haarness_mcp::NativeMcpRegistry::with_auth_dir(
+            paths.data.join("mcp-oauth"),
+        ));
+        let service = crate::management::ManagementService::new(
+            paths.clone(),
+            workspace.clone(),
+            true,
+            skills,
+            mcp,
+        );
+        let skill = workspace.join(".haarness/skills/demo/SKILL.md");
+        let mut servers = Vec::new();
+        let delay = Duration::from_millis(600);
+        for case in ["removed", "automatic", "by hand"] {
+            let (mut second, server) = slow_manifest(
+                archive(&[("SKILL.md", "---\ndescription: Proof\n---\ndemo two\n")]),
+                delay,
+            )
+            .await;
+            servers.push(server);
+            let id = second["resource"]["id"].as_str().unwrap().to_owned();
+            let (first, server) = skill_version(Some(&id), 1, "demo one").await;
+            servers.push(server);
+            let first = install(&paths, &workspace, true, &first, &json!({"scope":"local"}))
+                .await
+                .unwrap();
+            second["resource"]["id"] = json!(id);
+            let mut input = json!({"scope":"local","version":2});
+            if case != "by hand" {
+                input["autoUpdateFrom"] = first["version"]["id"].clone();
+            }
+            let update = install(&paths, &workspace, true, &second, &input);
+            let meanwhile = async {
+                tokio::time::sleep(delay / 3).await;
+                if case == "removed" {
+                    service
+                        .marketplace_request(&json!({"action":"remove","id":id,"scope":"local"}))
+                        .await
+                        .unwrap();
+                } else {
+                    set_auto_update(&paths, &workspace, &first, false).unwrap();
+                }
+            };
+            let (result, ()) = tokio::join!(update, meanwhile);
+            let receipt_file = workspace
+                .join(".haarness/marketplace")
+                .join(format!("{id}.json"));
+            match case {
+                "removed" => {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains("stays removed"), "{error}");
+                    assert!(!skill.exists() && !receipt_file.exists());
+                }
+                "automatic" => {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains("left as it is"), "{error}");
+                    assert!(fs::read_to_string(&skill).unwrap().contains("demo one"));
+                    let receipt: Value =
+                        serde_json::from_slice(&fs::read(&receipt_file).unwrap()).unwrap();
+                    assert_eq!(receipt["autoUpdate"], false);
+                    assert_eq!(receipt["version"]["number"], 1);
+                }
+                _ => {
+                    // Updated by hand, the switch turned off meanwhile stays off.
+                    let receipt = result.unwrap();
+                    assert_eq!(receipt["version"]["number"], 2);
+                    assert_eq!(receipt["autoUpdate"], false);
+                    assert!(fs::read_to_string(&skill).unwrap().contains("demo two"));
+                }
+            }
+            if receipt_file.exists() {
+                service
+                    .marketplace_request(&json!({"action":"remove","id":id,"scope":"local"}))
+                    .await
+                    .unwrap();
+            }
+        }
         for server in servers {
             server.abort();
         }

@@ -5,8 +5,9 @@
 //! Several servers run on one computer (one per folder). A stamp file, read
 //! and written under an editor lock, lets one of them do each round: one
 //! stamp in the data folder for everything installed for all projects, and
-//! one in a project's `.haarness/marketplace/` for what is installed for that
-//! project only.
+//! one per project, also in the data folder (named by a digest of the
+//! project's path, so nothing is written into the project), for what is
+//! installed for that project only.
 use crate::management::ManagementService;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -33,6 +34,17 @@ const SLACK: Duration = Duration::from_secs(5);
 /// The stamp's file name. The configuration scan skips it, so writing it
 /// never reloads anything.
 pub(crate) const STAMP: &str = ".auto-update-checked";
+
+/// The stamp of `workspace`'s own round, kept under the data folder.
+pub(crate) fn project_stamp(data: &Path, workspace: &Path) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    let path = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let digest = format!("{:x}", Sha256::digest(path.to_string_lossy().as_bytes()));
+    data.join("auto-update")
+        .join(format!("{}.checked", &digest[..24]))
+}
 
 pub(crate) fn enabled() -> bool {
     !std::env::var(SWITCH).is_ok_and(|value| {
@@ -130,10 +142,16 @@ mod tests {
         assert!(!claim(&data, &stamp, every, next + Duration::from_secs(30)).unwrap());
         // A stamp ahead of the clock does not stop rounds.
         assert!(claim(&data, &stamp, every, start).unwrap());
-        // A project's stamp is its own.
-        let project = root.join("project/.haarness/marketplace").join(STAMP);
+        // A project's stamp is its own, and lives outside the project.
+        let workspace = root.join("project");
+        fs::create_dir_all(&workspace).unwrap();
+        let project = project_stamp(&data, &workspace);
+        assert!(project.starts_with(&data) && !project.starts_with(&workspace));
+        assert_ne!(project, project_stamp(&data, &root.join("other")));
+        assert_eq!(project, project_stamp(&data, &workspace));
         assert!(claim(&data, &project, every, start).unwrap());
         assert!(!claim(&data, &project, every, start + Duration::from_secs(5)).unwrap());
+        assert!(!workspace.join(".haarness").exists());
         // An unreadable stamp counts as no round yet.
         fs::write(&stamp, "not a time").unwrap();
         assert!(claim(&data, &stamp, every, start).unwrap());
