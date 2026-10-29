@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Real server, echo provider: webfetch reads pages as text, meets rules for every spelling of an address,
-reports redirects off the address by reason, stops oversized and stalled pages, and honours Stop;
-media generation still follows its backend's redirects.
+reports redirects off the address by reason, follows one on it only where the rules allow its new address
+(in a turn and in a workflow's own call), stops oversized and stalled pages, and honours Stop; media
+generation still follows its backend's redirects.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-webfetch.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
-import http.server, json, os, pathlib, subprocess, tempfile, threading, time, urllib.request, uuid
+import http.server, json, os, pathlib, shutil, subprocess, tempfile, threading, time, urllib.request, uuid
 import e2e_scratch
 from e2e_env import clean_env
 
@@ -54,6 +55,10 @@ class Web(http.server.BaseHTTPRequestHandler):
                     self.chunk(block); sent['endless'] += len(block)
                 self.wfile.write(b'0\r\n\r\n')
             except (BrokenPipeError, ConnectionResetError): pass
+        elif self.path.startswith('/login?next='):
+            # An open redirect on the host: it sends the visitor wherever `next` says.
+            self.send_response(302); self.send_header('Location', self.path.split('=', 1)[1])
+            self.send_header('Content-Length', '0'); self.end_headers()
         elif self.path in ('/hop', '/away', '/port'):
             # /hop stays on this host; /away leads to another host name for the same server; /port to another port.
             target = {'/hop': '/landing', '/away': f'http://localhost:{self.server.server_port}/landing',
@@ -75,6 +80,9 @@ port = web.server_port
     f'webfetch = {{ "*" = "allow", "http://127.0.0.1:{port}/private*" = "deny", "http://localhost:{port}/*" = "deny" }}\n'
     'media_generate = "allow"\n')
 env = clean_env()
+# A workflow's own calls run on Bun; keep the one this machine has on PATH.
+bun = shutil.which('bun') or str(pathlib.Path.home()/'.bun/bin/bun')
+env['PATH'] = f'{pathlib.Path(bun).parent}:{env.get("PATH", "/usr/bin:/bin")}'
 env.update(HAARNESS_DATA_DIR=str(state), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1',
            HAARNESS_IMAGE_GENERATE_URL=f'http://127.0.0.1:{port}/moved')
@@ -149,6 +157,33 @@ try:
     result = finish(thread, before)
     assert result['is_error'] and 'denied by permission rule' in result['output'], result
     check('a same-host redirect is followed; one to another host is reported, and fetching it meets the deny')
+
+    for target in ['/private', '/%70rivate', '/private#part']:
+        _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/login?next={target}'})
+        result = finish(thread, before)
+        assert not result['is_error'], result
+        assert 'which the permission rules do not let this fetch follow' in result['output'], (target, result)
+        assert result['metadata']['redirect'].startswith(f'http://127.0.0.1:{port}/'), result
+    _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/login?next=/landing'})
+    result = finish(thread, before)
+    assert not result['is_error'] and 'same-host-landing-proof' in result['output'], result
+    assert not any(path.split('#')[0] in (f'127.0.0.1:{port}/private', f'127.0.0.1:{port}/%70rivate')
+                   for path in requests), requests
+    check('a redirect on the host into a denied path, in any spelling, is reported and never requested')
+
+    (workspace/'.haarness/workflows').mkdir(parents=True)
+    (workspace/'.haarness/workflows/fetcher.ts').write_text(
+        'import { workflow } from "@haarness-ai/plugin"\n'
+        'export default workflow({ name: "fetcher", async run(args, ctx) {\n'
+        f'  const stopped = await ctx.tool("webfetch", {{ url: "http://127.0.0.1:{port}/login?next=/private" }})\n'
+        f'  const followed = await ctx.tool("webfetch", {{ url: "http://127.0.0.1:{port}/login?next=/landing" }})\n'
+        '  return { stopped, followed }\n} })\n')
+    before_requests = len(requests)
+    output = run([str(binary), '--workspace', str(workspace), 'workflow', 'run', 'fetcher'], env=env)
+    assert 'which the permission rules do not let this fetch follow' in output, output
+    assert 'same-host-landing-proof' in output, output
+    assert not any(path == f'127.0.0.1:{port}/private' for path in requests[before_requests:]), requests
+    check("a workflow's own fetch meets the same rules on a redirect")
 
     _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/port'})
     result = finish(thread, before)

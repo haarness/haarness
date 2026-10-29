@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Instruction globs end to end: an `instructions` glob that crosses link loops loads at once.
+
+A mock Anthropic Messages server records what a real `haarness run` sends. The person's notes hold
+two links back up their own tree (`a/up -> ..`, `a/self -> .`), a link to a folder elsewhere, a link
+to a file, and folders nine deep; the project's docs hold a loop too. The script proves that:
+
+1. `haarness run` with `"instructions": ["~/notes/**/*.md"]` and a project's `"docs/**/*.md"`
+   answers within seconds, and its prompt carries the files those globs match: the linked file and
+   a file 8 folders down, but nothing through the links back up, the linked folder or deeper;
+2. the log says the walk stopped 8 folders below `~/notes`;
+3. the terminal UI opens on the same configuration and answers a message (echo provider, tmux).
+
+Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-instruction-globs.py
+"""
+import http.server
+import json
+import os
+import subprocess
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+import e2e_scratch
+from e2e_env import ISOLATED
+from e2e_tmux import pane_command
+
+repo = Path(__file__).resolve().parents[1]
+binary = Path(os.environ.get("HAARNESS_BIN", repo / "target/debug/haarness")).resolve()
+root = Path(tempfile.mkdtemp(prefix="haarness-instruction-globs-", dir=os.environ.get("HAARNESS_E2E_DIR"))).resolve()
+MODEL = "claude-sonnet-4-6"
+REQUESTS = []
+checks = []
+session = f"haarness-instruction-globs-{os.getpid()}"
+
+
+class Anthropic(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"data": [{"id": MODEL, "display_name": "Fixture Sonnet"}]}).encode())
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        REQUESTS.append(body)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        events = [{"type": "message_start", "message": {"id": f"msg_{len(REQUESTS)}", "usage": {"input_tokens": 9, "output_tokens": 0}}},
+                  {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                  {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Fixture answer"}},
+                  {"type": "content_block_stop", "index": 0},
+                  {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 2}},
+                  {"type": "message_stop"}]
+        for event in events:
+            self.wfile.write(("event: " + event["type"] + "\ndata: " + json.dumps(event) + "\n\n").encode())
+        self.wfile.flush()
+
+
+service = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Anthropic)
+threading.Thread(target=service.serve_forever, daemon=True).start()
+home, project, data = root / "home", root / "project", root / "data"
+env = {**ISOLATED, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "HAARNESS_HOME": str(home),
+       "HAARNESS_DATA_DIR": str(data), "USER": os.environ.get("USER", "fixture"), "LANG": "en_US.UTF-8",
+       "ANTHROPIC_API_KEY": "fixture-key", "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{service.server_port}/v1"}
+
+
+def write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def check(label, condition=True):
+    assert condition, label
+    checks.append(label)
+    print("PASS", label, flush=True)
+
+
+def until(predicate, label, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(.1)
+    raise AssertionError(label)
+
+
+def system(body):
+    return "".join(block["text"] for block in body["system"]) if isinstance(body["system"], list) else body["system"]
+
+
+try:
+    notes = home / "notes"
+    marks = {
+        "notes/top.md": "MARK_TOP", "notes/a/note.md": "MARK_NOTE",
+        "notes/l1/l2/l3/l4/l5/l6/l7/l8/eight.md": "MARK_EIGHT",
+        "notes/l1/l2/l3/l4/l5/l6/l7/l8/l9/deep.md": "MARK_DEEP",
+        "elsewhere/other.md": "MARK_AWAY", "elsewhere/single.md": "MARK_LINKED_FILE",
+    }
+    for name, mark in marks.items():
+        write(home / name, mark + "\n")
+    os.symlink("..", notes / "a/up")
+    os.symlink(".", notes / "a/self")
+    os.symlink("../elsewhere", notes / "away")
+    os.symlink("../elsewhere/single.md", notes / "linked.md")
+    write(data / "config/haarness.json", json.dumps({"instructions": ["~/notes/**/*.md"]}))
+    project.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    write(project / ".haarness/config.toml", f'[defaults]\nprovider="anthropic"\nmodel="{MODEL}"\n[lsp]\nenabled=false\n')
+    write(project / "haarness.json", json.dumps({"instructions": ["docs/**/*.md"]}))
+    write(project / "docs/guide.md", "MARK_PROJECT_DOC\n")
+    os.symlink("..", project / "docs/loop")
+
+    started = time.monotonic()
+    answer = subprocess.run([str(binary), "--workspace", str(project), "--trust-project", "run", "hello",
+                             "--provider", "anthropic", "--model", MODEL],
+                            text=True, capture_output=True, env=env, timeout=120)
+    elapsed = time.monotonic() - started
+    assert answer.returncode == 0, answer.stdout + answer.stderr
+    turn = next(body for body in REQUESTS if body.get("tools"))
+    prompt = system(turn)
+    for mark in ["MARK_TOP", "MARK_NOTE", "MARK_EIGHT", "MARK_LINKED_FILE", "MARK_PROJECT_DOC"]:
+        assert prompt.count(mark) == 1, (mark, prompt[-3000:])
+    for mark in ["MARK_DEEP", "MARK_AWAY"]:
+        assert mark not in prompt, (mark, prompt[-3000:])
+    check(f"`haarness run` answers in {elapsed:.1f} s with the files the globs match, none through a loop, "
+          "a linked folder or past 8 folders")
+
+    logs = "".join(path.read_text(errors="replace") for path in data.rglob("haarness.log*") if path.is_file())
+    notice = f"instructions ~/notes/**/*.md: looked no deeper than 8 folders below {notes}"
+    check("the log says where the walk stopped", notice in logs)
+
+    # The person's glob loads for any project: a plain one, on the echo provider.
+    plain = root / "plain"
+    plain.mkdir()
+    tui_env = {**env, "HAARNESS_TEST_PROVIDER": "1", "HAARNESS_DEFAULT_PROVIDER": "echo", "HAARNESS_DEFAULT_MODEL": "echo-1"}
+    command = pane_command(tui_env, [binary, "--workspace", str(plain)])
+    subprocess.run(["tmux", "new-session", "-d", "-x", "160", "-y", "40", "-s", session, command], check=True)
+
+    def pane():
+        return subprocess.run(["tmux", "capture-pane", "-p", "-t", session], text=True, capture_output=True).stdout
+
+    until(lambda: "h a a r n e s s" in pane(), "the terminal UI did not open", 60)
+    (root / "tui-open.txt").write_text(pane())
+    subprocess.run(["tmux", "send-keys", "-l", "-t", session, "glob-tmux-proof"], check=True)
+    subprocess.run(["tmux", "send-keys", "-t", session, "Enter"], check=True)
+    until(lambda: pane().count("glob-tmux-proof") >= 2, "the terminal UI did not answer", 60)
+    (root / "tui-answer.txt").write_text(pane())
+    check("the terminal UI opens on the looping configuration and answers a message")
+
+    print(f"PASS {len(checks)} instruction glob checks.", flush=True)
+finally:
+    subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
+    for folder in (project, root / "plain"):
+        subprocess.run([str(binary), "--workspace", str(folder), "serve", "--stop"], env=env, capture_output=True, timeout=35)
+    service.shutdown()
+    service.server_close()
+    e2e_scratch.settle(root)
