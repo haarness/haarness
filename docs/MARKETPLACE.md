@@ -71,7 +71,9 @@ install refuses to overwrite a resource of the same name that it did not install
 **Automatic updates.** A receipt's `autoUpdate` says whether the install follows new versions. An
 install of the latest version gets `true`; one that names its version (`--version`, or the version
 field of a request) gets `false`, and so does `install --no-auto-update`. An update keeps the value it
-finds unless the request sets `autoUpdate`. A receipt without the field, which every install made
+finds unless the request sets `autoUpdate`, with one exception: `update --version N` for a version the
+catalog does not offer as its current one (a rollback) turns it off, and says the resource is now
+pinned, because the next round would undo it. A receipt without the field, which every install made
 before this setting has, reads as `false`, so nothing changes on its own on a machine that upgrades.
 `auto-update` (the `auto_update` request: `id`, `scope`, `enabled`) rewrites only the receipt.
 
@@ -86,37 +88,65 @@ event follows a round that changed anything. In **Installed resources** each row
 versions (`updates automatically`, `pinned to version 3`, or `has local edits, so automatic updates
 wait`) and offers one entry to change it beside **Update**.
 
+An install decides on the receipt as it is when it writes, not as it was before the download: under
+the marketplace editor lock it reads the receipt again, so a resource removed meanwhile stays removed,
+an automatic update stops when the resource was updated or its automatic updates were turned off
+meanwhile, and an update by hand keeps a switch turned off meanwhile. Removal holds the same lock until
+the receipt is gone. An update of a marketplace extension leaves the extensions switch as it was; only
+a first install turns it on.
+
 **In the background.** A long-running server (`haarness serve`, so the server the TUI and Desktop
 start, and Cloud workspace runtimes; never a one-shot command such as `haarness run`) runs a round
 about two minutes after it starts and then every `HAARNESS_AUTO_UPDATE_INTERVAL_SECS` seconds (1800 by
 default, at least 60; a shorter interval brings the first round forward too). `HAARNESS_AUTO_UPDATE=0`
 turns the rounds off. Several servers run on one computer, one per folder, so a stamp decides which of
 them does a round: `.auto-update-checked` in the data folder for installs for all projects and the Git
-plugin marketplaces below, and the same file in a project's `.haarness/marketplace/` (written only
-where that project has installs that follow new versions) for the project's own. The stamp is read
-and written under an editor lock, and the configuration watcher skips it. A round never delays
-startup, says it could not reach the network at info level, and leaves running turns alone: what it
-installs reaches the runtime with the next idle configuration reload.
+plugin marketplaces below, and `<data>/auto-update/<digest of the project's path>.checked` for a
+project's own installs (only where it has installs that follow new versions). Nothing is written into
+the project. The stamp is read and written under an editor lock. A round never delays startup, says
+it could not reach the network at info level, and leaves running turns alone: what it installs reaches
+the runtime with the next idle configuration reload.
 
 **Git plugin marketplaces.** `marketplaces.json` stays a plain `name → path` map, which older
 versions read. Beside it, `<data>/plugins/marketplace-sources.json` records where each Git clone came
 from: `name → {source, autoUpdate, commit, updatedAt}`. Registering a Git marketplace writes its entry
-with `autoUpdate: true`; a folder gets none, because it is read as it is. `haarness plugin marketplace
-update [name]` (the `update_plugin_marketplace` request, or plugin action `marketplace_update`) asks
-the repository for its default branch's commit with `git ls-remote`, using the same non-interactive git
-as cloning, and does nothing more when the clone and the record already hold it. Otherwise it clones
-into a staging folder beside the old clone, refuses the result if the marketplace now gives itself
-another name, swaps the folders (the old one comes back if the swap fails) and then updates each
-installed plugin of that marketplace whose files would change, keeping it on or off as it was. A
-plugin the marketplace no longer lists stays installed as it is and is reported. A marketplace
-registered before sources were recorded has no entry and is not refreshed in the background; updating
-it by hand works when its clone has an `origin`, and records an entry with `autoUpdate: false`.
-`haarness plugin marketplace auto-update <name> [--off]` (the `plugin_marketplace_auto_update` request
-with `name` and `enabled`, or plugin action `marketplace_auto_update` with `name`, `name:on` or
-`name:off`) changes that setting. `plugin_marketplaces` lists `type` (`git` or `folder`), `source` (a
-credential in it shown as `<redacted>`), `autoUpdate`, `commit` and `updatedAt` for each one. Desktop's
-**Settings → Plugins** lists them under **Marketplaces**, with **Update automatically** and **Update**
-for a Git one.
+with `autoUpdate: true` (and says how to turn that off); a folder gets none, because it is read as it
+is. `haarness plugin marketplace update [name]` (the `update_plugin_marketplace` request, or plugin
+action `marketplace_update`) asks the repository for its default branch's commit with `git ls-remote`
+and does nothing more when the clone and the record already hold it. Otherwise it clones into a
+staging folder beside the old clone, refuses the result if the marketplace now gives itself another
+name, swaps the folders (the old one comes back if the swap fails, and one left aside by a swap that
+stopped halfway is put back next time) and then updates each installed plugin of that marketplace
+whose files would change. A plugin the marketplace no longer lists stays installed as it is and is
+reported. A marketplace registered before sources were recorded has no entry and is not refreshed in
+the background; updating it by hand works when its clone has an `origin`, and records an entry with
+`autoUpdate: false`. `haarness plugin marketplace auto-update <name> [--off]` (the
+`plugin_marketplace_auto_update` request with `name` and `enabled`, or plugin action
+`marketplace_auto_update` with `name`, `name:on` or `name:off`) changes that setting.
+
+These automatic plugin updates are careful about what they replace. `installed.json` keeps a digest of
+each plugin Haarness installs (records from before have none and are updated as before), so an
+installed copy with local edits is never replaced: its update waits with `has local edits`, and a
+`plugin update` by hand refuses until the edits are kept elsewhere and the plugin is removed and
+installed again, as marketplace installs do. A new version that would add or change hooks
+(`hooks/hooks.json` or `hooks` in `plugin.json`), add or change MCP servers (`.mcp.json` or
+`mcpServers`) or add programs (files marked executable) waits too, with the reason (`asks for more: new
+hooks`); `haarness plugin update <name>` installs it. A plugin's record keeps that reason (`held`) until
+it is updated or nothing waits any more. Every change to `installed.json` is a read, change and write
+under one editor lock, and the new files are fetched before it is taken: a plugin turned off or removed
+while its update is fetched stays off or removed.
+
+Git runs without a terminal (no input, `GIT_TERMINAL_PROMPT=0`, ssh with `BatchMode=yes` and a 15
+second connection timeout), gives up on a transfer slower than 1 KB/s for 30 seconds, and is stopped,
+with what it started, after ten minutes for a clone or fetch, one minute for `ls-remote` and 30 seconds
+for anything else. Clones are made before the registrations are locked; the lock covers only the
+swap. A tag or branch named in a plugin entry is looked up by its full name (`refs/heads/<ref>`, then
+the tag's commit), so `v1` never means `feature/v1`.
+
+`plugin_marketplaces` lists `type` (`git` or `folder`), `source` (a credential in it shown as
+`<redacted>`), `autoUpdate`, `commit`, `updatedAt` and `held` (installed plugins whose update waits,
+with why) for each one. Desktop's **Settings → Plugins** lists them under **Marketplaces**, with
+**Update automatically** and **Update** for a Git one, and says there which plugins wait for you.
 
 ## Capabilities
 
