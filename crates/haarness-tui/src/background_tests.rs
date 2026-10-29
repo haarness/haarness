@@ -1997,6 +1997,26 @@ async fn ctrl_x_says_when_nothing_could_move_while_a_command_runs() {
     .await
     .unwrap();
     assert_eq!(app.notice, "Nothing could move to the background");
+    assert!(
+        app.notification_toast.is_none(),
+        "the band shows it while idle"
+    );
+    // While a reply runs it owns the band: a card says it.
+    app.active_turn = Some(TurnId::new());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        app.notification_toast
+            .as_ref()
+            .map(|toast| toast.message.as_str()),
+        Some("Nothing could move to the background")
+    );
+    app.active_turn = None;
     app.language = crate::locale::Language::Arabic;
     app.execute_command("/background", &client).await.unwrap();
     assert_eq!(app.notice, "لم يمكن نقل أي شيء إلى الخلفية");
