@@ -21628,6 +21628,7 @@ fn management_lines_read_inline_instead_of_behind_a_details_row() {
             description: String::new(),
             request: serde_json::json!({"action":"logout"}),
             confirm: None,
+            icon: None,
         }],
         ..Default::default()
     };
