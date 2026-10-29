@@ -428,7 +428,12 @@ command that completed. Enums may gain values; an unknown one reads as
 - `POST /v1/threads/{id}/commands/background` sends every running foreground
   command of the chat tree to the background, the one named with
   `?commandId=` alone; it answers the commands moved. A named command that
-  cannot move (a subagent's, one that ended) is `409`. Subagents move with
+  cannot move answers `409` with one plain reason as `message`, for a client
+  to show as it is: it has ended, it already runs in the background, it is a
+  subagent's, or the chat already runs as many commands in the background as
+  `execution.shell_background_per_chat` allows. Moving every command answers
+  `409` with that last reason when the cap kept all of them back. Subagents
+  move with
   `POST /v1/threads/{id}/background`, so a client's "send everything to the
   background" calls both.
 - `GET /v1/commands/active` lists the running commands of every chat, as

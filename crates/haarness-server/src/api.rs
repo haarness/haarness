@@ -2946,12 +2946,18 @@ async fn background_shell_commands(
     Path(id): Path<ThreadId>,
     Query(query): Query<BackgroundCommandsQuery>,
 ) -> ApiResult<Json<Vec<ShellCommandInfo>>> {
-    Ok(Json(
-        state
-            .runtime
-            .background_shell_commands(id, query.command_id.as_deref())
-            .await?,
-    ))
+    // A refusal is a sentence a client shows as it is.
+    state
+        .runtime
+        .background_shell_commands(id, query.command_id.as_deref())
+        .await
+        .map(Json)
+        .map_err(|error| match error {
+            CoreError::Conflict(message) => {
+                ApiFailure(CoreError::Conflict(message.clone()), Some(message))
+            }
+            other => other.into(),
+        })
 }
 /// Running commands of every chat, as `/turns/active` lists turns.
 async fn active_shell_commands(State(state): State<ServerState>) -> Json<Vec<ShellCommandInfo>> {
