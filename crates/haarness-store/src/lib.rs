@@ -1324,11 +1324,11 @@ impl ThreadRepository for SqliteStore {
             };
             for (old_id, sequence, data_json, created_at) in copied {
                 let mut data: ItemData = serde_json::from_str(&data_json).map_err(storage)?;
-                // The fork runs none of its source's commands.
-                if let ItemData::CommandState { state, .. } = &mut data
-                    && state.is_live()
-                {
-                    *state = haarness_protocol::ShellCommandState::Interrupted;
+                // The fork runs none of its source's commands: a checkpoint
+                // of one still running is left out (the copied call's result
+                // still names the command), an ended one is kept.
+                if matches!(&data, ItemData::CommandState { state, .. } if state.is_live()) {
+                    continue;
                 }
                 if let ItemData::QueueConsumed { item_id } = &mut data {
                     let Some(remapped) = id_map.get(item_id).copied() else {
@@ -2209,9 +2209,8 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(
-            states(store.list_items(fork.id, None).await.unwrap()),
-            [ShellCommandState::Interrupted],
+        assert!(
+            states(store.list_items(fork.id, None).await.unwrap()).is_empty(),
             "the fork never ran the command"
         );
         // The command ends, and an undo takes its end out of the chat.
@@ -2276,9 +2275,8 @@ mod tests {
         }
         archive.root_thread_id = imported_id;
         store.import_session_archive(archive).await.unwrap();
-        assert_eq!(
-            states(store.list_items(imported_id, None).await.unwrap()),
-            [ShellCommandState::Interrupted],
+        assert!(
+            states(store.list_items(imported_id, None).await.unwrap()).is_empty(),
             "an imported chat runs nothing"
         );
         let report = |command: &StrandedCommand| {

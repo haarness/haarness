@@ -308,6 +308,11 @@ impl SqliteStore {
             }
 
             for source in &entry.items {
+                // An imported chat runs none of the commands it holds: a
+                // checkpoint of one still running is left out.
+                if matches!(&source.data, ItemData::CommandState { state, .. } if state.is_live()) {
+                    continue;
+                }
                 let mut item = source.clone();
                 normalize_task_state(&mut item);
                 if let Some((owner, sequence)) = tx
@@ -478,12 +483,6 @@ fn normalize_task_state(item: &mut Item) {
         )
     {
         *state = "interrupted".into();
-    }
-    // An imported chat runs none of the commands it holds.
-    if let ItemData::CommandState { state, .. } = &mut item.data
-        && state.is_live()
-    {
-        *state = haarness_protocol::ShellCommandState::Interrupted;
     }
 }
 
