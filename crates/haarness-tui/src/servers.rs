@@ -104,6 +104,7 @@ fn entry(label: impl Into<String>, description: impl Into<String>, request: Valu
         description: description.into(),
         request,
         confirm: None,
+        icon: None,
     }
 }
 fn field(key: &str, label: &str, secret: bool) -> Field {

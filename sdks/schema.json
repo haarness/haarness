@@ -3176,6 +3176,13 @@
           "description": {
             "type": "string"
           },
+          "icon": {
+            "description": "A square image drawn beside the label, as an absolute https URL.\nClients that show text only leave it out.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "label": {
             "type": "string"
           },
@@ -3236,6 +3243,13 @@
               "$ref": "#/components/schemas/ManagementField"
             },
             "type": "array"
+          },
+          "icon": {
+            "description": "A square image drawn beside the title, as an absolute https URL.\nClients that show text only leave it out.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "lines": {
             "items": {

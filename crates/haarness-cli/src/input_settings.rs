@@ -245,6 +245,7 @@ pub(super) fn request(
     if input["format"] == "view" || action == "view" {
         return Ok(serde_json::to_value(ManagementView {
             title: "General · Input mode".into(),
+            icon: None,
             data: Some(result.clone()),
             lines: vec![
                 message.unwrap_or_else(|| {
@@ -280,6 +281,7 @@ pub(super) fn request(
                 description: "Read current settings".into(),
                 request: json!({"action":"view","scope":scope}),
                 confirm: None,
+                icon: None,
             }],
         })?);
     }
