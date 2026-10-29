@@ -267,38 +267,10 @@ impl ModelProvider for GeminiProvider {
         if structured_output.is_some() {
             body["toolConfig"] = json!({"functionCallingConfig":{"mode":"ANY"}});
         }
-        if let Some(effort) = request.reasoning_effort.as_deref() {
-            if uses_thinking_level(&request.model) {
-                let level = match effort {
-                    "none" | "minimal"
-                        if gemini_reasoning_efforts(&request.model).contains(&"minimal") =>
-                    {
-                        "minimal"
-                    }
-                    "none" | "minimal" | "low" => "low",
-                    "medium" => "medium",
-                    _ => "high",
-                };
-                body["generationConfig"] =
-                    json!({"thinkingConfig":{"thinkingLevel":level,"includeThoughts":true}});
-            } else {
-                let budget: i64 = match effort {
-                    "none" | "minimal" => 0,
-                    "low" => 2048,
-                    "high" => 24_576,
-                    _ => 8192,
-                };
-                if request.model.starts_with("gemini-2.5") || budget > 0 {
-                    // Gemini 2.5 Pro cannot disable thinking (minimum 128).
-                    let budget = if request.model.starts_with("gemini-2.5-pro") {
-                        budget.max(128)
-                    } else {
-                        budget
-                    };
-                    body["generationConfig"] =
-                        json!({"thinkingConfig":{"thinkingBudget":budget,"includeThoughts":true}});
-                }
-            }
+        if let Some(thinking) = request.reasoning_effort.as_deref().and_then(|effort| {
+            thinking_config(&request.model, effort, request.parameters.max_output_tokens)
+        }) {
+            body["generationConfig"] = json!({ "thinkingConfig": thinking });
         }
         let parameters = &request.parameters;
         if let Some(temperature) = parameters.temperature {
@@ -404,6 +376,55 @@ fn gemini_generation(id: &str) -> Option<u32> {
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(name.len());
     name[..digits].parse().ok()
+}
+
+/// The `thinkingConfig` for `effort`, or `None` to leave thinking to the
+/// model. Gemini 3 and later think at a level. Earlier models take a token
+/// budget, and their thinking counts against the response's output limit, so
+/// with a limit set thinking gets at most half of it and the answer keeps room
+/// (a short structured verdict under a small limit would otherwise end before
+/// it began).
+fn thinking_config(model: &str, effort: &str, output_limit: Option<u64>) -> Option<Value> {
+    if uses_thinking_level(model) {
+        let level = match effort {
+            "none" | "minimal" if gemini_reasoning_efforts(model).contains(&"minimal") => "minimal",
+            "none" | "minimal" | "low" => "low",
+            "medium" => "medium",
+            _ => "high",
+        };
+        return Some(json!({"thinkingLevel":level,"includeThoughts":true}));
+    }
+    let budget: u64 = match effort {
+        "none" | "minimal" => 0,
+        "low" => 2048,
+        "high" => 24_576,
+        _ => 8192,
+    };
+    if !model.starts_with("gemini-2.5") && budget == 0 {
+        return None;
+    }
+    // Gemini 2.5 Pro cannot disable thinking (minimum 128); Flash-Lite
+    // thinks at least 512 tokens when it thinks at all.
+    let pro = model.starts_with("gemini-2.5-pro");
+    let least = if pro {
+        128
+    } else if model.contains("flash-lite") {
+        512
+    } else {
+        1
+    };
+    let budget = match output_limit.filter(|limit| *limit > 0) {
+        // Half the limit is less than the model thinks at all: Pro thinks
+        // its least, and a model that can stop thinking stops.
+        Some(limit) if budget > 0 => match budget.min(limit / 2) {
+            half if half >= least => half,
+            _ if pro => least,
+            _ => 0,
+        },
+        _ => budget,
+    };
+    let budget = if pro { budget.max(least) } else { budget };
+    Some(json!({"thinkingBudget":budget,"includeThoughts":true}))
 }
 
 /// Gemini 3 and later think at a `thinkingLevel`. Through Vertex, Gemini 4
@@ -680,7 +701,7 @@ mod tests {
 
     use super::{
         GeminiProvider, api_key_from, discovered_model, discovered_model_for, gemini_contents,
-        gemini_reasoning_efforts, uses_thinking_level,
+        gemini_reasoning_efforts, thinking_config, uses_thinking_level,
     };
 
     #[derive(Clone, Default)]
@@ -976,6 +997,120 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
         }))
         .unwrap();
         assert_eq!(argon.reasoning_efforts, ["low", "medium", "high"]);
+    }
+
+    #[test]
+    fn a_thinking_budget_leaves_at_least_half_the_output_limit_for_the_answer() {
+        let budget = |model: &str, effort: &str, limit: Option<u64>| {
+            thinking_config(model, effort, limit).map(|config| config["thinkingBudget"].clone())
+        };
+        // Without a limit, as before.
+        assert_eq!(budget("gemini-2.5-pro", "low", None), Some(json!(2048)));
+        assert_eq!(
+            budget("gemini-2.5-flash", "high", None),
+            Some(json!(24_576))
+        );
+        // Half of the limit at most.
+        assert_eq!(
+            budget("gemini-2.5-pro", "low", Some(2048)),
+            Some(json!(1024))
+        );
+        assert_eq!(
+            budget("gemini-2.5-flash", "high", Some(8192)),
+            Some(json!(4096))
+        );
+        assert_eq!(
+            budget("gemini-2.5-flash", "low", Some(32_000)),
+            Some(json!(2048))
+        );
+        // Thinking that was asked for stays on: 2.5 Flash keeps a positive
+        // budget under the same review limit.
+        assert_eq!(
+            budget("gemini-2.5-flash", "low", Some(2048)),
+            Some(json!(1024))
+        );
+        assert_eq!(
+            budget("gemini-2.5-flash-lite", "low", Some(2048)),
+            Some(json!(1024))
+        );
+        // Below a model's least: 2.5 Pro thinks its 128, and a model that can
+        // stop thinking stops rather than take more than half the limit.
+        assert_eq!(budget("gemini-2.5-pro", "low", Some(100)), Some(json!(128)));
+        assert_eq!(
+            budget("gemini-2.5-flash-lite", "low", Some(600)),
+            Some(json!(0))
+        );
+        assert_eq!(budget("gemini-2.5-flash", "low", Some(1)), Some(json!(0)));
+        assert_eq!(budget("gemini-2.5-pro", "low", Some(0)), Some(json!(2048)));
+        // Thinking asked off stays as it was.
+        assert_eq!(
+            budget("gemini-2.5-flash", "minimal", Some(2048)),
+            Some(json!(0))
+        );
+        assert_eq!(
+            budget("gemini-2.5-pro", "minimal", Some(2048)),
+            Some(json!(128))
+        );
+        assert_eq!(budget("gemini-flash-latest", "minimal", Some(2048)), None);
+        // Gemini 3 and later think at a level, which a limit leaves alone.
+        assert_eq!(
+            thinking_config("gemini-3-flash-preview", "minimal", Some(2048)),
+            Some(json!({"thinkingLevel": "minimal", "includeThoughts": true}))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_short_verdict_under_a_small_limit_keeps_room_after_thinking() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route(
+                "/models/gemini-2.5-pro:streamGenerateContent",
+                post(structured_content),
+            )
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = GeminiProvider::for_test(format!("http://{address}"));
+        // What Auto's reviewer asks of Gemini 2.5 Pro.
+        let events = provider
+            .stream(
+                ProviderRequest {
+                    model: "gemini-2.5-pro".into(),
+                    system: "review".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "rm -rf build".into(),
+                    }],
+                    tools: vec![],
+                    reasoning_effort: Some("low".into()),
+                    parameters: haarness_core::RequestParameters {
+                        max_output_tokens: Some(2048),
+                        ..haarness_core::RequestParameters::default()
+                    },
+                    output_schema: Some(json!({
+                        "type":"object",
+                        "properties":{"count":{"type":"integer"}},
+                        "required":["count"]
+                    })),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.into_iter().any(
+            |event| matches!(event.unwrap(), ProviderEvent::StructuredOutput(value) if value == json!({"count": 4}))
+        ));
+        let requests = state.0.lock();
+        assert_eq!(
+            requests[0]["generationConfig"],
+            json!({
+                "thinkingConfig": {"thinkingBudget": 1024, "includeThoughts": true},
+                "maxOutputTokens": 2048
+            })
+        );
     }
 
     #[tokio::test]
