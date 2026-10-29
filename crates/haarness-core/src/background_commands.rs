@@ -45,6 +45,9 @@ pub const OUTPUT_TAIL_KEPT: usize = 64 * 1024;
 /// What a command in the background, or one without a deadline, saves of its
 /// output, from the start. 64 MiB, as much as a request body.
 pub const OUTPUT_SAVED_LIMIT: u64 = 64 * 1024 * 1024;
+/// How the output file of a command in the background is named: then
+/// the id of the process that ran it, a dash and the file's first name.
+pub const BACKGROUND_FILE_PREFIX: &str = "background-";
 /// How much of the command line a command reports.
 const COMMAND_TEXT_LIMIT: usize = 8 * 1024;
 /// A page of output when the reader names no limit, and the most it may name.
@@ -140,7 +143,9 @@ pub struct CommandProcess {
 /// kept in memory ([`OUTPUT_TAIL_KEPT`]), so a long-running command's middle
 /// can be dropped.
 pub struct CommandOutput {
-    path: PathBuf,
+    /// Where the file is: renamed once the command runs in the background
+    /// (see [`BACKGROUND_FILE_PREFIX`]).
+    path: Mutex<PathBuf>,
     state: Mutex<OutputState>,
     size: watch::Sender<u64>,
     file: tokio::sync::Mutex<Option<tokio::fs::File>>,
@@ -177,7 +182,7 @@ impl CommandOutput {
     #[must_use]
     pub fn new(path: PathBuf, file: tokio::fs::File, save_limit: u64) -> Self {
         Self {
-            path,
+            path: Mutex::new(path),
             state: Mutex::new(OutputState {
                 size: 0,
                 saved: 0,
@@ -250,8 +255,32 @@ impl CommandOutput {
     }
 
     #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> PathBuf {
+        self.path.lock().clone()
+    }
+
+    /// Name the file as a command in the background's, `background-<this
+    /// process's id>-<its name>`, so a later start can tell it from the
+    /// output files results name and remove it once its process is gone.
+    /// Where an open file cannot be renamed (Windows) it keeps its name.
+    pub fn mark_background(&self) {
+        if !self.state.lock().file_kept {
+            return;
+        }
+        let mut path = self.path.lock();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return;
+        };
+        if name.starts_with(BACKGROUND_FILE_PREFIX) {
+            return;
+        }
+        let renamed = path.with_file_name(format!(
+            "{BACKGROUND_FILE_PREFIX}{}-{name}",
+            std::process::id()
+        ));
+        if std::fs::rename(&*path, &renamed).is_ok() {
+            *path = renamed;
+        }
     }
 
     /// Whether the file is still there.
@@ -277,7 +306,7 @@ impl CommandOutput {
             state.file_kept = false;
         }
         drop(self.file.lock().await.take());
-        let _ = tokio::fs::remove_file(&self.path).await;
+        let _ = tokio::fs::remove_file(self.path()).await;
         true
     }
 
@@ -346,7 +375,7 @@ impl CommandOutput {
             state.tail[from.min(to)..to].to_vec()
         } else {
             let to = end.min(saved);
-            let mut file = tokio::fs::File::open(&self.path).await?;
+            let mut file = tokio::fs::File::open(self.path()).await?;
             file.seek(std::io::SeekFrom::Start(start)).await?;
             let mut bytes = vec![0; usize::try_from(to - start).unwrap_or(0)];
             file.read_exact(&mut bytes).await?;
@@ -456,8 +485,12 @@ impl CommandPolicy {
         let explicit = timeout_ms.map(|ms| (ms > 0).then(|| millis(ms)));
         let deadline = (settings.shell_timeout_ms > 0).then(|| millis(settings.shell_timeout_ms));
         let interactive = follows && !subagent;
-        let move_after = (interactive && explicit.is_none() && settings.shell_move_after_ms > 0)
-            .then(|| millis(settings.shell_move_after_ms));
+        // A deadline that comes before the move wins, as it always did.
+        let move_after = (interactive
+            && explicit.is_none()
+            && settings.shell_move_after_ms > 0
+            && deadline.is_none_or(|deadline| millis(settings.shell_move_after_ms) < deadline))
+        .then(|| millis(settings.shell_move_after_ms));
         let foreground_deadline = match explicit {
             Some(limit) => limit,
             // A command that moves is never stopped for running long in the
@@ -466,7 +499,9 @@ impl CommandPolicy {
             None => deadline,
         };
         let background_limit = match explicit {
-            Some(None) if !interactive => deadline.map(Limit::SinceStart),
+            // Counted from the move, so a command that ran without a
+            // deadline in the foreground is not stopped the moment it moves.
+            Some(None) if !interactive => deadline.map(Limit::SinceBackground),
             Some(limit) => limit.map(Limit::SinceStart),
             None if interactive => (settings.shell_background_max_ms > 0)
                 .then(|| Limit::SinceBackground(millis(settings.shell_background_max_ms))),
@@ -506,6 +541,34 @@ impl CommandPolicy {
     }
 }
 
+/// Why a command cannot move to the background, in words a client shows
+/// as they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MoveRefusal {
+    Ended,
+    InBackground,
+    Subagent,
+    /// Its chat runs this many commands there already.
+    AtCap(usize),
+}
+
+impl std::fmt::Display for MoveRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ended => formatter.write_str("That command has already ended."),
+            Self::InBackground => {
+                formatter.write_str("That command already runs in the background.")
+            }
+            Self::Subagent => formatter.write_str("A subagent's command stays with its subagent."),
+            Self::AtCap(running) => write!(
+                formatter,
+                "This chat already runs {running} command{} in the background.",
+                if *running == 1 { "" } else { "s" }
+            ),
+        }
+    }
+}
+
 /// What stops a command, once something asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StopCause {
@@ -513,6 +576,8 @@ struct StopCause {
     state: ShellCommandState,
     /// One signal was sent, which the command may not heed.
     soft: bool,
+    /// A stop of everything took over a stop already under way.
+    taken_over: bool,
 }
 
 /// How a stop goes.
@@ -537,6 +602,10 @@ pub(crate) trait CommandHooks: Send + Sync {
     async fn backgrounded(&self, entry: &CommandEntry, moved: Option<ShellCommandMovedBy>);
     /// It ended in the background; `notify`: its chat is told.
     async fn ended(&self, entry: &CommandEntry, notify: bool);
+    /// Its end is decided before its process has gone (Haarness stops
+    /// while a person or the agent was stopping it): record it as `state`
+    /// now.
+    async fn decided(&self, entry: &CommandEntry, state: ShellCommandState);
 }
 
 /// One command.
@@ -558,6 +627,11 @@ pub(crate) struct CommandEntry {
     wake: Notify,
     /// Clients were told of it (`command.updated`).
     announced: AtomicBool,
+    /// It stayed in the foreground because its chat ran as many commands
+    /// in the background as it may.
+    held: AtomicBool,
+    /// Its end checkpoint is written already (see [`Self::stop_for_shutdown`]).
+    end_recorded: AtomicBool,
 }
 
 impl CommandEntry {
@@ -592,35 +666,42 @@ impl CommandEntry {
         self.info()
     }
 
-    /// Whether its chat runs as many commands in the background as it may.
-    fn chat_at_cap(&self) -> bool {
+    /// How many commands its chat runs in the background, when that is as
+    /// many as it may.
+    fn chat_at_cap(&self) -> Option<usize> {
         let cap = self.policy.per_chat;
-        let Some(listed) = self.listed.upgrade() else {
-            return false;
-        };
+        let listed = self.listed.upgrade()?;
         let (id, thread) = {
             let info = self.info.borrow();
             (info.id.clone(), info.thread_id)
         };
-        cap > 0
-            && listed
-                .live(|entry| {
-                    let info = entry.info.borrow();
-                    info.background && info.thread_id == thread && info.id != id
-                })
-                .len()
-                >= cap
+        let running = listed
+            .live(|entry| {
+                let info = entry.info.borrow();
+                info.background && info.thread_id == thread && info.id != id
+            })
+            .len();
+        (cap > 0 && running >= cap).then_some(running)
     }
 
-    /// Send it to the background while it runs in the foreground. Answers
-    /// whether it moved. One whose chat runs as many commands in the
+    /// Send it to the background while it runs in the foreground, or say
+    /// why it cannot go. One whose chat runs as many commands in the
     /// background as it may stays in the foreground; when its time to move
     /// came (`Limit`), it gets the deadline it would have had otherwise.
-    pub(crate) fn move_to_background(&self, by: ShellCommandMovedBy) -> bool {
+    pub(crate) fn move_to_background(&self, by: ShellCommandMovedBy) -> Result<(), MoveRefusal> {
         if by == ShellCommandMovedBy::Person && !self.policy.movable {
-            return false;
+            return Err(MoveRefusal::Subagent);
         }
-        if self.chat_at_cap() {
+        {
+            let info = self.info.borrow();
+            if info.background {
+                return Err(MoveRefusal::InBackground);
+            }
+            if info.state != ShellCommandState::Running {
+                return Err(MoveRefusal::Ended);
+            }
+        }
+        if let Some(running) = self.chat_at_cap() {
             if by == ShellCommandMovedBy::Limit {
                 let held = self.policy.held_deadline;
                 self.info.send_if_modified(|info| {
@@ -635,17 +716,23 @@ impl CommandEntry {
                     });
                     true
                 });
+                self.held.store(true, Ordering::SeqCst);
                 self.wake.notify_one();
                 if self.announced.load(Ordering::SeqCst) {
                     self.publish();
                 }
             }
-            return false;
+            return Err(MoveRefusal::AtCap(running));
         }
         let now = Utc::now();
-        let mut moved = false;
+        let mut refused = None;
         self.info.send_if_modified(|info| {
-            if info.background || info.state != ShellCommandState::Running {
+            if info.background {
+                refused = Some(MoveRefusal::InBackground);
+                return false;
+            }
+            if info.state != ShellCommandState::Running {
+                refused = Some(MoveRefusal::Ended);
                 return false;
             }
             info.background = true;
@@ -654,25 +741,27 @@ impl CommandEntry {
             info.moves_at = None;
             info.stops_at = self.policy.stops_at(info.started_at, Some(now));
             info.delivers_notice = self.policy.delivers_notice;
-            moved = true;
             true
         });
-        if moved {
-            self.process.output.limit_saving(OUTPUT_SAVED_LIMIT);
-            self.wake.notify_one();
+        if let Some(refused) = refused {
+            return Err(refused);
         }
-        moved
+        self.process.output.limit_saving(OUTPUT_SAVED_LIMIT);
+        self.process.output.mark_background();
+        self.wake.notify_one();
+        Ok(())
     }
 
-    /// Send it to the background for `by`, telling clients and its chat.
-    /// Answers whether it moved.
-    pub(crate) async fn send_to_background(&self, by: ShellCommandMovedBy) -> bool {
-        if !self.move_to_background(by) {
-            return false;
-        }
+    /// Send it to the background for `by`, telling clients and its chat,
+    /// or say why it cannot go.
+    pub(crate) async fn send_to_background(
+        &self,
+        by: ShellCommandMovedBy,
+    ) -> Result<(), MoveRefusal> {
+        self.move_to_background(by)?;
         self.publish();
         self.hooks.backgrounded(self, Some(by)).await;
-        true
+        Ok(())
     }
 
     /// Stop it, by `ended_by`. Answers whether a stop began (false when it
@@ -703,6 +792,7 @@ impl CommandEntry {
                             ended_by,
                             state: cause.state,
                             soft: false,
+                            taken_over: true,
                         });
                     }
                     match sequence {
@@ -717,6 +807,7 @@ impl CommandEntry {
                         ended_by,
                         state,
                         soft: only,
+                        taken_over: false,
                     });
                 }
             }
@@ -841,7 +932,10 @@ impl CommandEntry {
                     continue;
                 }
                 if info.moves_at.is_some_and(|at| at <= now)
-                    && self.send_to_background(ShellCommandMovedBy::Limit).await
+                    && self
+                        .send_to_background(ShellCommandMovedBy::Limit)
+                        .await
+                        .is_ok()
                 {
                     continue;
                 }
@@ -919,6 +1013,54 @@ impl CommandEntry {
         }
     }
 
+    /// Haarness stops. A command nothing was stopping gets a quick stop and
+    /// records nothing: the next start reports it cut off. One a person or
+    /// the agent was stopping ends as they decided: that end is recorded at
+    /// once, nobody is told, and its process is killed rather than left to
+    /// its grace. Answers whether a stop began or was taken over.
+    pub(crate) async fn stop_for_shutdown(self: &Arc<Self>, grace: Duration) -> bool {
+        if !self.info.borrow().state.is_live() {
+            return false;
+        }
+        let decided = {
+            let mut stopping = self.stopping.lock();
+            match stopping.as_mut() {
+                Some(cause) if !cause.soft && !cause.taken_over => {
+                    cause.taken_over = true;
+                    cause.ended_by = ShellCommandEndedBy::Shutdown;
+                    Some(cause.state)
+                }
+                _ => None,
+            }
+        };
+        let Some(state) = decided else {
+            return self.stop(
+                ShellCommandEndedBy::Shutdown,
+                ShellCommandState::Stopped,
+                StopSequence::Graceful(grace),
+            );
+        };
+        if self.info.borrow().background {
+            self.hooks.decided(self, state).await;
+            self.end_recorded.store(true, Ordering::SeqCst);
+        }
+        self.process.control.signal(StopSignal::Kill);
+        true
+    }
+
+    /// Its end checkpoint is written already.
+    pub(crate) fn end_recorded(&self) -> bool {
+        self.end_recorded.load(Ordering::SeqCst)
+    }
+
+    /// Haarness stopped while it ran, and nothing else had begun to stop
+    /// it: its end is left for the next start to report.
+    pub(crate) fn cut_off_by_shutdown(&self) -> bool {
+        self.stopping.lock().is_some_and(|cause| {
+            cause.ended_by == ShellCommandEndedBy::Shutdown && !cause.taken_over
+        })
+    }
+
     /// The end of its output, at most `lines` lines and `bytes` bytes.
     pub(crate) fn tail_text(&self, lines: usize, bytes: usize) -> (String, bool) {
         let (tail, cut) = self.process.output.tail(bytes);
@@ -939,7 +1081,7 @@ impl CommandEntry {
         self.process
             .output
             .file_kept()
-            .then(|| self.process.output.path().to_path_buf())
+            .then(|| self.process.output.path())
     }
 
     /// The hidden message its chat gets when it ends in the background.
@@ -1106,7 +1248,7 @@ impl ShellCommands {
             let info = entry.info.borrow();
             let keep = info.state.is_live() || info.ended_at.is_none_or(|ended| ended > cutoff);
             if !keep && info.background && entry.process.output.file_kept() {
-                files.push(entry.process.output.path().to_path_buf());
+                files.push(entry.process.output.path());
             }
             keep
         });
@@ -1304,6 +1446,7 @@ impl ShellCall {
         };
         if request.background {
             process.output.limit_saving(OUTPUT_SAVED_LIMIT);
+            process.output.mark_background();
         }
         let entry = Arc::new(CommandEntry {
             info: watch::Sender::new(info.clone()),
@@ -1317,6 +1460,8 @@ impl ShellCall {
             released: watch::Sender::new(false),
             wake: Notify::new(),
             announced: AtomicBool::new(false),
+            held: AtomicBool::new(false),
+            end_recorded: AtomicBool::new(false),
         });
         call.commands.forget_ended();
         call.commands
@@ -1362,6 +1507,16 @@ impl ShellCall {
         }
         let end = entry.process.end.borrow().clone().unwrap_or_default();
         if current.state == ShellCommandState::TimedOut {
+            if entry.held.load(Ordering::SeqCst) {
+                let ran = current
+                    .ended_at
+                    .map_or(0, |ended| (ended - current.started_at).num_milliseconds());
+                return Err(CoreError::Tool(format!(
+                    "command timed out after {ran} ms: this chat already ran as many commands in the background as execution.shell_background_per_chat allows ({}), so it stayed in the foreground with its deadline; output saved to {}",
+                    call.settings.shell_background_per_chat,
+                    entry.process.output.path().display()
+                )));
+            }
             return Err(CoreError::Tool(format!(
                 "command timed out after {} ms; output saved to {}",
                 request.timeout_ms.unwrap_or(call.settings.shell_timeout_ms),
@@ -1872,6 +2027,7 @@ mod tests {
         fn printed(&self, _: &ShellCommandInfo, _: u64) {}
         async fn backgrounded(&self, _: &CommandEntry, _: Option<ShellCommandMovedBy>) {}
         async fn ended(&self, _: &CommandEntry, _: bool) {}
+        async fn decided(&self, _: &CommandEntry, _: ShellCommandState) {}
     }
 
     /// A process nobody can signal.
@@ -2007,7 +2163,7 @@ mod tests {
         let script = CommandPolicy::new(&settings, false, false, Some(0));
         assert_eq!(
             script.background_limit,
-            Some(Limit::SinceStart(Duration::from_secs(120)))
+            Some(Limit::SinceBackground(Duration::from_secs(120)))
         );
         assert_eq!(script.foreground_deadline, None);
         // Zero moves nothing; a background limit counts from the move.
@@ -2246,6 +2402,17 @@ mod tests {
         large.settled(Duration::from_secs(2)).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(output.path().exists());
+        // Named as a background command's, for a later start to find.
+        let name = output
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with(&format!("{BACKGROUND_FILE_PREFIX}{}-", std::process::id())),
+            "{name}"
+        );
         large.info.send_modify(|info| {
             info.ended_at = Some(Utc::now() - chrono::Duration::minutes(11));
         });
@@ -2376,6 +2543,8 @@ mod tests {
                 released: watch::Sender::new(false),
                 wake: Notify::new(),
                 announced: AtomicBool::new(false),
+                held: AtomicBool::new(false),
+                end_recorded: AtomicBool::new(false),
             })
         };
         for (id, thread, state, ended) in [
