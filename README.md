@@ -109,6 +109,10 @@ $env:HAARNESS_NO_DESKTOP='1'; irm https://haarness.ai/install.ps1 | iex      # C
 <tr><td><b>Runs on</b></td><td>Apple silicon and Intel</td><td>x64 and ARM64; CLI on glibc 2.17+, Desktop on GTK 3 desktops such as Ubuntu 20.04+</td><td>x64 and ARM64, Windows 10 and 11</td></tr>
 </table>
 
+Haarness Router, the OpenAI-compatible model router you run yourself, installs the same way into the CLI's
+folder: `curl -fsSL https://haarness.ai/install-router.sh | sh`, or `irm https://haarness.ai/install-router.ps1 | iex`
+on Windows ([Connect Haarness Router](docs/ROUTER.md#install-the-router)).
+
 On Debian and Ubuntu you can also install Desktop system-wide from the
 [download page](https://haarness.ai/download): `sudo apt install ./Haarness-<version>-linux-x64.deb`.
 Afterwards, `haarness desktop` opens Desktop (installing it first if you skipped it), `haarness doctor`

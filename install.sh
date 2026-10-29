@@ -2,14 +2,29 @@
 # Install checksum-verified Haarness from Haarness Cloud: the CLI, then Desktop. No sudo required.
 #   curl -fsSL https://haarness.ai/install.sh | sh                      CLI and Desktop
 #   curl -fsSL https://haarness.ai/install.sh | sh -s -- --no-desktop   CLI only (or HAARNESS_NO_DESKTOP=1)
-# HAARNESS_PRODUCT=cli or desktop installs only that one (`haarness upgrade` installs the CLI this way).
+#   curl -fsSL https://haarness.ai/install-router.sh | sh               Haarness Router
+# HAARNESS_PRODUCT=cli, desktop or router installs only that one (`haarness upgrade` installs the CLI this way).
+# install-router.sh is this script with router as the default product: the Cloud changes only the next line.
 set -eu
+default_product=all
 base=${HAARNESS_RELEASE_URL:-https://haarness.ai}
 channel=${HAARNESS_CHANNEL:-stable}
 version=${HAARNESS_VERSION:-latest}
-product=${HAARNESS_PRODUCT:-all}
+product=${HAARNESS_PRODUCT:-$default_product}
 case "${HAARNESS_NO_DESKTOP:-0}" in ''|0|false|no) no_desktop=0;; *) no_desktop=1;; esac
 usage() {
+  if [ "$default_product" = router ]; then
+    cat <<'USAGE'
+Install Haarness Router, the OpenAI-compatible model router you run yourself.
+
+  curl -fsSL https://haarness.ai/install-router.sh | sh
+
+HAARNESS_CHANNEL        stable (default) or preview
+HAARNESS_VERSION        a published version (default: latest)
+HAARNESS_INSTALL_DIR    where haarness-router goes (default ~/.local/bin)
+USAGE
+    return
+  fi
   cat <<'USAGE'
 Install Haarness: the CLI, then Desktop (macOS, and Linux with a graphical session).
 
@@ -17,10 +32,10 @@ Install Haarness: the CLI, then Desktop (macOS, and Linux with a graphical sessi
 
   --no-desktop   Install only the CLI (or set HAARNESS_NO_DESKTOP=1)
 
-HAARNESS_PRODUCT        cli or desktop: install only that one
+HAARNESS_PRODUCT        cli, desktop or router: install only that one
 HAARNESS_CHANNEL        stable (default) or preview
 HAARNESS_VERSION        a published version (default: latest)
-HAARNESS_INSTALL_DIR    the CLI folder (default ~/.local/bin), or Desktop's with HAARNESS_PRODUCT=desktop
+HAARNESS_INSTALL_DIR    the CLI and router folder (default ~/.local/bin), or Desktop's with HAARNESS_PRODUCT=desktop
 HAARNESS_DESKTOP_DIR    the Desktop folder (macOS: /Applications when writable, else ~/Applications;
                         Linux: ~/.local/bin)
 USAGE
@@ -37,7 +52,7 @@ case "$base" in *@*|*\\*) echo 'Release URL cannot hold a user name, a password 
 case "$base" in https://*|http://127.0.0.1:*|http://localhost:*) ;; *) echo 'Release URL requires HTTPS (HTTP is allowed only on loopback).' >&2; exit 1;; esac
 case "$channel" in stable|preview) ;; *) echo 'Invalid release channel' >&2; exit 1;; esac
 case "$version" in *[!a-zA-Z0-9._+-]*|'') echo 'Invalid release version' >&2; exit 1;; esac
-case "$product" in all|cli|desktop) ;; *) echo 'Invalid product' >&2; exit 1;; esac
+case "$product" in all|cli|desktop|router) ;; *) echo 'Invalid product' >&2; exit 1;; esac
 case "$(uname -s)" in Darwin) os=macos;; Linux) os=linux;; *) echo 'Use install.ps1 on Windows' >&2; exit 1;; esac
 case "$(uname -m)" in arm64|aarch64) arch=arm64;; x86_64|amd64) arch=x64;; *) echo 'Unsupported architecture' >&2; exit 1;; esac
 
@@ -62,10 +77,12 @@ has_fuse2() {
 install_product() (
   set -e
   product=$1 destination=$2
+  # name: the file installed; title: what messages call it.
   case "$product:$os" in
-    cli:*) kind=binary; name=haarness;;
-    desktop:macos) kind=zip; name=Haarness.app;;
-    desktop:linux) kind=AppImage; name=Haarness.AppImage;;
+    cli:*) kind=binary; name=haarness; title=Haarness;;
+    router:*) kind=binary; name=haarness-router; title='Haarness Router';;
+    desktop:macos) kind=zip; name=Haarness.app; title='Haarness Desktop';;
+    desktop:linux) kind=AppImage; name=Haarness.AppImage; title='Haarness Desktop';;
   esac
   mkdir -p "$destination"
   # Stage on the destination filesystem: final rename is atomic for CLI/AppImage.
@@ -82,7 +99,7 @@ install_product() (
   progress=--silent
   if [ -t 2 ]; then
     progress=--progress-bar
-    case "$product" in cli) label='Haarness CLI';; *) label='Haarness Desktop';; esac
+    case "$product" in cli) label='Haarness CLI';; *) label=$title;; esac
     printf 'Downloading %s for %s %s...\n' "$label" "$os" "$arch" >&2
   fi
   # Downloads $1 to $stage/payload (headers in $stage/headers, HTTP status in $status) in up to three tries; false
@@ -181,15 +198,16 @@ install_product() (
   else
     chmod 755 "$stage/payload"
     clear_quarantine "$stage/payload"
-    [ "$product" != cli ] || ensure_signature "$stage/payload"
-    if [ "$product" = cli ]; then
+    # The CLI and the router are programs: signed if need be, then run once to show they start here.
+    if [ "$kind" = binary ]; then
+      ensure_signature "$stage/payload"
       if ! actual_version=$("$stage/payload" --version 2>"$stage/error"); then
-        echo 'The downloaded Haarness does not run on this system; installation left unchanged.' >&2
+        echo "The downloaded $title does not run on this system; installation left unchanged." >&2
         cat "$stage/error" >&2
-        [ "$os" != linux ] || echo 'Haarness for Linux needs glibc 2.17 or newer; musl systems such as Alpine are not supported yet.' >&2
+        [ "$os" != linux ] || echo "$title for Linux needs glibc 2.17 or newer; musl systems such as Alpine are not supported yet." >&2
         exit 1
       fi
-      [ "$actual_version" = "haarness $released" ] || { echo "Binary version mismatch: $actual_version" >&2; exit 1; }
+      [ "$actual_version" = "$name $released" ] || { echo "Binary version mismatch: $actual_version" >&2; exit 1; }
     fi
     mv -f "$stage/payload" "$destination/$name"
   fi
@@ -239,9 +257,13 @@ ENTRY
     fi
   }
   [ "$product:$os" != desktop:linux ] || install_linux_launcher
-  printf 'Installed Haarness %s: %s/%s\n' "$released" "$destination" "$name"
-  if [ "$product" = cli ]; then
-    case ":$PATH:" in *":$destination:"*) ;; *) printf 'Add to your shell profile: export PATH="%s:$PATH"\n' "$destination";; esac
+  case "$product" in router) installed=$title;; *) installed=Haarness;; esac
+  printf 'Installed %s %s: %s/%s\n' "$installed" "$released" "$destination" "$name"
+  if [ "$kind" = binary ]; then
+    run=$name
+    case ":$PATH:" in *":$destination:"*) ;; *) run="$destination/$name"; printf 'Add to your shell profile: export PATH="%s:$PATH"\n' "$destination";; esac
+    [ "$product" != router ] ||
+      printf 'Run %s to start it with the provider keys in your environment; its dashboard is at http://127.0.0.1:8080/ui\n' "$run"
   elif [ "$os" = linux ]; then
     printf 'Start Haarness from your applications menu, or run %s/haarness-desktop.\n' "$destination"
     has_fuse2 || echo 'Installing FUSE 2 (libfuse2; libfuse2t64 on Ubuntu 24.04 and later) lets it start faster.'
@@ -251,7 +273,7 @@ ENTRY
 )
 
 case "$product" in
-  cli) install_product cli "${HAARNESS_INSTALL_DIR:-$HOME/.local/bin}";;
+  cli|router) install_product "$product" "${HAARNESS_INSTALL_DIR:-$HOME/.local/bin}";;
   desktop) install_product desktop "${HAARNESS_INSTALL_DIR:-$(default_desktop_dir)}";;
   all)
     install_product cli "${HAARNESS_INSTALL_DIR:-$HOME/.local/bin}"

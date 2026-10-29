@@ -1,6 +1,6 @@
 ---
 name: haarness-release
-description: Build, verify, publish and present Haarness CLI and Electron Desktop releases for macOS, Linux and Windows through the Cloud release API, and deploy the matching Haarness Cloud (web app, API, worker, router, gateway, workspace image) to staging then prod — per-platform builds (glibc-pinned Linux, static-CRT Windows), DMG/ZIP, AppImage/deb and NSIS packages, curl and PowerShell installers, checksums, quarantine, the download page, README/profile/docs install sections, SDK proof, rollback and a final proof report. Use when building, publishing, shipping or install-testing a release; excludes npm and Docker publication.
+description: Build, verify, publish and present Haarness CLI, Electron Desktop and Haarness Router releases for macOS, Linux and Windows through the Cloud release API, and deploy the matching Haarness Cloud (web app, API, worker, router, gateway, workspace image) to staging then prod — per-platform builds (glibc-pinned Linux, static-CRT Windows), DMG/ZIP, AppImage/deb and NSIS packages, the router binaries and their GitHub release, curl and PowerShell installers (install.sh/ps1 and install-router.sh/ps1), checksums, quarantine, the download page, README/profile/docs install sections, SDK proof, rollback and a final proof report. Use when building, publishing, shipping or install-testing a release; excludes npm and Docker publication.
 ---
 
 # Haarness binary releases
@@ -10,7 +10,10 @@ description: Build, verify, publish and present Haarness CLI and Electron Deskto
 - Start in the native repository (Cargo.toml and apps/desktop) and read
   [build/run guidance](../../.skills/haarness-build-run/SKILL.md). Preserve existing work and
   unrelated app instances. Use an isolated Cloud checkout if its primary is dirty.
-- One version for the CLI and Desktop (Cargo workspace = `apps/desktop/package.json`). Uploaded
+- One version for the CLI, Desktop and Haarness Router (Cargo workspace = `apps/desktop/package.json` =
+  haarness-router's `[workspace.package] version`). The router is the release's fourth product (`router`, beside
+  `cli`, `desktop` and `chrome-extension`), built from haarness-router's tag `v<version>`; see "The router's version
+  and tag" below. Uploaded
   filenames and published versions are immutable: use a fresh preview version per attempt. The
   service keys an upload by version, product and file name on **every** channel: once any
   publish of a version has carried a file, every later publish of that version must carry the
@@ -21,8 +24,15 @@ description: Build, verify, publish and present Haarness CLI and Electron Deskto
 - The workflow builds all six platforms and publishes only when every one passed. Never publish
   a partial matrix to stable: downloads read only the channel's newest release, so a platform
   missing from it answers "release platform not found" instead of falling back to an older one.
+  The router is part of every platform: `publish` refuses a CLI whose platform has no router
+  (`--without-router` is for local proof only), router builds of different router commits, and
+  files without a CLI (the router or Haarness for Chrome added later) unless the channel's current
+  release is their version and commit.
 - The installers live twice: `install.sh`/`install.ps1` here and
-  `haarness-cloud/assets/install.{sh,ps1}`, which the Cloud serves. Keep them identical.
+  `haarness-cloud/assets/install.{sh,ps1}`, which the Cloud serves. Keep them identical. The Cloud
+  also serves them as `/install-router.sh` and `/install-router.ps1` with one line changed, the
+  default product (`default_product=all` → `router`, `$DefaultProduct = 'all'` → `'router'`;
+  `releases.rs`, tested on both sides): never edit or duplicate that line.
 - A release is the Cloud too: the web app, the API that serves the download page and the
   release manifests, the worker, router and gateway, and the Fly workspace image that runs the
   CLI in Cloud workspaces. Deploy the Cloud that matches the release (section 5) before the
@@ -34,14 +44,40 @@ description: Build, verify, publish and present Haarness CLI and Electron Deskto
 
 ## Platform matrix
 
-| Platform | CLI build | Desktop | Published files | Platform checks |
+| Platform | CLI and router build | Desktop | Published files | Platform checks |
 | --- | --- | --- | --- | --- |
-| macOS arm64, x64 | `cargo build --release --target <triple>` | DMG, ZIP | `haarness-macos-<arch>`, `Haarness-<v>-mac-<arch>.{dmg,zip}` | package, quarantine, packaged Electron tests |
-| Linux x64, arm64 | `cargo zigbuild --release --target <triple>.2.17` | AppImage, deb | `haarness-linux-<arch>`, `Haarness-<v>-linux-<arch>.{AppImage,deb}` | `test-release-linux.py` |
-| Windows x64, arm64 | `cargo build --release --target <triple>` (static CRT) | NSIS EXE | `haarness-windows-<arch>.exe`, `Haarness-<v>-win-<arch>.exe` | `test-release-install-ps1.py`, package |
+| macOS arm64, x64 | `cargo build --release --target <triple>` | DMG, ZIP | `haarness-macos-<arch>`, `haarness-router-macos-<arch>`, `Haarness-<v>-mac-<arch>.{dmg,zip}` | package, quarantine, packaged Electron tests, router `--version` and `/healthz` |
+| Linux x64, arm64 | `cargo zigbuild --release --target <triple>.2.17` | AppImage, deb | `haarness-linux-<arch>`, `haarness-router-linux-<arch>`, `Haarness-<v>-linux-<arch>.{AppImage,deb}` | `test-release-linux.py`, router on Ubuntu 22.04 |
+| Windows x64, arm64 | `cargo build --release --target <triple>` (static CRT) | NSIS EXE | `haarness-windows-<arch>.exe`, `haarness-router-windows-<arch>.exe`, `Haarness-<v>-win-<arch>.exe` | `test-release-install-ps1.py`, package, router under Wine (x64) |
 
 Every later step reads the one CLI binary through `HAARNESS_BIN`; Desktop packaging copies it
-(`apps/desktop/scripts/prepare.mjs`) and `collect` publishes it.
+(`apps/desktop/scripts/prepare.mjs`) and `collect` publishes it. The router binary goes through
+`HAARNESS_ROUTER_BIN` (installer tests) and `collect --router-binary`; product `router`, kind `binary`.
+
+### The router's version and tag
+
+Before building, in haarness-router's main (its own repository, MIT, public):
+
+```sh
+v=X.Y.Z
+sed -i '' -E "s/^version = \"[^\"]+\"/version = \"$v\"/" Cargo.toml                         # [workspace.package]
+sed -i '' -E "s/(router-[a-z]+ = \{ version = \")[^\"]+/\1$v/" crates/*/Cargo.toml     # its own path dependencies
+cargo update --workspace --offline && cargo build --locked --bin haarness-router
+target/debug/haarness-router --version        # haarness-router X.Y.Z
+git commit -am "Version $v, released with Haarness $v" && git tag v$v && git push origin main v$v
+```
+
+The path dependencies carry versions too: a pre-release or a new minor no longer matches the old
+requirement. haarness-cloud builds the router crates by path from haarness-router's pushed `main`
+with `--locked`, so the bump changes its `Cargo.lock` too, and every `--locked` cargo command there
+fails until it is updated (proven 2026-10-29 with a throwaway bump). With the bumped router beside it:
+
+```sh
+cd ~/work/haarness/haarness-cloud
+cargo update -p router-protocol -p router-core -p router-providers --offline   # five lines of Cargo.lock
+cargo build --locked -p cloud-router
+git commit -am "Cargo.lock follows Haarness Router $v" && git push   # before build-local.sh cloud
+```
 
 ## 1. Pre-build gate
 
@@ -50,7 +86,8 @@ Every later step reads the one CLI binary through `HAARNESS_BIN`; Desktop packag
    `sh scripts/check-commercial-boundary.sh`, `python3 scripts/test-release-publish.py`.
    In the Cloud checkout: `cargo test --locked --workspace` with
    `HAARNESS_CLOUD_TEST_DATABASE_URL` set (a missing database skips the store, worker, api,
-   router and gateway tests, which is not proof) and `npm test --prefix web`.
+   router and gateway tests, which is not proof) and `npm test --prefix web`. In haarness-router
+   at its tag: `cargo test --locked --workspace` and its `sh scripts/check-commercial-boundary.sh`.
    (`cargo clippy -- -D warnings` has failed on main since the first commit on pedantic lints;
    check that a change adds no new finding instead of reading the total.)
 3. Compile the platforms you are not on. From Linux or macOS, Windows:
@@ -107,12 +144,28 @@ Linux does. Check it:
 no `api-ms-win-crt-*`). Always pass `--target`: the `windows-11-arm` runner's host toolchain
 need not match the architecture it publishes.
 
+**The router**, on every platform, from a clean checkout of haarness-router's tag with the CLI's
+toolchain (`RUSTUP_TOOLCHAIN` from this repository's `rust-toolchain.toml`; the router pins none)
+and its own lock file: `cargo build --release --locked --bin haarness-router --target <triple>`,
+`cargo zigbuild … --target <triple>.2.17` on Linux, `cargo xwin build …` for Windows with the static
+C runtime (the router's `.cargo/config.toml`, or `CARGO_TARGET_<TRIPLE>_RUSTFLAGS='-C
+target-feature=+crt-static'` when its tag has none; the same import check applies). Its
+`--version` must say `haarness-router <v>` wherever it can run. It needs CA certificates to start
+its server: where there are none (a stock `ubuntu:22.04` container) it stops with `Error: builder
+error` before it listens, so the Docker checks run `--version` on stock Ubuntu 22.04 and serve
+`/healthz` in the check image, which has them (CentOS 7 ships them and serves too).
+
 ### Without GitHub Actions (local cross-builds)
 
 When the workflow cannot run (a blocked billing account), a Mac covers all six platforms (macOS
 natively, the rest in Docker), or a Mac and one Linux x64 machine. Same tag, same Bun 1.3.14 per
 target (checked against Bun's `SHASUMS256.txt`), same steps as above:
 
+- Both scripts also build the router, from a clean worktree of haarness-router's `v<v>` (`ROUTER_REPO`,
+  default `~/work/haarness/haarness-router` after `git fetch --tags`; `ROUTER_REF` for another ref) at
+  `release-<v>/haarness-router`, where `collect --router-source` looks by default. `ROUTER_ONLY=1` builds,
+  checks and collects only the router, into `dist/router-<platform>`, to add it to a release already
+  published from the tag (publish those indexes alone; the service adds the product).
 - **A Mac** builds both macOS architectures with `VERSION=<v>
   ~/work/haarness/haarness-deploy/scripts/release-macos.sh`: a clean worktree of the tag in
   `~/work/haarness/release-<v>/haarness`, `--target aarch64-apple-darwin` and
@@ -140,7 +193,9 @@ target (checked against Bun's `SHASUMS256.txt`), same steps as above:
   as Ubuntu's 6.0.3 lacks the `bcryptprimitives.dll` every Rust 1.78+ program imports), cargo
   caches in named volumes, then the platform checks: `test-release-package.py` and
   `test-release-linux.py` per Linux architecture (arm64 natively in an arm64 container), each NSIS
-  installer's contents, the x64 CLI's `--version` and `doctor` under Wine, and both installer tests.
+  installer's contents, the x64 CLI's `--version` and `doctor` under Wine, the x64 router's `--version` and
+  `/healthz` under Wine, each Linux router's on Ubuntu 22.04 (amd64, arm64), and both installer tests
+  (`test-release-install.py` installing the Linux x64 router build).
   It signs every Windows program and runs `release.py check-windows` before collecting each Windows
   architecture (Signing, Windows); without the Artifact Signing account it stops unless
   `WIN_SIGN=test` (throwaway certificate) or `ALLOW_UNSIGNED=1`.
@@ -157,9 +212,9 @@ target (checked against Bun's `SHASUMS256.txt`), same steps as above:
   `git fetch` it instead of `git init`-ing a new history (its commit would not match).
 - A cross build cannot run its binary, so label it:
   `release.py collect --binary <target binary> --os linux --arch arm64 --version <v>
-  --desktop-dir apps/desktop/release --out dist/releases/linux-arm64`, one `--out` per platform
-  (each run writes one `index-*.json`); `publish` refuses indexes whose version or source commit
-  differ.
+  --desktop-dir apps/desktop/release --router-binary <router binary> --out dist/releases/linux-arm64`,
+  one `--out` per platform (each run writes one `index-*.json`); `publish` refuses indexes whose
+  version or source commit differ.
 - The CI-only gates (stable signing, `cargo test`, the installer and package checks) do not run on
   their own: run them, and an unsigned stable release is the owner's explicit decision, stated in
   the final proof.
@@ -168,17 +223,22 @@ target (checked against Bun's `SHASUMS256.txt`), same steps as above:
 
 ```sh
 python3 scripts/test-release-package.py              # bundled CLI, Bun, Chrome extension
-python3 scripts/release.py collect --binary "$HAARNESS_BIN"
+python3 scripts/release.py collect --binary "$HAARNESS_BIN" --router-binary "$HAARNESS_ROUTER_BIN" \
+  --router-source ../haarness-router                 # the router checkout at its v<version> tag
 python3 scripts/release.py collect-extension         # Haarness for Chrome: zip + signed CRX (release key needed)
 python3 scripts/test-release-extension.py            # its packaging and every refusal
-python3 scripts/test-release-install.py              # install.sh faults (macOS, Linux)
-python3 scripts/test-release-install-ps1.py          # install.ps1 under pwsh, every OS
+python3 scripts/test-release-install.py              # install.sh faults (macOS, Linux); HAARNESS_ROUTER_BIN installs the router build
+python3 scripts/test-release-install-ps1.py          # install.ps1 under pwsh, every OS; on Windows HAARNESS_ROUTER_BIN too
 python3 scripts/test-release-linux.py                # Linux only
 python3 scripts/test-release-quarantine.py           # macOS only
 ```
 
 - `collect` stages checksummed artifacts and one platform index under `dist/releases`; keep it
-  unchanged for idempotent retries.
+  unchanged for idempotent retries. With `--router-binary` the index also carries
+  `haarness-router-<os>-<arch>` (`.exe` on Windows) with the router's own commit as its
+  `sourceRevision`; collect refuses a dirty router checkout (`--allow-dirty` marks the index dirty),
+  one whose workspace version is not the release's, and a router that runs here but reports another
+  version. `--router-only` writes an index with the router alone.
 - `collect-extension` packages Haarness for Chrome once per release (one build for every
   platform, product `chrome-extension`, `os`/`arch` `any`): `haarness-chrome-<v>.zip`, the folder
   people load unpacked, and `haarness-chrome-<v>.crx`, the same zip signed with the release key
@@ -201,6 +261,11 @@ python3 scripts/test-release-quarantine.py           # macOS only
 - `test-release-install-ps1.py`: corrupt/missing checksum, plain-HTTP origin, unknown channel and
   a download that cannot run are all refused with the folder untouched; on Windows with
   `HAARNESS_BIN` the real binary installs over a previous copy.
+- Both installer tests cover the router: `HAARNESS_PRODUCT=router` and the router variant (made with
+  the Cloud's one-line substitution, which the tests check) fetch `/router/download?…&kind=binary`;
+  a corrupt, unchecked, unpublished, mismatched (another version, or the CLI) or broken download leaves
+  a previous `haarness-router` and a clean folder; `--help` of each variant describes what it installs;
+  the installed router names how to start it, the dashboard and, when needed, the PATH line.
 - Both installer tests cover the release domain: the file comes from the `Content-Location` the
   service names to `HEAD` (resuming there too, for install.sh) and must match the service's
   SHA-256; a release domain that does not deliver, or a plain-HTTP address, leaves the service to
@@ -261,6 +326,12 @@ curl -sS -X POST -H 'Content-Type: application/json' -d "{\"records\":[{\"record
 
 Releases up to 0.1.3 shipped an ad-hoc CLI; their bytes are fixed.
 
+The router (`haarness-router-macos-<arch>`) gets the same treatment: Developer ID, hardened runtime,
+secure timestamp, identifier `dev.haarness.router`, no entitlements (it loads no library of its own),
+checked to start (`--version`, and `/healthz` with the router repository's `tests/config.mock.toml`; x64
+through Rosetta), notarized as a zip, and the same ticket lookup in the gate. `install.sh` signs it ad
+hoc only when its signature does not verify.
+
 **macOS in the workflow: open item.** `release.yml` notarizes the app but does not seal the DMG.
 electron-builder deletes its temporary keychain when packaging ends, so a later `codesign` there
 needs the identity again (its own keychain as the script does, or `--config.dmg.sign=true` during
@@ -285,7 +356,8 @@ What is signed, all with jsign 7.6 (`windows-sign.sh` in the `haarness-wine` ima
 RFC 3161 timestamp from `timestamp.acs.microsoft.com` so signatures outlive the three-day
 certificates):
 
-- the CLI, before packaging, so the installer carries it byte for byte;
+- the CLI, before packaging, so the installer carries it byte for byte, and the router
+  (`haarness-router.exe`), which `check-windows` checks and `collect` records beside the CLI;
 - the plugin DLLs the NSIS installer loads while it runs (`windows-sign.sh nsis` signs copies of both
   bundles electron-builder takes them from, NSIS's own `System`, `nsDialogs`, `nsExec`… and
   `nsis-resources`' `StdUtils`, `UAC`, `nsis7z`…, used through `ELECTRON_BUILDER_NSIS_DIR` and
@@ -394,7 +466,9 @@ workload and waits for the rollouts; `-e restart=true` rolls pods whose tags did
   `Completed`; `kubectl -n <namespace> logs deploy/haarness-worker --since=10m` has no
   `job dead-lettered` or repeated `job failed` lines.
 - `curl -fsS https://<host>/healthz` and `/readyz`; `/download` shows the six platforms;
-  `/install.sh` matches `install.sh` here byte for byte.
+  `/install.sh` matches `install.sh` here byte for byte, and `diff <(curl -fsS
+  https://<host>/install-router.sh) install.sh` shows only the default-product line (likewise
+  `install-router.ps1`).
 - A Cloud workspace starts and answers (the workspace image), when it was rebuilt.
 
 Roll back by deploying the previous tags from `version.yml`'s history; migrations are forward-only,
@@ -434,26 +508,32 @@ workflow's `HAARNESS_RELEASE_URL`: pointing it at `https://haarness.ai` fails th
 - Public: `/api/v1/releases?channel=preview`, `/api/v1/releases/history?channel=preview`,
   `/api/v1/releases/artifacts/{id}`, and
   `/api/v1/releases/{channel}/{product}/download?os=macos&arch=arm64&kind=zip` (`version` pins).
-  Kinds: CLI `binary`; Desktop `dmg`/`zip`, `AppImage`/`deb`, `exe`.
+  Kinds: CLI and router `binary` (the default for both); Desktop `dmg`/`zip`, `AppImage`/`deb`, `exe`.
 - Operator: POST `/internal/releases/artifacts`, POST `/internal/releases`, POST
   `/internal/releases/{id}/promote` (same-channel rollback), DELETE `/internal/releases/{id}`
   (withdraw; never silently selects an older release). Roll back by promoting a known-good receipt.
 
-**GitHub release.** After haarness.ai, the same indexes go to the tag's GitHub release:
+**GitHub release.** After haarness.ai, the same indexes go to the tags' GitHub releases: the CLI,
+Desktop and Haarness for Chrome on `haarness/haarness`, the router's files on
+`haarness/haarness-router`'s release of the same tag (named "Haarness Router <v>", with the install
+commands in its notes):
 
 ```sh
 python3 scripts/release.py github --index dist/releases/index-*.json --channel stable
+# --only haarness | --only router mirrors one of them (the workflow, whose token reaches only this repository)
 ```
 
-It refuses unless the tag on GitHub is the indexes' `sourceRevision` and every local file still
-has its recorded SHA-256. It creates (or resumes) a **draft**, removes draft assets with other
+It refuses unless each tag on GitHub is its commit (the indexes' `sourceRevision`, and the router
+artifacts' own) and every local file still has its recorded SHA-256. It creates (or resumes) a **draft**, removes draft assets with other
 bytes, uploads every artifact plus `SHA256SUMS`, and publishes only once GitHub's own `digest`
 and size of every asset match. Stable becomes Latest, preview a prerelease (a later stable run
 promotes it without uploading). A published release is never changed: different bytes fail.
-`publish-release.sh` runs it after `publish`, the workflow's publish job too. Release immutability
-(repository settings) must be on, so a published release's tag and assets cannot change; the
-command warns otherwise. The repository is private, so its release assets reach members only;
-haarness.ai stays the public download.
+`publish-release.sh` runs it after `publish`, the workflow's publish job too (the router's with
+`HAARNESS_ROUTER_RELEASE_TOKEN`, contents: write on haarness-router); `gh`'s login needs contents:
+write on both repositories. Release immutability (repository settings) must be on in both, so a
+published release's tag and assets cannot change; the command warns otherwise (on 2026-10-29 it was
+on for haarness, off for haarness-router). Both repositories are public; haarness.ai stays the main
+download.
 
 ## 7. Install and run the downloaded bytes, per platform
 
@@ -465,13 +545,27 @@ curl -fsSL http://127.0.0.1:19080/install.sh | HAARNESS_RELEASE_URL=http://127.0
 ./dist/releases/installed-cli/haarness upgrade --channel preview --release-url http://127.0.0.1:19080
 ```
 
+The router, from the same service:
+
+```sh
+curl -fsSL http://127.0.0.1:19080/install-router.sh | HAARNESS_RELEASE_URL=http://127.0.0.1:19080 \
+  HAARNESS_CHANNEL=preview HAARNESS_INSTALL_DIR="$PWD/dist/releases/installed-cli" sh
+./dist/releases/installed-cli/haarness-router --version   # haarness-router <v>; then start it, /healthz, /ui
+```
+
+and in Ubuntu 22.04 containers (amd64, arm64; the installer allows plain HTTP only on loopback, so
+forward the service's port into the container, e.g. `socat TCP-LISTEN:19080,fork,bind=127.0.0.1
+TCP:host.docker.internal:19080`), and `irm …/install-router.ps1 | iex` on Windows.
+
 By default the installers put in the CLI, then Desktop (`--no-desktop` / `HAARNESS_NO_DESKTOP=1`
-skip it, `HAARNESS_PRODUCT=cli|desktop` installs one; `haarness upgrade` passes `cli`); a Desktop
+skip it, `HAARNESS_PRODUCT=cli|desktop|router` installs one; `haarness upgrade` passes `cli`;
+`install-router.sh`/`.ps1` default to `router`); a Desktop
 failure is a warning, not a failed CLI install, and Linux without `DISPLAY`/`WAYLAND_DISPLAY`
 skips Desktop. Destinations: CLI `~/.local/bin` (`HAARNESS_INSTALL_DIR`); macOS Desktop
 `/Applications` when writable, else `~/Applications` (an app already there is updated in place;
 `HAARNESS_DESKTOP_DIR`); Linux Desktop `~/.local/bin/Haarness.AppImage` plus a `haarness-desktop`
-command, menu entry and icon under `~/.local/share`; Windows CLI `%LOCALAPPDATA%\Haarness\bin`,
+command, menu entry and icon under `~/.local/share`; the router `haarness-router` in the CLI's folder
+on every OS; Windows CLI `%LOCALAPPDATA%\Haarness\bin`,
 added to the user PATH unless `HAARNESS_NO_MODIFY_PATH=1` (`haarness upgrade` sets it), and
 Desktop through its NSIS setup wizard, which the script waits for (`/S` exited 2 without
 installing under Wine; prove it on real Windows before switching to it). The installer checks SHA-256
@@ -522,10 +616,13 @@ commands and file kinds:
 - `haarness/.github` `profile/README.md` (public): the same commands and file kinds; no links to
   private repositories before launch.
 - Cloud `/download`: each OS tab shows the right hero logo and file (DMG, AppImage before .deb,
-  EXE), the CLI command (sh or PowerShell) and the Desktop command. Check it against a real
+  EXE), the CLI command (sh or PowerShell), the Desktop command, and the Haarness Router panel
+  with its binary and `install-router` command. Check it against a real
   manifest, or locally with a mock API: run vite with `HAARNESS_CLOUD_API_ORIGIN` pointing at a
   server that returns a six-platform manifest shaped like `release.py publish`.
-- Docs: `docs/public/start/02-install.md` and `docs/public/desktop/01-install.md`.
+- Docs: `docs/public/start/02-install.md` and `docs/public/desktop/01-install.md`; the router's
+  install in `docs/ROUTER.md` here, the README's Install section, haarness-router's README and the
+  site's router pages (no `cargo run` as the way to get it).
 - Preview README rendering before pushing: `gh api -X POST /markdown` (mode gfm, repo context)
   wrapped in github-markdown-css, opened in the browser.
 
@@ -546,9 +643,11 @@ Report, in this order:
 - Version, source commit, channel, receipt/release ID.
 - Cloud: the `version` and `workspace_version` tags deployed to staging and prod, their source
   commits, and the `version.yml` commit in haarness-deploy.
-- Per platform: file names, SHA-256 and sizes; how each was proven (native machine, CI run,
-  container/Wine/cross-compile, or not at all).
-- Installer results per OS (sh, PowerShell 5.1/7), upgrade, quarantine/unblock.
+- Per platform: file names, SHA-256 and sizes, the router's among them with haarness-router's commit
+  and its GitHub release URL; how each was proven (native machine, CI run, container/Wine/cross-compile,
+  or not at all).
+- Installer results per OS (sh, PowerShell 5.1/7), upgrade, quarantine/unblock, and the router's
+  installers (`install-router.sh`, `install-router.ps1`) with the installed router started.
 - Desktop test results per OS, with known environment failures named and why.
 - Download page, README, profile and docs checks (screenshots or rendered previews).
 - Signing and notarization state, CI state, and anything left unverified or skipped. For macOS,

@@ -2,7 +2,7 @@
 """Collect real build outputs, publish immutably, and verify every downloaded byte.
 No npm/Docker publication. Tokens are read from the environment, never arguments.
 """
-import argparse, base64, hashlib, http.client, json, os, platform, shutil, subprocess, tempfile, zipfile
+import argparse, base64, hashlib, http.client, json, os, platform, re, shutil, subprocess, tempfile, zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, urlencode
@@ -111,6 +111,29 @@ def check_windows(args):
     if args.record: Path(args.record).write_text(json.dumps(record,indent=2)+'\n')
     print(f'PASS {len(args.files)} Windows files, every program in them signed by {args.publisher} or a vendor'+('' if record['publicTrust'] else ' (test root, not publicly trusted)'))
 
+def workspace_version(cargo_toml):
+    # [workspace.package] version of a Cargo workspace (Python 3.10 on the build machines has no tomllib).
+    section=None
+    for line in Path(cargo_toml).read_text().splitlines():
+        line=line.strip()
+        if line.startswith('['): section=line
+        elif section=='[workspace.package]' and (m:=re.fullmatch(r'version\s*=\s*"([^"]+)"',line)): return m[1]
+    raise ValueError(f'{cargo_toml}: no [workspace.package] version')
+
+def router_build(args, version):
+    # Haarness Router ships with every release, at the release's version, built from its own repository: its commit,
+    # whether that checkout was clean, and its version (from the checkout, so a cross build that cannot run is checked
+    # too; one that runs here must also report it).
+    source=Path(args.router_source).resolve()
+    revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip()
+    dirty=subprocess.check_output(['git','status','--porcelain','--untracked-files=no'],cwd=source,text=True).strip()
+    if dirty and not args.allow_dirty: raise ValueError(f'Commit the router sources in {source} before collecting a publishable release (or --allow-dirty for local proof).')
+    if (found:=workspace_version(source/'Cargo.toml'))!=version: raise ValueError(f'The router in {source} is version {found}, not {version}: bump its workspace version and tag it v{version}')
+    if not args.version:
+        reported=subprocess.check_output([str(Path(args.router_binary).resolve()),'--version'],text=True).strip()
+        if reported!=f'haarness-router {version}': raise ValueError(f'The router binary reports {reported!r}, not haarness-router {version}')
+    return revision,bool(dirty)
+
 def collect(args):
     revision = subprocess.check_output(['git','rev-parse','HEAD'], cwd=ROOT, text=True).strip()
     dirty = subprocess.check_output(['git','status','--porcelain','--untracked-files=no'], cwd=ROOT, text=True).strip()
@@ -120,20 +143,26 @@ def collect(args):
     os_name = args.os or {'Darwin':'macos','Linux':'linux','Windows':'windows'}[platform.system()]
     # Windows reports ARM64 in capitals (and AMD64), macOS arm64, Linux aarch64.
     arch = args.arch or {'arm64':'arm64','aarch64':'arm64','amd64':'x64','x86_64':'x64'}[platform.machine().lower()]
+    if args.router_only and not args.router_binary: raise ValueError('--router-only collects the --router-binary')
     binary = Path(args.binary).resolve()
-    version = args.version or subprocess.check_output([str(binary),'--version'],text=True).strip().removeprefix('haarness ')
-    desktop = json.loads((ROOT/'apps/desktop/package.json').read_text())
-    if desktop['version'] != version: raise ValueError('CLI and Desktop versions differ')
+    version = args.version or (subprocess.check_output([str(Path(args.router_binary).resolve()),'--version'],text=True).strip().removeprefix('haarness-router ') if args.router_only
+                               else subprocess.check_output([str(binary),'--version'],text=True).strip().removeprefix('haarness '))
+    # A router-only index adds the router to a release already published from the same commit (the service adds a
+    # product to the channel's current release); its CLI and Desktop are that release's.
+    if not args.router_only:
+        desktop = json.loads((ROOT/'apps/desktop/package.json').read_text())
+        if desktop['version'] != version: raise ValueError('CLI and Desktop versions differ')
+    router_revision,router_dirty = router_build(args,version) if args.router_binary else (None,False)
     out = Path(args.out).resolve(); out.mkdir(parents=True, exist_ok=True)
     artifacts = []
     # check-windows' record of the Windows files (--authenticode), by SHA-256.
     record=json.loads(Path(args.authenticode).read_text()) if args.authenticode else {}
     authenticode_record=record.get('files',{});authenticode_publicly_trusted=bool(record.get('publicTrust'))
-    def add(path, product, kind, name=None):
+    def add(path, product, kind, name=None, **fields):
         name = name or path.name
         dest = out/name
         if path.resolve() != dest: shutil.copy2(path,dest)
-        artifact=dict(file=name, product=product, kind=kind, os=os_name, arch=arch, size=dest.stat().st_size, sha256=digest(dest))
+        artifact=dict(file=name, product=product, kind=kind, os=os_name, arch=arch, size=dest.stat().st_size, sha256=digest(dest), **fields)
         # Recorded for a publisher that is not a Mac (CI publishes from Linux); publish refuses a package without it.
         if os_name=='macos' and product=='desktop':
             try: artifact['gatekeeper']=gatekeeper(dest)
@@ -144,18 +173,22 @@ def collect(args):
             if checked: artifact['authenticode']=dict(signer=checked['signer'],publicTrust=authenticode_publicly_trusted,programs=len(checked['programs']))
             else: print(f'Warning, publish will refuse {name} without --allow-unsigned-windows: no check-windows record of it')
         artifacts.append(artifact)
-    add(binary,'cli','binary',f'haarness-{os_name}-{arch}'+('.exe' if os_name=='windows' else ''))
-    extensions = {'macos':{'dmg','zip'},'linux':{'AppImage','deb'},'windows':{'exe'}}[os_name]
-    build_os = {'macos':'mac','linux':'linux','windows':'win'}[os_name]
-    # electron-builder names Linux packages by each format's word for the CPU
-    # (x86_64 for AppImage, amd64 for .deb); publish every package as x64/arm64.
-    arch_names = {'x64':{'x64','x86_64','amd64'},'arm64':{'arm64','aarch64'}}[arch]
-    for path in sorted(Path(args.desktop_dir).iterdir()):
-        kind = path.suffix.lstrip('.')
-        name = f'Haarness-{version}-{build_os}-{arch}.{kind}'
-        if path.is_file() and kind in extensions and any(path.name == f'Haarness-{version}-{build_os}-{a}.{kind}' for a in arch_names): add(path,'desktop',kind,name)
-    if not any(a['product']=='desktop' for a in artifacts): raise ValueError('No Desktop packages found for this version and architecture')
-    index = dict(version=version, sourceRevision=revision, dirty=bool(dirty), releasedAt=datetime.now(timezone.utc).isoformat(), artifacts=artifacts)
+    exe='.exe' if os_name=='windows' else ''
+    if not args.router_only:
+        add(binary,'cli','binary',f'haarness-{os_name}-{arch}{exe}')
+        extensions = {'macos':{'dmg','zip'},'linux':{'AppImage','deb'},'windows':{'exe'}}[os_name]
+        build_os = {'macos':'mac','linux':'linux','windows':'win'}[os_name]
+        # electron-builder names Linux packages by each format's word for the CPU
+        # (x86_64 for AppImage, amd64 for .deb); publish every package as x64/arm64.
+        arch_names = {'x64':{'x64','x86_64','amd64'},'arm64':{'arm64','aarch64'}}[arch]
+        for path in sorted(Path(args.desktop_dir).iterdir()):
+            kind = path.suffix.lstrip('.')
+            name = f'Haarness-{version}-{build_os}-{arch}.{kind}'
+            if path.is_file() and kind in extensions and any(path.name == f'Haarness-{version}-{build_os}-{a}.{kind}' for a in arch_names): add(path,'desktop',kind,name)
+        if not any(a['product']=='desktop' for a in artifacts): raise ValueError('No Desktop packages found for this version and architecture')
+    # The router's own commit beside the release's: its GitHub release is on the router repository's tag.
+    if args.router_binary: add(Path(args.router_binary).resolve(),'router','binary',f'haarness-router-{os_name}-{arch}{exe}',sourceRevision=router_revision)
+    index = dict(version=version, sourceRevision=revision, dirty=bool(dirty) or router_dirty, releasedAt=datetime.now(timezone.utc).isoformat(), artifacts=artifacts)
     path=out/f'index-{os_name}-{arch}.json';path.write_text(json.dumps(index,indent=2)+'\n')
     print(path)
 
@@ -276,6 +309,23 @@ def publish(args):
     if args.allow_unsigned_windows: print('Warning: publishing Windows files without a publicly trusted signature (SmartScreen warns, Smart App Control may block)')
     indexes=[(Path(p),json.loads(Path(p).read_text())) for p in args.index]
     first=indexes[0][1]; ids=[]; seen=set(); uploads=[]
+    # Haarness Router ships with every platform's CLI, all from one router commit.
+    built=lambda product:{(a['os'],a['arch']) for _,index in indexes for a in index['artifacts'] if a['product']==product}
+    if (missing:=sorted(built('cli')-built('router'))) and not args.without_router:
+        raise ValueError(f'No Haarness Router for {", ".join("-".join(p) for p in missing)}: collect --router-binary on every platform (or --without-router)')
+    if len({a.get('sourceRevision') for _,index in indexes for a in index['artifacts'] if a['product']=='router'}-{None})>1 or \
+            any(a['product']=='router' and not a.get('sourceRevision') for _,index in indexes for a in index['artifacts']):
+        raise ValueError('Every router build must record the one router commit it was built from')
+    # Files without a CLI (Haarness for Chrome or the router, added later) can only join the channel's current release
+    # of the same version and commit; on their own they would make a release that installs no CLI.
+    if not built('cli'):
+        try: current=request(args.url,'GET','/api/v1/releases?'+urlencode({'channel':args.channel}))['manifest']
+        except RuntimeError as e:
+            if ': 404 ' not in str(e): raise
+            current={}
+        if (current.get('version'),current.get('source_revision'))!=(first['version'],first['sourceRevision']):
+            raise ValueError(f'These files carry no CLI, so they can only join the {args.channel} channel\'s current release of '
+                             f'{first["version"]} from {first["sourceRevision"]}, which is not there')
     # Every artifact is checked before the first upload, so a refused release leaves nothing behind.
     for path,index in indexes:
         if index.get('dirty') and not (args.allow_dirty and urlsplit(args.url).hostname in ('127.0.0.1','localhost')): raise ValueError('Dirty artifacts can only be used for explicit local proof')
@@ -334,21 +384,44 @@ def gh(*args):
     return json.loads(r.stdout) if r.stdout.strip() else None
 
 def github(args):
-    # Mirrors a publication onto the tag's GitHub release, with the bytes the indexes record and a SHA256SUMS file.
-    # The release stays a draft until GitHub reports every asset uploaded with the expected size and SHA-256, so it
-    # never shows a partial set; a published release is never changed, only checked (and a preview made stable).
+    # Mirrors a publication onto GitHub releases, with the bytes the indexes record and a SHA256SUMS file: the CLI,
+    # Desktop and Haarness for Chrome on this repository's tag, Haarness Router on the router repository's tag of the
+    # same version (the commit its builds record). Each release stays a draft until GitHub reports every asset
+    # uploaded with the expected size and SHA-256, so it never shows a partial set; a published release is never
+    # changed, only checked (and a preview made stable).
     indexes=[(Path(p),json.loads(Path(p).read_text())) for p in args.index]
-    first=indexes[0][1];files={}
+    first=indexes[0][1];groups={'haarness':{},'router':{}};router_revision=None
     for path,index in indexes:
         if index.get('dirty'): raise ValueError('Dirty artifacts are not released on GitHub')
         if any(index[k]!=first[k] for k in ('version','sourceRevision')): raise ValueError('All builds must share version and source commit')
         for a in index['artifacts']:
             file=path.parent/a['file']
             if file.parent.resolve()!=path.parent.resolve() or digest(file)!=a['sha256'] or file.stat().st_size!=a['size']: raise ValueError(f'Artifact changed: {file}')
+            files=groups['router' if a['product']=='router' else 'haarness']
             if a['file'] in files or a['file']=='SHA256SUMS': raise ValueError(f'Duplicate asset name: {a["file"]}')
             files[a['file']]=(file,a['size'],a['sha256'])
-    repo,tag=args.repo,f'v{first["version"]}'
-    if gh('api',f'repos/{repo}/commits/{tag}')['sha']!=first['sourceRevision']: raise ValueError(f'{repo} {tag} is not {first["sourceRevision"]}')
+            if a['product']=='router':
+                if router_revision not in (None,a.get('sourceRevision')) or not a.get('sourceRevision'): raise ValueError('Every router build must record the one router commit it was built from')
+                router_revision=a['sourceRevision']
+    version=first['version']
+    releases={
+        'haarness':(args.repo,first['sourceRevision'],f'Haarness {version}',
+                    f'Haarness {version}, built from {first["sourceRevision"]}. The same files as https://haarness.ai/download; SHA-256 sums in SHA256SUMS.'),
+        'router':(args.router_repo,router_revision,f'Haarness Router {version}',
+                  f'Haarness Router {version}, built from {router_revision}, released with Haarness {version}. Install it with '
+                  '`curl -fsSL https://haarness.ai/install-router.sh | sh` (macOS, Linux) or `irm https://haarness.ai/install-router.ps1 | iex` '
+                  '(Windows); SHA-256 sums in SHA256SUMS.')}
+    for name in [args.only] if args.only else ['haarness','router']:
+        if not groups[name]:
+            if args.only: raise ValueError(f'No {name} files in these indexes')
+            continue
+        repo,revision,title,notes=releases[name]
+        mirror(repo,f'v{version}',revision,title,notes+(f'\n\n{args.notes_url}' if args.notes_url else ''),dict(groups[name]),args.channel)
+
+def mirror(repo,tag,revision,title,notes,files,channel):
+    # One GitHub release: `files` ({name: (path, size, sha256)}) and their SHA256SUMS on `repo`'s `tag`, which must be
+    # `revision`.
+    if gh('api',f'repos/{repo}/commits/{tag}')['sha']!=revision: raise ValueError(f'{repo} {tag} is not {revision}')
     with tempfile.TemporaryDirectory(prefix='haarness-github-') as d:
         sums=Path(d)/'SHA256SUMS';sums.write_text(''.join(f'{h}  {n}\n' for n,(_,_,h) in sorted(files.items())))
         files['SHA256SUMS']=(sums,sums.stat().st_size,digest(sums))
@@ -356,9 +429,8 @@ def github(args):
         if len(found)>1: raise ValueError(f'{repo} has {len(found)} releases for {tag}')
         release=found[0] if found else None
         if release is None:
-            notes=f'Haarness {first["version"]}, built from {first["sourceRevision"]}. The same files as https://haarness.ai/download; SHA-256 sums in SHA256SUMS.'+(f'\n\n{args.notes_url}' if args.notes_url else '')
-            release=gh('api','-X','POST',f'repos/{repo}/releases','-f',f'tag_name={tag}','-f',f'name=Haarness {first["version"]}','-f',f'body={notes}','-F','draft=true','-F',f'prerelease={str(args.channel!="stable").lower()}')
-            print(f'Created draft release {tag}')
+            release=gh('api','-X','POST',f'repos/{repo}/releases','-f',f'tag_name={tag}','-f',f'name={title}','-f',f'body={notes}','-F','draft=true','-F',f'prerelease={str(channel!="stable").lower()}')
+            print(f'Created draft release {repo} {tag}')
         def check(assets):
             # GitHub computes each asset's digest on upload: the check reads GitHub's copy, not this disk.
             assets={x['name']:x for x in assets};bad=[]
@@ -375,18 +447,18 @@ def github(args):
                 if n not in have: gh('release','upload',tag,str(file),'--repo',repo);print(f'Uploaded {n}')
             release=gh('api',f'repos/{repo}/releases/{release["id"]}')
         bad,extra=check(release['assets'])
-        if bad or extra: raise ValueError(f'GitHub release {tag} differs: wrong or missing {bad}, unexpected {extra}')
-        print(f'Verified on GitHub: {len(files)} assets, sizes and SHA-256 as recorded')
-        if release['draft'] or (args.channel=='stable' and release['prerelease']):
-            release=gh('api','-X','PATCH',f'repos/{repo}/releases/{release["id"]}','-F','draft=false','-F',f'prerelease={str(args.channel!="stable").lower()}','-f',f'make_latest={str(args.channel=="stable").lower()}')
+        if bad or extra: raise ValueError(f'GitHub release {repo} {tag} differs: wrong or missing {bad}, unexpected {extra}')
+        print(f'Verified on GitHub: {repo} {tag}, {len(files)} assets, sizes and SHA-256 as recorded')
+        if release['draft'] or (channel=='stable' and release['prerelease']):
+            release=gh('api','-X','PATCH',f'repos/{repo}/releases/{release["id"]}','-F','draft=false','-F',f'prerelease={str(channel!="stable").lower()}','-f',f'make_latest={str(channel=="stable").lower()}')
         if not release.get('immutable'): print(f'Warning: {repo} releases are not immutable; enable release immutability in the repository settings')
         print('GitHub release:',release['html_url'])
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='command',required=True)
-    c=sub.add_parser('collect');c.add_argument('--binary',default=str(ROOT/'target/release'/('haarness.exe' if os.name=='nt' else 'haarness')));c.add_argument('--out',default=str(ROOT/'dist/releases'));c.add_argument('--allow-dirty',action='store_true');c.add_argument('--os',choices=['macos','linux','windows'],help='target OS of a cross build');c.add_argument('--arch',choices=['x64','arm64'],help='target architecture of a cross build');c.add_argument('--version',help='version of a cross-built binary that cannot run here');c.add_argument('--desktop-dir',default=str(ROOT/'apps/desktop/release'),help='where electron-builder wrote the packages');c.add_argument('--authenticode',help="check-windows' record of the Windows files");c.set_defaults(run=collect)
-    c=sub.add_parser('publish');c.add_argument('--index',nargs='+',required=True);c.add_argument('--url',required=True);c.add_argument('--channel',choices=['preview','stable'],default='preview');c.add_argument('--notes-url');c.add_argument('--receipt',default='release-receipt.json');c.add_argument('--allow-dirty',action='store_true');c.add_argument('--allow-unsigned',action='store_true',help='preview only: publish a Mac Desktop that Gatekeeper rejects');c.add_argument('--allow-unsigned-windows',action='store_true',help='publish Windows files without a publicly trusted Authenticode signature (the owner\'s decision)');c.set_defaults(run=publish)
-    c=sub.add_parser('github',help='release the published artifacts on the tag\'s GitHub release');c.add_argument('--index',nargs='+',required=True);c.add_argument('--repo',default=os.environ.get('GITHUB_REPOSITORY','haarness/haarness'));c.add_argument('--channel',choices=['preview','stable'],default='preview');c.add_argument('--notes-url');c.set_defaults(run=github)
+    c=sub.add_parser('collect');c.add_argument('--binary',default=str(ROOT/'target/release'/('haarness.exe' if os.name=='nt' else 'haarness')));c.add_argument('--out',default=str(ROOT/'dist/releases'));c.add_argument('--allow-dirty',action='store_true');c.add_argument('--os',choices=['macos','linux','windows'],help='target OS of a cross build');c.add_argument('--arch',choices=['x64','arm64'],help='target architecture of a cross build');c.add_argument('--version',help='version of a cross-built binary that cannot run here');c.add_argument('--desktop-dir',default=str(ROOT/'apps/desktop/release'),help='where electron-builder wrote the packages');c.add_argument('--authenticode',help="check-windows' record of the Windows files");c.add_argument('--router-binary',help='the Haarness Router binary built for this platform from --router-source');c.add_argument('--router-source',default=str(ROOT.parent/'haarness-router'),help='the clean haarness-router checkout (at its v<version> tag) the router was built from');c.add_argument('--router-only',action='store_true',help='collect only the router, to add it to a release already published from this commit');c.set_defaults(run=collect)
+    c=sub.add_parser('publish');c.add_argument('--index',nargs='+',required=True);c.add_argument('--url',required=True);c.add_argument('--channel',choices=['preview','stable'],default='preview');c.add_argument('--notes-url');c.add_argument('--receipt',default='release-receipt.json');c.add_argument('--allow-dirty',action='store_true');c.add_argument('--allow-unsigned',action='store_true',help='preview only: publish a Mac Desktop that Gatekeeper rejects');c.add_argument('--allow-unsigned-windows',action='store_true',help='publish Windows files without a publicly trusted Authenticode signature (the owner\'s decision)');c.add_argument('--without-router',action='store_true',help='publish CLI builds that carry no Haarness Router (local proof only)');c.set_defaults(run=publish)
+    c=sub.add_parser('github',help='release the published artifacts on the tag\'s GitHub release');c.add_argument('--index',nargs='+',required=True);c.add_argument('--repo',default=os.environ.get('GITHUB_REPOSITORY','haarness/haarness'));c.add_argument('--router-repo',default='haarness/haarness-router');c.add_argument('--only',choices=['haarness','router'],help="mirror only this repository's release");c.add_argument('--channel',choices=['preview','stable'],default='preview');c.add_argument('--notes-url');c.set_defaults(run=github)
     c=sub.add_parser('collect-extension',help='package Haarness for Chrome as a zip and a signed CRX');c.add_argument('--extension-dir',default=str(ROOT/'apps/browser-extension/dist/chrome'),help='the unpacked extension: the build, or the folder `haarness browser setup` wrote from a released CLI');c.add_argument('--key',default=str(EXTENSION_KEY));c.add_argument('--version',help='refuse an extension of another version');c.add_argument('--revision',help='the commit a released CLI was built from, when packaging its folder');c.add_argument('--out',default=str(ROOT/'dist/releases/chrome-extension'));c.add_argument('--allow-dirty',action='store_true');c.set_defaults(run=collect_extension)
     c=sub.add_parser('check-macos',help='check that Gatekeeper accepts the app in each downloaded .dmg/.zip');c.add_argument('packages',nargs='+');c.set_defaults(run=check_macos)
     c=sub.add_parser('check-windows',help='check the Authenticode signature of every Windows program in each CLI and installer (needs osslsigncode and 7zz)');c.add_argument('files',nargs='+');c.add_argument('--publisher',required=True,help="the signing certificate's subject CN");c.add_argument('--test-ca',help='trust this throwaway root instead of the pinned one');c.add_argument('--record',help='write what was checked here, for collect --authenticode');c.set_defaults(run=check_windows)

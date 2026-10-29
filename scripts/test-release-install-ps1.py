@@ -5,6 +5,11 @@ PowerShell 7 (`pwsh`, on any OS) or Windows PowerShell 5.1 (`powershell`).
 Every fault leaves an existing haarness.exe and the folder untouched. On
 Windows with HAARNESS_BIN set, the real release binary installs, replaces a
 running-style previous copy and reports its version.
+
+Haarness Router goes through the same checks with HAARNESS_PRODUCT=router and
+through install-router.ps1, the same script with router as its default product
+(the Cloud's one-line substitution, made here as the Cloud makes it). On Windows
+with HAARNESS_ROUTER_BIN set, the real router build installs and runs.
 """
 import hashlib, http.server, os, shutil, subprocess, sys, tempfile, threading
 from pathlib import Path
@@ -59,10 +64,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
-def install(env):
+def install(env, script=ROOT / 'install.ps1'):
     return subprocess.run([SHELL, '-NoProfile', '-NonInteractive', '-Command',
-                           f"Get-Content -Raw -LiteralPath '{ROOT / 'install.ps1'}' | Invoke-Expression"],
+                           f"Get-Content -Raw -LiteralPath '{script}' | Invoke-Expression"],
                           env=env, capture_output=True, text=True, timeout=600)
+
+def router_variant(text):
+    # install-router.ps1 as the Cloud serves it (haarness-cloud releases.rs): exactly one line changes.
+    line = "\n$DefaultProduct = 'all'\n"
+    assert text.count(line) == 1, 'install.ps1 must name its default product on one line'
+    variant = text.replace(line, "\n$DefaultProduct = 'router'\n")
+    changed = [(a, b) for a, b in zip(text.splitlines(), variant.splitlines()) if a != b]
+    assert changed == [("$DefaultProduct = 'all'", "$DefaultProduct = 'router'")], changed
+    return variant
 
 def main():
     if not SHELL:
@@ -142,9 +156,57 @@ def main():
                 assert [q.get('kind') for q in state['queries']] == [['binary'], ['exe']], state['queries']
                 assert subprocess.check_output([str(installed), '--version'], text=True).strip() == f"haarness {state['version']}"
                 print('PASS: the default install reports a missing Desktop and keeps the CLI')
+        with tempfile.TemporaryDirectory(prefix='haarness-install-router-ps1-') as folder:
+            folder = Path(folder)
+            variant = folder.parent / f'{folder.name}-install-router.ps1'
+            variant.write_text(router_variant((ROOT / 'install.ps1').read_text()))
+            try:
+                router_cases(server, folder, variant)
+            finally:
+                variant.unlink()
     finally:
         server.shutdown()
         server.server_close()
+
+def router_cases(server, folder, variant):
+    installed = folder / 'haarness-router.exe'
+    installed.write_bytes(b'existing router')
+    env = {**os.environ, 'HAARNESS_INSTALL_DIR': str(folder), 'HAARNESS_CHANNEL': 'preview',
+           'HAARNESS_RELEASE_URL': f'http://127.0.0.1:{server.server_port}', 'HAARNESS_NO_MODIFY_PATH': '1'}
+    env.pop('HAARNESS_PRODUCT', None)
+    env.setdefault('PROCESSOR_ARCHITECTURE', 'AMD64')
+    service = '/api/v1/releases/preview/router/download'
+    state.update(edge=None, edge_status=200, edge_corrupt=False, no_desktop_release=False)
+    # Through HAARNESS_PRODUCT=router and through the router variant's own default.
+    for script, extra in ((ROOT / 'install.ps1', {'HAARNESS_PRODUCT': 'router'}), (variant, {})):
+        for mode, message in (('corrupt', 'Checksum mismatch'), ('missing', 'Checksum mismatch'),
+                              ('absent', 'No preview release of Haarness router for windows x64 yet')):
+            state.update(mode=mode, version='0.1.0', paths=[], queries=[])
+            result = install({**env, **extra}, script)
+            output = result.stdout + result.stderr
+            assert result.returncode != 0 and message in output, (script.name, mode, output)
+            assert state['paths'] == [service] and state['queries'] == [{'os': ['windows'], 'arch': ['x64'], 'kind': ['binary']}], state
+            assert installed.read_bytes() == b'existing router' and sorted(p.name for p in folder.iterdir()) == ['haarness-router.exe'], mode
+        state.update(mode='ok', payload=b'MZ not a program', version='1.2.3', paths=[])
+        result = install({**env, **extra}, script)
+        assert result.returncode != 0 and 'The downloaded Haarness Router does not run on this computer' in result.stdout + result.stderr, result
+        assert installed.read_bytes() == b'existing router' and state['paths'] == [service]
+    print('PASS: HAARNESS_PRODUCT=router and install-router.ps1 fetch the router binary; corrupt, unchecked, unpublished '
+          'and broken downloads leave the previous haarness-router.exe and a clean folder')
+    state['paths'] = []
+    result = install({**env, 'HAARNESS_PRODUCT': 'routers'}, variant)
+    assert result.returncode != 0 and 'Invalid release selection' in result.stdout + result.stderr and not state['paths'], result
+    print('PASS: an unknown product is refused before any request')
+    binary = os.environ.get('HAARNESS_ROUTER_BIN')
+    if os.name == 'nt' and binary:
+        state['payload'] = Path(binary).read_bytes()
+        state['version'] = subprocess.check_output([binary, '--version'], text=True).split()[-1]
+        result = install(env, variant)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert subprocess.check_output([str(installed), '--version'], text=True).strip() == f"haarness-router {state['version']}"
+        assert not (folder / 'haarness-router.previous.exe').exists()
+        assert f'Run {installed} to start it' in result.stdout and 'http://127.0.0.1:8080/ui' in result.stdout, result.stdout
+        print('PASS: the router build installs over a previous copy, runs, and says how to start it')
 
 if __name__ == '__main__':
     main()
