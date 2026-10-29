@@ -2811,14 +2811,10 @@ fn skill_roots(
     if let Some(home) = home.as_deref() {
         roots.push((home.join(".agents/skills"), true, None));
     }
-    if claude_compat(file_config).skills() {
-        if let Some(home) = home.as_deref() {
-            roots.push((home.join(".claude/skills"), true, None));
-        }
-        if trust {
-            for directory in layout::project_directories(workspace) {
-                roots.push((directory.join(".claude/skills"), true, None));
-            }
+    let claude = claude_compat(file_config);
+    for (directory, project) in jsonconfig::claude_directories(home.as_deref(), workspace, trust) {
+        if claude.files(project).skills() {
+            roots.push((directory.join("skills"), true, None));
         }
     }
     roots.push((paths.skills.clone(), true, None));
@@ -7269,7 +7265,7 @@ struct HotReloadCandidate {
 /// is on, and files named by `instructions` entries.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct ReloadWatch {
-    claude: ClaudeCodeCompatibility,
+    claude: ClaudeCompat,
     instruction_files: Vec<PathBuf>,
     /// Folders that hold only agent definitions (`…/agents`, `…/agent`), so
     /// the scan can tell an edit to them apart from every other source.
@@ -7397,7 +7393,7 @@ impl HotReloadController {
             .with_browser(self.browser.clone())
             .with_management(self.management.clone())
             .with_language(self.language.clone())
-            .with_claude_instructions(claude_compat(&sources.file_config).instructions()),
+            .with_claude_instructions(claude_compat(&sources.file_config).project.instructions()),
         );
         let hooks = (!sources.json_layers.hooks.is_empty()).then(|| {
             Arc::new(haarness_server::ConfiguredHooks::new(
@@ -7767,9 +7763,9 @@ fn runtime_source_fingerprint_for(
     roots.push(config_dir.join("plugins/local"));
     roots.push(config_dir.join("agent"));
     roots.extend(watch.instruction_files.iter().cloned());
-    let claude = &watch.claude;
-    if claude.any() {
+    if watch.claude.any() {
         let mut claude_roots = |base: &Path, project: bool| {
+            let claude = watch.claude.files(project);
             if claude.instructions() {
                 roots.push(base.join("CLAUDE.md"));
                 if project {
@@ -8178,7 +8174,7 @@ async fn application_at(
         .with_browser(browser.clone())
         .with_management(management.clone())
         .with_language(language.clone())
-        .with_claude_instructions(claude_compat(&file_config).instructions()),
+        .with_claude_instructions(claude_compat(&file_config).project.instructions()),
     );
     let extensions = extensions::load(paths, workspace, trust).await?;
     let tools = extensions.wrap_tools(tools).await?;
@@ -10043,6 +10039,11 @@ struct FileConfig {
     base_mcp: std::collections::BTreeSet<String>,
     /// Opt-in discovery of Claude Code home/project files.
     compatibility: Option<CompatibilitySection>,
+    /// `compatibility.claude_code` as the person's own configuration set it,
+    /// before any project layer: what decides their `~/.claude` files. The
+    /// configuration loader sets it; `None` reads `compatibility` instead.
+    #[serde(skip)]
+    person_claude_code: Option<ClaudeCodeCompatibility>,
     /// Extra skill folders and remote skill indexes (`skills`).
     skills: Option<SkillsSection>,
     /// How Auto's reviewer works. The configuration loader merges it layer
@@ -10076,7 +10077,8 @@ struct CompatibilitySection {
 
 /// `compatibility.claude_code`: every category defaults to off, and
 /// `enabled = false` switches all of them off regardless of the individual
-/// toggles (the application master switch).
+/// toggles (the application master switch). A project's configuration
+/// decides only the project's own files; see [`ClaudeCompat`].
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 struct ClaudeCodeCompatibility {
@@ -10112,13 +10114,40 @@ impl ClaudeCodeCompatibility {
     }
 }
 
+/// The Claude Code compatibility toggles in effect, by whose files they
+/// decide. The person's `~/.claude` files follow the person's configuration
+/// alone, so a repository's configuration can neither switch them off nor on;
+/// a project's own files (its `CLAUDE.md` family and `.claude` folders) follow
+/// the project's configuration over the person's.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ClaudeCompat {
+    person: ClaudeCodeCompatibility,
+    project: ClaudeCodeCompatibility,
+}
+impl ClaudeCompat {
+    /// The toggles for a project's files, or for the person's.
+    fn files(&self, project: bool) -> &ClaudeCodeCompatibility {
+        if project { &self.project } else { &self.person }
+    }
+    fn any(&self) -> bool {
+        self.person.any() || self.project.any()
+    }
+}
+
 /// The effective Claude Code compatibility toggles of a merged configuration.
-fn claude_compat(config: &FileConfig) -> ClaudeCodeCompatibility {
-    config
+fn claude_compat(config: &FileConfig) -> ClaudeCompat {
+    let project = config
         .compatibility
         .as_ref()
         .and_then(|section| section.claude_code.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    ClaudeCompat {
+        person: config
+            .person_claude_code
+            .clone()
+            .unwrap_or_else(|| project.clone()),
+        project,
+    }
 }
 
 /// `skills`: `paths` are additional skill roots (`~/` and workspace-relative
