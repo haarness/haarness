@@ -26,6 +26,10 @@ pub(crate) struct ConnectRequest {
     pub project: bool,
 }
 
+/// Said when a router answers with an empty catalog: it runs, but holds no provider key yet. The connection is kept,
+/// since its models appear on their own once the router has one.
+pub(crate) const NO_MODELS_YET: &str = "The router has no provider keys yet. Set one where it runs, such as OPENAI_API_KEY or ANTHROPIC_API_KEY, and restart it: its models then appear here on their own.";
+
 pub(crate) enum ConnectResult {
     NeedsKey,
     Connected {
@@ -282,6 +286,44 @@ mod connection_tests {
                 .unwrap()
                 .is_empty()
         );
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_router_without_provider_keys_stays_connected_and_says_what_it_needs() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-router-empty-{}", uuid::Uuid::now_v7()));
+        let paths = crate::Paths::new(Some(&root)).unwrap();
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async { Json(serde_json::json!({"object":"list","data":[]})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let request = ConnectRequest {
+            url,
+            name: String::new(),
+            key: String::new(),
+            project: false,
+        };
+        let ConnectResult::Connected { id, models, .. } =
+            connect(&paths, &root, false, &request).await.unwrap()
+        else {
+            panic!("unexpected key prompt")
+        };
+        assert_eq!(models, 0);
+        // Kept, so the router's models appear once it has a key.
+        assert!(
+            crate::load_config(&paths, &root, false)
+                .unwrap()
+                .providers
+                .contains_key(&id)
+        );
+        assert!(NO_MODELS_YET.contains("restart"));
         task.abort();
         std::fs::remove_dir_all(root).unwrap();
     }

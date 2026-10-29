@@ -2337,6 +2337,10 @@ async fn provider_command(
                 router_connection::ConnectResult::NeedsKey => anyhow::bail!(
                     "This router requires an access key. Supply it through --key-stdin."
                 ),
+                router_connection::ConnectResult::Connected { id, models: 0, .. } => {
+                    println!("Connected {id} · no models yet");
+                    println!("{}", router_connection::NO_MODELS_YET);
+                }
                 router_connection::ConnectResult::Connected { id, models, .. } => {
                     println!(
                         "Connected {id} · {} available",
