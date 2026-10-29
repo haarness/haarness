@@ -388,8 +388,13 @@ read) and stops one with `bash_stop` (interrupt, terminate, then kill,
 `execution.shell_stop_grace_ms` apart, with every process it started). Its
 instructions say to run servers, watchers and multi-minute builds or test
 suites this way, and never to leave a process running with a trailing `&` or
-`nohup`: a command that ends while something it started that way still runs
-now returns at once, stops what it left, and says so.
+`nohup`. Any shell command, yours too, ends with its shell: something it
+started that still holds its output open (`(sleep 1; echo late) & echo
+early`) gets a quarter of a second of quiet, two seconds at most, to finish
+printing, and is then stopped with the command's process group, and the
+result says so. A process that left that group (a session of its own, as
+`ssh -f` makes) cannot be stopped that way: it runs on, its output is no
+longer read, and the result says that instead.
 
 In a chat open in Desktop, the terminal UI, the phone and web apps, or a
 `haarness run --wait-background`, an agent's foreground command that has no
