@@ -20,8 +20,8 @@ use crate::background_commands::{
 
 /// A chat's end of its commands: events, checkpoints, notices and hooks.
 pub(super) struct CommandHost {
+    /// The live runtime: its current configuration and hooks apply.
     runtime: AgentRuntime,
-    hooks: Option<Arc<dyn crate::HookPort>>,
     hook_call: crate::HookCall,
     /// How the turn that started the command ran, for the turn its notice
     /// starts (as a background subagent's result does).
@@ -68,7 +68,7 @@ impl CommandHost {
     }
 
     async fn notify_hooks(&self, kind: &str, message: &str, detail: serde_json::Value) {
-        if let Some(hooks) = &self.hooks {
+        if let Some(hooks) = &self.runtime.components().hooks {
             hooks
                 .command_notification(&self.hook_call, kind, message, &detail)
                 .await;
@@ -213,11 +213,19 @@ impl CommandHooks for CommandHost {
 }
 
 impl RunnerTask {
+    /// The runtime as it is when it is used, not as it was when this turn
+    /// began: a command's end may start a turn hours later.
+    fn live_runtime(&self) -> AgentRuntime {
+        let mut runtime = self.runtime_handle();
+        runtime.components = Arc::clone(&self.live_components);
+        runtime.reload_gate = Arc::clone(&self.live_reload_gate);
+        runtime
+    }
+
     /// The command a `bash` call `call_id` of this turn runs.
     pub(super) fn shell_call(&self, call_id: &str) -> ShellCall {
         let host = CommandHost {
-            runtime: self.runtime_handle(),
-            hooks: self.hooks.clone(),
+            runtime: self.live_runtime(),
             hook_call: self.hook_call(None),
             auto_approve: self.request.auto_approve,
             unattended: self.unattended,
@@ -238,7 +246,6 @@ impl RunnerTask {
             settings: self.config.execution.clone(),
             follows: self.request.follows_background && !self.unattended,
             subagent: self.thread.is_subagent,
-            unattended: self.unattended,
         })
     }
 

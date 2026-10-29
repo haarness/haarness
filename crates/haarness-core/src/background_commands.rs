@@ -62,6 +62,8 @@ const CHECKPOINT_TAIL_BYTES: usize = 4 * 1024;
 const ANNOUNCE_AFTER: Duration = Duration::from_secs(2);
 /// At most one `command.output` event per command in this time.
 const OUTPUT_EVENT_EVERY: Duration = Duration::from_secs(1);
+/// How much of an unfinished line a later search for a match reads again.
+const MATCH_OVERLAP: usize = 4 * 1024;
 /// How long a stopped command's end is awaited before the stop answers.
 const STOP_SETTLE: Duration = Duration::from_secs(5);
 
@@ -105,9 +107,13 @@ pub struct ProcessEnd {
     pub exit_code: Option<i32>,
     /// The signal that ended it (`SIGTERM`).
     pub signal: Option<String>,
-    /// Processes it started were still running after it ended, and were
-    /// stopped with it (`server &` in a command).
+    /// Processes it started were still running after it ended (`server &`
+    /// in a command), holding its output open, and were stopped with it.
     pub leftovers: bool,
+    /// Some of them were out of reach (a process in a session of its own)
+    /// and still held its output open after the stop: they run on, and
+    /// their output is no longer read.
+    pub leftovers_running: bool,
     /// Reading its output failed; it was stopped.
     pub error: Option<String>,
 }
@@ -197,7 +203,10 @@ impl CommandOutput {
         if room > 0
             && let Some(file) = self.file.lock().await.as_mut()
         {
+            // Flushed before it counts as saved: a reader opens the file
+            // and reads up to that point.
             file.write_all(&bytes[..room]).await?;
+            file.flush().await?;
         }
         let size = {
             let mut state = self.state.lock();
@@ -288,9 +297,19 @@ impl CommandOutput {
     /// earliest byte that is.
     pub async fn read(&self, cursor: u64, limit: usize) -> std::io::Result<OutputPage> {
         let page = self.read_bytes(cursor, limit.max(1) as u64).await?;
-        // A limit smaller than the character at the cursor still gets it.
+        // A limit smaller than the character at the cursor still gets it,
+        // and only it.
         if page.bytes.is_empty() && page.end < page.size {
-            return self.read_bytes(page.start, 4).await;
+            let mut page = self.read_bytes(page.start, 4).await?;
+            let length = match page.bytes.first() {
+                Some(0xC2..=0xDF) => 2,
+                Some(0xE0..=0xEF) => 3,
+                Some(0xF0..=0xF4) => 4,
+                _ => 1,
+            };
+            page.bytes.truncate(length);
+            page.end = page.start + page.bytes.len() as u64;
+            return Ok(page);
         }
         Ok(page)
     }
@@ -415,19 +434,22 @@ pub(crate) struct CommandPolicy {
     /// Its end is told to its chat when it runs in the background.
     delivers_notice: bool,
     per_chat: usize,
+    /// The deadline it gets when it cannot move because its chat runs as
+    /// many commands in the background as it may.
+    held_deadline: Option<Duration>,
 }
 
 impl CommandPolicy {
     /// `follows`: the turn's client follows background work up;
     /// `subagent`: the chat is a subagent's (or a workflow's);
-    /// `unattended`: nobody watches the turn (a scheduled run), whose
-    /// commands in the background never run unlimited;
-    /// `timeout_ms`: the call's own timeout, when it gave one.
+    /// `timeout_ms`: the call's own timeout, when it gave one. Where
+    /// nothing follows background work up (a scheduled run, `haarness run`,
+    /// a script), a command in the background never runs unlimited: a
+    /// timeout of 0 does not lift `shell_timeout_ms` there.
     pub(crate) fn new(
         settings: &ExecutionSettings,
         follows: bool,
         subagent: bool,
-        unattended: bool,
         timeout_ms: Option<u64>,
     ) -> Self {
         let millis = Duration::from_millis;
@@ -444,7 +466,7 @@ impl CommandPolicy {
             None => deadline,
         };
         let background_limit = match explicit {
-            Some(None) if unattended => deadline.map(Limit::SinceStart),
+            Some(None) if !interactive => deadline.map(Limit::SinceStart),
             Some(limit) => limit.map(Limit::SinceStart),
             None if interactive => (settings.shell_background_max_ms > 0)
                 .then(|| Limit::SinceBackground(millis(settings.shell_background_max_ms))),
@@ -458,6 +480,7 @@ impl CommandPolicy {
             stop_grace: millis(settings.shell_stop_grace_ms),
             delivers_notice: !subagent,
             per_chat: settings.shell_background_per_chat,
+            held_deadline: deadline,
         }
     }
 
@@ -519,6 +542,8 @@ pub(crate) trait CommandHooks: Send + Sync {
 /// One command.
 pub(crate) struct CommandEntry {
     info: watch::Sender<ShellCommandInfo>,
+    /// The commands it is listed with, to count its chat's.
+    listed: std::sync::Weak<ShellCommands>,
     process: CommandProcess,
     /// The folder it runs in.
     cwd: PathBuf,
@@ -567,10 +592,54 @@ impl CommandEntry {
         self.info()
     }
 
+    /// Whether its chat runs as many commands in the background as it may.
+    fn chat_at_cap(&self) -> bool {
+        let cap = self.policy.per_chat;
+        let Some(listed) = self.listed.upgrade() else {
+            return false;
+        };
+        let (id, thread) = {
+            let info = self.info.borrow();
+            (info.id.clone(), info.thread_id)
+        };
+        cap > 0
+            && listed
+                .live(|entry| {
+                    let info = entry.info.borrow();
+                    info.background && info.thread_id == thread && info.id != id
+                })
+                .len()
+                >= cap
+    }
+
     /// Send it to the background while it runs in the foreground. Answers
-    /// whether it moved.
+    /// whether it moved. One whose chat runs as many commands in the
+    /// background as it may stays in the foreground; when its time to move
+    /// came (`Limit`), it gets the deadline it would have had otherwise.
     pub(crate) fn move_to_background(&self, by: ShellCommandMovedBy) -> bool {
         if by == ShellCommandMovedBy::Person && !self.policy.movable {
+            return false;
+        }
+        if self.chat_at_cap() {
+            if by == ShellCommandMovedBy::Limit {
+                let held = self.policy.held_deadline;
+                self.info.send_if_modified(|info| {
+                    if info.background || info.moves_at.is_none() {
+                        return false;
+                    }
+                    info.moves_at = None;
+                    info.stops_at = held.and_then(|limit| {
+                        chrono::Duration::from_std(limit)
+                            .ok()
+                            .map(|limit| info.started_at + limit)
+                    });
+                    true
+                });
+                self.wake.notify_one();
+                if self.announced.load(Ordering::SeqCst) {
+                    self.publish();
+                }
+            }
             return false;
         }
         let now = Utc::now();
@@ -622,8 +691,20 @@ impl CommandEntry {
             let mut stopping = self.stopping.lock();
             match *stopping {
                 // A stop is under way: a kill speeds it up, one signal is
-                // sent, anything else waits for it.
+                // sent, anything else waits for it. A stop of everything
+                // (the chat's, Haarness's) takes it over, so nobody is told
+                // of an end it decided.
                 Some(cause) if !cause.soft => {
+                    if matches!(
+                        ended_by,
+                        ShellCommandEndedBy::ChatStopped | ShellCommandEndedBy::Shutdown
+                    ) {
+                        *stopping = Some(StopCause {
+                            ended_by,
+                            state: cause.state,
+                            soft: false,
+                        });
+                    }
                     match sequence {
                         StopSequence::Now => self.process.control.signal(StopSignal::Kill),
                         StopSequence::Only(signal) => self.process.control.signal(signal),
@@ -824,6 +905,12 @@ impl CommandEntry {
             info.delivers_notice = notify;
         });
         let info = self.info();
+        // A command in the background has no result that names its file:
+        // the file goes when the output is all in memory, else when the
+        // command is forgotten.
+        if info.background {
+            self.process.output.discard_file().await;
+        }
         if info.background || self.announced.load(Ordering::SeqCst) {
             self.publish();
         }
@@ -1007,16 +1094,25 @@ impl ShellCommands {
         u32::try_from(count).unwrap_or(u32::MAX)
     }
 
-    /// Drop ended commands listed longer than [`ENDED_KEPT`].
-    fn forget_ended(&self) {
+    /// Drop ended commands listed longer than [`ENDED_KEPT`], and the
+    /// files that keep the output of those that ran in the background.
+    pub(crate) fn forget_ended(&self) {
         let Ok(kept) = chrono::Duration::from_std(ENDED_KEPT) else {
             return;
         };
         let cutoff = Utc::now() - kept;
+        let mut files = Vec::new();
         self.entries.retain(|_, entry| {
             let info = entry.info.borrow();
-            info.state.is_live() || info.ended_at.is_none_or(|ended| ended > cutoff)
+            let keep = info.state.is_live() || info.ended_at.is_none_or(|ended| ended > cutoff);
+            if !keep && info.background && entry.process.output.file_kept() {
+                files.push(entry.process.output.path().to_path_buf());
+            }
+            keep
         });
+        for file in files {
+            let _ = std::fs::remove_file(file);
+        }
     }
 }
 
@@ -1042,7 +1138,6 @@ pub(crate) struct ShellCallInner {
     pub(crate) settings: ExecutionSettings,
     pub(crate) follows: bool,
     pub(crate) subagent: bool,
-    pub(crate) unattended: bool,
 }
 
 impl std::fmt::Debug for ShellCall {
@@ -1078,6 +1173,8 @@ pub enum CommandRun {
     Ended {
         reference: ShellCommandRef,
         end: ProcessEnd,
+        /// Who stopped it, when someone did (a person, from its row).
+        stopped_by: Option<ShellCommandEndedBy>,
     },
     /// It runs on in the background: the call's result.
     Background(ToolOutput),
@@ -1105,6 +1202,29 @@ impl Drop for Foreground {
 impl ShellCall {
     pub(crate) fn new(inner: ShellCallInner) -> Self {
         Self(Arc::new(inner))
+    }
+
+    /// The rules for a command of this call that gave `timeout_ms`.
+    fn policy(&self, timeout_ms: Option<u64>) -> CommandPolicy {
+        CommandPolicy::new(
+            &self.0.settings,
+            self.0.follows,
+            self.0.subagent,
+            timeout_ms,
+        )
+    }
+
+    /// Whether all of the command's output is saved, from the start: only
+    /// while it runs in the foreground with a deadline. Otherwise (no
+    /// deadline, or in the background) its first [`OUTPUT_SAVED_LIMIT`]
+    /// bytes are.
+    #[must_use]
+    pub fn saves_whole_output(&self, request: &CommandRequest) -> bool {
+        !request.background
+            && self
+                .policy(request.timeout_ms)
+                .foreground_deadline
+                .is_some()
     }
 
     /// Whether the command may start; a call past the chat's cap of
@@ -1141,13 +1261,7 @@ impl ShellCall {
         cancel: &CancellationToken,
     ) -> CoreResult<CommandRun> {
         let call = &self.0;
-        let policy = CommandPolicy::new(
-            &call.settings,
-            call.follows,
-            call.subagent,
-            call.unattended,
-            request.timeout_ms,
-        );
+        let policy = self.policy(request.timeout_ms);
         let started_at = Utc::now();
         let background_at = request.background.then_some(started_at);
         let mut command = request.command.clone();
@@ -1193,6 +1307,7 @@ impl ShellCall {
         }
         let entry = Arc::new(CommandEntry {
             info: watch::Sender::new(info.clone()),
+            listed: Arc::downgrade(&call.commands),
             process,
             cwd: request.cwd.clone(),
             policy,
@@ -1259,6 +1374,7 @@ impl ShellCall {
         Ok(CommandRun::Ended {
             reference: reference(&current),
             end,
+            stopped_by: current.ended_by,
         })
     }
 }
@@ -1400,10 +1516,8 @@ pub(crate) async fn bash_output(
         }
         _ => Until::Exit,
     };
-    let cursor = arguments
-        .get("cursor")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_else(|| *entry.read_cursor.lock());
+    let given = arguments.get("cursor").and_then(serde_json::Value::as_u64);
+    let cursor = given.unwrap_or_else(|| *entry.read_cursor.lock());
     let mut found = None;
     let mut waited = false;
     if wait > 0 {
@@ -1418,22 +1532,26 @@ pub(crate) async fn bash_output(
         found = search(&entry, pattern, cursor).await?.0;
     }
     let info = entry.info();
-    let page = entry
-        .process
-        .output
-        .read(cursor, PAGE_MAX)
+    let output = &entry.process.output;
+    // From a cursor it was given: the part that starts there. Otherwise
+    // what is new since its last read, the newest part when that is more
+    // than it is shown at once.
+    let from = match given {
+        Some(_) => cursor,
+        None => cursor.max(output.size().saturating_sub(AGENT_READ_BYTES as u64)),
+    };
+    let page = output
+        .read(from, AGENT_READ_BYTES)
         .await
         .map_err(|error| CoreError::Tool(error.to_string()))?;
     let more_than_shown = page.end < page.size;
     let mut text = page.text();
-    let mut start = page.start;
-    if text.len() > AGENT_READ_BYTES {
-        let cut = text.len() - AGENT_READ_BYTES;
-        let cut = (cut..text.len())
-            .find(|index| text.is_char_boundary(*index))
-            .unwrap_or(text.len());
-        start += cut as u64;
-        text.drain(..cut);
+    // The newest part starts on a whole line when it can.
+    if from > cursor
+        && let Some(line) = text.find('\n')
+        && line + 1 < text.len()
+    {
+        text.drain(..=line);
     }
     let mut lines_left_out = false;
     if let Some(lines) = arguments
@@ -1463,18 +1581,17 @@ pub(crate) async fn bash_output(
         report.push('\n');
         report.push_str(&outcome);
     }
-    if page.start > cursor {
+    if from == cursor && page.start > cursor {
         let _ = write!(
             report,
             "\n{} bytes of output before this are no longer kept.",
             page.start - cursor
         );
     }
-    if start > page.start || lines_left_out {
+    if from > cursor || lines_left_out {
         let _ = write!(
             report,
-            "\nOnly the end of the new output is shown; read from cursor {} for the rest.",
-            page.start
+            "\nOnly the end of the new output is shown; read from cursor {cursor} for the rest."
         );
     }
     if text.is_empty() {
@@ -1487,7 +1604,7 @@ pub(crate) async fn bash_output(
         "\nCursor: {}{}",
         page.end,
         if more_than_shown {
-            " (more output follows; read again)"
+            " (more output follows; read on from this cursor)"
         } else {
             ""
         }
@@ -1548,7 +1665,10 @@ async fn wait_for(
 }
 
 /// The first line from `cursor` that matches `pattern`, and where a later
-/// search goes on from (the start of the last line, which may still grow).
+/// search goes on from. A line ends at a line break or a carriage return
+/// (a progress bar redrawing its line). The last, unfinished line is read
+/// again by the next search, at most its last [`MATCH_OVERLAP`] bytes, so a
+/// line that never ends is not searched from its start each time.
 async fn search(
     entry: &CommandEntry,
     pattern: &regex::Regex,
@@ -1564,8 +1684,8 @@ async fn search(
             .map_err(|error| CoreError::Tool(error.to_string()))?;
         let text = page.text();
         let mut consumed = 0;
-        for line in text.split_inclusive('\n') {
-            let complete = line.ends_with('\n');
+        for line in text.split_inclusive(['\n', '\r']) {
+            let complete = line.ends_with(['\n', '\r']);
             let line_text = line.trim_end_matches(['\n', '\r']);
             if pattern.is_match(line_text) {
                 return Ok((Some(line_text.chars().take(500).collect()), page.end));
@@ -1574,12 +1694,12 @@ async fn search(
                 consumed += line.len();
             }
         }
-        let next = page.start + consumed as u64;
+        let unfinished = page.start + consumed as u64;
+        let next = unfinished.max(page.end.saturating_sub(MATCH_OVERLAP as u64));
         if page.end >= page.size || page.end == page.start {
             return Ok((None, next));
         }
-        // A line longer than a page: go on past it.
-        at = if next > page.start { next } else { page.end };
+        at = next.max(page.start + 1);
     }
 }
 
@@ -1801,8 +1921,10 @@ mod tests {
         // A limit that ends inside é stops before it.
         let page = output.read(0, 2).await.unwrap();
         assert_eq!((page.text().as_str(), page.start, page.end), ("a", 0, 1));
+        let page = output.read(page.end, 1).await.unwrap();
+        assert_eq!((page.text().as_str(), page.end), ("é", 3));
         let page = output.read(page.end, 10).await.unwrap();
-        assert_eq!((page.text().as_str(), page.end, page.size), ("éb", 4, 4));
+        assert_eq!((page.text().as_str(), page.end, page.size), ("b", 4, 4));
         // A cursor inside a character that is no longer kept starts at the
         // next whole one.
         let dir2 = fixture();
@@ -1821,6 +1943,27 @@ mod tests {
         assert_eq!(page.text(), "xxx");
     }
 
+    #[tokio::test]
+    async fn what_was_saved_can_be_read_back_at_once() {
+        let dir = fixture();
+        let output = output(dir.path(), u64::MAX).await;
+        let chunk = [b'x'; 1000];
+        for written in 1..=200_u64 {
+            output.append(&chunk).await.unwrap();
+            // What counts as saved is on disk already: a reader opening the
+            // file finds all of it.
+            assert_eq!(
+                std::fs::metadata(output.path()).unwrap().len(),
+                output.saved(),
+                "after {written} writes"
+            );
+            // Past the end kept in memory, a page from the start is read
+            // from the file, up to all that was saved.
+            let page = output.read(0, PAGE_MAX).await.unwrap();
+            assert_eq!(page.end, written * 1000, "after {written} writes");
+        }
+    }
+
     #[test]
     fn whole_end_keeps_complete_and_invalid_bytes() {
         assert_eq!(whole_end("aé".as_bytes()), 3);
@@ -1833,13 +1976,13 @@ mod tests {
     #[test]
     fn the_policy_moves_only_where_a_client_follows_and_never_a_subagents() {
         let settings = ExecutionSettings::default();
-        let interactive = CommandPolicy::new(&settings, true, false, false, None);
+        let interactive = CommandPolicy::new(&settings, true, false, None);
         assert_eq!(interactive.move_after, Some(Duration::from_secs(60)));
         assert_eq!(interactive.foreground_deadline, None);
         assert_eq!(interactive.background_limit, None);
         assert!(interactive.movable && interactive.delivers_notice);
         // A timeout the agent gives limits the whole run and nothing moves.
-        let timed = CommandPolicy::new(&settings, true, false, false, Some(5_000));
+        let timed = CommandPolicy::new(&settings, true, false, Some(5_000));
         assert_eq!(timed.move_after, None);
         assert_eq!(timed.foreground_deadline, Some(Duration::from_secs(5)));
         assert_eq!(
@@ -1848,29 +1991,32 @@ mod tests {
         );
         // Elsewhere, as before: the configured deadline, also in the
         // background.
-        let script = CommandPolicy::new(&settings, false, false, false, None);
+        let script = CommandPolicy::new(&settings, false, false, None);
         assert_eq!(script.move_after, None);
         assert_eq!(script.foreground_deadline, Some(Duration::from_secs(120)));
         assert_eq!(
             script.background_limit,
             Some(Limit::SinceStart(Duration::from_secs(120)))
         );
-        let subagent = CommandPolicy::new(&settings, true, true, false, None);
+        let subagent = CommandPolicy::new(&settings, true, true, None);
         assert_eq!(subagent.move_after, None);
         assert!(!subagent.movable && !subagent.delivers_notice);
-        // Nobody watches a scheduled run: no timeout lifts its limit.
-        let scheduled = CommandPolicy::new(&settings, false, false, true, Some(0));
+        // Where nothing follows background work up (a scheduled run,
+        // `haarness run`, a script), no timeout lifts the limit in the
+        // background; it still does in the foreground.
+        let script = CommandPolicy::new(&settings, false, false, Some(0));
         assert_eq!(
-            scheduled.background_limit,
+            script.background_limit,
             Some(Limit::SinceStart(Duration::from_secs(120)))
         );
+        assert_eq!(script.foreground_deadline, None);
         // Zero moves nothing; a background limit counts from the move.
         let settings = ExecutionSettings {
             shell_move_after_ms: 0,
             shell_background_max_ms: 1_000,
             ..ExecutionSettings::default()
         };
-        let never = CommandPolicy::new(&settings, true, false, false, None);
+        let never = CommandPolicy::new(&settings, true, false, None);
         assert_eq!(never.move_after, None);
         assert_eq!(never.foreground_deadline, Some(Duration::from_secs(120)));
         assert_eq!(
@@ -1930,6 +2076,183 @@ mod tests {
         assert_eq!(spoken_duration(Duration::from_secs(7500)), "2h 5m");
     }
 
+    /// A command started in the background whose process the test plays,
+    /// in `registry` for chat `thread`.
+    async fn started(
+        dir: &Path,
+        registry: &Arc<ShellCommands>,
+        thread: ThreadId,
+    ) -> (
+        Arc<CommandEntry>,
+        Arc<CommandOutput>,
+        watch::Sender<Option<ProcessEnd>>,
+    ) {
+        let (end, ended) = watch::channel(None);
+        let output = output(dir, u64::MAX).await;
+        let call = ShellCall::new(ShellCallInner {
+            commands: Arc::clone(registry),
+            hooks: Arc::new(Quiet),
+            thread_id: thread,
+            root_thread_id: thread,
+            turn_id: TurnId::new(),
+            call_id: "call".into(),
+            settings: ExecutionSettings::default(),
+            follows: true,
+            subagent: false,
+        });
+        let run = call
+            .run(
+                CommandProcess {
+                    output: Arc::clone(&output),
+                    end: ended,
+                    control: Arc::new(Silent),
+                },
+                CommandRequest {
+                    command: "server".into(),
+                    cwd: dir.to_path_buf(),
+                    workdir: None,
+                    timeout_ms: None,
+                    background: true,
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let CommandRun::Background(result) = run else {
+            panic!("a background start answers at once");
+        };
+        let id = result.metadata["command"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        (registry.get(&id).unwrap(), output, end)
+    }
+
+    #[tokio::test]
+    async fn bash_output_pages_forward_from_a_cursor_it_was_given() {
+        let dir = fixture();
+        let registry = Arc::new(ShellCommands::default());
+        let thread = ThreadId::new();
+        let (entry, output, _end) = started(dir.path(), &registry, thread).await;
+        let mut lines = String::new();
+        for line in 0..2000 {
+            let _ = writeln!(lines, "line-{line:04}-{}", "x".repeat(40));
+        }
+        output.append(lines.as_bytes()).await.unwrap();
+        let threads = HashSet::from([thread]);
+        let id = entry.info().id;
+        let cancel = CancellationToken::new();
+        let read = |arguments: serde_json::Value| {
+            let registry = Arc::clone(&registry);
+            let threads = threads.clone();
+            let cancel = cancel.clone();
+            async move {
+                bash_output(&registry, &threads, &arguments, &cancel)
+                    .await
+                    .unwrap()
+                    .text
+            }
+        };
+        let cursor_of = |text: &str| -> u64 {
+            text.split("Cursor: ")
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        // Without a cursor: the newest output, and where the rest starts.
+        let latest = read(json!({"id": id})).await;
+        assert!(latest.contains("line-1999"), "{latest:.300}");
+        // It starts on a whole line.
+        let shown = latest.split("Output:\n").nth(1).unwrap();
+        assert!(shown.starts_with("line-"), "{shown:.80}");
+        let from = latest
+            .split("read from cursor ")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .trim_end_matches(|c: char| !c.is_ascii_digit())
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(from, 0, "{latest:.300}");
+        // From that cursor: the first part, and a cursor where it ends.
+        let first = read(json!({"id": id, "cursor": from})).await;
+        assert!(first.contains("\nline-0000-"), "{first:.300}");
+        assert!(!first.contains("line-1999"), "{first:.300}");
+        let next = cursor_of(&first);
+        assert!(next > 0 && next < lines.len() as u64, "{next}");
+        // Following it goes on where the first part ended.
+        let second = read(json!({"id": id, "cursor": next})).await;
+        let resumed = &lines[usize::try_from(next).unwrap()..];
+        let shown = second.split("Output:\n").nth(1).unwrap();
+        assert!(resumed.starts_with(&shown[..40]), "{shown:.80}");
+        assert!(cursor_of(&second) > next);
+    }
+
+    #[tokio::test]
+    async fn a_match_reads_progress_lines_and_never_rescans_a_long_line_from_its_start() {
+        let dir = fixture();
+        let registry = Arc::new(ShellCommands::default());
+        let (entry, output, _end) = started(dir.path(), &registry, ThreadId::new()).await;
+        // A progress bar redraws its line with a carriage return.
+        output
+            .append(b"progress 10%\rprogress 100%\rdone in 3s\n")
+            .await
+            .unwrap();
+        let pattern = regex::Regex::new("^done").unwrap();
+        let (found, _) = search(&entry, &pattern, 0).await.unwrap();
+        assert_eq!(found.as_deref(), Some("done in 3s"));
+        // A line that never ends: the next search starts near its end,
+        // not at its start again.
+        let start = output.size();
+        output.append(&vec![b'.'; 2 * 1024 * 1024]).await.unwrap();
+        let missing = regex::Regex::new("never").unwrap();
+        let (found, next) = search(&entry, &missing, start).await.unwrap();
+        assert!(found.is_none());
+        assert!(
+            next >= output.size() - MATCH_OVERLAP as u64,
+            "{next} of {}",
+            output.size()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_background_commands_output_file_goes_once_it_is_not_needed() {
+        let dir = fixture();
+        let registry = Arc::new(ShellCommands::default());
+        // All of its output is in memory when it ends: the file goes then.
+        let (small, output, end) = started(dir.path(), &registry, ThreadId::new()).await;
+        output.append(b"done\n").await.unwrap();
+        output.finish().await.unwrap();
+        end.send_replace(Some(ProcessEnd::default()));
+        small.settled(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!output.path().exists(), "{}", output.path().display());
+        assert!(small.output_file().is_none());
+        // More than memory keeps: the file stays while the command is
+        // listed, and goes when it is forgotten.
+        let (large, output, end) = started(dir.path(), &registry, ThreadId::new()).await;
+        output
+            .append(&vec![b'x'; OUTPUT_TAIL_KEPT + 10])
+            .await
+            .unwrap();
+        output.finish().await.unwrap();
+        end.send_replace(Some(ProcessEnd::default()));
+        large.settled(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(output.path().exists());
+        large.info.send_modify(|info| {
+            info.ended_at = Some(Utc::now() - chrono::Duration::minutes(11));
+        });
+        registry.forget_ended();
+        assert!(!output.path().exists());
+    }
+
     #[tokio::test]
     async fn a_stop_signals_in_steps_until_the_process_ends() {
         let dir = fixture();
@@ -1949,7 +2272,6 @@ mod tests {
             },
             follows: true,
             subagent: false,
-            unattended: false,
         });
         let run = call
             .run(
@@ -2018,6 +2340,7 @@ mod tests {
             let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
             let now = Utc::now();
             Arc::new(CommandEntry {
+                listed: std::sync::Weak::new(),
                 info: watch::Sender::new(ShellCommandInfo {
                     id: id.into(),
                     thread_id: thread,
@@ -2046,7 +2369,7 @@ mod tests {
                     control: Arc::new(Silent),
                 },
                 cwd: PathBuf::new(),
-                policy: CommandPolicy::new(&ExecutionSettings::default(), true, false, false, None),
+                policy: CommandPolicy::new(&ExecutionSettings::default(), true, false, None),
                 hooks: Arc::new(Quiet),
                 read_cursor: Mutex::new(0),
                 stopping: Mutex::new(None),
