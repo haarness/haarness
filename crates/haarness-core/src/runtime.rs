@@ -6719,6 +6719,8 @@ impl AgentRuntime {
         active.changed.notify_waiters();
         drop(admission_guard);
         let task = Arc::new(RunnerTask {
+            live_components: self.components.clone(),
+            live_reload_gate: self.reload_gate.clone(),
             repository: self.repository.clone(),
             providers: components.providers.clone(),
             tools: components.tools.clone(),
@@ -7131,6 +7133,11 @@ impl AgentRuntime {
 }
 
 struct RunnerTask {
+    /// The runtime's current generation and reload gate, for work that
+    /// outlives this turn (a command's end, hours later) and must start on
+    /// the configuration of that moment.
+    live_components: Arc<RwLock<Arc<RuntimeComponents>>>,
+    live_reload_gate: Arc<AsyncRwLock<()>>,
     repository: Arc<dyn ThreadRepository>,
     providers: Arc<dyn ProviderRegistry>,
     tools: Arc<dyn ToolRegistry>,
@@ -12523,6 +12530,8 @@ impl RunnerTask {
             .permission_engine(self.request.agent.as_deref().unwrap_or(&self.thread.agent))
             .boundary();
         let child_task = Arc::new(RunnerTask {
+            live_components: self.live_components.clone(),
+            live_reload_gate: self.live_reload_gate.clone(),
             repository: self.repository.clone(),
             providers: self.providers.clone(),
             tools: self.tools.clone(),
