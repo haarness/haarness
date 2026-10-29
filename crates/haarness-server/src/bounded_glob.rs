@@ -7,7 +7,9 @@
 //! Here a `**` follows a linked folder, as `glob` does, unless the link leads
 //! back into a folder the walk is inside: one that holds the link, or one the
 //! walk came through to reach it. With [`Links::Once`] it also never reads a
-//! folder it has already read by another path. A `**` does not go into a
+//! folder again for the same `**` of the pattern after reading it by another
+//! path (what a `**` finds below a folder depends only on the folder, while
+//! another `**` of the pattern looks for something else). A `**` does not go into a
 //! version control folder (`.git`, `.hg`, …). A linked folder the pattern
 //! names, or that a one-level wildcard such as `*` matches, is read as
 //! before (the pattern bounds how deep that goes), and a linked file matches
@@ -31,8 +33,8 @@ pub enum Links {
     /// listed by each path that reaches it.
     Unlooped,
     /// Those, less any whose folder the walk has already read (by its real
-    /// path), so each folder is read once, by the first path that reaches
-    /// it.
+    /// path) for the same `**`, so each folder is read once for each, by the
+    /// first path that reaches it.
     Once,
 }
 
@@ -95,8 +97,9 @@ pub struct Walk {
     todo: Vec<(Entry, Option<usize>)>,
     /// Where each folder a link check asked about really is.
     real: HashMap<PathBuf, Option<PathBuf>>,
-    /// The real paths of the folders read, for [`Links::Once`].
-    read: HashSet<PathBuf>,
+    /// The real paths of the folders read, each with the part it was read
+    /// for, for [`Links::Once`].
+    read: HashSet<(PathBuf, usize)>,
 }
 
 impl Walk {
@@ -176,7 +179,7 @@ impl Walk {
             .is_some_and(|name| VERSION_CONTROL.iter().any(|folder| name == *folder))
             || (entry.link && self.leads_back(&entry.path))
             || (self.links == Links::Once
-                && real_path(entry).is_some_and(|real| self.read.contains(&real)))
+                && real_path(entry).is_some_and(|real| self.read.contains(&(real, at))))
         {
             return;
         }
@@ -265,7 +268,7 @@ impl Walk {
             return;
         };
         if let Some(real) = real {
-            self.read.insert(real);
+            self.read.insert((real, at));
         }
         self.looked += children.len();
         // Taken from the end, so in name order.
@@ -574,6 +577,25 @@ mod tests {
         // With no match at all, it ends just the same.
         let none = format!("{}/**/*.nothing", root.display());
         assert!(ends(Walk::new(&none).unwrap()).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_read_through_a_link_is_read_again_for_another_double_star() {
+        let root = tree(
+            "two-stars",
+            &["handbook/teams/web/RULES.md", "handbook/RULES.md"],
+        );
+        let handbook = root.join("handbook");
+        // Read first through the link, for the first `**`.
+        std::os::unix::fs::symlink("teams/web", handbook.join("aaa-web")).unwrap();
+        let pattern = format!("{}/**/teams/**/RULES.md", handbook.display());
+        assert_eq!(walked(&pattern, Links::Once), globbed(&pattern));
+        assert_eq!(
+            walked(&pattern, Links::Once),
+            [handbook.join("teams/web/RULES.md")]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
