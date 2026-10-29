@@ -1907,13 +1907,15 @@ pub(crate) async fn host_access(
     }
     let mut account = client.config.selected_account();
     let mut organization = None;
-    let mut unreachable = None;
+    let mut reached = check_cloud;
     if check_cloud {
         match host_account(client).await {
             Ok(Some(selected)) => (account, organization) = (Some(selected.0), selected.1),
             Ok(None) => return Ok(HostAccess::new(AccessState::SignedOut)),
-            // Cloud is out of reach: say what this computer knows.
-            Err(error) => unreachable = Some(error.to_string()),
+            // Cloud is out of reach: say what this computer knows. The
+            // connector waits such an outage out by itself, so it is not
+            // reported as a problem.
+            Err(_) => reached = false,
         }
     }
     let Some((file, identity)) = host_identities(paths, client, account.as_deref())?
@@ -1931,23 +1933,16 @@ pub(crate) async fn host_access(
                 .map_or_else(haarness_account::computer_name, str::to_owned),
         ),
         organization,
-        error: unreachable,
         ..HostAccess::new(AccessState::Off)
     };
     if !running(&file)? {
         // A connector that gave up (signed out, access removed, an outdated
         // protocol) said why; it shows until access is turned on or off again.
-        access.error = identity["error"]
-            .as_str()
-            .map(str::to_owned)
-            .or(access.error);
+        access.error = identity["error"].as_str().map(str::to_owned);
         return Ok(access);
     }
     access.state = AccessState::Connecting;
-    let Some(id) = identity["id"]
-        .as_str()
-        .filter(|_| check_cloud && access.error.is_none())
-    else {
+    let Some(id) = identity["id"].as_str().filter(|_| reached) else {
         return Ok(access);
     };
     match client
@@ -1959,7 +1954,6 @@ pub(crate) async fn host_access(
         .await
     {
         Ok(host) if host["connected"] == true => access.state = AccessState::On,
-        Ok(_) => {}
         // Removed in Cloud (Remove access on a phone or the web): the
         // connector has nothing left to serve. A host that is still
         // registering is not listed yet.
@@ -1968,9 +1962,10 @@ pub(crate) async fn host_access(
             std::fs::remove_file(&file)?;
             access.state = AccessState::Off;
         }
-        Err(error) if not_found(&error) => {}
         Err(haarness_account::Error::NotLoggedIn) => access.state = AccessState::SignedOut,
-        Err(error) => access.error = Some(error.to_string()),
+        // Not connected or registered yet, or Cloud out of reach for a
+        // moment: still connecting, which the connector sees through by itself.
+        _ => {}
     }
     Ok(access)
 }
@@ -2449,6 +2444,39 @@ mod tests {
         assert_eq!(access(true).await.unwrap().state, AccessState::Off);
         connector.join().unwrap();
         assert!(!file.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn cloud_out_of_reach_is_not_a_problem_to_show() {
+        let root = std::env::temp_dir().join(format!("haarness-remote-away-{}", Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        let client = haarness_account::Client::new(
+            haarness_account::Config::new("http://127.0.0.1:9", root.join("cloud"), "test")
+                .unwrap()
+                .with_api_key("hck_fixture".into())
+                .unwrap(),
+        )
+        .unwrap();
+        // Off: no connector, and Cloud cannot be asked.
+        let off = host_access(&client, &paths, true).await.unwrap();
+        assert_eq!((off.state, off.error), (AccessState::Off, None));
+        // On its way: the connector rides the outage out, so it reads as
+        // connecting, never as a failure.
+        let file = paths.config_dir().join("remote-host.json");
+        std::fs::write(
+            &file,
+            json!({"id":Uuid::now_v7(),"chatId":null,"apiUrl":client.config.api_url,
+                "name":"Desk","registered":true})
+            .to_string(),
+        )
+        .unwrap();
+        let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let away = host_access(&client, &paths, true).await.unwrap();
+        assert_eq!((away.state, away.error), (AccessState::Connecting, None));
+        assert!(file.exists(), "an unreachable Cloud is not a removal");
+        drop(lock);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]

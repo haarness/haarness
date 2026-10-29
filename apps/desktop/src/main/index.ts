@@ -271,6 +271,14 @@ let accessQueue: Promise<unknown> = Promise.resolve();
  * every project, so this computer is reached even with no project open. A
  * change, and what starting Desktop restores, reaches every window.
  */
+/** Turn remote access back on as Desktop starts, if it was on. A computer
+ * that starts before its network is up gets more tries, a minute apart. */
+function restoreRemoteAccess(attempt = 1) {
+  void remoteAccess("restore").catch((error) => {
+    console.warn("Haarness remote access: could not restore: " + String(error));
+    if (attempt < 10) setTimeout(() => restoreRemoteAccess(attempt + 1), 60_000);
+  });
+}
 function remoteAccess(change?: "on" | "off" | "restore", check?: boolean) {
   if (!change) return chatHomeFolder().then((chatHome) => accountRequest({ action: "remote-access", check: !!check, chatHome }));
   const next = accessQueue.then(async () => {
@@ -2363,7 +2371,7 @@ else {
       createWindow();
       void refreshProjects().catch(() => {});
       // Remote access left on stays on across restarts.
-      void remoteAccess("restore").catch((error) => console.warn("Haarness remote access: could not restore: " + String(error)));
+      restoreRemoteAccess();
       setupChromeOnLaunch();
       void updaterMade.then(() => updater?.start());
       if (app.isPackaged) app.setAsDefaultProtocolClient("haarness");
