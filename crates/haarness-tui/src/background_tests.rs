@@ -835,7 +835,7 @@ async fn the_output_view_reads_the_end_first_then_on_from_it() {
     let rows = frame_text(&app, (80, 20));
     assert!(
         rows.iter()
-            .any(|row| row.contains("earlier output is no longer kept"))
+            .any(|row| row.contains("earlier output isn't shown here"))
     );
     assert!(rows.iter().any(|row| row == "  …tail") && rows.iter().any(|row| row == "  next"));
 }
@@ -1039,10 +1039,10 @@ async fn the_idle_band_counts_commands_in_the_background_and_esc_esc_stops_them(
     )
     .await
     .unwrap();
-    assert!(
-        app.notice.contains("again to stop session work"),
-        "{}",
-        app.notice
+    // It says which work the second press stops.
+    assert_eq!(
+        app.notice,
+        "Press Esc again to stop 2 commands in background"
     );
     let action = crate::input::handle_key(
         &mut app,
@@ -1580,4 +1580,217 @@ fn the_view_says_it_waits_only_once_its_first_read_is_late_and_a_narrow_band_kee
         narrow.contains("Copied select") && !narrow.contains("1 command"),
         "{narrow}"
     );
+}
+
+#[tokio::test]
+async fn progress_without_newlines_keeps_the_view_moving_past_what_it_keeps() {
+    let thread = fixture_thread();
+    let mut app = app_on(&thread, vec![]);
+    let conversation = app.conversation_id();
+    app.shell_commands.update(
+        info_for(&thread, TurnId::new(), "c1", "call-1", true),
+        conversation,
+    );
+    app.open_command_output("c1", None);
+    // `\r` progress only, in pages of about 540 KiB: well past the 2 MiB the
+    // view keeps, every page must still show its newest line.
+    let mut cursor = 0;
+    for page_index in 0..8_u64 {
+        let text = (0..30_000_u64).fold(String::new(), |mut text, step| {
+            use std::fmt::Write as _;
+            let _ = write!(text, "progress {:08}\r", page_index * 30_000 + step);
+            text
+        });
+        let size = cursor + text.len() as u64;
+        app.command_view
+            .as_mut()
+            .unwrap()
+            .apply(ShellCommandOutput {
+                start: cursor,
+                cursor: size,
+                size,
+                text,
+                more: false,
+                settled: false,
+                state: ShellCommandState::Running,
+                exit_code: None,
+            });
+        cursor = size;
+        let newest = format!("  progress {:08}", page_index * 30_000 + 29_999);
+        assert!(
+            frame_text(&app, (80, 16))
+                .iter()
+                .any(|row| row.trim_end() == newest),
+            "page {page_index}: {:#?}",
+            frame_text(&app, (80, 16))
+        );
+    }
+
+    // Fallen further behind than it keeps, the view reads from the end.
+    let (client, seen) = recording_server(|_, _| {
+        (
+            "200 OK",
+            serde_json::to_string(&page(
+                "progress 99999999\r",
+                9_000_000,
+                false,
+                ShellCommandState::Running,
+            ))
+            .unwrap(),
+        )
+    })
+    .await;
+    let view = app.command_view.as_mut().unwrap();
+    view.apply(ShellCommandOutput {
+        start: cursor,
+        cursor: cursor + 4,
+        size: cursor + 3 * 1024 * 1024,
+        text: "tail".into(),
+        more: true,
+        settled: false,
+        state: ShellCommandState::Running,
+        exit_code: None,
+    });
+    for _ in 0..200 {
+        app.poll_command_output(&client);
+        if frame_text(&app, (80, 16))
+            .iter()
+            .any(|row| row.trim_end() == "  progress 99999999")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let lines = requested(&seen);
+    assert!(
+        lines[0].contains("tail=true") && !lines[0].contains("cursor="),
+        "{lines:?}"
+    );
+    let rows = frame_text(&app, (80, 16));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("earlier output isn't shown here")),
+        "{rows:#?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.trim_end() == "  progress 99999999"),
+        "{rows:#?}"
+    );
+}
+
+#[tokio::test]
+async fn ctrl_c_twice_still_quits_while_commands_run_in_the_background() {
+    let thread = fixture_thread();
+    let (client, seen) = recording_server(|_, _| ("200 OK", "{}".into())).await;
+    let mut app = app_on(&thread, vec![]);
+    let conversation = app.conversation_id();
+    app.shell_commands.update(
+        info_for(&thread, TurnId::new(), "c1", "call-1", true),
+        conversation,
+    );
+    let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    crate::input::handle_key(&mut app, key, &client)
+        .await
+        .unwrap();
+    assert_eq!(app.notice, "Press Ctrl+C again to quit");
+    let action = crate::input::handle_key(&mut app, key, &client)
+        .await
+        .unwrap();
+    assert!(matches!(action, crate::input::AppAction::Quit));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(requested(&seen).is_empty(), "the server keeps the commands");
+
+    // One command alone: the Esc prompt names it.
+    let mut app = app_on(&thread, vec![]);
+    app.shell_commands.update(
+        info_for(&thread, TurnId::new(), "c1", "call-1", true),
+        conversation,
+    );
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    crate::input::handle_key(&mut app, esc, &client)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.notice,
+        "Press Esc again to stop 1 command in background"
+    );
+    app.language = crate::locale::Language::Arabic;
+    app.escape_interrupt = None;
+    crate::input::handle_key(&mut app, esc, &client)
+        .await
+        .unwrap();
+    assert_eq!(app.notice, "اضغط Esc مرة أخرى لإيقاف أمر واحد في الخلفية");
+}
+
+#[tokio::test]
+async fn a_session_stop_while_the_main_reply_runs_still_answers_steering() {
+    let root = fixture_thread();
+    let child = Thread {
+        parent_id: Some(root.id),
+        is_subagent: true,
+        ..fixture_thread()
+    };
+    let (client, seen) = recording_server(|_, _| ("200 OK", "{}".into())).await;
+    let mut app = App::new(
+        root.clone(),
+        vec![root.clone(), child.clone()],
+        vec![],
+        vec![],
+        vec![],
+    );
+    // A child still works; the main reply runs, though not on this view.
+    app.live_threads.entry(child.id).or_default();
+    app.root_active_turn = Some(TurnId::new());
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    crate::input::handle_key(&mut app, esc, &client)
+        .await
+        .unwrap();
+    crate::input::handle_key(&mut app, esc, &client)
+        .await
+        .unwrap();
+    let stop = format!("POST /v1/threads/{}/interrupt?resume=true ", root.id);
+    for _ in 0..200 {
+        if requested(&seen).iter().any(|line| line.starts_with(&stop)) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        requested(&seen).iter().any(|line| line.starts_with(&stop)),
+        "{:?}",
+        requested(&seen)
+    );
+}
+
+#[tokio::test]
+async fn background_from_a_childs_view_promotes_that_childs_own_subagents_too() {
+    let root = fixture_thread();
+    let child = Thread {
+        parent_id: Some(root.id),
+        is_subagent: true,
+        ..fixture_thread()
+    };
+    let (client, seen) = recording_server(|_, _| ("200 OK", "[]".into())).await;
+    let mut app = app_on(&child, vec![]);
+    app.threads = vec![root.clone(), child.clone()];
+    app.parent_stack = vec![root.clone()];
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        &client,
+    )
+    .await
+    .unwrap();
+    let lines = requested(&seen);
+    for expected in [
+        format!("POST /v1/threads/{}/background ", child.id),
+        format!("POST /v1/threads/{}/background ", root.id),
+        format!("POST /v1/threads/{}/commands/background ", root.id),
+    ] {
+        assert!(
+            lines.iter().any(|line| line.starts_with(&expected)),
+            "{expected} missing: {lines:?}"
+        );
+    }
 }

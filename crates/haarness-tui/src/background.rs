@@ -498,9 +498,13 @@ impl App {
             return;
         }
         let conversation = self.conversation_id();
-        let tree = client.shell_commands(conversation).await.ok();
-        let active = client.active_shell_commands().await.ok();
-        self.shell_commands.hydrate(conversation, tree, active);
+        // Both reads at once: opening a chat waits for the slower only.
+        let (tree, active) = tokio::join!(
+            client.shell_commands(conversation),
+            client.active_shell_commands()
+        );
+        self.shell_commands
+            .hydrate(conversation, tree.ok(), active.ok());
     }
 
     /// Follow `command.updated` and `command.output` from every chat: the
@@ -575,8 +579,17 @@ impl App {
         let chat = self.conversation_id();
         let commands = self.background_commands_supported();
         let named = arguments.trim();
+        // Subagents are promoted by the chat that waits for them: the one on
+        // screen (a child's own subagent, from its view), then the
+        // conversation's top chat. Commands move for the whole conversation.
+        let parents: Vec<ThreadId> = std::iter::once(self.thread.id)
+            .chain((chat != self.thread.id).then_some(chat))
+            .collect();
         let (subagents, moved) = if named.is_empty() {
-            let subagents = client.promote_background_tasks(chat, None).await?.len();
+            let mut subagents = 0;
+            for parent in &parents {
+                subagents += client.promote_background_tasks(*parent, None).await?.len();
+            }
             let moved = if commands {
                 client.send_commands_to_background(chat, None).await?.len()
             } else {
@@ -585,13 +598,18 @@ impl App {
             (subagents, moved)
         } else {
             let child = named.parse::<uuid::Uuid>().ok();
-            let subagents = match child {
-                Some(child) => client
-                    .promote_background_tasks(chat, Some(ThreadId(child)))
-                    .await?
-                    .len(),
-                None => 0,
-            };
+            let mut subagents = 0;
+            if let Some(child) = child {
+                for parent in &parents {
+                    subagents += client
+                        .promote_background_tasks(*parent, Some(ThreadId(child)))
+                        .await?
+                        .len();
+                    if subagents > 0 {
+                        break;
+                    }
+                }
+            }
             if subagents > 0 {
                 (subagents, 0)
             } else if commands {
@@ -960,9 +978,9 @@ pub(crate) enum ReadError {
 
 type Read = tokio::sync::oneshot::Receiver<std::result::Result<ShellCommandOutput, ReadError>>;
 
-/// Rows of the output at a width, for the length of output they were cut
-/// from.
-type ShownRows = Option<(usize, usize, Rc<[String]>)>;
+/// Rows of the output at a width, for the revision of the output they were
+/// cut from.
+type ShownRows = Option<(u64, usize, Rc<[String]>)>;
 
 /// The full-screen view of one command's output (`Overlay::CommandOutput`).
 #[allow(clippy::struct_excessive_bools)] // independent facts about one read stream
@@ -975,6 +993,14 @@ pub(crate) struct CommandView {
     /// What it printed, as written (escapes left in), from where the view
     /// started reading.
     raw: String,
+    /// Grows with every change to `raw`, which can keep its length while
+    /// its text moves on (output past `OUTPUT_KEPT`).
+    revision: u64,
+    /// The next read starts from the end again: the output ran on further
+    /// than the view keeps while it followed the end.
+    skip_ahead: bool,
+    /// The read in flight is such a read from the end.
+    skipping: bool,
     /// Where the next read starts.
     pub cursor: u64,
     /// The command has ended and every byte it printed is in.
@@ -1011,6 +1037,9 @@ impl CommandView {
             thread,
             command,
             raw: String::new(),
+            revision: 0,
+            skip_ahead: false,
+            skipping: false,
             cursor: 0,
             settled: false,
             state: None,
@@ -1036,11 +1065,15 @@ impl CommandView {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let client = client.clone();
         let (thread, id) = (self.thread, self.id.clone());
-        let (cursor, tail) = if self.loaded {
+        // The end first, then on from it; from the end again when following
+        // fell further behind than the view keeps.
+        let (cursor, tail) = if self.loaded && !self.skip_ahead {
             (Some(self.cursor), false)
         } else {
             (None, true)
         };
+        self.skipping = self.loaded && tail;
+        self.skip_ahead = false;
         let task = tokio::spawn(async move {
             let result = client
                 .shell_command_output(thread, &id, cursor, tail, OUTPUT_PAGE)
@@ -1082,6 +1115,22 @@ impl CommandView {
         if !self.loaded {
             self.trimmed = page.start > 0;
             self.loaded = true;
+        } else if std::mem::take(&mut self.skipping) {
+            // A read from the end: what came before it is no longer shown.
+            if page.start > self.cursor {
+                self.raw.clear();
+                self.trimmed = true;
+            } else {
+                // Nothing was skipped after all: keep what follows the cursor.
+                let fresh = usize::try_from(self.cursor.saturating_sub(page.start)).unwrap_or(0);
+                let mut cut = fresh.min(page.text.len());
+                while !page.text.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                let mut page = page;
+                page.text.drain(..cut);
+                return self.take_page(page);
+            }
         } else if page.start > self.cursor {
             // Output between the last read and this one is no longer kept.
             self.trimmed = true;
@@ -1089,6 +1138,11 @@ impl CommandView {
                 self.raw.push('\n');
             }
         }
+        self.take_page(page);
+    }
+
+    fn take_page(&mut self, page: ShellCommandOutput) {
+        self.revision += page.text.len() as u64 + 1;
         self.raw.push_str(&page.text);
         if self.raw.len() > OUTPUT_KEPT {
             let mut cut = self.raw.len() - OUTPUT_KEPT;
@@ -1105,11 +1159,18 @@ impl CommandView {
         self.settled = page.settled;
         self.state = Some((page.state, page.exit_code));
         self.wanted |= page.more;
+        // Following the end, output further ahead than the view keeps is
+        // read from the end rather than page by page: the screen keeps up.
+        if self.top.is_none() && page.size.saturating_sub(page.cursor) > OUTPUT_KEPT as u64 {
+            self.skip_ahead = true;
+            self.wanted = true;
+        }
     }
 
     /// The server no longer has the command: show the end that was kept.
     fn keep_only(&mut self, kept: &str) {
         kept.clone_into(&mut self.raw);
+        self.revision += 1;
         self.loaded = true;
         self.settled = true;
         self.only_kept = true;
@@ -1127,8 +1188,8 @@ impl CommandView {
     /// a line rewritten with carriage returns as it last read.
     pub(crate) fn shown_rows(&self, width: usize) -> Rc<[String]> {
         let width = width.max(8);
-        if let Some((length, at, rows)) = self.shown.borrow().as_ref()
-            && *length == self.raw.len()
+        if let Some((revision, at, rows)) = self.shown.borrow().as_ref()
+            && *revision == self.revision
             && *at == width
         {
             return rows.clone();
@@ -1144,7 +1205,7 @@ impl CommandView {
             }
         }
         let rows: Rc<[String]> = rows.into();
-        *self.shown.borrow_mut() = Some((self.raw.len(), width, rows.clone()));
+        *self.shown.borrow_mut() = Some((self.revision, width, rows.clone()));
         rows
     }
 }
