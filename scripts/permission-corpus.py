@@ -98,6 +98,21 @@ CORPUS = [
     # Multi-line scripts
     'set -e\nnpm ci\nnpm run build\nnpm test', 'for f in src/*.rs; do wc -l "$f"; done',
     'if [ -f .env ]; then echo yes; fi', 'npm test\r\nnpm run build',
+    # Wrappers, the variables they set and the folders they choose
+    'time cargo build', 'time npm test', 'time -p make', 'env RUST_LOG=1 cargo test',
+    'env NODE_ENV=production npm run build', 'env -i PATH=/usr/bin make', 'sudo -E make',
+    'sudo -u postgres psql -c "select 1"', 'NODE_ENV=test npm test', 'RUST_LOG=debug cargo run -- serve',
+    'nohup npm start > server.log 2>&1 &', 'env -C src ls', 'env -C src cat ../README.md', 'env -Csrc cat main.rs',
+    'env --chdir=src cat main.rs', 'env -C src cat ../../outside/secret', 'env --chdir=/tmp cat x',
+    'sudo -D /tmp cat x', 'env -C ~/.ssh cat id_rsa', 'env -C "$D" cat x', 'env -C~/x cat y',
+    'cd src && env -C ../deep cat ../README.md', 'time A=1 rm -rf ~/Documents', 'time -p A=$(pwd) B+=x rm -rf ~/x',
+    'env A+=1 rm -rf ~/x', "env 'A B=1' rm -rf ~/x", 'env A=$(pwd) rm -rf victim', 'sudo A=1 -u root rm -rf victim',
+    'env - rm -rf victim', 'env --chdir="$D" rm -rf victim', 'coproc rm -rf ~/x', 'coproc NAME { rm -rf victim; }',
+    '! { rm -rf victim; }',
+    # Lines of assignments
+    'A=1 B=2\nnpm test', 'PORT=3000 HOST=0.0.0.0\nnpm start', 'A=1\n! cat ../outside/x', 'A=1 B=2\n! rm -rf victim',
+    'A=1\nif true; then rm -rf victim; fi', 'A=1 B=2\n{ rm -rf victim; }', 'A=1 B=2 # note\nrm -rf victim',
+    'A=1 B=2 \\\n  npm test', 'export A=1 B=2\nnpm test', 'A=1 B=2 npm test',
     # Function definitions
     'cat() { echo x; } > notes.md; cat', 'f() { git status; }; f',
     # Files
