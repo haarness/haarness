@@ -2824,8 +2824,25 @@ impl App {
                 } else {
                     let (action, target) = if action == "marketplace" {
                         let subcommand = words.next().unwrap_or_default();
+                        if subcommand == "update" {
+                            // Fetched again by the server, which says what changed.
+                            let name = words.collect::<Vec<_>>().join(" ");
+                            let result = client
+                                .manage(
+                                    "marketplace",
+                                    &serde_json::json!({
+                                        "action": "update_plugin_marketplace",
+                                        "name": (!name.is_empty()).then_some(name),
+                                    }),
+                                )
+                                .await?;
+                            self.notice = marketplace_refresh_notice(&result);
+                            return Ok(AppAction::Continue);
+                        }
                         if subcommand != "add" {
-                            self.refuse_command("Usage: /plugin marketplace add <path-or-url>");
+                            self.refuse_command(
+                                "Usage: /plugin marketplace add <path-or-url> · /plugin marketplace update [name]",
+                            );
                             return Ok(AppAction::Continue);
                         }
                         ("marketplace", words.collect::<Vec<_>>().join(" "))
@@ -2844,7 +2861,7 @@ impl App {
                                 | "marketplace"
                         )
                     {
-                        self.notice = "Use /plugin, /plugin search <text>, /plugin install <name@marketplace|local-path>, /plugin update|enable|disable|remove <name>, or /plugin marketplace add <path-or-url>".into();
+                        self.notice = "Use /plugin, /plugin search <text>, /plugin install <name@marketplace|local-path>, /plugin update|enable|disable|remove <name>, /plugin marketplace add <path-or-url>, or /plugin marketplace update [name]".into();
                     } else {
                         client
                             .plugin_action(haarness_protocol::PluginActionRequest {
@@ -5045,6 +5062,62 @@ pub(crate) fn language_tool_rows(
         format!("  {}  {status}", formatter.id)
     }));
     lines
+}
+
+/// `/plugin marketplace update`'s answer in one status line: what each
+/// marketplace did, and the plugins that changed or did not.
+pub(crate) fn marketplace_refresh_notice(result: &serde_json::Value) -> String {
+    let rows = result["marketplaces"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return "No plugin marketplaces registered · add one with /plugin marketplace add <path-or-url>".into();
+    }
+    let mut parts = Vec::new();
+    let mut reload = false;
+    for row in &rows {
+        let name = row["name"].as_str().unwrap_or_default();
+        let list = |key: &str| {
+            row[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.as_str().or_else(|| item["plugin"].as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut part = match row["status"].as_str() {
+            Some("unchanged") => format!("{name} is up to date"),
+            Some("updated") => format!("{name} updated"),
+            Some("folder") => format!("{name} is a local folder, read as it is"),
+            _ => format!(
+                "{name} not updated: {}",
+                row["error"].as_str().unwrap_or("unknown error")
+            ),
+        };
+        let plugins = list("plugins");
+        if !plugins.is_empty() {
+            reload = true;
+            part.push_str(" · plugins updated: ");
+            part.push_str(&plugins);
+        }
+        let unlisted = list("unlisted");
+        if !unlisted.is_empty() {
+            part.push_str(" · no longer listed, kept as is: ");
+            part.push_str(&unlisted);
+        }
+        let failed = list("failed");
+        if !failed.is_empty() {
+            part.push_str(" · could not update: ");
+            part.push_str(&failed);
+        }
+        parts.push(part);
+    }
+    if reload {
+        parts.push("reload queued until active work is idle".into());
+    }
+    parts.join(" · ")
 }
 
 /// `/usage`'s cost: unpriced turns make a total a subtotal, and none priced

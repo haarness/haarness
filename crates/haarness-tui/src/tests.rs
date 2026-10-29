@@ -23152,6 +23152,31 @@ fn report_wording_is_precise() {
     assert_eq!(cost(serde_json::json!({"costUsd": 0.5})), "$0.500000");
 }
 
+/// `/plugin marketplace update` says in one line what each marketplace did.
+#[test]
+fn a_plugin_marketplace_refresh_reads_as_one_line() {
+    let notice = |value| crate::commands::marketplace_refresh_notice(&value);
+    assert_eq!(
+        notice(serde_json::json!({"marketplaces": []})),
+        "No plugin marketplaces registered · add one with /plugin marketplace add <path-or-url>"
+    );
+    assert_eq!(
+        notice(serde_json::json!({"marketplaces": [
+            {"name": "team", "status": "unchanged", "plugins": [], "unlisted": [], "failed": []}
+        ]})),
+        "team is up to date"
+    );
+    assert_eq!(
+        notice(serde_json::json!({"marketplaces": [
+            {"name": "team", "status": "updated", "plugins": ["kit"], "unlisted": ["old"],
+             "failed": [{"plugin": "broken", "error": "offline"}]},
+            {"name": "other", "status": "failed", "error": "could not reach it",
+             "plugins": [], "unlisted": [], "failed": []}
+        ]})),
+        "team updated · plugins updated: kit · no longer listed, kept as is: old · could not update: broken · other not updated: could not reach it · reload queued until active work is idle"
+    );
+}
+
 /// In Review, the default, a passing notice wins the band's room: the mode
 /// shows only where room is left. In Auto the band keeps saying requests are
 /// answered without asking, and the notice is cut to the room that is left,

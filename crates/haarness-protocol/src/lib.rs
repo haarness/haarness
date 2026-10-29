@@ -1103,7 +1103,7 @@ pub struct PluginInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginActionRequest {
-    /// install | update | enable | disable | remove | marketplace
+    /// install | update | enable | disable | remove | marketplace | marketplace_update (target: a marketplace, or empty for all) | marketplace_auto_update (target: name, name:on or name:off)
     pub action: String,
     pub target: String,
 }

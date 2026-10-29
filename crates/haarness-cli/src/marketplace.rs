@@ -79,6 +79,9 @@ enum Command {
         /// Settings the resource asks for, as a JSON object.
         #[arg(long, default_value = "{}")]
         values: String,
+        /// Stay on the installed version instead of following new ones.
+        #[arg(long)]
+        no_auto_update: bool,
     },
     /// Install another version of an installed resource.
     Update {
@@ -91,6 +94,19 @@ enum Command {
         #[arg(long)]
         local: bool,
     },
+    /// Install new versions of a resource when they are published, or stop.
+    AutoUpdate {
+        /// Resource id, or publisher/slug.
+        id: String,
+        /// Stay on the installed version.
+        #[arg(long)]
+        off: bool,
+        /// The copy installed for this project.
+        #[arg(long)]
+        local: bool,
+    },
+    /// Install new versions of every resource that updates automatically.
+    CheckUpdates,
     /// Turn an installed resource on.
     Enable {
         /// Resource id, or publisher/slug.
@@ -146,7 +162,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: Args) -> Re
             for row in rows {
                 let text = |key: &str| row[key].as_str().unwrap_or_default().to_owned();
                 println!(
-                    "{}\t{}\tversion {}\t{}{}",
+                    "{}\t{}\tversion {}\t{}\t{}{}",
                     text("name"),
                     text("kind"),
                     row["version"]["number"],
@@ -155,6 +171,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: Args) -> Re
                     } else {
                         "all projects"
                     },
+                    update_state(row),
                     if row["enabled"] == false { "\toff" } else { "" }
                 );
             }
@@ -168,11 +185,42 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: Args) -> Re
             local,
             global: _,
             values,
+            no_auto_update,
         } => {
-            json!({"action":"install","kind":kind,"id":id,"version":version,"scope":if local {"local"} else {"global"},"values":serde_json::from_str::<Value>(&values)?})
+            let mut input = json!({"action":"install","kind":kind,"id":id,"version":version,"scope":if local {"local"} else {"global"},"values":serde_json::from_str::<Value>(&values)?});
+            if no_auto_update {
+                input["autoUpdate"] = json!(false);
+            }
+            input
         }
         Command::Update { id, version, local } => {
             json!({"action":"update","id":id,"version":version,"scope":if local {"local"} else {"global"}})
+        }
+        Command::AutoUpdate { id, off, local } => {
+            let receipt = service(paths, workspace, trust)
+                .await?
+                .marketplace_request(&json!({"action":"auto_update","id":id,"enabled":!off,"scope":if local {"local"} else {"global"}}))
+                .await?;
+            let name = receipt["name"].as_str().unwrap_or(&id);
+            if off {
+                println!(
+                    "{name} stays on version {} until you update it.",
+                    receipt["version"]["number"]
+                );
+            } else {
+                println!("{name} now installs new versions when they are published.");
+            }
+            return Ok(());
+        }
+        Command::CheckUpdates => {
+            let summary = service(paths, workspace, trust)
+                .await?
+                .marketplace_request(&json!({"action":"check_updates"}))
+                .await?;
+            for line in summary_lines(&summary) {
+                println!("{line}");
+            }
+            return Ok(());
         }
         Command::Enable { id, local } => {
             json!({"action":"enable","id":id,"scope":if local {"local"} else {"global"}})
@@ -191,6 +239,56 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: Args) -> Re
         serde_json::to_string_pretty(&service.marketplace_request(&input).await?)?
     );
     Ok(())
+}
+
+/// How an installed resource gets new versions, for `installed`.
+fn update_state(row: &Value) -> &'static str {
+    if !follows_new_versions(row) {
+        "pinned"
+    } else if row["updateHeld"].is_string() {
+        "has local edits, so automatic updates wait"
+    } else {
+        "updates automatically"
+    }
+}
+
+/// What a round of `check_updates` did, one short line each.
+pub(crate) fn summary_lines(summary: &Value) -> Vec<String> {
+    let list = |key: &str| summary[key].as_array().cloned().unwrap_or_default();
+    let checked = summary["checked"].as_u64().unwrap_or_default();
+    if checked == 0 {
+        return vec!["Nothing installed from the marketplace updates automatically.".into()];
+    }
+    let mut lines = Vec::new();
+    for row in list("updated") {
+        lines.push(format!(
+            "Updated {} to version {}.",
+            row["name"].as_str().unwrap_or_default(),
+            row["to"]
+        ));
+    }
+    for row in list("held") {
+        lines.push(format!(
+            "{} has local edits, so it stays on version {}.",
+            row["name"].as_str().unwrap_or_default(),
+            row["version"]
+        ));
+    }
+    for row in list("failed") {
+        lines.push(format!(
+            "Could not check {}: {}",
+            row["name"].as_str().unwrap_or_default(),
+            row["error"].as_str().unwrap_or_default()
+        ));
+    }
+    if lines.is_empty() {
+        lines.push(if checked == 1 {
+            "Checked 1 resource: it is up to date.".into()
+        } else {
+            format!("Checked {checked} resources: all are up to date.")
+        });
+    }
+    lines
 }
 
 pub async fn service(
@@ -814,7 +912,7 @@ pub async fn install(
             if target.exists() { ensure!(old["installedDigest"] == tree_digest(&target)?, "Resource was modified locally; preserve your edits before updating"); }
         }
         let digest = tree_digest(&source)?;
-        let receipt = json!({"id":id,"kind":kind,"name":name,"publisher":manifest["resource"]["publisher"],"slug":slug,"scope":if local {"local"} else {"global"},"path":target,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":digest,"pluginName":if kind=="mcp" {Some(format!("mcp-{name}"))} else if kind=="plugin" {Some(name.to_owned())} else {None},"restartRequired":false});
+        let receipt = json!({"id":id,"kind":kind,"name":name,"publisher":manifest["resource"]["publisher"],"slug":slug,"scope":if local {"local"} else {"global"},"path":target,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":digest,"pluginName":if kind=="mcp" {Some(format!("mcp-{name}"))} else if kind=="plugin" {Some(name.to_owned())} else {None},"autoUpdate":auto_update_choice(input, old.as_ref()),"restartRequired":false});
         fs::create_dir_all(target.parent().context("Target parent")?)?;
         let backup = stage.join("previous");
         let existed = target.exists();
@@ -833,6 +931,239 @@ pub async fn install(
     }.await;
     let _ = fs::remove_dir_all(stage);
     result
+}
+
+/// Whether a receipt follows new versions on its own. A receipt written
+/// before automatic updates existed has no field and stays where it is.
+pub fn follows_new_versions(receipt: &Value) -> bool {
+    receipt["autoUpdate"].as_bool().unwrap_or(false)
+}
+
+/// `autoUpdate` for the receipt an install writes: what the request says,
+/// else what the installed copy already did, else on for a new install of
+/// the latest version and off for one that names its version.
+pub(crate) fn auto_update_choice(input: &Value, old: Option<&Value>) -> bool {
+    input["autoUpdate"].as_bool().unwrap_or_else(|| match old {
+        Some(old) => follows_new_versions(old),
+        None => input["version"].is_null(),
+    })
+}
+
+/// The receipt file of `receipt`, read again and checked as `installed`
+/// checks it. Callers hold the marketplace editor lock.
+fn reread_receipt(paths: &Paths, workspace: &Path, receipt: &Value) -> Result<(PathBuf, Value)> {
+    let id = uuid::Uuid::parse_str(receipt["id"].as_str().context("Invalid receipt id")?)?;
+    let local = match receipt["scope"].as_str() {
+        Some("local") => true,
+        Some("global") => false,
+        _ => bail!("Invalid receipt scope"),
+    };
+    let file = receipt_root(paths, workspace, local).join(format!("{id}.json"));
+    haarness_profiles::check_path(&file)?;
+    let current: Value =
+        serde_json::from_slice(&fs::read(&file).context("The resource is no longer installed")?)?;
+    ensure!(
+        current["id"] == id.to_string() && current["scope"] == receipt["scope"],
+        "Invalid installation receipt"
+    );
+    validate_receipt(paths, workspace, &current)?;
+    Ok((file, current))
+}
+
+/// Turn automatic updates on or off for one installed resource.
+pub fn set_auto_update(
+    paths: &Paths,
+    workspace: &Path,
+    receipt: &Value,
+    enabled: bool,
+) -> Result<Value> {
+    let _lock = crate::desktop::editor_lock(&paths.data, "marketplace")?;
+    let (file, mut current) = reread_receipt(paths, workspace, receipt)?;
+    current["autoUpdate"] = json!(enabled);
+    if !enabled && let Some(fields) = current.as_object_mut() {
+        // A hold explains why an automatic update waits; there is none to wait now.
+        fields.remove("updateHeld");
+    }
+    haarness_profiles::write(&file, &serde_json::to_vec_pretty(&current)?, true)?;
+    Ok(current)
+}
+
+/// Record (`Some`) or clear (`None`) why an automatic update waits. Writes
+/// only when that changes and the same version is still installed; returns
+/// whether it wrote.
+fn set_update_held(
+    paths: &Paths,
+    workspace: &Path,
+    receipt: &Value,
+    reason: Option<&str>,
+) -> Result<bool> {
+    let _lock = crate::desktop::editor_lock(&paths.data, "marketplace")?;
+    let (file, mut current) = reread_receipt(paths, workspace, receipt)?;
+    if current["version"]["id"] != receipt["version"]["id"]
+        || current["updateHeld"].as_str() == reason
+    {
+        return Ok(false);
+    }
+    match reason {
+        Some(reason) => current["updateHeld"] = json!(reason),
+        None => {
+            if let Some(fields) = current.as_object_mut() {
+                fields.remove("updateHeld");
+            }
+        }
+    }
+    haarness_profiles::write(&file, &serde_json::to_vec_pretty(&current)?, true)?;
+    Ok(true)
+}
+
+/// Whether the installed files differ from what the marketplace installed.
+pub fn locally_modified(receipt: &Value) -> Result<bool> {
+    let path = if receipt["kind"] == "extension" {
+        receipt["packageRoot"]
+            .as_str()
+            .or_else(|| receipt["path"].as_str())
+    } else {
+        receipt["path"].as_str()
+    }
+    .map(Path::new)
+    .context("Invalid receipt path")?;
+    Ok(path.exists() && receipt["installedDigest"] != tree_digest(path)?)
+}
+
+/// One round of automatic updates over the receipts of `scope` (both when
+/// `None`) that follow new versions. A locally modified install is never
+/// replaced: the hold is recorded on its receipt instead. A resource the
+/// catalog cannot answer for is left for the next round. Returns the
+/// summary and whether anything on disk changed.
+pub async fn check_updates(
+    paths: &Paths,
+    workspace: &Path,
+    trust: bool,
+    scope: Option<&str>,
+) -> Result<(Value, bool)> {
+    check_updates_from(&CloudCatalog, paths, workspace, trust, scope).await
+}
+
+/// Where a round of automatic updates reads resource details and install
+/// manifests: Haarness Cloud, or a stand-in in tests.
+#[async_trait::async_trait]
+pub(crate) trait CatalogReader: Sync {
+    /// `GET api/v1/marketplace/resources/{id}`.
+    async fn detail(&self, id: &str) -> Result<Value>;
+    /// The install manifest `fetch` reads for `input`.
+    async fn manifest(&self, input: &Value) -> Result<Value>;
+}
+
+struct CloudCatalog;
+
+#[async_trait::async_trait]
+impl CatalogReader for CloudCatalog {
+    async fn detail(&self, id: &str) -> Result<Value> {
+        catalog(&format!("api/v1/marketplace/resources/{id}"), &[]).await
+    }
+    async fn manifest(&self, input: &Value) -> Result<Value> {
+        fetch(input).await
+    }
+}
+
+pub(crate) async fn check_updates_from(
+    reader: &dyn CatalogReader,
+    paths: &Paths,
+    workspace: &Path,
+    trust: bool,
+    scope: Option<&str>,
+) -> Result<(Value, bool)> {
+    let rows = installed(paths, workspace, trust)?;
+    let mut checked = 0;
+    let mut changed = false;
+    let (mut updated, mut held, mut failed) = (Vec::new(), Vec::new(), Vec::new());
+    for row in rows.as_array().into_iter().flatten() {
+        if !follows_new_versions(row) || scope.is_some_and(|scope| row["scope"] != scope) {
+            continue;
+        }
+        checked += 1;
+        let id = row["id"].as_str().unwrap_or_default();
+        let name = row["name"].as_str().unwrap_or(id);
+        let about = |extra: Value| {
+            let mut value = json!({"id":id,"name":name,"kind":row["kind"],"scope":row["scope"],"version":row["version"]["number"]});
+            if let (Some(value), Some(extra)) = (value.as_object_mut(), extra.as_object()) {
+                value.extend(extra.clone());
+            }
+            value
+        };
+        let modified = match locally_modified(row) {
+            Ok(modified) => modified,
+            Err(error) => {
+                failed.push(about(json!({"error":error.to_string()})));
+                continue;
+            }
+        };
+        // Edits undone since the last round: nothing waits any more.
+        if !modified && row["updateHeld"].is_string() {
+            changed |= recorded(set_update_held(paths, workspace, row, None));
+        }
+        let detail = match reader.detail(id).await {
+            Ok(detail) => detail,
+            Err(error) => {
+                tracing::info!(resource = %id, error = %error, "automatic update check skipped");
+                failed.push(about(json!({"error":error.to_string()})));
+                continue;
+            }
+        };
+        let active = &detail["activeVersion"];
+        let newer = active.is_object()
+            && active["id"] != row["version"]["id"]
+            && active["yanked"] != true
+            && active["status"]
+                .as_str()
+                .is_none_or(|status| status == "approved");
+        if !newer {
+            continue;
+        }
+        if modified {
+            changed |= recorded(set_update_held(paths, workspace, row, Some("modified")));
+            held.push(about(json!({"available":active["number"]})));
+            continue;
+        }
+        // The exact version the detail named, so a version published
+        // meanwhile is not installed unseen.
+        let input = json!({"action":"update","id":id,"kind":row["kind"],"version":active["number"],"scope":row["scope"]});
+        let result = async {
+            let manifest = reader.manifest(&input).await?;
+            ensure!(
+                manifest["version"]["id"] == active["id"],
+                "The catalog changed while checking; trying again next time"
+            );
+            install(paths, workspace, trust, &manifest, &input).await
+        }
+        .await;
+        match result {
+            Ok(receipt) => {
+                changed = true;
+                tracing::info!(resource = %id, version = %receipt["version"]["number"], "installed a new version automatically");
+                updated.push(about(
+                    json!({"from":row["version"]["number"],"to":receipt["version"]["number"]}),
+                ));
+            }
+            Err(error) => {
+                tracing::info!(resource = %id, error = %error, "automatic update failed");
+                failed.push(about(json!({"error":error.to_string()})));
+            }
+        }
+    }
+    Ok((
+        json!({"checked":checked,"updated":updated,"held":held,"failed":failed}),
+        changed,
+    ))
+}
+
+/// Whether a hold was written; a receipt that cannot be rewritten is logged
+/// and the round goes on with the others.
+fn recorded(result: Result<bool>) -> bool {
+    result.unwrap_or_else(|error| {
+        tracing::warn!(error = %error, "could not record why an automatic update waits");
+        false
+    })
 }
 
 fn substitute(value: &mut Value, values: &Value) -> Result<()> {
@@ -1251,6 +1582,339 @@ mod tests {
         assert_eq!(config["env"]["TOKEN"], "pa${USER}ss${");
         assert_eq!(config["env"]["USER"], "me ${TOKEN}");
         assert_eq!(config["args"][0], "--key=pa${USER}ss${");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn automatic_updates_default_on_for_latest_installs_and_stay_as_they_were() {
+        let old = |value: Option<bool>| {
+            let mut receipt = json!({"id":"x"});
+            if let Some(value) = value {
+                receipt["autoUpdate"] = json!(value);
+            }
+            receipt
+        };
+        // A new install of the latest version follows new ones; one that
+        // names its version stays on it; the request can say otherwise.
+        assert!(auto_update_choice(&json!({}), None));
+        assert!(!auto_update_choice(&json!({"version":3}), None));
+        assert!(!auto_update_choice(&json!({"autoUpdate":false}), None));
+        assert!(auto_update_choice(
+            &json!({"version":3,"autoUpdate":true}),
+            None
+        ));
+        // An update keeps what the installed copy did, even with a version.
+        assert!(auto_update_choice(
+            &json!({"version":4}),
+            Some(&old(Some(true)))
+        ));
+        assert!(!auto_update_choice(&json!({}), Some(&old(Some(false)))));
+        assert!(auto_update_choice(
+            &json!({"autoUpdate":true}),
+            Some(&old(Some(false)))
+        ));
+        // Receipts written before automatic updates have no field: they stay put.
+        assert!(!follows_new_versions(&old(None)));
+        assert!(!auto_update_choice(&json!({}), Some(&old(None))));
+    }
+
+    /// A catalog in memory: each resource's detail, and its manifests by
+    /// version number. Offline answers every request with the transport error.
+    #[derive(Default)]
+    struct FakeCatalog {
+        details: std::sync::Mutex<std::collections::BTreeMap<String, Value>>,
+        manifests: std::sync::Mutex<std::collections::BTreeMap<(String, u64), Value>>,
+        offline: std::sync::atomic::AtomicBool,
+        requests: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FakeCatalog {
+        fn publish(&self, manifest: &Value) {
+            let id = manifest["resource"]["id"].as_str().unwrap().to_owned();
+            let number = manifest["version"]["number"].as_u64().unwrap();
+            self.manifests
+                .lock()
+                .unwrap()
+                .insert((id.clone(), number), manifest.clone());
+            self.details.lock().unwrap().insert(
+                id.clone(),
+                json!({"id":id,"activeVersion":manifest["version"]}),
+            );
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CatalogReader for FakeCatalog {
+        async fn detail(&self, id: &str) -> Result<Value> {
+            self.requests.lock().unwrap().push(format!("detail {id}"));
+            ensure!(
+                !self.offline.load(std::sync::atomic::Ordering::SeqCst),
+                "Can't reach the marketplace. Check your internet connection and try again."
+            );
+            self.details
+                .lock()
+                .unwrap()
+                .get(id)
+                .cloned()
+                .context("not found")
+        }
+        async fn manifest(&self, input: &Value) -> Result<Value> {
+            let id = input["id"].as_str().unwrap().to_owned();
+            let number = input["version"].as_u64().context("a version number")?;
+            self.requests
+                .lock()
+                .unwrap()
+                .push(format!("manifest {id} {number}"));
+            self.manifests
+                .lock()
+                .unwrap()
+                .get(&(id, number))
+                .cloned()
+                .context("no such version")
+        }
+    }
+
+    /// Version `number` of the skill `id` (a new resource when `None`), its
+    /// instructions saying `body`.
+    async fn skill_version(
+        id: Option<&str>,
+        number: u64,
+        body: &str,
+    ) -> (Value, tokio::task::JoinHandle<()>) {
+        let bytes = archive(&[(
+            "SKILL.md",
+            &format!("---\ndescription: Proof\n---\n{body}\n"),
+        )]);
+        let (mut manifest, server) = manifest("skill", bytes).await;
+        if let Some(id) = id {
+            manifest["resource"]["id"] = json!(id);
+            manifest["lock"]["resourceId"] = json!(id);
+        }
+        manifest["version"]["number"] = json!(number);
+        (manifest, server)
+    }
+
+    #[tokio::test]
+    async fn check_updates_installs_what_is_new_and_leaves_pinned_modified_yanked_and_unreachable_ones()
+     {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-marketplace-updates-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let paths = Paths::new(Some(&root.join("home"))).unwrap();
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let catalog = FakeCatalog::default();
+        let mut servers = Vec::new();
+        let mut ids = std::collections::BTreeMap::new();
+        // Version 1 of five skills: four installed as the latest, one with its version named.
+        for name in ["follows", "pinned", "edited", "yanked", "offline"] {
+            let (manifest, server) = skill_version(None, 1, &format!("{name} one")).await;
+            servers.push(server);
+            catalog.publish(&manifest);
+            let mut input = json!({"scope":"local","name":name});
+            if name == "pinned" {
+                input["version"] = json!(1);
+            }
+            let receipt = install(&paths, &workspace, true, &manifest, &input)
+                .await
+                .unwrap();
+            assert_eq!(receipt["autoUpdate"], name != "pinned", "{name}");
+            ids.insert(name, receipt["id"].as_str().unwrap().to_owned());
+        }
+        let skill = |name: &str| workspace.join(format!(".haarness/skills/{name}/SKILL.md"));
+        let receipt = |name: &str| -> Value {
+            serde_json::from_slice(
+                &fs::read(
+                    workspace
+                        .join(".haarness/marketplace")
+                        .join(format!("{}.json", ids[name])),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        // Nothing new yet: nothing changes.
+        let (summary, changed) = check_updates_from(&catalog, &paths, &workspace, true, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            summary,
+            json!({"checked":4,"updated":[],"held":[],"failed":[]})
+        );
+        assert!(!changed);
+
+        // Version 2 of each; the yanked one's is yanked.
+        for name in ["follows", "pinned", "edited", "yanked", "offline"] {
+            let (mut manifest, server) =
+                skill_version(Some(&ids[name]), 2, &format!("{name} two")).await;
+            if name == "yanked" {
+                manifest["version"]["yanked"] = json!(true);
+            }
+            servers.push(server);
+            catalog.publish(&manifest);
+        }
+        fs::write(skill("edited"), "my own edits").unwrap();
+        let (summary, changed) = {
+            // The "offline" resource's detail fails; check it on its own.
+            let kept = catalog
+                .details
+                .lock()
+                .unwrap()
+                .remove(&ids["offline"])
+                .unwrap();
+            let result = check_updates_from(&catalog, &paths, &workspace, true, Some("local"))
+                .await
+                .unwrap();
+            catalog
+                .details
+                .lock()
+                .unwrap()
+                .insert(ids["offline"].clone(), kept);
+            result
+        };
+        assert!(changed);
+        assert_eq!(summary["checked"], 4);
+        assert_eq!(
+            summary["updated"],
+            json!([{"id":ids["follows"],"name":"follows","kind":"skill","scope":"local","version":1,"from":1,"to":2}])
+        );
+        assert_eq!(summary["held"][0]["name"], "edited");
+        assert_eq!(summary["held"][0]["available"], 2);
+        assert_eq!(summary["failed"][0]["name"], "offline");
+        assert!(
+            fs::read_to_string(skill("follows"))
+                .unwrap()
+                .contains("follows two")
+        );
+        assert_eq!(receipt("follows")["version"]["number"], 2);
+        assert_eq!(receipt("follows")["autoUpdate"], true);
+        // Pinned: never asked about. Yanked: not installed.
+        assert!(
+            fs::read_to_string(skill("pinned"))
+                .unwrap()
+                .contains("pinned one")
+        );
+        assert!(
+            !catalog
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.contains(&ids["pinned"]))
+        );
+        assert!(
+            fs::read_to_string(skill("yanked"))
+                .unwrap()
+                .contains("yanked one")
+        );
+        // Local edits are kept, and the receipt says why the update waits.
+        assert_eq!(fs::read_to_string(skill("edited")).unwrap(), "my own edits");
+        assert_eq!(receipt("edited")["updateHeld"], "modified");
+        assert_eq!(receipt("edited")["version"]["number"], 1);
+
+        // Offline: the round fails quietly, changes nothing, and tries again next time.
+        catalog
+            .offline
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (summary, changed) = check_updates_from(&catalog, &paths, &workspace, true, None)
+            .await
+            .unwrap();
+        assert!(!changed);
+        assert_eq!(summary["updated"], json!([]));
+        assert_eq!(summary["failed"].as_array().unwrap().len(), 4);
+        assert!(
+            summary["failed"][0]["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Can't reach the marketplace")
+        );
+        catalog
+            .offline
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // Edits undone: the held one updates and its hold is gone.
+        fs::write(
+            skill("edited"),
+            "---\ndescription: Proof\n---\nedited one\n",
+        )
+        .unwrap();
+        let (summary, _) = check_updates_from(&catalog, &paths, &workspace, true, None)
+            .await
+            .unwrap();
+        let mut updated = summary["updated"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        updated.sort_unstable();
+        assert_eq!(updated, ["edited", "offline"]);
+        assert!(receipt("edited")["updateHeld"].is_null());
+        assert!(
+            fs::read_to_string(skill("edited"))
+                .unwrap()
+                .contains("edited two")
+        );
+
+        // Turned off, it is not checked; turned on again, it is.
+        let off = set_auto_update(&paths, &workspace, &receipt("follows"), false).unwrap();
+        assert_eq!(off["autoUpdate"], false);
+        assert_eq!(receipt("follows")["autoUpdate"], false);
+        let (summary, _) = check_updates_from(&catalog, &paths, &workspace, true, None)
+            .await
+            .unwrap();
+        assert_eq!(summary["checked"], 3);
+        set_auto_update(&paths, &workspace, &receipt("follows"), true).unwrap();
+        assert_eq!(receipt("follows")["autoUpdate"], true);
+        // An update by hand keeps the setting.
+        let (manifest, server) = skill_version(Some(&ids["pinned"]), 3, "pinned three").await;
+        servers.push(server);
+        install(
+            &paths,
+            &workspace,
+            true,
+            &manifest,
+            &json!({"scope":"local","version":3}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt("pinned")["autoUpdate"], false);
+        assert_eq!(receipt("pinned")["version"]["number"], 3);
+
+        // A receipt from before automatic updates (no field) is left alone.
+        let mut legacy = receipt("follows");
+        legacy.as_object_mut().unwrap().remove("autoUpdate");
+        fs::write(
+            workspace
+                .join(".haarness/marketplace")
+                .join(format!("{}.json", ids["follows"])),
+            serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let (manifest, server) = skill_version(Some(&ids["follows"]), 3, "follows three").await;
+        servers.push(server);
+        catalog.publish(&manifest);
+        let (summary, _) = check_updates_from(&catalog, &paths, &workspace, true, None)
+            .await
+            .unwrap();
+        assert!(
+            !summary["updated"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["name"] == "follows")
+        );
+        assert!(
+            fs::read_to_string(skill("follows"))
+                .unwrap()
+                .contains("follows two")
+        );
+        for server in servers {
+            server.abort();
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

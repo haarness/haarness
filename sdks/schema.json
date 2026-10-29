@@ -4023,7 +4023,7 @@
       "PluginActionRequest": {
         "properties": {
           "action": {
-            "description": "install | update | enable | disable | remove | marketplace",
+            "description": "install | update | enable | disable | remove | marketplace | marketplace_update (target: a marketplace, or empty for all) | marketplace_auto_update (target: name, name:on or name:off)",
             "type": "string"
           },
           "target": {
