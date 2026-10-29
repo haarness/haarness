@@ -207,7 +207,7 @@ The same rule covers the other shell text Haarness runs from configuration. An M
 | `PostCompact` | after a compaction commits | `trigger`, `compaction` | `manual` or `automatic` |
 | `StopFailure` | once after terminal failure and exhausted recovery | `error` (`incomplete`, `content_filter`, `provider`, `tool`, `other`), `error_type` (what happened: `authentication_failed`, `rate_limit`, `overloaded`, `server_error`, `invalid_request` or `unknown` for a provider error; otherwise as `error`, and `unknown` for `other`), `error_details`, `provider_id`, `model_id` | `error` and `error_type`; also Claude Code's `billing_error` (a rate limit or quota) and `max_output_tokens` (a reply that ended early) |
 | `TurnEnd` | after `Stop`, once per completed root turn | `turn_id`, `agent`, `provider`, `model`, `finish_reason` | — |
-| `Notification` | a permission prompt is waiting (`permission_prompt`) or a turn completed (`turn_completed`) | `notification_type`, `message` | `notification_type` |
+| `Notification` | a permission prompt is waiting (`permission_prompt`), a turn completed (`turn_completed`), an agent's command moved to the background (`command_moved`) or one there ran out of time (`command_time_limit`) | `notification_type`, `message`; for a command also `command_id`, `reason` and `elapsed_ms`, never its output | `notification_type` |
 | `SessionEnd` | a thread is archived | `reason` (`archived`) | `reason` |
 | `ConfigChange` | a hot-reloaded configuration generation became active | `source` (`reload`); no `session_id` | — |
 
