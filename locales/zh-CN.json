@@ -2950,5 +2950,6 @@
   "Up to date": "已是最新",
   "Updated just now": "刚刚已更新",
   "Plugins updated: {names}": "已更新的插件：{names}",
-  "Could not update {names}": "无法更新 {names}"
+  "Could not update {names}": "无法更新 {names}",
+  "Waiting for you: {plugins}": "等待你确认：{plugins}"
 }

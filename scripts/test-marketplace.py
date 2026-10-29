@@ -166,7 +166,15 @@ def main():
             for kind in ("skill","agent","plugin","mcp","extension"):
                 api("/v1/manage/marketplace",{"action":"disable","id":ids[kind],"scope":"local"})
             wait(lambda:not has("/v1/skills","name","proof-skill") and not has("/v1/agents","id","proof-agent") and not has("/v1/skills","name","proof-plugin:plugin-proof"),"disabled resources leave runtime")
+            # Extensions switched off stay off through an update of one of them.
+            extension_settings=workspace/".haarness/extensions.json"
+            def extensions_on(value):
+                settings=json.loads(extension_settings.read_text());settings["enabled"]=value
+                extension_settings.write_text(json.dumps(settings))
+            extensions_on(False)
             for kind in ids: marketplace("update",id=ids[kind],scope="local")
+            assert json.loads(extension_settings.read_text())["enabled"] is False,"an update turned extensions back on"
+            extensions_on(True)
             assert api("/v1/manage/capabilities",{"action":"list"})["extensions"][0]["enabled"] is False
             process.terminate();process.wait(timeout=20);process=None
             process=subprocess.Popen([*prefix,"serve","--host","127.0.0.1","--port",str(port),"--token",token],env=env,stdout=log,stderr=log)
@@ -207,6 +215,14 @@ def main():
             assert "Updated proof-follow to version 2." in out and "Updated proof-local to version 2." in out,out
             assert "FOLLOW_TWO" in text(follow) and "LOCAL_TWO" in text(local)
             assert "PINNED_ONE" in text(pinned) and "OPTOUT_ONE" in text(optout)
+            # A rollback by version number stays put until it follows again.
+            out=run("marketplace","update",follow,"--version","1").stdout
+            assert "Updated proof-follow to version 1." in out and "pinned to version 1" in out,out
+            assert receipt(follow)["autoUpdate"] is False and "FOLLOW_ONE" in text(follow)
+            assert "Checked 1 resource: it is up to date." in run("marketplace","check-updates").stdout
+            assert "FOLLOW_ONE" in text(follow)
+            run("marketplace","auto-update",follow)
+            assert "Updated proof-follow to version 2." in run("marketplace","check-updates").stdout
             # Turned off and on again from the CLI; the receipt says which.
             assert "stays on version 2" in run("marketplace","auto-update",local,"--local","--off").stdout
             assert receipt(local)["autoUpdate"] is False
@@ -227,7 +243,8 @@ def main():
                 git("add","-A");git("commit","-qm",message);git("push","-q","origin","HEAD:main")
             upstream.mkdir();git("init","-q","--bare",str(bare),cwd=root);git("init","-q");git("remote","add","origin",str(bare))
             plugin_commit("GIT_PLUGIN_ONE","one")
-            assert "registered" in run("plugin","marketplace","add",f"file://{bare}").stdout
+            added=run("plugin","marketplace","add",f"file://{bare}").stdout
+            assert "registered" in added and "It updates automatically; `haarness plugin marketplace auto-update git-fixture --off` stops that." in added,added
             run("plugin","install","kit@git-fixture")
             assert "is up to date" in run("plugin","marketplace","update","git-fixture").stdout
             kit=next(p for p in json.loads(run("marketplace","request",json.dumps({"action":"plugin_marketplaces"})).stdout) if p["name"]=="git-fixture")
@@ -241,7 +258,7 @@ def main():
             publish_skill("proof-pinned",3,"PINNED_THREE",pinned)
             server_env={**env,"HAARNESS_AUTO_UPDATE_INTERVAL_SECS":"60"}
             # A round an earlier server of this run did would hold this one off.
-            for stamp in root.rglob(".auto-update-checked"): stamp.unlink()
+            for stamp in [*root.rglob(".auto-update-checked"),*root.rglob("auto-update/*.checked")]: stamp.unlink()
             started=time.time()
             process=subprocess.Popen([*prefix,"serve","--host","127.0.0.1","--port",str(port),"--token",token],env=server_env,stdout=log,stderr=log)
             wait(lambda: api("/v1/info"),"server start for automatic updates")
@@ -254,7 +271,9 @@ def main():
             assert 50<took<110,took
             assert receipt(follow)["version"]["number"]==3 and receipt(local)["version"]["number"]==3
             assert "PINNED_ONE" in text(pinned) and "OPTOUT_ONE" in text(optout)
-            assert (workspace/".haarness/marketplace/.auto-update-checked").is_file()
+            # The rounds' stamps live in the data folder: nothing new in the project.
+            assert not list(workspace.rglob("*auto-update*")),list(workspace.rglob("*auto-update*"))
+            assert list(root.rglob("auto-update/*.checked")),"no project stamp in the data folder"
             # The updated skill reaches the runtime too.
             wait(lambda: has("/v1/skills","name","proof-follow"),"updated skill loaded")
             print(f"PASS automatic updates: check-updates installs new versions of installs that follow them, the server's round did so (and fetched a Git plugin marketplace's new commit) {took:.0f}s after start, pinned and opted-out installs stayed")

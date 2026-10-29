@@ -2950,5 +2950,6 @@
   "Up to date": "Актуально",
   "Updated just now": "Только что обновлено",
   "Plugins updated: {names}": "Обновлены плагины: {names}",
-  "Could not update {names}": "Не удалось обновить {names}"
+  "Could not update {names}": "Не удалось обновить {names}",
+  "Waiting for you: {plugins}": "Ждёт вашего решения: {plugins}"
 }

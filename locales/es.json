@@ -2950,5 +2950,6 @@
   "Up to date": "Al día",
   "Updated just now": "Actualizado ahora mismo",
   "Plugins updated: {names}": "Plugins actualizados: {names}",
-  "Could not update {names}": "No se pudo actualizar {names}"
+  "Could not update {names}": "No se pudo actualizar {names}",
+  "Waiting for you: {plugins}": "Esperando tu aprobación: {plugins}"
 }

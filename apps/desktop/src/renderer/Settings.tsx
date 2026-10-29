@@ -1904,6 +1904,8 @@ interface PluginMarketplace {
   source?: string | null;
   autoUpdate?: boolean;
   updatedAt?: string | null;
+  /** Installed plugins of it whose automatic update waits, and why. */
+  held?: { plugin: string; reason: string }[];
   error?: string;
 }
 /** What fetching one marketplace again did. */
@@ -1911,21 +1913,25 @@ interface MarketplaceRefresh {
   name: string;
   status: string;
   plugins: string[];
+  held?: { plugin: string; reason: string }[];
   failed: { plugin: string; error: string }[];
   error?: string;
 }
+/** "kit (asks for more: new hooks)": the plugins whose update waits, and why. */
+const heldText = (held: { plugin: string; reason: string }[] | undefined) =>
+  held?.length
+    ? t("Waiting for you: {plugins}", { plugins: held.map((item) => `${item.plugin} (${item.reason})`).join(", ") })
+    : "";
 /** The line a marketplace row shows after Update: the outcome, in words. */
 function refreshOutcome(refresh: MarketplaceRefresh | undefined) {
   if (!refresh) return { text: "" };
   if (refresh.error) return { text: refresh.error, failed: true };
   const failed = refresh.failed.map((failure) => failure.plugin);
   if (failed.length) return { text: t("Could not update {names}", { names: failed.join(", ") }), failed: true };
-  if (refresh.status === "unchanged") return { text: t("Up to date") };
-  return {
-    text: refresh.plugins.length
-      ? t("Updated just now") + " · " + t("Plugins updated: {names}", { names: refresh.plugins.join(", ") })
-      : t("Updated just now"),
-  };
+  const parts = [refresh.status === "unchanged" ? t("Up to date") : t("Updated just now")];
+  if (refresh.plugins.length) parts.push(t("Plugins updated: {names}", { names: refresh.plugins.join(", ") }));
+  if (refresh.held?.length) parts.push(heldText(refresh.held));
+  return { text: parts.join(" · ") };
 }
 function Plugins() {
   const app = useApp();
@@ -1981,6 +1987,7 @@ function Plugins() {
   const marketplaceStatus = (marketplace: PluginMarketplace) =>
     outcomes()[marketplace.name]?.text ||
     marketplace.error ||
+    heldText(marketplace.held) ||
     (marketplace.updatedAt ? t("Fetched {time}", { time: ago(marketplace.updatedAt) }) : "");
   return (
     <>

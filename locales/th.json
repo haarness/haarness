@@ -2950,5 +2950,6 @@
   "Up to date": "เป็นเวอร์ชันล่าสุด",
   "Updated just now": "อัปเดตเมื่อสักครู่",
   "Plugins updated: {names}": "ปลั๊กอินที่อัปเดต: {names}",
-  "Could not update {names}": "อัปเดต {names} ไม่สำเร็จ"
+  "Could not update {names}": "อัปเดต {names} ไม่สำเร็จ",
+  "Waiting for you: {plugins}": "รอคุณยืนยัน: {plugins}"
 }

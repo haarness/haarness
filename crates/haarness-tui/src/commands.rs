@@ -5107,6 +5107,23 @@ pub(crate) fn marketplace_refresh_notice(result: &serde_json::Value) -> String {
             part.push_str(" · no longer listed, kept as is: ");
             part.push_str(&unlisted);
         }
+        let held = row["held"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|held| {
+                format!(
+                    "{} ({})",
+                    held["plugin"].as_str().unwrap_or_default(),
+                    held["reason"].as_str().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !held.is_empty() {
+            part.push_str(" · waiting for you: ");
+            part.push_str(&held);
+        }
         let failed = list("failed");
         if !failed.is_empty() {
             part.push_str(" · could not update: ");
