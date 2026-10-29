@@ -7057,6 +7057,13 @@ struct TurnToolInvoker {
     sequence: std::sync::atomic::AtomicUsize,
 }
 
+/// `rules` bounded by an active skill's: what its `disallowed-tools` denies
+/// refuses the call, so it refuses a redirect there too.
+fn with_skill_rules(mut rules: PermissionEngine, skill: Vec<PermissionRule>) -> PermissionEngine {
+    rules.add_inherited_ceiling([skill]);
+    rules
+}
+
 /// What a fetch or a search run outside a turn (a workflow's or a person's
 /// own call) may ask of its caller: only the rules it was checked under.
 struct DirectRules(PermissionEngine);
@@ -7115,10 +7122,11 @@ impl crate::ToolInvoker for TurnToolInvoker {
         Some(self.runner.permission_engine_for_tool(&self.agent, "read"))
     }
     fn webfetch_rules(&self) -> Option<PermissionEngine> {
-        Some(
+        Some(with_skill_rules(
             self.runner
                 .permission_engine_for_tool(&self.agent, "webfetch"),
-        )
+            self.runner.skill_rules.lock().clone(),
+        ))
     }
     fn instructions_in_context(&self) -> Option<crate::instructions::InContext> {
         Some(Arc::clone(&self.runner.instructions_in_context))
@@ -15117,10 +15125,12 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
     // A fetch also meets the rules for the address it really reads, so case,
     // a user name, a trailing dot, the default port or `..` cannot step
     // around a rule written for the plain address.
-    if name == "webfetch"
-        && let Some(pattern) = webfetch_pattern(&target)
-    {
-        patterns.push(pattern);
+    if name == "webfetch" {
+        for pattern in webfetch_patterns(&target) {
+            if !patterns.contains(&pattern) {
+                patterns.push(pattern);
+            }
+        }
     }
     let mut resolved = Vec::new();
     // A list through a link meets the rules for the folder it really lists.
@@ -15206,43 +15216,66 @@ fn resource_server_pattern(server: &str) -> String {
         .collect()
 }
 
-/// The address a fetch of `target` reads, written the way rules name it:
+/// The other ways rules may name the address a fetch of `target` reads:
 /// scheme and host in lower case, without a user name or password, a
 /// trailing dot on the host, the default port, `.`/`..` path segments or a
 /// `#` fragment (which never reaches the server), and with the letters,
 /// digits and `-._~` of its path written plainly where `%` codes spell them
-/// (a server reads `/%61dmin` as `/admin`). `None` when `target` is already
-/// written that way or is not an http(s) URL.
-fn webfetch_pattern(target: &str) -> Option<String> {
-    let mut url = url::Url::parse(target.trim()).ok()?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return None;
+/// (a server reads `/%61dmin` as `/admin`). An address with no path is also
+/// written with its `/` (the page it reads), and a host the address spells
+/// in punycode also in Unicode, as a rule may name it. Empty when `target`
+/// is already written that way or is not an http(s) URL.
+fn webfetch_patterns(target: &str) -> Vec<String> {
+    let Ok(mut url) = url::Url::parse(target.trim()) else {
+        return Vec::new();
+    };
+    if !matches!(url.scheme(), "http" | "https")
+        || url.set_username("").is_err()
+        || url.set_password(None).is_err()
+    {
+        return Vec::new();
     }
-    url.set_username("").ok()?;
-    url.set_password(None).ok()?;
     url.set_fragment(None);
     if let Some(host) = url
         .host_str()
         .and_then(|host| host.strip_suffix('.'))
         .map(str::to_owned)
+        && url.set_host(Some(&host)).is_err()
     {
-        url.set_host(Some(&host)).ok()?;
+        return Vec::new();
     }
     let path = plain_unreserved(url.path());
     if path != url.path() {
         url.set_path(&path);
     }
-    let mut pattern = url.to_string();
+    let mut forms = vec![url.to_string()];
     // The parser writes `https://example.com` as `https://example.com/`; the
-    // same page either way, so a rule for the form written still settles it.
+    // same page either way, so a rule for the form written settles it too.
     let written = target.trim();
     let written = written
         .split_once('#')
         .map_or(written, |(address, _)| address);
     if url.path() == "/" && url.query().is_none() && !written.ends_with('/') {
-        pattern.pop();
+        let mut bare = forms[0].clone();
+        bare.pop();
+        forms.insert(0, bare);
     }
-    (pattern != target).then_some(pattern)
+    if let Some(host) = url.host_str()
+        && host.split('.').any(|label| label.starts_with("xn--"))
+        && let (unicode, Ok(())) = idna::domain_to_unicode(host)
+        && unicode != host
+    {
+        let ascii = format!("://{host}");
+        let spelled = format!("://{unicode}");
+        let unicode: Vec<String> = forms
+            .iter()
+            .map(|form| form.replacen(&ascii, &spelled, 1))
+            .collect();
+        forms.extend(unicode);
+    }
+    forms.retain(|form| form != target);
+    forms.dedup();
+    forms
 }
 
 /// `path` with each `%` code for a letter, a digit, `-`, `.`, `_` or `~`
@@ -15285,7 +15318,7 @@ pub fn webfetch_redirect_verdict(
 ) -> PermissionDecision {
     let judged = |target: &str| -> Vec<crate::permissions::Evaluation> {
         std::iter::once(target.to_owned())
-            .chain(webfetch_pattern(target))
+            .chain(webfetch_patterns(target))
             .map(|pattern| rules.evaluate_detailed(&format!("webfetch:{pattern}")))
             .collect()
     };
@@ -19442,12 +19475,17 @@ mod tests {
             (plan.patterns, denied)
         };
         // An address written plainly is checked once, as written.
-        for url in [
-            "https://docs.example/guide",
-            "https://docs.example",
-            "https://docs.example/",
-        ] {
+        for url in ["https://docs.example/guide", "https://docs.example/"] {
             assert_eq!(plan(url), (vec![url.to_owned()], false), "{url}");
+        }
+        // One with no path also as the page it reads, `/`, so a rule for
+        // every page of the host holds for it, with or without a fragment.
+        assert_eq!(
+            plan("https://docs.example").0,
+            vec!["https://docs.example", "https://docs.example/"]
+        );
+        for url in ["https://denied.example", "https://denied.example#part"] {
+            assert!(plan(url).1, "{url}");
         }
         assert_eq!(
             plan("https://denied.example/secret"),
@@ -19496,8 +19534,28 @@ mod tests {
         );
         assert_eq!(
             plan("https://docs.example#top").0,
-            vec!["https://docs.example#top", "https://docs.example"]
+            vec![
+                "https://docs.example#top",
+                "https://docs.example",
+                "https://docs.example/"
+            ]
         );
+        // A host in punycode also meets a rule that names it in Unicode.
+        let books = crate::PermissionEngine::new(vec![crate::PermissionRule {
+            pattern: "webfetch:https://bücher.example/*".into(),
+            decision: crate::PermissionDecision::Deny,
+        }]);
+        let (patterns, _) = plan("https://xn--bcher-kva.example/list");
+        assert_eq!(
+            patterns,
+            vec![
+                "https://xn--bcher-kva.example/list",
+                "https://bücher.example/list"
+            ]
+        );
+        assert!(patterns.iter().any(|pattern| {
+            books.evaluate(&format!("webfetch:{pattern}")) == crate::PermissionDecision::Deny
+        }));
         // Other codes stay as written: `%2F` is not a folder's `/`.
         assert_eq!(
             plan("https://docs.example/a%2Fb%20c%zz%4"),
@@ -19546,6 +19604,36 @@ mod tests {
             "https://intra.example/admin/x#top",
         ] {
             assert_eq!(verdict(&denied, login, hop), Deny, "{hop}");
+        }
+        // A skill's `disallowed-tools` holds on a redirect too, and a rule
+        // that names a host in Unicode holds for the punycode a redirect
+        // arrives in.
+        let skill = haarness_protocol::DefinitionExecution {
+            disallowed_tools: vec!["WebFetch(https://intra.example/admin/*)".into()],
+            ..haarness_protocol::DefinitionExecution::default()
+        };
+        let skilled = super::with_skill_rules(
+            crate::PermissionEngine::build_defaults(),
+            crate::definitions::skill_rules(&skill, "/workspace"),
+        );
+        assert_eq!(
+            verdict(&skilled, login, "https://intra.example/admin/x"),
+            Deny
+        );
+        assert_eq!(
+            verdict(&skilled, login, "https://intra.example/home"),
+            Allow
+        );
+        let books = engine(&[("webfetch:https://bücher.example/private/*", Deny)]);
+        for hop in [
+            "https://xn--bcher-kva.example/private/x",
+            "https://bücher.example/private/x",
+        ] {
+            assert_eq!(
+                verdict(&books, "https://xn--bcher-kva.example/", hop),
+                Deny,
+                "{hop}"
+            );
         }
         assert_eq!(verdict(&denied, login, "https://intra.example/home"), Allow);
         // `"webfetch": "ask"`: the call's approval was for the tool, and the
