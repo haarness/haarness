@@ -4189,13 +4189,15 @@ impl SecretFilter {
 /// everything there.
 const GLOB_LOOK_LIMIT: usize = 100_000;
 
-/// How many folder entries a glob reads before it stops, whatever it
-/// matches: a backstop for a walk through a very large tree. A `**` never
-/// goes round a link back up the tree (see [`crate::bounded_glob`]).
+/// How many folder entries a glob reads through links before it stops,
+/// whatever it matches: a backstop for a link to a very large folder. The
+/// project's own folders are read whatever their size, as before, and a
+/// `**` never goes round a link back up the tree (see
+/// [`crate::bounded_glob`]).
 const GLOB_ENTRY_LIMIT: usize = 1_000_000;
 
 /// Where a glob stops: after looking at `matches` matches, or after reading
-/// `entries` folder entries.
+/// `entries` folder entries through links.
 struct GlobLimits {
     matches: usize,
     entries: usize,
@@ -4236,7 +4238,7 @@ fn glob_walk(
     let stop = cancel.clone();
     let mut walk = crate::bounded_glob::Walk::new(pattern)
         .map_err(tool_error)?
-        .entries(limits.entries)
+        .linked_entries(limits.entries)
         .stop_when(move || stop.is_cancelled());
     for (looked, path) in walk.by_ref().enumerate() {
         if cancel.is_cancelled() {
@@ -4307,12 +4309,14 @@ fn with_stop(output: ToolOutput, limit: usize) -> ToolOutput {
     )
 }
 
-/// Ends a glob's output saying it stopped at its budget of folder entries.
+/// Ends a glob's output saying it stopped at its budget of folder entries
+/// read through links.
 fn with_read_stop(output: ToolOutput, entries: usize) -> ToolOutput {
     with_note(
         output,
         &format!(
-            "(stopped after reading {entries} folder entries; narrow the pattern or the path)"
+            "(stopped after reading {entries} folder entries through links; narrow the pattern \
+             or the path)"
         ),
     )
 }
@@ -8028,17 +8032,24 @@ export default workflow({
         std::fs::remove_dir_all(workspace).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
-    fn a_glob_stops_at_its_budget_of_folder_entries_and_says_so() {
-        let workspace = std::env::temp_dir()
+    fn a_glob_stops_at_its_budget_of_entries_read_through_links_and_says_so() {
+        let root = std::env::temp_dir()
             .canonicalize()
             .unwrap()
             .join(format!("haarness-glob-entries-{}", uuid::Uuid::now_v7()));
-        for file in ["a.txt", "b/c.txt", "d/e.txt", "f/g.txt"] {
-            let path = workspace.join(file);
+        let workspace = root.join("workspace");
+        for file in [
+            "workspace/a.txt",
+            "workspace/b/c.txt",
+            "workspace/d/e.txt",
+        ] {
+            let path = root.join(file);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "").unwrap();
         }
+        std::os::unix::fs::symlink("d", workspace.join("z-linked")).unwrap();
         let scope = GlobScope {
             root: workspace.clone(),
             workspace: workspace.clone(),
@@ -8047,21 +8058,20 @@ export default workflow({
         let secrets = SecretFilter::new(&workspace, ".", &workspace, None);
         let pattern = workspace.join("**/*.txt").to_string_lossy().into_owned();
         let cancel = CancellationToken::new();
-        let limits = GlobLimits {
-            matches: 1_000,
-            entries: 5,
-        };
-        let found = glob_walk(&pattern, &scope, &secrets, &cancel, limits).unwrap();
+        // The project's own folders are read whatever the budget, as on a
+        // repository far larger than it; only the linked folder is cut.
+        let found = glob_walk(&pattern, &scope, &secrets, &cancel, limits_entries(0)).unwrap();
         assert!(found.large && found.partial && !found.stopped);
-        assert!(found.values.len() < 4, "{:?}", found.values);
+        assert_eq!(found.values, ["a.txt", "b/c.txt", "d/e.txt"]);
         let all = glob_walk(&pattern, &scope, &secrets, &cancel, limits_entries(100)).unwrap();
         assert!(!all.large && !all.partial);
-        assert_eq!(all.values.len(), 4);
+        assert_eq!(all.values, ["a.txt", "b/c.txt", "d/e.txt", "z-linked/e.txt"]);
         assert_eq!(
             with_read_stop(output("a.txt".into()), 5).text,
-            "a.txt\n\n(stopped after reading 5 folder entries; narrow the pattern or the path)"
+            "a.txt\n\n(stopped after reading 5 folder entries through links; narrow the pattern \
+             or the path)"
         );
-        std::fs::remove_dir_all(workspace).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn limits_entries(entries: usize) -> GlobLimits {

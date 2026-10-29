@@ -13,9 +13,9 @@
 //! version control folder (`.git`, `.hg`, …). A linked folder the pattern
 //! names, or that a one-level wildcard such as `*` matches, is read as
 //! before (the pattern bounds how deep that goes), and a linked file matches
-//! as before. A walk can also end after a budget of folder entries, keeping
-//! what it has already listed, or when its caller says so; [`Walk::cut`]
-//! says which.
+//! as before. A walk can also end after a budget of folder entries (all of
+//! them, or only those read through a link), keeping what it has already
+//! listed, or when its caller says so; [`Walk::cut`] says which.
 
 use glob::{MatchOptions, Pattern, PatternError};
 use std::collections::{HashMap, HashSet};
@@ -41,8 +41,9 @@ pub enum Links {
 /// Why a walk ended before it read everything its pattern reaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cut {
-    /// It read as many folder entries as [`Walk::entries`] allows; what it
-    /// had listed by then is still matched.
+    /// It read as many folder entries as [`Walk::entries`] or
+    /// [`Walk::linked_entries`] allows; what it had listed by then is still
+    /// matched.
     Large,
     /// The caller's [`Walk::stop_when`] said to stop.
     Stopped,
@@ -66,16 +67,20 @@ struct Entry {
     link: bool,
     /// Where it really is, when known without asking the file system.
     real: Option<PathBuf>,
+    /// Reached through a link the walk met in a folder listing: this one or
+    /// one of the folders above it.
+    linked: bool,
 }
 
 impl Entry {
-    fn named(path: PathBuf) -> Self {
+    fn named(path: PathBuf, linked: bool) -> Self {
         let folder = fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir());
         Self {
             path,
             folder,
             link: false,
             real: None,
+            linked,
         }
     }
 }
@@ -88,6 +93,8 @@ pub struct Walk {
     start: Option<Entry>,
     require_folder: bool,
     entries: usize,
+    /// Only entries read through a link count against `entries`.
+    linked_only: bool,
     links: Links,
     stop: Option<Box<dyn Fn() -> bool + Send>>,
     looked: usize,
@@ -127,13 +134,13 @@ impl Walk {
         }
         Ok(Self {
             parts,
-            start: Some(Entry::named(PathBuf::from(if root.is_empty() {
-                "."
-            } else {
-                root
-            }))),
+            start: Some(Entry::named(
+                PathBuf::from(if root.is_empty() { "." } else { root }),
+                false,
+            )),
             require_folder: pattern.ends_with(std::path::is_separator),
             entries: usize::MAX,
+            linked_only: false,
             links: Links::Unlooped,
             stop: None,
             looked: 0,
@@ -149,6 +156,16 @@ impl Walk {
     #[must_use]
     pub fn entries(mut self, entries: usize) -> Self {
         self.entries = entries;
+        self
+    }
+
+    /// Reads no more folders through a link once `entries` entries have
+    /// been read through links ([`Cut::Large`]); a folder reached without one
+    /// is always read, as `glob` reads it.
+    #[must_use]
+    pub fn linked_entries(mut self, entries: usize) -> Self {
+        self.entries = entries;
+        self.linked_only = true;
         self
     }
 
@@ -217,7 +234,7 @@ impl Walk {
                 || (!special
                     && (fs::metadata(&next).is_ok() || fs::symlink_metadata(&next).is_ok()))
             {
-                self.add(at, Entry::named(next));
+                self.add(at, Entry::named(next, entry.linked));
             }
             return;
         }
@@ -228,7 +245,8 @@ impl Walk {
             self.cut = Some(Cut::Stopped);
             return;
         }
-        if self.looked >= self.entries {
+        let counted = !self.linked_only || entry.linked;
+        if counted && self.looked >= self.entries {
             self.cut = Some(Cut::Large);
             return;
         }
@@ -259,6 +277,7 @@ impl Walk {
                             folder,
                             link,
                             real,
+                            linked: entry.linked || link,
                         };
                         (entry, name)
                     })
@@ -270,7 +289,9 @@ impl Walk {
         if let Some(real) = real {
             self.read.insert((real, at));
         }
-        self.looked += children.len();
+        if counted {
+            self.looked += children.len();
+        }
         // Taken from the end, so in name order.
         children.sort_by(|first, second| second.1.cmp(&first.1));
         self.todo
@@ -282,7 +303,7 @@ impl Walk {
                     .pattern
                     .matches_with(special, MatchOptions::new())
                 {
-                    self.add(at, Entry::named(entry.path.join(special)));
+                    self.add(at, Entry::named(entry.path.join(special), entry.linked));
                 }
             }
         }
@@ -596,6 +617,32 @@ mod tests {
             walked(&pattern, Links::Once),
             [handbook.join("teams/web/RULES.md")]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_budget_of_linked_entries_leaves_folders_reached_without_a_link_alone() {
+        let root = tree(
+            "linked-budget",
+            &["project/src/a.rs", "project/src/b.rs", "elsewhere/c.rs"],
+        );
+        let project = root.join("project");
+        for index in 0..20 {
+            fs::write(project.join(format!("src/{index:02}.txt")), "").unwrap();
+        }
+        std::os::unix::fs::symlink("../elsewhere", project.join("vendor")).unwrap();
+        let pattern = format!("{}/**/*.rs", project.display());
+        // The project's own folders are read whatever their size.
+        let mut walk = Walk::new(&pattern).unwrap().linked_entries(0);
+        assert_eq!(
+            walk.by_ref().collect::<Vec<_>>(),
+            [project.join("src/a.rs"), project.join("src/b.rs")]
+        );
+        assert_eq!(walk.cut(), Some(Cut::Large));
+        let mut walk = Walk::new(&pattern).unwrap().linked_entries(5);
+        assert_eq!(walk.by_ref().count(), 3);
+        assert_eq!(walk.cut(), None);
         fs::remove_dir_all(root).unwrap();
     }
 
