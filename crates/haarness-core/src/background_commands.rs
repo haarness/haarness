@@ -1425,10 +1425,8 @@ pub(crate) async fn bash_output(
         }
         _ => Until::Exit,
     };
-    let cursor = arguments
-        .get("cursor")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_else(|| *entry.read_cursor.lock());
+    let given = arguments.get("cursor").and_then(serde_json::Value::as_u64);
+    let cursor = given.unwrap_or_else(|| *entry.read_cursor.lock());
     let mut found = None;
     let mut waited = false;
     if wait > 0 {
@@ -1443,23 +1441,20 @@ pub(crate) async fn bash_output(
         found = search(&entry, pattern, cursor).await?.0;
     }
     let info = entry.info();
-    let page = entry
-        .process
-        .output
-        .read(cursor, PAGE_MAX)
+    let output = &entry.process.output;
+    // From a cursor it was given: the part that starts there. Otherwise
+    // what is new since its last read, the newest part when that is more
+    // than it is shown at once.
+    let from = match given {
+        Some(_) => cursor,
+        None => cursor.max(output.size().saturating_sub(AGENT_READ_BYTES as u64)),
+    };
+    let page = output
+        .read(from, AGENT_READ_BYTES)
         .await
         .map_err(|error| CoreError::Tool(error.to_string()))?;
     let more_than_shown = page.end < page.size;
     let mut text = page.text();
-    let mut start = page.start;
-    if text.len() > AGENT_READ_BYTES {
-        let cut = text.len() - AGENT_READ_BYTES;
-        let cut = (cut..text.len())
-            .find(|index| text.is_char_boundary(*index))
-            .unwrap_or(text.len());
-        start += cut as u64;
-        text.drain(..cut);
-    }
     let mut lines_left_out = false;
     if let Some(lines) = arguments
         .get("tail_lines")
@@ -1488,18 +1483,17 @@ pub(crate) async fn bash_output(
         report.push('\n');
         report.push_str(&outcome);
     }
-    if page.start > cursor {
+    if from == cursor && page.start > cursor {
         let _ = write!(
             report,
             "\n{} bytes of output before this are no longer kept.",
             page.start - cursor
         );
     }
-    if start > page.start || lines_left_out {
+    if from > cursor || lines_left_out {
         let _ = write!(
             report,
-            "\nOnly the end of the new output is shown; read from cursor {} for the rest.",
-            page.start
+            "\nOnly the end of the new output is shown; read from cursor {cursor} for the rest."
         );
     }
     if text.is_empty() {
@@ -1512,7 +1506,7 @@ pub(crate) async fn bash_output(
         "\nCursor: {}{}",
         page.end,
         if more_than_shown {
-            " (more output follows; read again)"
+            " (more output follows; read on from this cursor)"
         } else {
             ""
         }
@@ -1974,6 +1968,114 @@ mod tests {
         assert_eq!(spoken_duration(Duration::from_secs(4)), "4s");
         assert_eq!(spoken_duration(Duration::from_secs(72)), "1m 12s");
         assert_eq!(spoken_duration(Duration::from_secs(7500)), "2h 5m");
+    }
+
+    /// A command started in the background whose process the test plays,
+    /// in `registry` for chat `thread`.
+    async fn started(
+        dir: &Path,
+        registry: &Arc<ShellCommands>,
+        thread: ThreadId,
+    ) -> (
+        Arc<CommandEntry>,
+        Arc<CommandOutput>,
+        watch::Sender<Option<ProcessEnd>>,
+    ) {
+        let (end, ended) = watch::channel(None);
+        let output = output(dir, u64::MAX).await;
+        let call = ShellCall::new(ShellCallInner {
+            commands: Arc::clone(registry),
+            hooks: Arc::new(Quiet),
+            thread_id: thread,
+            root_thread_id: thread,
+            turn_id: TurnId::new(),
+            call_id: "call".into(),
+            settings: ExecutionSettings::default(),
+            follows: true,
+            subagent: false,
+            unattended: false,
+        });
+        call.run(
+            CommandProcess {
+                output: Arc::clone(&output),
+                end: ended,
+                control: Arc::new(Silent),
+            },
+            CommandRequest {
+                command: "server".into(),
+                cwd: dir.to_path_buf(),
+                workdir: None,
+                timeout_ms: None,
+                background: true,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let id = registry.list(None).pop().unwrap().id;
+        (registry.get(&id).unwrap(), output, end)
+    }
+
+    #[tokio::test]
+    async fn bash_output_pages_forward_from_a_cursor_it_was_given() {
+        let dir = fixture();
+        let registry = Arc::new(ShellCommands::default());
+        let thread = ThreadId::new();
+        let (entry, output, _end) = started(dir.path(), &registry, thread).await;
+        let lines = (0..2000)
+            .map(|line| format!("line-{line:04}-{}\n", "x".repeat(40)))
+            .collect::<String>();
+        output.append(lines.as_bytes()).await.unwrap();
+        let threads = HashSet::from([thread]);
+        let id = entry.info().id;
+        let cancel = CancellationToken::new();
+        let read = |arguments: serde_json::Value| {
+            let registry = Arc::clone(&registry);
+            let threads = threads.clone();
+            let cancel = cancel.clone();
+            async move {
+                bash_output(&registry, &threads, &arguments, &cancel)
+                    .await
+                    .unwrap()
+                    .text
+            }
+        };
+        let cursor_of = |text: &str| -> u64 {
+            text.split("Cursor: ")
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        // Without a cursor: the newest output, and where the rest starts.
+        let latest = read(json!({"id": id})).await;
+        assert!(latest.contains("line-1999"), "{latest:.300}");
+        let from = latest
+            .split("read from cursor ")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .trim_end_matches(|c: char| !c.is_ascii_digit())
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(from, 0, "{latest:.300}");
+        // From that cursor: the first part, and a cursor where it ends.
+        let first = read(json!({"id": id, "cursor": from})).await;
+        assert!(first.contains("\nline-0000-"), "{first:.300}");
+        assert!(!first.contains("line-1999"), "{first:.300}");
+        let next = cursor_of(&first);
+        assert!(next > 0 && next < lines.len() as u64, "{next}");
+        // Following it goes on where the first part ended.
+        let second = read(json!({"id": id, "cursor": next})).await;
+        let resumed = &lines[usize::try_from(next).unwrap()..];
+        let shown = second.split("Output:\n").nth(1).unwrap();
+        assert!(resumed.starts_with(&shown[..40]), "{shown:.80}");
+        assert!(cursor_of(&second) > next);
     }
 
     #[tokio::test]
