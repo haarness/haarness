@@ -1886,6 +1886,25 @@ button.settings-link:hover:not(:disabled) {
 .tools-toolbar > input {
   flex: 0 1 260px;
 }
+/* Registered plugin marketplaces, under the plugins they install. */
+.plugin-marketplaces {
+  margin-block-start: var(--s6);
+}
+.plugin-marketplaces > h3 {
+  font-size: var(--ui-lg);
+  font-weight: 500;
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--hairline);
+}
+/* A Git address gives way at its end rather than pushing the controls out. */
+.setting-row .path-text.marketplace-source {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.plugin-marketplaces .quiet-switch {
+  white-space: nowrap;
+}
 .quiet-switch {
   display: inline-flex;
   align-items: center;

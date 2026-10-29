@@ -44,7 +44,7 @@ import { themes, themeColors } from "../themes";
 import { useApp } from "./state";
 import { dismissOnBackdrop } from "./ui";
 import { Wordmark } from "./brand";
-import { Button, Icon, ask, confirm, Empty } from "./ui";
+import { Button, Icon, ago, ask, confirm, Empty } from "./ui";
 import { restoreArgs, restoredMessage, restorePlan, restoreSummary } from "./profile-restore";
 import {
   settingsSections as sections,
@@ -1894,11 +1894,53 @@ function Mcp(props: { cli: Cli }) {
     </>
   );
 }
+/** A registered plugin marketplace as `plugin_marketplaces` lists it. */
+interface PluginMarketplace {
+  name: string;
+  path: string;
+  /** A Git clone Haarness fetches, or a folder it reads as it is. Servers
+   * before this field list neither, and get no controls. */
+  type?: "git" | "folder";
+  source?: string | null;
+  autoUpdate?: boolean;
+  updatedAt?: string | null;
+  error?: string;
+}
+/** What fetching one marketplace again did. */
+interface MarketplaceRefresh {
+  name: string;
+  status: string;
+  plugins: string[];
+  failed: { plugin: string; error: string }[];
+  error?: string;
+}
+/** The line a marketplace row shows after Update: the outcome, in words. */
+function refreshOutcome(refresh: MarketplaceRefresh | undefined) {
+  if (!refresh) return { text: "" };
+  if (refresh.error) return { text: refresh.error, failed: true };
+  const failed = refresh.failed.map((failure) => failure.plugin);
+  if (failed.length) return { text: t("Could not update {names}", { names: failed.join(", ") }), failed: true };
+  if (refresh.status === "unchanged") return { text: t("Up to date") };
+  return {
+    text: refresh.plugins.length
+      ? t("Updated just now") + " · " + t("Plugins updated: {names}", { names: refresh.plugins.join(", ") })
+      : t("Updated just now"),
+  };
+}
 function Plugins() {
   const app = useApp();
   const [rows, setRows] = createSignal<T.PluginInfo[]>([]);
+  const [marketplaces, setMarketplaces] = createSignal<PluginMarketplace[]>([]);
+  const [outcomes, setOutcomes] = createSignal<Record<string, { text: string; failed?: boolean }>>({});
+  const [updating, setUpdating] = createSignal<string>();
   async function refresh() {
-    setRows(await app.api("plugins"));
+    const [plugins, registered] = await Promise.all([
+      app.api<T.PluginInfo[]>("plugins"),
+      // The plugins stay listed if this server cannot list marketplaces.
+      app.api<PluginMarketplace[]>("manageResource", "marketplace", { action: "plugin_marketplaces" }).catch(() => []),
+    ]);
+    setRows(plugins);
+    setMarketplaces(Array.isArray(registered) ? registered : []);
   }
   createEffect(() => {
     app.state.catalogVersion;
@@ -1910,6 +1952,36 @@ function Plugins() {
     await refresh();
     await app.catalogs();
   }
+  async function updateMarketplace(name: string) {
+    setUpdating(name);
+    const others = { ...outcomes() };
+    delete others[name];
+    setOutcomes(others);
+    try {
+      const result = await app.api<{ marketplaces: MarketplaceRefresh[] }>("manageResource", "marketplace", {
+        action: "update_plugin_marketplace",
+        name,
+      });
+      setOutcomes({ ...outcomes(), [name]: refreshOutcome(result.marketplaces[0]) });
+      await refresh();
+      await app.catalogs();
+    } finally {
+      setUpdating(undefined);
+    }
+  }
+  async function followRepository(name: string, enabled: boolean) {
+    try {
+      await app.api("manageResource", "marketplace", { action: "plugin_marketplace_auto_update", name, enabled });
+    } finally {
+      // A refused change puts the switch back where the server has it.
+      await refresh();
+    }
+  }
+  /** Under a Git marketplace's source: what its last Update did, else when its clone was fetched. */
+  const marketplaceStatus = (marketplace: PluginMarketplace) =>
+    outcomes()[marketplace.name]?.text ||
+    marketplace.error ||
+    (marketplace.updatedAt ? t("Fetched {time}", { time: ago(marketplace.updatedAt) }) : "");
   return (
     <>
       <p class="muted">
@@ -1984,6 +2056,64 @@ function Plugins() {
           </Row>
         )}
       </For>
+      <Show when={marketplaces().length}>
+        <section class="plugin-marketplaces" aria-label={t("Marketplaces")} data-setting="Marketplaces">
+          <h3>{t("Marketplaces")}</h3>
+          <For each={marketplaces()}>
+            {(marketplace) => {
+              const failure = () => outcomes()[marketplace.name]?.failed;
+              return (
+                <Row
+                  title={marketplace.name}
+                  literal
+                  target={"marketplace:" + marketplace.name}
+                  detail={
+                    <>
+                      <Show
+                        when={marketplace.type === "git"}
+                        fallback={<PathText path={marketplace.source ?? marketplace.path} />}
+                      >
+                        <span class="path-text marketplace-source" title={marketplace.source ?? ""} dir="ltr">
+                          {marketplace.source}
+                        </span>
+                      </Show>
+                      <Show when={failure()}>
+                        <p role="alert">{outcomes()[marketplace.name]?.text}</p>
+                      </Show>
+                    </>
+                  }
+                  description={
+                    failure() ? undefined : marketplace.type === "git" ? marketplaceStatus(marketplace) : marketplace.error
+                  }
+                >
+                  <Show when={marketplace.type === "git"}>
+                    <label class="quiet-switch">
+                      <input
+                        type="checkbox"
+                        role="switch"
+                        aria-label={t("Update {name} automatically", { name: marketplace.name })}
+                        checked={!!marketplace.autoUpdate}
+                        onChange={(event) => {
+                          const on = event.currentTarget.checked;
+                          void app.run(() => followRepository(marketplace.name, on));
+                        }}
+                      />
+                      <span aria-hidden="true">{t("Update automatically")}</span>
+                    </label>
+                    <button
+                      disabled={updating() === marketplace.name}
+                      aria-busy={updating() === marketplace.name}
+                      onClick={() => app.run(() => updateMarketplace(marketplace.name))}
+                    >
+                      {t("Update")}
+                    </button>
+                  </Show>
+                </Row>
+              );
+            }}
+          </For>
+        </section>
+      </Show>
     </>
   );
 }

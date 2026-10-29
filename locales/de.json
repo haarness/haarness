@@ -2942,5 +2942,13 @@
   "Your free trial didn't start: that card was already used for a trial.": "Deine kostenlose Testphase hat nicht begonnen: Diese Karte wurde bereits für eine Testphase genutzt.",
   "The attachments come to {size}, over the {limit} limit for media in one message": "Die Anhänge umfassen {size} und überschreiten damit das Limit von {limit} für Medien in einer Nachricht",
   "its images and PDFs would take the message over the 20 MiB limit for media": "seine Bilder und PDFs würden die Nachricht über das Limit von 20 MiB für Medien bringen",
-  "{name} is {size}, over the {limit} limit for media in one message": "{name} ist {size} groß und überschreitet damit das Limit von {limit} für Medien in einer Nachricht"
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} ist {size} groß und überschreitet damit das Limit von {limit} für Medien in einer Nachricht",
+  "Marketplaces": "Marktplätze",
+  "Update automatically": "Automatisch aktualisieren",
+  "Update {name} automatically": "{name} automatisch aktualisieren",
+  "Fetched {time}": "Abgerufen {time}",
+  "Up to date": "Aktuell",
+  "Updated just now": "Gerade aktualisiert",
+  "Plugins updated: {names}": "Aktualisierte Plugins: {names}",
+  "Could not update {names}": "{names} konnte nicht aktualisiert werden"
 }

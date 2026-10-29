@@ -2942,5 +2942,13 @@
   "Your free trial didn't start: that card was already used for a trial.": "การทดลองใช้ฟรีไม่ได้เริ่ม: บัตรนี้เคยใช้ทดลองใช้แล้ว",
   "The attachments come to {size}, over the {limit} limit for media in one message": "ไฟล์แนบรวมกันมีขนาด {size} เกินขีดจำกัดสื่อ {limit} ต่อหนึ่งข้อความ",
   "its images and PDFs would take the message over the 20 MiB limit for media": "รูปภาพและ PDF ของรายการนี้จะทำให้ข้อความเกินขีดจำกัดสื่อ 20 MiB",
-  "{name} is {size}, over the {limit} limit for media in one message": "{name} มีขนาด {size} เกินขีดจำกัดสื่อ {limit} ต่อหนึ่งข้อความ"
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} มีขนาด {size} เกินขีดจำกัดสื่อ {limit} ต่อหนึ่งข้อความ",
+  "Marketplaces": "มาร์เก็ตเพลส",
+  "Update automatically": "อัปเดตโดยอัตโนมัติ",
+  "Update {name} automatically": "อัปเดต {name} โดยอัตโนมัติ",
+  "Fetched {time}": "ดึงข้อมูลเมื่อ {time}",
+  "Up to date": "เป็นเวอร์ชันล่าสุด",
+  "Updated just now": "อัปเดตเมื่อสักครู่",
+  "Plugins updated: {names}": "ปลั๊กอินที่อัปเดต: {names}",
+  "Could not update {names}": "อัปเดต {names} ไม่สำเร็จ"
 }
