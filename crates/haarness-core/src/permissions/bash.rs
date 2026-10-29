@@ -2364,8 +2364,10 @@ fn expanded(word: &Word<'_>, source: &str) -> Vec<Path_> {
 
 /// The paths an option's value stands for, as [`expanded`] reads a word. A
 /// value written in the option's own word (`-Cdir`, `--chdir=dir`) gets no
-/// `~` expansion from the shell, and only its literal start is known once
-/// an expansion follows (`--chdir=/tmp/$d`).
+/// `~` expansion from the shell; after the option's text it reads as
+/// [`path_literal`] reads a path (`--chdir="$HOME/x"` is the home folder's
+/// `x`), and otherwise only its literal start is known once an expansion
+/// follows (`--chdir=/tmp/$d`).
 fn given_paths(given: &Given<'_, '_>, source: &str) -> Vec<Path_> {
     let Some(word) = given.word else {
         return Vec::new();
@@ -2388,6 +2390,27 @@ fn given_paths(given: &Given<'_, '_>, source: &str) -> Vec<Path_> {
                 })
             })
             .collect();
+    }
+    if !word.literal && word.node.kind() == "concatenation" {
+        let parts: Vec<_> = word.node.named_children(&mut word.node.walk()).collect();
+        if let [option, first, rest @ ..] = parts.as_slice()
+            && node_text(*option, source) == prefix
+        {
+            let (mut value, mut complete) = path_literal(*first, source);
+            for part in rest {
+                if !complete {
+                    break;
+                }
+                let (text, whole) = literal(*part, source);
+                value.push_str(&text);
+                complete = whole;
+            }
+            return vec![Path_ {
+                raw: word.raw.clone(),
+                value,
+                complete,
+            }];
+        }
     }
     let known = if word.literal {
         given.value.len()
@@ -7641,6 +7664,29 @@ mod wrappers {
                 "cd sub && cd deeper && cat ../../README.md",
             ),
             ("env -C \"$D\" cat ../x", "cd \"$D\" && cat ../x"),
+            // A folder variable after the option's text is its folder.
+            (
+                "env --chdir=$HOME/.ssh cat id_rsa",
+                "cd $HOME/.ssh && cat id_rsa",
+            ),
+            (
+                "env --chdir=\"$HOME/.ssh\" cat id_rsa",
+                "cd \"$HOME/.ssh\" && cat id_rsa",
+            ),
+            ("env -C$HOME/.ssh cat id_rsa", "cd $HOME/.ssh && cat id_rsa"),
+            (
+                "env -C \"$HOME/.ssh\" cat id_rsa",
+                "cd \"$HOME/.ssh\" && cat id_rsa",
+            ),
+            (
+                "sudo --chdir=$HOME cat .ssh/id_rsa",
+                "cd $HOME && cat .ssh/id_rsa",
+            ),
+            (
+                "sudo -D\"$HOME\" cat .ssh/id_rsa",
+                "cd \"$HOME\" && cat .ssh/id_rsa",
+            ),
+            ("env --chdir=\"$TMPDIR\" cat x", "cd \"$TMPDIR\" && cat x"),
             ("env -C nosuch cat ../x", "cd nosuch && cat ../x"),
             ("env -C .. cat x", "cd .. && cat x"),
         ] {
@@ -7650,11 +7696,16 @@ mod wrappers {
                 "{wrapped}"
             );
         }
-        assert!(
-            !analyze("env -C ~/.ssh cat id_rsa", &workspace)
-                .external_dirs
-                .is_empty()
-        );
+        for command in [
+            "env -C ~/.ssh cat id_rsa",
+            "env --chdir=$HOME/.ssh cat id_rsa",
+            "sudo -D\"$HOME\" cat .ssh/id_rsa",
+        ] {
+            assert!(
+                !analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
         assert!(
             analyze("env -C sub cat ../README.md", &workspace)
                 .external_dirs
