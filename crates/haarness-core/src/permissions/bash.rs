@@ -280,6 +280,8 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         moved: 0,
         unplaced: false,
         folder: None,
+        here: None,
+        lost: false,
     };
     if !reader.read(command, Depth::default()) {
         return fallback(command);
@@ -609,6 +611,7 @@ fn joined_continuations(text: &str, within: bool) -> Option<String> {
     Some(joined)
 }
 
+#[allow(clippy::struct_excessive_bools)] // independent marks of one reading, not a state machine
 struct Reader<'w> {
     workspace: &'w Path,
     /// The folder the shell starts in: the project, or a call's `workdir`.
@@ -647,8 +650,20 @@ struct Reader<'w> {
     unplaced: bool,
     /// Where the relative paths being checked start when a plain `cd`
     /// earlier in the line's `&&` chain moved the shell (see
-    /// [`chain_folders`]); [`Self::start`] otherwise.
+    /// [`chain_folders`]) or a wrapper runs the command elsewhere (see
+    /// [`Self::wrapper_folder`]); [`Self::start`] otherwise.
     folder: Option<Rc<Path>>,
+    /// Where the written command being unwrapped runs when a plain `cd`
+    /// earlier in the line's `&&` chain moved the shell: what a wrapper's
+    /// relative folder starts from. The command it runs is read from where
+    /// the shell started unless the wrapper names a folder.
+    here: Option<Rc<Path>>,
+    /// Where the command being read runs is not known for sure, so a folder
+    /// a wrapper names is checked but not followed: a step where a `cd`
+    /// would not be followed (see [`chain_folders`]), text run again, or
+    /// what runs behind a wrapper whose folder nobody can place (`env -C
+    /// "$d"`, `sudo -i`, `find -execdir`).
+    lost: bool,
 }
 
 /// The written command whose standard input a program reads.
@@ -688,6 +703,18 @@ struct Depth {
     hops: u8,
 }
 
+/// Where a wrapper runs the command it is given: see
+/// [`Reader::wrapper_folder`].
+enum Moved {
+    /// Where the wrapper itself runs: it names no folder.
+    No,
+    /// Where nobody can tell (`env -C "$d"`, `sudo -i`): its relative paths
+    /// are read from where the shell started.
+    Unknown,
+    /// In this folder.
+    To(Rc<Path>),
+}
+
 /// One word of a command: its program or an argument.
 struct Word<'t> {
     node: tree_sitter::Node<'t>,
@@ -698,6 +725,9 @@ struct Word<'t> {
     value: String,
     /// Whether `value` is all literal text.
     literal: bool,
+    /// How much of `value` is literal text from its start, quoted or not
+    /// (`-C` of `"-C$d"`): all of it when [`Self::literal`].
+    known: usize,
 }
 
 /// Node kinds that are a command's words.
@@ -851,6 +881,8 @@ impl Reader<'_> {
         // sort by position so patterns keep source order.
         command_nodes.sort_by_key(|(node, _)| node.start_byte());
         let mut folders = HashMap::new();
+        // The steps where a `cd` would be followed: none in text run again.
+        let mut open = HashSet::new();
         if depth.text == 0 {
             let mut statements = tree.root_node().walk();
             let statements: Vec<_> = tree
@@ -869,10 +901,15 @@ impl Reader<'_> {
                 && !tree.root_node().has_error()
                 && joined_continuations(command, true).is_none()
             {
-                folders = chain_folders(*statement, command, self.start);
+                (folders, open) = chain_folders(*statement, command, self.start);
             }
         }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
+        // Text run again is read from where the shell started; the folders
+        // of the reading around it are its own again afterwards.
+        let outer_folder = self.folder.take();
+        let outer_here = self.here.take();
+        let outer_lost = self.lost;
         let continued = command.contains("\\\n");
         // The written command each command node is read for, by where the
         // node starts.
@@ -919,7 +956,8 @@ impl Reader<'_> {
             // Words written after a redirect (`rm 2>&1 -rf ~/x`) or a
             // here-document operator are the command's too.
             let (words, carried) = command_words(node, parent, command);
-            self.folder = folders.get(&node.id()).cloned();
+            let here = folders.get(&node.id()).cloned();
+            self.folder.clone_from(&here);
             self.check_paths(&words, command);
             self.folder = None;
             if depth.text == 0 {
@@ -966,7 +1004,10 @@ impl Reader<'_> {
                 wrappers: &wrappers,
                 documents: &documents,
             };
+            self.here = here;
+            self.lost = !open.contains(&node.id());
             self.unwrap(&words, Some(stdin), command, depth);
+            self.here = None;
             if let Some(lines) = parent.and_then(|statement| hidden.get(&statement.id())) {
                 for line in lines {
                     self.nested(line, depth);
@@ -1074,6 +1115,9 @@ impl Reader<'_> {
                 push_unique(&mut self.analysis.external_dirs, glob(&dir));
             }
         }
+        self.folder = outer_folder;
+        self.here = outer_here;
+        self.lost = outer_lost;
         true
     }
 
@@ -1239,6 +1283,75 @@ impl Reader<'_> {
         }
     }
 
+    /// Where a wrapper runs the command it is given (`env -C`, `sudo -D`).
+    /// Each folder it names is checked like a `cd`'s, from where the wrapper
+    /// runs. The command's relative paths then start in the last one where a
+    /// `cd` to it would be followed: the wrapper runs where that is known for
+    /// sure (see [`Self::lost`]), and the folder is one literal word that
+    /// [`plain`] takes and a folder now. Anywhere else they start where the
+    /// shell started, as after `cd "$d"`.
+    fn wrapper_folder(&mut self, folders: &[&Given<'_, '_>], source: &str) -> Moved {
+        if folders.is_empty() {
+            return Moved::No;
+        }
+        let base: Rc<Path> = self
+            .folder
+            .clone()
+            .or_else(|| self.here.clone())
+            .unwrap_or_else(|| Rc::from(self.start));
+        let outer = self.folder.replace(Rc::clone(&base));
+        let mut last = Vec::new();
+        let mut literal = false;
+        for given in folders {
+            last = given_paths(given, source);
+            literal = given.word.is_some_and(|word| word.literal);
+            for path in &last {
+                self.check_folder("cd", &path.raw, &path.value, path.complete);
+            }
+        }
+        self.folder = outer;
+        let [path] = last.as_slice() else {
+            return Moved::Unknown;
+        };
+        if self.lost || !literal || !path.complete || !plain(&path.value) {
+            return Moved::Unknown;
+        }
+        let target =
+            home_expansion(&path.raw, &path.value).unwrap_or_else(|| PathBuf::from(&path.value));
+        let next = base.join(target);
+        if next.as_os_str().len() > MAX_PLACED_BYTES || !next.is_dir() {
+            return Moved::Unknown;
+        }
+        Moved::To(Rc::from(next))
+    }
+
+    /// [`Self::invocation`] of what a wrapper runs, where
+    /// [`Self::wrapper_folder`] found it runs.
+    fn moved_invocation(
+        &mut self,
+        moved: Moved,
+        words: &[Word<'_>],
+        stdin: Option<Stdin<'_, '_>>,
+        source: &str,
+        depth: Depth,
+    ) {
+        let (folder, lost) = match moved {
+            Moved::No => {
+                self.invocation(words, stdin, source, depth);
+                return;
+            }
+            Moved::Unknown => (None, true),
+            Moved::To(folder) => (Some(folder), self.lost),
+        };
+        let outer = std::mem::replace(&mut self.folder, folder);
+        let outer_lost = std::mem::replace(&mut self.lost, lost);
+        self.moved += 1;
+        self.invocation(words, stdin, source, depth);
+        self.moved -= 1;
+        self.lost = outer_lost;
+        self.folder = outer;
+    }
+
     /// A command that a wrapper runs, read like one written on its own.
     fn invocation(
         &mut self,
@@ -1321,65 +1434,94 @@ impl Reader<'_> {
                 self.script(text, depth);
             }
             "env" => {
-                let options = Options::read(
-                    arguments,
-                    "uCPSa",
-                    "",
-                    &["unset", "chdir", "split-string", "argv0"],
-                );
-                let rest = after_assignments(options.rest);
+                let options = Options::with(arguments, "uCPSa", "", ENV_LONG);
+                let folders: Vec<&Given<'_, '_>> = options.all(&["C", "chdir"]).collect();
+                let folder = self.wrapper_folder(&folders, source);
                 if let Some(split) = options.value("S").or_else(|| options.value("split-string")) {
                     // `env -S` splits its text into words, options and
                     // assignments included, and goes on with the words
                     // after it.
                     let rest: Vec<&str> =
                         options.rest.iter().map(|word| word.raw.as_str()).collect();
-                    self.nested(&format!("env {split} {}", rest.join(" ")), depth);
-                } else {
-                    let moved = options.value("C").is_some() || options.value("chdir").is_some();
+                    let moved = !matches!(folder, Moved::No);
                     self.moved += u32::from(moved);
-                    self.invocation(rest, stdin, source, depth);
+                    self.nested(&format!("env {split} {}", rest.join(" ")), depth);
                     self.moved -= u32::from(moved);
+                } else {
+                    self.moved_invocation(folder, env_command(options.rest), stdin, source, depth);
                 }
             }
             "sudo" | "doas" => {
-                let options = Options::read(
-                    arguments,
-                    if name == "sudo" { "ugpCDrtTU" } else { "uC" },
-                    "",
-                    &[
-                        "user",
-                        "group",
-                        "host",
-                        "prompt",
-                        "close-from",
-                        "chdir",
-                        "role",
-                        "type",
-                        "command-timeout",
-                        "other-user",
-                    ],
-                );
+                let options = if name == "sudo" {
+                    Options::sudo(arguments)
+                } else {
+                    // `doas -C` names a configuration file.
+                    Options::with(arguments, "uC", "", SUDO_LONG)
+                };
                 // `sudo -e` edits files, `-l` and `-V` list.
                 if name == "sudo" && options.flags.contains(['e', 'l', 'V']) {
                     return;
                 }
-                let rest = after_assignments(options.rest);
+                let rest = after_settings(options.rest, name == "sudo");
+                // `-D` and `--chdir` choose the folder; a login shell's `-i`
+                // the user's home and `-R` a new root, which are not known.
+                let sudo = name == "sudo";
+                let folders: Vec<&Given<'_, '_>> = if sudo {
+                    options.all(&["D", "chdir"]).collect()
+                } else {
+                    Vec::new()
+                };
+                let mut folder = self.wrapper_folder(&folders, source);
+                if sudo
+                    && (options.flags.contains('i')
+                        || options.value("R").is_some()
+                        || options.value("chroot").is_some())
+                {
+                    folder = Moved::Unknown;
+                }
                 if rest.is_empty() {
-                    // A shell that reads its commands from standard input.
+                    // A shell that reads its commands from standard input,
+                    // where the folder is.
                     if options.flags.contains(['s', 'i']) {
+                        let moved = !matches!(folder, Moved::No);
+                        self.moved += u32::from(moved);
                         self.script(input(), depth);
+                        self.moved -= u32::from(moved);
                     }
                     return;
                 }
-                // `-D`, `--chdir` and a login shell's `-i` choose the folder.
-                let moved = name == "sudo"
-                    && (options.value("D").is_some()
-                        || options.value("chdir").is_some()
-                        || options.flags.contains('i'));
-                self.moved += u32::from(moved);
-                self.invocation(rest, stdin, source, depth);
-                self.moved -= u32::from(moved);
+                self.moved_invocation(folder, rest, stdin, source, depth);
+            }
+            "coproc" => {
+                // `coproc [NAME] { …; }`, `coproc [NAME] ( … )` or `coproc
+                // command`: the parser keeps it as words, a group's first
+                // command among them (a subshell it reads on its own).
+                let rest = match arguments {
+                    [open, rest @ ..] if opens_group(open) => rest,
+                    [_, open, rest @ ..] if opens_group(open) => rest,
+                    rest => rest,
+                };
+                self.invocation(after_shell_assignments(rest), stdin, source, depth);
+            }
+            // The shell's own words the parser leaves as a program where a
+            // line trips it (`! { rm x; }`, `coproc while …; do rm x; done`,
+            // or a line of assignments before one: `A=1 B=2`, then `! rm x`):
+            // what follows them is a command.
+            _ if matches!(
+                program.raw.as_str(),
+                "{" | "!" | "if" | "then" | "elif" | "else" | "while" | "until" | "do"
+            ) =>
+            {
+                self.invocation(after_shell_assignments(arguments), stdin, source, depth);
+            }
+            // `function f { …; }` after a line of assignments: the first
+            // command of its body.
+            _ if program.raw == "function" => {
+                if let [_, open, rest @ ..] = arguments
+                    && opens_group(open)
+                {
+                    self.invocation(rest, stdin, source, depth);
+                }
             }
             "su" => {
                 if let Some(text) = su_command(arguments) {
@@ -1448,7 +1590,9 @@ impl Reader<'_> {
             }
             "time" => {
                 let options = Options::read(arguments, "of", "", &["output", "format"]);
-                self.invocation(options.rest, stdin, source, depth);
+                // The shell's `time` times a command that may start with
+                // assignments (`time A=1 rm x`).
+                self.invocation(after_shell_assignments(options.rest), stdin, source, depth);
             }
             "stdbuf" => {
                 let options = Options::read(arguments, "ioe", "", &["input", "output", "error"]);
@@ -1459,21 +1603,7 @@ impl Reader<'_> {
                 self.invocation(options.rest, stdin, source, depth);
             }
             "xargs" => {
-                let options = Options::read(
-                    arguments,
-                    "InPLsdEaJRS",
-                    "ile",
-                    &[
-                        "max-args",
-                        "max-procs",
-                        "max-lines",
-                        "max-chars",
-                        "delimiter",
-                        "eof",
-                        "arg-file",
-                        "process-slot-var",
-                    ],
-                );
+                let options = Options::xargs(arguments);
                 // The command reads no input of the written command's.
                 self.invocation(options.rest, None, source, depth);
             }
@@ -1484,6 +1614,10 @@ impl Reader<'_> {
                         arguments[index].value.as_str(),
                         "-exec" | "-execdir" | "-ok" | "-okdir"
                     );
+                    // `-execdir` and `-okdir` run it in the folder of each
+                    // file found.
+                    let elsewhere =
+                        matches!(arguments[index].value.as_str(), "-execdir" | "-okdir");
                     index += 1;
                     if !starts {
                         continue;
@@ -1497,7 +1631,10 @@ impl Reader<'_> {
                     {
                         index += 1;
                     }
+                    let outer = self.lost;
+                    self.lost |= elsewhere;
                     self.invocation(&arguments[start..index], None, source, depth);
+                    self.lost = outer;
                 }
             }
             name if SHELLS.contains(&name) => {
@@ -1890,39 +2027,13 @@ impl Reader<'_> {
             // `xargs rm`: the paths come from its input, where nobody can
             // place them.
             "xargs" => {
-                let valued = [
-                    "-a",
-                    "-d",
-                    "-E",
-                    "-e",
-                    "-I",
-                    "-i",
-                    "-L",
-                    "-l",
-                    "-n",
-                    "-P",
-                    "-s",
-                    "--arg-file",
-                    "--delimiter",
-                    "--eof",
-                    "--replace",
-                    "--max-lines",
-                    "--max-args",
-                    "--max-procs",
-                    "--max-chars",
-                    "--process-slot-var",
-                ];
-                let mut skip = false;
-                let program = arguments.iter().find(|word| {
-                    if std::mem::take(&mut skip) {
-                        return false;
-                    }
-                    if word.value.starts_with('-') {
-                        skip = valued.contains(&word.value.as_str());
-                        return false;
-                    }
-                    true
-                });
+                // A cluster of flags with an expansion in it (`-r$X`) is
+                // still options here: the program is the first word that is
+                // not one.
+                let program = Options::xargs(arguments)
+                    .rest
+                    .iter()
+                    .find(|word| !word.value.starts_with('-'));
                 if let Some(program) =
                     program.filter(|word| DESTROYERS.contains(&program_name(&word.value).as_str()))
                 {
@@ -2218,6 +2329,109 @@ fn expanded(word: &Word<'_>, source: &str) -> Vec<Path_> {
             complete: false,
         }],
     }
+}
+
+/// The paths an option's value stands for, as [`expanded`] reads a word. A
+/// value written in the option's own word (`-Cdir`, `--chdir=dir`) gets no
+/// `~` expansion from the shell; after the option's text it reads as
+/// [`path_literal`] reads a path (`--chdir="$HOME/x"` is the home folder's
+/// `x`), and otherwise only its literal start is known once an expansion
+/// follows (`--chdir=/tmp/$d`).
+fn given_paths(given: &Given<'_, '_>, source: &str) -> Vec<Path_> {
+    let Some(word) = given.word else {
+        return Vec::new();
+    };
+    if !given.attached {
+        return expanded(word, source);
+    }
+    // The option's own text before the value, which no `~` follows: the
+    // paths keep it in front, as written.
+    let prefix = &word.value[..word.value.len() - given.value.len()];
+    if brace_list(&word.raw) {
+        return expanded(word, source)
+            .into_iter()
+            .filter_map(|path| {
+                let value = path.value.strip_prefix(prefix)?.to_owned();
+                Some(Path_ {
+                    raw: format!("{prefix}{value}"),
+                    value,
+                    complete: path.complete,
+                })
+            })
+            .collect();
+    }
+    if !word.literal
+        && let Some(path) = after_option(word, prefix.len(), source)
+    {
+        return vec![path];
+    }
+    let known = if word.literal {
+        given.value.len()
+    } else {
+        given.value.find(['$', '`']).unwrap_or(given.value.len())
+    };
+    vec![Path_ {
+        raw: word.raw.clone(),
+        value: given.value[..known].to_owned(),
+        complete: word.literal,
+    }]
+}
+
+/// The value written after the option's own `skip` bytes of literal text in
+/// `word`, read as [`path_literal`] reads a path: its parts as the shell
+/// joins them, a double-quoted string's own parts in its place, so
+/// `"-C$HOME"/.ssh`, `'-C'$HOME/.ssh` and `"-C""$HOME/.ssh"` are the home
+/// folder's `.ssh`. `None` when an expansion stands in the option's text.
+fn after_option(word: &Word<'_>, mut skip: usize, source: &str) -> Option<Path_> {
+    let mut parts = Vec::new();
+    let mut stack = vec![word.node];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "concatenation" | "string") {
+            let mut children: Vec<_> = node.named_children(&mut node.walk()).collect();
+            children.reverse();
+            stack.extend(children);
+        } else {
+            parts.push(node);
+        }
+    }
+    let mut value = String::new();
+    // Whether the value has begun: its first part may be a folder variable.
+    let mut started = false;
+    for part in parts {
+        if skip > 0 {
+            let (text, whole) = literal(part, source);
+            if !whole {
+                return None;
+            }
+            if text.len() <= skip {
+                skip -= text.len();
+                continue;
+            }
+            value.push_str(text.get(skip..)?);
+            started = true;
+            skip = 0;
+            continue;
+        }
+        let (text, whole) = if started {
+            literal(part, source)
+        } else {
+            path_literal(part, source)
+        };
+        started = true;
+        value.push_str(&text);
+        if !whole {
+            return Some(Path_ {
+                raw: word.raw.clone(),
+                value,
+                complete: false,
+            });
+        }
+    }
+    (skip == 0).then(|| Path_ {
+        raw: word.raw.clone(),
+        value,
+        complete: true,
+    })
 }
 
 /// How many words a brace list may expand to before it is too many to read.
@@ -2544,11 +2758,26 @@ fn words<'t>(node: tree_sitter::Node<'t>, source: &str) -> Vec<Word<'t>> {
             Word {
                 node: child,
                 raw: node_text(child, source),
+                known: known(child, &value, literal, source),
                 value,
                 literal,
             }
         })
         .collect()
+}
+
+/// How much of a word's `value` (see [`unquote`]) is literal text from its
+/// start: see [`Word::known`].
+fn known(node: tree_sitter::Node<'_>, value: &str, whole: bool, source: &str) -> usize {
+    if whole {
+        return value.len();
+    }
+    let (start, _) = literal(node, source);
+    if value.starts_with(&start) {
+        start.len()
+    } else {
+        0
+    }
 }
 
 /// Words as `eval` joins them before it runs them.
@@ -2560,17 +2789,73 @@ fn joined(words: &[Word<'_>]) -> String {
         .join(" ")
 }
 
-/// The words after any `NAME=value` assignments (`env A=1 cmd`, `sudo A=1 cmd`).
-fn after_assignments<'s, 't>(words: &'s [Word<'t>]) -> &'s [Word<'t>] {
+/// Whether `env` or `sudo` takes `word` for a variable to set rather than
+/// for the program: they set any word with a `=` in it (`A+=1`, `'A B=1'`),
+/// `sudo` none that starts with `/`. The `=` must be written out, in a
+/// literal word or before any expansion (`A=$(pwd)`): one an expansion may
+/// bring (`"$X"`, `$(…)`) is not known, so such a word is the program.
+fn sets_variable(word: &Word<'_>, sudo: bool) -> bool {
+    let holds = (word.literal && word.value.contains('='))
+        || word
+            .raw
+            .find('=')
+            .is_some_and(|at| !word.raw[..at].contains(['$', '`']));
+    holds && !(sudo && word.value.starts_with('/'))
+}
+
+/// The words after the variables `env` (or, with `sudo`, `sudo`) sets: see
+/// [`sets_variable`].
+fn after_settings<'s, 't>(words: &'s [Word<'t>], sudo: bool) -> &'s [Word<'t>] {
     let count = words
         .iter()
-        .take_while(|word| {
-            word.literal
-                && word.value.split_once('=').is_some_and(|(name, _)| {
-                    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                })
-        })
+        .take_while(|word| sets_variable(word, sudo))
+        .count();
+    &words[count..]
+}
+
+/// The command `env` runs, given the words after its options: a lone `-`
+/// (an empty environment, as `-i`) and the variables it sets come first.
+fn env_command<'s, 't>(rest: &'s [Word<'t>]) -> &'s [Word<'t>] {
+    let rest = match rest {
+        [dash, rest @ ..] if dash.literal && dash.value == "-" => rest,
+        rest => rest,
+    };
+    after_settings(rest, false)
+}
+
+/// Whether the shell itself reads `word` as an assignment where a command
+/// starts (after `time`, `coproc` or `!`): a name, a `[subscript]` if any,
+/// then `=` or `+=`, written out unquoted, whatever the value.
+fn shell_assignment(word: &Word<'_>) -> bool {
+    let raw = word.raw.as_bytes();
+    let name = raw
+        .iter()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
+        .count();
+    if name == 0 || raw[0].is_ascii_digit() {
+        return false;
+    }
+    let mut at = name;
+    if raw.get(at) == Some(&b'[') {
+        let Some(close) = raw[at..].iter().position(|byte| *byte == b']') else {
+            return false;
+        };
+        at += close + 1;
+    }
+    raw[at..].starts_with(b"=") || raw[at..].starts_with(b"+=")
+}
+
+/// Whether `word` opens a group of commands (`{`) or a subshell (`(`).
+fn opens_group(word: &Word<'_>) -> bool {
+    matches!(word.raw.as_str(), "{" | "(")
+}
+
+/// The words after the assignments the shell makes for a command (see
+/// [`shell_assignment`]).
+fn after_shell_assignments<'s, 't>(words: &'s [Word<'t>]) -> &'s [Word<'t>] {
+    let count = words
+        .iter()
+        .take_while(|word| shell_assignment(word))
         .count();
     &words[count..]
 }
@@ -2589,21 +2874,172 @@ fn program_name(value: &str) -> String {
     }
 }
 
+/// A wrapper's long options that take a value, as getopt reads them.
+#[derive(Clone, Copy, Default)]
+struct Long<'a> {
+    /// They take the next word as their value unless written
+    /// `--name=value`.
+    valued: &'a [&'a str],
+    /// They take a value only written `--name=value` (`xargs --eof=x`):
+    /// `--eof` alone takes none.
+    joined: &'a [&'a str],
+    /// They take none, each with the short option it stands for. Needed
+    /// where one starts like an option that takes a value (`sudo --login`
+    /// and `--login-class`), or says what the wrapper runs (`--shell`).
+    bare: &'a [(&'a str, char)],
+}
+
+/// What a long option takes, as getopt finds it by its name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Takes {
+    /// The next word, unless written `--name=value`.
+    Next,
+    /// A value only after `=`.
+    Joined,
+    /// None: the short option it stands for.
+    Flag(char),
+    /// None, or the name is no option the wrapper has.
+    Nothing,
+}
+
+impl Long<'_> {
+    /// The option `name` stands for and what it takes: the one it names in
+    /// full, or the only one it starts (`--chd` for `--chdir`). A start
+    /// several share is refused by getopt, and nothing runs; it takes the
+    /// next word when one of them does.
+    fn find(self, name: &str) -> (String, Takes) {
+        let options = self
+            .valued
+            .iter()
+            .map(|long| (*long, Takes::Next))
+            .chain(self.joined.iter().map(|long| (*long, Takes::Joined)))
+            .chain(
+                self.bare
+                    .iter()
+                    .map(|(long, letter)| (*long, Takes::Flag(*letter))),
+            );
+        if let Some((_, takes)) = options.clone().find(|(long, _)| *long == name) {
+            return (name.to_owned(), takes);
+        }
+        let found: Vec<_> = options
+            .filter(|(long, _)| !name.is_empty() && long.starts_with(name))
+            .collect();
+        match found.as_slice() {
+            [(long, takes)] => ((*long).to_owned(), *takes),
+            several if several.iter().any(|(_, takes)| *takes == Takes::Next) => {
+                (name.to_owned(), Takes::Next)
+            }
+            _ => (name.to_owned(), Takes::Nothing),
+        }
+    }
+}
+
+/// The long options of `sudo` (and, read alike, `doas`).
+const SUDO_LONG: Long<'static> = Long {
+    valued: &[
+        "user",
+        "group",
+        "host",
+        "prompt",
+        "close-from",
+        "chdir",
+        "role",
+        "type",
+        "command-timeout",
+        "other-user",
+        "chroot",
+        "auth-type",
+        "login-class",
+    ],
+    joined: &["preserve-env"],
+    bare: &[
+        ("askpass", 'A'),
+        ("background", 'b'),
+        ("bell", 'B'),
+        ("edit", 'e'),
+        ("set-home", 'H'),
+        ("help", 'h'),
+        ("login", 'i'),
+        ("remove-timestamp", 'K'),
+        ("reset-timestamp", 'k'),
+        ("list", 'l'),
+        ("non-interactive", 'n'),
+        ("preserve-groups", 'P'),
+        ("stdin", 'S'),
+        ("shell", 's'),
+        ("version", 'V'),
+        ("validate", 'v'),
+    ],
+};
+
+/// The long options of `env` that take a value.
+const ENV_LONG: Long<'static> = Long {
+    valued: &["unset", "chdir", "split-string", "argv0"],
+    joined: &["default-signal", "ignore-signal", "block-signal"],
+    bare: &[],
+};
+
+/// The long options of `xargs` that take a value.
+const XARGS_LONG: Long<'static> = Long {
+    valued: &[
+        "max-args",
+        "max-procs",
+        "max-chars",
+        "delimiter",
+        "arg-file",
+        "process-slot-var",
+    ],
+    joined: &["eof", "max-lines", "replace"],
+    bare: &[],
+};
+
 /// A wrapper's own options, read the way getopt reads them.
 struct Options<'s, 't> {
     /// The words after them: the command the wrapper runs.
     rest: &'s [Word<'t>],
     /// Short options given without a value.
     flags: String,
-    /// Options given with a value, by their short letter or long name.
-    values: Vec<(String, String)>,
+    /// Options given with a value, in order.
+    values: Vec<Given<'s, 't>>,
+}
+
+/// An option given with a value.
+struct Given<'s, 't> {
+    /// Its short letter or long name.
+    name: String,
+    /// The value, as the program receives it (expansions as written).
+    value: String,
+    /// The word that holds the value: the option's own when the value is
+    /// written in it (`-Cdir`, `--chdir=dir`), else the word after it
+    /// (`None` past the last word).
+    word: Option<&'s Word<'t>>,
+    /// The value is written in the option's own word.
+    attached: bool,
 }
 
 impl<'s, 't> Options<'s, 't> {
-    /// `valued` short options take a value (the rest of their cluster or the
-    /// next word), `optional` ones only the rest of their cluster, and
-    /// `long` ones the next word unless written `--name=value`.
+    /// [`Self::with`] for a wrapper whose `long` options all take the next
+    /// word unless written `--name=value`.
     fn read(words: &'s [Word<'t>], valued: &str, optional: &str, long: &[&str]) -> Self {
+        Self::with(
+            words,
+            valued,
+            optional,
+            Long {
+                valued: long,
+                joined: &[],
+                bare: &[],
+            },
+        )
+    }
+
+    /// `valued` short options take a value (the rest of their cluster or the
+    /// next word), `optional` ones only the rest of their cluster, and long
+    /// ones what [`Long::find`] says; a long name may be shortened to its
+    /// start (`--chd` for `--chdir`), as getopt takes it. A word with an
+    /// expansion is an option only when it names one before it, whose value
+    /// the expansion is part of (`--chdir="$d"`, `-C"$d"`).
+    fn with(words: &'s [Word<'t>], valued: &str, optional: &str, long: Long<'_>) -> Self {
         let mut options = Self {
             rest: words,
             flags: String::new(),
@@ -2611,27 +3047,41 @@ impl<'s, 't> Options<'s, 't> {
         };
         let mut index = 0;
         while let Some(word) = words.get(index) {
-            if !word.literal {
-                break;
-            }
             let value = word.value.as_str();
-            if value == "--" {
+            // How much of the value is literal text before an expansion,
+            // quoted or not: what may name an option.
+            let written = word.known;
+            if word.literal && value == "--" {
                 index += 1;
                 break;
             }
             if let Some(name) = value.strip_prefix("--") {
-                index += 1;
                 match name.split_once('=') {
-                    Some((name, given)) => options.values.push((name.into(), given.into())),
-                    None if long.contains(&name) => {
-                        let given = words.get(index).map(|word| word.value.clone());
-                        options
-                            .values
-                            .push((name.into(), given.unwrap_or_default()));
-                        index += 1;
+                    Some((name, given)) if 2 + name.len() < written => {
+                        options.values.push(Given {
+                            name: long.find(name).0,
+                            value: given.into(),
+                            word: Some(word),
+                            attached: true,
+                        });
                     }
-                    None => {}
+                    None if word.literal => match long.find(name) {
+                        (name, Takes::Next) => {
+                            index += 1;
+                            let next = words.get(index);
+                            options.values.push(Given {
+                                name,
+                                value: next.map(|word| word.value.clone()).unwrap_or_default(),
+                                word: next,
+                                attached: false,
+                            });
+                        }
+                        (_, Takes::Flag(letter)) => options.flags.push(letter),
+                        _ => {}
+                    },
+                    _ => break,
                 }
+                index += 1;
                 continue;
             }
             let Some(cluster) = value
@@ -2640,26 +3090,44 @@ impl<'s, 't> Options<'s, 't> {
             else {
                 break;
             };
-            index += 1;
+            let mut flags = String::new();
+            let mut given = None;
             for (at, letter) in cluster.char_indices() {
+                if 1 + at >= written {
+                    break;
+                }
                 let attached = &cluster[at + letter.len_utf8()..];
-                if valued.contains(letter) {
-                    let given = if attached.is_empty() {
-                        index += 1;
-                        words.get(index - 1).map(|word| word.value.clone())
-                    } else {
-                        Some(attached.to_owned())
-                    };
-                    options
-                        .values
-                        .push((letter.into(), given.unwrap_or_default()));
+                if valued.contains(letter) && attached.is_empty() && word.literal {
+                    let next = words.get(index + 1);
+                    given = Some(Given {
+                        name: letter.into(),
+                        value: next.map(|word| word.value.clone()).unwrap_or_default(),
+                        word: next,
+                        attached: false,
+                    });
                     break;
                 }
-                if optional.contains(letter) {
-                    options.values.push((letter.into(), attached.to_owned()));
+                if valued.contains(letter) || optional.contains(letter) {
+                    given = Some(Given {
+                        name: letter.into(),
+                        value: attached.to_owned(),
+                        word: Some(word),
+                        attached: true,
+                    });
                     break;
                 }
-                options.flags.push(letter);
+                flags.push(letter);
+            }
+            // A cluster whose letters an expansion may go on (`-x"$y"`) is
+            // not known to be options.
+            if !word.literal && given.is_none() {
+                break;
+            }
+            index += 1;
+            options.flags.push_str(&flags);
+            if let Some(given) = given {
+                index += usize::from(!given.attached);
+                options.values.push(given);
             }
         }
         options.rest = &words[index.min(words.len())..];
@@ -2669,8 +3137,40 @@ impl<'s, 't> Options<'s, 't> {
     fn value(&self, name: &str) -> Option<&str> {
         self.values
             .iter()
-            .find(|(given, _)| given == name)
-            .map(|(_, value)| value.as_str())
+            .find(|given| given.name == name)
+            .map(|given| given.value.as_str())
+    }
+
+    /// Every value given to one of the options `names`, in order.
+    fn all<'a>(&'a self, names: &'a [&str]) -> impl Iterator<Item = &'a Given<'s, 't>> {
+        self.values
+            .iter()
+            .filter(move |given| names.contains(&given.name.as_str()))
+    }
+
+    /// `sudo`'s options (`--login` read as `-i`, `--shell` as `-s` and so
+    /// on), and the variables it is given to set among them
+    /// (see [`sets_variable`]), after which it reads options again: `sudo
+    /// A=1 -u root rm x` runs `rm x` as root.
+    fn sudo(words: &'s [Word<'t>]) -> Self {
+        let read = |words: &'s [Word<'t>]| Self::with(words, "aCcDgpRrTtUu", "h", SUDO_LONG);
+        let mut options = read(words);
+        loop {
+            let rest = after_settings(options.rest, true);
+            if rest.len() == options.rest.len() {
+                return options;
+            }
+            let more = read(rest);
+            options.flags.push_str(&more.flags);
+            options.values.extend(more.values);
+            options.rest = more.rest;
+        }
+    }
+
+    /// `xargs`'s options: `-e`, `-i`, `-l` and their long names take a
+    /// value only written in the same word.
+    fn xargs(words: &'s [Word<'t>]) -> Self {
+        Self::with(words, "InPLsdEaJRS", "ile", XARGS_LONG)
     }
 }
 
@@ -2946,6 +3446,7 @@ fn command_words<'t>(
             list.push(Word {
                 node: child,
                 raw: node_text(child, source),
+                known: known(child, &value, literal, source),
                 value,
                 literal,
             });
@@ -3267,8 +3768,13 @@ pub fn is_obviously_read_only(command: &str) -> bool {
     while let Some(node) = stack.pop() {
         // Even a read-only command can write through `>`/`>>`. Staying
         // conservative for input and descriptor redirects keeps this check
-        // independent of shell-specific redirect semantics.
-        if node.kind() == "redirected_statement" {
+        // independent of shell-specific redirect semantics. The parser hangs
+        // a function definition's redirect on the definition (`cat() { echo
+        // x; } > notes.md; cat` writes `notes.md`), so any redirect counts.
+        if matches!(
+            node.kind(),
+            "redirected_statement" | "file_redirect" | "heredoc_redirect" | "herestring_redirect"
+        ) {
             return false;
         }
         if node.kind() == "command" {
@@ -3631,8 +4137,8 @@ const RUNS_IN_SHELL: &[&str] = &["time", "trap", "mapfile", "readarray", "enable
 ///
 /// Only the `cd`s and `pushd`s at the start of the chain are followed, each
 /// plain: one folder [`plain_path`] takes that is a folder now (not a `pushd
-/// +N` place in the folder stack), with no assignment, substitution or word
-/// after a redirect. After them, every step is read from the folder they
+/// +N` place in the folder stack), with no assignment, substitution (a
+/// redirect's included) or word after a redirect. After them, every step is read from the folder they
 /// reached while each step before it is a command that cannot move the
 /// shell: a program written as a literal name that is not a builtin
 /// [`moves_shell`] or [`RUNS_IN_SHELL`] names. Any other step (a pipeline, a
@@ -3642,12 +4148,17 @@ const RUNS_IN_SHELL: &[&str] = &["time", "trap", "mapfile", "readarray", "enable
 /// rest of the line read from where the shell started, as for any line.
 /// Past [`MAX_MOVES`] or a folder of [`MAX_PLACED_BYTES`] nothing more is
 /// followed.
+///
+/// Also the steps where a `cd` would be followed, by the node id of their
+/// command: each plain step before any other step ran. A wrapper's folder is
+/// followed there only (see [`Reader::wrapper_folder`]).
 fn chain_folders(
     chain: tree_sitter::Node<'_>,
     source: &str,
     workspace: &Path,
-) -> HashMap<usize, Rc<Path>> {
+) -> (HashMap<usize, Rc<Path>>, HashSet<usize>) {
     let mut folders = HashMap::new();
+    let mut open = HashSet::new();
     let mut folder: Rc<Path> = Rc::from(workspace);
     let (mut moves, mut ran) = (0, false);
     for (node, outer) in steps(chain) {
@@ -3672,17 +4183,23 @@ fn chain_folders(
             }
         }
         let words = words(command, source);
+        // A substitution, also one a redirect writes to (`> >(…)`), runs
+        // before the step does, and may make a link where it goes.
         let plain = command
             .named_children(&mut command.walk())
             .all(|child| child.kind() != "variable_assignment")
             && !has_substitution(command)
             && redirects.iter().all(|redirect| {
                 redirect.kind() == "file_redirect"
+                    && !has_substitution(*redirect)
                     && redirect
                         .children_by_field_name("destination", &mut redirect.walk())
                         .count()
                         == 1
             });
+        if plain && !ran {
+            open.insert(command.id());
+        }
         match words.as_slice() {
             [program, target]
                 if plain
@@ -3714,7 +4231,7 @@ fn chain_folders(
             _ => break,
         }
     }
-    folders
+    (folders, open)
 }
 
 /// `text` kept to [`CLIPPED_PATTERN_BYTES`], with `…` when cut.
@@ -4459,42 +4976,20 @@ impl Line<'_> {
             let name = program_name(&program.value);
             match name.as_str() {
                 "sudo" => {
-                    let options = Options::read(
-                        arguments,
-                        "ugpCDrtTU",
-                        "",
-                        &[
-                            "user",
-                            "group",
-                            "host",
-                            "prompt",
-                            "close-from",
-                            "chdir",
-                            "role",
-                            "type",
-                            "command-timeout",
-                            "other-user",
-                        ],
-                    );
+                    let options = Options::sudo(arguments);
                     // `-e` edits files, `-l` and `-V` list.
                     if options.flags.contains(['e', 'l', 'V']) {
                         return None;
                     }
                     elsewhere |= options.flags.contains('i')
-                        || options
-                            .value("D")
-                            .or_else(|| options.value("chdir"))
-                            .is_some();
-                    rest = after_assignments(options.rest);
+                        || ["D", "chdir", "R", "chroot"]
+                            .iter()
+                            .any(|name| options.value(name).is_some());
+                    rest = options.rest;
                     trusted &= rest.len() == arguments.len();
                 }
                 "env" => {
-                    let options = Options::read(
-                        arguments,
-                        "uCPSa",
-                        "",
-                        &["unset", "chdir", "split-string", "argv0"],
-                    );
+                    let options = Options::with(arguments, "uCPSa", "", ENV_LONG);
                     // `env -S` runs text.
                     if options
                         .value("S")
@@ -4507,7 +5002,7 @@ impl Line<'_> {
                         .value("C")
                         .or_else(|| options.value("chdir"))
                         .is_some();
-                    rest = after_assignments(options.rest);
+                    rest = env_command(options.rest);
                     // It sets, clears or searches for what runs.
                     trusted = false;
                 }
@@ -4804,9 +5299,12 @@ fn outputs_to_literal(redirect: tree_sitter::Node<'_>, source: &str) -> bool {
 /// home folder) and no `..` part, which the shell takes off the folder's
 /// name where a file is read through its links.
 fn plain_path(word: &Word<'_>) -> bool {
-    let value = word.value.as_str();
-    word.literal
-        && !value.is_empty()
+    word.literal && plain(&word.value)
+}
+
+/// The value of a [`plain_path`].
+fn plain(value: &str) -> bool {
+    !value.is_empty()
         && !value.starts_with('-')
         && !value.contains(['$', '`', '*', '?', '[', '{', '\\'])
         && !value.chars().any(char::is_control)
@@ -5034,6 +5532,9 @@ mod tests {
             "git status --short && rg -n 'unsafe|token' crates"
         ));
         assert!(is_obviously_read_only("sleep 1"));
+        for command in ["git status", "ls | head", "cat a | grep b"] {
+            assert!(is_obviously_read_only(command), "{command}");
+        }
     }
 
     #[test]
@@ -5051,6 +5552,13 @@ mod tests {
             "echo changed > file",
             "./looks-safe status",
             "cargo test",
+            // The parser hangs a function definition's redirect on the
+            // definition: each call writes through it.
+            "cat() { echo changed; } > notes.md; cat",
+            "f() { cat a; } >> log.txt; f",
+            "cat() { cat a; } >> log.txt; cat",
+            "f() { cat a; } 2> err.txt; f",
+            "f() { cat; } < input; f",
         ] {
             assert!(!is_obviously_read_only(command), "{command}");
         }
@@ -5415,6 +5923,8 @@ mod regression {
             "cd sub && $run && cat ../x",
             "pushd sub && pushd +1 && cat ../x",
             "cd sub && popd && cat ../x",
+            "cd sub > >(cat) && cat ../x",
+            "cd sub 2> \"$(mktemp)\" && cat ../x",
             "cd sub && cat ../x | head",
             "cd sub || cat ../x",
             "env cd sub && cat ../x",
@@ -7176,6 +7686,517 @@ mod here_document_backquotes {
     }
 }
 
+/// Commands a wrapper or one of the shell's own words runs: read after the
+/// variables they set, and judged from the folder a wrapper chooses.
+#[cfg(test)]
+mod wrappers {
+    use super::*;
+    use crate::permissions::wildcard_match;
+
+    fn workspace() -> PathBuf {
+        std::env::current_dir().expect("cwd")
+    }
+
+    fn reaches_rm(command: &str, workspace: &Path) -> bool {
+        analyze(command, workspace)
+            .patterns
+            .iter()
+            .any(|pattern| wildcard_match("rm *", pattern))
+    }
+
+    #[test]
+    fn a_wrapper_s_command_is_read_after_the_variables_it_sets() {
+        let workspace = workspace();
+        let home = haarness_protocol::home_dir().expect("home");
+        // `time` and `coproc` take the shell's own assignments before the
+        // command; `env` and `sudo` set any word with a `=`, and `sudo`
+        // reads options again after them; a wrapper's option may hold an
+        // expansion.
+        for command in [
+            "time A=1 rm -rf ~/x",
+            "time -p A=$(pwd) B+=x rm -rf ~/x",
+            "time A[1]=x B[k]+=y rm -rf ~/x",
+            "env A+=1 rm -rf ~/x",
+            "env 'A B=1' rm -rf ~/x",
+            "env A=$(pwd) rm -rf ~/x",
+            "env -i - A=1 rm -rf ~/x",
+            "env --unset=\"$V\" rm -rf ~/x",
+            "sudo A+=1 rm -rf ~/x",
+            "sudo A=1 -u root rm -rf ~/x",
+            "sudo --user=\"$U\" rm -rf ~/x",
+            "doas A=1 rm -rf ~/x",
+            "timeout --signal=\"$S\" 5 rm -rf ~/x",
+            // Option text in quotes before an expansion.
+            "env \"-C$D\" rm -rf ~/x",
+            "sudo \"-u$U\" rm -rf ~/x",
+            "timeout \"-s$S\" 5 rm -rf ~/x",
+            "env \"--unset=$V\" rm -rf ~/x",
+            // A root of its own, and long options shortened as getopt
+            // takes them.
+            "sudo -R /jail rm -rf ~/x",
+            "sudo --chroot=/jail rm -rf ~/x",
+            "sudo --us root rm -rf ~/x",
+            "env --chd /tmp rm -rf ~/x",
+            "env --unset=X --chd=/tmp rm -rf ~/x",
+            "coproc rm -rf ~/x",
+            "coproc A=1 rm -rf ~/x",
+            "coproc { rm -rf ~/x; }",
+            "coproc NAME { rm -rf ~/x; }",
+            "coproc while true; do rm -rf ~/x; done",
+        ] {
+            let analysis = analyze(command, &workspace);
+            assert!(reaches_rm(command, &workspace), "{command}: {analysis:?}");
+            assert!(
+                analysis
+                    .external_dirs
+                    .iter()
+                    .any(|dir| Path::new(dir.trim_end_matches("/*")).starts_with(&home)),
+                "{command}: {analysis:?}"
+            );
+        }
+        // What runs is read as before.
+        for (command, readings) in [
+            ("env RUST_LOG=1 cargo test", vec!["cargo test"]),
+            ("time cargo build", vec!["cargo build"]),
+            ("time -p make", vec!["make"]),
+            ("sudo -E make", vec!["make"]),
+            ("env -i PATH=/usr/bin make", vec!["make"]),
+            ("sudo -u root FOO=1 make", vec!["make"]),
+        ] {
+            let derived: Vec<String> = analyze(command, &workspace)
+                .derived
+                .into_iter()
+                .map(|derived| derived.pattern)
+                .collect();
+            assert_eq!(derived, readings, "{command}");
+        }
+        // Quoted, a name is no assignment to the shell; a `=` an expansion
+        // may bring is not known.
+        for command in [
+            "time 'A B=1' rm x",
+            "env \"$X\" rm x",
+            "env $(echo A=1) rm x",
+        ] {
+            assert!(!reaches_rm(command, &workspace), "{command}");
+        }
+    }
+
+    #[test]
+    fn options_that_take_a_value_only_after_equals_leave_the_command_read() {
+        let workspace = workspace();
+        // `xargs --eof`, `--max-lines`, `--replace` (and `-e`, `-l`, `-i`),
+        // `env --default-signal` and the like, and `sudo --preserve-env`
+        // take a value only written `--name=value`, also shortened.
+        for command in [
+            "xargs --max-l rm -rf < list.txt",
+            "xargs --eo rm -rf < list.txt",
+            "xargs --max-lines rm -rf < list.txt",
+            "xargs --eof rm -rf < list.txt",
+            "xargs --replace rm -rf {} < list.txt",
+            "xargs --max-lines=2 --eof=END rm -rf < list.txt",
+            "xargs -i rm -rf {} < list.txt",
+            "xargs -l rm -rf < list.txt",
+            "env --default-signal rm -rf x",
+            "env --block rm -rf x",
+            "sudo --preserve-env rm -rf x",
+            "sudo --preserve-env=PATH rm -rf x",
+            // A value in the next word, as before.
+            "xargs -n 1 rm -rf < list.txt",
+            "xargs --max-args 1 rm -rf < list.txt",
+            "xargs --max-a 1 rm -rf < list.txt",
+            "xargs -I {} rm -rf {} < list.txt",
+            "xargs --delimiter , rm -rf < list.txt",
+        ] {
+            assert!(reaches_rm(command, &workspace), "{command}");
+            // Auto's reviewer is told xargs deletes what its input names.
+            if command.starts_with("xargs") {
+                let deletions = analyze(command, &workspace).deletions;
+                assert!(
+                    deletions
+                        .iter()
+                        .any(|deletion| deletion.raw == "xargs rm" && !deletion.complete),
+                    "{command}: {deletions:?}"
+                );
+            }
+        }
+        // A cluster of flags with an expansion in it: what xargs runs is
+        // still told to Auto's reviewer.
+        let deletions = analyze("xargs \"-r$X\" rm < list.txt", &workspace).deletions;
+        assert!(
+            deletions.iter().any(|deletion| deletion.raw == "xargs rm"),
+            "{deletions:?}"
+        );
+    }
+
+    #[test]
+    fn sudo_s_long_flags_are_read_as_its_short_ones() {
+        let workspace = workspace();
+        // `--login` and `--shell` (also shortened) start a shell that reads
+        // its commands from standard input; `-a` and `-c` take a value.
+        for command in [
+            "sudo --login <<'EOF'\nrm -rf victim\nEOF",
+            "echo \"rm -rf victim\" | sudo --shell",
+            "sudo --sh <<EOF\nrm -rf victim\nEOF",
+            "sudo -a pam rm -rf victim",
+            "sudo -c staff rm -rf victim",
+            "sudo --login-class staff rm -rf victim",
+        ] {
+            assert!(reaches_rm(command, &workspace), "{command}");
+        }
+        // `--edit` edits files and `--list` and `--version` list: they run
+        // nothing.
+        for command in [
+            "sudo --edit rm",
+            "sudo --list rm -rf victim",
+            "sudo --vers rm -rf victim",
+        ] {
+            assert!(!reaches_rm(command, &workspace), "{command}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_folder_a_wrapper_runs_its_command_in_is_checked_and_read_from() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-wrapper-folder-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("sub/deeper")).unwrap();
+        std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
+        let parent = vec![glob(&root.canonicalize().unwrap())];
+        // Read as after a plain `cd` that opens an `&&` chain: the folder
+        // checked like the `cd`'s, the command's relative paths from there
+        // when it is plain and there, else from where the shell started.
+        for (wrapped, chained) in [
+            ("env -C ~/.ssh cat id_rsa", "cd ~/.ssh && cat id_rsa"),
+            (
+                "env --chdir=/tmp cat haarness-no-such-file",
+                "cd /tmp && cat haarness-no-such-file",
+            ),
+            (
+                "sudo -D /tmp cat haarness-no-such-file",
+                "cd /tmp && cat haarness-no-such-file",
+            ),
+            (
+                "sudo --chdir /tmp cat haarness-no-such-file",
+                "cd /tmp && cat haarness-no-such-file",
+            ),
+            ("env -C sub cat ../../x", "cd sub && cat ../../x"),
+            ("env -C sub cat ../README.md", "cd sub && cat ../README.md"),
+            ("env -Csub cat ../README.md", "cd sub && cat ../README.md"),
+            (
+                "env --chdir=sub cat ../README.md",
+                "cd sub && cat ../README.md",
+            ),
+            (
+                "env -C sub/deeper cat ../../README.md",
+                "cd sub/deeper && cat ../../README.md",
+            ),
+            (
+                "cd sub && env -C deeper cat ../../README.md",
+                "cd sub && cd deeper && cat ../../README.md",
+            ),
+            (
+                "sudo -D sub env -C deeper cat ../../README.md",
+                "cd sub && cd deeper && cat ../../README.md",
+            ),
+            ("env -C \"$D\" cat ../x", "cd \"$D\" && cat ../x"),
+            // A folder variable after the option's text is its folder.
+            (
+                "env --chdir=$HOME/.ssh cat id_rsa",
+                "cd $HOME/.ssh && cat id_rsa",
+            ),
+            (
+                "env --chdir=\"$HOME/.ssh\" cat id_rsa",
+                "cd \"$HOME/.ssh\" && cat id_rsa",
+            ),
+            ("env -C$HOME/.ssh cat id_rsa", "cd $HOME/.ssh && cat id_rsa"),
+            (
+                "env -C \"$HOME/.ssh\" cat id_rsa",
+                "cd \"$HOME/.ssh\" && cat id_rsa",
+            ),
+            (
+                "sudo --chdir=$HOME cat .ssh/id_rsa",
+                "cd $HOME && cat .ssh/id_rsa",
+            ),
+            (
+                "sudo -D\"$HOME\" cat .ssh/id_rsa",
+                "cd \"$HOME\" && cat .ssh/id_rsa",
+            ),
+            ("env --chdir=\"$TMPDIR\" cat x", "cd \"$TMPDIR\" && cat x"),
+            (
+                "env \"-C$HOME/.ssh\" cat id_rsa",
+                "cd \"$HOME/.ssh\" && cat id_rsa",
+            ),
+            (
+                "env \"--chdir=$HOME/.ssh\" cat id_rsa",
+                "cd \"$HOME/.ssh\" && cat id_rsa",
+            ),
+            (
+                "sudo \"-D$HOME\" cat .ssh/id_rsa",
+                "cd \"$HOME\" && cat .ssh/id_rsa",
+            ),
+            // The option's text and the value in parts of their own.
+            (
+                "env \"-C$HOME\"/.ssh cat id_rsa",
+                "cd \"$HOME\"/.ssh && cat id_rsa",
+            ),
+            (
+                "env \"--chdir=$HOME\"/.ssh cat id_rsa",
+                "cd \"$HOME\"/.ssh && cat id_rsa",
+            ),
+            (
+                "sudo \"-D$HOME\"/.ssh cat id_rsa",
+                "cd \"$HOME\"/.ssh && cat id_rsa",
+            ),
+            (
+                "env \"-C\"$HOME/.ssh cat id_rsa",
+                "cd $HOME/.ssh && cat id_rsa",
+            ),
+            (
+                "env '-C'$HOME/.ssh cat id_rsa",
+                "cd $HOME/.ssh && cat id_rsa",
+            ),
+            (
+                "env \"-C\"\"$HOME/.ssh\" cat id_rsa",
+                "cd \"$HOME/.ssh\" && cat id_rsa",
+            ),
+            (
+                "env \"-C${HOME}\"/.ssh cat id_rsa",
+                "cd \"${HOME}\"/.ssh && cat id_rsa",
+            ),
+            ("env \"-C/tmp/$D\" cat x", "cd \"/tmp/$D\" && cat x"),
+            (
+                "env --chd /tmp cat haarness-no-such-file",
+                "cd /tmp && cat haarness-no-such-file",
+            ),
+            ("env -C nosuch cat ../x", "cd nosuch && cat ../x"),
+            ("env -C .. cat x", "cd .. && cat x"),
+        ] {
+            assert_eq!(
+                analyze(wrapped, &workspace).external_dirs,
+                analyze(chained, &workspace).external_dirs,
+                "{wrapped}"
+            );
+        }
+        for command in [
+            "env -C ~/.ssh cat id_rsa",
+            "env --chdir=$HOME/.ssh cat id_rsa",
+            "sudo -D\"$HOME\" cat .ssh/id_rsa",
+            "env \"-C$HOME/.ssh\" cat id_rsa",
+            "env \"-C$HOME\"/.ssh cat id_rsa",
+            "env \"--chdir=$HOME\"/.ssh cat id_rsa",
+            "sudo \"-D$HOME\"/.ssh cat id_rsa",
+            "env \"-C\"$HOME/.ssh cat id_rsa",
+            "env '-C'$HOME/.ssh cat id_rsa",
+            "env \"-C\"\"$HOME/.ssh\" cat id_rsa",
+            "env \"-C${HOME}\"/.ssh cat id_rsa",
+        ] {
+            assert!(
+                !analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        assert!(
+            analyze("env -C sub cat ../README.md", &workspace)
+                .external_dirs
+                .is_empty()
+        );
+        assert_eq!(
+            analyze("env -C sub cat ../../x", &workspace).external_dirs,
+            parent
+        );
+        // The shell expands no `~` inside an option's own word: that folder
+        // is named `~`, in the project.
+        for command in ["env -C~/x cat y", "env --chdir=~/x cat y"] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        // Text run again, or split by `env -S`, is read from where the shell
+        // started, as before; the folder is still checked.
+        assert_eq!(
+            analyze("env -C ~/.ssh -S 'cat id_rsa'", &workspace).external_dirs,
+            analyze("cd ~/.ssh", &workspace).external_dirs
+        );
+        assert_eq!(
+            analyze("env -C sub bash -c 'cat ../README.md'", &workspace).external_dirs,
+            parent
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wrapper_s_folder_is_followed_only_where_a_cd_there_would_be() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-wrapper-step-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
+        let parent = vec![glob(&root.canonicalize().unwrap())];
+        // After a step that ran (it may have made `src` a link out), in a
+        // line of more than one statement, a pipeline, a step with an
+        // assignment or a substitution, and in text run again, a `cd` is not
+        // followed and neither is a wrapper's folder: the command's paths are
+        // read from where the shell started.
+        for (wrapped, chained) in [
+            (
+                "rm -rf src && ln -s ../outside src && env -C src cat ../README.md",
+                "rm -rf src && ln -s ../outside src && cd src && cat ../README.md",
+            ),
+            (
+                "true && env -C src cat ../README.md",
+                "true && cd src && cat ../README.md",
+            ),
+            (
+                "echo x; env -C src cat ../README.md",
+                "echo x; cd src && cat ../README.md",
+            ),
+            (
+                "A=1 env -C src cat ../README.md",
+                "A=1 cd src && cat ../README.md",
+            ),
+            (
+                "env -C src cat ../README.md > >(cat)",
+                "cd src > >(cat) && cat ../README.md",
+            ),
+        ] {
+            let analysis = analyze(wrapped, &workspace);
+            assert_eq!(analysis.external_dirs, parent, "{wrapped}");
+            assert_eq!(
+                analysis.external_dirs,
+                analyze(chained, &workspace).external_dirs,
+                "{wrapped}"
+            );
+        }
+        for command in [
+            // A substitution runs before the wrapper, and may make `src` a
+            // link out.
+            "env -C src cat ../README.md $(true)",
+            "env -C src cat ../README.md | head",
+            "bash -c 'env -C src cat ../README.md'",
+            // Behind a wrapper whose folder nobody can place, a relative
+            // folder is not placed either.
+            "env -C \"$D\" env -C src cat ../README.md",
+            "sudo -i env -C src cat ../README.md",
+            "sudo --login env -C src cat ../README.md",
+            "sudo -R /jail env -C src cat ../README.md",
+            "find . -execdir env -C src cat ../README.md \\;",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                parent,
+                "{command}"
+            );
+        }
+        // Where a `cd` would be followed, the folder is too.
+        for command in [
+            "env -C src cat ../README.md",
+            "cd src && env -C . cat ../README.md",
+            // The shell opens a redirect before the wrapper moves.
+            "env -C src cat ../README.md > out.txt",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_shell_sudo_starts_in_a_folder_reads_its_script_there() {
+        let workspace = workspace();
+        // The folder of a shell that reads its script from standard input
+        // is checked, and what the script deletes is in that folder.
+        let ssh = analyze("cd ~/.ssh", &workspace).external_dirs;
+        assert!(!ssh.is_empty());
+        for command in [
+            "sudo -D ~/.ssh -s <<'EOF'\ncat id_rsa\nEOF",
+            "echo 'cat id_rsa' | sudo -D ~/.ssh -s",
+            "sudo --chdir ~/.ssh -i <<'EOF'\ncat id_rsa\nEOF",
+        ] {
+            assert_eq!(analyze(command, &workspace).external_dirs, ssh, "{command}");
+        }
+        for command in [
+            "sudo -D /etc -s <<EOF\nrm -rf x\nEOF",
+            "sudo -i <<EOF\nrm -rf x\nEOF",
+            "sudo --login <<EOF\nrm -rf x\nEOF",
+            "env -C /etc -S 'rm -rf x'",
+        ] {
+            let deletions = analyze(command, &workspace).deletions;
+            assert!(
+                deletions
+                    .iter()
+                    .any(|deletion| deletion.value == "x" && deletion.moved),
+                "{command}: {deletions:?}"
+            );
+        }
+        let deletions = analyze("sudo -s <<EOF\nrm -rf x\nEOF", &workspace).deletions;
+        assert!(
+            deletions.iter().all(|deletion| !deletion.moved),
+            "{deletions:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_after_a_line_of_assignments_is_read() {
+        let workspace = workspace();
+        // The parser runs a line of two or more assignments into the command
+        // on the next line, named by the shell's word that starts it (`!`,
+        // `{`, `function`); one assignment is a line of its own.
+        for command in [
+            "A=1 B=2\n! rm -rf victim",
+            "A=1 B=2\n{ rm -rf victim; }",
+            "A=1 B=2 C=3\n  ! rm -rf victim | cat",
+            "A=1 B=2\nfunction f { rm -rf victim; }",
+            "A=1 B=2\nif true; then rm -rf victim; fi",
+            "A=1\n! rm -rf victim",
+            "A=1\nif true; then rm -rf victim; fi",
+            "! { rm -rf victim; }",
+        ] {
+            let patterns = analyze(command, &workspace).patterns;
+            assert!(
+                patterns.contains(&"rm -rf victim".to_owned()),
+                "{command:?}: {patterns:?}"
+            );
+        }
+        let outside = analyze("cat ../x", &workspace).external_dirs;
+        assert!(!outside.is_empty());
+        for command in [
+            "A=1\n! cat ../x",
+            "A=1 B=2\n! cat ../x",
+            "A=1 B=2\n{ cat ../x; }",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                outside,
+                "{command:?}"
+            );
+        }
+        // As before: assignments on the command's own line or joined to it,
+        // a line of assignments before a command (a rule for the command
+        // alone does not open it), and here-document text.
+        for (command, patterns) in [
+            ("A=1 rm x", vec!["A=1 rm x", "rm x"]),
+            ("A=1 \\\nrm x", vec!["A=1 \\\nrm x", "rm x", "A=1 rm x"]),
+            ("A=1 B=2\nnpm test", vec!["A=1 B=2\nnpm test", "npm test"]),
+            (
+                "cat <<EOF\nA=1 B=2\n! rm -rf victim\nEOF",
+                vec!["cat <<EOF\nA=1 B=2\n! rm -rf victim\nEOF"],
+            ),
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).patterns,
+                patterns,
+                "{command:?}"
+            );
+        }
+    }
+}
+
 /// [`script_files`]: which file a command line runs as a script, and when
 /// its text may be shown.
 #[cfg(all(test, not(windows)))]
@@ -7566,6 +8587,7 @@ mod scripts {
             "sudo -D sub ./run.sh",
             "sudo --chdir=sub ./run.sh",
             "sudo -i bash run.sh",
+            "sudo --login bash run.sh",
             // A `cd` after it changes nothing about that (the order the
             // October 23 fix kept).
             "env -C sub ./run.sh; cd .",
