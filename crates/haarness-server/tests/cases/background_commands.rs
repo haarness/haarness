@@ -642,7 +642,7 @@ async fn the_agent_reads_waits_for_and_stops_its_commands() {
         .unwrap()
         .to_owned();
     command_until(&runtime, thread, &id, |info| info.output_bytes > 0).await;
-    // The line was printed before the call; a wait still finds it, and a
+    // The match is in output that came before the wait began, and a
     // leading (?i) ignores case.
     let turn = scripted(
         &runtime,
@@ -713,4 +713,459 @@ async fn a_chat_runs_no_more_background_commands_than_its_cap_and_archiving_stop
         stopped.ended_by,
         Some(haarness_protocol::ShellCommandEndedBy::ChatStopped)
     );
+}
+
+#[tokio::test]
+async fn an_agent_command_without_a_deadline_saves_only_the_start_of_its_output() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_timeout_ms = 0;
+    });
+    let thread = chat(&runtime, None).await;
+    let past = haarness_core::OUTPUT_SAVED_LIMIT + 1024 * 1024;
+    let turn = scripted(
+        &runtime,
+        thread,
+        &format!(r#"!tool bash {{"command":"yes 0123456789 | head -c {past}"}}"#),
+        false,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert_eq!(
+        metadata["outputSavedBytes"],
+        haarness_core::OUTPUT_SAVED_LIMIT,
+        "{text:.200}"
+    );
+    let path = metadata["outputPath"].as_str().unwrap();
+    assert_eq!(
+        std::fs::metadata(path).unwrap().len(),
+        haarness_core::OUTPUT_SAVED_LIMIT
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn a_foreground_command_a_person_stopped_says_so_in_its_result() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |_| {});
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"printf 'working\n'; sleep 30"}"#,
+        false,
+    )
+    .await;
+    let id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(info) = runtime.shell_commands(thread).await.unwrap().pop()
+                && info.output_bytes > 0
+            {
+                return info.id;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    runtime.stop_shell_command(thread, &id).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert!(text.contains("The person stopped this command"), "{text}");
+    assert!(text.contains("SIGINT"), "{text}");
+    assert!(text.contains("working"), "{text}");
+    assert_eq!(metadata["command"]["background"], false);
+}
+
+/// A store that counts how often every chat is listed.
+struct CountingLists {
+    inner: SqliteStore,
+    lists: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl ThreadRepository for CountingLists {
+    async fn create_thread(&self, request: CreateThreadRequest) -> CoreResult<Thread> {
+        self.inner.create_thread(request).await
+    }
+    async fn list_threads(&self, include_archived: bool) -> CoreResult<Vec<Thread>> {
+        self.lists.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.list_threads(include_archived).await
+    }
+    async fn get_thread(&self, id: ThreadId) -> CoreResult<Thread> {
+        self.inner.get_thread(id).await
+    }
+    async fn update_thread(
+        &self,
+        id: ThreadId,
+        request: haarness_protocol::UpdateThreadRequest,
+    ) -> CoreResult<Thread> {
+        self.inner.update_thread(id, request).await
+    }
+    async fn list_items(
+        &self,
+        id: ThreadId,
+        after: Option<u64>,
+    ) -> CoreResult<Vec<haarness_protocol::Item>> {
+        self.inner.list_items(id, after).await
+    }
+    async fn start_turn(
+        &self,
+        id: ThreadId,
+        request: StartTurnRequest,
+    ) -> CoreResult<(Turn, haarness_protocol::Item, bool)> {
+        self.inner.start_turn(id, request).await
+    }
+    async fn get_turn(&self, id: haarness_protocol::TurnId) -> CoreResult<Turn> {
+        self.inner.get_turn(id).await
+    }
+    async fn append_item(
+        &self,
+        thread: ThreadId,
+        turn: Option<haarness_protocol::TurnId>,
+        data: haarness_protocol::ItemData,
+    ) -> CoreResult<haarness_protocol::Item> {
+        self.inner.append_item(thread, turn, data).await
+    }
+    async fn set_turn_status(
+        &self,
+        id: haarness_protocol::TurnId,
+        status: TurnStatus,
+        error: Option<String>,
+    ) -> CoreResult<Turn> {
+        self.inner.set_turn_status(id, status, error).await
+    }
+    async fn compact(
+        &self,
+        id: ThreadId,
+        request: haarness_protocol::CompactRequest,
+        expected_tail: Option<(haarness_protocol::ItemId, u64)>,
+    ) -> CoreResult<haarness_protocol::Item> {
+        self.inner.compact(id, request, expected_tail).await
+    }
+    async fn fork_thread(
+        &self,
+        id: ThreadId,
+        title: Option<String>,
+        up_to_sequence: Option<u64>,
+    ) -> CoreResult<Thread> {
+        self.inner.fork_thread(id, title, up_to_sequence).await
+    }
+    async fn set_revert_state(
+        &self,
+        id: ThreadId,
+        state: Option<(u64, String, Option<String>)>,
+    ) -> CoreResult<()> {
+        self.inner.set_revert_state(id, state).await
+    }
+    async fn soft_delete_items_after(&self, id: ThreadId, sequence: u64) -> CoreResult<u64> {
+        self.inner.soft_delete_items_after(id, sequence).await
+    }
+    async fn save_permission_rule(
+        &self,
+        workspace: &str,
+        rule: &haarness_core::PermissionRule,
+    ) -> CoreResult<()> {
+        self.inner.save_permission_rule(workspace, rule).await
+    }
+    async fn load_permission_rules(
+        &self,
+        workspace: &str,
+    ) -> CoreResult<Vec<haarness_core::PermissionRule>> {
+        self.inner.load_permission_rules(workspace).await
+    }
+    async fn recover_interrupted(&self) -> CoreResult<u64> {
+        self.inner.recover_interrupted().await
+    }
+    async fn thread_extras(
+        &self,
+        id: ThreadId,
+    ) -> CoreResult<(Option<String>, Option<haarness_protocol::LoopConfig>)> {
+        self.inner.thread_extras(id).await
+    }
+    async fn set_goal(&self, id: ThreadId, goal: Option<String>) -> CoreResult<()> {
+        self.inner.set_goal(id, goal).await
+    }
+    async fn goal_state(&self, id: ThreadId) -> CoreResult<Option<haarness_protocol::GoalState>> {
+        self.inner.goal_state(id).await
+    }
+    async fn save_goal_state(
+        &self,
+        id: ThreadId,
+        state: Option<haarness_protocol::GoalState>,
+    ) -> CoreResult<()> {
+        self.inner.save_goal_state(id, state).await
+    }
+    async fn set_loop(
+        &self,
+        id: ThreadId,
+        config: Option<haarness_protocol::LoopConfig>,
+    ) -> CoreResult<()> {
+        self.inner.set_loop(id, config).await
+    }
+}
+
+#[tokio::test]
+async fn following_a_chats_commands_never_lists_every_chat() {
+    use std::sync::atomic::Ordering;
+    let workspace = Workspace::new();
+    let store = Arc::new(CountingLists {
+        inner: SqliteStore::in_memory().unwrap(),
+        lists: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut config = haarness_core::RuntimeConfig::default();
+    config.base_rules.push(haarness_core::PermissionRule {
+        pattern: "*".into(),
+        decision: haarness_core::PermissionDecision::Allow,
+    });
+    let runtime = AgentRuntime::with_config(
+        store.clone(),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(NativeToolRegistry::new(workspace.0.clone())),
+        EventBus::new(256),
+        workspace.0.clone(),
+        String::new(),
+        config,
+    );
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let id = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    store.lists.store(0, Ordering::SeqCst);
+    // What a client polls while it shows the chat.
+    for _ in 0..5 {
+        assert_eq!(
+            runtime
+                .thread_activity(thread)
+                .await
+                .unwrap()
+                .background_commands,
+            1
+        );
+        assert_eq!(runtime.shell_commands(thread).await.unwrap().len(), 1);
+        runtime.shell_command(thread, &id).await.unwrap();
+        runtime
+            .shell_command_output(thread, &id, Some(0), None, false)
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.lists.load(Ordering::SeqCst), 0);
+    runtime.stop_shell_command(thread, &id).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_commands_end_starts_its_turn_with_the_configuration_of_that_moment() {
+    let workspace = Workspace::new();
+    let (runtime, first) = commands_runtime(&workspace.0, |_| {});
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 1","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    // The configuration is reloaded while the command runs.
+    let second = Capturing::default();
+    let mut config = haarness_core::RuntimeConfig::default();
+    config.base_rules.push(haarness_core::PermissionRule {
+        pattern: "*".into(),
+        decision: haarness_core::PermissionDecision::Allow,
+    });
+    assert!(runtime.replace_components_when_idle(
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(second.clone()) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(NativeToolRegistry::new(workspace.0.clone())),
+        String::new(),
+        config,
+        None,
+        || {},
+    ));
+    let before = first.requests.lock().unwrap().len();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while notices(&runtime, thread).await.is_empty()
+            || runtime.active_turn(thread).await.unwrap().is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        first.requests.lock().unwrap().len(),
+        before,
+        "the notice's turn ran on the configuration the command started with"
+    );
+    assert!(!second.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn bash_output_and_bash_stop_are_offered_only_where_bash_is() {
+    let workspace = Workspace::new();
+    let (runtime, provider) = commands_runtime(&workspace.0, |_| {});
+    let offered = |provider: &Capturing| {
+        provider
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(&runtime, thread, "hello", true).await;
+    wait_done(&runtime, &turn).await;
+    let tools = offered(&provider);
+    assert!(tools.contains("bash_output") && tools.contains("bash_stop"));
+    // A turn without bash gets neither, and a call of one is refused.
+    let before = provider.requests.lock().unwrap().len();
+    let mut request = turn_request("!tool bash_output {}");
+    request.tools = Some(std::collections::HashMap::from([("bash".into(), false)]));
+    let turn = runtime.start_turn(thread, request).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    for request in &provider.requests.lock().unwrap()[before..] {
+        let tools = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !tools.contains(&"bash")
+                && !tools.contains(&"bash_output")
+                && !tools.contains(&"bash_stop"),
+            "{tools:?}"
+        );
+    }
+    let (text, _) = last_result(&runtime, thread).await;
+    assert!(text.contains("disabled"), "{text}");
+    // Nor an agent whose rules deny bash.
+    let mut engine = haarness_core::PermissionEngine::build_defaults();
+    engine.add_rule(haarness_core::PermissionRule {
+        pattern: "bash:*".into(),
+        decision: haarness_core::PermissionDecision::Deny,
+    });
+    assert!(engine.disables_tool("bash_output") && engine.disables_tool("bash_stop"));
+    assert!(!haarness_core::PermissionEngine::build_defaults().disables_tool("bash_output"));
+}
+
+#[tokio::test]
+async fn archiving_a_chat_while_a_command_stops_tells_nobody() {
+    use haarness_protocol::ShellCommandEndedBy;
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_stop_grace_ms = 1_500;
+    });
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"trap '' INT; printf ready; sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let id = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    command_until(&runtime, thread, &id, |info| info.output_bytes > 0).await;
+    // A person stops it; it ignores the interrupt, and the chat is
+    // archived before the terminate.
+    runtime.stop_shell_command(thread, &id).await.unwrap();
+    runtime
+        .update_thread(
+            thread,
+            haarness_protocol::UpdateThreadRequest {
+                title: None,
+                archived: Some(true),
+                agent: None,
+                provider: None,
+                model: None,
+                ultracode: None,
+            },
+        )
+        .await
+        .unwrap();
+    let ended = command_until(&runtime, thread, &id, |info| !info.state.is_live()).await;
+    assert_eq!(ended.ended_by, Some(ShellCommandEndedBy::ChatStopped));
+    assert!(!ended.delivers_notice);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(notices(&runtime, thread).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_chat_at_its_cap_keeps_a_long_command_in_the_foreground() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_background_per_chat = 1;
+        settings.shell_move_after_ms = 300;
+    });
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let server = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // It would move after 300 ms, but the chat runs as many in the
+    // background as it may: it stays, and the call waits for it.
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 1.5; echo held"}"#,
+        true,
+    )
+    .await;
+    let held = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(info) = runtime
+                .shell_commands(thread)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|info| info.id != server)
+            {
+                return info;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Nor can a person send it there.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(matches!(
+        runtime
+            .background_shell_commands(thread, Some(&held.id))
+            .await,
+        Err(haarness_core::CoreError::Conflict(_))
+    ));
+    wait_done(&runtime, &turn).await;
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert!(text.starts_with("exit: 0\nheld"), "{text}");
+    assert_eq!(metadata["command"]["background"], false);
+    runtime.stop_shell_command(thread, &server).await.unwrap();
 }

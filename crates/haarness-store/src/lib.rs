@@ -1324,6 +1324,12 @@ impl ThreadRepository for SqliteStore {
             };
             for (old_id, sequence, data_json, created_at) in copied {
                 let mut data: ItemData = serde_json::from_str(&data_json).map_err(storage)?;
+                // The fork runs none of its source's commands.
+                if let ItemData::CommandState { state, .. } = &mut data
+                    && state.is_live()
+                {
+                    *state = haarness_protocol::ShellCommandState::Interrupted;
+                }
                 if let ItemData::QueueConsumed { item_id } = &mut data {
                     let Some(remapped) = id_map.get(item_id).copied() else {
                         // A corrupt/out-of-range acknowledgement must not turn
@@ -1729,13 +1735,16 @@ impl SqliteStore {
             turn_id: Option<TurnId>,
             sequence: i64,
             data: ItemData,
+            deleted: bool,
         }
         let mut latest = HashMap::<(ThreadId, String), Latest>::new();
         {
+            // Undone checkpoints count too: an end an undo took out of the
+            // chat still means the command ended.
             let mut statement = tx
                 .prepare(
-                    "SELECT thread_id,turn_id,data_json,sequence FROM items
-                     WHERE deleted=0 AND json_extract(data_json,'$.type')='command_state'
+                    "SELECT thread_id,turn_id,data_json,sequence,deleted FROM items
+                     WHERE json_extract(data_json,'$.type')='command_state'
                      ORDER BY thread_id,sequence",
                 )
                 .map_err(storage)?;
@@ -1746,11 +1755,12 @@ impl SqliteStore {
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, i64>(3)?,
+                        row.get::<_, bool>(4)?,
                     ))
                 })
                 .map_err(storage)?;
             for row in rows {
-                let (raw_thread, raw_turn, raw_data, sequence) = row.map_err(storage)?;
+                let (raw_thread, raw_turn, raw_data, sequence, deleted) = row.map_err(storage)?;
                 // A checkpoint a newer server wrote in a shape this one
                 // cannot read is left alone.
                 let Ok(data) = serde_json::from_str::<ItemData>(&raw_data) else {
@@ -1767,6 +1777,7 @@ impl SqliteStore {
                         turn_id: raw_turn.as_deref().map(turn_id).transpose()?,
                         sequence,
                         data,
+                        deleted,
                     },
                 );
             }
@@ -1774,15 +1785,34 @@ impl SqliteStore {
         let now = Utc::now();
         let updated_at = time(now);
         let mut written = Vec::new();
-        let mut stranded = latest
-            .into_values()
-            .filter(|latest| {
-                matches!(
+        let mut stranded = Vec::new();
+        for latest in latest.into_values() {
+            if latest.deleted
+                || !matches!(
                     &latest.data,
                     ItemData::CommandState { state, .. } if state.is_live()
                 )
-            })
-            .collect::<Vec<_>>();
+            {
+                continue;
+            }
+            // A checkpoint copied from elsewhere (a fork's, which has no
+            // turn) is not one of this chat's commands.
+            let Some(turn) = latest.turn_id else {
+                continue;
+            };
+            let owned = tx
+                .query_row(
+                    "SELECT 1 FROM turns WHERE id=?1 AND thread_id=?2",
+                    params![turn.to_string(), latest.thread_id.to_string()],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(storage)?
+                .is_some();
+            if owned {
+                stranded.push(latest);
+            }
+        }
         stranded.sort_by_key(|latest| (latest.thread_id.to_string(), latest.sequence));
         for latest in stranded {
             let ItemData::CommandState {
@@ -2123,6 +2153,160 @@ fn storage(error: impl std::fmt::Display) -> CoreError {
 mod tests {
     use super::*;
 
+    /// A turn of `thread`, which a command's checkpoints belong to.
+    async fn command_turn(store: &SqliteStore, thread: ThreadId) -> TurnId {
+        store
+            .start_turn(
+                thread,
+                StartTurnRequest {
+                    request_id: RequestId::new(),
+                    text: "run it".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .0
+            .id
+    }
+
+    #[tokio::test]
+    async fn copies_and_reverted_checkpoints_of_a_running_command_are_never_told_as_cut_off() {
+        use haarness_protocol::{ShellCommandMovedBy, ShellCommandState};
+        let store = SqliteStore::in_memory().unwrap();
+        let checkpoint = |id: &str, state| ItemData::CommandState {
+            call_id: format!("call-{id}"),
+            command_id: id.into(),
+            state,
+            exit_code: None,
+            signal: None,
+            tail: String::new(),
+            started_at: Utc::now(),
+            ended_at: None,
+            moved_by: Some(ShellCommandMovedBy::Agent),
+        };
+        // A fork copies a chat while its command runs in the background.
+        let source = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let turn = command_turn(&store, source.id).await;
+        store
+            .append_item(
+                source.id,
+                Some(turn),
+                checkpoint("cmd-forked", ShellCommandState::Running),
+            )
+            .await
+            .unwrap();
+        let fork = store.fork_thread(source.id, None, None).await.unwrap();
+        let states = |items: Vec<Item>| {
+            items
+                .into_iter()
+                .filter_map(|item| match item.data {
+                    ItemData::CommandState { state, .. } => Some(state),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            states(store.list_items(fork.id, None).await.unwrap()),
+            [ShellCommandState::Interrupted],
+            "the fork never ran the command"
+        );
+        // The command ends, and an undo takes its end out of the chat.
+        let reverted = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let turn = command_turn(&store, reverted.id).await;
+        let running = store
+            .append_item(
+                reverted.id,
+                Some(turn),
+                checkpoint("cmd-reverted", ShellCommandState::Running),
+            )
+            .await
+            .unwrap();
+        store
+            .append_item(
+                reverted.id,
+                Some(turn),
+                checkpoint("cmd-reverted", ShellCommandState::Exited),
+            )
+            .await
+            .unwrap();
+        store
+            .soft_delete_items_after(reverted.id, running.sequence)
+            .await
+            .unwrap();
+        // An archive holds a checkpoint of a command running when it was
+        // made.
+        let exported = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let turn = command_turn(&store, exported.id).await;
+        store
+            .append_item(
+                exported.id,
+                Some(turn),
+                checkpoint("cmd-archived", ShellCommandState::Running),
+            )
+            .await
+            .unwrap();
+        let mut archive = store
+            .export_session_archive(exported.id, false)
+            .await
+            .unwrap();
+        let imported_id = ThreadId::new();
+        let mapping = HashMap::from([(exported.id, imported_id)]);
+        for entry in &mut archive.threads {
+            entry.thread.id = mapping[&entry.thread.id];
+            for turn in &mut entry.turns {
+                turn.thread_id = imported_id;
+                turn.id = TurnId::new();
+            }
+            let turn = entry.turns[0].id;
+            for item in &mut entry.items {
+                item.id = ItemId::new();
+                item.thread_id = imported_id;
+                item.turn_id = Some(turn);
+            }
+        }
+        archive.root_thread_id = imported_id;
+        store.import_session_archive(archive).await.unwrap();
+        assert_eq!(
+            states(store.list_items(imported_id, None).await.unwrap()),
+            [ShellCommandState::Interrupted],
+            "an imported chat runs nothing"
+        );
+        let report = |command: &StrandedCommand| {
+            vec![ItemData::Error {
+                message: command.command_id.clone(),
+                retryable: false,
+            }]
+        };
+        let written = store.recover_interrupted_commands(&report).await.unwrap();
+        let mut told = written
+            .iter()
+            .filter_map(|item| match &item.data {
+                ItemData::Error { message, .. } => Some((item.thread_id, message.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        told.sort_by(|left, right| left.1.cmp(&right.1));
+        // Only the chats whose own turns ran a command still running are
+        // told: not the fork, the undone end, or the imported copy.
+        assert_eq!(
+            told,
+            [
+                (exported.id, "cmd-archived".to_owned()),
+                (source.id, "cmd-forked".to_owned()),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn a_command_a_restart_cut_off_is_recorded_once_and_told_only_where_it_should_be() {
         use haarness_protocol::{ShellCommandMovedBy, ShellCommandState};
@@ -2155,10 +2339,11 @@ mod tests {
             (told.id, "cmd-told"),
             (ended.id, "cmd-ended"),
         ] {
+            let turn = Some(command_turn(&store, thread).await);
             store
                 .append_item(
                     thread,
-                    None,
+                    turn,
                     ItemData::ToolCall {
                         call_id: format!("call-{id}"),
                         name: "bash".into(),
@@ -2169,7 +2354,7 @@ mod tests {
                 .await
                 .unwrap();
             store
-                .append_item(thread, None, checkpoint(id, ShellCommandState::Running))
+                .append_item(thread, turn, checkpoint(id, ShellCommandState::Running))
                 .await
                 .unwrap();
         }

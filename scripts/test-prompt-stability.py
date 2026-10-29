@@ -172,7 +172,9 @@ try:
     (home / '.local/bin').mkdir(parents=True, exist_ok=True)
     (workspace / '.haarness').mkdir(parents=True, exist_ok=True)
     (workspace / '.haarness/config.toml').write_text(
-        f'[defaults]\nprovider="anthropic"\nmodel="{MODEL}"\n[permissions]\n"*"="deny"\n[lsp]\nenabled=false\n')
+        # Review, as the TUI's status line it waits for shows; chats start
+        # in Auto otherwise.
+        f'[defaults]\nprovider="anthropic"\nmodel="{MODEL}"\napproval_mode="review"\n[permissions]\n"*"="deny"\n[lsp]\nenabled=false\n')
     stamp = f"{sys.executable} -c \"import json,time; print(json.dumps({{'additionalContext': 'HOOK_STAMP %d' % time.time_ns()}}))\""
     (workspace / 'haarness.json').write_text(json.dumps({'hooks': {
         'UserPromptSubmit': [{'hooks': [{'type': 'command', 'command': stamp}]}],
