@@ -2811,14 +2811,10 @@ fn skill_roots(
     if let Some(home) = home.as_deref() {
         roots.push((home.join(".agents/skills"), true, None));
     }
-    if claude_compat(file_config).skills() {
-        if let Some(home) = home.as_deref() {
-            roots.push((home.join(".claude/skills"), true, None));
-        }
-        if trust {
-            for directory in layout::project_directories(workspace) {
-                roots.push((directory.join(".claude/skills"), true, None));
-            }
+    let claude = claude_compat(file_config);
+    for (directory, project) in jsonconfig::claude_directories(home.as_deref(), workspace, trust) {
+        if claude.files(project).skills() {
+            roots.push((directory.join("skills"), true, None));
         }
     }
     roots.push((paths.skills.clone(), true, None));
@@ -7278,7 +7274,7 @@ struct HotReloadCandidate {
 /// is on, and files named by `instructions` entries.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct ReloadWatch {
-    claude: ClaudeCodeCompatibility,
+    claude: ClaudeCompat,
     instruction_files: Vec<PathBuf>,
     /// Folders that hold only agent definitions (`…/agents`, `…/agent`), so
     /// the scan can tell an edit to them apart from every other source.
@@ -7406,7 +7402,7 @@ impl HotReloadController {
             .with_browser(self.browser.clone())
             .with_management(self.management.clone())
             .with_language(self.language.clone())
-            .with_claude_instructions(claude_compat(&sources.file_config).instructions()),
+            .with_claude_instructions(claude_compat(&sources.file_config).project.instructions()),
         );
         let hooks = (!sources.json_layers.hooks.is_empty()).then(|| {
             Arc::new(haarness_server::ConfiguredHooks::new(
@@ -7701,6 +7697,50 @@ const SYSTEM_CONFIG_ENTRIES: [&str; 14] = [
     "plugins/local",
 ];
 
+/// The Claude Code files and folders a reload watches, each where the
+/// toggles that cover it say to: the person's in `~/.claude` itself, and a
+/// project's in each project folder and its `.claude`.
+fn claude_watch_roots(
+    claude: &ClaudeCompat,
+    home: Option<&Path>,
+    workspace: &Path,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut add = |toggles: &ClaudeCodeCompatibility, folder: &Path, instructions: &[&str]| {
+        if toggles.instructions() {
+            roots.extend(instructions.iter().map(|name| folder.join(name)));
+        }
+        for (on, name) in [
+            (toggles.agents(), ".claude/agents"),
+            (toggles.commands(), ".claude/commands"),
+            (toggles.skills(), ".claude/skills"),
+        ] {
+            if on {
+                roots.push(folder.join(name));
+            }
+        }
+    };
+    if let Some(home) = home {
+        add(&claude.person, home, &[".claude/CLAUDE.md"]);
+    }
+    for directory in layout::project_directories(workspace) {
+        add(
+            &claude.project,
+            &directory,
+            &[
+                "CLAUDE.md",
+                "AGENTS.local.md",
+                "CLAUDE.local.md",
+                "CONTEXT.md",
+                "CONTEXT.local.md",
+                ".claude/CLAUDE.md",
+                ".claude/CLAUDE.local.md",
+            ],
+        );
+    }
+    roots
+}
+
 /// A digest of the content of every runtime source. It changes only when a
 /// source's content does: timestamps, folder metadata, editor scratch files
 /// and OAuth token refreshes leave it alone.
@@ -7776,41 +7816,11 @@ fn runtime_source_fingerprint_for(
     roots.push(config_dir.join("plugins/local"));
     roots.push(config_dir.join("agent"));
     roots.extend(watch.instruction_files.iter().cloned());
-    let claude = &watch.claude;
-    if claude.any() {
-        let mut claude_roots = |base: &Path, project: bool| {
-            if claude.instructions() {
-                roots.push(base.join("CLAUDE.md"));
-                if project {
-                    for name in [
-                        "AGENTS.local.md",
-                        "CLAUDE.local.md",
-                        "CONTEXT.md",
-                        "CONTEXT.local.md",
-                        ".claude/CLAUDE.md",
-                        ".claude/CLAUDE.local.md",
-                    ] {
-                        roots.push(base.join(name));
-                    }
-                }
-            }
-            if claude.agents() {
-                roots.push(base.join(".claude/agents"));
-            }
-            if claude.commands() {
-                roots.push(base.join(".claude/commands"));
-            }
-            if claude.skills() {
-                roots.push(base.join(".claude/skills"));
-            }
-        };
-        if let Some(home) = haarness_protocol::home_dir() {
-            claude_roots(&home.join(".claude"), false);
-        }
-        for directory in layout::project_directories(workspace) {
-            claude_roots(&directory, true);
-        }
-    }
+    roots.extend(claude_watch_roots(
+        &watch.claude,
+        haarness_protocol::home_dir().as_deref(),
+        workspace,
+    ));
     for directory in layout::project_directories(workspace) {
         for name in [
             "haarness.json",
@@ -8187,7 +8197,7 @@ async fn application_at(
         .with_browser(browser.clone())
         .with_management(management.clone())
         .with_language(language.clone())
-        .with_claude_instructions(claude_compat(&file_config).instructions()),
+        .with_claude_instructions(claude_compat(&file_config).project.instructions()),
     );
     let extensions = extensions::load(paths, workspace, trust).await?;
     let tools = extensions.wrap_tools(tools).await?;
@@ -10052,6 +10062,11 @@ struct FileConfig {
     base_mcp: std::collections::BTreeSet<String>,
     /// Opt-in discovery of Claude Code home/project files.
     compatibility: Option<CompatibilitySection>,
+    /// `compatibility.claude_code` as the person's own configuration set it,
+    /// before any project layer: what decides their `~/.claude` files. The
+    /// configuration loader sets it; `None` reads `compatibility` instead.
+    #[serde(skip)]
+    person_claude_code: Option<ClaudeCodeCompatibility>,
     /// Extra skill folders and remote skill indexes (`skills`).
     skills: Option<SkillsSection>,
     /// How Auto's reviewer works. The configuration loader merges it layer
@@ -10085,7 +10100,8 @@ struct CompatibilitySection {
 
 /// `compatibility.claude_code`: every category defaults to off, and
 /// `enabled = false` switches all of them off regardless of the individual
-/// toggles (the application master switch).
+/// toggles (the application master switch). A project's configuration
+/// decides only the project's own files; see [`ClaudeCompat`].
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 struct ClaudeCodeCompatibility {
@@ -10121,13 +10137,40 @@ impl ClaudeCodeCompatibility {
     }
 }
 
+/// The Claude Code compatibility toggles in effect, by whose files they
+/// decide. The person's `~/.claude` files follow the person's configuration
+/// alone, so a repository's configuration can neither switch them off nor on;
+/// a project's own files (its `CLAUDE.md` family and `.claude` folders) follow
+/// the project's configuration over the person's.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ClaudeCompat {
+    person: ClaudeCodeCompatibility,
+    project: ClaudeCodeCompatibility,
+}
+impl ClaudeCompat {
+    /// The toggles for a project's files, or for the person's.
+    fn files(&self, project: bool) -> &ClaudeCodeCompatibility {
+        if project { &self.project } else { &self.person }
+    }
+    fn any(&self) -> bool {
+        self.person.any() || self.project.any()
+    }
+}
+
 /// The effective Claude Code compatibility toggles of a merged configuration.
-fn claude_compat(config: &FileConfig) -> ClaudeCodeCompatibility {
-    config
+fn claude_compat(config: &FileConfig) -> ClaudeCompat {
+    let project = config
         .compatibility
         .as_ref()
         .and_then(|section| section.claude_code.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    ClaudeCompat {
+        person: config
+            .person_claude_code
+            .clone()
+            .unwrap_or_else(|| project.clone()),
+        project,
+    }
 }
 
 /// `skills`: `paths` are additional skill roots (`~/` and workspace-relative
@@ -17394,6 +17437,57 @@ request_timeout = 0
             assert_ne!(inputs(base.clone()), inputs(changed));
         }
         assert_eq!(super::auth_reload_inputs(b"{not json"), b"{not json");
+    }
+
+    #[test]
+    fn claude_code_folders_are_watched_where_they_are_by_whose_toggles_cover_them() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-claude-watch-{}", uuid::Uuid::now_v7()));
+        let home = root.join("home");
+        let project = root.join("project");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        let every = super::ClaudeCodeCompatibility {
+            enabled: None,
+            instructions: Some(true),
+            agents: Some(true),
+            skills: Some(true),
+            commands: Some(true),
+        };
+        let person_only = super::ClaudeCompat {
+            person: every.clone(),
+            project: super::ClaudeCodeCompatibility::default(),
+        };
+        assert_eq!(
+            super::claude_watch_roots(&person_only, Some(&home), &project),
+            [
+                home.join(".claude/CLAUDE.md"),
+                home.join(".claude/agents"),
+                home.join(".claude/commands"),
+                home.join(".claude/skills"),
+            ]
+        );
+        let project_only = super::ClaudeCompat {
+            person: super::ClaudeCodeCompatibility::default(),
+            project: every,
+        };
+        let roots = super::claude_watch_roots(&project_only, Some(&home), &project);
+        assert!(
+            roots.iter().all(|root| root.starts_with(&project)),
+            "{roots:?}"
+        );
+        for expected in [
+            "CLAUDE.md",
+            ".claude/CLAUDE.md",
+            ".claude/agents",
+            ".claude/skills",
+        ] {
+            assert!(roots.contains(&project.join(expected)), "{expected}");
+        }
+        assert!(
+            super::claude_watch_roots(&super::ClaudeCompat::default(), Some(&home), &project)
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -89,7 +89,8 @@ with tempfile.TemporaryDirectory(prefix='haarness-reliability-adaptations-') as 
     workspace = root / 'workspace'
     config = workspace / '.haarness'
     (config / 'agents').mkdir(parents=True)
-    (config / 'config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n[lsp]\nenabled=false\n')
+    # Chats start in Auto; the switch below needs a person's approval, as in Review.
+    (config / 'config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\napproval_mode="review"\n[lsp]\nenabled=false\n')
     for agent in ['review', 'review-two']:
         (config / 'agents' / (agent + '.md')).write_text('---\ndescription: Fixture reviewer\nmode: primary\nmodel: openai/gpt-5.4-mini\n---\nReply briefly.\n')
     run(['git', 'init', '-q', str(workspace)])
