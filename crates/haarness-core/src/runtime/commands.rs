@@ -190,8 +190,10 @@ impl CommandHooks for CommandHost {
     async fn ended(&self, entry: &CommandEntry, notify: bool) {
         let info = entry.info();
         // A shutdown records nothing: the next start finds the command still
-        // running in the chat's record and says it was cut off.
-        if info.ended_by == Some(ShellCommandEndedBy::Shutdown) {
+        // running in the chat's record and says it was cut off. One that a
+        // person or the agent had begun to stop records its end; nobody is
+        // told of it.
+        if entry.cut_off_by_shutdown() {
             return;
         }
         self.checkpoint(entry).await;

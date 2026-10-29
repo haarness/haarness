@@ -515,6 +515,8 @@ struct StopCause {
     state: ShellCommandState,
     /// One signal was sent, which the command may not heed.
     soft: bool,
+    /// A stop of everything took over a stop already under way.
+    taken_over: bool,
 }
 
 /// How a stop goes.
@@ -705,6 +707,7 @@ impl CommandEntry {
                             ended_by,
                             state: cause.state,
                             soft: false,
+                            taken_over: true,
                         });
                     }
                     match sequence {
@@ -719,6 +722,7 @@ impl CommandEntry {
                         ended_by,
                         state,
                         soft: only,
+                        taken_over: false,
                     });
                 }
             }
@@ -919,6 +923,14 @@ impl CommandEntry {
         if info.background {
             self.hooks.ended(self, notify).await;
         }
+    }
+
+    /// Haarness stopped while it ran, and nothing else had begun to stop
+    /// it: its end is left for the next start to report.
+    pub(crate) fn cut_off_by_shutdown(&self) -> bool {
+        self.stopping.lock().is_some_and(|cause| {
+            cause.ended_by == ShellCommandEndedBy::Shutdown && !cause.taken_over
+        })
     }
 
     /// The end of its output, at most `lines` lines and `bytes` bytes.

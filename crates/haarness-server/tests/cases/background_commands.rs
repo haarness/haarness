@@ -1243,3 +1243,46 @@ async fn a_command_ends_when_its_shell_does_though_what_it_left_never_stops_prin
         let _ = std::fs::remove_file(path);
     }
 }
+
+#[tokio::test]
+async fn a_command_already_stopping_when_haarness_stops_records_its_end() {
+    use haarness_protocol::ShellCommandState as State;
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_stop_grace_ms = 1_000;
+    });
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"trap '' INT; printf ready; sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let id = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    command_until(&runtime, thread, &id, |info| info.output_bytes > 0).await;
+    // A person stops it, and Haarness stops before it has ended.
+    runtime.stop_shell_command(thread, &id).await.unwrap();
+    runtime
+        .interrupt_active_turns("Haarness stopped")
+        .await
+        .unwrap();
+    command_until(&runtime, thread, &id, |info| !info.state.is_live()).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while checkpoints(&runtime, thread).await.len() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("its end is recorded, so a restart does not call it cut off");
+    assert_eq!(
+        checkpoints(&runtime, thread).await,
+        [(id.clone(), State::Running), (id.clone(), State::Stopped)]
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(notices(&runtime, thread).await.is_empty());
+}
