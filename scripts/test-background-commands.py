@@ -17,7 +17,10 @@ Drives an isolated workspace daemon with the echo provider (no paid model):
   began, and `bash_stop` ends the command; the agent is not told again.
 - run: `haarness run --wait-background` waits for the command and prints
   what the agent says when it ends; without the flag the run says it keeps
-  running on the server.
+  running on the server. A run never moves a command to the background:
+  a long one keeps its deadline (`shell_timeout_ms`, 8 s here), one the
+  agent starts there stops at it, and a waiting run that gives up stops
+  what it waited for.
 """
 import json
 import os
@@ -41,7 +44,7 @@ home.mkdir()
 (workspace / ".haarness").mkdir(parents=True)
 (workspace / ".haarness/config.toml").write_text(
     '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="allow"\n[lsp]\nenabled=false\n'
-    "[execution]\nshell_move_after_ms=1500\nshell_stop_grace_ms=500\n")
+    "[execution]\nshell_timeout_ms=8000\nshell_move_after_ms=1500\nshell_stop_grace_ms=500\n")
 env = {**ISOLATED, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "HAARNESS_HOME": str(home),
        "HAARNESS_DATA_DIR": str(root / "data"), "USER": os.environ.get("USER", "fixture"), "LANG": "en_US.UTF-8",
        "HAARNESS_TEST_PROVIDER": "1"}
@@ -240,6 +243,26 @@ try:
     assert detached.returncode == 0, detached.stderr
     assert "1 background command keeps running on the Haarness server." in detached.stderr, detached.stderr
     ok("haarness run --wait-background waits for the command and prints what follows")
+
+    # run limits
+    left = [entry for entry in api("/commands/active") if entry["command"] == "sleep 30"]
+    assert len(left) == 1 and not left[0].get("movesAt"), left
+    began = time.monotonic()
+    held = subprocess.run(args + ["run", "--wait-background", tool("bash", {"command": "sleep 25; echo never"})],
+                          env=env, capture_output=True, text=True, timeout=120)
+    assert time.monotonic() - began < 20, "a run moved a long command and waited for it"
+    assert "timed out after 8000 ms" in held.stdout, held.stdout
+    gave_up = subprocess.run(args + ["run", "--wait-background", "--background-timeout-ms", "1500",
+                                     tool("bash", {"command": "sleep 40", "run_in_background": True})],
+                             env=env, capture_output=True, text=True, timeout=120)
+    assert gave_up.returncode != 0 and "was stopped" in gave_up.stderr, gave_up.stderr
+    until(lambda: not [entry for entry in api("/commands/active") if entry["command"] == "sleep 40"],
+          "the run that gave up left its command running")
+    detached_chat = left[0]["threadId"]
+    info = until(lambda: (lambda info: info if info["state"] not in ("running", "stopping") else None)(
+        command(detached_chat, left[0]["id"])), "the detached command outlived its limit", 20)
+    assert info["state"] == "timed_out", info
+    ok("a run keeps deadlines, stops what it gave up on, and its background commands stop at their limit")
 finally:
     if connection:
         subprocess.run(args + ["serve", "--stop"], env=env, capture_output=True, timeout=60)

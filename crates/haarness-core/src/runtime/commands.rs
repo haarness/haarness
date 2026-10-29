@@ -246,7 +246,6 @@ impl RunnerTask {
             settings: self.config.execution.clone(),
             follows: self.request.follows_background && !self.unattended,
             subagent: self.thread.is_subagent,
-            unattended: self.unattended,
         })
     }
 
