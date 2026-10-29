@@ -432,14 +432,14 @@ pub(crate) struct CommandPolicy {
 impl CommandPolicy {
     /// `follows`: the turn's client follows background work up;
     /// `subagent`: the chat is a subagent's (or a workflow's);
-    /// `unattended`: nobody watches the turn (a scheduled run), whose
-    /// commands in the background never run unlimited;
-    /// `timeout_ms`: the call's own timeout, when it gave one.
+    /// `timeout_ms`: the call's own timeout, when it gave one. Where
+    /// nothing follows background work up (a scheduled run, `haarness run`,
+    /// a script), a command in the background never runs unlimited: a
+    /// timeout of 0 does not lift `shell_timeout_ms` there.
     pub(crate) fn new(
         settings: &ExecutionSettings,
         follows: bool,
         subagent: bool,
-        unattended: bool,
         timeout_ms: Option<u64>,
     ) -> Self {
         let millis = Duration::from_millis;
@@ -456,7 +456,7 @@ impl CommandPolicy {
             None => deadline,
         };
         let background_limit = match explicit {
-            Some(None) if unattended => deadline.map(Limit::SinceStart),
+            Some(None) if !interactive => deadline.map(Limit::SinceStart),
             Some(limit) => limit.map(Limit::SinceStart),
             None if interactive => (settings.shell_background_max_ms > 0)
                 .then(|| Limit::SinceBackground(millis(settings.shell_background_max_ms))),
@@ -1128,7 +1128,6 @@ pub(crate) struct ShellCallInner {
     pub(crate) settings: ExecutionSettings,
     pub(crate) follows: bool,
     pub(crate) subagent: bool,
-    pub(crate) unattended: bool,
 }
 
 impl std::fmt::Debug for ShellCall {
@@ -1201,7 +1200,6 @@ impl ShellCall {
             &self.0.settings,
             self.0.follows,
             self.0.subagent,
-            self.0.unattended,
             timeout_ms,
         )
     }
@@ -1959,13 +1957,13 @@ mod tests {
     #[test]
     fn the_policy_moves_only_where_a_client_follows_and_never_a_subagents() {
         let settings = ExecutionSettings::default();
-        let interactive = CommandPolicy::new(&settings, true, false, false, None);
+        let interactive = CommandPolicy::new(&settings, true, false, None);
         assert_eq!(interactive.move_after, Some(Duration::from_secs(60)));
         assert_eq!(interactive.foreground_deadline, None);
         assert_eq!(interactive.background_limit, None);
         assert!(interactive.movable && interactive.delivers_notice);
         // A timeout the agent gives limits the whole run and nothing moves.
-        let timed = CommandPolicy::new(&settings, true, false, false, Some(5_000));
+        let timed = CommandPolicy::new(&settings, true, false, Some(5_000));
         assert_eq!(timed.move_after, None);
         assert_eq!(timed.foreground_deadline, Some(Duration::from_secs(5)));
         assert_eq!(
@@ -1974,29 +1972,32 @@ mod tests {
         );
         // Elsewhere, as before: the configured deadline, also in the
         // background.
-        let script = CommandPolicy::new(&settings, false, false, false, None);
+        let script = CommandPolicy::new(&settings, false, false, None);
         assert_eq!(script.move_after, None);
         assert_eq!(script.foreground_deadline, Some(Duration::from_secs(120)));
         assert_eq!(
             script.background_limit,
             Some(Limit::SinceStart(Duration::from_secs(120)))
         );
-        let subagent = CommandPolicy::new(&settings, true, true, false, None);
+        let subagent = CommandPolicy::new(&settings, true, true, None);
         assert_eq!(subagent.move_after, None);
         assert!(!subagent.movable && !subagent.delivers_notice);
-        // Nobody watches a scheduled run: no timeout lifts its limit.
-        let scheduled = CommandPolicy::new(&settings, false, false, true, Some(0));
+        // Where nothing follows background work up (a scheduled run,
+        // `haarness run`, a script), no timeout lifts the limit in the
+        // background; it still does in the foreground.
+        let script = CommandPolicy::new(&settings, false, false, Some(0));
         assert_eq!(
-            scheduled.background_limit,
+            script.background_limit,
             Some(Limit::SinceStart(Duration::from_secs(120)))
         );
+        assert_eq!(script.foreground_deadline, None);
         // Zero moves nothing; a background limit counts from the move.
         let settings = ExecutionSettings {
             shell_move_after_ms: 0,
             shell_background_max_ms: 1_000,
             ..ExecutionSettings::default()
         };
-        let never = CommandPolicy::new(&settings, true, false, false, None);
+        let never = CommandPolicy::new(&settings, true, false, None);
         assert_eq!(never.move_after, None);
         assert_eq!(never.foreground_deadline, Some(Duration::from_secs(120)));
         assert_eq!(
@@ -2079,7 +2080,6 @@ mod tests {
             settings: ExecutionSettings::default(),
             follows: true,
             subagent: false,
-            unattended: false,
         });
         let run = call
             .run(
@@ -2250,7 +2250,6 @@ mod tests {
             },
             follows: true,
             subagent: false,
-            unattended: false,
         });
         let run = call
             .run(
@@ -2348,7 +2347,7 @@ mod tests {
                     control: Arc::new(Silent),
                 },
                 cwd: PathBuf::new(),
-                policy: CommandPolicy::new(&ExecutionSettings::default(), true, false, false, None),
+                policy: CommandPolicy::new(&ExecutionSettings::default(), true, false, None),
                 hooks: Arc::new(Quiet),
                 read_cursor: Mutex::new(0),
                 stopping: Mutex::new(None),

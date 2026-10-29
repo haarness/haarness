@@ -380,10 +380,12 @@ foreground command moves to the background while it runs when a person sends
 it there, or by itself after `execution.shell_move_after_ms` in a turn whose
 client sent `followsBackground: true` with `/turns`, `/input` (kept with a
 queued message until it runs) or `/commands`; the turns its background results
-start keep it. Desktop, the terminal UI, the phone and web apps and
-`haarness run --wait-background` send it. Without it (an SDK script, an editor
-over ACP, `haarness run` without waiting, a scheduled run, an older client) a
-foreground command never moves by itself and keeps its deadline, as before.
+start keep it. Desktop, the terminal UI and the phone and web apps send it.
+Without it (an SDK script, an editor over ACP, `haarness run`, a scheduled
+run, an older client) a foreground command never moves by itself and keeps
+its deadline, as before, and a command the agent starts in the background is
+stopped `execution.shell_timeout_ms` after it started, also when the agent
+gave a `timeout` of 0.
 A subagent's commands never move, and its background commands stop without a
 message when its turn ends. A person's own `!` command and a workflow's
 `shell()` never go to the background. The agent reads a command's output, lists

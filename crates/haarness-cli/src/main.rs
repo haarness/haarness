@@ -512,8 +512,11 @@ struct RunArgs {
     #[arg(long, value_enum, default_value_t = RunFormat::Default)]
     format: RunFormat,
     /// Wait for background subagents, workflows and shell commands launched
-    /// by the model; a long command moves to the background meanwhile.
-    /// Without this flag, they continue on the workspace server.
+    /// by the model, and for what the agent says when they end. Shell
+    /// commands the agent starts in the background stop at
+    /// execution.shell_timeout_ms; a run that stops waiting (the timeout,
+    /// Ctrl-C) stops them. Without this flag, they continue on the
+    /// workspace server.
     #[arg(long)]
     wait_background: bool,
     /// Maximum background wait in milliseconds; implies --wait-background.
@@ -4851,7 +4854,8 @@ async fn run_command(
         }
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
-        stop_on_signal(&client, thread.id, goal, async {
+        let waits_for_background = args.wait_background || args.background_timeout_ms.is_some();
+        stop_on_signal(&client, thread.id, goal, waits_for_background, async {
             // Auto and Yolo answer requests without a person; with nobody
             // to ask, a run refuses what still needs one and goes on.
             let answers = approvals
@@ -4963,11 +4967,10 @@ async fn run_command(
                         command: args
                             .command
                             .map(|command| command.trim_start_matches('/').to_owned()),
-                        // A run that waits for background work follows it up:
-                        // a long command moves to the background instead of
-                        // reaching its deadline, and the run waits for it.
-                        follows_background: args.wait_background
-                            || args.background_timeout_ms.is_some(),
+                        // A one-shot run does not follow background work up:
+                        // a long command keeps its deadline in the foreground,
+                        // and one the agent starts in the background stops
+                        // at execution.shell_timeout_ms, as in a schedule.
                         ..Default::default()
                     },
                 )
@@ -6584,6 +6587,7 @@ async fn stop_on_signal<T>(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
     goal: bool,
+    waits_for_background: bool,
     work: impl Future<Output = Result<T>>,
 ) -> Result<T> {
     let status = tokio::select! {
@@ -6602,7 +6606,12 @@ async fn stop_on_signal<T>(
                 .goal_action(thread_id, &GoalActionRequest::Pause)
                 .await;
         }
-        client.interrupt_session(thread_id, false).await
+        let stopped = client.interrupt_session(thread_id, false).await;
+        // A run that waited for its commands leaves none of them running.
+        if waits_for_background {
+            stop_background_commands_client(client, thread_id).await;
+        }
+        stopped
     };
     tokio::select! {
         stopped = tokio::time::timeout(Duration::from_secs(10), stop) => match stopped {
@@ -6866,12 +6875,22 @@ async fn settle_cli_subagents_client(
             break;
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            // A run that stops waiting leaves no command it waited for.
+            let stopped = stop_background_commands_client(client, thread_id).await;
             anyhow::bail!(
-                "background wait timed out; {} subagent{} and {} command{} continue on the Haarness server",
+                "background wait timed out; {} subagent{} continue{} on the Haarness server{}",
                 tasks.len(),
                 if tasks.len() == 1 { "" } else { "s" },
-                commands.running,
-                if commands.running == 1 { "" } else { "s" },
+                if tasks.len() == 1 { "s" } else { "" },
+                if stopped > 0 {
+                    format!(
+                        ", and {stopped} background command{} {} stopped",
+                        if stopped == 1 { "" } else { "s" },
+                        if stopped == 1 { "was" } else { "were" }
+                    )
+                } else {
+                    String::new()
+                },
             );
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -6944,6 +6963,27 @@ impl BackgroundCommands {
     fn settled(&self) -> bool {
         self.running == 0 && self.untold == 0
     }
+}
+
+/// Stop the chat's commands still running; answers how many it stopped.
+async fn stop_background_commands_client(
+    client: &haarness_tui::api::ApiClient,
+    thread_id: ThreadId,
+) -> usize {
+    let Ok(commands) = client.shell_commands(thread_id).await else {
+        return 0;
+    };
+    let mut stopped = 0;
+    for command in commands.iter().filter(|command| command.state.is_live()) {
+        if client
+            .stop_shell_command(thread_id, &command.id)
+            .await
+            .is_ok()
+        {
+            stopped += 1;
+        }
+    }
+    stopped
 }
 
 async fn background_commands_client(
