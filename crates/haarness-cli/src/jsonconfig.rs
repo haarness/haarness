@@ -433,9 +433,20 @@ pub fn load_layers_with_system(
     let mut read_rules = haarness_core::PermissionEngine::new(read_rules);
     read_rules.set_floor(layers.global_rules().iter().cloned());
     read_rules.set_workspace(workspace);
+    // A file is judged where it really is, but a rule may name it through a folder link: macOS keeps /var, /tmp
+    // and /etc under /private, so a rule for `/var/…` must meet the real `/private/var/…` path too.
     let denied = |file: &Path| {
-        (read_rules.evaluate(&format!("read:{}", file.display()))
-            == haarness_core::PermissionDecision::Deny)
+        let real = file.display().to_string();
+        let alias = ["/private/var/", "/private/tmp/", "/private/etc/"]
+            .iter()
+            .any(|prefix| real.starts_with(prefix))
+            .then(|| real["/private".len()..].to_owned());
+        std::iter::once(real.as_str())
+            .chain(alias.as_deref())
+            .any(|path| {
+                read_rules.evaluate(&format!("read:{path}"))
+                    == haarness_core::PermissionDecision::Deny
+            })
             .then_some("a read rule denies it")
     };
     for (file, trusted) in local_files {
@@ -3029,6 +3040,7 @@ mod tests {
             config.clone(),
             home.join(".st/data"),
             home.join(".ssh"),
+            home.join("private"),
             project.join(".git"),
             own.join(".git"),
         ] {
@@ -3039,14 +3051,16 @@ mod tests {
         fs::write(&store, "SIGN_IN_SECRET").unwrap();
         fs::write(&older, "OLDER_SIGN_IN_SECRET").unwrap();
         fs::write(home.join(".ssh/id_ed25519"), "KEY_SECRET").unwrap();
+        fs::write(home.join("private/notes.md"), "PRIVATE_NOTES").unwrap();
         haarness_core::record_credential_store(store.clone(), false);
         haarness_core::record_credential_store(older.clone(), false);
         fs::write(config.join("AGENTS.md"), "GLOBAL_BODY").unwrap();
         fs::write(
             config.join("haarness.json"),
             format!(
-                r#"{{"permission":{{"read":{{"{}/*":"deny","*AGENTS.md":"deny"}}}}}}"#,
-                home.join(".ssh").display()
+                r#"{{"permission":{{"read":{{"{}/*":"deny","{}/*":"deny","*AGENTS.md":"deny"}}}}}}"#,
+                home.join(".ssh").display(),
+                home.join("private").display()
             ),
         )
         .unwrap();
@@ -3055,7 +3069,7 @@ mod tests {
         fs::write(
             project.join("haarness.json"),
             format!(
-                r#"{{"instructions":["~/.st/data/auth.json","~/.ssh/id_ed25519","{}"]}}"#,
+                r#"{{"instructions":["~/.st/data/auth.json","~/.ssh/id_ed25519","~/private/notes.md","{}"]}}"#,
                 store.display()
             ),
         )
@@ -3073,7 +3087,7 @@ mod tests {
             layers.notices
         );
         let instructions = layers.instructions.expect("instructions");
-        for hidden in ["SIGN_IN_SECRET", "KEY_SECRET"] {
+        for hidden in ["SIGN_IN_SECRET", "KEY_SECRET", "PRIVATE_NOTES"] {
             assert!(!instructions.contains(hidden), "{instructions}");
         }
         // The person's own file still loads, a read rule about it or not.
@@ -3083,6 +3097,11 @@ mod tests {
                 "[Instruction file omitted: {} (Haarness keeps sign-ins there)]",
                 store.display()
             )),
+            "{instructions}"
+        );
+        // A private key is left out as credentials, rule or no rule; another file by its read rule.
+        assert!(
+            instructions.contains("(it holds credentials)]"),
             "{instructions}"
         );
         assert!(

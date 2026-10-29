@@ -392,8 +392,50 @@ pub fn file_left_out(
     let inside = root
         .as_deref()
         .is_some_and(|root| canonical.starts_with(root));
+    // A project names files outside itself only through its own configuration, which a cloned repository writes:
+    // it never gets a private key or another tool's credentials into the prompt, rule or no rule.
+    if !trusted && !inside && holds_credentials(&canonical) {
+        return Some(CREDENTIALS_FILE);
+    }
     let rules: ImportFilter<'_> = if trusted || inside { &|_| None } else { omit };
     left_out(&canonical, root.as_deref(), rules)
+}
+
+/// Why [`file_left_out`] leaves out a file that holds credentials.
+pub const CREDENTIALS_FILE: &str = "it holds credentials";
+
+/// Files where tools keep keys and credentials: SSH, cloud and cluster tools, package registries, Git, and key
+/// files by their extension.
+fn holds_credentials(canonical: &Path) -> bool {
+    const FOLDERS: [&str; 8] = [
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".kube",
+        ".docker",
+        ".azure",
+        ".config/gcloud",
+        ".config/gh",
+    ];
+    const NAMES: [&str; 5] = [".netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass"];
+    const EXTENSIONS: [&str; 6] = ["pem", "key", "p12", "pfx", "jks", "keystore"];
+    let in_folder = haarness_protocol::home_dir()
+        .and_then(|home| home.canonicalize().ok())
+        .is_some_and(|home| {
+            FOLDERS
+                .iter()
+                .any(|folder| canonical.starts_with(home.join(folder)))
+        });
+    let name = canonical
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    in_folder
+        || NAMES.contains(&name.as_str())
+        || (name.starts_with("id_") && !name.ends_with(".pub"))
+        || name
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| EXTENSIONS.contains(&extension))
 }
 
 /// Why [`left_out`] leaves out a secret-named file.
@@ -527,6 +569,43 @@ fn resolve(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_project_never_names_credentials_outside_itself_as_instructions() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-credential-instructions-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let project = root.join("project");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let none: ImportFilter<'_> = &|_| None;
+        for name in [
+            "id_ed25519",
+            "deploy.pem",
+            ".netrc",
+            "service.key",
+            ".git-credentials",
+        ] {
+            let file = outside.join(name);
+            std::fs::write(&file, "SECRET").unwrap();
+            assert_eq!(
+                file_left_out(&file, &project, false, none),
+                Some(CREDENTIALS_FILE),
+                "{name}"
+            );
+            // The person's own configuration may still name it.
+            assert_eq!(file_left_out(&file, &project, true, none), None, "{name}");
+        }
+        for name in ["guide.md", "id_ed25519.pub"] {
+            let file = outside.join(name);
+            std::fs::write(&file, "fine").unwrap();
+            assert_eq!(file_left_out(&file, &project, false, none), None, "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     use super::*;
 
     fn temp(name: &str) -> PathBuf {
