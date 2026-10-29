@@ -176,6 +176,23 @@ test.describe("a server with commands in the background", () => {
     await expect(command.locator(".tool-output")).toContainText("ready");
     await expect(command.locator(".tool-output")).toContainText("tick 4", { timeout: 10000 });
     await expect(command).not.toContainText("runs in the background");
+    // Its stop names it, comes before its output for the keyboard, and the
+    // title bar's count stands as tall as the buttons beside it.
+    const stopButton = step("trap").getByRole("button", { name: /^Stop this command: trap '' INT TERM/ });
+    await expect(stopButton).toBeVisible();
+    expect(
+      await step("trap").evaluate((element) => {
+        const stop = element.querySelector(".tool-controls")!;
+        const output = element.querySelector(".tool-output")!;
+        return !!(stop.compareDocumentPosition(output) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }),
+    ).toBe(true);
+    const heights = await page.evaluate(() =>
+      [".background-pill", ".titlebar-actions .icon-button"].map((selector) =>
+        Math.round(document.querySelector(selector)!.getBoundingClientRect().height),
+      ),
+    );
+    expect(heights[0]).toBe(heights[1]);
     await pictures("background-row", step("trap"));
     await pictures("background-titlebar", page.locator(".titlebar"));
     await pictures("background-sidebar-ring", page.locator(".sidebar"));
@@ -349,14 +366,22 @@ test.describe("a server with commands in the background", () => {
     await page.waitForTimeout(1500);
     await expect(copy).not.toHaveAttribute("data-status", "running");
     await expect(copy.locator(".tool-state")).toHaveCount(0);
-    await expect(step("original server").getByRole("button", { name: "Stop this command" })).toHaveCount(0);
+    await expect(step("original server").getByRole("button", { name: /^Stop this command/ })).toHaveCount(0);
     await expect(pill()).toHaveCount(0);
+    // Opened, the copy follows nothing and tells the original nothing.
+    await copy.locator("summary").click();
+    await page.waitForTimeout(1500);
     await pictures("fork-copy", step("original server"));
-    // The original still runs, and its row says so.
+    // The original still runs, and its row, its stop, the count and Still
+    // running say so.
     const title = ((await api("listThreads", {})) as any[]).find((thread) => thread.id === original).title;
     await page.locator(".sidebar-lists").getByTitle(title, { exact: true }).first().click();
     await expect(row("original server")).toHaveAttribute("data-status", "running");
+    await expect(row("original server").locator(".tool-state")).toHaveText(/^\d+s$/);
+    await expect(step("original server").getByRole("button", { name: /^Stop this command/ })).toBeVisible();
     await expect(pill()).toHaveText("1 in background");
+    if ((await pill().getAttribute("aria-pressed")) !== "true") await pill().click();
+    await expect(page.getByRole("region", { name: "Still running" }).locator("details.tool-call")).toHaveCount(1);
     // The agent reads and stops it; then the server is asked afresh (a
     // reload) from a fork of all that, which the server never ran.
     await send("!tool bash_output " + JSON.stringify({ id: running.id }));
@@ -402,14 +427,16 @@ test.describe("a server with commands in the background", () => {
       .toBe(0);
     expect(((await api("activeTurns")) as any[]).length).toBe(1);
     await expect(pill()).toHaveText("1 in background");
-    // Still running stayed open from before; the pill says so.
-    await expect(pill()).toHaveAttribute("aria-pressed", "true");
+    if ((await pill().getAttribute("aria-pressed")) !== "true") await pill().click();
     const panel = page.getByRole("region", { name: "Still running" });
     await expect(panel.locator(".agent-task")).toHaveCount(1);
     await pictures("still-running-subagent", page.locator(".side-panel"));
-    // It finishes on its own: the count goes and it stays listed, greyed.
+    const listed = await panel.locator(".agent-task").elementHandle();
+    // It finishes on its own: the count goes and it stays listed, greyed,
+    // the same row all along.
     await expect(pill()).toHaveCount(0, { timeout: 40000 });
     await expect(panel.locator(".background-item.ended .agent-task")).toHaveCount(1);
+    expect(await listed!.evaluate((element) => element.isConnected)).toBe(true);
     await idle();
   });
 
@@ -436,6 +463,91 @@ test.describe("a server with commands in the background", () => {
     await step("building").getByRole("button", { name: "Stop this command" }).click();
     await expect(command.locator(".tool-state")).toHaveText("Stopped", { timeout: 15000 });
     await idle();
+    expect(errors).toEqual([]);
+  });
+});
+
+test.describe("the sidebar's ring across chats and projects", () => {
+  let second = "";
+  test.beforeAll(async () => {
+    test.setTimeout(150000);
+    root = await realpath(await mkdtemp(join(process.env.HAARNESS_E2E_DIR ?? tmpdir(), "haarness-background-ring-")));
+    project = join(root, "project");
+    second = join(root, "second");
+    for (const folder of [project, second]) {
+      await mkdir(join(folder, ".haarness"), { recursive: true });
+      await writeFile(
+        join(folder, ".haarness/config.toml"),
+        '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="allow"\n[lsp]\nenabled=false\n',
+      );
+    }
+    await launch(binary);
+  });
+  test.afterAll(async () => {
+    try {
+      execFileSync(binary, ["--workspace", second, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
+    } catch {}
+    await close(binary);
+  });
+
+  test("a chat not shown, here or in another project, rings while its command runs", async () => {
+    test.setTimeout(150000);
+    const on = (folder: string) => (method: string, ...args: unknown[]) =>
+      page.evaluate(
+        ({ connection, method, args }) => (window as any).haarness.api(connection, method, args),
+        { connection: "local:" + folder, method, args },
+      ) as Promise<any>;
+    // This project: a chat left serving, then another one opened.
+    await send(bash("printf 'ring here\\n'; sleep 120", true));
+    await expect(row("ring here").locator(".tool-chip")).toHaveText("In background");
+    await idle();
+    const here = await shownChat();
+    await newChat();
+    await send(bash("printf 'quick\\n'"));
+    await expect(row("quick")).toHaveAttribute("data-status", "done");
+    await idle();
+    const quick = await shownChat();
+    const title = (thread: string, list: any[]) => list.find((item) => item.id === thread).title as string;
+    const hereRow = page
+      .getByRole("region", { name: "Project project", exact: true })
+      .locator(".session-row")
+      .filter({ has: page.getByTitle(title(here, await api("listThreads", {})), { exact: true }) })
+      .first();
+    await expect(hereRow.locator(".session-status")).toHaveClass(/\bbackground\b/);
+    // Another project, with a chat left serving there.
+    await app.evaluate(({ dialog }, path) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] });
+    }, second);
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
+    await expect(page.getByRole("region", { name: "Project second", exact: true })).toHaveClass(/current/);
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+    await newChat();
+    await send(bash("printf 'ring there\\n'; sleep 120", true));
+    await expect(row("ring there").locator(".tool-chip")).toHaveText("In background");
+    const there = (await on(second)("listThreads", {})).find((thread: any) => !thread.isSubagent)!;
+    // Back in the first project, on the other chat: both rings show.
+    await page
+      .getByRole("region", { name: "Project project", exact: true })
+      .getByTitle(title(quick, await api("listThreads", {})), { exact: true })
+      .first()
+      .click();
+    await expect(page.getByRole("region", { name: "Project project", exact: true })).toHaveClass(/current/);
+    const thereRow = page
+      .getByRole("region", { name: "Project second", exact: true })
+      .locator(".session-row")
+      .filter({ has: page.getByTitle(there.title, { exact: true }) })
+      .first();
+    await expect(thereRow.locator(".session-status")).toHaveClass(/\bbackground\b/, { timeout: 30000 });
+    await expect(hereRow.locator(".session-status")).toHaveClass(/\bbackground\b/);
+    await expect(hereRow.locator("button").first()).toHaveAttribute("aria-description", /Working in background/);
+    await pictures("sidebar-rings", page.locator(".sidebar"));
+    // Stopped from elsewhere, each ring goes.
+    const thereCommand = (await on(second)("listShellCommands", there.id))[0];
+    await on(second)("stopShellCommand", there.id, thereCommand.id);
+    await expect(thereRow.locator(".session-status")).not.toHaveClass(/\bbackground\b/, { timeout: 30000 });
+    const hereCommand = (await commands(here))[0];
+    await api("stopShellCommand", here, hereCommand.id);
+    await expect(hereRow.locator(".session-status")).not.toHaveClass(/\bbackground\b/, { timeout: 30000 });
     expect(errors).toEqual([]);
   });
 });

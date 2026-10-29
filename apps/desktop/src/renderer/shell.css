@@ -91,7 +91,7 @@
   align-items: center;
   gap: var(--s1);
   min-height: 0;
-  height: var(--control-sm);
+  height: var(--icon-button);
   padding: 0 var(--s2);
   margin-inline-end: var(--s1);
   border: 0;

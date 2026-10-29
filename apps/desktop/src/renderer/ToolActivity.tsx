@@ -13,6 +13,7 @@ import {
 } from "./background-work";
 import {
   commandForCall,
+  commandForgotten,
   commandRef,
   commandStatus,
   commandView,
@@ -20,6 +21,7 @@ import {
   liveCommand,
   ranFor,
   screenText,
+  goneKey,
   stepCallId,
   type CommandCheckpoint,
 } from "./shell-commands";
@@ -153,7 +155,7 @@ export function ToolActivity(props: {
             : undefined;
     // A row shows its own chat's command: a fork's copied row is not the
     // original's, which runs on in the chat it was forked from.
-    if (!found || store.state.commandsGone[found.id]) return undefined;
+    if (!found || store.state.commandsGone[goneKey(found.threadId, found.id)]) return undefined;
     return props.call && found.threadId !== props.call.threadId ? undefined : found;
   });
   /** A batch with a step whose command runs on in the background says so
@@ -168,17 +170,26 @@ export function ToolActivity(props: {
         command.callId.startsWith(call.callId + ":") &&
         command.background &&
         liveCommand(command.state) &&
-        !store.state.commandsGone[command.id],
+        !store.state.commandsGone[goneKey(command.threadId, command.id)],
     );
   };
-  /** The server no longer has the command this row's checkpoint names. */
+  /**
+   * The command this row's checkpoint names does not run for this chat: the
+   * server answered that this chat no longer has it, listed this chat's
+   * commands without it, or reports it as another chat's (a fork names the
+   * commands of the chat it came from).
+   */
   const forgotten = () => {
     const id = props.checkpoint?.command_id ?? ref()?.id;
-    return (
-      !info() &&
-      !!id &&
-      (!!store.state.commandsGone[id] || (!!props.call && !!store.state.commandsListed[props.call.threadId]))
-    );
+    const thread = props.call?.threadId;
+    return commandForgotten({
+      id,
+      thread,
+      reported: !!info(),
+      owner: id ? store.state.shellCommands[id]?.threadId : undefined,
+      gone: (key) => !!store.state.commandsGone[key],
+      listed: !!thread && !!store.state.commandsListed[thread],
+    });
   };
   const command = createMemo(() =>
     shell() || props.command
@@ -310,10 +321,12 @@ export function ToolActivity(props: {
   };
   /** The command's output while it runs or once it ran in the background,
    * read live while the row is open. */
-  const following = () => (background() && commandLive()) || (!!info() && (background() || !props.result));
+  // Only a command the server reports for this chat: a checkpoint alone may
+  // be a fork's copy of another chat's.
+  const following = () => !!info() && (background() || !props.result);
   const followed = followCommand({
-    id: () => info()?.id ?? command()?.id,
-    thread: () => info()?.threadId ?? props.call?.threadId,
+    id: () => info()?.id,
+    thread: () => info()?.threadId,
     active: () => open() && following(),
   });
   /** What the open row shows of a command's output: what was followed, or
@@ -394,7 +407,37 @@ export function ToolActivity(props: {
   };
   return (
     <>
-    <Show when={toolName(props.name) === "preview" && props.result && !props.result.is_error && previewInfo(props.result.metadata)} fallback={<><details
+    <Show when={toolName(props.name) === "preview" && props.result && !props.result.is_error && previewInfo(props.result.metadata)} fallback={<>
+    {/* Before the row, so the keyboard reaches them ahead of an open
+        output; they are drawn over the summary's end. */}
+    <Show when={stoppable() || (movable() && !background())}>
+      <div class="tool-controls" ref={measure}>
+        <Show when={movable()}>
+          <button
+            type="button"
+            class="tool-action"
+            aria-label={`${t("Send to background")}: ${target()}`}
+            disabled={!!busy()}
+            onClick={() => void store.run(move)}
+          >
+            {t("Send to background")}
+          </button>
+        </Show>
+        <Show when={stoppable()}>
+          <button
+            type="button"
+            class="icon-button tool-stop"
+            aria-label={`${stoppable()!.state === "stopping" ? t("Stopping…") : t("Stop this command")}: ${target()}`}
+            title={stoppable()!.state === "stopping" ? t("Stopping…") : t("Stop this command")}
+            disabled={stoppable()!.state === "stopping" || busy() === "stop"}
+            onClick={() => void store.run(stop)}
+          >
+            <Icon name="stop" size="xs" filled />
+          </button>
+        </Show>
+      </div>
+    </Show>
+    <details
       class="tool-call"
       classList={{
         "tool-child": props.nested,
@@ -628,32 +671,6 @@ export function ToolActivity(props: {
         </div>
       </Show>
     </details>
-    <Show when={stoppable() || (movable() && !background())}>
-      <div class="tool-controls" ref={measure}>
-        <Show when={movable()}>
-          <button
-            type="button"
-            class="tool-action"
-            disabled={!!busy()}
-            onClick={() => void store.run(move)}
-          >
-            {t("Send to background")}
-          </button>
-        </Show>
-        <Show when={stoppable()}>
-          <button
-            type="button"
-            class="icon-button tool-stop"
-            aria-label={stoppable()!.state === "stopping" ? t("Stopping…") : t("Stop this command")}
-            title={stoppable()!.state === "stopping" ? t("Stopping…") : t("Stop this command")}
-            disabled={stoppable()!.state === "stopping" || busy() === "stop"}
-            onClick={() => void store.run(stop)}
-          >
-            <Icon name="stop" size="xs" filled />
-          </button>
-        </Show>
-      </div>
-    </Show>
     </>}><PreviewBanner metadata={props.result?.metadata} /></Show>
     <Show when={app()} keyed>
       {(value) => (

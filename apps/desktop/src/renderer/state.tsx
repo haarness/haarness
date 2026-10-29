@@ -102,7 +102,7 @@ import { chatFolderPath, newChatFolder } from "./chat-folder";
 import { createProjectOverview } from "./project-overview";
 import { carryDraft } from "./draft-carry";
 import { commandBody, messageBody } from "./send-request";
-import { BACKGROUND_COMMANDS, laterCommand, liveCommand } from "./shell-commands";
+import { BACKGROUND_COMMANDS, goneKey, laterCommand, liveCommand } from "./shell-commands";
 import { checkAttachments, fileAttachments, type Attachment } from "./media";
 import type { SearchEntry } from "./search";
 import { requestedReasoning } from "./reasoning";
@@ -127,7 +127,8 @@ interface State extends Live {
   /** Chats whose commands the server has listed since the project opened:
    * a command of theirs it did not list is no longer running. */
   commandsListed: Record<string, boolean>;
-  /** Commands the server answered it no longer has. */
+  /** Commands the server answered it no longer has, by `goneKey` (the chat
+   * asked about them, then the command). */
   commandsGone: Record<string, boolean>;
   modelRecents: ModelKey[];
   /** This device's mode for new chats per project, and per-chat choices
@@ -1733,7 +1734,12 @@ function createApp(saved?: Preferences) {
           live === state ? Object.values(state.shellCommands) : (indexes()[location.id]?.commands ?? []);
         const background = new Set(
           commands
-            .filter((command) => command.background && liveCommand(command.state) && !state.commandsGone[command.id])
+            .filter(
+              (command) =>
+                command.background &&
+                liveCommand(command.state) &&
+                !state.commandsGone[goneKey(command.threadId, command.id)],
+            )
             .map((command) => command.rootThreadId),
         );
         return (live?.threads ?? []).map((thread) => ({

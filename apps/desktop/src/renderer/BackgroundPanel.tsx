@@ -23,10 +23,14 @@ export function BackgroundPanel(props: { work: ReturnType<typeof backgroundWork>
       >
         <div class="background-list">
           <For each={props.work.subagents()}>
-            {(task) => (
-              <div class="background-item" classList={{ ended: ended(props.work.status(task.key)) }}>
-                <AgentTask task={task} />
-              </div>
+            {(key) => (
+              <Show when={props.work.task(key)}>
+                {(task) => (
+                  <div class="background-item" classList={{ ended: ended(props.work.status(key)) }}>
+                    <AgentTask task={task()} />
+                  </div>
+                )}
+              </Show>
             )}
           </For>
           <For each={props.work.commands()}>
