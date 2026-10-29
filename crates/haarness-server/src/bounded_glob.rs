@@ -303,7 +303,10 @@ impl Walk {
                     .pattern
                     .matches_with(special, MatchOptions::new())
                 {
-                    self.add(at, Entry::named(entry.path.join(special), entry.linked));
+                    // `..` leads above the folder, as a link would: what is
+                    // read through it counts against a budget of linked
+                    // entries.
+                    self.add(at, Entry::named(entry.path.join(special), true));
                 }
             }
         }
@@ -633,7 +636,7 @@ mod tests {
         }
         std::os::unix::fs::symlink("../elsewhere", project.join("vendor")).unwrap();
         let pattern = format!("{}/**/*.rs", project.display());
-        // The project's own folders are read whatever their size.
+        // Every folder reached without a link is read whatever its size.
         let mut walk = Walk::new(&pattern).unwrap().linked_entries(0);
         assert_eq!(
             walk.by_ref().collect::<Vec<_>>(),
@@ -643,6 +646,24 @@ mod tests {
         let mut walk = Walk::new(&pattern).unwrap().linked_entries(5);
         assert_eq!(walk.by_ref().count(), 3);
         assert_eq!(walk.cut(), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_dot_part_that_climbs_to_the_parent_counts_as_linked() {
+        let root = tree("dots", &["project/.config/a.yml", "other/b.yml"]);
+        let project = root.join("project");
+        // `.*` also matches `.` and `..`; what `..` reaches lies outside the
+        // folder, as a linked one does.
+        let pattern = format!("{}/.*/**/*.yml", project.display());
+        let mut walk = Walk::new(&pattern).unwrap().linked_entries(0);
+        assert_eq!(
+            walk.by_ref().collect::<Vec<_>>(),
+            [project.join(".config/a.yml")]
+        );
+        assert_eq!(walk.cut(), Some(Cut::Large));
+        // Without a budget, `..` is read as `glob` reads it.
+        assert_eq!(walked(&pattern, Links::Unlooped), globbed(&pattern));
         fs::remove_dir_all(root).unwrap();
     }
 
