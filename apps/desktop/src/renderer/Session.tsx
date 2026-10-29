@@ -72,7 +72,7 @@ import { carriedReasoning } from "./reasoning";
 import { AgentTask } from "./AgentTask";
 import { Shimmer } from "./Shimmer";
 import { agentTasks, agentTaskStatus, taskKey, type AgentTask as Task } from "./agent-tasks";
-import { commandCheckpoints, type CommandCheckpoint } from "./shell-commands";
+import { commandCheckpoints, commandLines, type CommandCheckpoint } from "./shell-commands";
 import { backgroundCommands, commandsOffered } from "./background-work";
 import { createDictation } from "./dictation";
 import { FolderPicker } from "./FolderPicker";
@@ -1320,6 +1320,9 @@ export function Session() {
   const checkpoints = createMemo(() =>
     commandCheckpoints(retainedItems(state.items, thread())),
   );
+  /** Each command's line by its id, which a step reading or stopping it names. */
+  const lines = createMemo(() => commandLines(retainedItems(state.items, thread())));
+  const commandLine = (id: string) => lines().get(id);
   /* File → Send to background (no key unless the person gives it one): the
      reply carries on without waiting for its running commands and
      subagents, which go on in the background. With nothing to move it does
@@ -2600,6 +2603,8 @@ export function Session() {
                         ? checkpoints().get(taskKey(item.turnId, item.data.call_id))
                         : undefined;
                     })()}
+                    checkpointFor={(call) => checkpoints().get(taskKey(rows()[row.index]?.turnId, call))}
+                    commandLine={commandLine}
                     reply={reply(rows()[row.index])}
                     fork={() => app.run(() => fork(rows()[row.index]))}
                   />
@@ -3327,6 +3332,9 @@ function Message(props: {
   task?: Task;
   /** A shell command's last checkpoint, for its call's row. */
   checkpoint?: CommandCheckpoint;
+  /** A batch step's, by the step's call id. */
+  checkpointFor?: (callId: string) => CommandCheckpoint | undefined;
+  commandLine?: (id: string) => string | undefined;
   fork: () => Promise<unknown>;
   /** The message is the current Find match. */
   matched?: boolean;
@@ -3532,6 +3540,8 @@ function Message(props: {
                     callId: tool().call_id,
                   }}
                   checkpoint={props.checkpoint}
+                  checkpointFor={props.checkpointFor}
+                  commandLine={props.commandLine}
                   expanded={!app.state.preferences.compactTools}
                   waiting={awaitsApproval(app.state.permissions, {
                     threadId: props.item.threadId,

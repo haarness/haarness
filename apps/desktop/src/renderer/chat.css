@@ -688,7 +688,8 @@ html[dir="rtl"] .tool-target {
    not in it, so pressing one never opens the row; the summary keeps their
    width free before its chevron (`.tool-controls-room`). They are placed
    over the row's first line from the block that holds it. */
-.message:has(> .tool-controls) {
+.message:has(> .tool-controls),
+.tool-step {
   position: relative;
 }
 .tool-controls-room {
@@ -771,6 +772,17 @@ html[dir="rtl"] .tool-target {
   font-family: var(--sans);
   font-size: var(--ui-xs);
   color: var(--muted);
+}
+/* With a step's command in the background, the badge takes room: what the
+   steps acted on gives way first, and the batch keeps its words. */
+.tool-batch > summary:has(> .tool-chip) strong {
+  flex: 0 1 auto;
+}
+.tool-batch > summary:has(> .tool-chip) .tool-target {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .tool-children {
   padding-block: var(--s1);

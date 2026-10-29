@@ -70,15 +70,21 @@ export function commandView(input: {
   result?: { metadata?: unknown };
   info?: ShellCommandInfo;
   checkpoint?: CommandCheckpoint;
+  /** The server has listed the chat's commands, or answered that it has no
+   * such command, and this one was not there: a checkpoint that says it runs
+   * is from before (a restart the chat did not record, or a fork, which
+   * copies the checkpoints but runs nothing). */
+  forgotten?: boolean;
 }): CommandView | undefined {
   const { info, checkpoint } = input;
   const ref = commandRef(input.result?.metadata);
   if (!info && !checkpoint && !ref) return undefined;
+  const recorded = input.forgotten && liveCommand(checkpoint?.state) ? undefined : checkpoint?.state;
   // A checkpoint is written only for a command in the background.
   return {
     id: info?.id ?? checkpoint?.command_id ?? ref?.id,
     background: !!(info?.background || checkpoint || ref?.background),
-    state: info?.state ?? checkpoint?.state,
+    state: info?.state ?? recorded,
     exitCode: info ? (info.exitCode ?? undefined) : (checkpoint?.exit_code ?? undefined),
     signal: info ? (info.signal ?? undefined) : (checkpoint?.signal ?? undefined),
     startedAt: info?.startedAt ?? checkpoint?.started_at ?? ref?.startedAt,
@@ -152,6 +158,45 @@ export function laterCommand(current: ShellCommandInfo | undefined, incoming: Sh
   if (rank(incoming.state) < rank(current.state)) return current;
   if (current.background && !incoming.background) return current;
   return incoming;
+}
+
+/** A `batch` step's own call id: the steps' calls are numbered from 1 after
+ * the batch's (`call:1`, `call:2`). */
+export const stepCallId = (batch: string, index: number) => `${batch}:${index + 1}`;
+
+/**
+ * Each command's line by its id, from the chat's own `bash` calls (a
+ * `batch`'s steps too) and the `metadata.command` of their results: what a
+ * `bash_output` or `bash_stop` step names once the server no longer lists
+ * the command it read or stopped.
+ */
+export function commandLines(items: Item[]) {
+  const calls = new Map<string, unknown>();
+  const lines = new Map<string, string>();
+  const line = (args: unknown) => {
+    const command = record(args)?.command;
+    return typeof command === "string" ? command : undefined;
+  };
+  for (const item of items) {
+    const data = item.data;
+    const key = `${item.turnId ?? ""}:${"call_id" in data ? data.call_id : ""}`;
+    if (data.type === "tool_call") calls.set(key, data.arguments);
+    if (data.type !== "tool_result") continue;
+    const args = calls.get(key);
+    const own = commandRef(data.metadata);
+    const text = line(args);
+    if (own && text) lines.set(own.id, text);
+    // A batch's steps, each with its own result.
+    const steps = record(args)?.tool_calls;
+    const results = record(data.metadata)?.results;
+    if (!Array.isArray(steps) || !Array.isArray(results)) continue;
+    steps.forEach((step, index) => {
+      const ref = commandRef(record(results[index])?.metadata);
+      const text = line(record(step)?.parameters);
+      if (ref && text) lines.set(ref.id, text);
+    });
+  }
+  return lines;
 }
 
 /** The command a row shows: the one its result names, or the one the server
@@ -231,13 +276,15 @@ export function createOutputFollow(options: {
   update: (view: FollowView) => void;
   poll?: number;
   keep?: number;
-  /** Whether a failed read means the server no longer has the command. */
-  gone?: (error: unknown) => boolean;
+  /** Whether a failed read means the server no longer has the command;
+   * anything else (a computer offline, a workspace asleep) is passing, and
+   * the output read so far stays. */
+  gone?: (error: unknown) => boolean | Promise<boolean>;
   timer?: { set: (run: () => void, ms: number) => unknown; clear: (handle: unknown) => void };
 }) {
   const keep = options.keep ?? OUTPUT_KEEP;
   const poll = options.poll ?? 4000;
-  const gone = options.gone ?? ((error: unknown) => /\b404\b|not[ _]found/i.test(String((error as Error)?.message ?? error)));
+  const gone = options.gone ?? (() => false);
   const timer = options.timer ?? {
     set: (run: () => void, ms: number) => setTimeout(run, ms),
     clear: (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -248,7 +295,6 @@ export function createOutputFollow(options: {
   let again = false;
   let disposed = false;
   let waiting: unknown;
-  let failures = 0;
   const view: FollowView = { text: "", read: false, cut: false, settled: false, gone: false };
   const publish = () => options.update({ ...view, text: screenText(raw) });
   /** Keeps the end of the output, from the start of a line, so a cut never
@@ -273,15 +319,15 @@ export function createOutputFollow(options: {
     try {
       page = await options.read(first ? { tail: true, limit: keep } : { cursor, limit: keep });
     } catch (error) {
+      const lost = !disposed && (await Promise.resolve(gone(error)).catch(() => false));
       if (disposed) return undefined;
-      if (gone(error) || ++failures >= 5) {
+      if (lost) {
         view.gone = true;
         publish();
       }
       return undefined;
     }
     if (disposed) return undefined;
-    failures = 0;
     let text = page.text;
     if (first && page.start > 0) {
       // The end of a long output starts inside a line.

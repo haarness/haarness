@@ -299,6 +299,84 @@ test.describe("a server with commands in the background", () => {
     await pictures("agent-command-steps", page.locator(".transcript"));
   });
 
+  test("a command a batch started in the background shows under its batch row, stops there and is listed", async () => {
+    test.setTimeout(90000);
+    await newChat();
+    await send(
+      "!tool batch " +
+        JSON.stringify({
+          tool_calls: [
+            { tool: "list", parameters: { path: "." } },
+            { tool: "bash", parameters: { command: "printf 'batch step\\n'; sleep 120", run_in_background: true } },
+          ],
+        }),
+    );
+    const batchRow = page.locator(".transcript details.tool-batch").last();
+    await expect(batchRow.locator(":scope > summary .tool-chip")).toHaveText("In background");
+    await idle();
+    await expect(pill()).toHaveText("1 in background");
+    await batchRow.locator(":scope > summary").click();
+    const stepRow = batchRow.locator("details.tool-child").filter({ hasText: "batch step" });
+    await expect(stepRow.locator(".tool-chip")).toHaveText("In background");
+    await expect(stepRow.locator(".tool-state")).toHaveText(/^\d+s$/);
+    await stepRow.locator("summary").click();
+    await expect(stepRow.locator(".tool-output")).toContainText("batch step");
+    await pictures("batch-step", page.locator(".transcript .message.step").filter({ has: page.locator("details.tool-batch") }).last());
+    if ((await pill().getAttribute("aria-pressed")) !== "true") await pill().click();
+    const panel = page.getByRole("region", { name: "Still running" });
+    await expect(panel.locator("details.tool-call").filter({ hasText: "batch step" })).toHaveCount(1);
+    await batchRow.locator(".tool-step").filter({ hasText: "batch step" }).getByRole("button", { name: "Stop this command" }).click();
+    await expect(stepRow.locator(".tool-state")).toHaveText("Stopped", { timeout: 15000 });
+    await expect(batchRow.locator(":scope > summary .tool-chip")).toHaveCount(0);
+    await expect(pill()).toHaveCount(0);
+    await idle();
+  });
+
+  test("a fork's copy of a running command is not live, and steps name a command the server forgot", async () => {
+    test.setTimeout(120000);
+    await newChat();
+    await send(bash("printf 'original server\\n'; sleep 120", true));
+    await expect(row("original server").locator(".tool-chip")).toHaveText("In background");
+    await idle();
+    const original = await shownChat();
+    const running = (await commands(original))[0];
+    // Forked while it runs: the fork has the row, not the command.
+    const fork = await api("forkThread", original, { title: "Fork of the server chat" });
+    await page.locator(".sidebar-lists").getByRole("button", { name: "Fork of the server chat", exact: true }).click();
+    const copy = row("original server");
+    await expect(copy.locator(".tool-chip")).toHaveText("In background");
+    await expect.poll(async () => (await commands(fork.id)).length).toBe(0);
+    await page.waitForTimeout(1500);
+    await expect(copy).not.toHaveAttribute("data-status", "running");
+    await expect(copy.locator(".tool-state")).toHaveCount(0);
+    await expect(step("original server").getByRole("button", { name: "Stop this command" })).toHaveCount(0);
+    await expect(pill()).toHaveCount(0);
+    await pictures("fork-copy", step("original server"));
+    // The original still runs, and its row says so.
+    const title = ((await api("listThreads", {})) as any[]).find((thread) => thread.id === original).title;
+    await page.locator(".sidebar-lists").getByTitle(title, { exact: true }).first().click();
+    await expect(row("original server")).toHaveAttribute("data-status", "running");
+    await expect(pill()).toHaveText("1 in background");
+    // The agent reads and stops it; then the server is asked afresh (a
+    // reload) from a fork of all that, which the server never ran.
+    await send("!tool bash_output " + JSON.stringify({ id: running.id }));
+    await expect(page.locator(".transcript details.tool-call")).toHaveCount(2);
+    await idle();
+    await send("!tool bash_stop " + JSON.stringify({ id: running.id }));
+    await expect(page.locator(".transcript details.tool-call")).toHaveCount(3);
+    await idle();
+    await api("forkThread", original, { title: "Fork after the stop" });
+    await page.locator(".sidebar-lists").getByRole("button", { name: "Fork after the stop", exact: true }).click();
+    await expect(page.locator(".transcript details.tool-call")).toHaveCount(3);
+    await page.reload();
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+    const rows = page.locator(".transcript details.tool-call > summary");
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(1)).toHaveText(/^Checked a command\s*printf 'original server\\n'; sleep 120$/);
+    await expect(rows.nth(2)).toHaveText(/^Stopped a command\s*printf 'original server\\n'; sleep 120$/);
+    for (const text of await rows.allTextContents()) expect(text).not.toContain(running.id);
+  });
+
   test("File → Send to background moves a running foreground subagent and the reply carries on", async () => {
     test.setTimeout(120000);
     await newChat();
