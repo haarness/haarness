@@ -833,6 +833,12 @@ impl CommandEntry {
             info.delivers_notice = notify;
         });
         let info = self.info();
+        // A command in the background has no result that names its file:
+        // the file goes when the output is all in memory, else when the
+        // command is forgotten.
+        if info.background {
+            self.process.output.discard_file().await;
+        }
         if info.background || self.announced.load(Ordering::SeqCst) {
             self.publish();
         }
@@ -1016,16 +1022,25 @@ impl ShellCommands {
         u32::try_from(count).unwrap_or(u32::MAX)
     }
 
-    /// Drop ended commands listed longer than [`ENDED_KEPT`].
-    fn forget_ended(&self) {
+    /// Drop ended commands listed longer than [`ENDED_KEPT`], and the
+    /// files that keep the output of those that ran in the background.
+    pub(crate) fn forget_ended(&self) {
         let Ok(kept) = chrono::Duration::from_std(ENDED_KEPT) else {
             return;
         };
         let cutoff = Utc::now() - kept;
+        let mut files = Vec::new();
         self.entries.retain(|_, entry| {
             let info = entry.info.borrow();
-            info.state.is_live() || info.ended_at.is_none_or(|ended| ended > cutoff)
+            let keep = info.state.is_live() || info.ended_at.is_none_or(|ended| ended > cutoff);
+            if !keep && info.background && entry.process.output.file_kept() {
+                files.push(entry.process.output.path().to_path_buf());
+            }
+            keep
         });
+        for file in files {
+            let _ = std::fs::remove_file(file);
+        }
     }
 }
 
@@ -2000,24 +2015,31 @@ mod tests {
             subagent: false,
             unattended: false,
         });
-        call.run(
-            CommandProcess {
-                output: Arc::clone(&output),
-                end: ended,
-                control: Arc::new(Silent),
-            },
-            CommandRequest {
-                command: "server".into(),
-                cwd: dir.to_path_buf(),
-                workdir: None,
-                timeout_ms: None,
-                background: true,
-            },
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        let id = registry.list(None).pop().unwrap().id;
+        let run = call
+            .run(
+                CommandProcess {
+                    output: Arc::clone(&output),
+                    end: ended,
+                    control: Arc::new(Silent),
+                },
+                CommandRequest {
+                    command: "server".into(),
+                    cwd: dir.to_path_buf(),
+                    workdir: None,
+                    timeout_ms: None,
+                    background: true,
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let CommandRun::Background(result) = run else {
+            panic!("a background start answers at once");
+        };
+        let id = result.metadata["command"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         (registry.get(&id).unwrap(), output, end)
     }
 
@@ -2108,6 +2130,38 @@ mod tests {
             "{next} of {}",
             output.size()
         );
+    }
+
+    #[tokio::test]
+    async fn a_background_commands_output_file_goes_once_it_is_not_needed() {
+        let dir = fixture();
+        let registry = Arc::new(ShellCommands::default());
+        // All of its output is in memory when it ends: the file goes then.
+        let (small, output, end) = started(dir.path(), &registry, ThreadId::new()).await;
+        output.append(b"done\n").await.unwrap();
+        output.finish().await.unwrap();
+        end.send_replace(Some(ProcessEnd::default()));
+        small.settled(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!output.path().exists(), "{}", output.path().display());
+        assert!(small.output_file().is_none());
+        // More than memory keeps: the file stays while the command is
+        // listed, and goes when it is forgotten.
+        let (large, output, end) = started(dir.path(), &registry, ThreadId::new()).await;
+        output
+            .append(&vec![b'x'; OUTPUT_TAIL_KEPT + 10])
+            .await
+            .unwrap();
+        output.finish().await.unwrap();
+        end.send_replace(Some(ProcessEnd::default()));
+        large.settled(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(output.path().exists());
+        large.info.send_modify(|info| {
+            info.ended_at = Some(Utc::now() - chrono::Duration::minutes(11));
+        });
+        registry.forget_ended();
+        assert!(!output.path().exists());
     }
 
     #[tokio::test]
