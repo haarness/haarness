@@ -278,12 +278,26 @@ impl ManagementService {
             } else {
                 crate::marketplace::fetch(input).await?
             };
+            let mut input = input.clone();
+            // A version asked for by number that is not the one the catalog
+            // offers now (a rollback) stays put: following new versions
+            // would undo it at the next round.
+            if crate::marketplace::names_its_version(&input) {
+                let id = manifest["resource"]["id"].as_str().unwrap_or_default();
+                let active = crate::marketplace::active_version_number(id)
+                    .await
+                    .ok()
+                    .flatten();
+                if crate::marketplace::pins(&manifest, active) {
+                    input["autoUpdate"] = json!(false);
+                }
+            }
             let result = crate::marketplace::install(
                 &self.paths,
                 &self.workspace,
                 self.trust_project,
                 &manifest,
-                input,
+                &input,
             )
             .await?;
             self.capabilities_changed("marketplace", action);
@@ -345,17 +359,20 @@ impl ManagementService {
             matches!(action, "enable" | "disable" | "remove"),
             "Unsupported marketplace action"
         );
+        // Held until the receipt is gone, so an update that started meanwhile
+        // finds it removed instead of installing the resource again.
+        let _lock = crate::desktop::editor_lock(&self.paths.data, "marketplace")?;
+        let (receipt_file, receipt) =
+            crate::marketplace::reread_receipt(&self.paths, &self.workspace, receipt)?;
+        let receipt = &receipt;
         let kind = receipt["kind"].as_str().context("Invalid receipt kind")?;
         let path = Path::new(receipt["path"].as_str().context("Invalid receipt path")?);
-        let local = receipt["scope"] == "local";
         let target = if let Some(plugin) = receipt["pluginName"].as_str() {
             json!({"kind":"plugin","name":plugin})
         } else {
             json!({"kind":kind,"name":receipt["name"]})
         };
         if action == "remove" && kind != "extension" {
-            let _lock = crate::desktop::editor_lock(&self.paths.data, "marketplace")?;
-            crate::marketplace::validate_receipt(&self.paths, &self.workspace, receipt)?;
             if path.exists() {
                 ensure!(
                     receipt["installedDigest"] == crate::marketplace::tree_digest(path)?,
@@ -368,8 +385,6 @@ impl ManagementService {
                 }
             }
         } else if matches!(kind, "plugin" | "mcp") {
-            let _lock = crate::desktop::editor_lock(&self.paths.data, "marketplace")?;
-            crate::marketplace::validate_receipt(&self.paths, &self.workspace, receipt)?;
             ensure!(
                 path.is_dir(),
                 "Installed plugin is missing; reinstall the resource"
@@ -381,19 +396,17 @@ impl ManagementService {
                 fs::remove_file(marker)?;
             }
         } else {
-            if action == "remove" && kind == "extension" {
-                let _lock = crate::desktop::editor_lock(&self.paths.data, "marketplace")?;
-                crate::marketplace::validate_receipt(&self.paths, &self.workspace, receipt)?;
-                if let Some(root) = receipt["packageRoot"]
+            if action == "remove"
+                && kind == "extension"
+                && let Some(root) = receipt["packageRoot"]
                     .as_str()
                     .map(Path::new)
                     .filter(|root| root.exists())
-                {
-                    ensure!(
-                        receipt["installedDigest"] == crate::marketplace::tree_digest(root)?,
-                        "Resource was modified locally; preserve your edits before removing it"
-                    );
-                }
+            {
+                ensure!(
+                    receipt["installedDigest"] == crate::marketplace::tree_digest(root)?,
+                    "Resource was modified locally; preserve your edits before removing it"
+                );
             }
             let mut request = target;
             request["action"] = json!(action);
@@ -404,11 +417,7 @@ impl ManagementService {
             }
         }
         if action == "remove" {
-            let id = uuid::Uuid::parse_str(id)?;
-            fs::remove_file(
-                crate::marketplace::receipt_root(&self.paths, &self.workspace, local)
-                    .join(format!("{id}.json")),
-            )?;
+            fs::remove_file(&receipt_file)?;
         }
         self.capabilities_changed(kind, action);
         Ok(json!({"id":id,"action":action,"restartRequired":false}))
@@ -472,9 +481,8 @@ impl ManagementService {
                 changed |= refresh.changed();
             }
         }
-        // A project's stamp is written only where it has installs that
-        // follow new versions, so other projects get no new file.
-        let project = crate::marketplace::receipt_root(&self.paths, &self.workspace, true);
+        // A project's round runs only where it has installs that follow new
+        // versions; its stamp lives in the data folder, never the project.
         let follows = self.trust_project
             && crate::marketplace::installed(&self.paths, &self.workspace, true).is_ok_and(
                 |rows| {
@@ -483,7 +491,7 @@ impl ManagementService {
                     })
                 },
             );
-        if follows && claimed(project.join(STAMP)).await {
+        if follows && claimed(crate::auto_update::project_stamp(&data, &self.workspace)).await {
             changed |= check("local").await;
         }
         if changed {
