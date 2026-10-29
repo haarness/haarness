@@ -133,3 +133,48 @@
 .management-panel fieldset > .management-actions:not(:empty) {
   margin-block-start: var(--s4);
 }
+/* A resource's own icon: a small rounded square with a hairline edge that
+   holds light and dark artwork on either theme. It fades in once loaded and
+   is simply absent when there is none, so no row shows an empty frame. */
+.management-icon,
+.management-title-icon {
+  flex: none;
+  display: block;
+  object-fit: cover;
+  background: var(--surface);
+  outline: 1px solid var(--hairline);
+  outline-offset: -1px;
+  opacity: 0;
+  transition: opacity var(--slow) var(--ease);
+}
+.management-icon.loaded,
+.management-title-icon.loaded {
+  opacity: 1;
+}
+.management-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+}
+.management-title-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-md);
+}
+/* When any row has an icon, every row keeps its width, so the labels of a
+   list line up whether or not each one has a picture. */
+.management-entries.with-icons .management-entry {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  column-gap: var(--s3);
+  row-gap: 2px;
+  align-items: center;
+}
+.management-entries.with-icons .management-entry-icon {
+  grid-row: 1 / span 2;
+  display: flex;
+}
+.management-entries.with-icons .management-entry-label,
+.management-entries.with-icons .management-entry-description {
+  grid-column: 2;
+}

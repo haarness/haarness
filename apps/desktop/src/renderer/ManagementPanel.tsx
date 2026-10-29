@@ -17,7 +17,43 @@ import { Select } from "./Select";
 import { ProviderLabel } from "./ProviderIcon";
 import { ErrorNotice } from "./ui";
 import { cancelled } from "./error-text";
+import { iconFailed, iconSource, rowsHaveIcons } from "./entry-icon";
 import "./management.css";
+
+/**
+ * The square image a view names beside its title or a row. It fades in once
+ * loaded; missing, refused by the page's CSP or failing to load, it is gone,
+ * never a broken-image box.
+ */
+function EntryIcon(props: { icon?: string | null; class: string; onFail?: () => void }) {
+  const [loaded, setLoaded] = createSignal(false);
+  const [broken, setBroken] = createSignal(false);
+  return (
+    <Show when={!broken() && iconSource(props.icon)} keyed>
+      {(src) => (
+        <img
+          class={props.class}
+          classList={{ loaded: loaded() }}
+          src={src}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          referrerpolicy="no-referrer"
+          draggable={false}
+          ref={(image) => {
+            if (image.complete && image.naturalWidth > 0) setLoaded(true);
+          }}
+          onLoad={() => setLoaded(true)}
+          onError={() => {
+            iconFailed(src);
+            setBroken(true);
+            props.onFail?.();
+          }}
+        />
+      )}
+    </Show>
+  );
+}
 
 /** A sentence reads as text; JSON, commands and paths keep the code face. */
 const prose = (line: string) =>
@@ -54,6 +90,12 @@ export function ManagementPanel(props: {
   // The list a "Back to list" returns to; on that list the button goes nowhere.
   const [rootTitle, setRootTitle] = createSignal<string>();
   const [atRoot, setAtRoot] = createSignal(false);
+  // A row's icon that fails may leave the list with none to line up.
+  const [iconFailures, setIconFailures] = createSignal(0);
+  const withIcons = (view: ManagementView) => {
+    void iconFailures();
+    return rowsHaveIcons(view.entries?.filter((entry) => entry.description) ?? []);
+  };
   let generation = 0;
   onCleanup(() => {
     generation++;
@@ -175,6 +217,7 @@ export function ManagementPanel(props: {
               when={!atRoot() || props.rootHeading !== false}
             >
               <header class="management-card-heading">
+                <EntryIcon icon={current.icon} class="management-title-icon" />
                 <h3>{current.title}</h3>
                 <Show when={!atRoot()}>
                   <button
@@ -290,7 +333,10 @@ export function ManagementPanel(props: {
                 </button>
               </Show>
               <Show when={current.entries?.some((entry) => entry.description)}>
-                <div class="management-entries">
+                <div
+                  class="management-entries"
+                  classList={{ "with-icons": withIcons(current) }}
+                >
                   <For each={current.entries?.filter((entry) => entry.description)}>
                     {(entry) => (
                       <button
@@ -301,6 +347,15 @@ export function ManagementPanel(props: {
                         data-setting={entrySetting(entry)}
                         onClick={() => activate(entry)}
                       >
+                        <Show when={withIcons(current)}>
+                          <span class="management-entry-icon" aria-hidden="true">
+                            <EntryIcon
+                              icon={entry.icon}
+                              class="management-icon"
+                              onFail={() => setIconFailures(iconFailures() + 1)}
+                            />
+                          </span>
+                        </Show>
                         <span class="management-entry-label">
                           <Show when={provider(entry)} fallback={entry.label}>
                             <ProviderLabel provider={provider(entry)}>

@@ -1,6 +1,7 @@
 import { defineConfig } from "electron-vite";
 import solid from "vite-plugin-solid";
 import { resolve } from "node:path";
+import { withCloudImages } from "./src/image-policy";
 export default defineConfig({
   main: {
     // The browser driver is linked TypeScript source with its own node_modules;
@@ -25,6 +26,7 @@ export default defineConfig({
     root: "src/renderer",
     plugins: [
       solid(),
+      { name: "cloud-image-policy", transformIndexHtml: (html) => withCloudImages(html, process.env) },
       {
         name: "desktop-development-policy",
         apply: "serve",

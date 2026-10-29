@@ -68,6 +68,15 @@ receipt cannot point an update or removal anywhere else. Update and remove refus
 files no longer match the digest ("Resource was modified locally; preserve your edits…"), and an
 install refuses to overwrite a resource of the same name that it did not install.
 
+**Icons.** A catalog resource may name `iconUrl`, a square image. It is passed on only when it is an
+https address on the Cloud the catalog comes from (the API origin or the configured web origin);
+anything else is dropped. Search rows and the install form carry it as `icon` in their
+`marketplace-ui` view, and an install or update records it in the receipt, so **Installed
+resources** shows it on the resource's first row without asking the catalog. Desktop draws it as a
+small rounded square and draws nothing when there is none or it does not load; its page loads images
+only from `https://haarness.ai` and the https Cloud named in `HAARNESS_CLOUD_API_URL` or
+`HAARNESS_CLOUD_WEB_ORIGIN` when it is built. The TUI shows the same rows without icons.
+
 **Automatic updates.** A receipt's `autoUpdate` says whether the install follows new versions. An
 install of the latest version gets `true`; one that names its version (`--version`, or the version
 field of a request) gets `false`, and so does `install --no-auto-update`. An update keeps the value it
