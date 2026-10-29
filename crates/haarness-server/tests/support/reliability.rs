@@ -387,6 +387,10 @@ async fn reliability_connection_cut_after_a_tool_call_closes_it_without_running_
             .any(|message| matches!(message,
         ProviderMessage::ToolResult {call_id,is_error:true,..} if call_id == "cut-call"))
     );
+    // What the model reads, and the person sees on the call, in plain words.
+    assert!(runtime.items(thread.id, None).await.unwrap().iter().any(|item| matches!(&item.data,
+        ItemData::ToolResult {call_id,output,is_error:true,..} if call_id == "cut-call"
+            && output == "The connection to Echo broke off before this call ran, so it did not run.")));
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -405,13 +409,17 @@ async fn reliability_connection_cut_every_time_fails_after_the_recoveries() {
     let finished = settled(&runtime, &turn).await;
     assert_eq!(finished.status, TurnStatus::Failed);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    // Plain words, never the transport's: the turn's error is what every
+    // client shows, and the error row says the same.
+    let plain = "The connection to Echo kept breaking off mid-answer. Check the network connection, then send a message to continue.";
+    assert_eq!(finished.error.as_deref(), Some(plain));
     assert!(
-        finished
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("connection reset by peer")),
-        "{:?}",
-        finished.error
+        runtime
+            .items(thread.id, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|item| matches!(&item.data, ItemData::Error { message, .. } if message == plain))
     );
     assert_eq!(hooks.failures.lock().unwrap().len(), 1);
     assert_eq!(hooks.failures.lock().unwrap()[0]["error"], "incomplete");
