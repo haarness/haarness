@@ -777,3 +777,190 @@ async fn a_foreground_command_a_person_stopped_says_so_in_its_result() {
     assert!(text.contains("working"), "{text}");
     assert_eq!(metadata["command"]["background"], false);
 }
+
+/// A store that counts how often every chat is listed.
+struct CountingLists {
+    inner: SqliteStore,
+    lists: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl ThreadRepository for CountingLists {
+    async fn create_thread(&self, request: CreateThreadRequest) -> CoreResult<Thread> {
+        self.inner.create_thread(request).await
+    }
+    async fn list_threads(&self, include_archived: bool) -> CoreResult<Vec<Thread>> {
+        self.lists.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.list_threads(include_archived).await
+    }
+    async fn get_thread(&self, id: ThreadId) -> CoreResult<Thread> {
+        self.inner.get_thread(id).await
+    }
+    async fn update_thread(
+        &self,
+        id: ThreadId,
+        request: haarness_protocol::UpdateThreadRequest,
+    ) -> CoreResult<Thread> {
+        self.inner.update_thread(id, request).await
+    }
+    async fn list_items(
+        &self,
+        id: ThreadId,
+        after: Option<u64>,
+    ) -> CoreResult<Vec<haarness_protocol::Item>> {
+        self.inner.list_items(id, after).await
+    }
+    async fn start_turn(
+        &self,
+        id: ThreadId,
+        request: StartTurnRequest,
+    ) -> CoreResult<(Turn, haarness_protocol::Item, bool)> {
+        self.inner.start_turn(id, request).await
+    }
+    async fn get_turn(&self, id: haarness_protocol::TurnId) -> CoreResult<Turn> {
+        self.inner.get_turn(id).await
+    }
+    async fn append_item(
+        &self,
+        thread: ThreadId,
+        turn: Option<haarness_protocol::TurnId>,
+        data: haarness_protocol::ItemData,
+    ) -> CoreResult<haarness_protocol::Item> {
+        self.inner.append_item(thread, turn, data).await
+    }
+    async fn set_turn_status(
+        &self,
+        id: haarness_protocol::TurnId,
+        status: TurnStatus,
+        error: Option<String>,
+    ) -> CoreResult<Turn> {
+        self.inner.set_turn_status(id, status, error).await
+    }
+    async fn compact(
+        &self,
+        id: ThreadId,
+        request: haarness_protocol::CompactRequest,
+        expected_tail: Option<(haarness_protocol::ItemId, u64)>,
+    ) -> CoreResult<haarness_protocol::Item> {
+        self.inner.compact(id, request, expected_tail).await
+    }
+    async fn fork_thread(
+        &self,
+        id: ThreadId,
+        title: Option<String>,
+        up_to_sequence: Option<u64>,
+    ) -> CoreResult<Thread> {
+        self.inner.fork_thread(id, title, up_to_sequence).await
+    }
+    async fn set_revert_state(
+        &self,
+        id: ThreadId,
+        state: Option<(u64, String, Option<String>)>,
+    ) -> CoreResult<()> {
+        self.inner.set_revert_state(id, state).await
+    }
+    async fn soft_delete_items_after(&self, id: ThreadId, sequence: u64) -> CoreResult<u64> {
+        self.inner.soft_delete_items_after(id, sequence).await
+    }
+    async fn save_permission_rule(
+        &self,
+        workspace: &str,
+        rule: &haarness_core::PermissionRule,
+    ) -> CoreResult<()> {
+        self.inner.save_permission_rule(workspace, rule).await
+    }
+    async fn load_permission_rules(
+        &self,
+        workspace: &str,
+    ) -> CoreResult<Vec<haarness_core::PermissionRule>> {
+        self.inner.load_permission_rules(workspace).await
+    }
+    async fn recover_interrupted(&self) -> CoreResult<u64> {
+        self.inner.recover_interrupted().await
+    }
+    async fn thread_extras(
+        &self,
+        id: ThreadId,
+    ) -> CoreResult<(Option<String>, Option<haarness_protocol::LoopConfig>)> {
+        self.inner.thread_extras(id).await
+    }
+    async fn set_goal(&self, id: ThreadId, goal: Option<String>) -> CoreResult<()> {
+        self.inner.set_goal(id, goal).await
+    }
+    async fn goal_state(&self, id: ThreadId) -> CoreResult<Option<haarness_protocol::GoalState>> {
+        self.inner.goal_state(id).await
+    }
+    async fn save_goal_state(
+        &self,
+        id: ThreadId,
+        state: Option<haarness_protocol::GoalState>,
+    ) -> CoreResult<()> {
+        self.inner.save_goal_state(id, state).await
+    }
+    async fn set_loop(
+        &self,
+        id: ThreadId,
+        config: Option<haarness_protocol::LoopConfig>,
+    ) -> CoreResult<()> {
+        self.inner.set_loop(id, config).await
+    }
+}
+
+#[tokio::test]
+async fn following_a_chats_commands_never_lists_every_chat() {
+    use std::sync::atomic::Ordering;
+    let workspace = Workspace::new();
+    let store = Arc::new(CountingLists {
+        inner: SqliteStore::in_memory().unwrap(),
+        lists: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut config = haarness_core::RuntimeConfig::default();
+    config.base_rules.push(haarness_core::PermissionRule {
+        pattern: "*".into(),
+        decision: haarness_core::PermissionDecision::Allow,
+    });
+    let runtime = AgentRuntime::with_config(
+        store.clone(),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(NativeToolRegistry::new(workspace.0.clone())),
+        EventBus::new(256),
+        workspace.0.clone(),
+        String::new(),
+        config,
+    );
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let id = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    store.lists.store(0, Ordering::SeqCst);
+    // What a client polls while it shows the chat.
+    for _ in 0..5 {
+        assert_eq!(
+            runtime
+                .thread_activity(thread)
+                .await
+                .unwrap()
+                .background_commands,
+            1
+        );
+        assert_eq!(runtime.shell_commands(thread).await.unwrap().len(), 1);
+        runtime.shell_command(thread, &id).await.unwrap();
+        runtime
+            .shell_command_output(thread, &id, Some(0), None, false)
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.lists.load(Ordering::SeqCst), 0);
+    runtime.stop_shell_command(thread, &id).await.unwrap();
+}

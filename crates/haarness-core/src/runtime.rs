@@ -3754,7 +3754,7 @@ impl AgentRuntime {
         };
         let background_commands = self
             .shell_commands
-            .running_in_background(&self.thread_tree_ids(id).await?);
+            .running_in_background(&self.command_threads(id).await?);
         // Last: a turn that started and ended between two reads of a chat
         // that looks quiet is the newest here.
         let last_turn = self.repository.last_turn(id).await?;
@@ -3766,10 +3766,54 @@ impl AgentRuntime {
         })
     }
 
+    /// `thread` and the chats under it that have commands listed now: what
+    /// a client polling a chat's commands reads, without listing every chat.
+    /// A root chat's commands carry it as their root; a chat under one is
+    /// found among the ancestors of the chats that have commands.
+    async fn command_threads(&self, thread: ThreadId) -> CoreResult<HashSet<ThreadId>> {
+        let asked = self.repository.get_thread(thread).await?;
+        let mut inside = HashSet::from([thread]);
+        let listed = self
+            .shell_commands
+            .all(|_| true)
+            .into_iter()
+            .map(|entry| {
+                let info = entry.info();
+                (info.thread_id, info.root_thread_id)
+            })
+            .collect::<HashSet<_>>();
+        for (candidate, root) in listed {
+            if candidate == thread || inside.contains(&candidate) {
+                continue;
+            }
+            if asked.parent_id.is_none() {
+                if root == thread {
+                    inside.insert(candidate);
+                }
+                continue;
+            }
+            let mut current = candidate;
+            for _ in 0..16 {
+                let Ok(parent) = self.repository.get_thread(current).await else {
+                    break;
+                };
+                match parent.parent_id {
+                    Some(parent) if parent == thread => {
+                        inside.insert(candidate);
+                        break;
+                    }
+                    Some(parent) => current = parent,
+                    None => break,
+                }
+            }
+        }
+        Ok(inside)
+    }
+
     /// The agents' shell commands in `thread` and the chats under it:
     /// running ones first, then those that ended in the last ten minutes.
     pub async fn shell_commands(&self, thread: ThreadId) -> CoreResult<Vec<ShellCommandInfo>> {
-        let threads = self.thread_tree_ids(thread).await?;
+        let threads = self.command_threads(thread).await?;
         Ok(self.shell_commands.list(Some(&threads)))
     }
 
@@ -3789,7 +3833,7 @@ impl AgentRuntime {
         thread: ThreadId,
         id: &str,
     ) -> CoreResult<Arc<crate::background_commands::CommandEntry>> {
-        let threads = self.thread_tree_ids(thread).await?;
+        let threads = self.command_threads(thread).await?;
         self.shell_commands
             .get(id)
             .filter(|entry| threads.contains(&entry.info().thread_id))
@@ -3847,7 +3891,7 @@ impl AgentRuntime {
             }
             return Ok(vec![entry.info()]);
         }
-        let threads = self.thread_tree_ids(thread).await?;
+        let threads = self.command_threads(thread).await?;
         let mut moved = Vec::new();
         for entry in self.shell_commands.live(|entry| {
             let info = entry.info();
