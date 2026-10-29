@@ -389,22 +389,30 @@ subagent's result does). The agent reads a command's output, lists the chat's
 commands or waits for one with `bash_output` (until it ends, prints nothing for
 a while, or prints a line matching a pattern, searching from where it last
 read) and stops one with `bash_stop` (interrupt, terminate, then kill,
-`execution.shell_stop_grace_ms` apart, with every process it started). Its
+`execution.shell_stop_grace_ms` apart, with every process it started; on
+Windows the first two steps only ask the command's windows to close, which a
+console program does not heed, so it ends with the kill). Its
 instructions say to run servers, watchers and multi-minute builds or test
 suites this way, and never to leave a process running with a trailing `&` or
-`nohup`: a command that ends while something it started that way still runs
-now returns at once, stops what it left, and says so.
+`nohup`. Any shell command, yours too, ends with its shell: something it
+started that still holds its output open (`(sleep 1; echo late) & echo
+early`) gets a quarter of a second of quiet, two seconds at most, to finish
+printing, and is then stopped with the command's process group, and the
+result says so. A process that left that group (a session of its own, as
+`ssh -f` makes) cannot be stopped that way: it runs on, its output is no
+longer read, and the result says that instead.
 
-In a chat open in Desktop, the terminal UI, the phone and web apps, or a
-`haarness run --wait-background`, an agent's foreground command that has no
-`timeout` of its own moves to the background by itself once it has run for
-`execution.shell_move_after_ms` (a minute), and the reply goes on while a slow
-build runs; you can also send one there sooner. Everywhere else (an editor over ACP,
-scripts and SDK calls, `haarness run` without the flag, schedules) a
-foreground command stays in the foreground until it ends or reaches its
-deadline, as before. A command in the background is stopped after
+In a chat open in Desktop, the terminal UI or the phone and web apps, an
+agent's foreground command that has no `timeout` of its own moves to the
+background by itself once it has run for `execution.shell_move_after_ms` (a
+minute), and the reply goes on while a slow build runs; you can also send one
+there sooner. A command in the background there is stopped after
 `execution.shell_background_max_ms` (no limit by default) or the `timeout` the
-agent gave; where nothing follows it up, after `execution.shell_timeout_ms`.
+agent gave. Everywhere else (an editor over ACP, scripts and SDK calls,
+`haarness run`, schedules) a foreground command stays in the foreground until
+it ends or reaches its deadline, as before, and a command the agent starts in
+the background is stopped `execution.shell_timeout_ms` after it started, also
+when the agent gave a `timeout` of 0.
 A subagent's commands never move, and its background commands stop, untold,
 when its turn ends. Your own `!` commands and a workflow's `shell()` always
 run in the foreground.
@@ -415,8 +423,10 @@ of course, and so does a click on Stop that lands just after the reply ended;
 an explicit stop of everything while nothing runs (Esc Esc in the terminal UI)
 stops them too, and so does archiving the chat. A command ended by a person or its time limit tells the agent; one the
 agent stopped itself does not. `haarness run --wait-background` and scheduled
-runs wait for their commands and print what the agent says when they end;
-without the flag `run` reports how many keep running on the server. A command
+runs wait for their commands and print what the agent says when they end; a
+waiting run that stops waiting (its `--background-timeout-ms`, Ctrl-C) stops
+them. Without the flag `run` leaves the commands the agent started in the
+background running on the server, until their time limit, and says how many. A command
 running when Haarness stops is stopped with it; after the next start its chat
 gets a hidden note and a notice that it was cut off, and no turn starts by
 itself. Clients follow commands through

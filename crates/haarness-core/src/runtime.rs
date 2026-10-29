@@ -3754,7 +3754,7 @@ impl AgentRuntime {
         };
         let background_commands = self
             .shell_commands
-            .running_in_background(&self.thread_tree_ids(id).await?);
+            .running_in_background(&self.command_threads(id).await?);
         // Last: a turn that started and ended between two reads of a chat
         // that looks quiet is the newest here.
         let last_turn = self.repository.last_turn(id).await?;
@@ -3766,10 +3766,54 @@ impl AgentRuntime {
         })
     }
 
+    /// `thread` and the chats under it that have commands listed now: what
+    /// a client polling a chat's commands reads, without listing every chat.
+    /// A root chat's commands carry it as their root; a chat under one is
+    /// found among the ancestors of the chats that have commands.
+    async fn command_threads(&self, thread: ThreadId) -> CoreResult<HashSet<ThreadId>> {
+        let asked = self.repository.get_thread(thread).await?;
+        let mut inside = HashSet::from([thread]);
+        let listed = self
+            .shell_commands
+            .all(|_| true)
+            .into_iter()
+            .map(|entry| {
+                let info = entry.info();
+                (info.thread_id, info.root_thread_id)
+            })
+            .collect::<HashSet<_>>();
+        for (candidate, root) in listed {
+            if candidate == thread || inside.contains(&candidate) {
+                continue;
+            }
+            if asked.parent_id.is_none() {
+                if root == thread {
+                    inside.insert(candidate);
+                }
+                continue;
+            }
+            let mut current = candidate;
+            for _ in 0..16 {
+                let Ok(parent) = self.repository.get_thread(current).await else {
+                    break;
+                };
+                match parent.parent_id {
+                    Some(parent) if parent == thread => {
+                        inside.insert(candidate);
+                        break;
+                    }
+                    Some(parent) => current = parent,
+                    None => break,
+                }
+            }
+        }
+        Ok(inside)
+    }
+
     /// The agents' shell commands in `thread` and the chats under it:
     /// running ones first, then those that ended in the last ten minutes.
     pub async fn shell_commands(&self, thread: ThreadId) -> CoreResult<Vec<ShellCommandInfo>> {
-        let threads = self.thread_tree_ids(thread).await?;
+        let threads = self.command_threads(thread).await?;
         Ok(self.shell_commands.list(Some(&threads)))
     }
 
@@ -3789,7 +3833,7 @@ impl AgentRuntime {
         thread: ThreadId,
         id: &str,
     ) -> CoreResult<Arc<crate::background_commands::CommandEntry>> {
-        let threads = self.thread_tree_ids(thread).await?;
+        let threads = self.command_threads(thread).await?;
         self.shell_commands
             .get(id)
             .filter(|entry| threads.contains(&entry.info().thread_id))
@@ -3842,12 +3886,12 @@ impl AgentRuntime {
             let entry = self.shell_command_entry(thread, id).await?;
             if !entry.send_to_background(ShellCommandMovedBy::Person).await {
                 return Err(CoreError::Conflict(format!(
-                    "Command {id} cannot move to the background: it has ended, already runs there, or belongs to a subagent"
+                    "Command {id} cannot move to the background: it has ended, already runs there, belongs to a subagent, or its chat runs as many commands there as it may"
                 )));
             }
             return Ok(vec![entry.info()]);
         }
-        let threads = self.thread_tree_ids(thread).await?;
+        let threads = self.command_threads(thread).await?;
         let mut moved = Vec::new();
         for entry in self.shell_commands.live(|entry| {
             let info = entry.info();
@@ -6675,6 +6719,8 @@ impl AgentRuntime {
         active.changed.notify_waiters();
         drop(admission_guard);
         let task = Arc::new(RunnerTask {
+            live_components: self.components.clone(),
+            live_reload_gate: self.reload_gate.clone(),
             repository: self.repository.clone(),
             providers: components.providers.clone(),
             tools: components.tools.clone(),
@@ -7087,6 +7133,11 @@ impl AgentRuntime {
 }
 
 struct RunnerTask {
+    /// The runtime's current generation and reload gate, for work that
+    /// outlives this turn (a command's end, hours later) and must start on
+    /// the configuration of that moment.
+    live_components: Arc<RwLock<Arc<RuntimeComponents>>>,
+    live_reload_gate: Arc<AsyncRwLock<()>>,
     repository: Arc<dyn ThreadRepository>,
     providers: Arc<dyn ProviderRegistry>,
     tools: Arc<dyn ToolRegistry>,
@@ -10515,6 +10566,10 @@ impl RunnerTask {
     }
 
     fn tool_enabled(&self, name: &str) -> bool {
+        // Following and stopping commands goes with running them.
+        if matches!(name, "bash_output" | "bash_stop") && !self.tool_enabled("bash") {
+            return false;
+        }
         if name == "preview"
             && self
                 .request
@@ -12479,6 +12534,8 @@ impl RunnerTask {
             .permission_engine(self.request.agent.as_deref().unwrap_or(&self.thread.agent))
             .boundary();
         let child_task = Arc::new(RunnerTask {
+            live_components: self.live_components.clone(),
+            live_reload_gate: self.live_reload_gate.clone(),
             repository: self.repository.clone(),
             providers: self.providers.clone(),
             tools: self.tools.clone(),
