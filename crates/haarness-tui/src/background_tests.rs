@@ -1889,3 +1889,35 @@ fn a_person_stopping_a_foreground_command_reads_stopped_and_leftovers_running_sa
         "{rows:#?}"
     );
 }
+
+#[test]
+fn a_progress_line_read_part_way_shows_as_a_terminal_leaves_it() {
+    let thread = fixture_thread();
+    let mut app = app_on(&thread, vec![]);
+    app.open_command_output("c1", None);
+    // The page ends in the middle of a rewrite of the line.
+    app.command_view.as_mut().unwrap().apply(page(
+        "progress 00000041\rprogress 00000042\rprogress 0000",
+        0,
+        false,
+        ShellCommandState::Running,
+    ));
+    let rows = frame_text(&app, (80, 16));
+    assert!(
+        rows.iter()
+            .any(|row| row.trim_end() == "  progress 00000042"),
+        "{rows:#?}"
+    );
+    app.command_view.as_mut().unwrap().apply(page(
+        "0043\rdone\n",
+        49,
+        false,
+        ShellCommandState::Running,
+    ));
+    let rows = frame_text(&app, (80, 16));
+    assert!(
+        rows.iter()
+            .any(|row| row.trim_end() == "  doneress 00000043"),
+        "{rows:#?}"
+    );
+}

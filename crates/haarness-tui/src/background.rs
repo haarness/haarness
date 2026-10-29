@@ -1218,15 +1218,33 @@ impl CommandView {
         let text = clean.strip_suffix('\n').unwrap_or(&clean);
         if !text.is_empty() {
             for line in text.split('\n') {
-                let line = line.strip_suffix('\r').unwrap_or(line);
-                let line = line.rsplit('\r').next().unwrap_or(line);
-                wrap_into(&mut rows, line, width);
+                if line.contains('\r') {
+                    wrap_into(&mut rows, &overprinted(line), width);
+                } else {
+                    wrap_into(&mut rows, line, width);
+                }
             }
         }
         let rows: Rc<[String]> = rows.into();
         *self.shown.borrow_mut() = Some((self.revision, width, rows.clone()));
         rows
     }
+}
+
+/// A line rewritten with carriage returns, as a terminal leaves it: each
+/// part writes over the start of what the parts before it wrote, so a
+/// progress line read part way through still shows whole.
+fn overprinted(line: &str) -> String {
+    let mut shown: Vec<char> = Vec::new();
+    for part in line.split('\r') {
+        for (column, character) in part.chars().enumerate() {
+            match shown.get_mut(column) {
+                Some(cell) => *cell = character,
+                None => shown.push(character),
+            }
+        }
+    }
+    shown.into_iter().collect()
 }
 
 /// Cut a line of output into rows of `width` columns, tabs set every eight.
