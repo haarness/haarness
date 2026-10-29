@@ -43,7 +43,7 @@ export const settingsKeywords: Record<string, string> = {
   skills: "skill instructions knowledge enable disable",
   tools: "tool loading lazy schemas enable disable permission",
   mcp: "model context protocol integrations servers oauth authentication interactive apps pages keychain secrets",
-  plugins: "marketplace install uninstall extensions bundles",
+  plugins: "marketplace marketplaces install uninstall extensions bundles git repository update automatically",
   marketplace: "public private account catalog install update versions skills agents mcp plugins extensions",
   extensions: "javascript typescript hooks events scripts enable scope",
   schedules: "automation recurring cron timer scheduled tasks",

@@ -67,6 +67,12 @@ Checks that found real bugs and must stay covered:
   and the CLI prints that reason.
 - Workspaces of a non-production stack read that stack's catalog (`HAARNESS_CLOUD_MARKETPLACE_URL`).
 - The model installs `name@marketplace` through `marketplace_manage` (`plugin_marketplaces`, `plugin`).
+- Automatic updates: an install of the latest version follows new ones and a pinned one never moves;
+  publish a new version, run `haarness marketplace check-updates` and a server with
+  `HAARNESS_AUTO_UPDATE_INTERVAL_SECS=60`, and edit an install to see its update held.
+- A registered Git marketplace (a real one such as `anthropics/claude-plugins-official` too) answers
+  `haarness plugin marketplace update` with "up to date"; reset its clone a commit back, or change the
+  commit in `marketplace-sources.json`, and the same command fetches it and updates changed plugins.
 - `@agent` offers Claude-format agents (no `mode`) in the TUI; profiles carry `config/plugins/local`.
 
 Open gaps: Desktop's plugin install form asks for plugin and marketplace names instead of listing a registered

@@ -435,8 +435,12 @@ impl App {
                     .await;
             }
             "configuration.reload_queued" => {
-                self.notice =
-                    "Configuration changed · reload queued until active work is idle".into();
+                // A command that just changed something ("team-tools updated ·
+                // plugins updated: kit · reload queued …") said more already.
+                if !self.notice_is_fresh(std::time::Instant::now()) {
+                    self.notice =
+                        "Configuration changed · reload queued until active work is idle".into();
+                }
             }
             "configuration.reload_failed" => {
                 let error = event.payload["error"]
