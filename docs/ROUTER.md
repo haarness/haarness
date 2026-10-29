@@ -10,6 +10,30 @@ Haarness Router connects your model providers through one endpoint. A router tha
 Haarness Cloud runs for your account is chosen with `/router` or
 `haarness account --router` instead (see [Sign in to Haarness](HAARNESS-ACCOUNT.md#cloud-routers)).
 
+## Install the router
+
+Every Haarness release carries Haarness Router at the same version, built from the
+[haarness-router](https://github.com/haarness/haarness-router) repository's tag of that version:
+
+```sh
+curl -fsSL https://haarness.ai/install-router.sh | sh       # macOS and Linux
+```
+
+```powershell
+irm https://haarness.ai/install-router.ps1 | iex             # Windows
+```
+
+These are `install.sh` and `install.ps1` with the router as their default product
+(`HAARNESS_PRODUCT=router` does the same with the usual installers): the SHA-256 is
+checked and `haarness-router --version` must run before anything is replaced, and
+`haarness-router` goes into the CLI's folder (`~/.local/bin`, or
+`%LOCALAPPDATA%\Haarness\bin` on the user PATH). `HAARNESS_CHANNEL`,
+`HAARNESS_VERSION` and `HAARNESS_INSTALL_DIR` work as for the CLI. Then run
+`haarness-router`; its dashboard is at `http://127.0.0.1:8080/ui`. The files are
+`haarness-router-<os>-<arch>` (`.exe` on Windows) on the
+[download page](https://haarness.ai/download) and on the router repository's GitHub
+release, with `SHA256SUMS`.
+
 ## Desktop and TUI
 
 In Desktop, open **Settings → Providers → Connect Haarness Router**, or

@@ -1,8 +1,10 @@
 # Install checksum-verified Haarness from Haarness Cloud: the CLI, then Desktop. No administrator rights required.
 # Runs in its own scope, so `irm https://haarness.ai/install.ps1 | iex` leaves no variables behind.
-# $env:HAARNESS_NO_DESKTOP='1' installs only the CLI; HAARNESS_PRODUCT='cli' or 'desktop' installs only that one
-# (`haarness upgrade` installs the CLI this way).
+# $env:HAARNESS_NO_DESKTOP='1' installs only the CLI; HAARNESS_PRODUCT='cli', 'desktop' or 'router' installs only that
+# one (`haarness upgrade` installs the CLI this way). `irm https://haarness.ai/install-router.ps1 | iex` installs
+# Haarness Router: it is this script with 'router' as the default product, and the Cloud changes only the next line.
 & {
+$DefaultProduct = 'all'
 $ErrorActionPreference = 'Stop'
 # Windows PowerShell 5.1 draws a progress bar per chunk (very slow downloads) and may not offer TLS 1.2;
 # PowerShell 7 shows download progress without that cost.
@@ -13,9 +15,9 @@ $Uri = [Uri]$Base
 if ($Uri.Scheme -ne 'https' -and -not ($Uri.Scheme -eq 'http' -and $Uri.IsLoopback)) { throw 'Release URL requires HTTPS' }
 $Channel = if ($env:HAARNESS_CHANNEL) { $env:HAARNESS_CHANNEL } else { 'stable' }
 $Version = if ($env:HAARNESS_VERSION) { $env:HAARNESS_VERSION } else { 'latest' }
-$Product = if ($env:HAARNESS_PRODUCT) { $env:HAARNESS_PRODUCT } else { 'all' }
+$Product = if ($env:HAARNESS_PRODUCT) { $env:HAARNESS_PRODUCT } else { $DefaultProduct }
 $NoDesktop = $env:HAARNESS_NO_DESKTOP -and $env:HAARNESS_NO_DESKTOP -notin @('0','false','no')
-if ($Channel -notin @('stable','preview') -or $Version -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._+-]*$' -or $Product -notin @('all','cli','desktop')) { throw 'Invalid release selection' }
+if ($Channel -notin @('stable','preview') -or $Version -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._+-]*$' -or $Product -notin @('all','cli','desktop','router')) { throw 'Invalid release selection' }
 # The machine's own architecture: an x64 PowerShell emulated on ARM64 reports AMD64 everywhere else.
 $Native = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name PROCESSOR_ARCHITECTURE -ErrorAction SilentlyContinue).PROCESSOR_ARCHITECTURE
 if (-not $Native) { $Native = $env:PROCESSOR_ARCHITECTURE }
@@ -26,11 +28,14 @@ $InstallDir = (Get-Item -LiteralPath $InstallDir).FullName
 $Temporary = Join-Path $InstallDir ('.haarness-install-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $Temporary | Out-Null
 function Install-HaarnessProduct([string]$Item) {
-    $Kind = if ($Item -eq 'cli') { 'binary' } else { 'exe' }
+    # The CLI and the router are programs ($Command.exe); Desktop is its setup wizard. $Title is what messages call it.
+    $Kind = if ($Item -eq 'desktop') { 'exe' } else { 'binary' }
+    $Command = @{ cli = 'haarness'; router = 'haarness-router' }[$Item]
+    $Title = @{ cli = 'Haarness'; router = 'Haarness Router'; desktop = 'Haarness Desktop' }[$Item]
     $Url = "$Base/api/v1/releases/$Channel/$Item/download?os=windows&arch=$Arch&kind=$Kind"
     if ($Version -ne 'latest') { $Url += '&version=' + [Uri]::EscapeDataString($Version) }
-    $Binary = Join-Path $Temporary $(if ($Item -eq 'cli') { 'haarness.exe' } else { 'Haarness-Setup.exe' })
-    Write-Host "Downloading Haarness $(if ($Item -eq 'cli') { 'CLI' } else { 'Desktop' }) for windows $Arch..."
+    $Binary = Join-Path $Temporary $(if ($Command) { "$Command.exe" } else { 'Haarness-Setup.exe' })
+    Write-Host "Downloading $(if ($Item -eq 'cli') { 'Haarness CLI' } else { $Title }) for windows $Arch..."
     # Asked with HEAD, the service names the file's checksum, version and, in Content-Location, its address on the
     # release domain, which serves it from Cloudflare's edge. Without that address (an older service, one that
     # refuses HEAD) or when the edge does not deliver, the file comes from the service itself.
@@ -71,36 +76,39 @@ function Install-HaarnessProduct([string]$Item) {
         Write-Host "Installed Haarness Desktop $Released. Start it from the Start menu."
     } else {
         try { $Reported = & $Binary --version 2>&1 } catch { $Reported = $_ }
-        if ($LASTEXITCODE -ne 0 -or "$Reported" -ne "haarness $Released") {
-            throw "The downloaded Haarness does not run on this computer; installation left unchanged. $Reported"
+        if ($LASTEXITCODE -ne 0 -or "$Reported" -ne "$Command $Released") {
+            throw "The downloaded $Title does not run on this computer; installation left unchanged. $Reported"
         }
-        $Target = Join-Path $InstallDir 'haarness.exe'
+        $Target = Join-Path $InstallDir "$Command.exe"
         # A running Windows executable cannot be overwritten, but it can be renamed.
-        $Backup = Join-Path $InstallDir 'haarness.previous.exe'
+        $Backup = Join-Path $InstallDir "$Command.previous.exe"
         Remove-Item -LiteralPath $Backup -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $Target) { Move-Item -Force -LiteralPath $Target -Destination $Backup }
         try { Move-Item -LiteralPath $Binary -Destination $Target } catch { if (Test-Path -LiteralPath $Backup) { Move-Item -Force -LiteralPath $Backup -Destination $Target }; throw }
-        # Gone unless an older haarness.exe is still running from it.
+        # Gone unless an older copy is still running from it.
         Remove-Item -LiteralPath $Backup -Force -ErrorAction SilentlyContinue
-        Write-Host "Installed Haarness $Released at $Target"
+        Write-Host "Installed $(if ($Item -eq 'router') { $Title } else { 'Haarness' }) $Released at $Target"
         $UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         $Listed = @(($UserPath, $env:Path) -join ';' -split ';' | ForEach-Object { $_.TrimEnd('\') }) -contains $InstallDir.TrimEnd('\')
+        $Run = $Command
         if (-not $Listed) {
             if ($env:HAARNESS_NO_MODIFY_PATH -eq '1') {
-                Write-Host "Add $InstallDir to your user PATH to run haarness from any terminal."
+                Write-Host "Add $InstallDir to your user PATH to run $Command from any terminal."
+                $Run = $Target
             } else {
                 [Environment]::SetEnvironmentVariable('Path', ((@($UserPath, $InstallDir) | Where-Object { $_ }) -join ';'), 'User')
                 $env:Path = "$env:Path;$InstallDir"
-                Write-Host "Added $InstallDir to your user PATH; open a new terminal to run haarness."
+                Write-Host "Added $InstallDir to your user PATH; open a new terminal to run $Command."
             }
+        }
+        if ($Item -eq 'router') {
+            Write-Host "Run $Run to start it with the provider keys in your environment; its dashboard is at http://127.0.0.1:8080/ui"
         }
     }
 }
 try {
-    if ($Product -ne 'desktop') { Install-HaarnessProduct 'cli' }
-    if ($Product -eq 'desktop') {
-        Install-HaarnessProduct 'desktop'
-    } elseif ($Product -eq 'all' -and -not $NoDesktop) {
+    Install-HaarnessProduct $(if ($Product -eq 'all') { 'cli' } else { $Product })
+    if ($Product -eq 'all' -and -not $NoDesktop) {
         # The CLI is installed whatever happens to Desktop; a Desktop failure is reported, not fatal.
         try { Install-HaarnessProduct 'desktop' } catch {
             Write-Warning "Haarness Desktop was not installed (the CLI is): $($_.Exception.Message). To retry: `$env:HAARNESS_PRODUCT='desktop'; irm $Base/install.ps1 | iex"
