@@ -78,7 +78,11 @@ const MULTIEDIT_DESCRIPTION: &str = "Apply several exact replacements to one UTF
 
 const APPLY_PATCH_DESCRIPTION: &str = "Apply a V4A patch envelope across one or more files. Use *** Begin Patch and *** End Patch, with an explicit *** Add File, *** Update File, or *** Delete File header for every operation. Prefix every line of a new file with '+'. Update hunks use @@ locators and must include enough unchanged context to identify exactly one location; use a unique locator instead of a bare brace. *** Move to may follow an Update File header. If verification reports ambiguity, read the region and retry with more context. Prefer this tool for coordinated or multi-file text edits.";
 
-const BASH_DESCRIPTION: &str = "Run a terminal command through the workspace shell. Use bash for builds, tests, git, package managers, process inspection, and other terminal operations. Do not use it for ordinary file reading, listing, searching, writing, or editing when read, list, glob, grep, write, edit, or apply_patch can express the operation more clearly. Ripgrep (rg) is bundled and available on PATH for searches requiring flags or pipelines beyond the grep/glob tools; no installation is needed. Use workdir instead of 'cd <dir> && ...'. Quote paths containing spaces. timeout is milliseconds, defaults to the configured deadline (normally 120000), and has no fixed upper limit; set 0 for no deadline. Output includes the exit code and combined stdout/stderr. Do not create commits or push unless the user explicitly asks, and do not use destructive git or filesystem operations without clear authorization.";
+const BASH_DESCRIPTION: &str = "Run a terminal command through the workspace shell. Use bash for builds, tests, git, package managers, process inspection, and other terminal operations. Do not use it for ordinary file reading, listing, searching, writing, or editing when read, list, glob, grep, write, edit, or apply_patch can express the operation more clearly. Ripgrep (rg) is bundled and available on PATH for searches requiring flags or pipelines beyond the grep/glob tools; no installation is needed. Use workdir instead of 'cd <dir> && ...'. Quote paths containing spaces. timeout is milliseconds, defaults to the configured deadline (normally 120000), and has no fixed upper limit; set 0 for no deadline. Output includes the exit code and combined stdout/stderr. Do not create commits or push unless the user explicitly asks, and do not use destructive git or filesystem operations without clear authorization. Set run_in_background for a command that keeps running or takes minutes, such as a dev server, a file watcher, or a full build or test suite: the call returns at once with the command's id, you keep working, and a message tells you when it ends with its exit code and the end of its output. Meanwhile read its output with bash_output, which can also wait for it, and end it with bash_stop. Keep quick commands, and any command whose result your next step needs, in the foreground, and wait for a background one with bash_output when the answer depends on it. Never start a lasting process with a trailing & or nohup; use run_in_background so Haarness can follow and stop it. A timeout you give limits the whole run, in the background too. In some chats a foreground command that runs long moves to the background by itself; its result then says so and gives its id.";
+
+const BASH_OUTPUT_DESCRIPTION: &str = "Follow the shell commands bash started in this chat. With an id it returns what that command printed since your last read of it (at most 30 KB; tail_lines keeps only the last lines), whether it still runs or how it ended, and a cursor to read from later. Without an id it lists the chat's commands with their ids and states. wait_seconds waits up to that long before answering: until the command ends (until=exit, the default), until it prints nothing for quiet_seconds (until=quiet), or until a line matches pattern (until=match), searching the output since your last read, so a line printed before this call counts. A foreground command's result already holds its output; use this for commands in the background.";
+
+const BASH_STOP_DESCRIPTION: &str = "Stop a shell command bash started in this chat, by its id, with every process it started. By default it is interrupted, then terminated, then killed, with a short grace period between the steps; signal sends that one signal instead (INT, TERM or KILL). Stopping a command that already ended changes nothing. The result gives how it ended and the end of its output.";
 
 const WEBFETCH_DESCRIPTION: &str = "Fetch a fully formed HTTP or HTTPS URL as a read-only operation. HTML is converted to markdown by default; use format='raw' only when the original response body is required. Prefer a more targeted connected tool when one exists for the requested service or data. Large results may be truncated with a path to the full output.";
 /// A body larger than this is refused while it is read: a server that sends
@@ -266,6 +270,8 @@ impl NativeToolRegistry {
             Kind::MultiEdit,
             Kind::ApplyPatch,
             Kind::Bash,
+            Kind::BashOutput,
+            Kind::BashStop,
             Kind::WebFetch,
             Kind::Question,
             Kind::Todo,
@@ -2510,6 +2516,8 @@ enum Kind {
     MultiEdit,
     ApplyPatch,
     Bash,
+    BashOutput,
+    BashStop,
     WebFetch,
     Question,
     /// Legacy Haarness spelling retained for existing providers/scripts.
@@ -2688,9 +2696,33 @@ impl Tool for BuiltinTool {
                 json!({
                     "command":{"type":"string","description":"Shell command to execute."},
                     "timeout":{"type":"integer","minimum":0,"description":"Optional timeout in milliseconds; defaults to the configured deadline (normally 120000). Zero disables the deadline."},
-                    "workdir":{"type":"string","description":"Workspace-relative or absolute working directory. Omit to use the workspace; prefer this over a cd prefix."}
+                    "workdir":{"type":"string","description":"Workspace-relative or absolute working directory. Omit to use the workspace; prefer this over a cd prefix."},
+                    "run_in_background":{"type":"boolean","default":false,"description":"Return at once with the command's id and let it run on; you are told when it ends."}
                 }),
                 vec!["command"],
+            ),
+            Kind::BashOutput => (
+                "bash_output",
+                BASH_OUTPUT_DESCRIPTION,
+                json!({
+                    "id":{"type":"string","minLength":1,"description":"The command's id, from its bash result. Omit it to list this chat's commands."},
+                    "wait_seconds":{"type":"integer","minimum":0,"maximum":300,"default":0,"description":"Wait up to this many seconds for what until names before answering; 0 answers at once."},
+                    "until":{"type":"string","enum":["exit","quiet","match"],"default":"exit","description":"What a wait waits for: the command ending (exit), no output for quiet_seconds (quiet), or a line matching pattern (match)."},
+                    "pattern":{"type":"string","minLength":1,"description":"For until=match: a regular expression in Rust syntax, matched against each line; begin it with (?i) to ignore case."},
+                    "quiet_seconds":{"type":"integer","minimum":1,"maximum":300,"default":5,"description":"For until=quiet: how many seconds without output count as quiet."},
+                    "cursor":{"type":"integer","minimum":0,"description":"Read from this cursor, from an earlier result, instead of from your last read."},
+                    "tail_lines":{"type":"integer","minimum":1,"maximum":2000,"description":"Keep only the last this many lines of what is returned."}
+                }),
+                vec![],
+            ),
+            Kind::BashStop => (
+                "bash_stop",
+                BASH_STOP_DESCRIPTION,
+                json!({
+                    "id":{"type":"string","minLength":1,"description":"The command's id, from its bash result or bash_output."},
+                    "signal":{"type":"string","enum":["INT","TERM","KILL"],"description":"Send only this signal instead of the interrupt, terminate, kill sequence."}
+                }),
+                vec!["id"],
             ),
             Kind::WebFetch => (
                 "webfetch",
@@ -3239,6 +3271,11 @@ impl Tool for BuiltinTool {
             }
             Kind::Bash => {
                 let command = string(&args, "command")?;
+                if args.get("run_in_background").and_then(Value::as_bool) == Some(true) {
+                    return Err(CoreError::Tool(
+                        "run_in_background is not available on this server yet; run the command in the foreground".into(),
+                    ));
+                }
                 let workdir = match args.get("workdir") {
                     Some(value) => {
                         let value = value.as_str().ok_or_else(|| {
@@ -3287,6 +3324,9 @@ impl Tool for BuiltinTool {
             }
             Kind::Todo | Kind::TodoWrite | Kind::TodoRead => Err(CoreError::Tool(
                 "todo state is managed by the runtime task coordinator".into(),
+            )),
+            Kind::BashOutput | Kind::BashStop => Err(CoreError::Tool(
+                "commands in the background are not available on this server yet".into(),
             )),
             Kind::Question => Err(CoreError::Tool(
                 "question requires an interactive permission/question reply channel".into(),

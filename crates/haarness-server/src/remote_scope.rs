@@ -134,7 +134,7 @@ pub async fn enforce(State(state): State<ServerState>, request: Request, next: N
             "threads" | "permissions" | "questions" | "info" | "events" | "providers" | "agents"
             | "commands" | "plugins" | "tools",
         ]
-        | ["turns", "active"]
+        | ["turns" | "commands", "active"]
         | ["skills" | "mcp", ..] => get,
         ["threads", id, rest @ ..] => visible(id) && !rest.contains(&"fork"),
         ["turns", id, ..] => {
@@ -169,7 +169,12 @@ pub async fn enforce(State(state): State<ServerState>, request: Request, next: N
     if !response.status().is_success()
         || !matches!(
             path.as_str(),
-            "/threads" | "/permissions" | "/questions" | "/turns/active" | "/info"
+            "/threads"
+                | "/permissions"
+                | "/questions"
+                | "/turns/active"
+                | "/commands/active"
+                | "/info"
         )
     {
         return response;

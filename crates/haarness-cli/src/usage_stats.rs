@@ -29,6 +29,8 @@ const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60)
 const BUILTIN_TOOLS: &[&str] = &[
     "apply_patch",
     "bash",
+    "bash_output",
+    "bash_stop",
     "edit",
     "get_goal",
     "glob",

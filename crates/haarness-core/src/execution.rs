@@ -6,6 +6,19 @@ use serde::{Deserialize, Serialize};
 pub struct ExecutionSettings {
     /// Zero disables the deadline. A tool invocation can override this default.
     pub shell_timeout_ms: u64,
+    /// How long an agent's command without a `timeout` of its own runs in
+    /// the foreground of a chat whose client follows background work before
+    /// it moves to the background. Zero keeps it in the foreground.
+    pub shell_move_after_ms: u64,
+    /// How long a command may run in the background before it is stopped.
+    /// Zero sets no limit; a call's own `timeout` still applies.
+    pub shell_background_max_ms: u64,
+    /// How long a stopped command gets after each signal (interrupt, then
+    /// terminate) before the next; zero kills it at once.
+    pub shell_stop_grace_ms: u64,
+    /// How many commands one chat may run in the background at once. Zero
+    /// sets no cap.
+    pub shell_background_per_chat: usize,
     pub media_max_bytes: u64,
     pub subagent_concurrency: usize,
     /// One allows root -> child. Higher values enable nested task agents.
@@ -39,6 +52,10 @@ impl Default for ExecutionSettings {
     fn default() -> Self {
         Self {
             shell_timeout_ms: 120_000,
+            shell_move_after_ms: 60_000,
+            shell_background_max_ms: 0,
+            shell_stop_grace_ms: 2_000,
+            shell_background_per_chat: 16,
             media_max_bytes: 20 * 1024 * 1024,
             subagent_concurrency: 4,
             subagent_depth: 1,
@@ -86,6 +103,21 @@ mod tests {
         .unwrap();
         settings.validate().unwrap();
         assert_eq!(settings.media_max_bytes, 20 * 1024 * 1024);
+        // Background commands: a minute in the foreground, no background
+        // limit, two seconds between signals, 16 at once per chat.
+        assert_eq!(settings.shell_move_after_ms, 60_000);
+        assert_eq!(settings.shell_background_max_ms, 0);
+        assert_eq!(settings.shell_stop_grace_ms, 2_000);
+        assert_eq!(settings.shell_background_per_chat, 16);
+        let settings: ExecutionSettings = serde_json::from_str(
+            r#"{"shell_move_after_ms":0,"shell_background_max_ms":3600000,"shell_stop_grace_ms":0,"shell_background_per_chat":2}"#,
+        )
+        .unwrap();
+        settings.validate().unwrap();
+        assert_eq!(settings.shell_move_after_ms, 0);
+        assert_eq!(settings.shell_background_max_ms, 3_600_000);
+        assert_eq!(settings.shell_stop_grace_ms, 0);
+        assert_eq!(settings.shell_background_per_chat, 2);
         for bad in [
             r#"{"read_parallelism":0}"#,
             r#"{"subagent_concurrency":0}"#,

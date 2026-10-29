@@ -929,6 +929,76 @@
     }
   },
   {
+    "name": "list_shell_commands",
+    "method": "GET",
+    "path": "/v1/threads/{id}/commands",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/ShellCommandInfo"
+      }
+    }
+  },
+  {
+    "name": "background_shell_commands",
+    "method": "POST",
+    "path": "/v1/threads/{id}/commands/background",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/ShellCommandInfo"
+      }
+    },
+    "query": {
+      "$ref": "#/components/schemas/BackgroundCommandsQuery"
+    }
+  },
+  {
+    "name": "get_shell_command",
+    "method": "GET",
+    "path": "/v1/threads/{id}/commands/{command}",
+    "pathParams": [
+      "id",
+      "command"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ShellCommandInfo"
+    }
+  },
+  {
+    "name": "read_shell_command_output",
+    "method": "GET",
+    "path": "/v1/threads/{id}/commands/{command}/output",
+    "pathParams": [
+      "id",
+      "command"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ShellCommandOutput"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ShellCommandOutputQuery"
+    }
+  },
+  {
+    "name": "stop_shell_command",
+    "method": "POST",
+    "path": "/v1/threads/{id}/commands/{command}/stop",
+    "pathParams": [
+      "id",
+      "command"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ShellCommandInfo"
+    }
+  },
+  {
     "name": "queue_input",
     "method": "POST",
     "path": "/v1/threads/{id}/input",
@@ -1217,6 +1287,18 @@
       "type": "array",
       "items": {
         "$ref": "#/components/schemas/Turn"
+      }
+    }
+  },
+  {
+    "name": "active_shell_commands",
+    "method": "GET",
+    "path": "/v1/commands/active",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/ShellCommandInfo"
       }
     }
   },
