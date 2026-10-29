@@ -2921,6 +2921,7 @@
   "Command moved to background · its result will return here": "Befehl in den Hintergrund verschoben · das Ergebnis kommt hierher zurück",
   "{count} moved to background · results will return here": "{count} in den Hintergrund verschoben · die Ergebnisse kommen hierher zurück",
   "This command can't move to the background": "Dieser Befehl kann nicht in den Hintergrund",
+  "stopped what it left running": "zurückgelassene Prozesse gestoppt",
   "1 tool call": "1 Tool-Aufruf",
   "{count} tool calls": "{count} Tool-Aufrufe",
   "less than a day left at this pace": "bei diesem Tempo weniger als ein Tag übrig",

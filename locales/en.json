@@ -2921,6 +2921,7 @@
   "Command moved to background · its result will return here": "Command moved to background · its result will return here",
   "{count} moved to background · results will return here": "{count} moved to background · results will return here",
   "This command can't move to the background": "This command can't move to the background",
+  "stopped what it left running": "stopped what it left running",
   "1 tool call": "1 tool call",
   "{count} tool calls": "{count} tool calls",
   "less than a day left at this pace": "less than a day left at this pace",

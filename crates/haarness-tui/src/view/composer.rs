@@ -828,8 +828,14 @@ fn right_segments(app: &App, width: usize) -> (Vec<Vec<Span>>, usize) {
             variants.push(plain(format!("{lead}   {tier}"), theme.muted));
         }
         variants.push(plain(lead, theme.muted));
+        // Narrow, a notice that answers what was just done keeps its place;
+        // an older one gives it to the commands.
         if !notice.is_empty() {
-            variants.push(plain(notice.clone(), theme.muted));
+            if app.notice_is_fresh(std::time::Instant::now()) {
+                variants.push(plain(notice.clone(), theme.muted));
+            } else {
+                variants.push(plain(commands, theme.muted));
+            }
         }
         return detail(variants);
     }

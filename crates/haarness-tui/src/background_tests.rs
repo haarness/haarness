@@ -1029,8 +1029,9 @@ async fn the_idle_band_counts_commands_in_the_background_and_esc_esc_stops_them(
     app.language = crate::locale::Language::English;
 
     // With nothing but them running, Esc Esc stops the chat's work, them
-    // included, and never quits.
-    let client = offline_client();
+    // included (a stop that answers steering would leave them), and never
+    // quits.
+    let (client, seen) = recording_server(|_, _| ("200 OK", "{}".into())).await;
     crate::input::handle_key(
         &mut app,
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
@@ -1052,6 +1053,18 @@ async fn the_idle_band_counts_commands_in_the_background_and_esc_esc_stops_them(
     .unwrap();
     assert!(matches!(action, crate::input::AppAction::Continue));
     assert_eq!(app.notice, "Stopping session work…");
+    let stop = format!("POST /v1/threads/{}/interrupt ", thread.id);
+    for _ in 0..200 {
+        if requested(&seen).iter().any(|line| line.starts_with(&stop)) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        requested(&seen).iter().any(|line| line.starts_with(&stop)),
+        "{:?}",
+        requested(&seen)
+    );
 }
 
 #[tokio::test]
@@ -1156,4 +1169,415 @@ fn hydrating_replaces_the_conversations_list_and_keeps_other_chats_running_ones(
         "it ended while nothing said so"
     );
     assert_eq!(commands.running_in_background(other.id), 1);
+}
+
+#[test]
+fn bash_output_and_bash_stop_rows_name_the_command_and_leftovers_are_said() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let mut items = bash(
+        &thread,
+        turn,
+        "call-1",
+        "npm run dev",
+        Some(("Started.", "c1", true)),
+    );
+    let call = |sequence, call: &str, name: &str, arguments| {
+        message_item_for_turn(
+            sequence,
+            &thread,
+            turn,
+            ItemData::ToolCall {
+                call_id: call.into(),
+                name: name.into(),
+                arguments,
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    items.push(call(
+        3,
+        "call-2",
+        "bash_output",
+        serde_json::json!({"id": "c1", "until": "match", "pattern": "ready on \\d+"}),
+    ));
+    items.push(call(
+        4,
+        "call-3",
+        "bash_stop",
+        serde_json::json!({"id": "c1"}),
+    ));
+    items.push(call(
+        5,
+        "call-4",
+        "bash",
+        serde_json::json!({"command": "sleep 300 & echo started"}),
+    ));
+    items.push(message_item_for_turn(
+        6,
+        &thread,
+        turn,
+        ItemData::ToolResult {
+            call_id: "call-4".into(),
+            name: "bash".into(),
+            output: "exit: 0\nstarted".into(),
+            is_error: false,
+            metadata: serde_json::json!({
+                "exit": 0,
+                "leftovers": true,
+                "command": {"id": "c4", "background": false, "startedAt": Utc::now()},
+            }),
+        },
+    ));
+    // Known only from the transcript: the server forgot it.
+    let app = app_on(&thread, items);
+    let rows = frame_text(&app, (100, 30));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("bash_output npm run dev · ready on \\d+")),
+        "{}",
+        rows.join("\n")
+    );
+    assert!(rows.iter().any(|row| row.contains("bash_stop npm run dev")));
+    assert!(
+        row_with(&rows, "bash sleep 300 & echo started")
+            .contains("·  stopped what it left running")
+    );
+}
+
+/// A batch call whose second step runs `command`, with the batch's answer
+/// naming that step's command `id` when `answered`.
+fn batch(thread: &Thread, turn: TurnId, command: &str, id: &str, answered: bool) -> Vec<Item> {
+    let mut items = vec![message_item_for_turn(
+        1,
+        thread,
+        turn,
+        ItemData::ToolCall {
+            call_id: "call-b".into(),
+            name: "batch".into(),
+            arguments: serde_json::json!({"tool_calls": [
+                {"tool": "read", "parameters": {"path": "README.md"}},
+                {"tool": "bash", "parameters": {"command": command, "run_in_background": true}},
+            ]}),
+            provider_metadata: serde_json::Value::Null,
+        },
+    )];
+    if answered {
+        items.push(message_item_for_turn(
+            2,
+            thread,
+            turn,
+            ItemData::ToolResult {
+                call_id: "call-b".into(),
+                name: "batch".into(),
+                output: "{}".into(),
+                is_error: false,
+                metadata: serde_json::json!({"results": [
+                    {"tool": "read", "metadata": {}},
+                    {"tool": "bash", "metadata": {
+                        "command": {"id": id, "background": true, "startedAt": Utc::now()}
+                    }},
+                ]}),
+            },
+        ));
+    }
+    items
+}
+
+#[tokio::test]
+async fn a_shell_step_of_a_batch_reads_in_background_under_the_batch_row() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let mut app = app_on(&thread, batch(&thread, turn, "npm run dev", "c1", true));
+    let conversation = app.conversation_id();
+    // The step runs as call `<batch call>:2`.
+    let mut info = info_for(&thread, turn, "c1", "call-b:2", true);
+    info.started_at = Utc::now() - chrono::Duration::seconds(65);
+    app.shell_commands.update(info.clone(), conversation);
+    let rows = frame_text(&app, (100, 30));
+    let step = row_with(&rows, "bash npm run dev");
+    assert!(step.contains("in background · 1m 5s"), "{step}");
+    let _ = app.lines((100, 30));
+    assert!(
+        app.hit_rows
+            .borrow()
+            .iter()
+            .any(|hit| hit.target == crate::view::frame::HitTarget::CommandOpen("c1".into()))
+    );
+    // /tasks and the sidebar list it too.
+    assert_eq!(app.command_task_entries()[0].label, "npm run dev");
+    assert_eq!(app.background_commands().len(), 1);
+
+    // Once the server forgot it, the chat's checkpoint says how it ended.
+    let mut items = batch(&thread, turn, "npm run dev", "c1", true);
+    items.push(message_item_for_turn(
+        3,
+        &thread,
+        turn,
+        ItemData::CommandState {
+            call_id: "call-b:2".into(),
+            command_id: "c1".into(),
+            state: ShellCommandState::Exited,
+            exit_code: Some(0),
+            signal: None,
+            tail: String::new(),
+            started_at: Utc::now(),
+            ended_at: Some(Utc::now()),
+            moved_by: None,
+        },
+    ));
+    let app = app_on(&thread, items);
+    let rows = frame_text(&app, (100, 30));
+    assert!(row_with(&rows, "bash npm run dev").contains("in background · completed"));
+}
+
+#[test]
+fn a_checkpoint_the_chats_list_left_out_is_not_live() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let mut items = bash(
+        &thread,
+        turn,
+        "call-1",
+        "npm run dev",
+        Some(("ok", "c1", true)),
+    );
+    items.push(message_item_for_turn(
+        3,
+        &thread,
+        turn,
+        ItemData::CommandState {
+            call_id: "call-1".into(),
+            command_id: "c1".into(),
+            state: ShellCommandState::Running,
+            exit_code: None,
+            signal: None,
+            tail: "copied\n".into(),
+            started_at: Utc::now() - chrono::Duration::seconds(30),
+            ended_at: None,
+            moved_by: None,
+        },
+    ));
+    let mut app = app_on(&thread, items);
+    // Before the list came, the checkpoint is all there is.
+    let rows = frame_text(&app, (100, 30));
+    assert!(row_with(&rows, "bash npm run dev").contains("in background · 30s"));
+    // A forked chat copies the checkpoint, but its list has no such command.
+    let conversation = app.conversation_id();
+    app.shell_commands
+        .hydrate(conversation, Some(Vec::new()), Some(Vec::new()));
+    app.tick = 3;
+    let rows = frame_text(&app, (100, 30));
+    let row = row_with(&rows, "bash npm run dev");
+    assert!(row.trim_end().ends_with("in background"), "no timer: {row}");
+    assert!(row.contains('○'), "no spinner: {row}");
+    app.open_command_output("c1", None);
+    let rows = frame_text(&app, (80, 16));
+    assert!(
+        !rows.last().unwrap().contains("s stop"),
+        "no stop: {rows:#?}"
+    );
+    assert!(!rows[0].contains("running"), "{}", rows[0]);
+}
+
+#[tokio::test]
+async fn only_a_404_or_410_says_a_command_is_gone_and_the_view_keeps_what_it_read() {
+    let thread = fixture_thread();
+    let answers = Arc::new(Mutex::new(vec![
+        ("409 Conflict", "this workspace is asleep"),
+        ("400 Bad Request", "relay refused"),
+        ("410 Gone", "no such command"),
+    ]));
+    let queue = answers.clone();
+    let (client, seen) = recording_server(move |_, _| {
+        let (status, message) = queue.lock().unwrap().remove(0);
+        (
+            status,
+            serde_json::json!({"code": "x", "message": message, "retryable": true}).to_string(),
+        )
+    })
+    .await;
+    let mut app = app_on(&thread, vec![]);
+    let conversation = app.conversation_id();
+    app.shell_commands.update(
+        info_for(&thread, TurnId::new(), "c1", "call-1", true),
+        conversation,
+    );
+    app.open_command_output("c1", None);
+    app.command_view.as_mut().unwrap().apply(page(
+        "kept line\n",
+        0,
+        false,
+        ShellCommandState::Running,
+    ));
+    // A relay's 409, then a 400: the view keeps its output and reads again.
+    for _ in 0..2 {
+        let before = requested(&seen).len();
+        app.command_view.as_mut().unwrap().wanted = true;
+        app.poll_command_output(&client);
+        for _ in 0..200 {
+            app.poll_command_output(&client);
+            if requested(&seen).len() > before
+                && app.command_view.as_ref().is_some_and(|view| !view.wanted)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        app.poll_command_output(&client);
+        let view = app.command_view.as_ref().unwrap();
+        assert!(!view.settled && !view.only_kept);
+        assert!(
+            frame_text(&app, (80, 16))
+                .iter()
+                .any(|row| row == "  kept line")
+        );
+        assert!(app.shell_commands.get("c1").is_some());
+    }
+    // A 410: no more comes, what was read stays, and the row is not live.
+    app.command_view.as_mut().unwrap().wanted = true;
+    for _ in 0..200 {
+        app.poll_command_output(&client);
+        if app.command_view.as_ref().is_some_and(|view| view.settled) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let rows = frame_text(&app, (80, 16));
+    assert!(rows.iter().any(|row| row == "  kept line"), "{rows:#?}");
+    assert!(!rows.last().unwrap().contains("s stop"));
+    assert!(app.shell_commands.get("c1").is_none());
+}
+
+#[tokio::test]
+async fn a_stop_the_server_cannot_find_settles_the_view_and_a_relays_refusal_does_not() {
+    let thread = fixture_thread();
+    let answers = Arc::new(Mutex::new(vec!["409 Conflict", "404 Not Found"]));
+    let queue = answers.clone();
+    let (client, _) = recording_server(move |_, _| {
+        let status = queue.lock().unwrap().remove(0);
+        (
+            status,
+            serde_json::json!({"code": "x", "message": "no", "retryable": false}).to_string(),
+        )
+    })
+    .await;
+    let mut app = app_on(&thread, vec![]);
+    let conversation = app.conversation_id();
+    app.shell_commands.update(
+        info_for(&thread, TurnId::new(), "c1", "call-1", true),
+        conversation,
+    );
+    app.open_command_output("c1", None);
+    app.command_view.as_mut().unwrap().apply(page(
+        "serving\n",
+        0,
+        false,
+        ShellCommandState::Running,
+    ));
+    let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+    assert!(app.command_output_key(key, &client).await.is_err());
+    assert!(!app.command_view.as_ref().unwrap().settled);
+    assert!(app.shell_commands.get("c1").is_some());
+    app.command_output_key(key, &client).await.unwrap();
+    assert!(app.command_view.as_ref().unwrap().settled);
+    assert!(app.shell_commands.get("c1").is_none());
+    let rows = frame_text(&app, (80, 16));
+    assert!(rows.iter().any(|row| row == "  serving"));
+    assert!(!rows.last().unwrap().contains("s stop"));
+}
+
+#[test]
+fn bash_output_and_bash_stop_never_show_a_raw_id() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    // The id is named only in a batch's answer for its shell step.
+    let mut items = batch(&thread, turn, "cargo watch -x test", "cmd-7f3a", true);
+    let call = |sequence, call: &str, name: &str, arguments| {
+        message_item_for_turn(
+            sequence,
+            &thread,
+            turn,
+            ItemData::ToolCall {
+                call_id: call.into(),
+                name: name.into(),
+                arguments,
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    items.push(call(
+        3,
+        "call-2",
+        "bash_output",
+        serde_json::json!({"id": "cmd-7f3a"}),
+    ));
+    items.push(call(
+        4,
+        "call-3",
+        "bash_stop",
+        serde_json::json!({"id": "cmd-unknown"}),
+    ));
+    let app = app_on(&thread, items);
+    let rows = frame_text(&app, (100, 30));
+    let text = rows.join("\n");
+    assert!(text.contains("bash_output cargo watch -x test"), "{text}");
+    assert!(
+        !text.contains("cmd-7f3a") && !text.contains("cmd-unknown"),
+        "{text}"
+    );
+    assert!(rows.iter().any(|row| row.trim_end().ends_with("bash_stop")));
+}
+
+#[test]
+fn the_view_says_it_waits_only_once_its_first_read_is_late_and_a_narrow_band_keeps_the_count() {
+    let thread = fixture_thread();
+    let mut app = app_on(&thread, vec![]);
+    let conversation = app.conversation_id();
+    app.shell_commands.update(
+        info_for(&thread, TurnId::new(), "c1", "call-1", true),
+        conversation,
+    );
+    app.open_command_output("c1", None);
+    let waiting = |app: &App| {
+        frame_text(app, (80, 16))
+            .iter()
+            .any(|row| row.contains("Waiting for output…"))
+    };
+    assert!(!waiting(&app), "nothing flashes before the first read");
+    app.command_view.as_mut().unwrap().opened = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(waiting(&app));
+    app.close_overlay();
+
+    // At 40 columns an older notice gives its place to the count; a fresh
+    // one, the answer to what was just done, keeps it.
+    let band = |app: &App| {
+        crate::view::composer::composer_lines(app, 40)
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    app.notice = "Ready".into();
+    app.notice_shown = Some((
+        "Ready".into(),
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(10))
+            .unwrap(),
+    ));
+    assert!(
+        band(&app).contains("1 command in background"),
+        "{}",
+        band(&app)
+    );
+    app.notice = "Copied selection".into();
+    app.notice_shown = Some(("Copied selection".into(), std::time::Instant::now()));
+    let narrow = band(&app);
+    assert!(
+        narrow.contains("Copied select") && !narrow.contains("1 command"),
+        "{narrow}"
+    );
 }

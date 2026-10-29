@@ -1532,6 +1532,7 @@ fn presentation_order(items: &[Item]) -> Vec<&Item> {
             // These are durable lifecycle/accounting records, not subsequent
             // visible work. They may sit between a call and same-round prose.
             ItemData::TaskLink { .. }
+            | ItemData::CommandState { .. }
             | ItemData::Usage { .. }
             | ItemData::Snapshot { .. }
             | ItemData::QueueConsumed { .. }
@@ -2241,6 +2242,19 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                             format!("  ·  {files} files  {stat}")
                         };
                     }
+                    // What a command left running (`server &`) was stopped
+                    // when it ended, which the row says quietly.
+                    if name == "bash"
+                        && metadata
+                            .get("leftovers")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                    {
+                        return format!(
+                            "  ·  {}",
+                            app.language.text("stopped what it left running")
+                        );
+                    }
                     if let Some(label) = empty_result_label(output) {
                         return format!("  ·  {label}");
                     }
@@ -2293,7 +2307,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 let argument = if name == "workflow" {
                     format!(" {}", workflow_argument(arguments))
                 } else {
-                    tool_target(app.language, name, arguments)
+                    crate::background::command_tool_target(app, name, arguments)
+                        .or_else(|| tool_target(app.language, name, arguments))
                         .map(|value| format!(" {}", single_line(&value, argument_budget)))
                         .unwrap_or_default()
                 };
@@ -2406,12 +2421,39 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                             .and_then(|phase| phase.call_id.as_deref())
                             .and_then(step_of)
                     };
-                    let mut push = |row: Line| match result {
-                        Some(result) => block.push_tagged(row, HitTarget::ToolToggle(result.id)),
-                        None => block.push(row),
+                    let mut push = |row: Line, opens: Option<String>| match (opens, result) {
+                        (Some(id), _) => block.push_tagged(row, HitTarget::CommandOpen(id)),
+                        (None, Some(result)) => {
+                            block.push_tagged(row, HitTarget::ToolToggle(result.id));
+                        }
+                        (None, None) => block.push(row),
                     };
                     for step in &listed[..shown] {
+                        // A shell step runs as call `<call id>:<step>`: one in
+                        // the background reads as a command row does, and
+                        // opens its output.
+                        let command = same_tool(step.tool, "bash")
+                            .then(|| {
+                                crate::background::step_command_row(
+                                    app,
+                                    &command_states,
+                                    item,
+                                    call_id,
+                                    step.index,
+                                    result,
+                                )
+                            })
+                            .flatten();
+                        let in_background = command.as_ref().filter(|command| command.background);
                         let (glyph, tone) = match (step.failed, status) {
+                            _ if in_background.is_some() => {
+                                let (glyph, tone) = task_state_style(
+                                    in_background.map_or("", |command| command.task_state()),
+                                    app.tick,
+                                    theme,
+                                );
+                                (glyph.to_string(), tone)
+                            }
                             _ if step.blocked.is_some() => ("⊘".to_owned(), theme.muted),
                             (Some(true), _) => ("✗".to_owned(), theme.danger),
                             (Some(false), _) | (None, Some("done")) => {
@@ -2442,8 +2484,17 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         let target = if same_tool(step.tool, "task") {
                             Some(batch_task_label(arguments, step.index))
                         } else {
-                            tool_target(app.language, step.tool, step.parameters)
+                            crate::background::command_tool_target(app, step.tool, step.parameters)
+                                .or_else(|| tool_target(app.language, step.tool, step.parameters))
                         };
+                        let state = in_background.map(|command| {
+                            let full = format!("  {}", command.status(app.language, false));
+                            if 7 + step.tool.chars().count() + 12 + full.chars().count() > width {
+                                format!("  {}", command.status(app.language, true))
+                            } else {
+                                full
+                            }
+                        });
                         // A refused step says so after its target, as a
                         // call of its own does.
                         let blocked = step.blocked.as_ref().map(|review| {
@@ -2461,7 +2512,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                                 7 + step.tool.chars().count()
                                     + blocked
                                         .as_ref()
-                                        .map_or(0, |text| text.chars().count().min(60)),
+                                        .map_or(0, |text| text.chars().count().min(60))
+                                    + state.as_ref().map_or(0, |state| state.chars().count()),
                             )
                             .max(12);
                         let mut spans = vec![
@@ -2477,14 +2529,22 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         if let Some(blocked) = blocked {
                             spans.push(Span::new(single_line(&blocked, 80), theme.muted));
                         }
-                        push(Line::new(spans));
+                        if let Some(state) = state {
+                            spans.push(Span::new(state, tone));
+                        }
+                        // The step's command opens its output while it runs,
+                        // and once it is in the background.
+                        let opens = command
+                            .filter(|command| command.background || result.is_none())
+                            .map(|command| command.id);
+                        push(Line::new(spans), opens);
                     }
                     if listed.len() > shown {
                         let more = app.language.format(
                             "+{count} more",
                             &[("count", &(listed.len() - shown).to_string())],
                         );
-                        push(line(format!("    … {more}"), theme.muted));
+                        push(line(format!("    … {more}"), theme.muted), None);
                     }
                 }
                 for (index, child_call_id, task) in &batch_children {

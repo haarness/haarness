@@ -2921,6 +2921,7 @@
   "Command moved to background · its result will return here": "Komanda je premještena u pozadinu · rezultat će se vratiti ovdje",
   "{count} moved to background · results will return here": "Premješteno u pozadinu: {count} · rezultati će se vratiti ovdje",
   "This command can't move to the background": "Ova komanda ne može u pozadinu",
+  "stopped what it left running": "zaustavljeno ono što je ostavila da radi",
   "1 tool call": "1 poziv alata",
   "{count} tool calls": "pozivi alata: {count}",
   "less than a day left at this pace": "ovim tempom ostaje manje od jednog dana",

@@ -11,7 +11,7 @@
 //! restarts.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -54,6 +54,12 @@ pub(crate) const TASKS_COMMAND: &str = "command:";
 #[derive(Default)]
 pub(crate) struct ShellCommands {
     by_id: HashMap<String, ShellCommandInfo>,
+    /// The conversation whose whole list came: a command its checkpoints
+    /// call running that the list leaves out (one a forked chat copied, one
+    /// a restart lost) is not running there.
+    listed: Option<ThreadId>,
+    /// Commands the server said it does not have (404 or 410 on a route).
+    gone: HashSet<String>,
 }
 
 /// Whether `info` belongs to the conversation rooted at `conversation`.
@@ -104,6 +110,9 @@ impl ShellCommands {
             for info in tree {
                 self.by_id.insert(info.id.clone(), info);
             }
+            self.listed = Some(conversation);
+        } else if self.listed != Some(conversation) {
+            self.listed = None;
         }
         if let Some(active) = active {
             // Another chat's command that is not running any more ended while
@@ -158,6 +167,19 @@ impl ShellCommands {
             .count()
     }
 
+    /// Whether a command this client has no report of may still run: not
+    /// once the conversation's whole list came without it, nor once the
+    /// server said it does not have it.
+    fn may_run(&self, id: &str, conversation: ThreadId) -> bool {
+        self.listed != Some(conversation) && !self.gone.contains(id)
+    }
+
+    /// The server does not have the command (any more).
+    pub(crate) fn forget(&mut self, id: &str) {
+        self.by_id.remove(id);
+        self.gone.insert(id.to_owned());
+    }
+
     fn set_output_size(&mut self, id: &str, size: u64) {
         if let Some(info) = self.by_id.get_mut(id) {
             info.output_bytes = info.output_bytes.max(size);
@@ -165,19 +187,31 @@ impl ShellCommands {
     }
 }
 
-/// The last `command_state` item of each command in a transcript.
+/// The last `command_state` item of each command in a transcript, by its
+/// id and by the call (and turn) that started it.
 pub(crate) struct DurableStates<'a> {
     by_command: HashMap<&'a str, &'a ItemData>,
+    by_call: HashMap<(&'a str, Option<haarness_protocol::TurnId>), &'a ItemData>,
 }
 
 pub(crate) fn durable_states(items: &[Item]) -> DurableStates<'_> {
     let mut by_command = HashMap::new();
+    let mut by_call = HashMap::new();
     for item in items {
-        if let ItemData::CommandState { command_id, .. } = &item.data {
+        if let ItemData::CommandState {
+            command_id,
+            call_id,
+            ..
+        } = &item.data
+        {
             by_command.insert(command_id.as_str(), &item.data);
+            by_call.insert((call_id.as_str(), item.turn_id), &item.data);
         }
     }
-    DurableStates { by_command }
+    DurableStates {
+        by_command,
+        by_call,
+    }
 }
 
 impl DurableStates<'_> {
@@ -297,6 +331,11 @@ fn result_command(result: Option<&Item>) -> Option<ShellCommandRef> {
     let ItemData::ToolResult { metadata, .. } = &result?.data else {
         return None;
     };
+    named_command(metadata)
+}
+
+/// `command` of a `bash` call's metadata.
+fn named_command(metadata: &serde_json::Value) -> Option<ShellCommandRef> {
     let command = metadata.get("command")?;
     Some(ShellCommandRef {
         id: command.get("id")?.as_str()?.to_owned(),
@@ -323,7 +362,37 @@ pub(crate) fn command_row(
     call_id: &str,
     result: Option<&Item>,
 ) -> Option<CommandRow> {
-    let named = result_command(result);
+    row_for(app, durable, call, call_id, result_command(result))
+}
+
+/// The command behind the `bash` step `step` (counted from 1) of the batch
+/// call `call`, which runs as call `<call id>:<step>`; the batch's result,
+/// once it came, names it in that step's entry.
+pub(crate) fn step_command_row(
+    app: &App,
+    durable: &DurableStates<'_>,
+    call: &Item,
+    call_id: &str,
+    step: usize,
+    result: Option<&Item>,
+) -> Option<CommandRow> {
+    let named = result.and_then(|result| match &result.data {
+        ItemData::ToolResult { metadata, .. } => metadata
+            .get("results")
+            .and_then(|results| results.get(step.checked_sub(1)?))
+            .and_then(|entry| named_command(entry.get("metadata")?)),
+        _ => None,
+    });
+    row_for(app, durable, call, &format!("{call_id}:{step}"), named)
+}
+
+fn row_for(
+    app: &App,
+    durable: &DurableStates<'_>,
+    call: &Item,
+    call_id: &str,
+    named: Option<ShellCommandRef>,
+) -> Option<CommandRow> {
     let info = named
         .as_ref()
         .and_then(|named| app.shell_commands.get(&named.id))
@@ -338,35 +407,54 @@ pub(crate) fn command_row(
         row.background |= named.as_ref().is_some_and(|named| named.background);
         return Some(row);
     }
-    let named = named?;
-    if let Some(ItemData::CommandState {
+    let checkpoint = named
+        .as_ref()
+        .and_then(|named| durable.by_command.get(named.id.as_str()))
+        .or_else(|| durable.by_call.get(&(call_id, call.turn_id)));
+    let (id, mut row) = if let Some(ItemData::CommandState {
+        command_id,
         state,
         exit_code,
         signal,
         started_at,
         ..
-    }) = durable.by_command.get(named.id.as_str())
+    }) = checkpoint
     {
-        return Some(CommandRow {
-            id: named.id,
-            thread: call.thread_id,
-            background: true,
-            state: *state,
-            exit_code: *exit_code,
-            signal: signal.clone(),
-            started_at: Some(*started_at),
-        });
+        (
+            command_id.clone(),
+            CommandRow {
+                id: command_id.clone(),
+                thread: call.thread_id,
+                background: true,
+                state: *state,
+                exit_code: *exit_code,
+                signal: signal.clone(),
+                started_at: Some(*started_at),
+            },
+        )
+    } else {
+        // Just sent to the background, before its report or checkpoint came.
+        let named = named.filter(|named| named.background)?;
+        (
+            named.id.clone(),
+            CommandRow {
+                id: named.id,
+                thread: call.thread_id,
+                background: true,
+                state: ShellCommandState::Running,
+                exit_code: None,
+                signal: None,
+                started_at: Some(named.started_at),
+            },
+        )
+    };
+    // Running, says the chat's record; but the server's list of the chat came
+    // without it (a forked chat's copy, a restart), or the server said it has
+    // no such command: it runs nowhere this client can follow.
+    if row.state.is_live() && !app.shell_commands.may_run(&id, app.conversation_id()) {
+        row.state = ShellCommandState::Unknown;
     }
-    // Just sent to the background, before its report or checkpoint came.
-    named.background.then_some(CommandRow {
-        id: named.id,
-        thread: call.thread_id,
-        background: true,
-        state: ShellCommandState::Running,
-        exit_code: None,
-        signal: None,
-        started_at: Some(named.started_at),
-    })
+    Some(row)
 }
 
 impl App {
@@ -559,11 +647,7 @@ impl App {
                     .clone_into(&mut self.notice);
                 Ok(None)
             }
-            Err(error)
-                if crate::api::refusal_status(&error) == Some(reqwest::StatusCode::NOT_FOUND) =>
-            {
-                Ok(Some(0))
-            }
+            Err(error) if gone(&error) => Ok(Some(0)),
             Err(error) => Err(error),
         }
     }
@@ -610,32 +694,70 @@ impl App {
     }
 
     /// The chat and command line of a command known only from the
-    /// transcript: the `bash` call whose result names it.
-    fn recorded_command(&self, id: &str) -> (ThreadId, String) {
-        let result = self
-            .items
-            .iter()
-            .find(|item| result_command(Some(item)).is_some_and(|named| named.id == id));
-        let call = result.and_then(|result| match &result.data {
-            ItemData::ToolResult { call_id, .. } => self.items.iter().find(|item| {
-                matches!(&item.data, ItemData::ToolCall { call_id: candidate, .. }
-                    if candidate == call_id && item.turn_id == result.turn_id)
-            }),
+    /// transcript: the `bash` call, or `bash` step of a batch, whose answer
+    /// or checkpoint names it. The line is empty when none does.
+    pub(crate) fn recorded_command(&self, id: &str) -> (ThreadId, String) {
+        // The call (and turn) that started it, and the item that says so.
+        let started = self.items.iter().find_map(|item| match &item.data {
+            ItemData::CommandState {
+                command_id,
+                call_id,
+                ..
+            } if command_id == id => Some((item, call_id.clone())),
+            ItemData::ToolResult {
+                call_id, metadata, ..
+            } => {
+                if named_command(metadata).is_some_and(|named| named.id == id) {
+                    return Some((item, call_id.clone()));
+                }
+                // A batch's answer names each step's command in its entry.
+                let step = metadata
+                    .get("results")
+                    .and_then(serde_json::Value::as_array)?
+                    .iter()
+                    .position(|entry| {
+                        entry
+                            .get("metadata")
+                            .and_then(named_command)
+                            .is_some_and(|named| named.id == id)
+                    })?;
+                Some((item, format!("{call_id}:{}", step + 1)))
+            }
             _ => None,
         });
-        let command = call
-            .and_then(|call| match &call.data {
-                ItemData::ToolCall { arguments, .. } => arguments
-                    .get("command")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
+        let Some((item, call_id)) = started else {
+            return (self.thread.id, String::new());
+        };
+        // `<batch call>:<step>` is a step of that batch call.
+        let (call, step) = match call_id.rsplit_once(':') {
+            Some((batch, step)) if step.parse::<usize>().is_ok() => {
+                (batch.to_owned(), step.parse::<usize>().ok())
+            }
+            _ => (call_id, None),
+        };
+        let command = self
+            .items
+            .iter()
+            .find_map(|candidate| match &candidate.data {
+                ItemData::ToolCall {
+                    call_id, arguments, ..
+                } if *call_id == call && candidate.turn_id == item.turn_id => {
+                    let arguments = match step {
+                        Some(step) => arguments
+                            .get("tool_calls")?
+                            .get(step.checked_sub(1)?)?
+                            .get("parameters")?,
+                        None => arguments,
+                    };
+                    arguments
+                        .get("command")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                }
                 _ => None,
             })
             .unwrap_or_default();
-        (
-            result.map_or(self.thread.id, |result| result.thread_id),
-            command,
-        )
+        (item.thread_id, command)
     }
 
     /// What the output view shows when the server no longer has the
@@ -671,8 +793,15 @@ impl App {
             match result {
                 Ok(page) => view.apply(page),
                 Err(ReadError::Gone) => {
-                    let kept = self.kept_output(&view.id);
-                    view.keep_only(&kept);
+                    self.shell_commands.forget(&view.id);
+                    if view.loaded {
+                        // What was read stays; only no more comes.
+                        view.settled = true;
+                        view.state = view.state.filter(|(state, _)| !state.is_live());
+                    } else {
+                        let kept = self.kept_output(&view.id);
+                        view.keep_only(&kept);
+                    }
                 }
                 Err(_) => {}
             }
@@ -735,11 +864,25 @@ impl App {
                     .get(&id)
                     .is_some_and(|info| info.state == ShellCommandState::Running);
                 if live {
-                    let info = client.stop_shell_command(thread, &id).await?;
-                    let conversation = self.conversation_id();
-                    self.shell_commands.update(info, conversation);
-                    if let Some(view) = self.command_view.as_mut() {
-                        view.wanted = true;
+                    match client.stop_shell_command(thread, &id).await {
+                        Ok(info) => {
+                            let conversation = self.conversation_id();
+                            self.shell_commands.update(info, conversation);
+                            if let Some(view) = self.command_view.as_mut() {
+                                view.wanted = true;
+                            }
+                        }
+                        // The server no longer has it: nothing runs to stop.
+                        Err(error) if gone(&error) => {
+                            self.shell_commands.forget(&id);
+                            if let Some(view) = self.command_view.as_mut() {
+                                view.settled = true;
+                                view.state = None;
+                            }
+                        }
+                        // A relay or a Cloud workspace that sleeps answers
+                        // for a while with something else: the view stays.
+                        Err(error) => return Err(error),
                     }
                 }
             }
@@ -756,6 +899,36 @@ impl App {
     }
 }
 
+/// What a `bash_output` or `bash_stop` row names: the command it reads or
+/// stops, by its line rather than its id, and the line a wait looks for.
+pub(crate) fn command_tool_target(
+    app: &App,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Option<String> {
+    if !matches!(name, "bash_output" | "bash_stop") {
+        return None;
+    }
+    // By its line, never its id: an id a person cannot read leaves the row
+    // to name what else the call says.
+    let id = arguments.get("id").and_then(serde_json::Value::as_str)?;
+    let line = app.shell_commands.get(id).map_or_else(
+        || command_line(&app.recorded_command(id).1),
+        |info| command_line(&info.command),
+    );
+    if line.is_empty() {
+        return None;
+    }
+    let pattern = arguments
+        .get("pattern")
+        .and_then(serde_json::Value::as_str)
+        .filter(|pattern| !pattern.is_empty() && name == "bash_output");
+    Some(match pattern {
+        Some(pattern) => format!("{line} · {}", crate::escapes::spelled_out(pattern)),
+        None => line,
+    })
+}
+
 /// The first line of a command, as a row or a list names it.
 pub(crate) fn command_line(command: &str) -> String {
     let first = command.lines().next().unwrap_or_default().trim();
@@ -764,6 +937,16 @@ pub(crate) fn command_line(command: &str) -> String {
     } else {
         first.to_owned()
     }
+}
+
+/// Only these answers say the server does not have a command: anything else
+/// on a command's route (a relay's 409 or 400, a Cloud workspace waking up)
+/// passes, and what is on screen stays.
+fn gone(error: &anyhow::Error) -> bool {
+    matches!(
+        crate::api::refusal_status(error),
+        Some(reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE)
+    )
 }
 
 /// Why a read of a command's output failed.
@@ -812,6 +995,9 @@ pub(crate) struct CommandView {
     pub page: Cell<usize>,
     /// Read again as soon as the read in flight is in.
     pub wanted: bool,
+    /// When the view opened: its first read usually lands before anything
+    /// needs saying.
+    pub opened: Instant,
     read_at: Option<Instant>,
     pending: Option<(Read, tokio::task::JoinHandle<()>)>,
     /// Rows of the output at a width, kept until it changes.
@@ -835,6 +1021,7 @@ impl CommandView {
             rows: Cell::new(0),
             page: Cell::new(0),
             wanted: true,
+            opened: Instant::now(),
             read_at: None,
             pending: None,
             shown: RefCell::new(None),
@@ -859,7 +1046,7 @@ impl CommandView {
                 .shell_command_output(thread, &id, cursor, tail, OUTPUT_PAGE)
                 .await
                 .map_err(|error| {
-                    if crate::api::refusal_status(&error) == Some(reqwest::StatusCode::NOT_FOUND) {
+                    if gone(&error) {
                         ReadError::Gone
                     } else {
                         tracing::debug!(%error, "could not read a command's output");

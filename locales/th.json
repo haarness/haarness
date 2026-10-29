@@ -2921,6 +2921,7 @@
   "Command moved to background · its result will return here": "ย้ายคำสั่งไปเบื้องหลังแล้ว · ผลลัพธ์จะกลับมาที่นี่",
   "{count} moved to background · results will return here": "ย้าย {count} รายการไปเบื้องหลังแล้ว · ผลลัพธ์จะกลับมาที่นี่",
   "This command can't move to the background": "ย้ายคำสั่งนี้ไปเบื้องหลังไม่ได้",
+  "stopped what it left running": "หยุดสิ่งที่ปล่อยให้ทำงานค้างไว้แล้ว",
   "1 tool call": "เรียกใช้เครื่องมือ 1 ครั้ง",
   "{count} tool calls": "เรียกใช้เครื่องมือ {count} ครั้ง",
   "less than a day left at this pace": "เหลือไม่ถึงหนึ่งวันในอัตรานี้",
