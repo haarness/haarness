@@ -739,12 +739,13 @@ pub struct StartTurnRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub attended: bool,
     /// The client shows the chat's background work and follows it up
-    /// (Desktop, the terminal UI, the phone and web apps, `haarness run
-    /// --wait-background`): an agent's shell command in the turn that starts,
-    /// and in the turns its background results start, moves to the
-    /// background after `execution.shell_move_after_ms` instead of holding
-    /// the reply. Without it a command stays in the foreground until it ends
-    /// or reaches its deadline, as before (`background-commands.v1`).
+    /// (Desktop, the terminal UI, the phone and web apps): an agent's shell
+    /// command in the turn that starts, and in the turns its background
+    /// results start, moves to the background after
+    /// `execution.shell_move_after_ms` instead of holding the reply. Without
+    /// it a command stays in the foreground until it ends or reaches its
+    /// deadline, as before, and one the agent starts in the background stops
+    /// at `execution.shell_timeout_ms` (`background-commands.v1`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub follows_background: bool,
 }

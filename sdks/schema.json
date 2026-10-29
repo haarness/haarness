@@ -5636,7 +5636,7 @@
             ]
           },
           "followsBackground": {
-            "description": "The client shows the chat's background work and follows it up\n(Desktop, the terminal UI, the phone and web apps, `haarness run\n--wait-background`): an agent's shell command in the turn that starts,\nand in the turns its background results start, moves to the\nbackground after `execution.shell_move_after_ms` instead of holding\nthe reply. Without it a command stays in the foreground until it ends\nor reaches its deadline, as before (`background-commands.v1`).",
+            "description": "The client shows the chat's background work and follows it up\n(Desktop, the terminal UI, the phone and web apps): an agent's shell\ncommand in the turn that starts, and in the turns its background\nresults start, moves to the background after\n`execution.shell_move_after_ms` instead of holding the reply. Without\nit a command stays in the foreground until it ends or reaches its\ndeadline, as before, and one the agent starts in the background stops\nat `execution.shell_timeout_ms` (`background-commands.v1`).",
             "type": "boolean"
           },
           "model": {

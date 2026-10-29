@@ -306,6 +306,9 @@ struct BackgroundTask {
     delivery_auto_approve: bool,
     delivery_unattended: bool,
     delivery_tools: Option<HashMap<String, bool>>,
+    /// The turn its result starts keeps the launching client's
+    /// `follows_background`.
+    delivery_follows_background: bool,
     suppress_delivery: AtomicBool,
     /// Stopped because the server is shutting down: its checkpoint is left
     /// in the background, so the next start tells the parent it stopped.
@@ -2557,6 +2560,28 @@ impl AgentRuntime {
                 json!(item),
             );
         }
+        // So is a shell command that ran in the background.
+        for item in self
+            .repository
+            .recover_interrupted_commands(&commands::interrupted_report)
+            .await?
+        {
+            let root = match self.repository.get_thread(item.thread_id).await {
+                Ok(thread) => self.resolve_root(&thread).await,
+                Err(_) => item.thread_id,
+            };
+            if matches!(item.data, ItemData::CommandState { .. }) {
+                info!(chat = %item.thread_id, "recorded a background command the restart stopped");
+            }
+            self.events.publish_scoped(
+                "item.created",
+                Some(item.thread_id),
+                Some(root),
+                item.turn_id,
+                Some(item.id),
+                json!(item),
+            );
+        }
 
         // A process restart cannot retain the provider/tool program counter.
         // Never leave a durable goal claiming to be actively pursuing while
@@ -3375,6 +3400,13 @@ impl AgentRuntime {
             json!(thread),
         );
         if archiving && thread.archived {
+            // An archived chat's commands stop, untold.
+            if let Ok(threads) = self.thread_tree_ids(id).await {
+                self.stop_commands_of(
+                    &threads,
+                    haarness_protocol::ShellCommandEndedBy::ChatStopped,
+                );
+            }
             if let Some(hooks) = &self.components().hooks {
                 let call = self.hook_call(&thread, None).await;
                 hooks.session_end(&call, "archived").await;
@@ -3835,7 +3867,7 @@ impl AgentRuntime {
         };
         let background_commands = self
             .shell_commands
-            .running_in_background(&self.thread_tree_ids(id).await?);
+            .running_in_background(&self.command_threads(id).await?);
         // Last: a turn that started and ended between two reads of a chat
         // that looks quiet is the newest here.
         let last_turn = self.repository.last_turn(id).await?;
@@ -3847,10 +3879,54 @@ impl AgentRuntime {
         })
     }
 
+    /// `thread` and the chats under it that have commands listed now: what
+    /// a client polling a chat's commands reads, without listing every chat.
+    /// A root chat's commands carry it as their root; a chat under one is
+    /// found among the ancestors of the chats that have commands.
+    async fn command_threads(&self, thread: ThreadId) -> CoreResult<HashSet<ThreadId>> {
+        let asked = self.repository.get_thread(thread).await?;
+        let mut inside = HashSet::from([thread]);
+        let listed = self
+            .shell_commands
+            .all(|_| true)
+            .into_iter()
+            .map(|entry| {
+                let info = entry.info();
+                (info.thread_id, info.root_thread_id)
+            })
+            .collect::<HashSet<_>>();
+        for (candidate, root) in listed {
+            if candidate == thread || inside.contains(&candidate) {
+                continue;
+            }
+            if asked.parent_id.is_none() {
+                if root == thread {
+                    inside.insert(candidate);
+                }
+                continue;
+            }
+            let mut current = candidate;
+            for _ in 0..16 {
+                let Ok(parent) = self.repository.get_thread(current).await else {
+                    break;
+                };
+                match parent.parent_id {
+                    Some(parent) if parent == thread => {
+                        inside.insert(candidate);
+                        break;
+                    }
+                    Some(parent) => current = parent,
+                    None => break,
+                }
+            }
+        }
+        Ok(inside)
+    }
+
     /// The agents' shell commands in `thread` and the chats under it:
     /// running ones first, then those that ended in the last ten minutes.
     pub async fn shell_commands(&self, thread: ThreadId) -> CoreResult<Vec<ShellCommandInfo>> {
-        let threads = self.thread_tree_ids(thread).await?;
+        let threads = self.command_threads(thread).await?;
         Ok(self.shell_commands.list(Some(&threads)))
     }
 
@@ -3870,7 +3946,7 @@ impl AgentRuntime {
         thread: ThreadId,
         id: &str,
     ) -> CoreResult<Arc<crate::background_commands::CommandEntry>> {
-        let threads = self.thread_tree_ids(thread).await?;
+        let threads = self.command_threads(thread).await?;
         self.shell_commands
             .get(id)
             .filter(|entry| threads.contains(&entry.info().thread_id))
@@ -3893,19 +3969,8 @@ impl AgentRuntime {
         limit: Option<u64>,
         tail: bool,
     ) -> CoreResult<ShellCommandOutput> {
-        let info = self.shell_command_entry(thread, id).await?.info();
-        let _ = (limit, tail);
-        let cursor = cursor.unwrap_or(0).min(info.output_bytes);
-        Ok(ShellCommandOutput {
-            text: String::new(),
-            start: cursor,
-            cursor,
-            size: info.output_bytes,
-            more: false,
-            settled: !info.state.is_live(),
-            state: info.state,
-            exit_code: info.exit_code,
-        })
+        let entry = self.shell_command_entry(thread, id).await?;
+        crate::background_commands::client_page(&entry, cursor, limit, tail).await
     }
 
     /// Stop the command `id` of `thread` or a chat under it, for a person.
@@ -3916,7 +3981,8 @@ impl AgentRuntime {
         thread: ThreadId,
         id: &str,
     ) -> CoreResult<ShellCommandInfo> {
-        Ok(self.shell_command_entry(thread, id).await?.info())
+        let entry = self.shell_command_entry(thread, id).await?;
+        Ok(self.stop_command_for_person(&entry))
     }
 
     /// Send `thread`'s running foreground commands (the one `id` when given)
@@ -3928,17 +3994,37 @@ impl AgentRuntime {
         thread: ThreadId,
         id: Option<&str>,
     ) -> CoreResult<Vec<ShellCommandInfo>> {
+        use haarness_protocol::ShellCommandMovedBy;
         if let Some(id) = id {
-            let info = self.shell_command_entry(thread, id).await?.info();
-            if !info.background {
-                return Err(CoreError::Conflict(format!(
-                    "command {id} cannot move to the background"
-                )));
-            }
-            return Ok(vec![info]);
+            let entry = self.shell_command_entry(thread, id).await?;
+            entry
+                .send_to_background(ShellCommandMovedBy::Person)
+                .await
+                .map_err(|refusal| CoreError::Conflict(refusal.to_string()))?;
+            return Ok(vec![entry.info()]);
         }
-        self.thread_tree_ids(thread).await?;
-        Ok(Vec::new())
+        let threads = self.command_threads(thread).await?;
+        let mut moved = Vec::new();
+        let mut held = None;
+        for entry in self.shell_commands.live(|entry| {
+            let info = entry.info();
+            !info.background && threads.contains(&info.thread_id)
+        }) {
+            match entry.send_to_background(ShellCommandMovedBy::Person).await {
+                Ok(()) => moved.push(entry.info()),
+                Err(refusal @ crate::background_commands::MoveRefusal::AtCap(_)) => {
+                    held = Some(refusal);
+                }
+                // A subagent's or an ended command is left where it is.
+                Err(_) => {}
+            }
+        }
+        // Nothing moved because the chat is at its cap: say so, so a
+        // client can tell the person why.
+        if let (true, Some(held)) = (moved.is_empty(), held) {
+            return Err(CoreError::Conflict(held.to_string()));
+        }
+        Ok(moved)
     }
 
     /// Let the background count read the workflow runs a thread launched
@@ -4181,6 +4267,18 @@ impl AgentRuntime {
         answer_steer: bool,
     ) -> CoreResult<u64> {
         let thread_ids = self.thread_tree_ids(root).await?;
+        // A stop while the chat replies ends the reply and its foreground
+        // commands and leaves its commands in the background running (a dev
+        // server outlives a change of course). An explicit stop while it is
+        // idle is a stop of everything, those commands included; a
+        // composer's Stop (`answer_steer`) that lands just after the reply
+        // ended is not.
+        if !answer_steer && !self.active.contains_key(&root) {
+            self.stop_commands_of(
+                &thread_ids,
+                haarness_protocol::ShellCommandEndedBy::ChatStopped,
+            );
+        }
 
         let tasks = self
             .background_tasks
@@ -6754,6 +6852,8 @@ impl AgentRuntime {
         active.changed.notify_waiters();
         drop(admission_guard);
         let task = Arc::new(RunnerTask {
+            live_components: self.components.clone(),
+            live_reload_gate: self.reload_gate.clone(),
             repository: self.repository.clone(),
             providers: components.providers.clone(),
             tools: components.tools.clone(),
@@ -7071,6 +7171,17 @@ impl AgentRuntime {
     /// cancellation cleanup, after which any straggler is made durably
     /// interrupted so a restart can never display a phantom running turn.
     pub async fn interrupt_active_turns(&self, reason: &str) -> CoreResult<u64> {
+        // Commands stop beside the turns, and the server waits for them
+        // too (as long as for the turns) so their ends are recorded first.
+        let commands = self.stop_commands_for_shutdown().await;
+        let (turns, ()) = tokio::join!(
+            self.interrupt_turns_for_shutdown(reason),
+            Self::settle_commands(commands, std::time::Duration::from_secs(5)),
+        );
+        turns
+    }
+
+    async fn interrupt_turns_for_shutdown(&self, reason: &str) -> CoreResult<u64> {
         for task in self
             .background_tasks
             .iter()
@@ -7165,6 +7276,11 @@ impl AgentRuntime {
 }
 
 struct RunnerTask {
+    /// The runtime's current generation and reload gate, for work that
+    /// outlives this turn (a command's end, hours later) and must start on
+    /// the configuration of that moment.
+    live_components: Arc<RwLock<Arc<RuntimeComponents>>>,
+    live_reload_gate: Arc<AsyncRwLock<()>>,
     repository: Arc<dyn ThreadRepository>,
     providers: Arc<dyn ProviderRegistry>,
     tools: Arc<dyn ToolRegistry>,
@@ -8494,6 +8610,9 @@ impl RunnerTask {
                 }
             }
         }
+        // A subagent's commands stop with its turn, before its last
+        // checkpoint; every other command of the turn may now tell its end.
+        self.end_turn_commands().await;
         // Capture any tail after the last provider event (including tool or
         // question waits on an error path) before changing goal status.
         let _ = self.checkpoint_goal_accounting(None).await;
@@ -10444,6 +10563,9 @@ impl RunnerTask {
                     if name == "task" {
                         self.release_task_delivery(&call_id);
                     }
+                    // A command it started (in a batch or a code block too)
+                    // may now tell its end.
+                    self.release_command_delivery(&call_id);
                 }
             }
         })
@@ -10646,6 +10768,10 @@ impl RunnerTask {
     }
 
     fn tool_enabled(&self, name: &str) -> bool {
+        // Following and stopping commands goes with running them.
+        if matches!(name, "bash_output" | "bash_stop") && !self.tool_enabled("bash") {
+            return false;
+        }
         if name == "preview"
             && self
                 .request
@@ -11381,6 +11507,11 @@ impl RunnerTask {
         {
             execution.shell_env = hooks.shell_env(self.thread.id, &self.workspace).await;
         }
+        // An agent's command is registered, so it can be followed and moved
+        // to the background; a definition's snippet runs as it always did.
+        if name == "bash" && definition_shell.is_none() {
+            execution.shell_call = Some(self.shell_call(call_id));
+        }
         // A snippet was judged with its folders filled in; unless a hook
         // rewrote it, the shell runs it with its references, reading the
         // values from its environment, so a folder name is never shell text.
@@ -11412,6 +11543,8 @@ impl RunnerTask {
         }
         let result = if matches!(name, "todo" | "todowrite") {
             self.record_todo(&arguments).await.map(plain_tool_output)
+        } else if matches!(name, "bash_output" | "bash_stop") {
+            self.command_tool(name, &arguments).await
         } else if name == "todoread" {
             let thread = self.repository.get_thread(self.thread.id).await?;
             let items = self.repository.list_items(self.thread.id, None).await?;
@@ -12603,6 +12736,8 @@ impl RunnerTask {
             .permission_engine(self.request.agent.as_deref().unwrap_or(&self.thread.agent))
             .boundary();
         let child_task = Arc::new(RunnerTask {
+            live_components: self.live_components.clone(),
+            live_reload_gate: self.live_reload_gate.clone(),
             repository: self.repository.clone(),
             providers: self.providers.clone(),
             tools: self.tools.clone(),
@@ -12709,6 +12844,7 @@ impl RunnerTask {
             } else {
                 None
             },
+            delivery_follows_background: self.request.follows_background,
             suppress_delivery: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             ended: AtomicBool::new(false),
@@ -12912,6 +13048,7 @@ impl RunnerTask {
                             attachments: Vec::new(),
                             resources: Vec::new(),
                             synthetic: true,
+                            follows_background: task.delivery_follows_background,
                             ..Default::default()
                         },
                         task.delivery_auto_approve,
@@ -15668,6 +15805,8 @@ fn resolved_pattern(workspace: &Path, target: &str, resolved: &Path) -> Option<S
     };
     (pattern != target).then_some(pattern)
 }
+
+mod commands;
 
 #[cfg(test)]
 mod permission_corpus;
