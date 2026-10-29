@@ -599,7 +599,7 @@ impl App {
                         if crate::api::refusal_status(&error)
                             == Some(reqwest::StatusCode::CONFLICT) =>
                     {
-                        self.notice = error.to_string();
+                        self.refuse_move(error.to_string());
                         return Ok(());
                     }
                     Err(error) => return Err(error),
@@ -643,16 +643,19 @@ impl App {
             .of(chat)
             .iter()
             .any(|info| info.state.is_live() && !info.background && info.thread_id == chat);
+        let refused = match (subagents, moved) {
+            (0, 0) if commands && waiting_on_command => {
+                Some(self.language.text("Nothing could move to the background"))
+            }
+            (0, 0) if commands => Some(self.language.text("Nothing is running in the foreground")),
+            (0, 0) => Some("No matching foreground subagent is running"),
+            _ => None,
+        };
+        if let Some(refused) = refused {
+            self.refuse_move(refused.to_owned());
+            return Ok(());
+        }
         self.notice = match (subagents, moved) {
-            (0, 0) if commands && waiting_on_command => self
-                .language
-                .text("Nothing could move to the background")
-                .to_owned(),
-            (0, 0) if commands => self
-                .language
-                .text("Nothing is running in the foreground")
-                .to_owned(),
-            (0, 0) => "No matching foreground subagent is running".into(),
             (1, 0) => "Subagent moved to background · completion will return here".into(),
             (count, 0) => {
                 format!("{count} subagents moved to background · completions will return here")
@@ -667,6 +670,20 @@ impl App {
             ),
         };
         Ok(())
+    }
+
+    /// Why nothing moved. A running reply owns the band, where the notice
+    /// would not show: then a card says it too, as for a mistyped command.
+    fn refuse_move(&mut self, message: String) {
+        if self.active_turn.is_some() {
+            self.show_toast(
+                None,
+                message.clone(),
+                crate::state::ToastVariant::Warning,
+                Duration::from_secs(5),
+            );
+        }
+        self.notice = message;
     }
 
     /// Send one command to the background: how many moved, or `None` once
@@ -686,13 +703,13 @@ impl App {
                 if crate::api::refusal_status(&error) == Some(reqwest::StatusCode::CONFLICT) =>
             {
                 let said = error.to_string();
-                self.notice = if said.trim().is_empty() {
+                self.refuse_move(if said.trim().is_empty() {
                     self.language
                         .text("This command can't move to the background")
                         .to_owned()
                 } else {
                     said
-                };
+                });
                 Ok(None)
             }
             Err(error) if gone(&error) => Ok(Some(0)),
