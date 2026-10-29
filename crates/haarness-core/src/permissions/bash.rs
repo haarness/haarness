@@ -5433,6 +5433,7 @@ mod tests {
             // definition: each call writes through it.
             "cat() { echo changed; } > notes.md; cat",
             "f() { cat a; } >> log.txt; f",
+            "cat() { cat a; } >> log.txt; cat",
             "f() { cat a; } 2> err.txt; f",
             "f() { cat; } < input; f",
         ] {
