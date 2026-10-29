@@ -483,6 +483,51 @@ test.describe("a server with commands in the background", () => {
   });
 });
 
+test.describe("a chat at its limit of commands in the background", () => {
+  test.beforeAll(async () => {
+    test.setTimeout(150000);
+    root = await realpath(await mkdtemp(join(process.env.HAARNESS_E2E_DIR ?? tmpdir(), "haarness-background-limit-")));
+    project = join(root, "project");
+    await mkdir(join(project, ".haarness"), { recursive: true });
+    await writeFile(
+      join(project, ".haarness/config.toml"),
+      '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="allow"\n[lsp]\nenabled=false\n' +
+        "[execution]\nshell_background_per_chat=1\nshell_stop_grace_ms=500\n",
+    );
+    await launch(binary);
+  });
+  test.afterAll(async () => close(binary));
+
+  test("a command the limit holds back stays, and Send to background says why in plain words", async () => {
+    test.setTimeout(120000);
+    // The one command the chat may run in the background.
+    await send(bash("printf 'holding the place\\n'; sleep 120", true));
+    await expect(row("holding the place").locator(".tool-chip")).toHaveText("In background");
+    await idle();
+    const thread = await shownChat();
+    await send(bash("printf 'held back\\n'; sleep 30"));
+    await expect(step("held back").getByRole("button", { name: /^Send to background/ })).toBeVisible({ timeout: 15000 });
+    await app.evaluate(({ BrowserWindow, Menu }) => {
+      const file = Menu.getApplicationMenu()!.items.find((item) => item.label === "File")!;
+      const item = file.submenu!.items.find((entry) => entry.label === "Send to background")!;
+      item.click(undefined, BrowserWindow.getAllWindows()[0]);
+    });
+    // Nothing moved: the refusal is the answer, in a person's words.
+    const banner = page.locator(".error-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).not.toContainText(/conflict|cmd-/i);
+    await expect(banner).toContainText(/background/i);
+    expect((await commands(thread)).find((command) => command.command.includes("held back"))?.background).toBe(false);
+    await expect(row("held back")).toHaveAttribute("data-status", "running");
+    await pictures("limit-refused", page.locator(".notifications"));
+    await page.getByRole("button", { name: "Dismiss error", exact: true }).click();
+    for (const command of await commands(thread))
+      if (command.state === "running") await api("stopShellCommand", thread, command.id);
+    await idle();
+    expect(errors).toEqual([]);
+  });
+});
+
 test.describe("the sidebar's ring across chats and projects", () => {
   let second = "";
   test.beforeAll(async () => {

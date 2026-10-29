@@ -8,6 +8,7 @@ import {
   goneKey,
   commandLines,
   moveRefusal,
+  sentOutcome,
   stepCallId,
   commandStatus,
   commandView,
@@ -521,6 +522,27 @@ test("a follow that waited out failures reads at once when the connection is bac
   assert.equal(server.reads.length, reads + 1);
   assert.equal(waits.at(-1), 1000);
   follow.dispose();
+});
+
+test("sending work to the background fails only when nothing moved", () => {
+  const moved = (count: number) => ({ status: "fulfilled" as const, value: Array.from({ length: count }) });
+  const refused = new Error("This chat runs as many commands in the background as it may.");
+  const heldBack = new Error("This chat can't send more commands to the background right now.");
+  const rejected = { status: "rejected" as const, reason: refused };
+  // Subagents moved while the limit held every command back: a quiet note.
+  assert.deepEqual(sentOutcome({ commands: rejected, subagents: moved(2), heldBack }), { note: refused });
+  // A server that answers no command moved, rather than refusing, reads the same.
+  assert.deepEqual(sentOutcome({ commands: moved(0), subagents: moved(1), heldBack }), { note: heldBack });
+  // Nothing moved: the refusal is the answer.
+  assert.deepEqual(sentOutcome({ commands: rejected, heldBack }), { error: refused });
+  assert.deepEqual(sentOutcome({ commands: moved(0), heldBack }), { error: heldBack });
+  assert.deepEqual(sentOutcome({ commands: rejected, subagents: moved(0), heldBack }), { error: refused });
+  // Everything asked moved, or only subagents were asked and moved.
+  assert.deepEqual(sentOutcome({ commands: moved(1), subagents: moved(1), heldBack }), {});
+  assert.deepEqual(sentOutcome({ subagents: moved(1), heldBack }), {});
+  // The subagents' request failed while a command moved: said, not an error.
+  const lost = new Error("Your computer couldn't answer.");
+  assert.deepEqual(sentOutcome({ commands: moved(1), subagents: { status: "rejected", reason: lost }, heldBack }), { note: lost });
 });
 
 test("a disposed follow drops a read still in flight and polls no more", async () => {

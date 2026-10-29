@@ -161,7 +161,11 @@ export async function stopCommand(app: ReturnType<typeof useApp>, command: Shell
 
 /** Sends one running foreground command, or every one of the chat's, to the
  * background; its reply goes on without waiting for it. */
-export async function backgroundCommands(app: ReturnType<typeof useApp>, thread: string, command?: string) {
+export async function backgroundCommands(
+  app: ReturnType<typeof useApp>,
+  thread: string,
+  command?: string,
+): Promise<ShellCommandInfo[]> {
   const connection = app.state.connection!.id;
   let moved: ShellCommandInfo[];
   try {
@@ -176,6 +180,7 @@ export async function backgroundCommands(app: ReturnType<typeof useApp>, thread:
     );
   }
   remember(app, connection, moved);
+  return moved;
 }
 
 /**
