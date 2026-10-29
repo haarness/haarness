@@ -991,6 +991,44 @@ impl ApiClient {
     ) -> Result<Vec<haarness_protocol::BackgroundTaskInfo>> {
         self.get(&format!("/v1/threads/{id}/background")).await
     }
+    /// Stop an agent's shell command of a chat (`background-commands.v1`).
+    pub async fn stop_shell_command(
+        &self,
+        id: haarness_protocol::ThreadId,
+        command: &str,
+    ) -> Result<haarness_protocol::ShellCommandInfo> {
+        Ok(self
+            .request(
+                reqwest::Method::POST,
+                &format!("/v1/threads/{id}/commands/{command}/stop"),
+            )
+            .sent()
+            .await?
+            .checked()
+            .await?
+            .json()
+            .await?)
+    }
+    /// The agents' shell commands of a chat and the chats under it
+    /// (`background-commands.v1`); none from a server before it.
+    pub async fn shell_commands(
+        &self,
+        id: haarness_protocol::ThreadId,
+    ) -> Result<Vec<haarness_protocol::ShellCommandInfo>> {
+        match self.get(&format!("/v1/threads/{id}/commands")).await {
+            Err(error)
+                if refusal_status(&error).is_some_and(|status| {
+                    matches!(
+                        status,
+                        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+                    )
+                }) =>
+            {
+                Ok(Vec::new())
+            }
+            listed => listed,
+        }
+    }
     pub async fn promote_background_tasks(
         &self,
         id: haarness_protocol::ThreadId,

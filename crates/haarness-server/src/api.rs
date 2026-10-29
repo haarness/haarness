@@ -145,6 +145,10 @@ pub async fn serve_with_host(
     .await
 }
 
+/// The output files of gone processes' background commands are swept once
+/// per process, by the first server it starts.
+static SWEPT_COMMAND_FILES: std::sync::Once = std::sync::Once::new();
+
 // Retain the same async startup API as serve for existing callers.
 #[allow(clippy::unused_async)]
 pub async fn serve_with_access(
@@ -166,6 +170,20 @@ pub async fn serve_with_access(
                 .map_or(0, |workflows| workflows.pending_deliveries(thread))
         }));
     }
+    // Output files of commands in the background that a gone process left
+    // (a crash, more output than memory kept): once per process.
+    SWEPT_COMMAND_FILES.call_once(|| {
+        let folder = crate::tools::tool_output_dir();
+        tokio::task::spawn_blocking(move || {
+            let removed = crate::shell::sweep_background_files(&folder);
+            if removed > 0 {
+                tracing::info!(
+                    removed,
+                    "removed output files of commands a gone process left"
+                );
+            }
+        });
+    });
     let language = state.language.clone();
     let ptys = Arc::new(PtyManager::new(
         state.workspace.clone(),
@@ -997,6 +1015,7 @@ async fn reset_workspace(
     Json(request): Json<WorkspaceResetRequest>,
 ) -> ApiResult<Json<WorkspaceOperationResponse>> {
     let manager = workspace_manager(&state)?;
+    stop_commands_in_workspace(&state, &manager, &reference).await;
     let response =
         tokio::task::spawn_blocking(move || manager.reset_worktree(&reference, &request))
             .await
@@ -1011,12 +1030,35 @@ async fn remove_workspace(
     Json(request): Json<WorkspaceRemoveRequest>,
 ) -> ApiResult<Json<WorkspaceOperationResponse>> {
     let manager = workspace_manager(&state)?;
+    stop_commands_in_workspace(&state, &manager, &reference).await;
     let response =
         tokio::task::spawn_blocking(move || manager.remove_worktree(&reference, &request))
             .await
             .map_err(|error| CoreError::Storage(error.to_string()))?
             .map_err(workspace_api_error)?;
     Ok(Json(response))
+}
+
+/// A worktree about to be reset or removed: the agents' commands of this
+/// server that run in it stop first, so none holds or writes files in it.
+async fn stop_commands_in_workspace(
+    state: &ServerState,
+    manager: &Arc<WorkspaceManager>,
+    reference: &str,
+) {
+    let (manager, reference) = (Arc::clone(manager), reference.to_owned());
+    if let Ok(Ok(workspace)) = tokio::task::spawn_blocking(move || manager.get(&reference)).await {
+        let stopped = state
+            .runtime
+            .stop_commands_in(std::path::Path::new(&workspace.path))
+            .await;
+        if stopped > 0 {
+            tracing::info!(
+                stopped,
+                "stopped commands running in a worktree being changed"
+            );
+        }
+    }
 }
 
 async fn cleanup_workspace(
@@ -2922,12 +2964,18 @@ async fn background_shell_commands(
     Path(id): Path<ThreadId>,
     Query(query): Query<BackgroundCommandsQuery>,
 ) -> ApiResult<Json<Vec<ShellCommandInfo>>> {
-    Ok(Json(
-        state
-            .runtime
-            .background_shell_commands(id, query.command_id.as_deref())
-            .await?,
-    ))
+    // A refusal is a sentence a client shows as it is.
+    state
+        .runtime
+        .background_shell_commands(id, query.command_id.as_deref())
+        .await
+        .map(Json)
+        .map_err(|error| match error {
+            CoreError::Conflict(message) => {
+                ApiFailure(CoreError::Conflict(message.clone()), Some(message))
+            }
+            other => other.into(),
+        })
 }
 /// Running commands of every chat, as `/turns/active` lists turns.
 async fn active_shell_commands(State(state): State<ServerState>) -> Json<Vec<ShellCommandInfo>> {

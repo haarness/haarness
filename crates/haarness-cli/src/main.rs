@@ -511,8 +511,14 @@ struct RunArgs {
     /// Output plain assistant text or newline-delimited JSON records.
     #[arg(long, value_enum, default_value_t = RunFormat::Default)]
     format: RunFormat,
-    /// Wait for background subagents and workflows launched by the model.
-    /// Without this flag, they continue on the workspace server.
+    /// Wait for background subagents, workflows and shell commands launched
+    /// by the model, and for what the agent says when they end. The shell
+    /// commands waited for are those started in the chat once the run's turn
+    /// began (with --session or --continue, others' too: give
+    /// --background-timeout-ms there). Shell commands the agent starts in the
+    /// background stop at execution.shell_timeout_ms; a run that stops
+    /// waiting (the timeout, Ctrl-C) stops those it waited for. Without this
+    /// flag, they continue on the workspace server.
     #[arg(long)]
     wait_background: bool,
     /// Maximum background wait in milliseconds; implies --wait-background.
@@ -3958,9 +3964,28 @@ async fn execute_schedule(
             )
             .await?;
         turn_id = Some(turn.id.0);
-        wait_for_turn_client(&client, turn.id, &RunWatch::scheduled()).await?;
-        let response =
-            assistant_messages_for_turn(client.items(thread.id).await?, turn.id).join("\n");
+        let watch = RunWatch::scheduled();
+        wait_for_turn_client(&client, turn.id, &watch).await?;
+        // A scheduled run waits for the commands it left running in the
+        // background (each stops at its time limit) and for what the agent
+        // says when they end.
+        let mut waited = false;
+        loop {
+            watch.answer(&client, thread.id).await?;
+            let commands = background_commands_client(&client, thread.id, turn.id).await?;
+            if commands.settled() && client.active_turn(thread.id).await?.is_none() {
+                break;
+            }
+            waited = true;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let items = client.items(thread.id).await?;
+        let response = if waited {
+            assistant_messages_since_turn(items, turn.id)
+        } else {
+            assistant_messages_for_turn(items, turn.id)
+        }
+        .join("\n");
         Result::<String>::Ok(response)
     }
     .await;
@@ -4836,7 +4861,12 @@ async fn run_command(
         }
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
-        stop_on_signal(&client, thread.id, goal, async {
+        let waits_for_background = args.wait_background || args.background_timeout_ms.is_some();
+        // The run's own turn: what it waits for and stops started there or
+        // after it (a chat it continues may run others' commands).
+        let run_turn = std::sync::OnceLock::new();
+        let stop_from = waits_for_background.then_some(&run_turn);
+        stop_on_signal(&client, thread.id, goal, stop_from, async {
             // Auto and Yolo answer requests without a person; with nobody
             // to ask, a run refuses what still needs one and goes on.
             let answers = approvals
@@ -4948,6 +4978,10 @@ async fn run_command(
                         command: args
                             .command
                             .map(|command| command.trim_start_matches('/').to_owned()),
+                        // A one-shot run does not follow background work up:
+                        // a long command keeps its deadline in the foreground,
+                        // and one the agent starts in the background stops
+                        // at execution.shell_timeout_ms, as in a schedule.
                         ..Default::default()
                     },
                 )
@@ -4964,6 +4998,7 @@ async fn run_command(
                 earlier.put_back(&client, thread.id).await;
             }
             let turn = discard_refused_chat(&client, &thread, created, turn).await?;
+            let _ = run_turn.set(turn.id);
             let printed_through = if goal {
                 let result =
                     wait_for_goal_client(&client, thread.id, goal_idle_timeout(), &watch).await;
@@ -4988,6 +5023,7 @@ async fn run_command(
             settle_cli_subagents_client(
                 &client,
                 thread.id,
+                turn.id,
                 wait_background,
                 args.background_timeout_ms,
                 args.format,
@@ -6564,6 +6600,7 @@ async fn stop_on_signal<T>(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
     goal: bool,
+    waited_from: Option<&std::sync::OnceLock<TurnId>>,
     work: impl Future<Output = Result<T>>,
 ) -> Result<T> {
     let status = tokio::select! {
@@ -6582,7 +6619,12 @@ async fn stop_on_signal<T>(
                 .goal_action(thread_id, &GoalActionRequest::Pause)
                 .await;
         }
-        client.interrupt_session(thread_id, false).await
+        let stopped = client.interrupt_session(thread_id, false).await;
+        // A run that waited for its commands leaves none of them running.
+        if let Some(turn) = waited_from.and_then(std::sync::OnceLock::get) {
+            stop_background_commands_client(client, thread_id, *turn).await;
+        }
+        stopped
     };
     tokio::select! {
         stopped = tokio::time::timeout(Duration::from_secs(10), stop) => match stopped {
@@ -6784,6 +6826,7 @@ async fn print_run_output_client(
 async fn settle_cli_subagents_client(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
+    run_turn: TurnId,
     wait: bool,
     timeout_ms: Option<u64>,
     format: RunFormat,
@@ -6793,26 +6836,45 @@ async fn settle_cli_subagents_client(
 ) -> Result<()> {
     let active = client.background_tasks(thread_id).await?;
     let parent_turn = client.active_turn(thread_id).await?;
-    if !wait && active.is_empty() && parent_turn.is_none() {
+    let commands = background_commands_client(client, thread_id, run_turn).await?;
+    if !wait && active.is_empty() && parent_turn.is_none() && commands.running == 0 {
         return Ok(());
     }
     if !wait {
-        // Completion delivery removes the child from the task registry as
-        // soon as its synthetic parent turn is admitted. That follow-up is
-        // still background work from a one-shot client's point of view.
-        let count = active.len().max(usize::from(parent_turn.is_some()));
-        if format == RunFormat::Json {
-            println!(
-                "{}",
-                json!({"type":"background_subagent", "status":"detached", "count":count})
-            );
-        } else {
-            eprintln!(
-                "{} background subagent{} continue{} on the Haarness server.",
-                count,
-                if count == 1 { "" } else { "s" },
-                if count == 1 { "s" } else { "" }
-            );
+        if !active.is_empty() || parent_turn.is_some() {
+            // Completion delivery removes the child from the task registry as
+            // soon as its synthetic parent turn is admitted. That follow-up is
+            // still background work from a one-shot client's point of view.
+            let count = active.len().max(usize::from(parent_turn.is_some()));
+            if format == RunFormat::Json {
+                println!(
+                    "{}",
+                    json!({"type":"background_subagent", "status":"detached", "count":count})
+                );
+            } else {
+                eprintln!(
+                    "{} background subagent{} continue{} on the Haarness server.",
+                    count,
+                    if count == 1 { "" } else { "s" },
+                    if count == 1 { "s" } else { "" }
+                );
+            }
+        }
+        if commands.running > 0 {
+            let count = commands.running;
+            if format == RunFormat::Json {
+                println!(
+                    "{}",
+                    json!({"type":"background_command", "status":"detached", "count":count})
+                );
+            } else {
+                eprintln!(
+                    "{} background command{} keep{} running on the Haarness server.",
+                    count,
+                    if count == 1 { "" } else { "s" },
+                    if count == 1 { "s" } else { "" }
+                );
+            }
         }
         return Ok(());
     }
@@ -6822,16 +6884,33 @@ async fn settle_cli_subagents_client(
         watch.answer(client, thread_id).await?;
         let tasks = client.background_tasks(thread_id).await?;
         let parent_turn = client.active_turn(thread_id).await?;
-        if tasks.is_empty() && parent_turn.is_none() {
+        let commands = background_commands_client(client, thread_id, run_turn).await?;
+        if tasks.is_empty() && parent_turn.is_none() && commands.settled() {
             break;
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            anyhow::bail!(
-                "background wait timed out; {} subagent{} continue{} on the Haarness server",
-                tasks.len(),
-                if tasks.len() == 1 { "" } else { "s" },
-                if tasks.len() == 1 { "s" } else { "" }
-            );
+            // A run that stops waiting leaves no command it waited for.
+            let stopped = stop_background_commands_client(client, thread_id, run_turn).await;
+            let mut parts = Vec::new();
+            if !tasks.is_empty() {
+                parts.push(format!(
+                    "{} subagent{} continue{} on the Haarness server",
+                    tasks.len(),
+                    if tasks.len() == 1 { "" } else { "s" },
+                    if tasks.len() == 1 { "s" } else { "" }
+                ));
+            }
+            if stopped > 0 {
+                parts.push(format!(
+                    "{stopped} background command{} {} stopped",
+                    if stopped == 1 { "" } else { "s" },
+                    if stopped == 1 { "was" } else { "were" }
+                ));
+            }
+            if parts.is_empty() {
+                anyhow::bail!("background wait timed out");
+            }
+            anyhow::bail!("background wait timed out; {}", parts.join(", and "));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -6889,6 +6968,84 @@ async fn settle_cli_subagents_client(
         anyhow::bail!("background subagent failed: {}", failures.join("; "));
     }
     Ok(())
+}
+
+/// The agents' commands of a chat a run waits for: those running in the
+/// background, and those that ended there and whose end has not reached the
+/// chat yet.
+struct BackgroundCommands {
+    running: usize,
+    untold: usize,
+}
+
+impl BackgroundCommands {
+    fn settled(&self) -> bool {
+        self.running == 0 && self.untold == 0
+    }
+}
+
+/// Stop the chat's commands still running that the turn `since` or a
+/// later one started; answers how many it stopped.
+async fn stop_background_commands_client(
+    client: &haarness_tui::api::ApiClient,
+    thread_id: ThreadId,
+    since: TurnId,
+) -> usize {
+    let Ok(commands) = client.shell_commands(thread_id).await else {
+        return 0;
+    };
+    let mut stopped = 0;
+    for command in commands
+        .iter()
+        .filter(|command| command.state.is_live() && command.turn_id.0 >= since.0)
+    {
+        if client
+            .stop_shell_command(thread_id, &command.id)
+            .await
+            .is_ok()
+        {
+            stopped += 1;
+        }
+    }
+    stopped
+}
+
+/// Turn ids grow with time, so `since` and the turns after it are those a
+/// run started, and those its commands' ends started.
+async fn background_commands_client(
+    client: &haarness_tui::api::ApiClient,
+    thread_id: ThreadId,
+    since: TurnId,
+) -> Result<BackgroundCommands> {
+    let commands = client
+        .shell_commands(thread_id)
+        .await?
+        .into_iter()
+        .filter(|command| command.turn_id.0 >= since.0)
+        .collect::<Vec<_>>();
+    let running = commands
+        .iter()
+        .filter(|command| command.background && command.state.is_live())
+        .count();
+    let ended = commands
+        .iter()
+        .filter(|command| !command.state.is_live() && command.delivers_notice)
+        .map(|command| format!("<command id=\"{}\"", command.id))
+        .collect::<Vec<_>>();
+    let untold = if ended.is_empty() {
+        0
+    } else {
+        let items = client.items(thread_id).await?;
+        ended
+            .iter()
+            .filter(|tag| {
+                !items.iter().any(|item| {
+                    matches!(&item.data, ItemData::UserMessage { text, .. } if text.starts_with(tag.as_str()))
+                })
+            })
+            .count()
+    };
+    Ok(BackgroundCommands { running, untold })
 }
 
 async fn settle_cli_workflows_client(
@@ -7050,6 +7207,29 @@ fn assistant_messages_for_turn(
     items
         .into_iter()
         .filter(|item| item.turn_id == Some(turn_id))
+        .filter_map(|item| match item.data {
+            ItemData::AssistantMessage { text } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The assistant's messages from turn `turn_id` on: its own, and those of
+/// the turns started after it (the ends of its commands in the background).
+fn assistant_messages_since_turn(
+    items: Vec<haarness_protocol::Item>,
+    turn_id: TurnId,
+) -> Vec<String> {
+    let Some(first) = items
+        .iter()
+        .find(|item| item.turn_id == Some(turn_id))
+        .map(|item| item.sequence)
+    else {
+        return Vec::new();
+    };
+    items
+        .into_iter()
+        .filter(|item| item.sequence >= first)
         .filter_map(|item| match item.data {
             ItemData::AssistantMessage { text } => Some(text),
             _ => None,
