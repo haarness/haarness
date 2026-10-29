@@ -1327,7 +1327,6 @@ impl Reader<'_> {
                     "",
                     &["unset", "chdir", "split-string", "argv0"],
                 );
-                let rest = after_assignments(options.rest);
                 if let Some(split) = options.value("S").or_else(|| options.value("split-string")) {
                     // `env -S` splits its text into words, options and
                     // assignments included, and goes on with the words
@@ -1338,33 +1337,22 @@ impl Reader<'_> {
                 } else {
                     let moved = options.value("C").is_some() || options.value("chdir").is_some();
                     self.moved += u32::from(moved);
-                    self.invocation(rest, stdin, source, depth);
+                    self.invocation(env_command(options.rest), stdin, source, depth);
                     self.moved -= u32::from(moved);
                 }
             }
             "sudo" | "doas" => {
-                let options = Options::read(
-                    arguments,
-                    if name == "sudo" { "ugpCDrtTU" } else { "uC" },
-                    "",
-                    &[
-                        "user",
-                        "group",
-                        "host",
-                        "prompt",
-                        "close-from",
-                        "chdir",
-                        "role",
-                        "type",
-                        "command-timeout",
-                        "other-user",
-                    ],
-                );
+                let options = if name == "sudo" {
+                    Options::sudo(arguments)
+                } else {
+                    // `doas -C` names a configuration file.
+                    Options::read(arguments, "uC", "", SUDO_LONG)
+                };
                 // `sudo -e` edits files, `-l` and `-V` list.
                 if name == "sudo" && options.flags.contains(['e', 'l', 'V']) {
                     return;
                 }
-                let rest = after_assignments(options.rest);
+                let rest = after_settings(options.rest, name == "sudo");
                 if rest.is_empty() {
                     // A shell that reads its commands from standard input.
                     if options.flags.contains(['s', 'i']) {
@@ -1380,6 +1368,17 @@ impl Reader<'_> {
                 self.moved += u32::from(moved);
                 self.invocation(rest, stdin, source, depth);
                 self.moved -= u32::from(moved);
+            }
+            "coproc" => {
+                // `coproc [NAME] { …; }`, `coproc [NAME] ( … )` or `coproc
+                // command`: the parser keeps it as words, a group's first
+                // command among them (a subshell it reads on its own).
+                let rest = match arguments {
+                    [open, rest @ ..] if opens_group(open) => rest,
+                    [_, open, rest @ ..] if opens_group(open) => rest,
+                    rest => rest,
+                };
+                self.invocation(after_shell_assignments(rest), stdin, source, depth);
             }
             "su" => {
                 if let Some(text) = su_command(arguments) {
@@ -1448,7 +1447,9 @@ impl Reader<'_> {
             }
             "time" => {
                 let options = Options::read(arguments, "of", "", &["output", "format"]);
-                self.invocation(options.rest, stdin, source, depth);
+                // The shell's `time` times a command that may start with
+                // assignments (`time A=1 rm x`).
+                self.invocation(after_shell_assignments(options.rest), stdin, source, depth);
             }
             "stdbuf" => {
                 let options = Options::read(arguments, "ioe", "", &["input", "output", "error"]);
@@ -2560,17 +2561,73 @@ fn joined(words: &[Word<'_>]) -> String {
         .join(" ")
 }
 
-/// The words after any `NAME=value` assignments (`env A=1 cmd`, `sudo A=1 cmd`).
-fn after_assignments<'s, 't>(words: &'s [Word<'t>]) -> &'s [Word<'t>] {
+/// Whether `env` or `sudo` takes `word` for a variable to set rather than
+/// for the program: they set any word with a `=` in it (`A+=1`, `'A B=1'`),
+/// `sudo` none that starts with `/`. The `=` must be written out, in a
+/// literal word or before any expansion (`A=$(pwd)`): one an expansion may
+/// bring (`"$X"`, `$(…)`) is not known, so such a word is the program.
+fn sets_variable(word: &Word<'_>, sudo: bool) -> bool {
+    let holds = (word.literal && word.value.contains('='))
+        || word
+            .raw
+            .find('=')
+            .is_some_and(|at| !word.raw[..at].contains(['$', '`']));
+    holds && !(sudo && word.value.starts_with('/'))
+}
+
+/// The words after the variables `env` (or, with `sudo`, `sudo`) sets: see
+/// [`sets_variable`].
+fn after_settings<'s, 't>(words: &'s [Word<'t>], sudo: bool) -> &'s [Word<'t>] {
     let count = words
         .iter()
-        .take_while(|word| {
-            word.literal
-                && word.value.split_once('=').is_some_and(|(name, _)| {
-                    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                })
-        })
+        .take_while(|word| sets_variable(word, sudo))
+        .count();
+    &words[count..]
+}
+
+/// The command `env` runs, given the words after its options: a lone `-`
+/// (an empty environment, as `-i`) and the variables it sets come first.
+fn env_command<'s, 't>(rest: &'s [Word<'t>]) -> &'s [Word<'t>] {
+    let rest = match rest {
+        [dash, rest @ ..] if dash.literal && dash.value == "-" => rest,
+        rest => rest,
+    };
+    after_settings(rest, false)
+}
+
+/// Whether the shell itself reads `word` as an assignment where a command
+/// starts (after `time`, `coproc` or `!`): a name, a `[subscript]` if any,
+/// then `=` or `+=`, written out unquoted, whatever the value.
+fn shell_assignment(word: &Word<'_>) -> bool {
+    let raw = word.raw.as_bytes();
+    let name = raw
+        .iter()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
+        .count();
+    if name == 0 || raw[0].is_ascii_digit() {
+        return false;
+    }
+    let mut at = name;
+    if raw.get(at) == Some(&b'[') {
+        let Some(close) = raw[at..].iter().position(|byte| *byte == b']') else {
+            return false;
+        };
+        at += close + 1;
+    }
+    raw[at..].starts_with(b"=") || raw[at..].starts_with(b"+=")
+}
+
+/// Whether `word` opens a group of commands (`{`) or a subshell (`(`).
+fn opens_group(word: &Word<'_>) -> bool {
+    matches!(word.raw.as_str(), "{" | "(")
+}
+
+/// The words after the assignments the shell makes for a command (see
+/// [`shell_assignment`]).
+fn after_shell_assignments<'s, 't>(words: &'s [Word<'t>]) -> &'s [Word<'t>] {
+    let count = words
+        .iter()
+        .take_while(|word| shell_assignment(word))
         .count();
     &words[count..]
 }
@@ -2589,20 +2646,44 @@ fn program_name(value: &str) -> String {
     }
 }
 
+/// The long options of `sudo` (and, read alike, `doas`) that take a value.
+const SUDO_LONG: &[&str] = &[
+    "user",
+    "group",
+    "host",
+    "prompt",
+    "close-from",
+    "chdir",
+    "role",
+    "type",
+    "command-timeout",
+    "other-user",
+];
+
 /// A wrapper's own options, read the way getopt reads them.
 struct Options<'s, 't> {
     /// The words after them: the command the wrapper runs.
     rest: &'s [Word<'t>],
     /// Short options given without a value.
     flags: String,
-    /// Options given with a value, by their short letter or long name.
-    values: Vec<(String, String)>,
+    /// Options given with a value, in order.
+    values: Vec<Given>,
+}
+
+/// An option given with a value.
+struct Given {
+    /// Its short letter or long name.
+    name: String,
+    /// The value, as the program receives it (expansions as written).
+    value: String,
 }
 
 impl<'s, 't> Options<'s, 't> {
     /// `valued` short options take a value (the rest of their cluster or the
     /// next word), `optional` ones only the rest of their cluster, and
-    /// `long` ones the next word unless written `--name=value`.
+    /// `long` ones the next word unless written `--name=value`. A word with
+    /// an expansion is an option only when it names one before it, whose
+    /// value the expansion is part of (`--chdir="$d"`, `-C"$d"`).
     fn read(words: &'s [Word<'t>], valued: &str, optional: &str, long: &[&str]) -> Self {
         let mut options = Self {
             rest: words,
@@ -2611,27 +2692,40 @@ impl<'s, 't> Options<'s, 't> {
         };
         let mut index = 0;
         while let Some(word) = words.get(index) {
-            if !word.literal {
-                break;
-            }
             let value = word.value.as_str();
-            if value == "--" {
+            // How much of the value is written out before a quote, an
+            // expansion or a backslash: what may name an option.
+            let written = if word.literal {
+                value.len()
+            } else {
+                word.raw
+                    .find(['$', '`', '\'', '"', '\\'])
+                    .unwrap_or_default()
+            };
+            if word.literal && value == "--" {
                 index += 1;
                 break;
             }
             if let Some(name) = value.strip_prefix("--") {
-                index += 1;
                 match name.split_once('=') {
-                    Some((name, given)) => options.values.push((name.into(), given.into())),
-                    None if long.contains(&name) => {
-                        let given = words.get(index).map(|word| word.value.clone());
-                        options
-                            .values
-                            .push((name.into(), given.unwrap_or_default()));
-                        index += 1;
+                    Some((name, given)) if 2 + name.len() < written => {
+                        options.values.push(Given {
+                            name: name.into(),
+                            value: given.into(),
+                        });
                     }
-                    None => {}
+                    None if word.literal && long.contains(&name) => {
+                        index += 1;
+                        let next = words.get(index);
+                        options.values.push(Given {
+                            name: name.into(),
+                            value: next.map(|word| word.value.clone()).unwrap_or_default(),
+                        });
+                    }
+                    None if word.literal => {}
+                    _ => break,
                 }
+                index += 1;
                 continue;
             }
             let Some(cluster) = value
@@ -2640,27 +2734,41 @@ impl<'s, 't> Options<'s, 't> {
             else {
                 break;
             };
-            index += 1;
+            let mut flags = String::new();
+            let mut given = None;
+            // The value is the next word.
+            let mut apart = false;
             for (at, letter) in cluster.char_indices() {
+                if 1 + at >= written {
+                    break;
+                }
                 let attached = &cluster[at + letter.len_utf8()..];
-                if valued.contains(letter) {
-                    let given = if attached.is_empty() {
-                        index += 1;
-                        words.get(index - 1).map(|word| word.value.clone())
-                    } else {
-                        Some(attached.to_owned())
-                    };
-                    options
-                        .values
-                        .push((letter.into(), given.unwrap_or_default()));
+                if valued.contains(letter) && attached.is_empty() && word.literal {
+                    let next = words.get(index + 1);
+                    given = Some(Given {
+                        name: letter.into(),
+                        value: next.map(|word| word.value.clone()).unwrap_or_default(),
+                    });
+                    apart = true;
                     break;
                 }
-                if optional.contains(letter) {
-                    options.values.push((letter.into(), attached.to_owned()));
+                if valued.contains(letter) || optional.contains(letter) {
+                    given = Some(Given {
+                        name: letter.into(),
+                        value: attached.to_owned(),
+                    });
                     break;
                 }
-                options.flags.push(letter);
+                flags.push(letter);
             }
+            // A cluster whose letters an expansion may go on (`-x"$y"`) is
+            // not known to be options.
+            if !word.literal && given.is_none() {
+                break;
+            }
+            index += 1 + usize::from(apart);
+            options.flags.push_str(&flags);
+            options.values.extend(given);
         }
         options.rest = &words[index.min(words.len())..];
         options
@@ -2669,8 +2777,26 @@ impl<'s, 't> Options<'s, 't> {
     fn value(&self, name: &str) -> Option<&str> {
         self.values
             .iter()
-            .find(|(given, _)| given == name)
-            .map(|(_, value)| value.as_str())
+            .find(|given| given.name == name)
+            .map(|given| given.value.as_str())
+    }
+
+    /// `sudo`'s options, and the variables it is given to set among them
+    /// (see [`sets_variable`]), after which it reads options again: `sudo
+    /// A=1 -u root rm x` runs `rm x` as root.
+    fn sudo(words: &'s [Word<'t>]) -> Self {
+        let read = |words: &'s [Word<'t>]| Self::read(words, "ugpCDrtTU", "", SUDO_LONG);
+        let mut options = read(words);
+        loop {
+            let rest = after_settings(options.rest, true);
+            if rest.len() == options.rest.len() {
+                return options;
+            }
+            let more = read(rest);
+            options.flags.push_str(&more.flags);
+            options.values.extend(more.values);
+            options.rest = more.rest;
+        }
     }
 }
 
@@ -4464,23 +4590,7 @@ impl Line<'_> {
             let name = program_name(&program.value);
             match name.as_str() {
                 "sudo" => {
-                    let options = Options::read(
-                        arguments,
-                        "ugpCDrtTU",
-                        "",
-                        &[
-                            "user",
-                            "group",
-                            "host",
-                            "prompt",
-                            "close-from",
-                            "chdir",
-                            "role",
-                            "type",
-                            "command-timeout",
-                            "other-user",
-                        ],
-                    );
+                    let options = Options::sudo(arguments);
                     // `-e` edits files, `-l` and `-V` list.
                     if options.flags.contains(['e', 'l', 'V']) {
                         return None;
@@ -4490,7 +4600,7 @@ impl Line<'_> {
                             .value("D")
                             .or_else(|| options.value("chdir"))
                             .is_some();
-                    rest = after_assignments(options.rest);
+                    rest = options.rest;
                     trusted &= rest.len() == arguments.len();
                 }
                 "env" => {
@@ -4512,7 +4622,7 @@ impl Line<'_> {
                         .value("C")
                         .or_else(|| options.value("chdir"))
                         .is_some();
-                    rest = after_assignments(options.rest);
+                    rest = env_command(options.rest);
                     // It sets, clears or searches for what runs.
                     trusted = false;
                 }
@@ -7187,6 +7297,89 @@ mod here_document_backquotes {
         .map(|written| written.pattern)
         .collect();
         assert!(written.contains(&"date".to_owned()), "{written:?}");
+    }
+}
+
+/// Commands a wrapper or one of the shell's own words runs, read after the
+/// variables they set.
+#[cfg(test)]
+mod wrappers {
+    use super::*;
+    use crate::permissions::wildcard_match;
+
+    fn workspace() -> PathBuf {
+        std::env::current_dir().expect("cwd")
+    }
+
+    fn reaches_rm(command: &str, workspace: &Path) -> bool {
+        analyze(command, workspace)
+            .patterns
+            .iter()
+            .any(|pattern| wildcard_match("rm *", pattern))
+    }
+
+    #[test]
+    fn a_wrapper_s_command_is_read_after_the_variables_it_sets() {
+        let workspace = workspace();
+        let home = haarness_protocol::home_dir().expect("home");
+        // `time` and `coproc` take the shell's own assignments before the
+        // command; `env` and `sudo` set any word with a `=`, and `sudo`
+        // reads options again after them; a wrapper's option may hold an
+        // expansion.
+        for command in [
+            "time A=1 rm -rf ~/x",
+            "time -p A=$(pwd) B+=x rm -rf ~/x",
+            "time A[1]=x B[k]+=y rm -rf ~/x",
+            "env A+=1 rm -rf ~/x",
+            "env 'A B=1' rm -rf ~/x",
+            "env A=$(pwd) rm -rf ~/x",
+            "env -i - A=1 rm -rf ~/x",
+            "env --unset=\"$V\" rm -rf ~/x",
+            "sudo A+=1 rm -rf ~/x",
+            "sudo A=1 -u root rm -rf ~/x",
+            "sudo --user=\"$U\" rm -rf ~/x",
+            "doas A=1 rm -rf ~/x",
+            "timeout --signal=\"$S\" 5 rm -rf ~/x",
+            "coproc rm -rf ~/x",
+            "coproc A=1 rm -rf ~/x",
+            "coproc { rm -rf ~/x; }",
+            "coproc NAME { rm -rf ~/x; }",
+        ] {
+            let analysis = analyze(command, &workspace);
+            assert!(reaches_rm(command, &workspace), "{command}: {analysis:?}");
+            assert!(
+                analysis
+                    .external_dirs
+                    .iter()
+                    .any(|dir| Path::new(dir.trim_end_matches("/*")).starts_with(&home)),
+                "{command}: {analysis:?}"
+            );
+        }
+        // What runs is read as before.
+        for (command, readings) in [
+            ("env RUST_LOG=1 cargo test", vec!["cargo test"]),
+            ("time cargo build", vec!["cargo build"]),
+            ("time -p make", vec!["make"]),
+            ("sudo -E make", vec!["make"]),
+            ("env -i PATH=/usr/bin make", vec!["make"]),
+            ("sudo -u root FOO=1 make", vec!["make"]),
+        ] {
+            let derived: Vec<String> = analyze(command, &workspace)
+                .derived
+                .into_iter()
+                .map(|derived| derived.pattern)
+                .collect();
+            assert_eq!(derived, readings, "{command}");
+        }
+        // Quoted, a name is no assignment to the shell; a `=` an expansion
+        // may bring is not known.
+        for command in [
+            "time 'A B=1' rm x",
+            "env \"$X\" rm x",
+            "env $(echo A=1) rm x",
+        ] {
+            assert!(!reaches_rm(command, &workspace), "{command}");
+        }
     }
 }
 
