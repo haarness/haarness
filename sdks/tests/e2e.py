@@ -474,12 +474,54 @@ def scenario(mode):
             c("promote_background_tasks", tid, {})
             c("interrupt_thread_tree", tid)
             c("wait_turn", child["id"], {"timeout_ms": 10000})
+            # A shell command the agent runs: listed, read while it runs, sent
+            # to the background by a person and stopped.
+            runner.until("active_turn", tid, predicate=lambda value: value is None)
+            shell = c(
+                "start_turn",
+                tid,
+                {
+                    "requestId": str(uuid4()),
+                    "text": '!tool bash {"command":"printf SDK_COMMAND_OK; sleep 30"}',
+                },
+            )
+            prompts = runner.until("list_permissions")
+            c("reply_permission", prompts[0]["permissionId"], {"decision": "once"})
+            command = runner.until(
+                "list_shell_commands",
+                tid,
+                predicate=lambda rows: any(row["state"] == "running" for row in rows),
+            )[0]
+            assert any(row["id"] == command["id"] for row in c("active_shell_commands"))
+            assert c("get_shell_command", tid, command["id"])["command"].startswith("printf")
+            moved = c("background_shell_commands", tid, {"commandId": command["id"]})
+            assert moved[0]["background"] and moved[0]["movedBy"] == "person", moved
+            c("wait_turn", shell["id"], {"timeout_ms": 10000})
+            runner.until(
+                "read_shell_command_output",
+                tid,
+                command["id"],
+                {"cursor": 0, "limit": 64},
+                predicate=lambda page: page["text"] == "SDK_COMMAND_OK",
+            )
+            assert c("stop_shell_command", tid, command["id"])["state"] in ("stopping", "stopped")
+            runner.until(
+                "get_shell_command",
+                tid,
+                command["id"],
+                predicate=lambda info: info["state"] == "stopped",
+            )
+            # Its end reaches the chat as a turn of its own.
+            runner.until("active_turn", tid, predicate=lambda value: value is None)
             # MCP uses a real stdio peer with tools/resources/templates/prompts.
             c(
                 "configure_mcp",
                 "fixture",
                 {
-                    "command": str(ROOT / "sdks/python/.venv/bin/python"),
+                    # The MCP fixture needs only the standard library.
+                    "command": str(
+                        os.environ.get("SDK_PYTHON", ROOT / "sdks/python/.venv/bin/python")
+                    ),
                     "args": [str(ROOT / "sdks/tests/mcp.py")],
                     "transport": "stdio",
                     "enabled": True,

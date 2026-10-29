@@ -1,14 +1,27 @@
-//! Stream shell output to disk while retaining only a bounded tail in memory.
-use haarness_core::{CoreError, CoreResult, ToolOutput};
+//! Run shell commands: their output streams to disk and its end stays in
+//! memory, while a task of its own reads it, so a command can outlive the
+//! call that started it (an agent's command in the background).
+use haarness_core::{
+    CommandOutput, CommandProcess, CommandRequest, CommandRun, CoreError, CoreResult,
+    OUTPUT_SAVED_LIMIT, ProcessControl, ProcessEnd, ShellCall, StopSignal, ToolOutput,
+};
 use haarness_protocol::ThreadId;
 use serde_json::json;
-use std::{collections::BTreeMap, path::Path, process::Stdio, time::Duration};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    process::Command,
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
+use tokio::{io::AsyncReadExt, process::Command, sync::watch};
 use tokio_util::sync::CancellationToken;
 
+/// Kills the command's process group when its reading ends, whatever is
+/// left of it.
 struct ProcessGroup(u32);
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
@@ -26,20 +39,102 @@ impl Drop for ProcessGroup {
     }
 }
 
+/// Signals for a running command: on Unix to its process group (it leads
+/// one of its own); on Windows `taskkill` on its tree, without `/F` (a
+/// request to close) for an interrupt or terminate, with it for a kill.
+struct GroupControl {
+    leader: u32,
+    /// The group is still ours: its leader has not been reaped, or what it
+    /// left running may still be in it.
+    live: AtomicBool,
+}
+
+impl ProcessControl for GroupControl {
+    fn signal(&self, signal: StopSignal) {
+        if !self.live.load(Ordering::SeqCst) {
+            return;
+        }
+        #[cfg(unix)]
+        if let Ok(pid) = i32::try_from(self.leader) {
+            use nix::sys::signal::Signal;
+            let signal = match signal {
+                StopSignal::Interrupt => Signal::SIGINT,
+                StopSignal::Terminate => Signal::SIGTERM,
+                StopSignal::Kill => Signal::SIGKILL,
+            };
+            let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), signal);
+        }
+        #[cfg(windows)]
+        {
+            let pid = self.leader.to_string();
+            let mut args = vec!["/T", "/PID", pid.as_str()];
+            if signal == StopSignal::Kill {
+                args.insert(0, "/F");
+            }
+            let _ = std::process::Command::new("taskkill").args(args).output();
+        }
+    }
+}
+
+/// How long the reading goes on after the command itself ended while
+/// something it started still holds its output open, quiet that long or at
+/// most that long in all, before what is left is stopped.
+const LEFTOVER_QUIET: Duration = Duration::from_millis(250);
+const LEFTOVER_MOST: Duration = Duration::from_secs(2);
+/// How long the reading goes on once what was left is stopped.
+const AFTER_LEFTOVERS: Duration = Duration::from_millis(500);
+/// The output an agent's or a person's call shows: its last 50 KiB and
+/// 2000 lines.
+const SHOWN_BYTES: usize = 50 * 1024;
+const SHOWN_LINES: usize = 2000;
+
+/// Holds back the start of a character whose other bytes have not been
+/// read yet, so stdout and stderr interleaved never split one.
+#[derive(Default)]
+struct Characters(Vec<u8>);
+
+impl Characters {
+    fn push(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut all = std::mem::take(&mut self.0);
+        all.extend_from_slice(bytes);
+        let whole = haarness_core::whole_end(&all);
+        self.0 = all.split_off(whole);
+        all
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+/// Counts kept besides the output: stdout alone, for a definition's
+/// snippet, and the lines of all of it.
+#[derive(Default)]
+struct Stats {
+    stdout_tail: Vec<u8>,
+    stdout_total: usize,
+    lines: usize,
+}
+
+/// A started command and what its call reads of it when it ends.
+struct Spawned {
+    process: CommandProcess,
+    stats: Arc<parking_lot::Mutex<Stats>>,
+}
+
 /// `env` adds or overrides variables for this one invocation (`shell.env`
 /// hooks); the parent environment is otherwise inherited, minus the server's
 /// private variables (`haarness_core::private_env_names`). `agent` is the
 /// chat a command the agent runs is for (`None` for a person's own command):
 /// see [`mark_agent`].
-pub(crate) async fn run(
+async fn spawn(
     command: &str,
     workdir: &Path,
-    timeout_ms: u64,
-    cancel: &CancellationToken,
+    save_limit: u64,
     directory: &Path,
     env: &BTreeMap<String, String>,
     agent: Option<ThreadId>,
-) -> CoreResult<ToolOutput> {
+) -> CoreResult<Spawned> {
     let error = |e: std::io::Error| CoreError::Tool(e.to_string());
     let mut command = haarness_ripgrep::shell_command(command).map_err(error)?;
     command
@@ -77,71 +172,213 @@ pub(crate) async fn run(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
+    let (path, file) = crate::data_folder::new_private_file(directory, "tool")
         .await
         .map_err(error)?;
     let mut child = Command::from(command)
         .kill_on_drop(true)
         .spawn()
         .map_err(error)?;
-    let _group = ProcessGroup(
-        child
-            .id()
-            .ok_or_else(|| CoreError::Tool("shell process did not start".into()))?,
-    );
+    let leader = child
+        .id()
+        .ok_or_else(|| CoreError::Tool("shell process did not start".into()))?;
+    let group = ProcessGroup(leader);
     // Stopped by the next server should this one die before it can.
-    let _recorded = haarness_core::process_groups::recorded(child.id());
-    let mut stdout = child.stdout.take().expect("piped stdout");
-    let mut stderr = child.stderr.take().expect("piped stderr");
-    let mut tail = Vec::new();
-    let mut stdout_tail = Vec::new();
-    let mut stdout_total = 0usize;
-    let mut total = 0usize;
-    let mut lines = 0usize;
+    let recorded = haarness_core::process_groups::recorded(Some(leader));
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let output = Arc::new(CommandOutput::new(path, file, save_limit));
+    let stats = Arc::new(parking_lot::Mutex::new(Stats::default()));
+    let control = Arc::new(GroupControl {
+        leader,
+        live: AtomicBool::new(true),
+    });
+    let (end, ended) = watch::channel(None);
+    tokio::spawn(pump(Pump {
+        child,
+        stdout,
+        stderr,
+        output: Arc::clone(&output),
+        stats: Arc::clone(&stats),
+        end,
+        control: Arc::clone(&control),
+        group,
+        recorded,
+    }));
+    Ok(Spawned {
+        process: CommandProcess {
+            output,
+            end: ended,
+            control,
+        },
+        stats,
+    })
+}
+
+/// What reads a running command, owning its process.
+struct Pump {
+    child: tokio::process::Child,
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    output: Arc<CommandOutput>,
+    stats: Arc<parking_lot::Mutex<Stats>>,
+    end: watch::Sender<Option<ProcessEnd>>,
+    control: Arc<GroupControl>,
+    group: ProcessGroup,
+    recorded: haarness_core::process_groups::Recorded,
+}
+
+/// Read the command's output until it has ended and nothing holds its
+/// output open, then say how it ended. A command that ends while
+/// something it started (`server &`) still runs and holds its output does
+/// not wait for that: what is left is stopped.
+async fn pump(mut pump: Pump) {
+    // Heap buffers keep this future small.
+    let mut out = vec![0u8; 8192];
+    let mut err = vec![0u8; 8192];
+    let mut out_open = true;
+    let mut err_open = true;
+    let mut out_characters = Characters::default();
+    let mut err_characters = Characters::default();
+    let mut status = None;
+    let mut ended_at = None;
+    let mut heard_at = tokio::time::Instant::now();
+    let mut stopped_leftovers: Option<tokio::time::Instant> = None;
+    let mut leftovers = false;
+    let mut failure = None;
+    while out_open || err_open || status.is_none() {
+        let wake = match (ended_at, stopped_leftovers) {
+            (_, Some(stopped)) => Some(stopped + AFTER_LEFTOVERS),
+            (Some(ended), None) => Some((heard_at + LEFTOVER_QUIET).min(ended + LEFTOVER_MOST)),
+            (None, None) => None,
+        };
+        let sleep = async {
+            match wake {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+        let (bytes, from_stdout) = tokio::select! {
+            read = pump.stdout.read(&mut out), if out_open => match read {
+                Ok(0) => { out_open = false; continue; }
+                Ok(n) => (&out[..n], true),
+                Err(error) => { failure = Some(error.to_string()); out_open = false; continue; }
+            },
+            read = pump.stderr.read(&mut err), if err_open => match read {
+                Ok(0) => { err_open = false; continue; }
+                Ok(n) => (&err[..n], false),
+                Err(error) => { failure = Some(error.to_string()); err_open = false; continue; }
+            },
+            waited = pump.child.wait(), if status.is_none() => {
+                match waited {
+                    Ok(waited) => status = Some(waited),
+                    Err(error) => {
+                        failure = Some(error.to_string());
+                        break;
+                    }
+                }
+                ended_at = Some(tokio::time::Instant::now());
+                continue;
+            }
+            () = sleep => {
+                if stopped_leftovers.is_some() {
+                    // Something outside the group still holds the output
+                    // open (a process that left it): stop reading.
+                    break;
+                }
+                leftovers = true;
+                pump.control.signal(StopSignal::Kill);
+                stopped_leftovers = Some(tokio::time::Instant::now());
+                continue;
+            }
+        };
+        heard_at = tokio::time::Instant::now();
+        {
+            let mut counts = pump.stats.lock();
+            counts.lines += newlines(bytes);
+            if from_stdout {
+                counts.stdout_total += bytes.len();
+                counts.stdout_tail.extend_from_slice(bytes);
+                if counts.stdout_tail.len() > SHOWN_BYTES {
+                    let cut = counts.stdout_tail.len() - SHOWN_BYTES;
+                    counts.stdout_tail.drain(..cut);
+                }
+            }
+        }
+        let whole = if from_stdout {
+            out_characters.push(bytes)
+        } else {
+            err_characters.push(bytes)
+        };
+        if let Err(error) = pump.output.append(&whole).await {
+            failure = Some(error.to_string());
+            break;
+        }
+    }
+    for rest in [out_characters.finish(), err_characters.finish()] {
+        let _ = pump.output.append(&rest).await;
+    }
+    if let Err(error) = pump.output.finish().await {
+        failure.get_or_insert(error.to_string());
+    }
+    if failure.is_some() || status.is_none() {
+        pump.control.signal(StopSignal::Kill);
+    }
+    let (exit_code, signal) = status.map_or((None, None), |status| {
+        (status.code(), terminating_signal(status))
+    });
+    pump.control.live.store(false, Ordering::SeqCst);
+    drop(pump.group);
+    drop(pump.recorded);
+    pump.end.send_replace(Some(ProcessEnd {
+        exit_code,
+        signal,
+        leftovers,
+        error: failure,
+    }));
+}
+
+/// The signal that ended the command, by name.
+fn terminating_signal(status: std::process::ExitStatus) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal().map(|number| {
+            nix::sys::signal::Signal::try_from(number).map_or_else(
+                |_| format!("signal {number}"),
+                |signal| signal.as_str().to_owned(),
+            )
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
+
+/// A person's own command, a workflow's, a definition's snippet: run in the
+/// foreground until it ends, its deadline (`timeout_ms`, 0 for none) or the
+/// stop of `cancel`. See [`spawn`] for the rest.
+pub(crate) async fn run(
+    command: &str,
+    workdir: &Path,
+    timeout_ms: u64,
+    cancel: &CancellationToken,
+    directory: &Path,
+    env: &BTreeMap<String, String>,
+    agent: Option<ThreadId>,
+) -> CoreResult<ToolOutput> {
     // A command with no deadline can print until it is stopped (`npm run
     // dev`, `tail -f`): its saved output keeps only its start.
     let save_limit = if timeout_ms == 0 {
-        SAVED_WITHOUT_DEADLINE
+        OUTPUT_SAVED_LIMIT
     } else {
-        usize::MAX
+        u64::MAX
     };
-    let mut saved = 0usize;
-    let execution = async {
-        // Heap buffers keep this future small enough to await unboxed.
-        let mut out = vec![0u8; 8192];
-        let mut err = vec![0u8; 8192];
-        let mut out_done = false;
-        let mut err_done = false;
-        let mut status = None;
-        while !out_done || !err_done || status.is_none() {
-            let bytes = tokio::select! {
-                value = stdout.read(&mut out), if !out_done => {
-                    let n = value.map_err(error)?; out_done = n == 0;
-                    stdout_tail.extend_from_slice(&out[..n]);
-                    stdout_total += n;
-                    if stdout_tail.len() > 50 * 1024 { stdout_tail.drain(..stdout_tail.len() - 50 * 1024); }
-                    &out[..n]
-                },
-                value = stderr.read(&mut err), if !err_done => {
-                    let n = value.map_err(error)?; err_done = n == 0; &err[..n]
-                },
-                value = child.wait(), if status.is_none() => { status = Some(value.map_err(error)?); continue; }
-            };
-            total += bytes.len();
-            lines += newlines(bytes);
-            let room = save_limit.saturating_sub(saved).min(bytes.len());
-            if room > 0 {
-                file.write_all(&bytes[..room]).await.map_err(error)?;
-                saved += room;
-            }
-            tail.extend_from_slice(bytes);
-            if tail.len() > 50 * 1024 {
-                tail.drain(..tail.len() - 50 * 1024);
-            }
-        }
-        file.flush().await.map_err(error)?;
-        Ok::<_, CoreError>(status.expect("wait completed").code().unwrap_or(-1))
-    };
+    let spawned = spawn(command, workdir, save_limit, directory, env, agent).await?;
+    let process = &spawned.process;
+    let mut end = process.end.clone();
     let deadline = async {
         if timeout_ms == 0 {
             std::future::pending::<()>().await;
@@ -149,51 +386,117 @@ pub(crate) async fn run(
             tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
         }
     };
-    let result = tokio::select! {
+    let ended = tokio::select! {
         biased;
         () = cancel.cancelled() => Err(CoreError::Cancelled),
-        () = deadline => Err(CoreError::Tool(format!("command timed out after {timeout_ms} ms; output saved to {}", path.display()))),
-        result = execution => result,
+        () = deadline => Err(CoreError::Tool(format!(
+            "command timed out after {timeout_ms} ms; output saved to {}",
+            process.output.path().display()
+        ))),
+        ended = end.wait_for(Option::is_some) => {
+            Ok(ended.ok().and_then(|ended| ended.clone()).unwrap_or_default())
+        }
     };
-    let exit = result?;
-    let truncated = total > 50 * 1024 || lines > 2000;
+    let end = match ended {
+        Ok(end) => end,
+        Err(error) => {
+            process.control.signal(StopSignal::Kill);
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                process.end.clone().wait_for(Option::is_some),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    if let Some(error) = &end.error {
+        return Err(CoreError::Tool(error.clone()));
+    }
+    Ok(ended_output(&spawned, &end, None).await)
+}
+
+/// An agent's command in its turn (`call`): registered so a client follows
+/// it, and run in the background, by `run_in_background` or by moving
+/// there while it runs. See [`spawn`] and [`ShellCall::run`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_call(
+    call: &ShellCall,
+    request: CommandRequest,
+    cancel: &CancellationToken,
+    directory: &Path,
+    env: &BTreeMap<String, String>,
+    agent: Option<ThreadId>,
+) -> CoreResult<ToolOutput> {
+    call.check_start(request.background)?;
+    // A deadline in the foreground saves all of the output; without one
+    // (or in the background) only its start.
+    let save_limit = match request.timeout_ms {
+        Some(timeout) if timeout > 0 && !request.background => u64::MAX,
+        None if !request.background => u64::MAX,
+        _ => OUTPUT_SAVED_LIMIT,
+    };
+    let spawned = spawn(
+        &request.command,
+        &request.cwd,
+        save_limit,
+        directory,
+        env,
+        agent,
+    )
+    .await?;
+    let process = CommandProcess {
+        output: Arc::clone(&spawned.process.output),
+        end: spawned.process.end.clone(),
+        control: Arc::clone(&spawned.process.control),
+    };
+    match call.run(process, request, cancel).await? {
+        CommandRun::Background(output) => Ok(output),
+        CommandRun::Ended { reference, end } => {
+            Ok(ended_output(&spawned, &end, Some(json!(reference))).await)
+        }
+    }
+}
+
+/// The result of a command that ended while its call waited: its exit code
+/// and the end of its output, with all of it in a file when that is cut.
+async fn ended_output(
+    spawned: &Spawned,
+    end: &ProcessEnd,
+    command: Option<serde_json::Value>,
+) -> ToolOutput {
+    let output = &spawned.process.output;
+    let exit = end.exit_code.unwrap_or(-1);
+    let total = output.size();
+    let saved = output.saved();
+    let (stdout_tail, stdout_total, lines) = {
+        let stats = spawned.stats.lock();
+        (stats.stdout_tail.clone(), stats.stdout_total, stats.lines)
+    };
+    let truncated = total > SHOWN_BYTES as u64 || lines > SHOWN_LINES;
+    // Cut by bytes, the end shown can start inside a character.
+    let (tail, _) = output.tail(SHOWN_BYTES);
     let text = String::from_utf8_lossy(&tail);
-    let preview = text
-        .lines()
-        .rev()
-        .take(2000)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-    // Cut by bytes, the kept stdout can start inside a character.
+    let preview = last_lines(&text, SHOWN_LINES);
     let stdout_kept = if stdout_total > stdout_tail.len() {
-        whole_characters(&stdout_tail)
+        haarness_core::whole_start(&stdout_tail)
     } else {
         &stdout_tail
     };
     let stdout_text = String::from_utf8_lossy(stdout_kept);
-    let stdout_preview = stdout_text
-        .lines()
-        .rev()
-        .take(2000)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
     let stdout_lines = stdout_text.lines().count();
-    let mut metadata = json!({"exit":exit,"truncated":truncated,"stdout": if stdout_lines > 2000 { stdout_preview.as_str() } else { stdout_text.as_ref() }});
+    let mut metadata = json!({"exit":exit,"truncated":truncated,"stdout": if stdout_lines > SHOWN_LINES { last_lines(&stdout_text, SHOWN_LINES) } else { stdout_text.clone().into_owned() }});
+    if let Some(command) = command {
+        metadata["command"] = command;
+    }
     // `stdout` holds only its end: a definition's snippet says so and names
     // the file, kept for it even when the output itself fits (2001 lines
     // with no final newline).
-    let stdout_cut = stdout_total > stdout_tail.len() || stdout_lines > 2000;
+    let stdout_cut = stdout_total > stdout_tail.len() || stdout_lines > SHOWN_LINES;
     if stdout_cut {
         metadata["stdoutCut"] = json!(true);
     }
     let notice = if truncated || stdout_cut {
-        metadata["outputPath"] = json!(path);
+        metadata["outputPath"] = json!(output.path());
         if saved < total {
             metadata["outputSavedBytes"] = json!(saved);
         }
@@ -202,42 +505,54 @@ pub(crate) async fn run(
         } else if saved < total {
             format!(
                 "First {} MiB of the output saved to: {}\n",
-                SAVED_WITHOUT_DEADLINE / (1024 * 1024),
-                path.display()
+                OUTPUT_SAVED_LIMIT / (1024 * 1024),
+                output.path().display()
             )
         } else {
-            format!("Full output saved to: {}\n", path.display())
+            format!("Full output saved to: {}\n", output.path().display())
         }
     } else {
-        drop(file);
-        let _ = tokio::fs::remove_file(&path).await;
+        output.discard_file().await;
         String::new()
     };
-    Ok(ToolOutput {
-        text: format!(
-            "exit: {exit}\n{notice}{}",
-            if truncated {
-                preview.as_str()
-            } else {
-                text.as_ref()
-            }
-        ),
-        metadata,
-    })
+    let mut text = format!(
+        "exit: {exit}\n{notice}{}",
+        if truncated {
+            preview.as_str()
+        } else {
+            text.as_ref()
+        }
+    );
+    if end.leftovers {
+        metadata["leftovers"] = json!(true);
+        text.push_str(
+            "\n(It left processes running, started with & or in the background of the shell, and they were stopped when it ended. For a server or another process that should keep running, use run_in_background.)",
+        );
+    }
+    ToolOutput { text, metadata }
+}
+
+/// The last `count` lines of `text`.
+fn last_lines(text: &str, count: usize) -> String {
+    text.lines()
+        .rev()
+        .take(count)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// What a command without a deadline saves of its output, from the start;
 /// the end it shows is kept apart. 64 MiB, as much as a request body.
-pub(crate) const SAVED_WITHOUT_DEADLINE: usize = 64 * 1024 * 1024;
+#[cfg(test)]
+const SAVED_WITHOUT_DEADLINE: usize = 64 * 1024 * 1024;
 
-/// `bytes` without the continuation bytes of a character cut off before it.
-fn whole_characters(bytes: &[u8]) -> &[u8] {
-    let partial = bytes
-        .iter()
-        .take(3)
-        .take_while(|byte| **byte & 0xC0 == 0x80)
-        .count();
-    &bytes[partial..]
+/// The newlines in `bytes`; a plain count, not worth a dependency.
+#[allow(clippy::naive_bytecount)]
+fn newlines(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|&&byte| byte == b'\n').count()
 }
 
 /// Marks a command the agent runs as an agent's (`AGENT`, `AI_AGENT`, and
@@ -248,12 +563,6 @@ fn whole_characters(bytes: &[u8]) -> &[u8] {
 /// `AI_AGENT` already set, there or in the server's environment, names an
 /// outer agent and is kept, unless it is Haarness's own. A person's own
 /// command is not marked.
-/// The newlines in `bytes`; a plain count, not worth a dependency.
-#[allow(clippy::naive_bytecount)]
-fn newlines(bytes: &[u8]) -> usize {
-    bytes.iter().filter(|&&byte| byte == b'\n').count()
-}
-
 fn mark_agent(command: &mut std::process::Command, thread: ThreadId, env: &[(&String, &String)]) {
     // What the command would get otherwise: `env`'s value, else the server's.
     let given = |name: &str| {
@@ -518,6 +827,89 @@ mod tests {
             assert!(!root.join("escaped").exists());
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn a_character_split_between_reads_and_pipes_stays_whole() {
+        let root = fixture();
+        // The first byte of é, then a byte on stderr, then the second byte
+        // of é: each its own read of its pipe.
+        let output = run(
+            r"printf '\303'; sleep .1; printf x >&2; sleep .1; printf '\251'",
+            &root,
+            0,
+            &CancellationToken::new(),
+            &root,
+            &BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!output.text.contains('\u{fffd}'), "{:?}", output.text);
+        assert!(output.text.ends_with("xé"), "{:?}", output.text);
+        assert_eq!(output.metadata["stdout"], "é");
+        // The end shown when the output is past 50 KiB starts on a whole
+        // character too: 30001 two-byte characters and one byte cut at an
+        // odd byte.
+        let output = run(
+            "i=0; while [ $i -lt 30001 ]; do printf 'é'; i=$((i+1)); done; printf x",
+            &root,
+            0,
+            &CancellationToken::new(),
+            &root,
+            &BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.metadata["truncated"], true);
+        let shown = output.text.lines().last().unwrap();
+        assert!(
+            shown.starts_with('é') && shown.ends_with('x'),
+            "{:?}",
+            shown.chars().take(4).collect::<String>()
+        );
+        assert!(!output.text.contains('\u{fffd}'));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_process_left_running_with_an_ampersand_does_not_hold_the_call() {
+        let root = fixture();
+        let started = std::time::Instant::now();
+        let output = tokio::time::timeout(
+            Duration::from_secs(15),
+            run(
+                "sleep 30 & echo $! > pid; echo started",
+                &root,
+                0,
+                &CancellationToken::new(),
+                &root,
+                &BTreeMap::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("the call returns once the command has ended")
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(output.metadata["exit"], 0);
+        assert_eq!(output.metadata["stdout"], "started\n");
+        // What it left running was stopped with it, and the call says so.
+        let pid = std::fs::read_to_string(root.join("pid")).unwrap();
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "sleep {pid} still runs");
+        assert_eq!(output.metadata["leftovers"], true);
+        assert!(output.text.contains("run_in_background"), "{}", output.text);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// The cases of [`agent_marker_case`] run in a child test process whose
