@@ -432,7 +432,11 @@ fn holds_credentials(canonical: &Path) -> bool {
         .unwrap_or_default();
     in_folder
         || NAMES.contains(&name.as_str())
-        || (name.starts_with("id_") && !name.ends_with(".pub"))
+        // `name` is lowercased above, so `.PUB` counts as a public key too.
+        || (name.starts_with("id_")
+            && std::path::Path::new(&name)
+                .extension()
+                .is_none_or(|extension| extension != "pub"))
         || name
             .rsplit_once('.')
             .is_some_and(|(_, extension)| EXTENSIONS.contains(&extension))
