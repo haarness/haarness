@@ -49,12 +49,15 @@ fn request_interrupt(app: &mut App, client: &ApiClient, target: InterruptTarget)
     let client = client.clone();
     // A running turn belongs to the thread on screen. Stopping it stops that
     // whole tree, as Desktop's Stop does, and asks the server to answer any
-    // steering the agent had not read yet rather than drop it.
+    // steering the agent had not read yet rather than drop it; commands in
+    // the background keep running. With no reply running there is nothing to
+    // answer: stopping the session's work is a stop of everything, those
+    // commands included, which a stop that answers steering never is.
     let thread = app.thread.id;
     tokio::spawn(async move {
         let result = match target {
             InterruptTarget::Turn(_) => client.interrupt_session(thread, true).await,
-            InterruptTarget::Session(root) => client.interrupt_session(root, true).await,
+            InterruptTarget::Session(root) => client.interrupt_session(root, false).await,
             InterruptTarget::Quit => return,
         };
         if let Err(error) = result {

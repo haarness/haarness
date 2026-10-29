@@ -2921,6 +2921,7 @@
   "Command moved to background · its result will return here": "نُقل الأمر إلى الخلفية · ستعود نتيجته إلى هنا",
   "{count} moved to background · results will return here": "نُقل {count} إلى الخلفية · ستعود النتائج إلى هنا",
   "This command can't move to the background": "لا يمكن نقل هذا الأمر إلى الخلفية",
+  "stopped what it left running": "أُوقفت العمليات التي تركها تعمل",
   "1 tool call": "استدعاء أداة واحد",
   "{count} tool calls": "استدعاءات الأدوات: {count}",
   "less than a day left at this pace": "يتبقى أقل من يوم بهذا المعدل",

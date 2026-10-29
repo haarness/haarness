@@ -15,6 +15,9 @@ use crate::state::App;
 use crate::view::frame::{HitRegion, HitTarget};
 use crate::view::span::{single_line, task_state_style};
 
+/// How long the view waits for its first read before it says it waits.
+const FIRST_READ: std::time::Duration = std::time::Duration::from_millis(600);
+
 /// Build the whole frame for the command `view` shows.
 pub fn frame(
     app: &App,
@@ -44,7 +47,10 @@ pub fn frame(
         body.push(note(app.language.text("earlier output is no longer kept")));
     }
     let rows = view.shown_rows(width.saturating_sub(4));
-    if rows.is_empty() && body.is_empty() {
+    // Before its first read lands the view stays quiet a moment: a word that
+    // flashes and is replaced at once is only noise.
+    let reading = !view.loaded && view.opened.elapsed() < FIRST_READ;
+    if rows.is_empty() && body.is_empty() && !reading {
         body.push(note(app.language.text(if view.settled {
             "No output"
         } else {

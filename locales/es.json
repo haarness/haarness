@@ -2921,6 +2921,7 @@
   "Command moved to background · its result will return here": "Comando pasado a segundo plano · su resultado volverá aquí",
   "{count} moved to background · results will return here": "{count} pasados a segundo plano · los resultados volverán aquí",
   "This command can't move to the background": "Este comando no puede pasar a segundo plano",
+  "stopped what it left running": "se detuvo lo que dejó en marcha",
   "1 tool call": "1 llamada a herramienta",
   "{count} tool calls": "{count} llamadas a herramientas",
   "less than a day left at this pace": "queda menos de un día a este ritmo",

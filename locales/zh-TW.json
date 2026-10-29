@@ -2921,6 +2921,7 @@
   "Command moved to background · its result will return here": "命令已移到背景 · 結果會回到這裡",
   "{count} moved to background · results will return here": "{count} 項已移到背景 · 結果會回到這裡",
   "This command can't move to the background": "此命令無法移到背景",
+  "stopped what it left running": "已停止它留下執行的程序",
   "1 tool call": "1 次工具呼叫",
   "{count} tool calls": "{count} 次工具呼叫",
   "less than a day left at this pace": "依此速度剩不到一天",

@@ -2921,6 +2921,7 @@
   "Command moved to background · its result will return here": "Kommandoen er flyttet til baggrunden · resultatet kommer tilbage her",
   "{count} moved to background · results will return here": "{count} flyttet til baggrunden · resultaterne kommer tilbage her",
   "This command can't move to the background": "Denne kommando kan ikke flyttes til baggrunden",
+  "stopped what it left running": "det, den lod køre, blev stoppet",
   "1 tool call": "1 værktøjskald",
   "{count} tool calls": "{count} værktøjskald",
   "less than a day left at this pace": "under en dag tilbage i dette tempo",

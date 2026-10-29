@@ -2921,6 +2921,7 @@
   "Command moved to background · its result will return here": "Komut arka plana taşındı · sonucu buraya dönecek",
   "{count} moved to background · results will return here": "{count} öğe arka plana taşındı · sonuçlar buraya dönecek",
   "This command can't move to the background": "Bu komut arka plana taşınamaz",
+  "stopped what it left running": "bıraktığı süreçler durduruldu",
   "1 tool call": "1 araç çağrısı",
   "{count} tool calls": "{count} araç çağrısı",
   "less than a day left at this pace": "bu hızla bir günden az kaldı",
