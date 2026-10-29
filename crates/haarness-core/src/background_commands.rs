@@ -197,7 +197,10 @@ impl CommandOutput {
         if room > 0
             && let Some(file) = self.file.lock().await.as_mut()
         {
+            // Flushed before it counts as saved: a reader opens the file
+            // and reads up to that point.
             file.write_all(&bytes[..room]).await?;
+            file.flush().await?;
         }
         let size = {
             let mut state = self.state.lock();
@@ -1837,6 +1840,27 @@ mod tests {
         // The saved start is still read from the file.
         let page = small.read(0, 3).await.unwrap();
         assert_eq!(page.text(), "xxx");
+    }
+
+    #[tokio::test]
+    async fn what_was_saved_can_be_read_back_at_once() {
+        let dir = fixture();
+        let output = output(dir.path(), u64::MAX).await;
+        let chunk = [b'x'; 1000];
+        for written in 1..=200_u64 {
+            output.append(&chunk).await.unwrap();
+            // What counts as saved is on disk already: a reader opening the
+            // file finds all of it.
+            assert_eq!(
+                std::fs::metadata(output.path()).unwrap().len(),
+                output.saved(),
+                "after {written} writes"
+            );
+            // Past the end kept in memory, a page from the start is read
+            // from the file, up to all that was saved.
+            let page = output.read(0, PAGE_MAX).await.unwrap();
+            assert_eq!(page.end, written * 1000, "after {written} writes");
+        }
     }
 
     #[test]
