@@ -1169,3 +1169,50 @@ async fn a_chat_at_its_cap_keeps_a_long_command_in_the_foreground() {
     assert_eq!(metadata["command"]["background"], false);
     runtime.stop_shell_command(thread, &server).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_command_a_person_moves_after_the_deadline_gets_its_limit_from_the_move() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_timeout_ms = 600;
+    });
+    let thread = chat(&runtime, None).await;
+    // No deadline in the foreground (timeout 0), in a chat nothing follows
+    // up; it has run past the configured deadline when a person moves it.
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30","timeout":0}"#,
+        false,
+    )
+    .await;
+    let id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(info) = runtime.shell_commands(thread).await.unwrap().pop() {
+                return info.id;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let moved = runtime
+        .background_shell_commands(thread, Some(&id))
+        .await
+        .unwrap();
+    let stops_at = moved[0].stops_at.expect("a limit in the background");
+    assert!(stops_at > chrono::Utc::now(), "{moved:?}");
+    wait_done(&runtime, &turn).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        runtime
+            .shell_command(thread, &id)
+            .await
+            .unwrap()
+            .state
+            .is_live(),
+        "a move must not stop it"
+    );
+    runtime.stop_shell_command(thread, &id).await.unwrap();
+}

@@ -466,7 +466,9 @@ impl CommandPolicy {
             None => deadline,
         };
         let background_limit = match explicit {
-            Some(None) if !interactive => deadline.map(Limit::SinceStart),
+            // Counted from the move, so a command that ran without a
+            // deadline in the foreground is not stopped the moment it moves.
+            Some(None) if !interactive => deadline.map(Limit::SinceBackground),
             Some(limit) => limit.map(Limit::SinceStart),
             None if interactive => (settings.shell_background_max_ms > 0)
                 .then(|| Limit::SinceBackground(millis(settings.shell_background_max_ms))),
@@ -2007,7 +2009,7 @@ mod tests {
         let script = CommandPolicy::new(&settings, false, false, Some(0));
         assert_eq!(
             script.background_limit,
-            Some(Limit::SinceStart(Duration::from_secs(120)))
+            Some(Limit::SinceBackground(Duration::from_secs(120)))
         );
         assert_eq!(script.foreground_deadline, None);
         // Zero moves nothing; a background limit counts from the move.
