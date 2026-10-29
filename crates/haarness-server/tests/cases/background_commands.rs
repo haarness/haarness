@@ -642,7 +642,7 @@ async fn the_agent_reads_waits_for_and_stops_its_commands() {
         .unwrap()
         .to_owned();
     command_until(&runtime, thread, &id, |info| info.output_bytes > 0).await;
-    // The line was printed before the call; a wait still finds it, and a
+    // The match is in output that came before the wait began, and a
     // leading (?i) ignores case.
     let turn = scripted(
         &runtime,

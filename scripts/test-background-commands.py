@@ -13,8 +13,8 @@ Drives an isolated workspace daemon with the echo provider (no paid model):
   through the routes; the agent is told it was stopped.
 - ampersand: `sleep 300 & echo started` no longer holds the call until its
   deadline: it answers at once and stops what the command left running.
-- agent: `bash_output` waits for a line printed before the call and
-  `bash_stop` stops the command; the agent is not told again.
+- agent: `bash_output` matches output the server wrote before the wait
+  began, and `bash_stop` ends the command; the agent is not told again.
 - run: `haarness run --wait-background` waits for the command and prints
   what the agent says when it ends; without the flag the run says it keeps
   running on the server.
@@ -227,7 +227,7 @@ try:
     assert command(thread, command_id)["endedBy"] == "agent"
     time.sleep(1)
     assert not notices(thread), "the agent was told of its own stop"
-    ok("bash_output finds a line printed before it waited and bash_stop stops the command")
+    ok("bash_output matches output that came before its wait, and bash_stop ends the command")
 
     # run
     waited = subprocess.run(args + ["run", "--wait-background", "--background-timeout-ms", "60000",
