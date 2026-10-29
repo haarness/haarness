@@ -31,6 +31,8 @@ haarness marketplace install skill acme/code-review   # --local for this project
 haarness marketplace install mcp acme/docs --values '{"API_TOKEN":"…"}'
 haarness marketplace installed                        # --json for the receipts
 haarness marketplace update acme/code-review
+haarness marketplace auto-update acme/code-review     # --off to stay on this version
+haarness marketplace check-updates                    # install what is new now
 haarness marketplace disable acme/code-review         # enable, remove
 haarness marketplace request '{"action":"installed"}' # the machine-readable form the SDK uses
 ```
@@ -66,6 +68,56 @@ receipt cannot point an update or removal anywhere else. Update and remove refus
 files no longer match the digest ("Resource was modified locally; preserve your edits…"), and an
 install refuses to overwrite a resource of the same name that it did not install.
 
+**Automatic updates.** A receipt's `autoUpdate` says whether the install follows new versions. An
+install of the latest version gets `true`; one that names its version (`--version`, or the version
+field of a request) gets `false`, and so does `install --no-auto-update`. An update keeps the value it
+finds unless the request sets `autoUpdate`. A receipt without the field, which every install made
+before this setting has, reads as `false`, so nothing changes on its own on a machine that upgrades.
+`auto-update` (the `auto_update` request: `id`, `scope`, `enabled`) rewrites only the receipt.
+
+`check-updates` (the `check_updates` request, optionally with a `scope`) reads each following
+resource's detail (`…/resources/{id}`). When its `activeVersion` is another version, approved and not
+yanked, it installs that exact version number, so a version published meanwhile is never installed
+unseen. It never replaces an install whose files were edited: the receipt gets `"updateHeld":
+"modified"`, which goes away once the update succeeds, the edits are undone or automatic updates are
+turned off. A resource the catalog does not answer for (offline, signed out, removed) is left for the
+next round. The answer is `{checked, updated, held, failed}`, and one `configuration.reload_queued`
+event follows a round that changed anything. In **Installed resources** each row says how it gets new
+versions (`updates automatically`, `pinned to version 3`, or `has local edits, so automatic updates
+wait`) and offers one entry to change it beside **Update**.
+
+**In the background.** A long-running server (`haarness serve`, so the server the TUI and Desktop
+start, and Cloud workspace runtimes; never a one-shot command such as `haarness run`) runs a round
+about two minutes after it starts and then every `HAARNESS_AUTO_UPDATE_INTERVAL_SECS` seconds (1800 by
+default, at least 60; a shorter interval brings the first round forward too). `HAARNESS_AUTO_UPDATE=0`
+turns the rounds off. Several servers run on one computer, one per folder, so a stamp decides which of
+them does a round: `.auto-update-checked` in the data folder for installs for all projects and the Git
+plugin marketplaces below, and the same file in a project's `.haarness/marketplace/` (written only
+where that project has installs that follow new versions) for the project's own. The stamp is read
+and written under an editor lock, and the configuration watcher skips it. A round never delays
+startup, says it could not reach the network at info level, and leaves running turns alone: what it
+installs reaches the runtime with the next idle configuration reload.
+
+**Git plugin marketplaces.** `marketplaces.json` stays a plain `name → path` map, which older
+versions read. Beside it, `<data>/plugins/marketplace-sources.json` records where each Git clone came
+from: `name → {source, autoUpdate, commit, updatedAt}`. Registering a Git marketplace writes its entry
+with `autoUpdate: true`; a folder gets none, because it is read as it is. `haarness plugin marketplace
+update [name]` (the `update_plugin_marketplace` request, or plugin action `marketplace_update`) asks
+the repository for its default branch's commit with `git ls-remote`, using the same non-interactive git
+as cloning, and does nothing more when the clone and the record already hold it. Otherwise it clones
+into a staging folder beside the old clone, refuses the result if the marketplace now gives itself
+another name, swaps the folders (the old one comes back if the swap fails) and then updates each
+installed plugin of that marketplace whose files would change, keeping it on or off as it was. A
+plugin the marketplace no longer lists stays installed as it is and is reported. A marketplace
+registered before sources were recorded has no entry and is not refreshed in the background; updating
+it by hand works when its clone has an `origin`, and records an entry with `autoUpdate: false`.
+`haarness plugin marketplace auto-update <name> [--off]` (the `plugin_marketplace_auto_update` request
+with `name` and `enabled`, or plugin action `marketplace_auto_update` with `name`, `name:on` or
+`name:off`) changes that setting. `plugin_marketplaces` lists `type` (`git` or `folder`), `source` (a
+credential in it shown as `<redacted>`), `autoUpdate`, `commit` and `updatedAt` for each one. Desktop's
+**Settings → Plugins** lists them under **Marketplaces**, with **Update automatically** and **Update**
+for a Git one.
+
 ## Capabilities
 
 ```sh
@@ -85,9 +137,13 @@ are forwarded to those services. The state lives in `crates/haarness-cli/src/cap
 ## Tests
 
 - `cargo test -p haarness-cli marketplace` covers verification, layouts, collisions, edits kept on
-  update and archives that try to escape.
+  update, archives that try to escape, and automatic updates against a stand-in catalog (new, pinned,
+  edited, yanked and unreachable resources). `cargo test -p haarness-cli plugins` refreshes Git
+  marketplaces from local repositories that get new commits; `auto_update` covers the stamp.
 - `HAARNESS_BIN=target/debug/haarness python3 scripts/test-marketplace.py` runs a fixture catalog
-  through the CLI, API and tools to a live runtime, with real ZIP and npm installs and hot reload.
+  through the CLI, API and tools to a live runtime, with real ZIP and npm installs and hot reload, then
+  publishes new versions and waits for a server with `HAARNESS_AUTO_UPDATE_INTERVAL_SECS=60` to install
+  them and to fetch a Git plugin marketplace's new commit (about a minute).
 - `scripts/test-real-plugins.sh` installs real plugins from Anthropic's public Claude Code marketplace
   (networked, optional).
 - Cloud-side catalog, review and storage checks are in the
