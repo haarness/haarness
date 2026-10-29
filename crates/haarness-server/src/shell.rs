@@ -7,6 +7,7 @@ use haarness_core::{
 };
 use haarness_protocol::ThreadId;
 use serde_json::json;
+use std::fmt::Write as _;
 use std::{
     collections::BTreeMap,
     path::Path,
@@ -483,8 +484,25 @@ pub(crate) async fn run_call(
     };
     match call.run(process, request, cancel).await? {
         CommandRun::Background(output) => Ok(output),
-        CommandRun::Ended { reference, end } => {
-            Ok(ended_output(&spawned, &end, Some(json!(reference))).await)
+        CommandRun::Ended {
+            reference,
+            end,
+            stopped_by,
+        } => {
+            let mut output = ended_output(&spawned, &end, Some(json!(reference))).await;
+            if stopped_by == Some(haarness_protocol::ShellCommandEndedBy::Person) {
+                let how = match (&end.signal, end.exit_code) {
+                    (Some(signal), _) => format!("it ended with {signal}"),
+                    (None, Some(code)) => format!("it exited with code {code}"),
+                    (None, None) => "it ended".to_owned(),
+                };
+                let _ = write!(
+                    output.text,
+                    "\n(The person stopped this command while it ran; {how}.)"
+                );
+                output.metadata["stoppedBy"] = json!("person");
+            }
+            Ok(output)
         }
     }
 }
