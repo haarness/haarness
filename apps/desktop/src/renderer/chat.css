@@ -287,6 +287,11 @@
     opacity: 1;
     pointer-events: auto;
   }
+  /* Copy on a code block, which a touch screen cannot hover to reveal. More
+     specific than the hidden rule below, which comes later. */
+  .markdown pre .code-copy {
+    opacity: 1;
+  }
 }
 .message-tools button {
   color: var(--faint);
