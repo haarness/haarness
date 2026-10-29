@@ -2942,5 +2942,14 @@
   "Your free trial didn't start: that card was already used for a trial.": "Бесплатный пробный период не начался: эта карта уже использовалась для пробного периода.",
   "The attachments come to {size}, over the {limit} limit for media in one message": "Вложения занимают {size} — больше лимита {limit} на медиафайлы в одном сообщении",
   "its images and PDFs would take the message over the 20 MiB limit for media": "его изображения и PDF превысили бы лимит сообщения на медиафайлы в 20 MiB",
-  "{name} is {size}, over the {limit} limit for media in one message": "{name} занимает {size} — больше лимита {limit} на медиафайлы в одном сообщении"
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} занимает {size} — больше лимита {limit} на медиафайлы в одном сообщении",
+  "Marketplaces": "Маркетплейсы",
+  "Update automatically": "Обновлять автоматически",
+  "Update {name} automatically": "Обновлять {name} автоматически",
+  "Fetched {time}": "Получено {time}",
+  "Up to date": "Актуально",
+  "Updated just now": "Только что обновлено",
+  "Plugins updated: {names}": "Обновлены плагины: {names}",
+  "Could not update {names}": "Не удалось обновить {names}",
+  "Waiting for you: {plugins}": "Ждёт вашего решения: {plugins}"
 }

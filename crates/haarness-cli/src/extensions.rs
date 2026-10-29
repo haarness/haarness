@@ -639,6 +639,12 @@ pub async fn marketplace_install(
             );
         }
         let path = scoped_config_path(paths, workspace, local);
+        // The marketplace lock first, as removal takes them: the receipt as
+        // it is now decides, not as it was before the download.
+        let _receipts = crate::desktop::editor_lock(&paths.data, "marketplace")?;
+        let current =
+            crate::marketplace::receipt_now(paths, workspace, receipt_file, old, input)?;
+        let old = current.as_ref();
         let _lock = crate::desktop::editor_lock(&paths.data, "extensions")?;
         let previous = std::fs::read(&path).ok();
         let mut config = scoped_config(paths, workspace, local)?;
@@ -697,8 +703,12 @@ pub async fn marketplace_install(
             enabled,
             ..entry
         });
-        config.enabled = true;
-        let receipt = json!({"id":manifest["resource"]["id"],"kind":"extension","name":name,"publisher":manifest["resource"]["publisher"],"slug":manifest["resource"]["slug"],"scope":if local {"local"} else {"global"},"path":source,"packageRoot":package_root,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":crate::marketplace::tree_digest(&package_root)?,"restartRequired":false});
+        // A first install turns extensions on; an update leaves the switch
+        // as the person set it.
+        if old.is_none() {
+            config.enabled = true;
+        }
+        let receipt = json!({"id":manifest["resource"]["id"],"kind":"extension","name":name,"publisher":manifest["resource"]["publisher"],"slug":manifest["resource"]["slug"],"scope":if local {"local"} else {"global"},"path":source,"packageRoot":package_root,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":crate::marketplace::tree_digest(&package_root)?,"autoUpdate":crate::marketplace::auto_update_choice(input, old),"restartRequired":false});
         save(&path, &config)?;
         if let Err(error) =
             haarness_profiles::write(receipt_file, &serde_json::to_vec_pretty(&receipt)?, true)

@@ -2942,5 +2942,14 @@
   "Your free trial didn't start: that card was already used for a trial.": "無料トライアルは開始されませんでした。このカードはすでにトライアルで使われています。",
   "The attachments come to {size}, over the {limit} limit for media in one message": "添付ファイルは合計 {size} で、1 件のメッセージのメディア上限 {limit} を超えています",
   "its images and PDFs would take the message over the 20 MiB limit for media": "このリソースの画像と PDF を含めると、メッセージがメディア上限の 20 MiB を超えます",
-  "{name} is {size}, over the {limit} limit for media in one message": "{name} は {size} で、1 件のメッセージのメディア上限 {limit} を超えています"
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} は {size} で、1 件のメッセージのメディア上限 {limit} を超えています",
+  "Marketplaces": "マーケットプレイス",
+  "Update automatically": "自動で更新",
+  "Update {name} automatically": "{name} を自動で更新",
+  "Fetched {time}": "取得: {time}",
+  "Up to date": "最新です",
+  "Updated just now": "たった今更新しました",
+  "Plugins updated: {names}": "更新したプラグイン: {names}",
+  "Could not update {names}": "{names} を更新できませんでした",
+  "Waiting for you: {plugins}": "確認待ち: {plugins}"
 }

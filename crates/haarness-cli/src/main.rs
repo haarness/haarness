@@ -1,5 +1,6 @@
 mod account;
 mod acp;
+mod auto_update;
 mod browser;
 mod browser_settings;
 mod capability_state;
@@ -1133,12 +1134,18 @@ enum WorkspaceCommand {
 #[derive(Subcommand)]
 enum PluginCommand {
     /// Register a marketplace: a git URL, owner/repo, or local directory
-    /// holding .claude-plugin/marketplace.json.
+    /// holding .claude-plugin/marketplace.json. `marketplace update [name]`
+    /// fetches registered Git marketplaces again and updates their installed
+    /// plugins; `marketplace auto-update <name> [--off]` says whether one is
+    /// fetched again in the background.
     Marketplace {
-        /// Git URL, owner/repo, or local folder.
+        /// Git URL, owner/repo, or local folder; or `add`, `update` or `auto-update`.
         source: String,
-        /// Compatibility positional for `plugin marketplace add <source>`.
+        /// The source after `add`, or the marketplace after `update` or `auto-update`.
         compatibility_source: Option<String>,
+        /// With `auto-update`: stop fetching it in the background.
+        #[arg(long)]
+        off: bool,
     },
     /// Install a plugin: name@marketplace, or a local plugin directory/plugin.json.
     Install {
@@ -4271,6 +4278,8 @@ async fn serve_command(
             args.host
         );
     }
+    // No one answers git's questions on a server's terminal.
+    plugins::serve_unattended();
     let (listener, state, hot_reload) =
         application_at(paths, &workspace, trust, yolo, listener, true).await?;
     let address = listener.local_addr()?;
@@ -4306,6 +4315,9 @@ async fn serve_command(
         stopping.cancelled().await;
         mcp.close();
     });
+    // Installs that follow new versions, and Git plugin marketplaces that
+    // follow their repository, kept current in the background.
+    auto_update::spawn(hot_reload.management.clone(), handle.shutdown_signal());
     tokio::spawn(hot_reload.run(handle.shutdown_signal()));
     write_runtime(
         paths,
@@ -7967,7 +7979,8 @@ fn fingerprint_path(path: &Path, depth: usize, scan: &mut SourceScan<'_>) -> Res
 /// Entries the source scan skips: tool caches, and the scratch and backup
 /// files editors write around a save (Vim swap files and its `4913` write
 /// probe, Emacs lock and autosave files, `~` backups, JetBrains safe-write
-/// temporaries, Finder metadata). None of them configures anything.
+/// temporaries, Finder metadata), and the stamp of automatic update rounds.
+/// None of them configures anything.
 fn ignored_source(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
@@ -7975,9 +7988,10 @@ fn ignored_source(path: &Path) -> bool {
     matches!(
         name,
         ".git" | "node_modules" | "target" | "__pycache__" | ".DS_Store" | "4913"
-    ) || [".swp", ".swo", ".swx", "~", "___jb_tmp___", "___jb_old___"]
-        .iter()
-        .any(|suffix| name.ends_with(suffix))
+    ) || name.starts_with(auto_update::STAMP)
+        || [".swp", ".swo", ".swx", "~", "___jb_tmp___", "___jb_old___"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
         || name.starts_with(".#")
         || (name.len() > 1 && name.starts_with('#') && name.ends_with('#'))
 }
@@ -11021,6 +11035,65 @@ fn runtime_config(
     })
 }
 
+/// What `plugin marketplace update` did to one marketplace, in short lines.
+fn marketplace_refresh_lines(refresh: &plugins::MarketplaceRefresh) -> Vec<String> {
+    let name = &refresh.name;
+    let short = |commit: &Option<String>| {
+        commit
+            .as_deref()
+            .map(|commit| commit.chars().take(12).collect::<String>())
+            .unwrap_or_default()
+    };
+    let mut lines = vec![match refresh.status {
+        "unchanged" => format!("{name} is up to date (commit {}).", short(&refresh.commit)),
+        "updated" => format!("{name} updated to commit {}.", short(&refresh.commit)),
+        "folder" => format!("{name} is a folder on this computer, which Haarness reads as it is."),
+        _ => format!(
+            "Could not update {name}: {}",
+            refresh.error.as_deref().unwrap_or("unknown error")
+        ),
+    }];
+    if !refresh.plugins.is_empty() {
+        lines.push(format!(
+            "  Updated plugins: {}. A running Haarness server will reload them when active work is idle.",
+            refresh.plugins.join(", ")
+        ));
+    } else if refresh.status == "updated"
+        && refresh.held.is_empty()
+        && refresh.failed.is_empty()
+        && refresh.removed.is_empty()
+    {
+        lines.push("  No installed plugin changed.".into());
+    }
+    for plugin in &refresh.unlisted {
+        lines.push(format!(
+            "  {name} no longer lists {plugin}; it stays installed as it is."
+        ));
+    }
+    for held in &refresh.held {
+        lines.push(if held.reason == "has local edits" {
+            format!("  {} has local edits, so it was not updated.", held.plugin)
+        } else {
+            format!(
+                "  {} was not updated: it {}. `haarness plugin update {}` installs it.",
+                held.plugin, held.reason, held.plugin
+            )
+        });
+    }
+    for plugin in &refresh.removed {
+        lines.push(format!(
+            "  {plugin} was removed meanwhile, so it was left alone."
+        ));
+    }
+    for failure in &refresh.failed {
+        lines.push(format!(
+            "  Could not update {}: {}",
+            failure.plugin, failure.error
+        ));
+    }
+    lines
+}
+
 fn plugin_command(
     paths: &Paths,
     workspace: &Path,
@@ -11031,7 +11104,52 @@ fn plugin_command(
         PluginCommand::Marketplace {
             source,
             compatibility_source,
+            off,
         } => {
+            match (source.as_str(), compatibility_source.as_deref()) {
+                ("update", name) => {
+                    let refreshed = match name {
+                        Some(name) => vec![plugins::marketplace_update(&paths.data, name)?],
+                        None => plugins::marketplace_update_all(&paths.data, false),
+                    };
+                    if refreshed.is_empty() {
+                        println!(
+                            "No marketplaces registered (haarness plugin marketplace <source>)."
+                        );
+                    }
+                    let mut failed = false;
+                    for refresh in &refreshed {
+                        for line in marketplace_refresh_lines(refresh) {
+                            println!("{line}");
+                        }
+                        failed |= refresh.error.is_some() || !refresh.failed.is_empty();
+                    }
+                    if failed {
+                        anyhow::bail!("Some marketplaces or plugins were not updated");
+                    }
+                    return Ok(());
+                }
+                ("auto-update", Some(name)) => {
+                    plugins::marketplace_auto_update(&paths.data, name, !off)?;
+                    if *off {
+                        println!(
+                            "{name} stays as it is until you run `haarness plugin marketplace update {name}`."
+                        );
+                    } else {
+                        println!(
+                            "{name} now follows its repository: Haarness fetches new commits in the background."
+                        );
+                    }
+                    return Ok(());
+                }
+                ("auto-update", None) => {
+                    anyhow::bail!("plugin marketplace auto-update requires a marketplace name")
+                }
+                _ if *off => {
+                    anyhow::bail!("--off goes with `plugin marketplace auto-update <name>`")
+                }
+                _ => {}
+            }
             let source = match (source.as_str(), compatibility_source.as_deref()) {
                 ("add", Some(source)) => source,
                 ("add", None) => anyhow::bail!("plugin marketplace add requires a source"),
@@ -11044,6 +11162,14 @@ fn plugin_command(
             println!(
                 "Marketplace '{name}' registered. Install with: haarness plugin install <plugin>@{name}"
             );
+            if plugins::marketplace_sources(&paths.data)
+                .get(&name)
+                .is_some_and(|source| source.auto_update)
+            {
+                println!(
+                    "It updates automatically; `haarness plugin marketplace auto-update {name} --off` stops that."
+                );
+            }
         }
         PluginCommand::Install { spec } => {
             let plugin = plugins::install(&paths.data, spec)?;
@@ -11060,13 +11186,26 @@ fn plugin_command(
             );
         }
         PluginCommand::List => {
-            let marketplaces = plugins::marketplaces(&paths.data);
+            let marketplaces = plugins::marketplace_catalog(&paths.data);
+            let marketplaces = marketplaces.as_array().cloned().unwrap_or_default();
             if marketplaces.is_empty() {
                 println!("No marketplaces registered (haarness plugin marketplace <source>).");
             } else {
                 println!("Marketplaces:");
-                for (name, path) in marketplaces {
-                    println!("  {name}  {}", path.display());
+                for marketplace in marketplaces {
+                    println!(
+                        "  {}  {}{}",
+                        marketplace["name"].as_str().unwrap_or_default(),
+                        marketplace["source"]
+                            .as_str()
+                            .or_else(|| marketplace["path"].as_str())
+                            .unwrap_or_default(),
+                        if marketplace["autoUpdate"] == true {
+                            "  (updates automatically)"
+                        } else {
+                            ""
+                        }
+                    );
                 }
             }
             let installed =
@@ -11075,9 +11214,19 @@ fn plugin_command(
                 println!("No plugins installed.");
             } else {
                 println!("Plugins:");
+                let records = plugins::installed(&paths.data);
                 for plugin in installed {
+                    let held = records
+                        .get(&plugin.name)
+                        .filter(|record| {
+                            plugin.source == "haarness"
+                                && record.path.to_string_lossy() == plugin.path
+                        })
+                        .and_then(|record| record.held.as_deref())
+                        .map(|reason| format!("  (update waits: {reason})"))
+                        .unwrap_or_default();
                     println!(
-                        "  {}  {}  {}  {}",
+                        "  {}  {}  {}  {}{held}",
                         if plugin.enabled { "●" } else { "○" },
                         plugin.name,
                         plugin.source,
@@ -17197,6 +17346,8 @@ request_timeout = 0
             "haarness.json___jb_old___",
             ".DS_Store",
             "node_modules",
+            // A round of automatic updates reloads nothing by itself.
+            "marketplace/.auto-update-checked",
         ] {
             assert!(super::ignored_source(&folder.join(name)), "{name}");
         }
@@ -17206,6 +17357,7 @@ request_timeout = 0
             "notes~draft.md",
             "#1 ideas.md",
             "swp.md",
+            "marketplace/0193c1de-0000-7000-8000-000000000000.json",
         ] {
             assert!(!super::ignored_source(&folder.join(name)), "{name}");
         }

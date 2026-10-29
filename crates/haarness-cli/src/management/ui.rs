@@ -708,8 +708,10 @@ impl ManagementService {
                 title: format!("Install {}", text(resource, "name")),
                 lines,
                 fields,
+                // The version shown is the one installed. Picked from the
+                // listing (the latest), it follows new versions afterwards.
                 submit: Some(
-                    json!({"action":"install","id":input["id"],"version":manifest["version"]["number"]}),
+                    json!({"action":"install","id":input["id"],"version":manifest["version"]["number"],"autoUpdate":input["version"].is_null()}),
                 ),
                 ..View::default()
             });
@@ -717,7 +719,7 @@ impl ManagementService {
         let mut notice = None;
         if matches!(
             action,
-            "install" | "update" | "enable" | "disable" | "remove"
+            "install" | "update" | "enable" | "disable" | "remove" | "auto_update"
         ) {
             let mut request = input.clone();
             if let Some(values) = input["valuesText"].as_str() {
@@ -729,14 +731,26 @@ impl ManagementService {
                 }
             }
             self.marketplace_request(&request).await?;
-            let done = match action {
-                "install" => "Installed",
-                "update" => "Updated",
-                "enable" => "Turned on",
-                "disable" => "Turned off",
-                _ => "Removed",
-            };
-            notice = Some(format!("{done}. Changes apply when active work is idle."));
+            notice = Some(match action {
+                // Only the receipt changes, so nothing waits for idle.
+                "auto_update" if input["enabled"] == true => {
+                    format!("{} now updates automatically.", text(input, "name"))
+                }
+                "auto_update" => format!(
+                    "{} stays on this version until you update it.",
+                    text(input, "name")
+                ),
+                _ => {
+                    let done = match action {
+                        "install" => "Installed",
+                        "update" => "Updated",
+                        "enable" => "Turned on",
+                        "disable" => "Turned off",
+                        _ => "Removed",
+                    };
+                    format!("{done}. Changes apply when active work is idle.")
+                }
+            });
         }
         let mut view=View {title:"Marketplace".into(),fields:vec![field("q","Search marketplace",text(input,"q"),false),choice("kind","Resource type",input["kind"].as_str().filter(|kind| !kind.is_empty()).unwrap_or("all"),&["all","skill","agent","mcp","plugin","extension"])],submit:Some(json!({"action":"search"})),lines:vec!["Public resources are visible to everyone. Private resources belong to your Haarness account and its members.".into()],..View::default()};
         if let Some(notice) = notice {
@@ -751,7 +765,7 @@ impl ManagementService {
         // its new state shows; an install goes back to browsing.
         if matches!(
             action,
-            "installed" | "enable" | "disable" | "update" | "remove"
+            "installed" | "enable" | "disable" | "update" | "remove" | "auto_update"
         ) {
             let installed = self
                 .marketplace_request(&json!({"action":"installed"}))
@@ -763,16 +777,29 @@ impl ManagementService {
             for row in installed.as_array().into_iter().flatten() {
                 let name = text(row, "name");
                 let enabled = row["enabled"] != false;
+                let automatic = crate::marketplace::follows_new_versions(row);
+                let version = &row["version"]["number"];
+                // The version once, and how it changes: on its own, held
+                // back by local edits, or only when asked.
                 let details = format!(
-                    "{} · {} · version {} · {}",
+                    "{} · {} · {} · {}{}",
                     text(row, "kind"),
                     if row["scope"] == "local" {
                         "this project"
                     } else {
                         "all projects"
                     },
-                    row["version"]["number"],
-                    if enabled { "on" } else { "off" }
+                    if automatic {
+                        format!("version {version}")
+                    } else {
+                        format!("pinned to version {version}")
+                    },
+                    if enabled { "on" } else { "off" },
+                    match (automatic, row["updateHeld"].is_string()) {
+                        (true, true) => " · has local edits, so automatic updates wait",
+                        (true, false) => " · updates automatically",
+                        _ => "",
+                    }
                 );
                 let request = |action: &str| json!({"action":action,"id":row["id"],"scope":row["scope"],"name":row["name"]});
                 // Only the toggle that applies: the state is in the description.
@@ -787,6 +814,21 @@ impl ManagementService {
                     "Install the latest version",
                     request("update"),
                 ));
+                let mut follow = request("auto_update");
+                follow["enabled"] = json!(!automatic);
+                view.entries.push(if automatic {
+                    entry(
+                        format!("Stop automatic updates for {name}"),
+                        format!("Stay on version {version}"),
+                        follow,
+                    )
+                } else {
+                    entry(
+                        format!("Update {name} automatically"),
+                        "Install new versions when they are published",
+                        follow,
+                    )
+                });
                 let mut remove = entry(format!("Remove {name}"), "Uninstall it", request("remove"));
                 remove.confirm = Some(format!("Remove {name}?"));
                 view.entries.push(remove);
@@ -2420,5 +2462,98 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
             replace_label("Use a GitHub token"),
             "Replace the GitHub token"
         );
+    }
+
+    /// The installed list says how each resource gets new versions, with one
+    /// entry to change it, and why an automatic update waits.
+    #[tokio::test]
+    async fn installed_resources_say_how_they_get_new_versions() {
+        use std::sync::Arc;
+        let root =
+            std::env::temp_dir().join(format!("haarness-ui-auto-update-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let paths = crate::Paths::new(Some(&root.join("home"))).unwrap();
+        let workspace = root.join("workspace");
+        let skill = workspace.join(".haarness/skills/demo");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\ndescription: Demo\n---\nDemo\n",
+        )
+        .unwrap();
+        let id = uuid::Uuid::now_v7();
+        let receipts = workspace.join(".haarness/marketplace");
+        fs::create_dir_all(&receipts).unwrap();
+        let write = |extra: Value| {
+            let mut receipt = json!({"id":id,"kind":"skill","name":"demo","slug":"demo","scope":"local","path":skill,
+                "version":{"id":"00000000-0000-0000-0000-000000000003","number":3},
+                "installedDigest":crate::marketplace::tree_digest(&skill).unwrap()});
+            receipt
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            fs::write(receipts.join(format!("{id}.json")), receipt.to_string()).unwrap();
+        };
+        write(json!({"autoUpdate":true}));
+        let skills: Arc<dyn haarness_core::SkillRegistry> = Arc::new(
+            haarness_server::FilesystemSkillRegistry::new(vec![(paths.skills.clone(), true)]),
+        );
+        let mcp = Arc::new(haarness_mcp::NativeMcpRegistry::with_auth_dir(
+            paths.data.join("mcp-oauth"),
+        ));
+        let service =
+            crate::management::ManagementService::new(paths, workspace.clone(), true, skills, mcp);
+        let view = async |input: Value| service.ui_request("marketplace-ui", &input).await.unwrap();
+        let entry = |view: &Value, label: &str| {
+            view["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["label"] == label)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {label}: {view:#}"))
+        };
+        let listed = view(json!({"action":"installed"})).await;
+        assert_eq!(
+            entry(&listed, "Disable demo")["description"],
+            "skill · this project · version 3 · on · updates automatically"
+        );
+        assert_eq!(
+            entry(&listed, "Update demo")["description"],
+            "Install the latest version"
+        );
+        let stop = entry(&listed, "Stop automatic updates for demo");
+        assert_eq!(stop["description"], "Stay on version 3");
+        assert!(stop["confirm"].is_null(), "no confirmation for a setting");
+
+        let pinned = view(stop["request"].clone()).await;
+        assert_eq!(
+            pinned["lines"][0],
+            "demo stays on this version until you update it."
+        );
+        assert_eq!(
+            entry(&pinned, "Disable demo")["description"],
+            "skill · this project · pinned to version 3 · on"
+        );
+        let follow = entry(&pinned, "Update demo automatically");
+        assert_eq!(follow["request"]["enabled"], true);
+        let following = view(follow["request"].clone()).await;
+        assert_eq!(following["lines"][0], "demo now updates automatically.");
+
+        write(json!({"autoUpdate":true,"updateHeld":"modified"}));
+        let held = view(json!({"action":"installed"})).await;
+        assert_eq!(
+            entry(&held, "Disable demo")["description"],
+            "skill · this project · version 3 · on · has local edits, so automatic updates wait"
+        );
+        // Turning it off clears the hold: nothing waits any more.
+        view(entry(&held, "Stop automatic updates for demo")["request"].clone()).await;
+        let receipt: Value =
+            serde_json::from_slice(&fs::read(receipts.join(format!("{id}.json"))).unwrap())
+                .unwrap();
+        assert_eq!(receipt["autoUpdate"], false);
+        assert!(receipt["updateHeld"].is_null());
+        fs::remove_dir_all(root).unwrap();
     }
 }
