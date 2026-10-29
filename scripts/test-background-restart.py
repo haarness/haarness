@@ -19,6 +19,11 @@ leaves a process the killed one never started alone.
 
 Before this change none of the chats heard anything: the subagent stayed
 "interrupted" (or "cancelled") in the task list and the model never knew.
+
+- commands: an agent's background shell command is cut off by a crash and by
+  `serve --stop`. Its chat gets an `interrupted` checkpoint, a
+  hidden `<command … state="interrupted">` message and a notice, once; no turn
+  starts by itself, and the next daemon stops what the crash left running.
 """
 import json
 import os
@@ -142,6 +147,27 @@ def reported(thread, child, description):
     assert not any(text.startswith('Echo: <task id="') for text in replies(thread)), replies(thread)
 
 
+def background_command(text):
+    thread = api("/threads", {"provider": "echo", "model": "echo-1"})["id"]
+    started = api(f"/threads/{thread}/turns", {"requestId": str(uuid.uuid4()), "text": text,
+                                                "followsBackground": True})
+    until(lambda: api(f"/turns/{started['id']}")["status"] == "completed", "the command's turn did not finish")
+    results = [item["data"] for item in api(f"/threads/{thread}/items") if item["data"]["type"] == "tool_result"]
+    return thread, results[-1]["metadata"]["command"]["id"]
+
+
+def cut_off(thread, command_id):
+    texts = [text for text in notices(thread) if text.startswith("<command ")]
+    assert len(texts) == 1 and texts[0].startswith(f'<command id="{command_id}" state="interrupted">'), texts
+    visible = [message for message in shown(thread) if message.startswith("Haarness restarted while the command")]
+    assert len(visible) == 1, shown(thread)
+    checkpoints = [item["data"]["state"] for item in api(f"/threads/{thread}/items")
+                   if item["data"]["type"] == "command_state"]
+    assert checkpoints == ["running", "interrupted"], checkpoints
+    time.sleep(1)
+    assert api(f"/threads/{thread}/activity")["activeTurn"] is None, "a turn started by itself after the restart"
+
+
 def running(marker):
     return [line for line in run(["ps", "-axo", "pid=,command="]).splitlines() if marker in line]
 
@@ -203,6 +229,29 @@ try:
     reported(busy, busy_child, "Busy audit")
     assert api(f"/turns/{busy_turn}")["status"] == "interrupted"
     print("PASS a chat the restart stopped gets the same report", flush=True)
+
+    # commands
+    marker = "background-command-" + uuid.uuid4().hex[:8]
+    crashed, crashed_id = background_command(
+        "!tool bash " + json.dumps({"command": f"sleep 600; echo {marker}", "run_in_background": True}))
+    until(lambda: running(marker), "the command did not start")
+    for pid in daemon_pids():
+        os.kill(pid, signal.SIGKILL)
+    until(lambda: not daemon_pids(), "the killed daemon is still listed")
+    connect()
+    until(lambda: not running(marker), "the next daemon left the command running")
+    until(lambda: [text for text in notices(crashed) if text.startswith("<command ")], "the cut-off command was never told")
+    cut_off(crashed, crashed_id)
+    stopped, stopped_id = background_command(
+        "!tool bash " + json.dumps({"command": "sleep 600", "run_in_background": True}))
+    run(args + ["serve", "--stop"], env=env, timeout=60)
+    until(lambda: not daemon_pids(), "the stopped daemon is still listed")
+    connect()
+    until(lambda: [text for text in notices(stopped) if text.startswith("<command ")],
+          "the command a graceful stop cut off was never told")
+    cut_off(stopped, stopped_id)
+    cut_off(crashed, crashed_id)
+    print("PASS a command in the background a restart cut off is told to its chat once, without a turn", flush=True)
 finally:
     if connection:
         subprocess.run(args + ["serve", "--stop"], env=env, capture_output=True, timeout=60)

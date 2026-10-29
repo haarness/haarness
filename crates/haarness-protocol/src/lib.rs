@@ -11,6 +11,7 @@ mod management;
 mod mention;
 mod model_names;
 mod pty;
+mod shell_commands;
 pub mod tokens;
 mod tools;
 mod workflow;
@@ -31,6 +32,7 @@ pub use model_names::{
     model_display_id, model_display_name, provider_display_id, provider_storage_id,
 };
 pub use pty::*;
+pub use shell_commands::*;
 pub use tools::*;
 pub use workflow::*;
 pub use workspace::*;
@@ -357,6 +359,30 @@ pub enum ItemData {
         /// running | background | done | failed | cancelled | interrupted
         state: String,
     },
+    /// Durable checkpoint of a shell command in the background, written when
+    /// it starts there or moves there and when it ends (a command that ends
+    /// in the foreground has its `tool_result` instead). After a restart the
+    /// last one of a command says how it ended, `interrupted` when Haarness
+    /// stopped while it ran.
+    CommandState {
+        /// The `bash` call that started it.
+        call_id: String,
+        command_id: String,
+        state: ShellCommandState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        /// The signal that ended it (`SIGTERM`), when one did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal: Option<String>,
+        /// The end of its output so far, at most 4 KiB, cut on a character.
+        #[serde(default)]
+        tail: String,
+        started_at: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ended_at: Option<DateTime<Utc>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        moved_by: Option<ShellCommandMovedBy>,
+    },
     McpAction {
         server: String,
         action: String,
@@ -664,6 +690,7 @@ pub struct UpdateThreadRequest {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)] // independent per-turn switches
 pub struct StartTurnRequest {
     pub request_id: RequestId,
     pub text: String,
@@ -711,6 +738,16 @@ pub struct StartTurnRequest {
     /// does. Nothing else depends on it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub attended: bool,
+    /// The client shows the chat's background work and follows it up
+    /// (Desktop, the terminal UI, the phone and web apps): an agent's shell
+    /// command in the turn that starts, and in the turns its background
+    /// results start, moves to the background after
+    /// `execution.shell_move_after_ms` instead of holding the reply. Without
+    /// it a command stays in the foreground until it ends or reaches its
+    /// deadline, as before, and one the agent starts in the background stops
+    /// at `execution.shell_timeout_ms` (`background-commands.v1`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub follows_background: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1068,6 +1105,11 @@ pub struct ExecuteCommandRequest {
     /// [`StartTurnRequest::attended`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub attended: bool,
+    /// The client follows background work up (see
+    /// [`StartTurnRequest::follows_background`]) in the turn a prompt
+    /// command starts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub follows_background: bool,
 }
 
 /// Tagged result of the shared command dispatcher. Prompt commands create a
@@ -1350,6 +1392,12 @@ pub struct ThreadActivity {
     pub active_turn: Option<Turn>,
     /// Background results this chat is still owed.
     pub background: u32,
+    /// Shell commands of this chat's tree running in the background. They
+    /// are not in `background`: a server may run for hours, and the chat is
+    /// done while it does. Each delivers its end when it ends, as a turn of
+    /// its own. Servers before `background-commands.v1` leave it out.
+    #[serde(default)]
+    pub background_commands: u32,
     /// The chat's newest turn by creation, whatever its status; null for a
     /// chat without turns. Read after the other two, so a turn that started
     /// and ended since an earlier read shows here. Always sent; servers
@@ -1394,6 +1442,11 @@ pub struct QueueInputRequest {
     /// the queue (see [`StartTurnRequest::attended`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub attended: bool,
+    /// The client follows background work up (see
+    /// [`StartTurnRequest::follows_background`]), kept with a queued message
+    /// until it runs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub follows_background: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1466,6 +1519,13 @@ pub struct ApiError {
         PendingQuestionInfo,
         BackgroundTaskInfo,
         ThreadActivity,
+        ShellCommandState,
+        ShellCommandMovedBy,
+        ShellCommandEndedBy,
+        ShellCommandInfo,
+        ShellCommandOutput,
+        ShellCommandOutputEvent,
+        ShellCommandRef,
         InputDelivery,
         PendingInput,
         InputQueue,

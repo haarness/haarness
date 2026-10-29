@@ -57,6 +57,8 @@ close_fds = "0.3"
 glob = "0.3"
 hex = "0.4"
 http = "1.4"
+# The host names url keeps in punycode, written back for rules that use Unicode.
+idna = "1.1"
 ignore = "0.4"
 libloading = "0.9"
 nix = { version = "0.31", default-features = false }

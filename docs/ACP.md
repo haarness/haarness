@@ -51,8 +51,13 @@ version 1.
   on the editor's session while that prompt runs, titled `<subagent> · <call>`, with
   `_meta.haarness.childSessionId` and `childTitle`.
 - **Tool kinds** map from Haarness tools: `read`/`list` → read, `write`/`edit`/`multiedit`/
-  `apply_patch` → edit, `glob`/`grep` → search, `bash` → execute, `webfetch` → fetch, `todowrite`/
-  `task`/`goal` → think, anything else → other. A todo list is sent as a plan.
+  `apply_patch` → edit, `glob`/`grep` → search, `bash` and `bash_stop` → execute, `bash_output` →
+  read, `webfetch` → fetch, `todowrite`/`task`/`goal` → think, anything else → other. A todo list is
+  sent as a plan.
+- **Commands in the background.** The bridge does not follow background work up, so an agent's
+  foreground command never moves to the background by itself; one the agent starts there with
+  `run_in_background` stops after `execution.shell_timeout_ms` (or the agent's own `timeout`, when it is not 0), and
+  its end reaches the chat as a turn of its own on the server.
 
 The rest of the behaviour (Auto review notes in titles, requests raised between prompts, reconnects)
 is described under [Servers and clients](REFERENCE.md#servers-and-clients), and the design rule under

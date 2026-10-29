@@ -345,6 +345,8 @@ A paste longer than eight lines or 1,000 bytes stays one `[#1 pasted 20 lines]` 
 
 **Ctrl+B** shows or hides the sidebar. Where the terminal is wide enough to dock it beside the conversation, the TUI keeps that choice for its next launch (`sidebar` in `tui-state.toml`); on a narrower one it opens over the conversation until hidden, which is not kept.
 
+**Ctrl+X** (`background` in `/keybinds`) sends the work running in the foreground to the background, as `/background` does: the chat's foreground child agents and the shell commands its agent is waiting on keep running while you and the agent carry on, and the draft stays as it is. A command the agent has waited on for three seconds names the key on its row (`ctrl+x sends to background`); one that runs past `execution.shell_move_after_ms` (a minute) goes there by itself, since the TUI tells the server it follows background work. A command in the background reads `in background · 1m 12s` on its row, then how it ended: `completed`, `exit 2`, `stopped`, `ran out of time` or `cut off by a restart` (Haarness stopped while it ran); a shell step of a batch reads the same under the batch row, and `bash_output` and `bash_stop` rows name the command by its line. A command the chat's record calls running that its server no longer lists (a forked chat's copy) reads `in background` with no timer. The end of a command in the background reaches the agent as a message of its own, which starts a turn. A command whose own `&` processes outlived it says `stopped what it left running` on its row, or `left processes running` when they had left its process group and run on; a command you stopped while the agent waited for it reads `⊘ stopped`. When the command the agent waits on cannot move (the chat already runs as many commands in the background as `execution.shell_background_per_chat` allows), the band says `Nothing could move to the background`, or the server's own reason when it gives one; when subagents moved but every command was held back, it says what moved, then that reason. While such commands run, the sidebar lists them under **background**, the band counts them (`1 command in background`) when no reply runs, beside running child turns too, and `/sessions` reads `running in background` for a chat with nothing else running. Click a command's row while it runs or once it is in the background (a finished foreground command's row still opens its result in place), its sidebar entry, or pick it in `/tasks` (**Ctrl+O**: child agents first, then commands), to read its output full screen. The view follows the end as output comes, each finished line as it was last rewritten and the line still being written as a terminal shows it; PgUp/PgDn, ↑/↓ and `g` scroll back, End or `G` follows again, `s` stops the command (it reads `stopping` until it has exited, and the view reads on until all of its output is in), and Esc or `q` goes back. Esc Esc while the agent replies stops the reply and the commands it waits on but leaves the ones in the background running; with no reply running, it stops the chat's work, commands in the background included, and its first press says what it stops (`Press Esc again to stop 1 command in background`, or `… session work and 1 command in background`). Ctrl+C twice never stops commands in the background: with child agents running it stops them, and with only commands running it quits, the server keeping them running.
+
 Drag with the mouse to copy text: the release copies what is highlighted, through OSC 52 and the system clipboard tool (`pbcopy` on macOS; `wl-copy`, else `xclip -selection clipboard`, else `xsel --clipboard` on Linux, so Ctrl+Shift+V pastes it), which gets the text on its input and is stopped after 10 seconds if it has not finished; the TUI never waits for it. A drag stays in the pane it started in, so a drag down the conversation never picks up the sidebar beside it, a dialog's text never the chat behind it, and the review's patch never its file tree nor, side by side, the other side (a drag that starts on a file's header takes the side it ends on). Gutters, the prompt's bar, the reply marker, a quote's bar and the review's line numbers and +/− signs are drawn but not copied; the same characters written in a message are. A click is a press released on the control it was made on (a chip, a tool row, a list row), for what that control stood for at the press: a permission or a question by its id, a list row by the list on screen and its item. So a card or list that appeared or was replaced under a held press, or a press that began beside a control, acts on nothing. A press that leaves the control and comes back acts on nothing either, when the terminal reports the motion; without motion reports only the press and the release are compared. A press on a control may slip one cell and still click it. The review's code and file-tree rows are text for this: any movement over them selects. Any other movement selects too, so a one-cell drag copies a wide character or a two-letter word.
 
 Use **Alt+M** or **`/messages [search]`** to browse prompts and replies, jump to an earlier message, read/copy its full text, add it to a draft, or fork at that message. **Alt+Up**/**Alt+Down** move the transcript to the previous or next message, **Alt+Shift+Up**/**Alt+Shift+Down** between your prompts, **Alt+Home** to the start and **Alt+End** to your last prompt. See [TUI message browser](TUI-MESSAGES.md#move-between-messages).
@@ -362,11 +364,13 @@ default. Passing `background: true` returns a child ID immediately; pass that
 ID back as `task_id` to continue the same child context. If it is still
 running, the follow-up is queued without another child or completion watcher. The same
 child continues on the server and its terminal result is injected into the
-parent automatically. `/background [child-id]` promotes an already-running
-foreground child without cancelling or restarting it, and `/tasks` opens its
-live transcript. `haarness run --wait-background` drains background subagents
-and workflows for headless callers; without it they remain owned by the
-workspace server. At most four child agents run at a time per delegation depth
+parent automatically. `/background [id]` (**Ctrl+X** in the TUI) promotes an
+already-running foreground child, and the shell commands the agent waits on,
+without cancelling or restarting them; `/tasks` lists them and opens a child's
+live transcript or a command's output. `haarness run --wait-background` drains
+background subagents, workflows and shell commands for headless callers;
+without it they remain owned by the workspace server. At most four child agents
+run at a time per delegation depth
 (`execution.subagent_concurrency`, see
 [execution budgets](PERMISSIONS-AND-EXECUTION.md#configure-execution-budgets)).
 
@@ -374,6 +378,61 @@ Commands the agent runs carry `AGENT=1`, `HAARNESS=1`, `AI_AGENT=haarness` and
 `HAARNESS_SESSION_ID` (the chat they run in), so scripts can tell an agent's
 command from a person's; a person's own `!` commands and terminals get none of
 them. See [Permissions and execution](PERMISSIONS-AND-EXECUTION.md).
+
+### Commands in the background
+
+An agent can keep a shell command running while it works on: `bash` with
+`run_in_background: true` answers at once with the command's id, and when the
+command ends the chat gets a hidden message with its exit code and the last 40
+lines of its output, which starts a turn when the chat is idle (as a background
+subagent's result does). The agent reads a command's output, lists the chat's
+commands or waits for one with `bash_output` (until it ends, prints nothing for
+a while, or prints a line matching a pattern, searching from where it last
+read) and stops one with `bash_stop` (interrupt, terminate, then kill,
+`execution.shell_stop_grace_ms` apart, with every process it started; on
+Windows the first two steps only ask the command's windows to close, which a
+console program does not heed, so it ends with the kill). Its
+instructions say to run servers, watchers and multi-minute builds or test
+suites this way, and never to leave a process running with a trailing `&` or
+`nohup`. Any shell command, yours too, ends with its shell: something it
+started that still holds its output open (`(sleep 1; echo late) & echo
+early`) gets a quarter of a second of quiet, two seconds at most, to finish
+printing, and is then stopped with the command's process group, and the
+result says so. A process that left that group (a session of its own, as
+`ssh -f` makes) cannot be stopped that way: it runs on, its output is no
+longer read, and the result says that instead.
+
+In a chat open in Desktop, the terminal UI or the phone and web apps, an
+agent's foreground command that has no `timeout` of its own moves to the
+background by itself once it has run for `execution.shell_move_after_ms` (a
+minute), and the reply goes on while a slow build runs; you can also send one
+there sooner. A command in the background there is stopped after
+`execution.shell_background_max_ms` (no limit by default) or the `timeout` the
+agent gave. Everywhere else (an editor over ACP, scripts and SDK calls,
+`haarness run`, schedules) a foreground command stays in the foreground until
+it ends or reaches its deadline, as before, and a command the agent starts in
+the background is stopped `execution.shell_timeout_ms` after it started, also
+when the agent gave a `timeout` of 0.
+A subagent's commands never move, and its background commands stop, untold,
+when its turn ends. Your own `!` commands and a workflow's `shell()` always
+run in the foreground.
+
+Stop while the agent replies ends the reply and its foreground commands and
+leaves commands in the background running, so a dev server survives a change
+of course, and so does a click on Stop that lands just after the reply ended;
+an explicit stop of everything while nothing runs (Esc Esc in the terminal UI)
+stops them too, and so does archiving the chat. A command ended by a person or its time limit tells the agent; one the
+agent stopped itself does not. `haarness run --wait-background` and scheduled
+runs wait for their commands and print what the agent says when they end; a
+waiting run that stops waiting (its `--background-timeout-ms`, Ctrl-C) stops
+them. A run waits for the commands started in its chat once its turn began:
+continuing a chat (`--session`, `--continue`) where someone else may start
+commands meanwhile, give it a `--background-timeout-ms`. Without the flag `run` leaves the commands the agent started in the
+background running on the server, until their time limit, and says how many. A command
+running when Haarness stops is stopped with it; after the next start its chat
+gets a hidden note and a notice that it was cut off, and no turn starts by
+itself. Clients follow commands through
+[`/v1/threads/{id}/commands`](API.md#agent-commands-in-the-background).
 
 Every provider request receives one provider-neutral system scaffold with the
 exact provider/model ID, working directory, git-repository status, OS,
@@ -759,7 +818,7 @@ Answering an approval with **Always** (`a`) saves the rule shown on the card, wh
 
 `auto_review` (`[auto_review]` in TOML) sets how Auto's reviewer works: `enabled` (default true), `model` (`provider/model`; default your global `small_model` when it is on the chat's provider, then the chat's model), `environment`, `allow` and `block` (plain-language lines), and `timeout` (seconds, default 60). A project file may only add `block` entries and lower `timeout`; its `small_model` never picks the reviewer. See [Auto's reviewer](AUTO-APPROVALS.md#autos-reviewer).
 
-The JSON/JSONC form (`haarness.json`, including legacy filename aliases) accepts the same sections plus the ecosystem keys `instructions` (extra instruction files: globs, `~/` paths, absolute paths and `http(s)://` URLs), `skills` (`paths` and remote `urls` indexes), and `compatibility.claude_code` (opt-in `instructions`, `agents`, `commands`, `skills` discovery of Claude Code files, all off by default). Markdown agents accept `hidden`, `color`, `steps`, `disable`, `temperature`, `top_p` and `variant`; commands accept `subtask: true` as `context: fork`; `@path` references in command templates attach file snapshots, directory listings or a subagent delegation hint. See [docs/CONFIGURATION-SCOPES.md](CONFIGURATION-SCOPES.md).
+The JSON/JSONC form (`haarness.json`, including legacy filename aliases) accepts the same sections plus the ecosystem keys `instructions` (extra instruction files: globs, `~/` paths, absolute paths and `http(s)://` URLs), `skills` (`paths` and remote `urls` indexes), and `compatibility.claude_code` (opt-in `instructions`, `agents`, `commands`, `skills` discovery of Claude Code files, all off by default; a project's setting covers only the project's own files, and your `~/.claude` files follow your global setting). Markdown agents accept `hidden`, `color`, `steps`, `disable`, `temperature`, `top_p` and `variant`; commands accept `subtask: true` as `context: fork`; `@path` references in command templates attach file snapshots, directory listings or a subagent delegation hint. See [docs/CONFIGURATION-SCOPES.md](CONFIGURATION-SCOPES.md).
 
 The built-in LSP catalog covers Rust, TypeScript/JavaScript, Python, Go, C/C++, shell, YAML, and TOML. The built-in formatter catalog covers rustfmt, gofmt, Prettier, Ruff, clang-format, shfmt, and Zig. Haarness discovers these commands on `PATH`; it does not silently install or update third-party executables. `/status` shows configured LSP processes as idle, running, missing, stopped, or error, and formatters as available or missing. Project `lsp` and `formatter` sections replace the global section unless project configuration is turned off, so a project can disable either feature completely without affecting other workspaces.
 

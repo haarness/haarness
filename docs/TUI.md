@@ -44,7 +44,9 @@ shows comes from that server over REST and SSE, and quitting it never stops the 
   `/hooks`, `/schedules`, `/marketplace` and others share their logic with Desktop.
 - Feature modules: `connect.rs` (`/connect`), `chrome.rs` (`/chrome`), `pty_view.rs` (`/terminal`
   over server-owned PTYs), `diffview.rs` (`/diff`), `messages.rs` (`/messages`), `side_chat.rs`
-  (`/btw`), `input_queue.rs` (steer and queue), `statusline.rs`, `theme.rs`, `keybindings.rs`.
+  (`/btw`), `input_queue.rs` (steer and queue), `background.rs` (the agents' shell commands in the
+  background, `/background` and a command's output view), `statusline.rs`, `theme.rs`,
+  `keybindings.rs`.
 - `locale.rs`: the 17 interface catalogs in `locales/`, shared with Desktop. Visible text is looked up
   by its English text, so every new string needs a key in each catalog (see
   [Supported languages](../locales/README.md)).

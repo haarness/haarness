@@ -2,7 +2,7 @@ import { BrowserPanel } from "./BrowserPanel";
 import { AccountMenu } from "./AccountMenu";
 import { UpdateRow } from "./Updates";
 import { Notifications } from "./Notifications";
-import { t } from "./i18n";
+import { formatNumber, t } from "./i18n";
 import { ServerConnect, openServerConnection } from "./ServerConnect";
 import { RemoteProjectPicker } from "./RemoteProjectPicker";
 import { ConnectProvider } from "./ConnectProvider";
@@ -34,6 +34,8 @@ import { ProjectHome } from "./ProjectHome";
 import { accountKnown, computers, lastSeen, loadComputers, platformName, signedIn } from "./computers";
 import { ChatLoading } from "./ChatLoading";
 import { ConversationContext } from "./ConversationContext";
+import { BackgroundPanel } from "./BackgroundPanel";
+import { backgroundWork } from "./background-work";
 import { toastAnchor } from "./toast-anchors";
 import { ComputerChats, ProjectRows, ProjectSection, SessionList } from "./ProjectGroup";
 import { SessionActions, renameSession } from "./SessionActions";
@@ -55,7 +57,7 @@ import { localServer } from "../servers";
 import { exportLogs } from "./Diagnostics";
 import { SideChatPanel, closeFrontSideThread, openSideChat, sideChatEmptied, sideChatFocused, sideChatRequested } from "./SideChat";
 import { CHAT_MIN, DOCK_MIN, SIDE_MAX, SIDE_MIN, SIDE_WIDTH, sidePlace } from "./side-chat";
-type Dock = "files" | "diff" | "context" | "browser";
+type Dock = "files" | "diff" | "context" | "browser" | "running";
 
 /** Workbench panels and their launcher copy. */
 const panelChoices: {
@@ -101,12 +103,14 @@ const dockNames: Record<Dock, string> = {
   files: "Files",
   diff: "Review",
   context: "Context",
+  running: "Still running",
 };
 const dockIcons: Record<Dock, IconName> = {
   browser: "web",
   files: "folder",
   diff: "diff",
   context: "chart",
+  running: "running",
 };
 const Explorer = lazy(() =>
   import("./Explorer").then((module) => ({ default: module.Explorer })),
@@ -217,6 +221,8 @@ export function App() {
   const [filesVisited, setFilesVisited] = createSignal(false);
   const [dock, setDock] = createSignal<Dock | "tools" | null>(null);
   const [dockTabs, setDockTabs] = createSignal<Dock[]>([]);
+  /** The open chat's work in the background: the title bar's count and Still running. */
+  const work = backgroundWork();
   const [sidebarVisible, setSidebarVisible] = createSignal(true);
   const [sidebarScrolling, setSidebarScrolling] = createSignal(false);
   let sidebarScrollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -481,7 +487,7 @@ export function App() {
       if (typeof raw.serverSwitcher === "boolean") setSwitcherBefore(raw.serverSwitcher);
       if (typeof raw.sideChatFront === "boolean") setSideFront(raw.sideChatFront);
       // Restored as it was: neither comes in front of the other.
-      if (["files", "diff", "context", "browser"].includes(String(raw.dock)))
+      if (["files", "diff", "context", "browser", "running"].includes(String(raw.dock)))
         openDock(raw.dock as Dock, false);
       else if (raw.dock === "tools") setDock("tools");
     }
@@ -1220,6 +1226,23 @@ export function App() {
         </div>
         <div class="titlebar-actions">
           <Show when={state.connection}>
+            {/* The open chat's work in the background, while there is some;
+                it opens Still running. */}
+            <Show when={work.running()}>
+              <button
+                type="button"
+                class="background-pill"
+                classList={{ active: dockOnScreen() && dock() === "running" }}
+                aria-pressed={dockOnScreen() && dock() === "running"}
+                title={t("Still running")}
+                onClick={() =>
+                  dockOnScreen() && dock() === "running" ? setDock(null) : openDock("running")
+                }
+              >
+                <Icon name="running" size="sm" />
+                <span>{t("{count} in background", { count: formatNumber(work.running()) })}</span>
+              </button>
+            </Show>
             {/* This whole computer, reachable from a phone or any browser
                 signed in to the same account; /remote-control shares one
                 chat. Absent while the window shows another computer. */}
@@ -1771,6 +1794,9 @@ export function App() {
               </Show>
               <Show when={state.connection && dock() === "context"}>
                 <ConversationContext />
+              </Show>
+              <Show when={state.connection && dock() === "running"}>
+                <BackgroundPanel work={work} />
               </Show>
               <Show when={browserHere()}>
                 <BrowserPanel visible={dockOnScreen() && dock() === "browser"} onOpen={(agent) => (agent ? revealBrowser() : openDock("browser"))} onReveal={revealBrowser} pickRequest={pickRequest()} />

@@ -141,6 +141,14 @@ do, so Gemini 4 and later offer low, medium and high, and a `none` or `minimal`
 effort is sent as `low`. The Gemini API still accepts a `thinkingBudget` for
 Argon, but through Vertex any budget is refused, so Haarness never sends one.
 
+A `thinkingBudget` counts against the request's output limit. When a request
+sets one (`maxOutputTokens`), the budget is at most half of it, so a short
+answer under a small limit (Auto's review verdict asks for 2048 tokens) still
+has room after the model thinks. Thinking that was asked for stays on unless
+half the limit is less than the model thinks at all: then 2.5 Pro, which cannot
+turn thinking off, thinks its minimum of 128 tokens, and a model that can turn
+it off does so (2.5 Flash-Lite thinks at least 512 tokens when it thinks).
+
 Argon is in the catalog with a 1,048,576-token window and the 32,768 output
 tokens the Models API lists. Probes found tools in `AUTO` and forced `ANY`
 modes (including the array bounds that break forced calling on older models),

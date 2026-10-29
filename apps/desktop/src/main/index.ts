@@ -695,7 +695,7 @@ async function manageWorktree(owner: string, method: string, args: unknown[]) {
 }
 
 const apis = new Set(
-  `manageResource info analyticsStats analyticsInsights providers refreshProviders agents commands lspStatus formatterStatus toolCatalog updateLazyTools updateTool projects workspacesList createWorkspace workspaceRefs resolveWorkspaceRef getWorkspace removeWorkspace openWorkspace resetWorkspace cleanupWorkspace listPtys createPty getPty updatePty deletePty workflows workflowSource startWorkflow listWorkflowRuns getWorkflowRun deleteWorkflowRun waitWorkflowRun cancelWorkflowRun pauseWorkflowRun resumeWorkflowRun skills loadSkill plugins pluginAction mcpServers configureMcp reconnectMcp disconnectMcp mcpTools callMcpTool mcpResources mcpResourceTemplates readMcpResource mcpPrompts getMcpPrompt listThreads createThread getThread updateThread exportSessionArchive forkThread listItems listTodos activeTurn interruptThreadTree listBackgroundTasks promoteBackgroundTasks pendingQuestion startTurn executeCommand queueInput inputQueue changeInputQueue btw compact getGoal setGoal getApprovalMode setApprovalMode getLoop setLoop threadUsage revertThread unrevertThread lastTurnDiff lastTurnReview vcsDiff searchFiles importSessionArchive activeTurns getTurn interruptTurn waitTurn listPermissions replyPermission listQuestions replyQuestion shutdownServer health openapi listProfiles uploadProfile getProfile deleteProfile downloadProfile listBrowserHosts`.split(
+  `manageResource info analyticsStats analyticsInsights providers refreshProviders agents commands lspStatus formatterStatus toolCatalog updateLazyTools updateTool projects workspacesList createWorkspace workspaceRefs resolveWorkspaceRef getWorkspace removeWorkspace openWorkspace resetWorkspace cleanupWorkspace listPtys createPty getPty updatePty deletePty workflows workflowSource startWorkflow listWorkflowRuns getWorkflowRun deleteWorkflowRun waitWorkflowRun cancelWorkflowRun pauseWorkflowRun resumeWorkflowRun skills loadSkill plugins pluginAction mcpServers configureMcp reconnectMcp disconnectMcp mcpTools callMcpTool mcpResources mcpResourceTemplates readMcpResource mcpPrompts getMcpPrompt listThreads createThread getThread updateThread exportSessionArchive forkThread listItems listTodos activeTurn interruptThreadTree listBackgroundTasks promoteBackgroundTasks pendingQuestion startTurn executeCommand listShellCommands backgroundShellCommands getShellCommand readShellCommandOutput stopShellCommand queueInput inputQueue changeInputQueue btw compact getGoal setGoal getApprovalMode setApprovalMode getLoop setLoop threadUsage revertThread unrevertThread lastTurnDiff lastTurnReview vcsDiff searchFiles importSessionArchive activeTurns activeShellCommands getTurn interruptTurn waitTurn listPermissions replyPermission listQuestions replyQuestion shutdownServer health openapi listProfiles uploadProfile getProfile deleteProfile downloadProfile listBrowserHosts`.split(
     " ",
   ),
 );
@@ -2096,6 +2096,15 @@ function menu() {
             label: t("Stop response"),
             accelerator: "CmdOrCtrl+.",
             click: (_item, win) => action("stop-response", win),
+          },
+          {
+            // The window's chat lets its running commands and subagents go on
+            // in the background; no key until the person gives it one.
+            label: t("Send to background"),
+            accelerator: data().preferences.shortcuts.background
+              ? data().preferences.shortcuts.background.replace(/\bMod\b/g, "CmdOrCtrl")
+              : undefined,
+            click: (_item, win) => action("send-to-background", win),
           },
           {
             label: t("Open project") + "…",

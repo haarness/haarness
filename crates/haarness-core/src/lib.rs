@@ -5,6 +5,7 @@ mod approval_mode;
 pub mod attachments;
 pub mod auto_review;
 mod background;
+mod background_commands;
 pub mod chat_folders;
 mod config;
 pub mod definitions;
@@ -39,6 +40,11 @@ pub use agents::{
 };
 pub use auto_review::AutoReviewSettings;
 pub use background::{BackgroundHandoff, BackgroundProbe};
+pub use background_commands::{
+    BACKGROUND_FILE_PREFIX, CommandOutput, CommandProcess, CommandRequest, CommandRun,
+    OUTPUT_SAVED_LIMIT, OUTPUT_TAIL_KEPT, OutputPage, ProcessControl, ProcessEnd, ShellCall,
+    StopSignal, spoken_duration, whole_end, whole_start,
+};
 pub use config::{CompactionSettings, CustomAgent, OutputStyle, RuntimeConfig};
 pub use events::{
     EncodedEvent, EventBus, EventSubscription, PENDING_EVENTS_LIMIT, PendingEvents, join_delta,
@@ -59,6 +65,7 @@ pub use prompts::{PromptFile, PromptMode, PromptName, Prompts};
 pub use runtime::{
     AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, PROMPT_BLOCKED,
     ResourceMentionPolicy, StaticProviderRegistry, prompt_blocked, refusal_reason, shorten_title,
+    webfetch_redirect_verdict,
 };
 pub use stream_limits::{
     DEFAULT_RESPONSE_TOTAL, DEFAULT_STREAM_IDLE, StreamLimits, response_timeout, stream_stall,

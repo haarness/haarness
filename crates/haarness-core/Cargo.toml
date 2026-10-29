@@ -13,6 +13,7 @@ crc32fast = "1.5"
 dashmap.workspace = true
 futures.workspace = true
 hex.workspace = true
+idna.workspace = true
 image.workspace = true
 haarness-protocol = { path = "../haarness-protocol" }
 jsonschema.workspace = true

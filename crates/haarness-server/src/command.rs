@@ -263,6 +263,7 @@ async fn execute_goal_manager(
                 // builtin as an unknown configured command.
                 command: None,
                 attended: request.attended,
+                follows_background: request.follows_background,
             },
         )
         .await?;
@@ -346,6 +347,7 @@ async fn execute_prompt_command(
                 tools: request.tools,
                 command: Some(resolved.info.name),
                 attended: request.attended,
+                follows_background: request.follows_background,
             },
         )
         .await?;

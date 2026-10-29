@@ -995,6 +995,10 @@ impl PermissionEngine {
     /// or an inherited boundary's whole-tool deny.
     #[must_use]
     pub fn disables_tool(&self, tool: &str) -> bool {
+        // Following and stopping commands goes with running them.
+        if matches!(tool, "bash_output" | "bash_stop") && self.disables_tool("bash") {
+            return true;
+        }
         self.hides_tool(tool) || self.inherited_tool_denial(tool).is_some()
     }
 }

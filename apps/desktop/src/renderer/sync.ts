@@ -1,6 +1,7 @@
 import { taskKey, type TaskProgress } from "./agent-tasks";
+import { laterCommand } from "./shell-commands";
 import type * as T from "@haarness/sdk";
-import type { SetStoreFunction } from "solid-js/store";
+import { reconcile, type SetStoreFunction } from "solid-js/store";
 /** Auto's reviewer is deciding a request of this turn, since `at` (local time). */
 export interface TurnReview {
   callId?: string;
@@ -10,6 +11,12 @@ export interface Live {
   tasks?: Record<string, TaskProgress>;
   /** By turn: the review running now, from `turn.status`. */
   reviews?: Record<string, TurnReview>;
+  /** The agents' shell commands the server reports, by id: those running in
+   * any chat, and the open chat's that ended lately (`background-commands.v1`). */
+  shellCommands?: Record<string, T.ShellCommandInfo>;
+  /** How much each command has printed, from `command.output`: an open row
+   * reads on when it grows. */
+  commandOutput?: Record<string, number>;
   threads: T.Thread[];
   turns: T.Turn[];
   permissions: T.PendingPermissionInfo[];
@@ -78,6 +85,19 @@ export function reduceEvent<S extends Live>(
       ...tasks,
       [key]: payload as unknown as TaskProgress,
     }));
+  }
+  if (event.type === "command.updated" && typeof payload.id === "string") {
+    const incoming = payload as unknown as T.ShellCommandInfo;
+    const current = state.shellCommands?.[incoming.id];
+    const next = laterCommand(current, incoming);
+    if (!state.shellCommands) update("shellCommands", {});
+    // Replaced whole: a field the server left out (a move time once it
+    // moved) must not linger from the report before.
+    if (next !== current) update("shellCommands", incoming.id, reconcile(next));
+  }
+  if (event.type === "command.output" && typeof payload.id === "string" && typeof payload.size === "number") {
+    if (!state.commandOutput) update("commandOutput", {});
+    update("commandOutput", payload.id, payload.size);
   }
   if (["thread.created", "thread.updated"].includes(event.type) && payload.id) {
     const thread = payload as T.Thread;

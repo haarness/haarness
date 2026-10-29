@@ -7,7 +7,9 @@ import json, os, pathlib, subprocess, tempfile, urllib.request, urllib.error, sy
 import e2e_scratch
 from e2e_env import clean_env
 repo=pathlib.Path(__file__).resolve().parents[1]
-root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-claude-compat-'))
+# Resolved: Haarness names a project by its real path, and macOS reaches the
+# temporary folder through a link (/var is /private/var).
+root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-claude-compat-')).resolve()
 workspace=root/'workspace';workspace.mkdir();state=root/'state';home=root/'home';home.mkdir()
 env=clean_env()
 env.update(HAARNESS_DATA_DIR=str(state),HAARNESS_HOME=str(home),HOME=str(home),HAARNESS_TEST_PROVIDER='1',HAARNESS_DEFAULT_PROVIDER='echo',HAARNESS_DEFAULT_MODEL='echo-1')
