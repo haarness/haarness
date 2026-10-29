@@ -247,9 +247,14 @@ async fn pump(mut pump: Pump) {
     let mut leftovers = false;
     let mut failure = None;
     while out_open || err_open || status.is_none() {
+        // Quiet counts from the command's end or its latest output after
+        // it, whichever is later: output it printed long before it ended
+        // says nothing about what it left.
         let wake = match (ended_at, stopped_leftovers) {
             (_, Some(stopped)) => Some(stopped + AFTER_LEFTOVERS),
-            (Some(ended), None) => Some((heard_at + LEFTOVER_QUIET).min(ended + LEFTOVER_MOST)),
+            (Some(ended), None) => {
+                Some((heard_at.max(ended) + LEFTOVER_QUIET).min(ended + LEFTOVER_MOST))
+            }
             (None, None) => None,
         };
         let sleep = async {
@@ -258,7 +263,10 @@ async fn pump(mut pump: Pump) {
                 None => std::future::pending().await,
             }
         };
+        // Reads first: a pipe that closed with the command is seen closed
+        // before the quiet time can be taken for something holding it.
         let (bytes, from_stdout) = tokio::select! {
+            biased;
             read = pump.stdout.read(&mut out), if out_open => match read {
                 Ok(0) => { out_open = false; continue; }
                 Ok(n) => (&out[..n], true),
@@ -293,6 +301,15 @@ async fn pump(mut pump: Pump) {
             }
         };
         heard_at = tokio::time::Instant::now();
+        // Something that keeps printing after the command ended (`yes &`)
+        // never lets the quiet time come: stop it at the most.
+        if stopped_leftovers.is_none()
+            && ended_at.is_some_and(|ended| heard_at >= ended + LEFTOVER_MOST)
+        {
+            leftovers = true;
+            pump.control.signal(StopSignal::Kill);
+            stopped_leftovers = Some(heard_at);
+        }
         {
             let mut counts = pump.stats.lock();
             counts.lines += newlines(bytes);
@@ -870,6 +887,54 @@ mod tests {
             shown.chars().take(4).collect::<String>()
         );
         assert!(!output.text.contains('\u{fffd}'));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_process_that_keeps_printing_after_the_command_ended_is_stopped() {
+        let root = fixture();
+        let output = tokio::time::timeout(
+            Duration::from_secs(15),
+            run(
+                "yes printing & echo started",
+                &root,
+                0,
+                &CancellationToken::new(),
+                &root,
+                &BTreeMap::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("the call returns")
+        .unwrap();
+        assert_eq!(output.metadata["leftovers"], true);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_quiet_command_is_never_taken_for_one_that_left_processes_running() {
+        let root = fixture();
+        for attempt in 0..30 {
+            for command in ["sleep 0.4", "sleep 0.4; echo done >&2"] {
+                let output = run(
+                    command,
+                    &root,
+                    0,
+                    &CancellationToken::new(),
+                    &root,
+                    &BTreeMap::new(),
+                    None,
+                )
+                .await
+                .unwrap();
+                assert!(
+                    output.metadata.get("leftovers").is_none(),
+                    "{command} (attempt {attempt}): {}",
+                    output.text
+                );
+            }
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
