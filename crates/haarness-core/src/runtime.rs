@@ -15199,9 +15199,11 @@ fn resource_server_pattern(server: &str) -> String {
 
 /// The address a fetch of `target` reads, written the way rules name it:
 /// scheme and host in lower case, without a user name or password, a
-/// trailing dot on the host, the default port or `.`/`..` path segments.
-/// `None` when `target` is already written that way or is not an http(s)
-/// URL.
+/// trailing dot on the host, the default port, `.`/`..` path segments or a
+/// `#` fragment (which never reaches the server), and with the letters,
+/// digits and `-._~` of its path written plainly where `%` codes spell them
+/// (a server reads `/%61dmin` as `/admin`). `None` when `target` is already
+/// written that way or is not an http(s) URL.
 fn webfetch_pattern(target: &str) -> Option<String> {
     let mut url = url::Url::parse(target.trim()).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
@@ -15209,6 +15211,7 @@ fn webfetch_pattern(target: &str) -> Option<String> {
     }
     url.set_username("").ok()?;
     url.set_password(None).ok()?;
+    url.set_fragment(None);
     if let Some(host) = url
         .host_str()
         .and_then(|host| host.strip_suffix('.'))
@@ -15216,17 +15219,45 @@ fn webfetch_pattern(target: &str) -> Option<String> {
     {
         url.set_host(Some(&host)).ok()?;
     }
+    let path = plain_unreserved(url.path());
+    if path != url.path() {
+        url.set_path(&path);
+    }
     let mut pattern = url.to_string();
     // The parser writes `https://example.com` as `https://example.com/`; the
     // same page either way, so a rule for the form written still settles it.
-    if url.path() == "/"
-        && url.query().is_none()
-        && url.fragment().is_none()
-        && !target.trim().ends_with('/')
-    {
+    let written = target.trim();
+    let written = written
+        .split_once('#')
+        .map_or(written, |(address, _)| address);
+    if url.path() == "/" && url.query().is_none() && !written.ends_with('/') {
         pattern.pop();
     }
     (pattern != target).then_some(pattern)
+}
+
+/// `path` with each `%` code for a letter, a digit, `-`, `.`, `_` or `~`
+/// replaced by the character: the same address either way (RFC 3986).
+fn plain_unreserved(path: &str) -> String {
+    let mut plain = String::with_capacity(path.len());
+    let mut rest = path;
+    while let Some(at) = rest.find('%') {
+        plain.push_str(&rest[..at]);
+        let code = rest
+            .get(at + 1..at + 3)
+            .filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            .filter(|byte| byte.is_ascii_alphanumeric() || b"-._~".contains(byte));
+        if let Some(byte) = code {
+            plain.push(char::from(byte));
+            rest = &rest[at + 3..];
+        } else {
+            plain.push('%');
+            rest = &rest[at + 1..];
+        }
+    }
+    plain.push_str(rest);
+    plain
 }
 
 /// Whether a fetch of `asked` follows a redirect to `hop` on the address it
@@ -19428,6 +19459,44 @@ mod tests {
                 vec![url.to_owned(), "https://denied.example/secret".to_owned()]
             );
         }
+        // So do the address without its fragment, and its path with the
+        // letters a `%` code spells written plainly.
+        for (url, read) in [
+            (
+                "https://denied.example/secret#part",
+                "https://denied.example/secret",
+            ),
+            (
+                "https://denied.example/%73ecret",
+                "https://denied.example/secret",
+            ),
+            (
+                "https://Denied.Example/%73%45cret%7e#x",
+                "https://denied.example/sEcret~",
+            ),
+        ] {
+            let (patterns, _) = plan(url);
+            assert_eq!(patterns, vec![url.to_owned(), read.to_owned()], "{url}");
+        }
+        assert!(plan("https://denied.example/%73ecret").1);
+        assert!(plan("https://denied.example/secret#part").1);
+        // The `/` written before a fragment stays.
+        assert_eq!(
+            plan("https://docs.example/#top").0,
+            vec!["https://docs.example/#top", "https://docs.example/"]
+        );
+        assert_eq!(
+            plan("https://docs.example#top").0,
+            vec!["https://docs.example#top", "https://docs.example"]
+        );
+        // Other codes stay as written: `%2F` is not a folder's `/`.
+        assert_eq!(
+            plan("https://docs.example/a%2Fb%20c%zz%4"),
+            (
+                vec!["https://docs.example/a%2Fb%20c%zz%4".to_owned()],
+                false
+            )
+        );
         // Another port is another address.
         assert!(!plan("https://denied.example:8443/secret").1);
     }
@@ -19464,6 +19533,8 @@ mod tests {
             "https://someone@intra.example/admin/x",
             "https://intra.example./admin/x",
             "https://intra.example/public/../admin/x",
+            "https://intra.example/%61dmin/x",
+            "https://intra.example/admin/x#top",
         ] {
             assert_eq!(verdict(&denied, login, hop), Deny, "{hop}");
         }
