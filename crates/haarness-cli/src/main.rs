@@ -3974,7 +3974,7 @@ async fn execute_schedule(
         let mut waited = false;
         loop {
             watch.answer(&client, thread.id).await?;
-            let commands = background_commands_client(&client, thread.id).await?;
+            let commands = background_commands_client(&client, thread.id, turn.id).await?;
             if commands.settled() && client.active_turn(thread.id).await?.is_none() {
                 break;
             }
@@ -4855,7 +4855,11 @@ async fn run_command(
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
         let waits_for_background = args.wait_background || args.background_timeout_ms.is_some();
-        stop_on_signal(&client, thread.id, goal, waits_for_background, async {
+        // The run's own turn: what it waits for and stops started there or
+        // after it (a chat it continues may run others' commands).
+        let run_turn = std::sync::OnceLock::new();
+        let stop_from = waits_for_background.then_some(&run_turn);
+        stop_on_signal(&client, thread.id, goal, stop_from, async {
             // Auto and Yolo answer requests without a person; with nobody
             // to ask, a run refuses what still needs one and goes on.
             let answers = approvals
@@ -4987,6 +4991,7 @@ async fn run_command(
                 earlier.put_back(&client, thread.id).await;
             }
             let turn = discard_refused_chat(&client, &thread, created, turn).await?;
+            let _ = run_turn.set(turn.id);
             let printed_through = if goal {
                 let result =
                     wait_for_goal_client(&client, thread.id, goal_idle_timeout(), &watch).await;
@@ -5011,6 +5016,7 @@ async fn run_command(
             settle_cli_subagents_client(
                 &client,
                 thread.id,
+                turn.id,
                 wait_background,
                 args.background_timeout_ms,
                 args.format,
@@ -6587,7 +6593,7 @@ async fn stop_on_signal<T>(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
     goal: bool,
-    waits_for_background: bool,
+    waited_from: Option<&std::sync::OnceLock<TurnId>>,
     work: impl Future<Output = Result<T>>,
 ) -> Result<T> {
     let status = tokio::select! {
@@ -6608,8 +6614,8 @@ async fn stop_on_signal<T>(
         }
         let stopped = client.interrupt_session(thread_id, false).await;
         // A run that waited for its commands leaves none of them running.
-        if waits_for_background {
-            stop_background_commands_client(client, thread_id).await;
+        if let Some(turn) = waited_from.and_then(std::sync::OnceLock::get) {
+            stop_background_commands_client(client, thread_id, *turn).await;
         }
         stopped
     };
@@ -6813,6 +6819,7 @@ async fn print_run_output_client(
 async fn settle_cli_subagents_client(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
+    run_turn: TurnId,
     wait: bool,
     timeout_ms: Option<u64>,
     format: RunFormat,
@@ -6822,7 +6829,7 @@ async fn settle_cli_subagents_client(
 ) -> Result<()> {
     let active = client.background_tasks(thread_id).await?;
     let parent_turn = client.active_turn(thread_id).await?;
-    let commands = background_commands_client(client, thread_id).await?;
+    let commands = background_commands_client(client, thread_id, run_turn).await?;
     if !wait && active.is_empty() && parent_turn.is_none() && commands.running == 0 {
         return Ok(());
     }
@@ -6870,28 +6877,33 @@ async fn settle_cli_subagents_client(
         watch.answer(client, thread_id).await?;
         let tasks = client.background_tasks(thread_id).await?;
         let parent_turn = client.active_turn(thread_id).await?;
-        let commands = background_commands_client(client, thread_id).await?;
+        let commands = background_commands_client(client, thread_id, run_turn).await?;
         if tasks.is_empty() && parent_turn.is_none() && commands.settled() {
             break;
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             // A run that stops waiting leaves no command it waited for.
-            let stopped = stop_background_commands_client(client, thread_id).await;
-            anyhow::bail!(
-                "background wait timed out; {} subagent{} continue{} on the Haarness server{}",
-                tasks.len(),
-                if tasks.len() == 1 { "" } else { "s" },
-                if tasks.len() == 1 { "s" } else { "" },
-                if stopped > 0 {
-                    format!(
-                        ", and {stopped} background command{} {} stopped",
-                        if stopped == 1 { "" } else { "s" },
-                        if stopped == 1 { "was" } else { "were" }
-                    )
-                } else {
-                    String::new()
-                },
-            );
+            let stopped = stop_background_commands_client(client, thread_id, run_turn).await;
+            let mut parts = Vec::new();
+            if !tasks.is_empty() {
+                parts.push(format!(
+                    "{} subagent{} continue{} on the Haarness server",
+                    tasks.len(),
+                    if tasks.len() == 1 { "" } else { "s" },
+                    if tasks.len() == 1 { "s" } else { "" }
+                ));
+            }
+            if stopped > 0 {
+                parts.push(format!(
+                    "{stopped} background command{} {} stopped",
+                    if stopped == 1 { "" } else { "s" },
+                    if stopped == 1 { "was" } else { "were" }
+                ));
+            }
+            if parts.is_empty() {
+                anyhow::bail!("background wait timed out");
+            }
+            anyhow::bail!("background wait timed out; {}", parts.join(", and "));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -6965,16 +6977,21 @@ impl BackgroundCommands {
     }
 }
 
-/// Stop the chat's commands still running; answers how many it stopped.
+/// Stop the chat's commands still running that the turn `since` or a
+/// later one started; answers how many it stopped.
 async fn stop_background_commands_client(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
+    since: TurnId,
 ) -> usize {
     let Ok(commands) = client.shell_commands(thread_id).await else {
         return 0;
     };
     let mut stopped = 0;
-    for command in commands.iter().filter(|command| command.state.is_live()) {
+    for command in commands
+        .iter()
+        .filter(|command| command.state.is_live() && command.turn_id.0 >= since.0)
+    {
         if client
             .stop_shell_command(thread_id, &command.id)
             .await
@@ -6986,11 +7003,19 @@ async fn stop_background_commands_client(
     stopped
 }
 
+/// Turn ids grow with time, so `since` and the turns after it are those a
+/// run started, and those its commands' ends started.
 async fn background_commands_client(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
+    since: TurnId,
 ) -> Result<BackgroundCommands> {
-    let commands = client.shell_commands(thread_id).await?;
+    let commands = client
+        .shell_commands(thread_id)
+        .await?
+        .into_iter()
+        .filter(|command| command.turn_id.0 >= since.0)
+        .collect::<Vec<_>>();
     let running = commands
         .iter()
         .filter(|command| command.background && command.state.is_live())
