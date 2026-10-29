@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Installer failure atomicity with a deliberately faulty loopback release service, and the default install of
-the CLI and Desktop (skipped with --no-desktop or HAARNESS_NO_DESKTOP=1)."""
+"""Installer failure atomicity with a deliberately faulty loopback release service, the default install of
+the CLI and Desktop (skipped with --no-desktop or HAARNESS_NO_DESKTOP=1), and Haarness Router: HAARNESS_PRODUCT=router
+and install-router.sh, the same script with router as its default product. HAARNESS_ROUTER_BIN installs a real router
+build through it too."""
 import hashlib, http.server, os, platform, pty, shutil, subprocess, tempfile, threading, sys
 from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
@@ -216,4 +218,89 @@ with tempfile.TemporaryDirectory(prefix='haarness-install-both-') as d:
         state['edge'],state['edge_status'],state['edge_corrupt']=None,200,False
         print('PASS: an edge that does not deliver, or a plain-HTTP address, falls back to the release service; '
               'bytes from the edge that do not match the service\'s checksum are refused')
+    finally: server.shutdown();server.server_close();thread.join()
+
+# Haarness Router: HAARNESS_PRODUCT=router installs haarness-router into the CLI's folder, checked as the CLI is, and
+# install-router.sh, which the Cloud serves as this script with only its default product changed, installs it by
+# default. Every refusal leaves a previous haarness-router and the folder as they were.
+def router_variant(text):
+    # The Cloud's substitution (haarness-cloud releases.rs): exactly one line changes.
+    assert text.count('\ndefault_product=all\n')==1,'install.sh must name its default product on one line'
+    variant=text.replace('\ndefault_product=all\n','\ndefault_product=router\n')
+    changed=[(a,b) for a,b in zip(text.splitlines(),variant.splitlines()) if a!=b]
+    assert changed==[('default_product=all','default_product=router')],changed
+    return variant
+ROUTER_SCRIPT=router_variant(SCRIPT.read_text())
+real_router=os.environ.get('HAARNESS_ROUTER_BIN')
+router={'mode':'ok','queries':[],'payload':b'#!/bin/sh\nprintf "haarness-router 2.0.0\\n"\n','version':'2.0.0'}
+if real_router:
+    router['payload']=Path(real_router).read_bytes()
+    router['version']=subprocess.check_output([real_router,'--version'],text=True).strip().removeprefix('haarness-router ')
+class Router(http.server.BaseHTTPRequestHandler):
+    def log_message(self,*args): pass
+    def do_HEAD(self): self.send_error(501)
+    def do_GET(self):
+        url=urlsplit(self.path);router['queries'].append((url.path,parse_qs(url.query)))
+        if router['mode']=='absent':
+            self.send_response(404);self.send_header('content-type','application/json');self.end_headers();self.wfile.write(b'{"code":"not_found"}');return
+        content={'wrong-version':b'#!/bin/sh\nprintf "haarness-router 1.9.9\\n"\n','cli':b'#!/bin/sh\nprintf "haarness 2.0.0\\n"\n',
+                 'broken':b'#!/bin/sh\necho "cannot start" >&2\nexit 3\n'}.get(router['mode'],router['payload'])
+        self.send_response(200)
+        if router['mode']!='missing':
+            self.send_header('x-content-sha256',hashlib.sha256(b'other bytes' if router['mode']=='corrupt' else content).hexdigest())
+        self.send_header('x-haarness-version',router['version']);self.send_header('content-length',str(len(content)));self.end_headers()
+        self.wfile.write(content)
+with tempfile.TemporaryDirectory(prefix='haarness-install-router-') as d:
+    d=Path(d)
+    server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Router)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    def run(name,script,args=(),extra=None,on_path=False):
+        root=d/name;router['queries'].clear();(root/'home').mkdir(parents=True,exist_ok=True)
+        env=clean_env('XDG_');env.update(HOME=str(root/'home'),HAARNESS_RELEASE_URL=f'http://127.0.0.1:{server.server_port}',
+                                         HAARNESS_CHANNEL='preview',HAARNESS_INSTALL_DIR=str(root/'bin'))
+        if on_path: env['PATH']=f'{root/"bin"}:{env["PATH"]}'
+        env.update(extra or {})
+        # As `curl … | sh` runs it.
+        return root,subprocess.run(['sh','-s','--',*args],input=script,env=env,capture_output=True,text=True)
+    try:
+        expected=f'haarness-router {router["version"]}'
+        for name,script,extra in (('product',SCRIPT.read_text(),{'HAARNESS_PRODUCT':'router'}),('variant',ROUTER_SCRIPT,None)):
+            root,r=run(name,script,extra=extra)
+            assert r.returncode==0,(name,r.stdout,r.stderr)
+            installed=root/'bin'/'haarness-router'
+            assert subprocess.check_output([str(installed),'--version'],text=True).strip()==expected,name
+            assert sorted(p.name for p in (root/'bin').iterdir())==['haarness-router'],name
+            path,query=router['queries'][0]
+            assert [q for q,_ in router['queries']]==['/api/v1/releases/preview/router/download'],(name,router['queries'])
+            host_arch={'arm64':'arm64','aarch64':'arm64','x86_64':'x64','amd64':'x64'}[platform.machine().lower()]
+            assert query=={'os':['macos' if macos else 'linux'],'arch':[host_arch],'kind':['binary']},query
+            assert f'Installed Haarness Router {router["version"]}: {installed}\n' in r.stdout,r.stdout
+            assert f'Add to your shell profile: export PATH="{root/"bin"}:$PATH"' in r.stdout,r.stdout
+            assert f'Run {installed} to start it with the provider keys in your environment' in r.stdout,r.stdout
+            assert 'http://127.0.0.1:8080/ui' in r.stdout and not r.stderr,(r.stdout,r.stderr)
+            if macos: subprocess.run(['codesign','--verify','--strict',str(installed)],check=True)
+        print(f'PASS: HAARNESS_PRODUCT=router and install-router.sh install {expected} into the CLI folder and say how to start it'
+              +(' (a real router build)' if real_router else ''))
+        root,r=run('on-path',ROUTER_SCRIPT,on_path=True)
+        assert r.returncode==0 and 'Run haarness-router to start it' in r.stdout and 'Add to your shell profile' not in r.stdout,(r.stdout,r.stderr)
+        print('PASS: with the folder on PATH it names the command alone')
+        for script,words,absent in ((ROUTER_SCRIPT,['Install Haarness Router','install-router.sh','HAARNESS_INSTALL_DIR'],['Desktop','--no-desktop']),
+                                    (SCRIPT.read_text(),['cli, desktop or router','--no-desktop'],['install-router.sh |'])):
+            root,r=run('help',script,['--help'])
+            assert r.returncode==0 and all(w in r.stdout for w in words) and not any(w in r.stdout for w in absent),r.stdout
+            assert not router['queries'] and not (root/'bin').exists()
+        print("PASS: each script's --help describes what it installs")
+        root=d/'refusals';(root/'bin').mkdir(parents=True);previous=root/'bin'/'haarness-router';previous.write_bytes(b'existing router');previous.chmod(0o755)
+        for mode,message in (('corrupt','Checksum mismatch'),('missing','Missing or invalid SHA-256'),
+                             ('absent','No preview release of Haarness router for'),('wrong-version','Binary version mismatch: haarness-router 1.9.9'),
+                             ('cli','Binary version mismatch: haarness 2.0.0'),('broken','The downloaded Haarness Router does not run on this system')):
+            router['mode']=mode
+            _,r=run('refusals',ROUTER_SCRIPT)
+            assert r.returncode!=0 and message in r.stderr,(mode,r.stdout,r.stderr)
+            assert previous.read_bytes()==b'existing router' and sorted(p.name for p in (root/'bin').iterdir())==['haarness-router'],mode
+        router['mode']='ok'
+        print('PASS: a corrupt, unchecked, unpublished, mismatched or broken router download leaves the previous one and a clean folder')
+        _,r=run('invalid',ROUTER_SCRIPT,extra={'HAARNESS_PRODUCT':'routers'})
+        assert r.returncode!=0 and 'Invalid product' in r.stderr and not router['queries'],(r.stdout,r.stderr)
+        print('PASS: an unknown product is refused before any request')
     finally: server.shutdown();server.server_close();thread.join()

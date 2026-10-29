@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing immutable v-prefixed tag (CLI and Desktop versions must match)
+        description: Existing immutable v-prefixed tag, also on haarness-router (CLI, Desktop and router versions must match)
         required: true
       channel:
         type: choice
@@ -97,6 +97,25 @@ jobs:
           fi
           binary="target/${{ matrix.target }}/release/haarness${{ runner.os == 'Windows' && '.exe' || '' }}"
           echo "HAARNESS_BIN=${{ github.workspace }}/$binary" >> "$GITHUB_ENV"
+      # Haarness Router ships with every platform's CLI at the same version, built from the router repository's tag
+      # with this toolchain (rust-toolchain.toml above it) and its own lock file; Windows links the C runtime
+      # statically, as the CLI does. The installer tests and collect read it through HAARNESS_ROUTER_BIN.
+      - uses: actions/checkout@v4
+        with: { repository: haarness/haarness-router, ref: '${{ inputs.tag }}', path: haarness-router }
+      - name: Build Haarness Router
+        shell: bash
+        working-directory: haarness-router
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+          CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          if [ -n "${{ matrix.glibc }}" ]; then
+            cargo zigbuild --release --locked --bin haarness-router --target "${{ matrix.target }}.${{ matrix.glibc }}"
+          else
+            cargo build --release --locked --bin haarness-router --target "${{ matrix.target }}"
+          fi
+          binary="haarness-router/target/${{ matrix.target }}/release/haarness-router${{ runner.os == 'Windows' && '.exe' || '' }}"
+          echo "HAARNESS_ROUTER_BIN=${{ github.workspace }}/$binary" >> "$GITHUB_ENV"
       - run: npm --prefix apps/desktop ci
       - run: npm --prefix apps/desktop test
       - name: Installer verification
@@ -165,7 +184,7 @@ jobs:
         shell: bash
         run: |
           python scripts/test-release-package.py
-          python scripts/release.py collect --binary "$HAARNESS_BIN"
+          python scripts/release.py collect --binary "$HAARNESS_BIN" --router-binary "$HAARNESS_ROUTER_BIN" --router-source haarness-router
       # The glibc floor, the .deb/AppImage contents, and the CLI on the oldest
       # supported distributions (in Docker, which Linux runners provide).
       - name: Linux portability
@@ -201,7 +220,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CHANNEL: ${{ inputs.channel }}
-        run: python scripts/release.py github --index dist/releases/index-*.json --repo "$GITHUB_REPOSITORY" --channel "$CHANNEL"
+        run: python scripts/release.py github --index dist/releases/index-*.json --repo "$GITHUB_REPOSITORY" --only haarness --channel "$CHANNEL"
+      # The router's files on haarness-router's release of the same tag, which this repository's token cannot write:
+      # HAARNESS_ROUTER_RELEASE_TOKEN has contents: write there.
+      - name: Haarness Router GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.HAARNESS_ROUTER_RELEASE_TOKEN }}
+          CHANNEL: ${{ inputs.channel }}
+        run: python scripts/release.py github --index dist/releases/index-*.json --router-repo haarness/haarness-router --only router --channel "$CHANNEL"
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: release-receipt, path: dist/releases/receipt.json }
