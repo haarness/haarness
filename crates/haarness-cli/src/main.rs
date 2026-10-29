@@ -4278,6 +4278,8 @@ async fn serve_command(
             args.host
         );
     }
+    // No one answers git's questions on a server's terminal.
+    plugins::serve_unattended();
     let (listener, state, hot_reload) =
         application_at(paths, &workspace, trust, yolo, listener, true).await?;
     let address = listener.local_addr()?;
@@ -11056,7 +11058,11 @@ fn marketplace_refresh_lines(refresh: &plugins::MarketplaceRefresh) -> Vec<Strin
             "  Updated plugins: {}. A running Haarness server will reload them when active work is idle.",
             refresh.plugins.join(", ")
         ));
-    } else if refresh.status == "updated" && refresh.held.is_empty() && refresh.failed.is_empty() {
+    } else if refresh.status == "updated"
+        && refresh.held.is_empty()
+        && refresh.failed.is_empty()
+        && refresh.removed.is_empty()
+    {
         lines.push("  No installed plugin changed.".into());
     }
     for plugin in &refresh.unlisted {
@@ -11073,6 +11079,11 @@ fn marketplace_refresh_lines(refresh: &plugins::MarketplaceRefresh) -> Vec<Strin
                 held.plugin, held.reason, held.plugin
             )
         });
+    }
+    for plugin in &refresh.removed {
+        lines.push(format!(
+            "  {plugin} was removed meanwhile, so it was left alone."
+        ));
     }
     for failure in &refresh.failed {
         lines.push(format!(

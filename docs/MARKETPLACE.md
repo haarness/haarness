@@ -128,20 +128,29 @@ These automatic plugin updates are careful about what they replace. `installed.j
 each plugin Haarness installs (records from before have none and are updated as before), so an
 installed copy with local edits is never replaced: its update waits with `has local edits`, and a
 `plugin update` by hand refuses until the edits are kept elsewhere and the plugin is removed and
-installed again, as marketplace installs do. A new version that would add or change hooks
+installed again, as marketplace installs do. The edits are looked at again just before the new files
+move in, so edits made while they were fetched count too. A new version that would add or change hooks
 (`hooks/hooks.json` or `hooks` in `plugin.json`), add or change MCP servers (`.mcp.json` or
-`mcpServers`) or add programs (files marked executable) waits too, with the reason (`asks for more: new
-hooks`); `haarness plugin update <name>` installs it. A plugin's record keeps that reason (`held`) until
-it is updated or nothing waits any more. Every change to `installed.json` is a read, change and write
-under one editor lock, and the new files are fetched before it is taken: a plugin turned off or removed
-while its update is fetched stays off or removed.
+`mcpServers`), or add extensions (`extensions/*.ts|js|mjs|mts`) or programs (files marked executable)
+waits too, with the reason (`asks for more: new hooks`). So does any change, addition or removal of a
+file other than Markdown in a plugin that runs code of its own (hooks, MCP servers or extensions, in
+either version), since that code may be what changed: `asks for more: changed files in a plugin that
+runs code`. A plugin of commands, agents and skills alone updates as it is. `haarness plugin update
+<name>` installs any of these. A plugin's record keeps the reason (`held`) until it is updated or
+nothing waits any more. Every change to `installed.json` is a read, change and write under one editor
+lock, and the new files are fetched before it is taken: a plugin turned off while its update is fetched
+stays off, and one removed stays removed (reported as left alone, not as a failure).
 
-Git runs without a terminal (no input, `GIT_TERMINAL_PROMPT=0`, ssh with `BatchMode=yes` and a 15
-second connection timeout), gives up on a transfer slower than 1 KB/s for 30 seconds, and is stopped,
-with what it started, after ten minutes for a clone or fetch, one minute for `ls-remote` and 30 seconds
-for anything else. Clones are made before the registrations are locked; the lock covers only the
-swap. A tag or branch named in a plugin entry is looked up by its full name (`refs/heads/<ref>`, then
-the tag's commit), so `v1` never means `feature/v1`.
+Git runs without input and never prompts for a password (`GIT_TERMINAL_PROMPT=0`). A command a person
+runs keeps their ssh setup, so a passphrase or a new host's question still reaches their terminal, and
+has no time limit, since they can stop it. In a server, where no one answers on its terminal, ssh also
+runs in batch mode with a 15 second connection timeout: the person's own `GIT_SSH_COMMAND` or
+`core.sshCommand` gets those options when it runs ssh itself, and a wrapper or a `GIT_SSH` program is
+left as it is. A background round also gives up on a transfer slower than 1 KB/s for 30 seconds and
+stops git, with what it started, after ten minutes for a clone or fetch, one minute for `ls-remote` and
+30 seconds for anything else. Clones are made before the registrations are locked; the lock covers
+only the swap. A tag or branch named in a plugin entry is looked up by its full name
+(`refs/heads/<ref>`, then the tag's commit), so `v1` never means `feature/v1`.
 
 `plugin_marketplaces` lists `type` (`git` or `folder`), `source` (a credential in it shown as
 `<redacted>`), `autoUpdate`, `commit`, `updatedAt` and `held` (installed plugins whose update waits,
