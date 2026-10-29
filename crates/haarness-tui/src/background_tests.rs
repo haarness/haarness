@@ -1803,7 +1803,7 @@ async fn ctrl_x_at_the_chats_cap_says_the_servers_words() {
         if line.contains("/commands/background") {
             (
                 "409 Conflict",
-                serde_json::json!({"code": "conflict", "message": "This chat runs 16 commands in the background, as many as it may", "retryable": false})
+                serde_json::json!({"code": "conflict", "message": "This chat already runs 16 commands in the background", "retryable": false})
                     .to_string(),
             )
         } else {
@@ -1822,7 +1822,7 @@ async fn ctrl_x_at_the_chats_cap_says_the_servers_words() {
     assert!(action.is_ok(), "no error card");
     assert_eq!(
         app.notice,
-        "This chat runs 16 commands in the background, as many as it may"
+        "This chat already runs 16 commands in the background"
     );
     assert_eq!(app.composer.text(), "draft");
 }
@@ -1916,8 +1916,232 @@ fn a_progress_line_read_part_way_shows_as_a_terminal_leaves_it() {
     ));
     let rows = frame_text(&app, (80, 16));
     assert!(
-        rows.iter()
-            .any(|row| row.trim_end() == "  doneress 00000043"),
+        rows.iter().any(|row| row.trim_end() == "  done"),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn finished_lines_show_their_last_rewrite_and_the_open_line_shows_as_a_terminal_leaves_it() {
+    let thread = fixture_thread();
+    let mut app = app_on(&thread, vec![]);
+    app.open_command_output("c1", None);
+    let text = concat!(
+        "A Building target-with-a-long-name\r\u{1b}[KA done\n",
+        "B abc\u{1b}[2K\rB xy\n",
+        "C downloading 100%\rC ok\n",
+        "D windows line one\r\nD windows two\r\n",
+        "E pad 50%\rE pad 100%\n",
+        "F \u{1b}[1mbold\u{1b}[0m plain\n",
+        "G 123456789\r\u{1b}[5CXY\n",
+        "H downloading 40%\r\u{1b}[KH 41",
+    );
+    app.command_view
+        .as_mut()
+        .unwrap()
+        .apply(page(text, 0, false, ShellCommandState::Running));
+    let rows: Vec<String> = frame_text(&app, (80, 20))
+        .into_iter()
+        .skip(2)
+        .map(|row| row.trim_end().to_owned())
+        .filter(|row| !row.is_empty())
+        .take(9)
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "  A done",
+            "  B xy",
+            "  C ok",
+            "  D windows line one",
+            "  D windows two",
+            "  E pad 100%",
+            "  F bold plain",
+            "  XY",
+            "  H 41",
+        ]
+    );
+    // The open line erased from its start, then rewritten part way.
+    let view = app.command_view.as_mut().unwrap();
+    view.apply(page(
+        "\r\u{1b}[2Kprogress 7%\rprog",
+        text.len() as u64,
+        false,
+        ShellCommandState::Running,
+    ));
+    assert_eq!(
+        frame_text(&app, (80, 20))
+            .iter()
+            .rfind(|row| !row.trim().is_empty() && !row.contains("esc back"))
+            .map(|row| row.trim_end().to_owned()),
+        Some("  progress 7%".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn ctrl_x_says_when_nothing_could_move_while_a_command_runs() {
+    let thread = fixture_thread();
+    // Today's answer at the cap: nothing moved.
+    let (client, _) = recording_server(|_, _| ("200 OK", "[]".into())).await;
+    let mut app = app_on(&thread, vec![]);
+    let conversation = app.conversation_id();
+    app.shell_commands.update(
+        info_for(&thread, TurnId::new(), "c1", "call-1", false),
+        conversation,
+    );
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.notice, "Nothing could move to the background");
+    app.language = crate::locale::Language::Arabic;
+    app.execute_command("/background", &client).await.unwrap();
+    assert_eq!(app.notice, "لم يمكن نقل أي شيء إلى الخلفية");
+}
+
+#[tokio::test]
+async fn only_esc_escs_explicit_stop_stops_commands_and_its_prompt_names_them() {
+    let root = fixture_thread();
+    let child = Thread {
+        parent_id: Some(root.id),
+        is_subagent: true,
+        ..fixture_thread()
+    };
+    let (client, seen) = recording_server(|_, _| ("200 OK", "{}".into())).await;
+    let fresh = || {
+        let mut app = App::new(
+            root.clone(),
+            vec![root.clone(), child.clone()],
+            vec![],
+            vec![],
+            vec![],
+        );
+        app.server_info = Some(side_server_info(vec![
+            haarness_protocol::BACKGROUND_COMMANDS_CAPABILITY.into(),
+        ]));
+        app.live_threads.entry(child.id).or_default();
+        let conversation = app.conversation_id();
+        app.shell_commands.update(
+            info_for(&root, TurnId::new(), "c1", "call-1", true),
+            conversation,
+        );
+        app
+    };
+    let wait = |line: String| {
+        let seen = seen.clone();
+        async move {
+            for _ in 0..200 {
+                if requested(&seen)
+                    .iter()
+                    .any(|request| request.starts_with(&line))
+                {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            false
+        }
+    };
+    // Ctrl+C twice stops the child, answering steering: the command runs on.
+    let mut app = fresh();
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    crate::input::handle_key(&mut app, ctrl_c, &client)
+        .await
+        .unwrap();
+    assert_eq!(app.notice, "Press Ctrl+C again to stop session work");
+    crate::input::handle_key(&mut app, ctrl_c, &client)
+        .await
+        .unwrap();
+    assert!(
+        wait(format!(
+            "POST /v1/threads/{}/interrupt?resume=true ",
+            root.id
+        ))
+        .await,
+        "{:?}",
+        requested(&seen)
+    );
+    // Esc Esc says the command goes too, and stops it.
+    let mut app = fresh();
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    crate::input::handle_key(&mut app, esc, &client)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.notice,
+        "Press Esc again to stop session work and 1 command in background"
+    );
+    crate::input::handle_key(&mut app, esc, &client)
+        .await
+        .unwrap();
+    assert!(
+        wait(format!("POST /v1/threads/{}/interrupt ", root.id)).await,
+        "{:?}",
+        requested(&seen)
+    );
+}
+
+#[tokio::test]
+async fn scrolling_back_while_a_read_from_the_end_is_on_its_way_keeps_the_text() {
+    let thread = fixture_thread();
+    let (client, seen) = recording_server(|line, _| {
+        let page = if line.contains("tail=true") {
+            page("far ahead\n", 9_000_000, false, ShellCommandState::Running)
+        } else {
+            page("next\n", 9, false, ShellCommandState::Running)
+        };
+        ("200 OK", serde_json::to_string(&page).unwrap())
+    })
+    .await;
+    let mut app = app_on(&thread, vec![]);
+    let conversation = app.conversation_id();
+    app.shell_commands.update(
+        info_for(&thread, TurnId::new(), "c1", "call-1", true),
+        conversation,
+    );
+    app.open_command_output("c1", None);
+    let view = app.command_view.as_mut().unwrap();
+    view.apply(ShellCommandOutput {
+        text: "kept one\n".into(),
+        start: 0,
+        cursor: 9,
+        size: 9 + 3 * 1024 * 1024,
+        more: true,
+        settled: false,
+        state: ShellCommandState::Running,
+        exit_code: None,
+    });
+    // The read from the end goes out; the person scrolls back before it lands.
+    app.poll_command_output(&client);
+    app.command_view.as_mut().unwrap().top = Some(0);
+    for _ in 0..200 {
+        app.poll_command_output(&client);
+        if requested(&seen).len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    for _ in 0..50 {
+        app.poll_command_output(&client);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let lines = requested(&seen);
+    assert!(lines[0].contains("tail=true"), "{lines:?}");
+    assert!(lines[1].contains("cursor=9"), "{lines:?}");
+    let rows = frame_text(&app, (80, 16));
+    assert!(
+        rows.iter().any(|row| row.trim_end() == "  kept one"),
+        "{rows:#?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.trim_end() == "  next"),
+        "{rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("far ahead")),
         "{rows:#?}"
     );
 }

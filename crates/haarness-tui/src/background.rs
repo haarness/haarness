@@ -636,7 +636,18 @@ impl App {
                 (0, 0)
             }
         };
+        // A command the agent waits on that did not move (the chat runs as
+        // many commands in the background as it may) is not "nothing".
+        let waiting_on_command = self
+            .shell_commands
+            .of(chat)
+            .iter()
+            .any(|info| info.state.is_live() && !info.background && info.thread_id == chat);
         self.notice = match (subagents, moved) {
+            (0, 0) if commands && waiting_on_command => self
+                .language
+                .text("Nothing could move to the background")
+                .to_owned(),
             (0, 0) if commands => self
                 .language
                 .text("Nothing is running in the foreground")
@@ -1135,6 +1146,12 @@ impl CommandView {
             self.trimmed = page.start > 0;
             self.loaded = true;
         } else if std::mem::take(&mut self.skipping) {
+            // Scrolled back meanwhile: what is read stays put, and reading
+            // goes on from where it was.
+            if self.top.is_some() {
+                self.wanted = true;
+                return;
+            }
             // A read from the end: what came before it is no longer shown.
             if page.start > self.cursor {
                 self.raw.clear();
@@ -1213,17 +1230,24 @@ impl CommandView {
         {
             return rows.clone();
         }
-        let clean = crate::escapes::without_escapes(&self.raw);
+        // A finished line shows what was written after its last carriage
+        // return; only the line still being written, a progress line, is
+        // drawn as a terminal draws it.
+        let (finished, open) = self
+            .raw
+            .rfind('\n')
+            .map_or(("", self.raw.as_str()), |end| self.raw.split_at(end + 1));
+        let clean = crate::escapes::without_escapes(finished);
         let mut rows = Vec::new();
-        let text = clean.strip_suffix('\n').unwrap_or(&clean);
-        if !text.is_empty() {
+        if let Some(text) = clean.strip_suffix('\n') {
             for line in text.split('\n') {
-                if line.contains('\r') {
-                    wrap_into(&mut rows, &overprinted(line), width);
-                } else {
-                    wrap_into(&mut rows, line, width);
-                }
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                let line = line.rsplit('\r').next().unwrap_or(line);
+                wrap_into(&mut rows, line, width);
             }
+        }
+        if !open.is_empty() {
+            wrap_into(&mut rows, &overprinted(open), width);
         }
         let rows: Rc<[String]> = rows.into();
         *self.shown.borrow_mut() = Some((self.revision, width, rows.clone()));
@@ -1231,20 +1255,62 @@ impl CommandView {
     }
 }
 
-/// A line rewritten with carriage returns, as a terminal leaves it: each
-/// part writes over the start of what the parts before it wrote, so a
-/// progress line read part way through still shows whole.
+/// Erasing a line (`ESC [ K`, `ESC [ 2 K`), marked with characters of the
+/// private use area so they outlive the other escapes' removal.
+const ERASE_TO_END: char = '\u{E000}';
+const ERASE_LINE: char = '\u{E001}';
+const ERASE_TO_CURSOR: char = '\u{E002}';
+
+/// The line still being written, as a terminal leaves it: a carriage return
+/// goes back to its start, what follows writes over what was there, and the
+/// erase-line codes clear it to its end, from its start or whole. A progress
+/// line read part way through a rewrite still shows whole.
 fn overprinted(line: &str) -> String {
-    let mut shown: Vec<char> = Vec::new();
-    for part in line.split('\r') {
-        for (column, character) in part.chars().enumerate() {
-            match shown.get_mut(column) {
-                Some(cell) => *cell = character,
-                None => shown.push(character),
+    let mut marked = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find("\u{1b}[") {
+        marked.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if after[digits..].starts_with('K') {
+            marked.push(match &after[..digits] {
+                "1" => ERASE_TO_CURSOR,
+                "2" => ERASE_LINE,
+                _ => ERASE_TO_END,
+            });
+            rest = &after[digits + 1..];
+        } else {
+            marked.push_str("\u{1b}[");
+            rest = after;
+        }
+    }
+    marked.push_str(rest);
+    let clean = crate::escapes::without_escapes(&marked);
+    let mut cells: Vec<char> = Vec::new();
+    let mut column = 0;
+    for character in clean.chars() {
+        match character {
+            '\r' => column = 0,
+            ERASE_TO_END => cells.truncate(column),
+            ERASE_LINE => cells.clear(),
+            ERASE_TO_CURSOR => {
+                for cell in cells.iter_mut().take(column + 1) {
+                    *cell = ' ';
+                }
+            }
+            character => {
+                if column < cells.len() {
+                    cells[column] = character;
+                } else {
+                    cells.resize(column, ' ');
+                    cells.push(character);
+                }
+                column += 1;
             }
         }
     }
-    shown.into_iter().collect()
+    let shown: String = cells.into_iter().collect();
+    shown.trim_end().to_owned()
 }
 
 /// Cut a line of output into rows of `width` columns, tabs set every eight.
