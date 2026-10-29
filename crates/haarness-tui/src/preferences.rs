@@ -180,12 +180,14 @@ impl App {
                             description: "Preserve the current draft in the stash".into(),
                             request: json!({"action":"restore","id":id}),
                             confirm: None,
+                            icon: None,
                         },
                         ManagementEntry {
                             label: "Delete prompt".into(),
                             description: String::new(),
                             request: json!({"action":"delete","id":id}),
                             confirm: Some("Delete this saved prompt?".into()),
+                            icon: None,
                         },
                     ],
                     ..ManagementView::default()
@@ -200,6 +202,7 @@ impl App {
                 description: "Preserves text, pasted content and attachments".into(),
                 request: json!({"action":"save"}),
                 confirm: None,
+                icon: None,
             }],
             ..ManagementView::default()
         };
@@ -216,6 +219,7 @@ impl App {
                 description: prompt.workspace,
                 request: json!({"action":"inspect","id":prompt.id}),
                 confirm: None,
+                icon: None,
             });
         }
         Ok(view)
