@@ -56,6 +56,10 @@ This example permits longer tools and two levels of task delegation:
 | Setting | Default | Meaning |
 | --- | ---: | --- |
 | `shell_timeout_ms` | 120000 | Default shell deadline in milliseconds; `0` disables it. A bash call can override it with `timeout`. A command that runs without a deadline saves only the first 64 MiB of its output. A command's or skill's `` !`…` `` snippet has none in a turn you start in Desktop, the terminal UI or an editor over ACP, where you can stop it; elsewhere (`haarness run`, schedules, Cloud, scripts) it keeps this deadline. The former 600000 ms maximum is removed. |
+| `shell_move_after_ms` | 60000 | How long an agent's command without its own `timeout` runs in the foreground before it moves to the background, in a chat whose app follows background work (Desktop, the terminal UI, the phone and web apps, `haarness run --wait-background`). Its call then returns with the command's id and the agent is told when it ends. `0` keeps commands in the foreground. Elsewhere commands never move by themselves. |
+| `shell_background_max_ms` | 0 | How long a command may run in the background before it is stopped; `0` sets no limit. A `timeout` the agent gave still applies to the whole run. |
+| `shell_stop_grace_ms` | 2000 | When a command is stopped, the time it gets after the interrupt and again after the terminate signal before it is killed; `0` kills it at once. |
+| `shell_background_per_chat` | 16 | How many commands one chat may run in the background at once; a call past it is refused. `0` sets no cap. |
 | `subagent_concurrency` | 4 | Running child agents per delegation depth. Must be positive. |
 | `subagent_depth` | 1 | Root → child by default; `2` enables grandchildren; `0` disables task delegation. |
 | `read_parallelism` | 8 | Consecutive native observations run together up to this count. Must be positive. |
