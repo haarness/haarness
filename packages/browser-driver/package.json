@@ -1,6 +1,6 @@
 {
   "name": "@haarness/browser-driver",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "description": "Chromium page driver shared by Haarness Desktop and Haarness for Chrome",
   "author": "Haarness",
