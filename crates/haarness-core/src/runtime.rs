@@ -837,9 +837,10 @@ fn is_provider_transient(error: &CoreError) -> bool {
     if is_provider_usage_limit(error) {
         return false;
     }
-    // A provider that sent nothing for the configured limit: its request was
-    // closed, and another may well be answered.
-    if crate::stream_stall_silence(error).is_some() {
+    // A provider that sent nothing for the configured limit, or a connection
+    // that broke before anything reached the person: another request may
+    // well be answered.
+    if is_stream_cut(error) {
         return true;
     }
     let message = message.to_ascii_lowercase();
@@ -859,6 +860,73 @@ fn is_provider_transient(error: &CoreError) -> bool {
     ]
     .iter()
     .any(|marker| message.contains(marker))
+}
+
+/// How a response that broke off in transit is worded: reqwest's errors for
+/// a body that could not be read to its end (whatever the cause beneath,
+/// a reset or an HTTP/2 stream error), hyper's and the system's words for a
+/// connection cut partway, and a Haarness router's for an upstream that
+/// fell silent while it relayed the answer.
+const STREAM_CUT: [&str; 5] = [
+    "request or response body error",
+    "error decoding response body",
+    "connection reset",
+    "connection closed before message completed",
+    "stream became idle",
+];
+
+/// Whether a response stopped because its connection broke or fell silent,
+/// not because the provider reported an error. After output has begun, such
+/// a cut is continued like a response cut short; an error the provider sent
+/// itself (an error event, which arrives as JSON) still fails the turn.
+fn is_stream_cut(error: &CoreError) -> bool {
+    let CoreError::Provider(message) = error else {
+        return false;
+    };
+    crate::stream_stall_silence(error).is_some() || is_transport_cut(message)
+}
+
+/// Whether `message` is a transport's words for a connection that broke
+/// (`STREAM_CUT`) rather than a provider's error event, which arrives as JSON.
+fn is_transport_cut(message: &str) -> bool {
+    if provider_error_fields(message).is_some() {
+        return false;
+    }
+    let message = message.to_ascii_lowercase();
+    // A body read to its end that is not the JSON expected ("error decoding
+    // response body: expected value at line 1 column 1", a captive portal's
+    // page) is an answer, not a cut: it fails at once.
+    if names_json_position(&message) {
+        return false;
+    }
+    STREAM_CUT.iter().any(|marker| message.contains(marker))
+}
+
+/// Whether `message` names a place in a JSON text the way a JSON parser
+/// does ("at line 1 column 1").
+fn names_json_position(message: &str) -> bool {
+    message.match_indices("at line ").any(|(at, marker)| {
+        let rest = &message[at + marker.len()..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        digits > 0
+            && rest[digits..]
+                .strip_prefix(" column ")
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    })
+}
+
+/// What a tool call says when the response that carried it was cut short
+/// and it was closed without running. A broken connection is said in plain
+/// words, never the transport's ("error decoding response body: Connection
+/// reset by peer (os error 54)"), which the log keeps.
+fn closed_call_reason(error: &CoreError, provider: Option<&str>) -> String {
+    match error {
+        CoreError::ProviderIncomplete(inner) if is_transport_cut(inner) => format!(
+            "The connection to {} broke off before this call ran, so it did not run.",
+            provider.unwrap_or("the provider")
+        ),
+        error => error.to_string(),
+    }
 }
 
 /// Retries for a transient provider failure before any output, waiting 2,
@@ -1289,12 +1357,17 @@ pub fn refusal_reason(error: &CoreError) -> String {
 }
 
 /// `describe_error`, except that a request the provider refused for its size
-/// in bytes is said plainly instead of repeating the 413. With `advice`, for
-/// the person, it also says what to do: the chat as a whole is what is too
-/// large (its files, the ones the model read among them, or its text behind
-/// a small limit), which compacting does not always make smaller. Without,
-/// for a model that started the work, it only says what happened.
+/// in bytes is said plainly instead of repeating the 413, and a connection
+/// that broke once the provider had answered (`describe_cut`) in plain words.
+/// With `advice`, for the person, it also says what to do: the chat as a
+/// whole is what is too large (its files, the ones the model read among them,
+/// or its text behind a small limit), which compacting does not always make
+/// smaller. Without, for a model that started the work, it only says what
+/// happened.
 fn describe_failure(error: &CoreError, provider: Option<&str>, advice: bool) -> String {
+    if let Some(words) = describe_cut(error, provider, advice) {
+        return words;
+    }
     if let CoreError::Provider(raw) = error
         && is_provider_oversized_request(error)
     {
@@ -1324,9 +1397,49 @@ fn describe_failure(error: &CoreError, provider: Option<&str>, advice: bool) -> 
     describe_error(error, provider)
 }
 
+/// A connection that broke after the provider had answered, in plain words
+/// rather than the transport's ("error decoding response body: Connection
+/// reset by peer (os error 54)"), which the log keeps: one that kept breaking
+/// mid-answer until the recoveries ran out, or one that broke before the
+/// answer began, every time it was retried. A request that never reached the
+/// provider ("error sending request") is not one: it could not be reached.
+/// With `advice` it also says what to do. `None` for any other failure.
+fn describe_cut(error: &CoreError, provider: Option<&str>, advice: bool) -> Option<String> {
+    let name = provider.unwrap_or("the provider");
+    let (happened, next) = match error {
+        CoreError::ProviderIncomplete(inner) if is_transport_cut(inner) => (
+            format!("The connection to {name} kept breaking off mid-answer."),
+            "Check the network connection, then send a message to continue.",
+        ),
+        CoreError::Provider(raw)
+            if is_transport_cut(raw)
+                && !raw.to_ascii_lowercase().contains("error sending request") =>
+        {
+            (
+                format!("The connection to {name} broke off before it answered."),
+                "Check the network connection, then try again.",
+            )
+        }
+        _ => return None,
+    };
+    Some(if advice {
+        format!("{happened} {next}")
+    } else {
+        happened
+    })
+}
+
 /// `user_facing_error`, naming the provider (when known) that has no
 /// credentials or refused them, so the fix is clear: connect it again.
 fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
+    // A provider that fell silent after it began, whose recoveries ran out,
+    // is named as silent, as it is before any output.
+    if let CoreError::ProviderIncomplete(inner) = error {
+        let silent = CoreError::Provider(inner.clone());
+        if crate::stream_stall_silence(&silent).is_some() {
+            return describe_error(&silent, provider);
+        }
+    }
     let CoreError::Provider(raw) = error else {
         return error.to_string();
     };
@@ -9575,6 +9688,14 @@ impl RunnerTask {
                     let event = match event {
                         Ok(event) => event,
                         Err(error_value) => {
+                            // Some providers keep reading after the event that
+                            // finishes a response (Gemini's finish reason, the
+                            // Responses API's `response.completed`): a cut then
+                            // loses nothing, and the round stands as finished.
+                            if finished && is_stream_cut(&error_value) {
+                                tracing::debug!(thread = %self.thread.id, error = %error_value, "connection broke after the response finished");
+                                break;
+                            }
                             record_span_error(&provider_span, &error_value);
                             // Providers check images before they answer, so a
                             // refusal arrives before anything was streamed.
@@ -9623,12 +9744,12 @@ impl RunnerTask {
                                     .await?;
                                 continue 'provider_round;
                             }
-                            // A provider that falls silent after it began is
-                            // recovered like a response cut short.
-                            let stalled = saw_provider_event
-                                && crate::stream_stall_silence(&error_value).is_some();
+                            // A response that broke off after it began (its
+                            // connection was cut, or the provider fell silent)
+                            // is recovered like a response cut short.
+                            let cut = saw_provider_event && is_stream_cut(&error_value);
                             blocked = Some(match error_value {
-                                CoreError::Provider(message) if stalled => {
+                                CoreError::Provider(message) if cut => {
                                     CoreError::ProviderIncomplete(message)
                                 }
                                 error_value => error_value,
@@ -9913,15 +10034,18 @@ impl RunnerTask {
                     wrote_text,
                 });
                 if let Some(error) = blocked {
-                    for (call_id, name, _) in calls {
-                        self.publish_item(ItemData::ToolResult {
-                            call_id,
-                            name,
-                            output: error.to_string(),
-                            is_error: true,
-                            metadata: serde_json::Value::Null,
-                        })
-                        .await?;
+                    if !calls.is_empty() {
+                        let reason = closed_call_reason(&error, Some(&provider.info().name));
+                        for (call_id, name, _) in calls {
+                            self.publish_item(ItemData::ToolResult {
+                                call_id,
+                                name,
+                                output: reason.clone(),
+                                is_error: true,
+                                metadata: serde_json::Value::Null,
+                            })
+                            .await?;
+                        }
                     }
                     if matches!(error, CoreError::ProviderIncomplete(_)) && recoveries < 3 {
                         recoveries += 1;
@@ -19520,6 +19644,37 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_connection_is_a_cut_but_an_error_the_provider_sent_is_not() {
+        let provider = |message: &str| CoreError::Provider(message.into());
+        for cut in [
+            // reqwest's words for a body read that failed, with its cause.
+            "request or response body error: connection reset by peer (os error 54)",
+            "request or response body error: error reading a body from connection: stream error received: unexpected internal error encountered",
+            "error decoding response body: connection closed before message completed",
+            "request or response body error: unexpected EOF during chunk size line",
+            // A Haarness router whose upstream fell silent, or broke off.
+            "upstream stream became idle",
+            "upstream stream failed: error decoding response body",
+            "the provider sent nothing for 5 minutes",
+        ] {
+            assert!(super::is_stream_cut(&provider(cut)), "{cut}");
+        }
+        for failed in [
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            r#"{"type":"response.failed","response":{"error":{"code":"server_error","message":"The connection reset while processing."}}}"#,
+            "invalid SSE JSON: EOF while parsing an object at line 1 column 12",
+            "HTTP 400 Bad Request: invalid tool schema",
+            "provider returned a tool call without a call ID or name",
+        ] {
+            assert!(!super::is_stream_cut(&provider(failed)), "{failed}");
+        }
+        assert!(!super::is_stream_cut(&CoreError::ProviderIncomplete(
+            "connection reset".into()
+        )));
+        assert!(!super::is_stream_cut(&CoreError::Cancelled));
+    }
+
+    #[test]
     fn busy_or_unreachable_providers_are_retried_but_limits_and_bad_requests_are_not() {
         let provider = |message: &str| CoreError::Provider(message.into());
         for retried in [
@@ -19527,6 +19682,14 @@ mod tests {
             "HTTP 529: overloaded_error",
             "HTTP 502 Bad Gateway",
             "error sending request for url (https://api.example/v1/messages)",
+            // A connection that broke while the response began, wrapped as
+            // reqwest's body error whatever broke it (a reset, Windows'
+            // 10054, an HTTP/2 stream error), or a router's silent upstream.
+            "request or response body error: connection reset by peer (os error 54)",
+            "request or response body error: An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "request or response body error: error reading a body from connection: stream error received: unexpected internal error encountered",
+            "error decoding response body: unexpected EOF during chunk size line",
+            "upstream stream became idle",
         ] {
             assert!(
                 super::is_provider_transient(&provider(retried)),
@@ -19729,6 +19892,103 @@ mod tests {
         assert!(!super::is_region_unavailable(
             "HTTP 400 Bad Request: location is required"
         ));
+    }
+
+    #[test]
+    fn a_connection_that_broke_is_said_in_plain_words() {
+        // Broke after the answer began, until the recoveries ran out.
+        for transport in [
+            "error decoding response body: Connection reset by peer (os error 54)",
+            "request or response body error: An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "upstream stream became idle",
+        ] {
+            let ended = CoreError::ProviderIncomplete(transport.into());
+            assert_eq!(
+                super::describe_failure(&ended, Some("Anthropic"), true),
+                "The connection to Anthropic kept breaking off mid-answer. Check the network connection, then send a message to continue."
+            );
+            // A model that started the work reads what happened, no advice.
+            assert_eq!(
+                super::describe_failure(&ended, Some("Anthropic"), false),
+                "The connection to Anthropic kept breaking off mid-answer."
+            );
+            assert_eq!(
+                super::user_facing_error(&ended),
+                "The connection to the provider kept breaking off mid-answer."
+            );
+            assert_eq!(
+                super::closed_call_reason(&ended, Some("Anthropic")),
+                "The connection to Anthropic broke off before this call ran, so it did not run."
+            );
+        }
+        // Broke before the answer began, on every retry: the provider was
+        // reached, so it is not "could not reach".
+        for transport in [
+            "error decoding response body: unexpected EOF during chunk size line",
+            "request or response body error: connection reset by peer (os error 54)",
+            "request or response body error: An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "request or response body error: error reading a body from connection: stream error received: unexpected internal error encountered",
+            "upstream stream became idle",
+        ] {
+            let broke = CoreError::Provider(transport.into());
+            assert_eq!(
+                super::describe_failure(&broke, Some("Anthropic"), true),
+                "The connection to Anthropic broke off before it answered. Check the network connection, then try again."
+            );
+            assert_eq!(
+                super::describe_failure(&broke, Some("Anthropic"), false),
+                "The connection to Anthropic broke off before it answered."
+            );
+            let shown = super::describe_failure(&broke, None, true);
+            assert!(
+                !shown.contains("os error") && !shown.contains("decoding"),
+                "{shown}"
+            );
+        }
+        // A request that never reached the provider could not reach it.
+        let unreached = CoreError::Provider(
+            "error sending request for url (https://api.anthropic.com/v1/messages): connection closed before message completed".into(),
+        );
+        assert!(
+            super::describe_failure(&unreached, Some("Anthropic"), true)
+                .starts_with("Could not reach Anthropic at api.anthropic.com.")
+        );
+        // A provider that fell silent after it began is named as silent.
+        let silent =
+            CoreError::ProviderIncomplete("the provider sent nothing for 5 minutes".into());
+        assert_eq!(
+            super::describe_failure(&silent, Some("Anthropic"), true),
+            "Anthropic sent nothing for 5 minutes, so the request was stopped. Try again, or check the network connection."
+        );
+        // Other endings keep their words.
+        let missing = CoreError::ProviderIncomplete("missing completion event".into());
+        assert_eq!(
+            super::describe_failure(&missing, None, true),
+            "Provider response ended before completion (missing completion event)."
+        );
+        assert_eq!(
+            super::closed_call_reason(&missing, Some("Anthropic")),
+            "Provider response ended before completion (missing completion event)."
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_an_answer_not_a_cut() {
+        // A captive portal's page read whole where JSON was expected.
+        for answer in [
+            "error decoding response body: expected value at line 1 column 1",
+            "Bedrock returned error decoding response body: EOF while parsing a value at line 3 column 0",
+        ] {
+            let error = CoreError::Provider(answer.into());
+            assert!(!super::is_stream_cut(&error), "{answer}");
+            assert!(!super::is_provider_transient(&error), "{answer}");
+            assert!(super::describe_failure(&error, None, true).starts_with("Provider error: "));
+        }
+        assert!(super::names_json_position(
+            "expected value at line 12 column 40"
+        ));
+        assert!(!super::names_json_position("upstream stream became idle"));
+        assert!(!super::names_json_position("failed at line 3"));
     }
 
     #[test]
