@@ -373,7 +373,9 @@ runs on, and when it ends the chat gets a hidden user message, as for a
 background subagent, which starts a turn when the chat is idle:
 `<command id="…" state="exited|stopped|timed_out|interrupted" exit="N" signal="SIGTERM">`
 with a `<summary>`, the last 40 lines of its output (at most 8 KiB) in
-`<command_output>` and the file that keeps all of it in `<output_file>`. A
+`<command_output>` and, when its output is more than the server keeps in
+memory, the file that keeps it in `<output_file>`, readable by you alone and
+removed ten minutes after the command ended. A
 foreground command moves to the background while it runs when a person sends
 it there, or by itself after `execution.shell_move_after_ms` in a turn whose
 client sent `followsBackground: true` with `/turns`, `/input` (kept with a
