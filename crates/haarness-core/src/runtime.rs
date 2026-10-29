@@ -7048,7 +7048,17 @@ impl AgentRuntime {
     /// cancellation cleanup, after which any straggler is made durably
     /// interrupted so a restart can never display a phantom running turn.
     pub async fn interrupt_active_turns(&self, reason: &str) -> CoreResult<u64> {
-        self.stop_commands_for_shutdown();
+        // Commands stop beside the turns, and the server waits for them
+        // too (as long as for the turns) so their ends are recorded first.
+        let commands = self.stop_commands_for_shutdown().await;
+        let (turns, ()) = tokio::join!(
+            self.interrupt_turns_for_shutdown(reason),
+            Self::settle_commands(commands, std::time::Duration::from_secs(5)),
+        );
+        turns
+    }
+
+    async fn interrupt_turns_for_shutdown(&self, reason: &str) -> CoreResult<u64> {
         for task in self
             .background_tasks
             .iter()
