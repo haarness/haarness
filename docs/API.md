@@ -375,7 +375,9 @@ background subagent, which starts a turn when the chat is idle:
 with a `<summary>`, the last 40 lines of its output (at most 8 KiB) in
 `<command_output>` and, when its output is more than the server keeps in
 memory, the file that keeps it in `<output_file>`, readable by you alone and
-removed ten minutes after the command ended. A
+removed ten minutes after the command ended, or by the next Haarness that
+starts when Haarness stopped before then (while the command ran, or within
+those ten minutes). A
 foreground command moves to the background while it runs when a person sends
 it there, or by itself after `execution.shell_move_after_ms` in a turn whose
 client sent `followsBackground: true` with `/turns`, `/input` (kept with a
@@ -390,7 +392,7 @@ A subagent's commands never move, and its background commands stop without a
 message when its turn ends. A person's own `!` command and a workflow's
 `shell()` never go to the background. The agent reads a command's output, lists
 the chat's commands or waits for one with the `bash_output` tool and stops one
-with `bash_stop`; both are always offered.
+with `bash_stop`; both are offered wherever `bash` is.
 
 Each command is a `ShellCommandInfo`: `id`, `threadId` (the chat whose agent
 ran it), `rootThreadId`, `turnId` and `callId` (the `bash` call that started
@@ -428,7 +430,12 @@ command that completed. Enums may gain values; an unknown one reads as
 - `POST /v1/threads/{id}/commands/background` sends every running foreground
   command of the chat tree to the background, the one named with
   `?commandId=` alone; it answers the commands moved. A named command that
-  cannot move (a subagent's, one that ended) is `409`. Subagents move with
+  cannot move answers `409` with one plain reason as `message`, for a client
+  to show as it is: it has ended, it already runs in the background, it is a
+  subagent's, or the chat already runs as many commands in the background as
+  `execution.shell_background_per_chat` allows. Moving every command answers
+  `409` with that last reason when the cap kept all of them back. Subagents
+  move with
   `POST /v1/threads/{id}/background`, so a client's "send everything to the
   background" calls both.
 - `GET /v1/commands/active` lists the running commands of every chat, as
@@ -473,7 +480,10 @@ ends: `{call_id, command_id, state, exit_code?, signal?, tail, started_at,
 ended_at?, moved_by?}`, `tail` being the end of its output (at most 4 KiB).
 After a restart a command the last such item shows running reads
 `interrupted`: the chat gets a hidden notice and an `error` item saying so,
-and no turn starts by itself.
+and no turn starts by itself. `interrupted` means only that: Haarness
+stopped while the command ran. A fork and an imported session archive leave
+out the checkpoint of a command still running (the copied `bash` result
+still names it), and keep those of ended ones.
 
 A background result (a subagent's or a workflow run's) that its chat cannot
 take as input is kept the same way instead of being lost: when the chat's

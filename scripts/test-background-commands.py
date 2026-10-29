@@ -20,7 +20,7 @@ Drives an isolated workspace daemon with the echo provider (no paid model):
   running on the server. A run never moves a command to the background:
   a long one keeps its deadline (`shell_timeout_ms`, 8 s here), one the
   agent starts there stops at it, and a waiting run that gives up stops
-  what it waited for.
+  what it waited for, never a command of the chat it did not start.
 """
 import json
 import os
@@ -263,6 +263,20 @@ try:
         command(detached_chat, left[0]["id"])), "the detached command outlived its limit", 20)
     assert info["state"] == "timed_out", info
     ok("a run keeps deadlines, stops what it gave up on, and its background commands stop at their limit")
+
+    # A waiting run that continues a chat leaves the commands it did not start alone.
+    thread = chat()
+    finished(turn(thread, tool("bash", {"command": "echo dev; sleep 120", "run_in_background": True}), True))
+    server = last_result(thread)["metadata"]["command"]["id"]
+    began = time.monotonic()
+    continued = subprocess.run(args + ["run", "--session", thread, "--wait-background", "--background-timeout-ms",
+                                       "3000", tool("bash", {"command": "echo quick"})],
+                               env=env, capture_output=True, text=True, timeout=120)
+    assert continued.returncode == 0, continued.stderr
+    assert time.monotonic() - began < 3, "the run waited for a command it did not start"
+    assert command(thread, server)["state"] == "running", command(thread, server)
+    api(f"/threads/{thread}/commands/{server}/stop", {})
+    ok("a run that continues a chat waits for and stops only what it started")
 finally:
     if connection:
         subprocess.run(args + ["serve", "--stop"], env=env, capture_output=True, timeout=60)

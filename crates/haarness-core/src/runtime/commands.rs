@@ -33,16 +33,21 @@ pub(super) struct CommandHost {
 
 impl CommandHost {
     async fn checkpoint(&self, entry: &CommandEntry) {
+        self.record(entry, None).await;
+    }
+
+    /// Record its checkpoint, as it is or, with `ended`, as it ends.
+    async fn record(&self, entry: &CommandEntry, ended: Option<ShellCommandState>) {
         let info = entry.info();
         let data = ItemData::CommandState {
             call_id: info.call_id.clone(),
             command_id: info.id.clone(),
-            state: info.state,
+            state: ended.unwrap_or(info.state),
             exit_code: info.exit_code,
             signal: info.signal.clone(),
             tail: entry.checkpoint_tail(),
             started_at: info.started_at,
-            ended_at: info.ended_at,
+            ended_at: info.ended_at.or_else(|| ended.map(|_| chrono::Utc::now())),
             moved_by: info.moved_by,
         };
         match self
@@ -187,14 +192,22 @@ impl CommandHooks for CommandHost {
         }
     }
 
+    async fn decided(&self, entry: &CommandEntry, state: ShellCommandState) {
+        self.record(entry, Some(state)).await;
+    }
+
     async fn ended(&self, entry: &CommandEntry, notify: bool) {
         let info = entry.info();
         // A shutdown records nothing: the next start finds the command still
-        // running in the chat's record and says it was cut off.
-        if info.ended_by == Some(ShellCommandEndedBy::Shutdown) {
+        // running in the chat's record and says it was cut off. One that a
+        // person or the agent had begun to stop records its end; nobody is
+        // told of it.
+        if entry.cut_off_by_shutdown() {
             return;
         }
-        self.checkpoint(entry).await;
+        if !entry.end_recorded() {
+            self.checkpoint(entry).await;
+        }
         if info.state == ShellCommandState::TimedOut {
             let elapsed = info
                 .ended_at
@@ -345,8 +358,9 @@ impl AgentRuntime {
             .count()
     }
 
-    /// Stop every live command as the server shuts down.
-    pub(super) fn stop_commands_for_shutdown(&self) {
+    /// Stop every live command as the server shuts down (see
+    /// [`CommandEntry::stop_for_shutdown`]), and answer them, to wait for.
+    pub(super) async fn stop_commands_for_shutdown(&self) -> Vec<Arc<CommandEntry>> {
         let grace = std::time::Duration::from_millis(
             self.components()
                 .config
@@ -354,12 +368,22 @@ impl AgentRuntime {
                 .shell_stop_grace_ms
                 .min(1_000),
         );
-        for entry in self.shell_commands.live(|_| true) {
-            entry.stop(
-                ShellCommandEndedBy::Shutdown,
-                ShellCommandState::Stopped,
-                StopSequence::Graceful(grace),
-            );
+        let running = self.shell_commands.live(|_| true);
+        for entry in &running {
+            entry.stop_for_shutdown(grace).await;
+        }
+        running
+    }
+
+    /// Wait, at most `limit` in all, for `commands` to end.
+    pub(super) async fn settle_commands(
+        commands: Vec<Arc<CommandEntry>>,
+        limit: std::time::Duration,
+    ) {
+        let deadline = tokio::time::Instant::now() + limit;
+        for entry in commands {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            entry.settled(left).await;
         }
     }
 
