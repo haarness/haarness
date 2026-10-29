@@ -32,7 +32,15 @@ fn confirm<T: Copy + PartialEq>(pending: &mut Option<(T, std::time::Instant)>, t
     }
 }
 
-fn request_interrupt(app: &mut App, client: &ApiClient, target: InterruptTarget) {
+/// `stop_background`: an explicit stop of the session's work (Esc Esc with
+/// no reply running), which stops its commands in the background too; any
+/// other stop leaves them running.
+fn request_interrupt(
+    app: &mut App,
+    client: &ApiClient,
+    target: InterruptTarget,
+    stop_background: bool,
+) {
     app.phase = Some(PhaseInfo {
         state: "stopping".into(),
         tool: None,
@@ -50,17 +58,17 @@ fn request_interrupt(app: &mut App, client: &ApiClient, target: InterruptTarget)
     // A running turn belongs to the thread on screen. Stopping it stops that
     // whole tree, as Desktop's Stop does, and asks the server to answer any
     // steering the agent had not read yet rather than drop it; commands in
-    // the background keep running. With no reply running there is nothing to
-    // answer: stopping the session's work is a stop of everything, those
-    // commands included, which a stop that answers steering never is.
+    // the background keep running. A stop that does not answer steering, with
+    // no reply running, is a stop of everything, those commands included:
+    // only Esc Esc's explicit stop of the session's work asks for that. A
+    // session stop while the main reply still runs (from a child's view) is
+    // a Stop of that reply, which answers steering.
     let thread = app.thread.id;
-    // A session stop chosen while the main reply still runs (from a child's
-    // view) is a Stop of that reply, which answers steering.
-    let replying = app.root_active_turn.is_some();
+    let answer_steering = !stop_background || app.root_active_turn.is_some();
     tokio::spawn(async move {
         let result = match target {
             InterruptTarget::Turn(_) => client.interrupt_session(thread, true).await,
-            InterruptTarget::Session(root) => client.interrupt_session(root, replying).await,
+            InterruptTarget::Session(root) => client.interrupt_session(root, answer_steering).await,
             InterruptTarget::Quit => return,
         };
         if let Err(error) = result {
@@ -621,16 +629,17 @@ pub async fn handle_key_at(
         } else if let Some(turn) = app.active_turn {
             let target = InterruptTarget::Turn(turn);
             if confirm(&mut app.ctrl_c_action, target) {
-                request_interrupt(app, client, target);
+                request_interrupt(app, client, target, false);
             } else {
                 app.notice = "Press Ctrl+C again to interrupt".into();
             }
         } else if app.root_descendant_active_count() > 0 {
-            // Commands left in the background are not stopped this way: the
+            // Commands left in the background are not stopped this way, nor
+            // is quitting held up by them: with only them running, the
             // second press quits, and the server keeps them running.
             let target = InterruptTarget::Session(app.root_thread_id);
             if confirm(&mut app.ctrl_c_action, target) {
-                request_interrupt(app, client, target);
+                request_interrupt(app, client, target, false);
             } else {
                 app.notice = "Press Ctrl+C again to stop session work".into();
             }
@@ -1175,7 +1184,7 @@ pub async fn handle_key_at(
                 app.ctrl_c_action = None;
                 let target = InterruptTarget::Turn(turn);
                 if confirm(&mut app.escape_interrupt, target) {
-                    request_interrupt(app, client, target);
+                    request_interrupt(app, client, target, false);
                 } else {
                     app.notice = "Press Esc again to interrupt".into();
                 }
@@ -1183,21 +1192,30 @@ pub async fn handle_key_at(
                 app.ctrl_c_action = None;
                 let target = InterruptTarget::Session(app.root_thread_id);
                 if confirm(&mut app.escape_interrupt, target) {
-                    request_interrupt(app, client, target);
-                } else if app.root_descendant_active_count() > 0 {
-                    app.notice = "Press Esc again to stop session work".into();
+                    request_interrupt(app, client, target, true);
                 } else {
-                    // Only commands run: say which work the press stops.
+                    // Say which work the press stops: the commands in the
+                    // background go too.
                     let count = app.background_command_count();
-                    app.notice = if count == 1 {
-                        app.language
+                    let language = app.language;
+                    let number = count.to_string();
+                    let values = [("count", number.as_str())];
+                    app.notice = match (app.root_descendant_active_count() > 0, count) {
+                        (true, 0) => "Press Esc again to stop session work".into(),
+                        (true, 1) => language
+                            .text("Press Esc again to stop session work and 1 command in background")
+                            .to_owned(),
+                        (true, _) => language.format(
+                            "Press Esc again to stop session work and {count} commands in background",
+                            &values,
+                        ),
+                        (false, 1) => language
                             .text("Press Esc again to stop 1 command in background")
-                            .to_owned()
-                    } else {
-                        app.language.format(
+                            .to_owned(),
+                        (false, _) => language.format(
                             "Press Esc again to stop {count} commands in background",
-                            &[("count", &count.to_string())],
-                        )
+                            &values,
+                        ),
                     };
                 }
             } else {
