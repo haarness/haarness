@@ -1109,3 +1109,63 @@ async fn archiving_a_chat_while_a_command_stops_tells_nobody() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(notices(&runtime, thread).await.is_empty());
 }
+
+#[tokio::test]
+async fn a_chat_at_its_cap_keeps_a_long_command_in_the_foreground() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_background_per_chat = 1;
+        settings.shell_move_after_ms = 300;
+    });
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let server = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // It would move after 300 ms, but the chat runs as many in the
+    // background as it may: it stays, and the call waits for it.
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 1.5; echo held"}"#,
+        true,
+    )
+    .await;
+    let held = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(info) = runtime
+                .shell_commands(thread)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|info| info.id != server)
+            {
+                return info;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Nor can a person send it there.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(matches!(
+        runtime
+            .background_shell_commands(thread, Some(&held.id))
+            .await,
+        Err(haarness_core::CoreError::Conflict(_))
+    ));
+    wait_done(&runtime, &turn).await;
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert!(text.starts_with("exit: 0\nheld"), "{text}");
+    assert_eq!(metadata["command"]["background"], false);
+    runtime.stop_shell_command(thread, &server).await.unwrap();
+}

@@ -3886,7 +3886,7 @@ impl AgentRuntime {
             let entry = self.shell_command_entry(thread, id).await?;
             if !entry.send_to_background(ShellCommandMovedBy::Person).await {
                 return Err(CoreError::Conflict(format!(
-                    "Command {id} cannot move to the background: it has ended, already runs there, or belongs to a subagent"
+                    "Command {id} cannot move to the background: it has ended, already runs there, belongs to a subagent, or its chat runs as many commands there as it may"
                 )));
             }
             return Ok(vec![entry.info()]);

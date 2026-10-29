@@ -424,6 +424,9 @@ pub(crate) struct CommandPolicy {
     /// Its end is told to its chat when it runs in the background.
     delivers_notice: bool,
     per_chat: usize,
+    /// The deadline it gets when it cannot move because its chat runs as
+    /// many commands in the background as it may.
+    held_deadline: Option<Duration>,
 }
 
 impl CommandPolicy {
@@ -467,6 +470,7 @@ impl CommandPolicy {
             stop_grace: millis(settings.shell_stop_grace_ms),
             delivers_notice: !subagent,
             per_chat: settings.shell_background_per_chat,
+            held_deadline: deadline,
         }
     }
 
@@ -528,6 +532,8 @@ pub(crate) trait CommandHooks: Send + Sync {
 /// One command.
 pub(crate) struct CommandEntry {
     info: watch::Sender<ShellCommandInfo>,
+    /// The commands it is listed with, to count its chat's.
+    listed: std::sync::Weak<ShellCommands>,
     process: CommandProcess,
     /// The folder it runs in.
     cwd: PathBuf,
@@ -576,10 +582,54 @@ impl CommandEntry {
         self.info()
     }
 
+    /// Whether its chat runs as many commands in the background as it may.
+    fn chat_at_cap(&self) -> bool {
+        let cap = self.policy.per_chat;
+        let Some(listed) = self.listed.upgrade() else {
+            return false;
+        };
+        let (id, thread) = {
+            let info = self.info.borrow();
+            (info.id.clone(), info.thread_id)
+        };
+        cap > 0
+            && listed
+                .live(|entry| {
+                    let info = entry.info.borrow();
+                    info.background && info.thread_id == thread && info.id != id
+                })
+                .len()
+                >= cap
+    }
+
     /// Send it to the background while it runs in the foreground. Answers
-    /// whether it moved.
+    /// whether it moved. One whose chat runs as many commands in the
+    /// background as it may stays in the foreground; when its time to move
+    /// came (`Limit`), it gets the deadline it would have had otherwise.
     pub(crate) fn move_to_background(&self, by: ShellCommandMovedBy) -> bool {
         if by == ShellCommandMovedBy::Person && !self.policy.movable {
+            return false;
+        }
+        if self.chat_at_cap() {
+            if by == ShellCommandMovedBy::Limit {
+                let held = self.policy.held_deadline;
+                self.info.send_if_modified(|info| {
+                    if info.background || info.moves_at.is_none() {
+                        return false;
+                    }
+                    info.moves_at = None;
+                    info.stops_at = held.and_then(|limit| {
+                        chrono::Duration::from_std(limit)
+                            .ok()
+                            .map(|limit| info.started_at + limit)
+                    });
+                    true
+                });
+                self.wake.notify_one();
+                if self.announced.load(Ordering::SeqCst) {
+                    self.publish();
+                }
+            }
             return false;
         }
         let now = Utc::now();
@@ -1249,6 +1299,7 @@ impl ShellCall {
         }
         let entry = Arc::new(CommandEntry {
             info: watch::Sender::new(info.clone()),
+            listed: Arc::downgrade(&call.commands),
             process,
             cwd: request.cwd.clone(),
             policy,
@@ -2268,6 +2319,7 @@ mod tests {
             let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
             let now = Utc::now();
             Arc::new(CommandEntry {
+                listed: std::sync::Weak::new(),
                 info: watch::Sender::new(ShellCommandInfo {
                     id: id.into(),
                     thread_id: thread,
