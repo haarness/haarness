@@ -162,7 +162,8 @@ try:
         _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/login?next={target}'})
         result = finish(thread, before)
         assert not result['is_error'], result
-        assert 'which the permission rules do not let this fetch follow' in result['output'], (target, result)
+        assert 'which a permission rule denies' in result['output'], (target, result)
+        assert 'Call webfetch' not in result['output'], (target, result)
         assert result['metadata']['redirect'].startswith(f'http://127.0.0.1:{port}/'), result
     _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/login?next=/landing'})
     result = finish(thread, before)
@@ -180,7 +181,7 @@ try:
         '  return { stopped, followed }\n} })\n')
     before_requests = len(requests)
     output = run([str(binary), '--workspace', str(workspace), 'workflow', 'run', 'fetcher'], env=env)
-    assert 'which the permission rules do not let this fetch follow' in output, output
+    assert 'which a permission rule denies' in output, output
     assert 'same-host-landing-proof' in output, output
     assert not any(path == f'127.0.0.1:{port}/private' for path in requests[before_requests:]), requests
     check("a workflow's own fetch meets the same rules on a redirect")

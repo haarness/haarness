@@ -1409,22 +1409,38 @@ struct FetchRules {
     asked: String,
 }
 
-/// Why a fetch does not follow a redirect to `to` that a fetch of `from`
-/// met, or `None` when it does. A redirect off the address asked for is not
-/// followed (see [`redirect_leaves`]), nor is one on it whose new address
-/// the call's rules do not let it reach (see
+/// Why a fetch does not follow a redirect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectStop {
+    /// It leaves the address asked for, as the reason says.
+    Leaves(&'static str),
+    /// A permission rule denies its address.
+    Denied,
+    /// Its address needs an approval this fetch did not get.
+    Unapproved,
+}
+
+/// Why a fetch of `asked` does not follow a redirect from `from` (the
+/// address that answered) to `to`, or `None` when it does. A redirect off
+/// the address asked for is not followed (see [`redirect_leaves`]), nor one
+/// from https back to plain http, nor one whose new address the call's
+/// rules do not let it reach (see
 /// [`haarness_core::webfetch_redirect_verdict`]), so an allowed address
-/// cannot lead past a denied one: the fetch returns the new address, and
-/// fetching that is the model's next call, checked against the rules like
-/// any other.
+/// cannot lead past a denied one.
 fn redirect_stop(
+    asked: &url::Url,
     from: &url::Url,
     to: &url::Url,
     rules: Option<&FetchRules>,
-) -> Option<&'static str> {
+) -> Option<RedirectStop> {
     use haarness_core::PermissionDecision;
-    if let Some(leaves) = redirect_leaves(from, to) {
-        return Some(leaves);
+    if let Some(leaves) = redirect_leaves(asked, to) {
+        return Some(RedirectStop::Leaves(leaves));
+    }
+    if from.scheme() == "https" && to.scheme() == "http" {
+        return Some(RedirectStop::Leaves(
+            "which leaves https for unencrypted http",
+        ));
     }
     let verdict = rules.map_or(PermissionDecision::Allow, |rules| {
         haarness_core::webfetch_redirect_verdict(&rules.rules, &rules.asked, to.as_str())
@@ -1437,7 +1453,19 @@ fn redirect_stop(
         denied = verdict == PermissionDecision::Deny,
         "webfetch did not follow a redirect its permission rules do not allow"
     );
-    Some("which the permission rules do not let this fetch follow")
+    Some(if verdict == PermissionDecision::Deny {
+        RedirectStop::Denied
+    } else {
+        RedirectStop::Unapproved
+    })
+}
+
+/// Whether a request to `to` goes to the same place as one to `from`: the
+/// same scheme, host and port, where the HTTP client sent a sign-in on.
+fn same_origin(from: &url::Url, to: &url::Url) -> bool {
+    from.scheme() == to.scheme()
+        && from.host_str() == to.host_str()
+        && from.port_or_known_default() == to.port_or_known_default()
 }
 
 /// How a redirect leaves the address a fetch asked for, or `None` when it
@@ -1491,7 +1519,8 @@ fn redirect_target(response: &reqwest::Response) -> Option<url::Url> {
     response
         .headers()
         .get(reqwest::header::LOCATION)
-        .and_then(|value| value.to_str().ok())
+        // As the HTTP client read it: any UTF-8, not only visible ASCII.
+        .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
         .and_then(|location| response.url().join(location).ok())
 }
 
@@ -1520,10 +1549,10 @@ async fn fetch_page(
         if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
             let reason =
                 redirect_leaves(&url, &target).unwrap_or("which leaves the address asked for");
-            break Some((target, reason));
+            break Some((target, RedirectStop::Leaves(reason)));
         }
-        if let Some(reason) = redirect_stop(&url, &target, rules) {
-            break Some((target, reason));
+        if let Some(stop) = redirect_stop(&url, response.url(), &target, rules) {
+            break Some((target, stop));
         }
         if followed == WEBFETCH_REDIRECTS {
             return Err(CoreError::Tool(format!(
@@ -1532,12 +1561,9 @@ async fn fetch_page(
         }
         followed += 1;
         let from = response.url();
-        if from.host_str() != target.host_str()
-            || from.port_or_known_default() != target.port_or_known_default()
-            || from.scheme() != target.scheme()
-        {
-            signed_in = false;
-        }
+        signed_in &= same_origin(from, &target);
+        // Never from https to http: `redirect_stop` stops those, so the
+        // `Referer` the client sent on every followed redirect goes too.
         let mut referer = from.clone();
         let _ = referer.set_username("");
         let _ = referer.set_password(None);
@@ -1554,14 +1580,27 @@ async fn fetch_page(
             .await
             .map_err(tool_error)?;
     };
-    if let Some((target, reason)) = stop {
+    if let Some((target, stop)) = stop {
+        let (from, status) = (response.url(), response.status().as_u16());
+        let reason = match stop {
+            RedirectStop::Denied => {
+                return Ok(ToolOutput {
+                    text: format!(
+                        "{from} redirects (HTTP {status}) to {target}, which a permission rule \
+                         denies, so the redirect was not followed. This is configured policy — \
+                         do not fetch that address."
+                    ),
+                    metadata: json!({"redirect": target.as_str(), "denied": true}),
+                });
+            }
+            RedirectStop::Leaves(reason) => reason,
+            RedirectStop::Unapproved => "which the permission rules do not let this fetch follow",
+        };
         return Ok(ToolOutput {
             text: format!(
-                "{} redirects (HTTP {}) to {target}, {reason}, so the redirect was not \
-                 followed. Call webfetch with {target} to read it; that fetch is checked \
-                 against the permission rules like any other.",
-                response.url(),
-                response.status().as_u16(),
+                "{from} redirects (HTTP {status}) to {target}, {reason}, so the redirect was not \
+                 followed. Call webfetch with {target} to read it; that fetch is checked against \
+                 the permission rules like any other."
             ),
             metadata: json!({"redirect": target.as_str()}),
         });
@@ -9083,15 +9122,17 @@ mod webfetch_tests {
         )]);
         let output = fetch_under(rules, format!("http://{address}/login?next=/admin/x")).await;
         let target = format!("http://{address}/admin/x");
-        assert!(
-            output.text.contains(&format!(
-                "redirects (HTTP 302) to {target}, which the permission rules do not let this \
-                 fetch follow, so the redirect was not followed. Call webfetch with {target}"
-            )),
-            "{}",
-            output.text
+        // No advice to fetch what a rule denies.
+        assert_eq!(
+            output.text,
+            format!(
+                "http://{address}/login?next=/admin/x redirects (HTTP 302) to {target}, which a \
+                 permission rule denies, so the redirect was not followed. This is configured \
+                 policy — do not fetch that address."
+            )
         );
         assert_eq!(output.metadata["redirect"], target);
+        assert_eq!(output.metadata["denied"], true);
         assert_eq!(requested_paths(&requests), ["/login?next=/admin/x"]);
         server.abort();
     }
@@ -9121,6 +9162,190 @@ mod webfetch_tests {
         );
         assert_eq!(requested_paths(&requests), ["/docs/start", "/docs/moved"]);
         server.abort();
+    }
+
+    /// A server that answers each path with its status: a redirect to the
+    /// `Location` given, or a page with the body given. It records each
+    /// request line.
+    async fn status_server(
+        routes: Vec<(String, u16, String)>,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, request) = accept_request(&listener).await;
+                let line = request.lines().next().unwrap_or_default().to_owned();
+                let path = line.split(' ').nth(1).unwrap_or_default().to_owned();
+                seen.lock().unwrap().push(line);
+                let reply = match routes.iter().find(|(known, ..)| *known == path) {
+                    Some((_, status, location)) if (300..400).contains(status) => format!(
+                        "HTTP/1.1 {status} Moved\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    Some((_, status, body)) => format!(
+                        "HTTP/1.1 {status} OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    }
+                };
+                let _ = stream.write_all(reply.as_bytes()).await;
+            }
+        });
+        (address, requests, server)
+    }
+
+    #[tokio::test]
+    async fn a_fetch_follows_ten_redirects_and_no_more() {
+        let mut routes: Vec<(String, u16, String)> = (0..11)
+            .map(|hop| (format!("/r{hop}"), 302, format!("/r{}", hop + 1)))
+            .collect();
+        routes.push(("/r11".into(), 200, "LAST".into()));
+        let (address, requests, server) = status_server(routes.clone()).await;
+        let error = webfetch_tool()
+            .execute(
+                json!({"url": format!("http://{address}/r0")}),
+                composite_context(&std::env::current_dir().unwrap()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("redirects more than 10 times"),
+            "{error}"
+        );
+        // The first address and the ten redirects it was given.
+        assert_eq!(requests.lock().unwrap().len(), 11);
+        server.abort();
+        // Ten are followed.
+        routes[10] = ("/r10".into(), 200, "TENTH".into());
+        let (address, requests, server) = status_server(routes).await;
+        let output = webfetch_tool()
+            .execute(
+                json!({"url": format!("http://{address}/r0")}),
+                composite_context(&std::env::current_dir().unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.text, "TENTH");
+        assert_eq!(requests.lock().unwrap().len(), 11);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn redirect_statuses_are_followed_as_the_client_followed_them() {
+        for status in [301, 302, 303, 307, 308] {
+            let (address, requests, server) = status_server(vec![
+                ("/start".into(), status, "/end".into()),
+                ("/end".into(), 200, "END".into()),
+            ])
+            .await;
+            let output = webfetch_tool()
+                .execute(
+                    json!({"url": format!("http://{address}/start")}),
+                    composite_context(&std::env::current_dir().unwrap()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(output.text, "END", "{status}");
+            // A fetch only reads: every redirect is followed with GET.
+            assert_eq!(
+                *requests.lock().unwrap(),
+                ["GET /start HTTP/1.1", "GET /end HTTP/1.1"],
+                "{status}"
+            );
+            server.abort();
+        }
+        // Other redirect statuses name a place without being followed.
+        for status in [300, 304] {
+            let (address, requests, server) = status_server(vec![
+                ("/start".into(), status, "/end".into()),
+                ("/end".into(), 200, "END".into()),
+            ])
+            .await;
+            let output = webfetch_tool()
+                .execute(
+                    json!({"url": format!("http://{address}/start")}),
+                    composite_context(&std::env::current_dir().unwrap()),
+                )
+                .await
+                .unwrap();
+            assert!(
+                output.text.starts_with(&format!(
+                    "http://{address}/start redirects (HTTP {status}) to http://{address}/end, \
+                     which leaves the address asked for"
+                )),
+                "{status}: {}",
+                output.text
+            );
+            assert_eq!(requests.lock().unwrap().len(), 1, "{status}");
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_location_in_utf8_is_followed() {
+        let (address, requests, server) = status_server(vec![
+            ("/start".into(), 302, "/café".into()),
+            ("/caf%C3%A9".into(), 200, "CAFE".into()),
+        ])
+        .await;
+        let output = webfetch_tool()
+            .execute(
+                json!({"url": format!("http://{address}/start")}),
+                composite_context(&std::env::current_dir().unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.text, "CAFE");
+        assert_eq!(requests.lock().unwrap()[1], "GET /caf%C3%A9 HTTP/1.1");
+        server.abort();
+    }
+
+    #[test]
+    fn a_sign_in_and_plain_http_stay_behind_a_change_of_scheme() {
+        let url = |value: &str| url::Url::parse(value).unwrap();
+        // The sign-in goes on to the same scheme, host and port only.
+        assert!(same_origin(
+            &url("http://a.example/x"),
+            &url("http://a.example/y")
+        ));
+        for (from, to) in [
+            ("http://a.example/", "https://a.example/"),
+            ("http://a.example/", "http://a.example:8080/"),
+            ("https://a.example/", "https://b.example/"),
+        ] {
+            assert!(!same_origin(&url(from), &url(to)), "{from} -> {to}");
+        }
+        // Back from https to http is judged against the address that
+        // answered, not only the one asked for.
+        assert_eq!(
+            redirect_stop(
+                &url("http://a.example/start"),
+                &url("https://a.example/secure"),
+                &url("http://a.example/plain"),
+                None,
+            ),
+            Some(RedirectStop::Leaves(
+                "which leaves https for unencrypted http"
+            ))
+        );
+        assert_eq!(
+            redirect_stop(
+                &url("http://a.example/start"),
+                &url("http://a.example/next"),
+                &url("http://a.example/plain"),
+                None,
+            ),
+            None
+        );
     }
 
     #[tokio::test]
