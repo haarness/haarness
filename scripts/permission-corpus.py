@@ -120,6 +120,9 @@ CORPUS = [
     'echo "rm -rf victim" | sudo --shell', 'sudo -c staff rm -rf victim',
     'env "-C$HOME/.ssh" cat id_rsa', 'sudo "-u$U" rm -rf victim', 'timeout "-s$S" 5 rm -rf victim',
     'cd src > >(cat) && cat ../README.md', 'env -C src cat ../README.md > >(cat)',
+    'env "-C$HOME"/.ssh cat id_rsa', 'env "--chdir=$HOME"/.ssh cat id_rsa', 'sudo "-D$HOME"/.ssh cat id_rsa',
+    'env "-C"$HOME/.ssh cat id_rsa', "env '-C'$HOME/.ssh cat id_rsa", 'env "-C""$HOME/.ssh" cat id_rsa',
+    'env "-C${HOME}"/.ssh cat id_rsa', 'xargs "-r$X" rm < files.txt',
     # Lines of assignments
     'A=1 B=2\nnpm test', 'PORT=3000 HOST=0.0.0.0\nnpm start', 'A=1\n! cat ../outside/x', 'A=1 B=2\n! rm -rf victim',
     'A=1\nif true; then rm -rf victim; fi', 'A=1 B=2\n{ rm -rf victim; }', 'A=1 B=2 # note\nrm -rf victim',

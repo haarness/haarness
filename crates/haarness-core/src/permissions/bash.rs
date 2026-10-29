@@ -2027,7 +2027,13 @@ impl Reader<'_> {
             // `xargs rm`: the paths come from its input, where nobody can
             // place them.
             "xargs" => {
-                let program = Options::xargs(arguments).rest.first();
+                // A cluster of flags with an expansion in it (`-r$X`) is
+                // still options here: the program is the first word that is
+                // not one.
+                let program = Options::xargs(arguments)
+                    .rest
+                    .iter()
+                    .find(|word| !word.value.starts_with('-'));
                 if let Some(program) =
                     program.filter(|word| DESTROYERS.contains(&program_name(&word.value).as_str()))
                 {
@@ -2354,26 +2360,10 @@ fn given_paths(given: &Given<'_, '_>, source: &str) -> Vec<Path_> {
             })
             .collect();
     }
-    if !word.literal && matches!(word.node.kind(), "concatenation" | "string") {
-        let parts: Vec<_> = word.node.named_children(&mut word.node.walk()).collect();
-        if let [option, first, rest @ ..] = parts.as_slice()
-            && node_text(*option, source) == prefix
-        {
-            let (mut value, mut complete) = path_literal(*first, source);
-            for part in rest {
-                if !complete {
-                    break;
-                }
-                let (text, whole) = literal(*part, source);
-                value.push_str(&text);
-                complete = whole;
-            }
-            return vec![Path_ {
-                raw: word.raw.clone(),
-                value,
-                complete,
-            }];
-        }
+    if !word.literal
+        && let Some(path) = after_option(word, prefix.len(), source)
+    {
+        return vec![path];
     }
     let known = if word.literal {
         given.value.len()
@@ -2385,6 +2375,63 @@ fn given_paths(given: &Given<'_, '_>, source: &str) -> Vec<Path_> {
         value: given.value[..known].to_owned(),
         complete: word.literal,
     }]
+}
+
+/// The value written after the option's own `skip` bytes of literal text in
+/// `word`, read as [`path_literal`] reads a path: its parts as the shell
+/// joins them, a double-quoted string's own parts in its place, so
+/// `"-C$HOME"/.ssh`, `'-C'$HOME/.ssh` and `"-C""$HOME/.ssh"` are the home
+/// folder's `.ssh`. `None` when an expansion stands in the option's text.
+fn after_option(word: &Word<'_>, mut skip: usize, source: &str) -> Option<Path_> {
+    let mut parts = Vec::new();
+    let mut stack = vec![word.node];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "concatenation" | "string") {
+            let mut children: Vec<_> = node.named_children(&mut node.walk()).collect();
+            children.reverse();
+            stack.extend(children);
+        } else {
+            parts.push(node);
+        }
+    }
+    let mut value = String::new();
+    // Whether the value has begun: its first part may be a folder variable.
+    let mut started = false;
+    for part in parts {
+        if skip > 0 {
+            let (text, whole) = literal(part, source);
+            if !whole {
+                return None;
+            }
+            if text.len() <= skip {
+                skip -= text.len();
+                continue;
+            }
+            value.push_str(text.get(skip..)?);
+            started = true;
+            skip = 0;
+            continue;
+        }
+        let (text, whole) = if started {
+            literal(part, source)
+        } else {
+            path_literal(part, source)
+        };
+        started = true;
+        value.push_str(&text);
+        if !whole {
+            return Some(Path_ {
+                raw: word.raw.clone(),
+                value,
+                complete: false,
+            });
+        }
+    }
+    (skip == 0).then(|| Path_ {
+        raw: word.raw.clone(),
+        value,
+        complete: true,
+    })
 }
 
 /// How many words a brace list may expand to before it is too many to read.
@@ -7772,6 +7819,13 @@ mod wrappers {
                 );
             }
         }
+        // A cluster of flags with an expansion in it: what xargs runs is
+        // still told to Auto's reviewer.
+        let deletions = analyze("xargs \"-r$X\" rm < list.txt", &workspace).deletions;
+        assert!(
+            deletions.iter().any(|deletion| deletion.raw == "xargs rm"),
+            "{deletions:?}"
+        );
     }
 
     #[test]
@@ -7881,6 +7935,36 @@ mod wrappers {
                 "sudo \"-D$HOME\" cat .ssh/id_rsa",
                 "cd \"$HOME\" && cat .ssh/id_rsa",
             ),
+            // The option's text and the value in parts of their own.
+            (
+                "env \"-C$HOME\"/.ssh cat id_rsa",
+                "cd \"$HOME\"/.ssh && cat id_rsa",
+            ),
+            (
+                "env \"--chdir=$HOME\"/.ssh cat id_rsa",
+                "cd \"$HOME\"/.ssh && cat id_rsa",
+            ),
+            (
+                "sudo \"-D$HOME\"/.ssh cat id_rsa",
+                "cd \"$HOME\"/.ssh && cat id_rsa",
+            ),
+            (
+                "env \"-C\"$HOME/.ssh cat id_rsa",
+                "cd $HOME/.ssh && cat id_rsa",
+            ),
+            (
+                "env '-C'$HOME/.ssh cat id_rsa",
+                "cd $HOME/.ssh && cat id_rsa",
+            ),
+            (
+                "env \"-C\"\"$HOME/.ssh\" cat id_rsa",
+                "cd \"$HOME/.ssh\" && cat id_rsa",
+            ),
+            (
+                "env \"-C${HOME}\"/.ssh cat id_rsa",
+                "cd \"${HOME}\"/.ssh && cat id_rsa",
+            ),
+            ("env \"-C/tmp/$D\" cat x", "cd \"/tmp/$D\" && cat x"),
             (
                 "env --chd /tmp cat haarness-no-such-file",
                 "cd /tmp && cat haarness-no-such-file",
@@ -7899,6 +7983,13 @@ mod wrappers {
             "env --chdir=$HOME/.ssh cat id_rsa",
             "sudo -D\"$HOME\" cat .ssh/id_rsa",
             "env \"-C$HOME/.ssh\" cat id_rsa",
+            "env \"-C$HOME\"/.ssh cat id_rsa",
+            "env \"--chdir=$HOME\"/.ssh cat id_rsa",
+            "sudo \"-D$HOME\"/.ssh cat id_rsa",
+            "env \"-C\"$HOME/.ssh cat id_rsa",
+            "env '-C'$HOME/.ssh cat id_rsa",
+            "env \"-C\"\"$HOME/.ssh\" cat id_rsa",
+            "env \"-C${HOME}\"/.ssh cat id_rsa",
         ] {
             assert!(
                 !analyze(command, &workspace).external_dirs.is_empty(),
