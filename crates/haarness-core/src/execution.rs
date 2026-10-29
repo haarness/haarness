@@ -46,6 +46,13 @@ pub struct ExecutionSettings {
     /// never configured.
     #[serde(skip)]
     pub chat_home: Option<std::path::PathBuf>,
+    /// The command a `bash` call of an agent's turn runs: registered so
+    /// clients follow it and it can move to the background. `None` for a
+    /// person's own command, a workflow's `shell()` and a definition's
+    /// snippet, which run in the foreground as they always did. Set per call
+    /// by the runtime, never configured.
+    #[serde(skip)]
+    pub shell_call: Option<crate::ShellCall>,
 }
 
 impl Default for ExecutionSettings {
@@ -67,6 +74,7 @@ impl Default for ExecutionSettings {
             shell_env: std::collections::BTreeMap::new(),
             person_shell: false,
             chat_home: None,
+            shell_call: None,
         }
     }
 }

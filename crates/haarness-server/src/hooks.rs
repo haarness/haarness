@@ -1176,7 +1176,12 @@ pub fn matcher_target(event: &str) -> MatcherTarget {
         "PermissionRequest" => MatcherTarget::Permission,
         "SessionStart" => MatcherTarget::Values(&["startup"]),
         "SessionEnd" => MatcherTarget::Values(&["archived"]),
-        "Notification" => MatcherTarget::Values(&["permission_prompt", "turn_completed"]),
+        "Notification" => MatcherTarget::Values(&[
+            "permission_prompt",
+            "turn_completed",
+            "command_moved",
+            "command_time_limit",
+        ]),
         "PostCompact" => MatcherTarget::Values(&["manual", "automatic"]),
         "StopFailure" => MatcherTarget::Values(&[
             "authentication_failed",
@@ -1522,6 +1527,35 @@ impl HookPort for ConfiguredHooks {
                     "notification_type": kind,
                     "message": message,
                 }),
+                self.folders(Some(call)),
+            )
+            .await;
+    }
+
+    async fn command_notification(
+        &self,
+        call: &HookCall,
+        kind: &str,
+        message: &str,
+        detail: &Value,
+    ) {
+        let mut payload = json!({
+            "hook_event_name": "Notification",
+            "session_id": call.thread,
+            "cwd": self.folders(Some(call)).cwd,
+            "notification_type": kind,
+            "message": message,
+        });
+        if let (Some(target), Some(extra)) = (payload.as_object_mut(), detail.as_object()) {
+            for (key, value) in extra {
+                target.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        let _ = self
+            .run_event(
+                "Notification",
+                Some(kind),
+                &payload,
                 self.folders(Some(call)),
             )
             .await;
@@ -2293,6 +2327,48 @@ mod tests {
             .filter(|line| !line.trim().is_empty())
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn command_notifications_carry_the_command_and_never_its_output() {
+        let thread = ThreadId::new();
+        let events = captured(
+            json!({"Notification": [{"matcher": "command_moved|command_time_limit"}]}),
+            async |hooks| {
+                hooks
+                    .command_notification(
+                        &HookCall::new(thread),
+                        "command_moved",
+                        "A command moved to the background",
+                        &json!({"command_id":"cmd-1","reason":"limit","elapsed_ms":60000}),
+                    )
+                    .await;
+                hooks
+                    .notification(&HookCall::new(thread), "turn_completed", "Session completed")
+                    .await;
+                hooks
+                    .command_notification(
+                        &HookCall::new(thread),
+                        "command_time_limit",
+                        "A command in the background ran out of time",
+                        &json!({"command_id":"cmd-2","reason":"time_limit","elapsed_ms":5000,"notification_type":"spoofed"}),
+                    )
+                    .await;
+            },
+        )
+        .await;
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[0]["notification_type"], "command_moved");
+        assert_eq!(events[0]["command_id"], "cmd-1");
+        assert_eq!(events[0]["reason"], "limit");
+        assert_eq!(events[0]["elapsed_ms"], 60000);
+        // A detail never replaces what the event itself says.
+        assert_eq!(events[1]["notification_type"], "command_time_limit");
+        assert_eq!(events[1]["session_id"], json!(thread));
+        assert!(matches!(
+            matcher_target("Notification"),
+            MatcherTarget::Values(values) if values.contains(&"command_moved")
+        ));
     }
 
     #[tokio::test]

@@ -107,7 +107,7 @@ A chat can also be created with a folder of its own: `directory`, as `<date>/<na
 
 - `POST /v1/threads/{id}/background[?childThreadId=...]` to promote running foreground subagents
 - `GET /v1/threads/{id}/commands`, `GET /v1/threads/{id}/commands/{command}`, `GET …/commands/{command}/output`, `POST …/commands/{command}/stop`, `POST /v1/threads/{id}/commands/background[?commandId=...]` and `GET /v1/commands/active` for the agents' shell commands (`background-commands.v1`; see [agent commands in the background](#agent-commands-in-the-background))
-- `POST /v1/threads/{id}/interrupt` to stop every active turn, child task, and workflow in that root conversation. Add `?resume=true` for an interactive Stop: steering the agent has not answered yet is answered by a continuation turn (see [Steer and Queue](INPUT-QUEUE.md))
+- `POST /v1/threads/{id}/interrupt` to stop every active turn, child task, and workflow in that root conversation. Add `?resume=true` for an interactive Stop: steering the agent has not answered yet is answered by a continuation turn (see [Steer and Queue](INPUT-QUEUE.md)). The agents' shell commands in the background keep running while the chat replies, and on a `resume=true` stop; without `resume`, and with no turn running in the chat, they are stopped too
 - `POST /v1/threads/{id}/goal` for tagged goal lifecycle actions
 - `GET /v1/turns/active`, `GET /v1/turns/{id}`, `POST /interrupt` (`?resume=true` as above), `GET /wait?timeout_ms=N` (default 30 s, at most 300 s; a turn still running then answers `409`)
 - `GET /v1/permissions`, `/v1/questions`; `POST /v1/permissions/{id}`, `/v1/questions/{id}`.
@@ -430,6 +430,14 @@ command that completed. Enums may gain values; an unknown one reads as
 - `GET /v1/commands/active` lists the running commands of every chat, as
   `/v1/turns/active` lists turns; a published chat sees those of its tree.
 
+Two kinds of command share these paths. `GET /v1/commands` and
+`POST /v1/threads/{id}/commands` are about slash commands (`/review`, a
+workflow): the first lists them, the second runs one. `GET
+/v1/threads/{id}/commands` and everything under `/v1/threads/{id}/commands/…`,
+and `GET /v1/commands/active`, are about the shell commands agents run. The
+SDKs keep them apart by name (`commands` and `executeCommand` beside
+`listShellCommands` … `activeShellCommands`).
+
 `GET /v1/threads/{id}/activity` adds `backgroundCommands`, the commands of the
 chat tree running in the background. They are not in `background`: a dev
 server may run for hours, and the chat is done meanwhile; each one's end
@@ -444,7 +452,16 @@ carries `{id, size}`, at most once a second per command, when it printed more
 (read the text from `/output`).
 
 The result of every agent `bash` call carries `metadata.command`:
-`{id, background, startedAt}`. A command in the background also leaves
+`{id, background, startedAt}` (a call that ran out of time or was stopped
+answers with an error instead; its command is still listed), and `metadata.leftovers: true` when the command
+ended while processes it started (`server &`) still ran and were stopped with
+it; any `bash` call, a person's too, no longer waits for those. Once a command
+has ended, `deliversNotice` says whether its end was told to its chat: not for
+one the agent stopped itself, or one stopped with its chat, its subagent's turn
+or Haarness. Hooks get `Notification` events `command_moved` (with
+`command_id`, `reason`: `person` or `limit`, and `elapsed_ms`) and
+`command_time_limit` (a command in the background ran out of time), never its
+output. A command in the background also leaves
 `command_state` items in its chat, when it starts or moves there and when it
 ends: `{call_id, command_id, state, exit_code?, signal?, tail, started_at,
 ended_at?, moved_by?}`, `tail` being the end of its output (at most 4 KiB).

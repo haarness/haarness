@@ -306,6 +306,9 @@ struct BackgroundTask {
     delivery_auto_approve: bool,
     delivery_unattended: bool,
     delivery_tools: Option<HashMap<String, bool>>,
+    /// The turn its result starts keeps the launching client's
+    /// `follows_background`.
+    delivery_follows_background: bool,
     suppress_delivery: AtomicBool,
     /// Stopped because the server is shutting down: its checkpoint is left
     /// in the background, so the next start tells the parent it stopped.
@@ -2444,6 +2447,28 @@ impl AgentRuntime {
                 json!(item),
             );
         }
+        // So is a shell command that ran in the background.
+        for item in self
+            .repository
+            .recover_interrupted_commands(&commands::interrupted_report)
+            .await?
+        {
+            let root = match self.repository.get_thread(item.thread_id).await {
+                Ok(thread) => self.resolve_root(&thread).await,
+                Err(_) => item.thread_id,
+            };
+            if matches!(item.data, ItemData::CommandState { .. }) {
+                info!(chat = %item.thread_id, "recorded a background command the restart stopped");
+            }
+            self.events.publish_scoped(
+                "item.created",
+                Some(item.thread_id),
+                Some(root),
+                item.turn_id,
+                Some(item.id),
+                json!(item),
+            );
+        }
 
         // A process restart cannot retain the provider/tool program counter.
         // Never leave a durable goal claiming to be actively pursuing while
@@ -3262,6 +3287,13 @@ impl AgentRuntime {
             json!(thread),
         );
         if archiving && thread.archived {
+            // An archived chat's commands stop, untold.
+            if let Ok(threads) = self.thread_tree_ids(id).await {
+                self.stop_commands_of(
+                    &threads,
+                    haarness_protocol::ShellCommandEndedBy::ChatStopped,
+                );
+            }
             if let Some(hooks) = &self.components().hooks {
                 let call = self.hook_call(&thread, None).await;
                 hooks.session_end(&call, "archived").await;
@@ -3780,19 +3812,8 @@ impl AgentRuntime {
         limit: Option<u64>,
         tail: bool,
     ) -> CoreResult<ShellCommandOutput> {
-        let info = self.shell_command_entry(thread, id).await?.info();
-        let _ = (limit, tail);
-        let cursor = cursor.unwrap_or(0).min(info.output_bytes);
-        Ok(ShellCommandOutput {
-            text: String::new(),
-            start: cursor,
-            cursor,
-            size: info.output_bytes,
-            more: false,
-            settled: !info.state.is_live(),
-            state: info.state,
-            exit_code: info.exit_code,
-        })
+        let entry = self.shell_command_entry(thread, id).await?;
+        crate::background_commands::client_page(&entry, cursor, limit, tail).await
     }
 
     /// Stop the command `id` of `thread` or a chat under it, for a person.
@@ -3803,7 +3824,8 @@ impl AgentRuntime {
         thread: ThreadId,
         id: &str,
     ) -> CoreResult<ShellCommandInfo> {
-        Ok(self.shell_command_entry(thread, id).await?.info())
+        let entry = self.shell_command_entry(thread, id).await?;
+        Ok(self.stop_command_for_person(&entry))
     }
 
     /// Send `thread`'s running foreground commands (the one `id` when given)
@@ -3815,17 +3837,27 @@ impl AgentRuntime {
         thread: ThreadId,
         id: Option<&str>,
     ) -> CoreResult<Vec<ShellCommandInfo>> {
+        use haarness_protocol::ShellCommandMovedBy;
         if let Some(id) = id {
-            let info = self.shell_command_entry(thread, id).await?.info();
-            if !info.background {
+            let entry = self.shell_command_entry(thread, id).await?;
+            if !entry.send_to_background(ShellCommandMovedBy::Person).await {
                 return Err(CoreError::Conflict(format!(
-                    "command {id} cannot move to the background"
+                    "Command {id} cannot move to the background: it has ended, already runs there, or belongs to a subagent"
                 )));
             }
-            return Ok(vec![info]);
+            return Ok(vec![entry.info()]);
         }
-        self.thread_tree_ids(thread).await?;
-        Ok(Vec::new())
+        let threads = self.thread_tree_ids(thread).await?;
+        let mut moved = Vec::new();
+        for entry in self.shell_commands.live(|entry| {
+            let info = entry.info();
+            !info.background && threads.contains(&info.thread_id)
+        }) {
+            if entry.send_to_background(ShellCommandMovedBy::Person).await {
+                moved.push(entry.info());
+            }
+        }
+        Ok(moved)
     }
 
     /// Let the background count read the workflow runs a thread launched
@@ -4068,6 +4100,18 @@ impl AgentRuntime {
         answer_steer: bool,
     ) -> CoreResult<u64> {
         let thread_ids = self.thread_tree_ids(root).await?;
+        // A stop while the chat replies ends the reply and its foreground
+        // commands and leaves its commands in the background running (a dev
+        // server outlives a change of course). An explicit stop while it is
+        // idle is a stop of everything, those commands included; a
+        // composer's Stop (`answer_steer`) that lands just after the reply
+        // ended is not.
+        if !answer_steer && !self.active.contains_key(&root) {
+            self.stop_commands_of(
+                &thread_ids,
+                haarness_protocol::ShellCommandEndedBy::ChatStopped,
+            );
+        }
 
         let tasks = self
             .background_tasks
@@ -6948,6 +6992,7 @@ impl AgentRuntime {
     /// cancellation cleanup, after which any straggler is made durably
     /// interrupted so a restart can never display a phantom running turn.
     pub async fn interrupt_active_turns(&self, reason: &str) -> CoreResult<u64> {
+        self.stop_commands_for_shutdown();
         for task in self
             .background_tasks
             .iter()
@@ -8323,6 +8368,9 @@ impl RunnerTask {
                 }
             }
         }
+        // A subagent's commands stop with its turn, before its last
+        // checkpoint; every other command of the turn may now tell its end.
+        self.end_turn_commands().await;
         // Capture any tail after the last provider event (including tool or
         // question waits on an error path) before changing goal status.
         let _ = self.checkpoint_goal_accounting(None).await;
@@ -10262,6 +10310,9 @@ impl RunnerTask {
                     if name == "task" {
                         self.release_task_delivery(&call_id);
                     }
+                    // A command it started (in a batch or a code block too)
+                    // may now tell its end.
+                    self.release_command_delivery(&call_id);
                 }
             }
         })
@@ -11199,6 +11250,11 @@ impl RunnerTask {
         {
             execution.shell_env = hooks.shell_env(self.thread.id, &self.workspace).await;
         }
+        // An agent's command is registered, so it can be followed and moved
+        // to the background; a definition's snippet runs as it always did.
+        if name == "bash" && definition_shell.is_none() {
+            execution.shell_call = Some(self.shell_call(call_id));
+        }
         // A snippet was judged with its folders filled in; unless a hook
         // rewrote it, the shell runs it with its references, reading the
         // values from its environment, so a folder name is never shell text.
@@ -11230,6 +11286,8 @@ impl RunnerTask {
         }
         let result = if matches!(name, "todo" | "todowrite") {
             self.record_todo(&arguments).await.map(plain_tool_output)
+        } else if matches!(name, "bash_output" | "bash_stop") {
+            self.command_tool(name, &arguments).await
         } else if name == "todoread" {
             let thread = self.repository.get_thread(self.thread.id).await?;
             let items = self.repository.list_items(self.thread.id, None).await?;
@@ -12527,6 +12585,7 @@ impl RunnerTask {
             } else {
                 None
             },
+            delivery_follows_background: self.request.follows_background,
             suppress_delivery: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             ended: AtomicBool::new(false),
@@ -12730,6 +12789,7 @@ impl RunnerTask {
                             attachments: Vec::new(),
                             resources: Vec::new(),
                             synthetic: true,
+                            follows_background: task.delivery_follows_background,
                             ..Default::default()
                         },
                         task.delivery_auto_approve,
@@ -15382,6 +15442,8 @@ fn resolved_pattern(workspace: &Path, target: &str, resolved: &Path) -> Option<S
     };
     (pattern != target).then_some(pattern)
 }
+
+mod commands;
 
 #[cfg(test)]
 mod permission_corpus;
