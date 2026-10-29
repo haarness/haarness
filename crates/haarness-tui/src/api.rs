@@ -237,6 +237,9 @@ pub struct ApiClient {
     /// A person is at this client and can stop what it starts (see
     /// [`ApiClient::attended`]).
     attended: bool,
+    /// This client shows the chat's background work and follows it up (see
+    /// [`ApiClient::follows_background`]).
+    follows_background: bool,
     pty_events: tokio::sync::broadcast::Sender<PtyClientEvent>,
     pty_connections: Arc<Mutex<HashMap<PtyId, PtyClientConnection>>>,
     /// Silence after which a connection counts as lost (see [`STREAM_IDLE`]).
@@ -388,6 +391,7 @@ impl ApiClient {
             local_workspace_switching: false,
             auto_approve: false,
             attended: false,
+            follows_background: false,
             pty_events,
             pty_connections: Arc::new(Mutex::new(HashMap::new())),
             stream_idle: STREAM_IDLE,
@@ -443,6 +447,17 @@ impl ApiClient {
     #[must_use]
     pub fn attended(mut self) -> Self {
         self.attended = true;
+        self
+    }
+
+    /// This client shows the chat's background work and follows it up (the
+    /// terminal UI): its messages and commands say so (`followsBackground`),
+    /// so an agent's shell command that runs long moves to the background
+    /// instead of holding the reply. `haarness run` and other scripts leave
+    /// it off, and their commands stay in the foreground as before.
+    #[must_use]
+    pub fn follows_background(mut self) -> Self {
+        self.follows_background = true;
         self
     }
 
@@ -1001,6 +1016,88 @@ impl ApiClient {
             .request(
                 reqwest::Method::POST,
                 &format!("/v1/threads/{id}/background{query}"),
+            )
+            .sent()
+            .await?
+            .checked()
+            .await?
+            .json()
+            .await?)
+    }
+    /// The agents' shell commands of a chat and the chats under it: running
+    /// ones first, then those that ended in the last ten minutes
+    /// (`background-commands.v1`).
+    pub async fn shell_commands(
+        &self,
+        id: haarness_protocol::ThreadId,
+    ) -> Result<Vec<haarness_protocol::ShellCommandInfo>> {
+        self.get(&format!("/v1/threads/{id}/commands")).await
+    }
+    /// The running shell commands of every chat.
+    pub async fn active_shell_commands(&self) -> Result<Vec<haarness_protocol::ShellCommandInfo>> {
+        self.get("/v1/commands/active").await
+    }
+    /// A page of what a command printed: from `cursor`, or with `tail` the
+    /// last `limit` bytes.
+    pub async fn shell_command_output(
+        &self,
+        id: haarness_protocol::ThreadId,
+        command: &str,
+        cursor: Option<u64>,
+        tail: bool,
+        limit: u64,
+    ) -> Result<haarness_protocol::ShellCommandOutput> {
+        let query = [
+            Some(format!("limit={limit}")),
+            cursor.map(|cursor| format!("cursor={cursor}")),
+            tail.then(|| "tail=true".to_owned()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("&");
+        self.get(&format!(
+            "/v1/threads/{id}/commands/{}/output?{query}",
+            encode_url_component(command)
+        ))
+        .await
+    }
+    /// Stop a command for the person; it reads `stopping` until it has
+    /// exited.
+    pub async fn stop_shell_command(
+        &self,
+        id: haarness_protocol::ThreadId,
+        command: &str,
+    ) -> Result<haarness_protocol::ShellCommandInfo> {
+        Ok(self
+            .request(
+                reqwest::Method::POST,
+                &format!(
+                    "/v1/threads/{id}/commands/{}/stop",
+                    encode_url_component(command)
+                ),
+            )
+            .sent()
+            .await?
+            .checked()
+            .await?
+            .json()
+            .await?)
+    }
+    /// Send the chat tree's running foreground commands, or the one named,
+    /// to the background; answers the commands moved.
+    pub async fn send_commands_to_background(
+        &self,
+        id: haarness_protocol::ThreadId,
+        command: Option<&str>,
+    ) -> Result<Vec<haarness_protocol::ShellCommandInfo>> {
+        let query = command.map_or_else(String::new, |command| {
+            format!("?commandId={}", encode_url_component(command))
+        });
+        Ok(self
+            .request(
+                reqwest::Method::POST,
+                &format!("/v1/threads/{id}/commands/background{query}"),
             )
             .sent()
             .await?
@@ -1582,6 +1679,7 @@ impl ApiClient {
         async {
             request.auto_approve |= self.auto_approve;
             request.attended |= self.attended;
+            request.follows_background |= self.follows_background;
             request.attachments = self.attachments(request.attachments).await?;
             Ok(self
                 .request(reqwest::Method::POST, &format!("/v1/threads/{id}/turns"))
@@ -1602,6 +1700,7 @@ impl ApiClient {
         mut request: ExecuteCommandRequest,
     ) -> Result<CommandExecutionResponse> {
         request.attended |= self.attended;
+        request.follows_background |= self.follows_background;
         request.attachments = self.attachments(request.attachments).await?;
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/commands"))
@@ -1705,6 +1804,7 @@ impl ApiClient {
         mut request: haarness_protocol::QueueInputRequest,
     ) -> Result<haarness_protocol::QueueInputResponse> {
         request.attended |= self.attended;
+        request.follows_background |= self.follows_background;
         request.attachments = self.attachments(request.attachments).await?;
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/input"))

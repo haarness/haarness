@@ -32,6 +32,13 @@ pub(crate) const ACTIONS: &[(&str, &str, &str)] = &[
     ("messages_next_user", "Next prompt", "alt+shift+down"),
     ("messages_first", "First message", "alt+home"),
     ("messages_last_user", "Last prompt", "alt+end"),
+    // Ctrl+B stays the sidebar's (and tmux's prefix); Ctrl+X reaches the
+    // TUI unchanged in every terminal and was free in every view.
+    (
+        crate::background::BACKGROUND_ACTION,
+        "Send to background",
+        "ctrl+x",
+    ),
 ];
 /// Keys named by their name rather than the character they type.
 const NAMED: &[(&str, KeyCode)] = &[

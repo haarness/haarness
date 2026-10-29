@@ -400,12 +400,12 @@ pub const COMMANDS: &[CommandSpec] = &[
     command(
         "tasks",
         &["subagents", "children"],
-        "Open a running child agent's live view",
+        "Child agents and shell commands of this chat; Enter opens one",
     ),
     command(
         "background",
         &["bg"],
-        "Move foreground subagents to background: /background [child-id]",
+        "Send running subagents and commands to the background: /background [id]",
     ),
     command(
         "goal",
@@ -2139,7 +2139,9 @@ impl App {
                 Ok(AppAction::Continue)
             }
             OverlayChoice::Option(OptionsKind::Tasks, value) => {
-                if let Ok(child_id) = value.parse::<uuid::Uuid>() {
+                if let Some(id) = value.strip_prefix(crate::background::TASKS_COMMAND) {
+                    self.open_command_output(id, Some(client));
+                } else if let Ok(child_id) = value.parse::<uuid::Uuid>() {
                     self.enter_child(haarness_protocol::ThreadId(child_id), client)
                         .await?;
                 }
@@ -3246,29 +3248,7 @@ impl App {
             "logs" => self.logs_command(arguments),
             "editor" => return Ok(AppAction::OpenEditor),
             "tasks" => self.open_tasks_overlay(),
-            "background" => {
-                let child = if arguments.is_empty() {
-                    None
-                } else {
-                    match arguments.parse::<uuid::Uuid>() {
-                        Ok(child) => Some(haarness_protocol::ThreadId(child)),
-                        Err(_) => {
-                            self.refuse_command("Usage: /background [running-child-thread-id]");
-                            return Ok(AppAction::Continue);
-                        }
-                    }
-                };
-                let promoted = client
-                    .promote_background_tasks(self.thread.id, child)
-                    .await?;
-                self.notice = match promoted.len() {
-                    0 => "No matching foreground subagent is running".into(),
-                    1 => "Subagent moved to background · completion will return here".into(),
-                    count => format!(
-                        "{count} subagents moved to background · completions will return here"
-                    ),
-                };
-            }
+            "background" => self.send_to_background(arguments, client).await?,
             "cancel" => {
                 if self.active_turn.is_some() {
                     // `/stop` is the typed form of Esc Esc: same tree-wide
@@ -4235,6 +4215,8 @@ impl App {
                 self.children.clear();
             }
             self.hydrate_child_links();
+            // A child's view shows its conversation's commands, read already.
+            self.hydrate_shell_commands(client).await;
         }
         if let Ok(turns) = client.active_turns().await {
             self.hydrate_active_turns(turns);
@@ -4349,11 +4331,17 @@ impl App {
         }
     }
 
-    /// Overlay listing live child-agent tasks; choosing one opens its thread.
+    /// Overlay listing live child-agent tasks, then the chat's shell
+    /// commands; choosing a child opens its thread, a command its output.
     pub fn open_tasks_overlay(&mut self) {
         let mut tasks = self.visible_children();
-        if tasks.is_empty() {
-            self.notice = "No child agents in this turn".into();
+        let commands = self.command_task_entries();
+        if tasks.is_empty() && commands.is_empty() {
+            self.notice = if self.background_commands_supported() {
+                self.language.text("No child agents or commands").to_owned()
+            } else {
+                "No child agents in this turn".into()
+            };
             return;
         }
         tasks.sort_by(|a, b| a.0.cmp(b.0));
@@ -4400,8 +4388,14 @@ impl App {
                 value: task.child_thread_id.to_string(),
             });
         }
+        let title = if commands.is_empty() {
+            "child agents"
+        } else {
+            "tasks"
+        };
+        entries.extend(commands);
         self.open_overlay(Overlay::Options {
-            title: "child agents".into(),
+            title: title.into(),
             kind: OptionsKind::Tasks,
             entries,
         });

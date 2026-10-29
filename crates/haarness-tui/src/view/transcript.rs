@@ -1810,6 +1810,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
         .filter_map(|item| Some((item.turn_id?, item.sequence)))
         .collect();
     let asked = !approval_calls.is_empty() || !question_calls.is_empty();
+    // How each command in the background last stood, from the chat's own
+    // checkpoints; read once rather than per row.
+    let command_states = crate::background::durable_states(&app.items);
     // Off screen, the sidebar leaves one row in its place: the plan's
     // progress where it last changed, which opens the sidebar.
     let plan_at = (app.plan_inline.get() && open_plan(app))
@@ -1977,6 +1980,15 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 ..
             } if !call_id.trim().is_empty() && !name.trim().is_empty() => {
                 let result = paired_result(app, item, call_id);
+                // The command behind a shell call, when the server reports
+                // one: a row in the background says where it is instead of
+                // what its call answered.
+                let command = (name == "bash")
+                    .then(|| {
+                        crate::background::command_row(app, &command_states, item, call_id, result)
+                    })
+                    .flatten();
+                let background = command.as_ref().filter(|command| command.background);
                 // A command that ran and exited non-zero failed too, and its
                 // row says with which code.
                 let exit_code = result.and_then(|item| match &item.data {
@@ -2140,6 +2152,36 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     None if queued => "  queued".to_owned(),
                     _ => String::new(),
                 };
+                // A command in the background takes a task's marker and
+                // says where it is (`in background · 1m 12s`), then how it
+                // ended; a narrow row keeps the part that matters.
+                let (marker, color, suffix) = match background {
+                    Some(command) => {
+                        let (glyph, tone) = task_state_style(command.task_state(), app.tick, theme);
+                        let marker = format!("  {glyph} ");
+                        let lead = (marker.chars().count() + name.chars().count() + 1).max(12);
+                        let full = format!("  {}", command.status(app.language, false));
+                        let suffix = if lead + 16 + full.chars().count() > width {
+                            format!("  {}", command.status(app.language, true))
+                        } else {
+                            full
+                        };
+                        (marker, tone, suffix)
+                    }
+                    None => (marker, color, suffix),
+                };
+                // A foreground command that runs on names the key that
+                // sends it to the background, where there is room for it.
+                let hint = command
+                    .as_ref()
+                    .filter(|_| result.is_none())
+                    .and_then(|command| app.move_hint(command, call_id))
+                    .map(|hint| format!("  ·  {hint}"))
+                    .filter(|hint| {
+                        let lead = (marker.chars().count() + name.chars().count() + 1).max(12);
+                        lead + 16 + hint.chars().count() <= width
+                    })
+                    .unwrap_or_default();
                 // Child-agent tasks are alive: show what the child is doing
                 // right now, not just that it was spawned.
                 // A delegation's live detail goes on its own line below the
@@ -2167,8 +2209,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 // useful information that is not implied by the call itself.
                 let disclosure = result.map_or_else(String::new, |item| {
                     // A task row already opens its durable child, where the
-                    // complete response belongs.
-                    if name == "task" {
+                    // complete response belongs; a command in the background
+                    // its output.
+                    if name == "task" || background.is_some() {
                         return String::new();
                     }
                     let ItemData::ToolResult {
@@ -2243,7 +2286,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         lead + progress.chars().count()
                             + suffix.chars().count()
                             + browser.chars().count()
-                            + disclosure.chars().count(),
+                            + disclosure.chars().count()
+                            + hint.chars().count(),
                     )
                     .max(16);
                 let argument = if name == "workflow" {
@@ -2260,7 +2304,14 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     Span::new(browser, theme.muted),
                     Span::new(progress, theme.muted),
                     Span::new(disclosure, theme.muted),
+                    Span::new(hint, theme.muted),
                 ]);
+                // A command this client follows opens its output on a click:
+                // one in the background, and one still running.
+                let opens_output = command
+                    .as_ref()
+                    .filter(|command| command.background || result.is_none())
+                    .map(|command| command.id.clone());
                 // A batch made only of delegations is an implementation
                 // detail: the wrapper stays invisible and every
                 // delegation is an ordinary task row of its own.
@@ -2279,6 +2330,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     && let Some(run_id) = workflow_run_id(arguments, result)
                 {
                     block.push_tagged(row, HitTarget::WorkflowOpen(run_id));
+                } else if let Some(id) = opens_output {
+                    block.push_tagged(row, HitTarget::CommandOpen(id));
                 } else if let Some(result) = compact_result
                     .or(result.filter(|_| matches!(status, Some("rejected" | "blocked"))))
                 {
@@ -2451,7 +2504,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         HitTarget::TaskOpen(child_call_id.clone()),
                     );
                 }
-                if let Some(result) = result {
+                // What a call in the background answered is the agent's
+                // note; its output opens from the row.
+                if let Some(result) = result.filter(|_| background.is_none()) {
                     render_tool_result(app, &mut block, result, name, width);
                 }
             }

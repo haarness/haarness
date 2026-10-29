@@ -22495,6 +22495,9 @@ mod chrome_tests;
 #[path = "display_tests.rs"]
 mod display_tests;
 
+#[path = "background_tests.rs"]
+mod background_tests;
+
 fn remote_control_text(app: &App, size: (u32, u32)) -> String {
     app.lines(size)
         .iter()

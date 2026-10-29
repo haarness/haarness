@@ -159,7 +159,8 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
         | Overlay::ProviderLogin
         | Overlay::RemoteControl
         | Overlay::Chrome
-        | Overlay::SideChat => {
+        | Overlay::SideChat
+        | Overlay::CommandOutput => {
             return TaggedLines::default();
         }
     };
@@ -349,7 +350,8 @@ fn leading_ellipsis(text: &str, width: usize) -> String {
 /// the composer; commands/models/threads/agents/themes and info panels use
 /// this richer modal surface.
 pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<TaggedLines> {
-    if matches!(app.overlay, Overlay::None) {
+    // A command's output is drawn full screen, never as a card.
+    if matches!(app.overlay, Overlay::None | Overlay::CommandOutput) {
         return None;
     }
     if let Overlay::Panel {
@@ -548,7 +550,8 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
         | Overlay::ProviderLogin
         | Overlay::RemoteControl
         | Overlay::Chrome
-        | Overlay::SideChat => {
+        | Overlay::SideChat
+        | Overlay::CommandOutput => {
             unreachable!()
         }
     };
