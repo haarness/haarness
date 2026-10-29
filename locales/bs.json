@@ -1614,6 +1614,7 @@
   "Stopped a command": "Zaustavljena naredba",
   "Stopping a command": "Zaustavljanje naredbe",
   "Tried to stop a command": "Pokušaj zaustavljanja naredbe",
+  "This chat can't send more commands to the background right now.": "Ovaj razgovor trenutno ne može poslati više naredbi u pozadinu.",
   "Tabs follow you into your next chat.": "Kartice vas prate u sljedeći razgovor.",
   "Target ref (optional)": "Ciljna referenca (opcionalno)",
   "The current file is backed up before this version replaces it.": "Trenutna datoteka se sigurnosno kopira prije nego je ova verzija zamijeni.",

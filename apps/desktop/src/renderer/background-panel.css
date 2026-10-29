@@ -19,6 +19,18 @@
 .background-item {
   position: relative;
 }
+/* A command's row lines its chevron and its stop up with a delegation's
+   (`.agent-task`): the end padding, and the gap before its stop, of a
+   delegation row. */
+.background-item .tool-call > summary {
+  padding-inline-end: var(--s3);
+}
+.background-item .tool-controls-room {
+  margin-inline-end: var(--s0);
+}
+.background-item .tool-controls {
+  inset-inline-end: calc(var(--s3) * 2 + 12px);
+}
 /* Ended a moment ago: still there to read, out of the way of what runs. */
 .background-item.ended {
   opacity: 0.55;

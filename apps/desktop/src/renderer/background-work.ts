@@ -8,7 +8,8 @@ import { reconcile } from "solid-js/store";
 import type { ShellCommandInfo } from "@haarness/sdk";
 import { agentTasks, agentTaskStatus } from "./agent-tasks";
 import { conversationRoot } from "../thread-kinds";
-import { notFoundAnswer } from "./error-text";
+import { conflictAnswer, notFoundAnswer } from "./error-text";
+import { t } from "./i18n";
 import { useApp } from "./state";
 import {
   BACKGROUND_COMMANDS,
@@ -16,6 +17,7 @@ import {
   goneKey,
   laterCommand,
   liveCommand,
+  moveRefusal,
   type FollowView,
   type OutputPage,
 } from "./shell-commands";
@@ -99,6 +101,20 @@ export function followCommand(input: {
         const shown = () => follow.resume();
         document.addEventListener("visibilitychange", shown);
         onCleanup(() => document.removeEventListener("visibilitychange", shown));
+        // Back online, or the project's connection back: a quiet row that
+        // was waiting out failures reads on at once.
+        const back = () => follow.nudge();
+        window.addEventListener("online", back);
+        onCleanup(() => window.removeEventListener("online", back));
+        createEffect(
+          on(
+            () => app.state.connectionStatus === "Connected",
+            (connected, before) => {
+              if (connected && before === false) back();
+            },
+            { defer: true },
+          ),
+        );
         follow.wake();
         createEffect(
           on(
@@ -147,11 +163,18 @@ export async function stopCommand(app: ReturnType<typeof useApp>, command: Shell
  * background; its reply goes on without waiting for it. */
 export async function backgroundCommands(app: ReturnType<typeof useApp>, thread: string, command?: string) {
   const connection = app.state.connection!.id;
-  const moved = await app.api<ShellCommandInfo[]>(
-    "backgroundShellCommands",
-    thread,
-    command ? { commandId: command } : {},
-  );
+  let moved: ShellCommandInfo[];
+  try {
+    moved = await app.api<ShellCommandInfo[]>("backgroundShellCommands", thread, command ? { commandId: command } : {});
+  } catch (error) {
+    // Refused (the chat runs as many commands there as it may): the
+    // server's own reason when it is plain, else ours.
+    if (!conflictAnswer(error)) throw error;
+    throw new Error(
+      moveRefusal(error instanceof Error ? error.message : String(error)) ??
+        t("This chat can't send more commands to the background right now."),
+    );
+  }
   remember(app, connection, moved);
 }
 
@@ -167,9 +190,11 @@ export function backgroundWork() {
   const root = createMemo(() =>
     app.state.selected ? conversationRoot(app.state.threads, app.state.selected) : "",
   );
-  /** A coarse clock, so what ended lately leaves the list on time; it ticks
-   * only while the list holds something that ended. */
-  const [now, setNow] = createSignal(Date.now());
+  /** A coarse tick, so what ended lately leaves the list on time; it ticks
+   * only while the list holds something that ended. It only says when to
+   * look again: ages are measured against the time now, so a chat opened
+   * between two ticks lists exactly what ended in the last ten minutes. */
+  const [tick, setTick] = createSignal(0);
   const commands = createMemo(() => {
     if (!offered() || !root()) return [];
     const mine = Object.values(app.state.shellCommands).filter(
@@ -181,11 +206,13 @@ export function backgroundWork() {
     const running = mine
       .filter((command) => liveCommand(command.state))
       .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    tick();
+    const now = Date.now();
     const ended = mine
       .filter(
         (command) =>
           !liveCommand(command.state) &&
-          (!command.endedAt || now() - Date.parse(command.endedAt) < RECENTLY_ENDED_MS),
+          (!command.endedAt || now - Date.parse(command.endedAt) < RECENTLY_ENDED_MS),
       )
       .sort((a, b) => (b.endedAt ?? "").localeCompare(a.endedAt ?? ""));
     return [...running, ...ended];
@@ -210,6 +237,8 @@ export function backgroundWork() {
   const subagents = createMemo(
     () => {
       if (!offered()) return [];
+      tick();
+      const now = Date.now();
       return tasks()
         .filter((task) => {
           const state = status(task.key);
@@ -217,7 +246,7 @@ export function backgroundWork() {
           const at = seen().get(`${app.state.selected}:${task.key}`);
           return (
             at !== undefined &&
-            now() - at < RECENTLY_ENDED_MS &&
+            now - at < RECENTLY_ENDED_MS &&
             ["completed", "failed", "stopped"].includes(state ?? "")
           );
         })
@@ -232,12 +261,14 @@ export function backgroundWork() {
       commands().filter((command) => liveCommand(command.state)).length +
       subagents().filter((key) => status(key) === "background").length,
   );
-  const ended = () =>
-    commands().some((command) => !liveCommand(command.state)) ||
-    subagents().some((key) => status(key) !== "background");
+  const ended = createMemo(
+    () =>
+      commands().some((command) => !liveCommand(command.state)) ||
+      subagents().some((key) => status(key) !== "background"),
+  );
   createEffect(() => {
     if (!ended()) return;
-    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    const timer = setInterval(() => setTick((value) => value + 1), 30_000);
     onCleanup(() => clearInterval(timer));
   });
   return { commands, subagents, task, running, status };

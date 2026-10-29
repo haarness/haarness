@@ -1614,6 +1614,7 @@
   "Stopped a command": "أوقف أمرًا",
   "Stopping a command": "جارٍ إيقاف أمر",
   "Tried to stop a command": "حاول إيقاف أمر",
+  "This chat can't send more commands to the background right now.": "لا يمكن لهذه المحادثة إرسال مزيد من الأوامر إلى الخلفية الآن.",
   "Tabs follow you into your next chat.": "تنتقل علامات التبويب معك إلى محادثتك التالية.",
   "Target ref (optional)": "المرجع الهدف (اختياري)",
   "The current file is backed up before this version replaces it.": "يُحفظ نسخ احتياطي من الملف الحالي قبل أن تحل هذه النسخة محله.",

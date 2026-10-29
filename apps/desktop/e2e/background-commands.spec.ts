@@ -368,9 +368,12 @@ test.describe("a server with commands in the background", () => {
     await expect(copy.locator(".tool-state")).toHaveCount(0);
     await expect(step("original server").getByRole("button", { name: /^Stop this command/ })).toHaveCount(0);
     await expect(pill()).toHaveCount(0);
-    // Opened, the copy follows nothing and tells the original nothing.
+    // Opened, the copy follows nothing, says nothing of an output it never
+    // had, and tells the original nothing.
     await copy.locator("summary").click();
     await page.waitForTimeout(1500);
+    await expect(copy.locator(".tool-input")).toBeVisible();
+    await expect(copy.locator(".tool-empty, .tool-output")).toHaveCount(0);
     await pictures("fork-copy", step("original server"));
     // The original still runs, and its row, its stop, the count and Still
     // running say so.
@@ -432,6 +435,19 @@ test.describe("a server with commands in the background", () => {
     await expect(panel.locator(".agent-task")).toHaveCount(1);
     await pictures("still-running-subagent", page.locator(".side-panel"));
     const listed = await panel.locator(".agent-task").elementHandle();
+    // A command beside it: their stops line up.
+    await send(bash("printf 'beside the agent\\n'; sleep 120", true));
+    await expect(panel.locator(".tool-stop")).toBeVisible();
+    await expect(pill()).toHaveText("2 in background");
+    const ends = await panel.evaluate((element) =>
+      [".agent-task-stop", ".tool-stop"].map((selector) =>
+        Math.round(element.querySelector(selector)!.getBoundingClientRect().right),
+      ),
+    );
+    expect(ends[0]).toBe(ends[1]);
+    await pictures("still-running-both", page.locator(".side-panel"));
+    await panel.locator(".tool-stop").click();
+    await expect(pill()).toHaveText("1 in background");
     // It finishes on its own: the count goes and it stays listed, greyed,
     // the same row all along.
     await expect(pill()).toHaveCount(0, { timeout: 40000 });

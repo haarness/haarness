@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ApiError, TransportError } from "@haarness/sdk";
-import { cancelled, errorText, errorTextLine, failureDetail, failureMessage, notFoundAnswer } from "../src/renderer/error-text";
+import { cancelled, conflictAnswer, errorText, errorTextLine, failureDetail, failureMessage, notFoundAnswer } from "../src/renderer/error-text";
 
 test("server layer prefixes never reach the reader", () => {
   assert.deepEqual(errorText(new Error("tool error: /tmp/does-not-exist does not exist")), {
@@ -185,4 +185,19 @@ test("only the server's answer that something does not exist reads as not found"
   assert.equal(notFoundAnswer(new Error("HTTP 409")), false);
   assert.equal(notFoundAnswer(new Error("invalid request: the workspace is asleep")), false);
   assert.equal(notFoundAnswer(new Error("fetch failed")), false);
+});
+
+test("a refusal that conflicts with how things stand reads as one, and keeps its reason across the window", () => {
+  const refused = Object.assign(new Error("conflict: this chat runs as many commands in the background as it may"), {
+    name: "ApiError",
+    status: 409,
+  });
+  // Main hands the window the server's words as they were.
+  assert.equal(failureMessage(refused), refused.message);
+  assert.equal(conflictAnswer(new Error(failureMessage(refused))), true);
+  assert.equal(conflictAnswer(new Error("HTTP 409")), true);
+  assert.equal(conflictAnswer(new Error("not found: command cmd-1")), false);
+  // A computer offline through the relay says so in plain words instead.
+  const offline = Object.assign(new Error("computer offline"), { name: "ApiError", status: 409 });
+  assert.equal(conflictAnswer(new Error(failureMessage(offline, { relay: true }))), false);
 });
