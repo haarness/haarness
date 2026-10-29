@@ -33,9 +33,25 @@ impl Drop for ProcessGroup {
             );
         }
         #[cfg(windows)]
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &self.0.to_string()])
-            .output();
+        taskkill(self.0, true);
+    }
+}
+
+/// `taskkill` on `pid` and its tree, with `/F` when `force`, off the async
+/// threads when there is a runtime to hand it to: it waits for the tree.
+#[cfg(windows)]
+fn taskkill(pid: u32, force: bool) {
+    let run = move || {
+        let pid = pid.to_string();
+        let mut command = std::process::Command::new("taskkill");
+        if force {
+            command.arg("/F");
+        }
+        let _ = command.args(["/T", "/PID", pid.as_str()]).output();
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => drop(handle.spawn_blocking(run)),
+        Err(_) => run(),
     }
 }
 
@@ -64,15 +80,11 @@ impl ProcessControl for GroupControl {
             };
             let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), signal);
         }
+        // A console program does not heed a request to close: on Windows
+        // the interrupt and terminate steps of a stop do nothing to one,
+        // and the kill after them ends it.
         #[cfg(windows)]
-        {
-            let pid = self.leader.to_string();
-            let mut args = vec!["/T", "/PID", pid.as_str()];
-            if signal == StopSignal::Kill {
-                args.insert(0, "/F");
-            }
-            let _ = std::process::Command::new("taskkill").args(args).output();
-        }
+        taskkill(self.leader, signal == StopSignal::Kill);
     }
 }
 
