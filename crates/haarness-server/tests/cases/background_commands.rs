@@ -1216,3 +1216,30 @@ async fn a_command_a_person_moves_after_the_deadline_gets_its_limit_from_the_mov
     );
     runtime.stop_shell_command(thread, &id).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_command_ends_when_its_shell_does_though_what_it_left_never_stops_printing() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |_| {});
+    let thread = chat(&runtime, None).await;
+    let began = std::time::Instant::now();
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"yes printing & sleep 1; echo started","timeout":20000}"#,
+        false,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert!(
+        began.elapsed() < Duration::from_secs(8),
+        "{:?}",
+        began.elapsed()
+    );
+    assert!(text.starts_with("exit: 0"), "{text:.200}");
+    assert_eq!(metadata["leftovers"], true);
+    if let Some(path) = metadata["outputPath"].as_str() {
+        let _ = std::fs::remove_file(path);
+    }
+}
