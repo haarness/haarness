@@ -882,14 +882,31 @@ fn is_stream_cut(error: &CoreError) -> bool {
     let CoreError::Provider(message) = error else {
         return false;
     };
-    if crate::stream_stall_silence(error).is_some() {
-        return true;
-    }
+    crate::stream_stall_silence(error).is_some() || is_transport_cut(message)
+}
+
+/// Whether `message` is a transport's words for a connection that broke
+/// (`STREAM_CUT`) rather than a provider's error event, which arrives as JSON.
+fn is_transport_cut(message: &str) -> bool {
     if provider_error_fields(message).is_some() {
         return false;
     }
     let message = message.to_ascii_lowercase();
     STREAM_CUT.iter().any(|marker| message.contains(marker))
+}
+
+/// What a tool call says when the response that carried it was cut short
+/// and it was closed without running. A broken connection is said in plain
+/// words, never the transport's ("error decoding response body: Connection
+/// reset by peer (os error 54)"), which the log keeps.
+fn closed_call_reason(error: &CoreError, provider: Option<&str>) -> String {
+    match error {
+        CoreError::ProviderIncomplete(inner) if is_transport_cut(inner) => format!(
+            "The connection to {} broke off before this call ran, so it did not run.",
+            provider.unwrap_or("the provider")
+        ),
+        error => error.to_string(),
+    }
 }
 
 /// Retries for a transient provider failure before any output, waiting 2,
@@ -1358,6 +1375,20 @@ fn describe_failure(error: &CoreError, provider: Option<&str>, advice: bool) -> 
 /// `user_facing_error`, naming the provider (when known) that has no
 /// credentials or refused them, so the fix is clear: connect it again.
 fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
+    // A response cut short after it began, whose recoveries ran out: said in
+    // plain words, as the same failure before any output is.
+    if let CoreError::ProviderIncomplete(inner) = error {
+        if is_transport_cut(inner) {
+            return format!(
+                "The connection to {} kept breaking off mid-answer. Check the network connection, then send a message to continue.",
+                provider.unwrap_or("the provider")
+            );
+        }
+        let silent = CoreError::Provider(inner.clone());
+        if crate::stream_stall_silence(&silent).is_some() {
+            return describe_error(&silent, provider);
+        }
+    }
     let CoreError::Provider(raw) = error else {
         return error.to_string();
     };
@@ -9837,15 +9868,18 @@ impl RunnerTask {
                     wrote_text,
                 });
                 if let Some(error) = blocked {
-                    for (call_id, name, _) in calls {
-                        self.publish_item(ItemData::ToolResult {
-                            call_id,
-                            name,
-                            output: error.to_string(),
-                            is_error: true,
-                            metadata: serde_json::Value::Null,
-                        })
-                        .await?;
+                    if !calls.is_empty() {
+                        let reason = closed_call_reason(&error, Some(&provider.info().name));
+                        for (call_id, name, _) in calls {
+                            self.publish_item(ItemData::ToolResult {
+                                call_id,
+                                name,
+                                output: reason.clone(),
+                                is_error: true,
+                                metadata: serde_json::Value::Null,
+                            })
+                            .await?;
+                        }
                     }
                     if matches!(error, CoreError::ProviderIncomplete(_)) && recoveries < 3 {
                         recoveries += 1;
@@ -19679,6 +19713,46 @@ mod tests {
         assert!(!super::is_region_unavailable(
             "HTTP 400 Bad Request: location is required"
         ));
+    }
+
+    #[test]
+    fn a_connection_that_kept_breaking_is_said_in_plain_words() {
+        for transport in [
+            "error decoding response body: Connection reset by peer (os error 54)",
+            "request or response body error: An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "upstream stream became idle",
+        ] {
+            let ended = CoreError::ProviderIncomplete(transport.into());
+            assert_eq!(
+                super::describe_error(&ended, Some("Anthropic")),
+                "The connection to Anthropic kept breaking off mid-answer. Check the network connection, then send a message to continue."
+            );
+            assert_eq!(
+                super::user_facing_error(&ended),
+                "The connection to the provider kept breaking off mid-answer. Check the network connection, then send a message to continue."
+            );
+            assert_eq!(
+                super::closed_call_reason(&ended, Some("Anthropic")),
+                "The connection to Anthropic broke off before this call ran, so it did not run."
+            );
+        }
+        // A provider that fell silent after it began is named as silent.
+        let silent =
+            CoreError::ProviderIncomplete("the provider sent nothing for 5 minutes".into());
+        assert_eq!(
+            super::describe_error(&silent, Some("Anthropic")),
+            "Anthropic sent nothing for 5 minutes, so the request was stopped. Try again, or check the network connection."
+        );
+        // Other endings keep their words.
+        let missing = CoreError::ProviderIncomplete("missing completion event".into());
+        assert_eq!(
+            super::describe_error(&missing, None),
+            "Provider response ended before completion (missing completion event)."
+        );
+        assert_eq!(
+            super::closed_call_reason(&missing, Some("Anthropic")),
+            "Provider response ended before completion (missing completion event)."
+        );
     }
 
     #[test]
