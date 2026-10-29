@@ -2951,5 +2951,11 @@
   "Updated just now": "حُدِّث للتو",
   "Plugins updated: {names}": "الإضافات المحدّثة: {names}",
   "Could not update {names}": "تعذّر تحديث {names}",
-  "Waiting for you: {plugins}": "بانتظارك: {plugins}"
+  "Waiting for you: {plugins}": "بانتظارك: {plugins}",
+  "Remote access": "الوصول عن بُعد",
+  "Open this computer's projects from your phone or any browser": "افتح مشاريع هذا الحاسوب من هاتفك أو من أي متصفح",
+  "On. Your phone and any browser signed in to Haarness can open {computer}.": "مُفعّل. يمكن لهاتفك ولأي متصفح مسجّل الدخول إلى Haarness فتح {computer}.",
+  "Members of {organization} can open it too.": "يمكن لأعضاء {organization} فتحه أيضًا.",
+  "Remote access is on. Open {computer} from Haarness on your phone or any browser.": "الوصول عن بُعد مُفعّل. افتح {computer} من Haarness على هاتفك أو من أي متصفح.",
+  "Remote access is off": "الوصول عن بُعد متوقف"
 }

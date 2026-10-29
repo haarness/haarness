@@ -236,7 +236,6 @@ pub(crate) struct Context {
 #[derive(Clone)]
 struct Setup {
     paths: Paths,
-    trust: bool,
     /// This build's executable as it is now. An in-place upgrade changes it
     /// while the connector runs, and the host gateway compares each server
     /// with the executable on disk at every request.
@@ -246,12 +245,10 @@ struct Setup {
 }
 
 impl Context {
-    /// For the connector of the workspace `paths` is scoped to, started with
-    /// this project configuration setting.
-    pub(crate) fn new(paths: &Paths, trust: bool, timing: Timing) -> Arc<Self> {
+    /// For the connector of the workspace `paths` is scoped to.
+    pub(crate) fn new(paths: &Paths, timing: Timing) -> Arc<Self> {
         Self::with_executable(
             paths,
-            trust,
             timing,
             Arc::new(|| super::current_executable_fingerprint().ok()),
         )
@@ -260,14 +257,12 @@ impl Context {
     /// As `new`, comparing servers with `executable` (tests replace the build).
     pub(crate) fn with_executable(
         paths: &Paths,
-        trust: bool,
         timing: Timing,
         executable: Fingerprint,
     ) -> Arc<Self> {
         Arc::new(Self {
             setup: Setup {
                 paths: paths.clone(),
-                trust,
                 executable,
                 timing,
                 memory: Arc::default(),
@@ -625,7 +620,6 @@ impl Watching {
             } else {
                 Route::Gateway {
                     record: server.record.discovery.clone(),
-                    trust: setup.trust,
                 }
             };
             let follower = follow(
@@ -809,10 +803,7 @@ enum Route {
     Direct,
     /// Another project's server, which the gateway finds with
     /// `ensure_workspace_server`.
-    Gateway {
-        record: RuntimeDiscovery,
-        trust: bool,
-    },
+    Gateway { record: RuntimeDiscovery },
 }
 
 impl Route {
@@ -821,24 +812,20 @@ impl Route {
     fn reaches(&self, info: Option<&ServerInfo>, executable: Option<&str>) -> bool {
         match self {
             Self::Direct => true,
-            Self::Gateway { record, trust } => {
-                info.is_some_and(|info| reused_as_is(record, info, *trust, executable))
+            Self::Gateway { record } => {
+                info.is_some_and(|info| reused_as_is(record, info, executable))
             }
         }
     }
 }
 
 /// Whether `ensure_workspace_server`, as the host gateway calls it, keeps this
-/// server as it runs. It replaces any other one, and refuses to while a turn
-/// runs, which is always so while something waits on the person: Cloud
-/// cannot answer for such a server.
-fn reused_as_is(
-    record: &RuntimeDiscovery,
-    info: &ServerInfo,
-    trust: bool,
-    executable: Option<&str>,
-) -> bool {
-    if super::server_compatibility_error(info).is_some() || info.project_trusted != Some(trust) {
+/// server as it runs, with whatever project configuration setting it runs
+/// with. It replaces any other one, and refuses to while a turn runs, which
+/// is always so while something waits on the person: Cloud cannot answer for
+/// such a server.
+fn reused_as_is(record: &RuntimeDiscovery, info: &ServerInfo, executable: Option<&str>) -> bool {
+    if super::server_compatibility_error(info).is_some() {
         return false;
     }
     // A configured (open or password) server is kept whichever build runs it.
@@ -3127,48 +3114,34 @@ mod tests {
         assert!(reused_as_is(
             &record(this, private.clone()),
             &info("1", false),
-            false,
             this
         ));
         // Another build, or a record from before fingerprints: replaced.
         assert!(!reused_as_is(
             &record(Some("old-build"), private.clone()),
             &info("1", false),
-            false,
             this
         ));
-        assert!(!reused_as_is(
-            &record(None, None),
-            &info("1", false),
-            false,
-            this
-        ));
-        // Another API schema or project setting: replaced.
+        assert!(!reused_as_is(&record(None, None), &info("1", false), this));
+        // Another API schema: replaced.
         assert!(!reused_as_is(
             &record(this, private.clone()),
             &info("0", false),
-            false,
             this
         ));
-        assert!(!reused_as_is(
-            &record(this, private),
-            &info("1", true),
-            false,
-            this
-        ));
+        // Either project configuration setting: kept as the person started it.
+        assert!(reused_as_is(&record(this, private), &info("1", true), this));
         // A configured server is kept whichever build runs it.
         let open = Some(ServerAccess::Open.fingerprint("token"));
         assert!(reused_as_is(
             &record(Some("old-build"), open),
             &info("1", false),
-            false,
             this
         ));
         assert!(Route::Direct.reaches(Some(&info("0", true)), None));
         assert!(
             !Route::Gateway {
-                record: record(this, None),
-                trust: false
+                record: record(this, None)
             }
             .reaches(None, this),
             "a server that has not answered yet"

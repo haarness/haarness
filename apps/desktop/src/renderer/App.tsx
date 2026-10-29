@@ -7,7 +7,7 @@ import { ServerConnect, openServerConnection } from "./ServerConnect";
 import { RemoteProjectPicker } from "./RemoteProjectPicker";
 import { ConnectProvider } from "./ConnectProvider";
 import { RemoteControlDialog } from "./RemoteControlDialog";
-import { isLive } from "./remote-control";
+import { RemoteAccessButton } from "./RemoteAccessButton";
 import {
   For,
   Show,
@@ -26,7 +26,6 @@ import {
   locationName,
   primaryLocation,
   sidebarGroups,
-  sessionKey,
 } from "../projects";
 import { Button, Icon, Forms, type IconName } from "./ui";
 import { ImageViewer } from "./ImageViewer";
@@ -725,11 +724,6 @@ export function App() {
     onCleanup(() => window.removeEventListener("keydown", keys));
   });
   const selected = () => state.threads.find((t) => t.id === state.selected);
-  /** The open chat is shared through Haarness Cloud right now. */
-  const remoteLive = () =>
-    !!state.connection &&
-    !!state.selected &&
-    isLive(state.remoteShares[sessionKey(state.connection.id, state.selected)]);
   /** A chat tab's name, read where it is shown so a generated title or a
    * rename reaches an open tab. */
   const tabTitle = (id: string) => {
@@ -1226,18 +1220,11 @@ export function App() {
         </div>
         <div class="titlebar-actions">
           <Show when={state.connection}>
-            {/* Continue the open chat from a phone or any browser. The dot
-                says it is live, as the message box's Remote chip does. */}
-            <Show when={selected() && !selected()!.isSubagent}>
-              <Button
-                icon="remote"
-                label={t("Remote control")}
-                hint={t("Continue this chat from your phone or any browser")}
-                active={remoteLive()}
-                dot={remoteLive()}
-                description={remoteLive() ? t("Live in Haarness Cloud") : undefined}
-                onClick={() => app.openRemoteControl(remoteLive() ? "view" : "start")}
-              />
+            {/* This whole computer, reachable from a phone or any browser
+                signed in to the same account; /remote-control shares one
+                chat. Absent while the window shows another computer. */}
+            <Show when={!state.connection?.remote}>
+              <RemoteAccessButton />
             </Show>
             <Button
               icon="terminal"

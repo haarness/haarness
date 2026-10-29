@@ -2951,5 +2951,11 @@
   "Updated just now": "Updated just now",
   "Plugins updated: {names}": "Plugins updated: {names}",
   "Could not update {names}": "Could not update {names}",
-  "Waiting for you: {plugins}": "Waiting for you: {plugins}"
+  "Waiting for you: {plugins}": "Waiting for you: {plugins}",
+  "Remote access": "Remote access",
+  "Open this computer's projects from your phone or any browser": "Open this computer's projects from your phone or any browser",
+  "On. Your phone and any browser signed in to Haarness can open {computer}.": "On. Your phone and any browser signed in to Haarness can open {computer}.",
+  "Members of {organization} can open it too.": "Members of {organization} can open it too.",
+  "Remote access is on. Open {computer} from Haarness on your phone or any browser.": "Remote access is on. Open {computer} from Haarness on your phone or any browser.",
+  "Remote access is off": "Remote access is off"
 }

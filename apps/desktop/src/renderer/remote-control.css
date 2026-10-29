@@ -111,3 +111,23 @@
 .composer .remote-pill .remote-dot {
   background: var(--green);
 }
+
+/* The title bar's remote access control (RemoteAccessButton): green while
+   this computer is reachable, pulsing while it connects, red after a
+   problem. */
+.remote-access.on .icon-button-dot {
+  background: var(--green);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--green) 22%, transparent);
+}
+.remote-access.connecting .icon-button-dot {
+  animation: pulse 0.9s ease-in-out infinite alternate;
+}
+.remote-access.error .icon-button-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 22%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .remote-access.connecting .icon-button-dot {
+    animation: none;
+  }
+}

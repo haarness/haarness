@@ -2951,5 +2951,11 @@
   "Updated just now": "たった今更新しました",
   "Plugins updated: {names}": "更新したプラグイン: {names}",
   "Could not update {names}": "{names} を更新できませんでした",
-  "Waiting for you: {plugins}": "確認待ち: {plugins}"
+  "Waiting for you: {plugins}": "確認待ち: {plugins}",
+  "Remote access": "リモートアクセス",
+  "Open this computer's projects from your phone or any browser": "スマートフォンやどのブラウザーからでも、このコンピューターのプロジェクトを開けます",
+  "On. Your phone and any browser signed in to Haarness can open {computer}.": "オン。Haarness にサインインしたスマートフォンやブラウザーから {computer} を開けます。",
+  "Members of {organization} can open it too.": "{organization} のメンバーも開けます。",
+  "Remote access is on. Open {computer} from Haarness on your phone or any browser.": "リモートアクセスをオンにしました。スマートフォンの Haarness やどのブラウザーからでも {computer} を開けます。",
+  "Remote access is off": "リモートアクセスをオフにしました"
 }

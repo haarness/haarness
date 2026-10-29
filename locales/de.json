@@ -2951,5 +2951,11 @@
   "Updated just now": "Gerade aktualisiert",
   "Plugins updated: {names}": "Aktualisierte Plugins: {names}",
   "Could not update {names}": "{names} konnte nicht aktualisiert werden",
-  "Waiting for you: {plugins}": "Wartet auf dich: {plugins}"
+  "Waiting for you: {plugins}": "Wartet auf dich: {plugins}",
+  "Remote access": "Fernzugriff",
+  "Open this computer's projects from your phone or any browser": "Öffne die Projekte dieses Computers auf deinem Smartphone oder in jedem Browser",
+  "On. Your phone and any browser signed in to Haarness can open {computer}.": "An. Dein Smartphone und jeder bei Haarness angemeldete Browser können {computer} öffnen.",
+  "Members of {organization} can open it too.": "Mitglieder von {organization} können ihn ebenfalls öffnen.",
+  "Remote access is on. Open {computer} from Haarness on your phone or any browser.": "Fernzugriff ist an. Öffne {computer} in Haarness auf deinem Smartphone oder in jedem Browser.",
+  "Remote access is off": "Fernzugriff ist aus"
 }

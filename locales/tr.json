@@ -2951,5 +2951,11 @@
   "Updated just now": "Az önce güncellendi",
   "Plugins updated: {names}": "Güncellenen eklentiler: {names}",
   "Could not update {names}": "{names} güncellenemedi",
-  "Waiting for you: {plugins}": "Onayınızı bekliyor: {plugins}"
+  "Waiting for you: {plugins}": "Onayınızı bekliyor: {plugins}",
+  "Remote access": "Uzaktan erişim",
+  "Open this computer's projects from your phone or any browser": "Bu bilgisayarın projelerini telefonunuzdan veya herhangi bir tarayıcıdan açın",
+  "On. Your phone and any browser signed in to Haarness can open {computer}.": "Açık. Telefonunuz ve Haarness'te oturum açmış her tarayıcı {computer} bilgisayarını açabilir.",
+  "Members of {organization} can open it too.": "{organization} üyeleri de açabilir.",
+  "Remote access is on. Open {computer} from Haarness on your phone or any browser.": "Uzaktan erişim açık. {computer} bilgisayarını telefonunuzdaki Haarness'ten veya herhangi bir tarayıcıdan açın.",
+  "Remote access is off": "Uzaktan erişim kapalı"
 }

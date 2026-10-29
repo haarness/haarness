@@ -80,10 +80,11 @@ test("remote control asks a signed-out user to sign in, and the short form works
   const { page, close } = await launch({ HAARNESS_CLOUD_API_URL: "http://127.0.0.1:9" });
   try {
     const message = page.getByRole("textbox", { name: "Message" });
+    // The title bar's control is the whole computer's remote access; a chat
+    // is shared with the command.
     const titlebar = page.locator(".titlebar").getByRole("button", { name: "Remote control" });
-    // Before the first message there is nothing to share, and the titlebar
-    // offers nothing.
     await expect(titlebar).toHaveCount(0);
+    await expect(page.locator(".titlebar").getByRole("button", { name: "Remote access" })).toBeVisible();
     await command(page, "/remote-control");
     await expect(page.getByText("Send a first message, then share the chat with /remote-control.")).toBeVisible();
     await chat(page, "hello");
@@ -101,14 +102,7 @@ test("remote control asks a signed-out user to sign in, and the short form works
     await expect(dialog).toBeHidden();
     await command(page, "/rc later");
     await expect(page.getByText("Use /remote-control, /remote-control status or /remote-control stop.")).toBeVisible();
-    // The titlebar's button opens the same dialog; nothing is live yet.
-    await expect(titlebar).toBeVisible();
-    await expect(titlebar).toHaveAttribute("aria-pressed", "false");
-    await expect(titlebar.locator(".icon-button-dot")).toHaveCount(0);
-    await titlebar.click();
-    await expect(dialog.getByRole("button", { name: "Sign in to Haarness Cloud" })).toBeVisible();
-    await dialog.getByRole("button", { name: "Cancel" }).click();
-    await expect(dialog).toBeHidden();
+    await expect(titlebar).toHaveCount(0);
   } finally {
     await close();
   }
@@ -148,19 +142,14 @@ test("remote control shares a chat through Haarness Cloud and stops sharing it",
     await pill.click();
     await expect(dialog.locator(".remote-link code")).toHaveText(link);
     await dialog.getByRole("button", { name: "Done" }).click();
-    // So does the titlebar, with its dot lit.
-    const titlebar = page.locator(".titlebar").getByRole("button", { name: "Remote control" });
-    await expect(titlebar).toHaveAttribute("aria-pressed", "true");
-    await expect(titlebar).toHaveAttribute("aria-description", "Live in Haarness Cloud");
-    await expect(titlebar.locator(".icon-button-dot")).toHaveCount(1);
-    await page.locator(".titlebar").screenshot({ path: test.info().outputPath("titlebar-live.png") });
-    await titlebar.click();
+    // Sharing a chat leaves the whole computer's remote access as it was.
+    const access = page.locator(".titlebar").getByRole("button", { name: "Remote access" });
+    await expect(access).toHaveAttribute("aria-pressed", "false");
+    await pill.click();
     await expect(dialog.locator(".remote-link code")).toHaveText(link);
     await dialog.getByRole("button", { name: "Stop sharing" }).click();
     await expect(dialog.getByRole("button", { name: "Share this chat" })).toBeVisible({ timeout: 30000 });
     await expect(pill).toBeHidden();
-    await expect(titlebar).toHaveAttribute("aria-pressed", "false");
-    await expect(titlebar.locator(".icon-button-dot")).toHaveCount(0);
     expect(published().some((item) => item.id === id)).toBe(false);
   } finally {
     await command(page, "/remote-control stop").catch(() => {});

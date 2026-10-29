@@ -47,8 +47,28 @@ impl WorkspaceHost for Host {
         path: Option<String>,
         options: BrowseOptions,
     ) -> Result<DirectoryListing> {
-        let default = self.workspace.clone();
-        tokio::task::spawn_blocking(move || list_directories(path, default, options)).await?
+        let paths = self.paths.clone();
+        let workspace = self.workspace.clone();
+        tokio::task::spawn_blocking(move || {
+            // The chat home is a folder of Haarness's own: a computer reached
+            // through it is browsed from the home folder.
+            let chat_home = paths.workspace_id.as_deref().is_some_and(|id| {
+                paths
+                    .workspace_manager()
+                    .and_then(|manager| Ok(manager.get(id)?))
+                    .is_ok_and(|workspace| workspace.chat_home)
+            });
+            let default = if chat_home {
+                directories::BaseDirs::new()
+                    .context("Home folder is unavailable")?
+                    .home_dir()
+                    .to_path_buf()
+            } else {
+                workspace
+            };
+            list_directories(path, default, options)
+        })
+        .await?
     }
     async fn open(&self, path: String) -> Result<WorkspaceInfo> {
         let paths = self.paths.clone();
@@ -116,7 +136,14 @@ impl Host {
             });
         }
         let paths = self.paths.scoped(&workspace.id, false)?;
-        let discovery = ensure_workspace_server_for_remote(&paths, &path, self.trust).await?;
+        // A server already running for the project (Desktop's, say) is used
+        // with the project configuration setting it was started with, so
+        // reaching the project from Cloud never restarts it under the person.
+        let trust = match inspect_workspace_server(&paths, &path).await {
+            Ok(Some(live)) => live.info.project_trusted.unwrap_or(self.trust),
+            _ => self.trust,
+        };
+        let discovery = ensure_workspace_server_for_remote(&paths, &path, trust).await?;
         Ok(WorkspaceTarget {
             url: discovery.url,
             token: discovery.token,
@@ -272,7 +299,7 @@ fn set_visible(paths: &Paths, id: &str, visible: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHAT_HOME_STAYS, Host, readable};
+    use super::{BrowseOptions, CHAT_HOME_STAYS, Host, readable};
     use haarness_protocol::{
         PTY_CAPABILITY, SCHEMA_VERSION, ServerInfo, WORKSPACE_HISTORY_CAPABILITY,
     };
@@ -350,6 +377,19 @@ mod tests {
                 ("http://127.0.0.1:1", "home-token")
             );
         }
+        // Reached through the chat home, the computer is browsed from the
+        // home folder, not from Haarness's own.
+        let host = Host {
+            paths: host.paths.scoped(&workspace.id, false).unwrap(),
+            ..host
+        };
+        let listing = host.browse(None, BrowseOptions::default()).await.unwrap();
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .canonicalize()
+            .unwrap();
+        assert_eq!(listing.path, home.display().to_string());
         let _ = std::fs::remove_dir_all(root);
     }
 }

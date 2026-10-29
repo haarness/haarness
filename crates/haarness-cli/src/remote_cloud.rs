@@ -211,33 +211,11 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                 println!("Connector is already running");
                 return Ok(());
             }
-            // Enabling is the person asking to connect this computer again: if
-            // Cloud removed its earlier registration (Remove access), register
-            // a new one instead of failing on the old identity.
-            let earlier = std::fs::read(&file)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .and_then(|identity| identity["id"].as_str().map(str::to_owned));
-            if let Some(id) = earlier {
-                let removed = matches!(
-                    client
-                        .request(
-                            reqwest::Method::GET,
-                            &format!("/api/v1/remote-hosts/{id}"),
-                            None
-                        )
-                        .await,
-                    Err(haarness_account::Error::Api { status: 404, .. })
-                );
-                if removed {
-                    std::fs::remove_file(&file)?;
-                    println!(
-                        "This computer was removed from Haarness Cloud; registering it again."
-                    );
-                }
+            if forget_removed_host(&client, &file).await? {
+                println!("This computer was removed from Haarness Cloud; registering it again.");
             }
             let log = file.with_extension("log");
-            spawn_connector(paths, workspace, &file, &name, session)
+            spawn_connector(paths, workspace, &file, &name, session, false)
                 .await
                 .map_err(|error| anyhow::anyhow!("{error}; inspect {}", log.display()))?;
             println!(
@@ -355,6 +333,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                 ("name", json!(name)),
                 ("apiUrl", json!(client.config.api_url)),
                 ("pid", json!(std::process::id())),
+                ("version", json!(env!("CARGO_PKG_VERSION"))),
             ] {
                 identity[key] = value;
             }
@@ -368,6 +347,10 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                 std::fs::remove_file(&stop_file)?;
             }
             client.request(reqwest::Method::POST,"/api/v1/remote-hosts",Some(json!({"id":id,"accountId":account,"name":name,"mode":mode,"metadata":{"platform":std::env::consts::OS,"version":env!("CARGO_PKG_VERSION")}}))).await?;
+            // From here a host Cloud no longer lists was removed there, not
+            // still on its way.
+            identity["registered"] = json!(true);
+            super::write_private_json(&file, &identity)?;
             if let Some(thread) = session {
                 let published = client
                     .request(
@@ -401,7 +384,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             let _watcher = AbortTask(watcher);
             let mut shown_title = identity["title"].as_str().unwrap_or_default().to_owned();
             let attention =
-                remote_attention::Context::new(paths, trust, remote_attention::Timing::default());
+                remote_attention::Context::new(paths, remote_attention::Timing::default());
             let mut relay = client
                 .config
                 .api_url
@@ -1414,6 +1397,7 @@ async fn spawn_connector(
     file: &Path,
     name: &str,
     session: Option<Uuid>,
+    chat_home: bool,
 ) -> Result<u64> {
     std::fs::create_dir_all(paths.config_dir())?;
     let log = file.with_extension("log");
@@ -1430,10 +1414,11 @@ async fn spawn_connector(
     if let Some(root) = &paths.root {
         command.arg("--data-dir").arg(root);
     }
-    command
-        .arg("--workspace")
-        .arg(workspace)
-        .args(["remote", "run", "--name", name]);
+    command.arg("--workspace").arg(workspace);
+    if chat_home {
+        command.arg("--chat-home");
+    }
+    command.args(["remote", "run", "--name", name]);
     if let Some(chat) = session {
         command.arg("--chat").arg(chat.to_string());
     }
@@ -1680,7 +1665,7 @@ pub(crate) async fn share_chat(paths: &Paths, workspace: &Path, thread: Uuid) ->
         }
     }
     let computer = haarness_account::computer_name();
-    let start = spawn_connector(paths, workspace, &file, &computer, Some(thread)).await?;
+    let start = spawn_connector(paths, workspace, &file, &computer, Some(thread), false).await?;
     // The connector registers and publishes as soon as it holds its lock.
     for _ in 0..150 {
         let published = std::fs::read(&file)
@@ -1780,6 +1765,360 @@ async fn forget_chat(
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
             _ => {}
         }
+    }
+    Ok(())
+}
+/// When Cloud no longer knows the host an identity registered (someone used
+/// Remove access), forget that identity so the next start registers anew.
+/// Returns whether it was forgotten.
+async fn forget_removed_host(client: &haarness_account::Client, file: &Path) -> Result<bool> {
+    let earlier = std::fs::read(file)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|identity| identity["id"].as_str().map(str::to_owned));
+    let Some(id) = earlier else {
+        return Ok(false);
+    };
+    let removed = matches!(
+        client
+            .request(
+                reqwest::Method::GET,
+                &format!("/api/v1/remote-hosts/{id}"),
+                None
+            )
+            .await,
+        Err(haarness_account::Error::Api { status: 404, .. })
+    );
+    if removed {
+        std::fs::remove_file(file)?;
+    }
+    Ok(removed)
+}
+
+/// Whether this whole computer can be reached from Cloud: Desktop's remote
+/// access control in the title bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AccessState {
+    /// No Haarness Cloud sign-in on this computer.
+    SignedOut,
+    Off,
+    /// The connector runs but Cloud does not see it yet.
+    Connecting,
+    /// Phones and browsers signed in to the account can open its projects.
+    On,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostAccess {
+    pub state: AccessState,
+    /// The name Cloud shows for this computer.
+    pub computer: Option<String>,
+    /// The organization account it is reachable from, whose members can
+    /// open it too; none for a personal account.
+    pub organization: Option<String>,
+    pub error: Option<String>,
+}
+impl HostAccess {
+    fn new(state: AccessState) -> Self {
+        Self {
+            state,
+            computer: None,
+            organization: None,
+            error: None,
+        }
+    }
+}
+/// The connector identities that make this computer a host of the configured
+/// Cloud, for `account` when it is known: the running ones first.
+fn host_identities(
+    paths: &Paths,
+    client: &haarness_account::Client,
+    account: Option<&str>,
+) -> Result<Vec<(std::path::PathBuf, Value)>> {
+    let mut found = identities(paths)?
+        .into_iter()
+        .filter(|(_, identity)| {
+            identity["chatId"].is_null()
+                && identity["apiUrl"].as_str() == Some(client.config.api_url.as_str())
+                && account.is_none_or(|account| identity["accountId"].as_str() == Some(account))
+        })
+        .map(|(file, identity)| Ok((running(&file)?, file, identity)))
+        .collect::<Result<Vec<_>>>()?;
+    found.sort_by_key(|(running, ..)| !running);
+    Ok(found
+        .into_iter()
+        .map(|(_, file, identity)| (file, identity))
+        .collect())
+}
+/// The identity file of `account`'s host connector: the one this computer
+/// has, or where a new one goes.
+fn host_file(
+    paths: &Paths,
+    client: &haarness_account::Client,
+    account: &str,
+    gateway: &Path,
+) -> Result<std::path::PathBuf> {
+    Ok(host_identities(paths, client, Some(account))?
+        .into_iter()
+        .next()
+        .map_or_else(
+            || identity_file(paths, client, account, gateway, None),
+            |(file, _)| file,
+        ))
+}
+/// The selected account and, for an organization, its name. Signed out is
+/// `None`.
+async fn host_account(
+    client: &haarness_account::Client,
+) -> Result<Option<(String, Option<String>)>> {
+    let status = match client.status().await {
+        Ok(status) => status,
+        Err(haarness_account::Error::NotLoggedIn) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if status["loggedIn"] != true {
+        return Ok(None);
+    }
+    let account = status["selectedAccountId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .context("Choose a Haarness Cloud account first")?
+        .to_owned();
+    let organization = status["accounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|row| row["id"].as_str() == Some(account.as_str()))
+        .filter(|row| row["kind"] == "organization")
+        .and_then(|row| row["name"].as_str().map(str::to_owned));
+    Ok(Some((account, organization)))
+}
+/// Report whether this computer is reachable from Cloud. `check_cloud` asks
+/// Cloud whether it sees the connector; without it the answer is local and
+/// instant.
+pub(crate) async fn host_access(
+    client: &haarness_account::Client,
+    paths: &Paths,
+    check_cloud: bool,
+) -> Result<HostAccess> {
+    if !client.config.signed_in() {
+        return Ok(HostAccess::new(AccessState::SignedOut));
+    }
+    let mut account = client.config.selected_account();
+    let mut organization = None;
+    let mut unreachable = None;
+    if check_cloud {
+        match host_account(client).await {
+            Ok(Some(selected)) => (account, organization) = (Some(selected.0), selected.1),
+            Ok(None) => return Ok(HostAccess::new(AccessState::SignedOut)),
+            // Cloud is out of reach: say what this computer knows.
+            Err(error) => unreachable = Some(error.to_string()),
+        }
+    }
+    let Some((file, identity)) = host_identities(paths, client, account.as_deref())?
+        .into_iter()
+        .next()
+    else {
+        let mut access = HostAccess::new(AccessState::Off);
+        access.organization = organization;
+        return Ok(access);
+    };
+    let mut access = HostAccess {
+        computer: Some(
+            identity["name"]
+                .as_str()
+                .map_or_else(haarness_account::computer_name, str::to_owned),
+        ),
+        organization,
+        error: unreachable,
+        ..HostAccess::new(AccessState::Off)
+    };
+    if !running(&file)? {
+        // A connector that gave up (signed out, access removed, an outdated
+        // protocol) said why; it shows until access is turned on or off again.
+        access.error = identity["error"]
+            .as_str()
+            .map(str::to_owned)
+            .or(access.error);
+        return Ok(access);
+    }
+    access.state = AccessState::Connecting;
+    let Some(id) = identity["id"]
+        .as_str()
+        .filter(|_| check_cloud && access.error.is_none())
+    else {
+        return Ok(access);
+    };
+    match client
+        .request(
+            reqwest::Method::GET,
+            &format!("/api/v1/remote-hosts/{id}"),
+            None,
+        )
+        .await
+    {
+        Ok(host) if host["connected"] == true => access.state = AccessState::On,
+        Ok(_) => {}
+        // Removed in Cloud (Remove access on a phone or the web): the
+        // connector has nothing left to serve. A host that is still
+        // registering is not listed yet.
+        Err(error) if not_found(&error) && identity["registered"] == true => {
+            stop_connector(&file).await?;
+            std::fs::remove_file(&file)?;
+            access.state = AccessState::Off;
+        }
+        Err(error) if not_found(&error) => {}
+        Err(haarness_account::Error::NotLoggedIn) => access.state = AccessState::SignedOut,
+        Err(error) => access.error = Some(error.to_string()),
+    }
+    Ok(access)
+}
+/// Make this whole computer reachable from Cloud for the selected account:
+/// start its connector, with `gateway` (Desktop's chat home, a folder of
+/// Haarness's own) as the project that routes Cloud's requests to every
+/// other one, and wait until Cloud sees it.
+pub(crate) async fn enable_host(
+    client: &haarness_account::Client,
+    paths: &Paths,
+    gateway: &Path,
+) -> Result<HostAccess> {
+    if !client.config.signed_in() {
+        return Ok(HostAccess::new(AccessState::SignedOut));
+    }
+    let Some((account, _)) = host_account(client).await? else {
+        return Ok(HostAccess::new(AccessState::SignedOut));
+    };
+    let file = host_file(paths, client, &account, gateway)?;
+    if !running(&file)? {
+        forget_removed_host(client, &file).await?;
+        paths.workspace_manager()?.register_chat_home(gateway)?;
+        let name = haarness_account::computer_name();
+        let start = spawn_connector(paths, gateway, &file, &name, None, true).await?;
+        // The connector registers with Cloud as soon as it holds its lock.
+        for _ in 0..150 {
+            let registered = std::fs::read(&file)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|identity| identity["registered"] == true);
+            if registered {
+                break;
+            }
+            if !running(&file)? {
+                anyhow::bail!(
+                    exit_reason(&file.with_extension("log"), start).unwrap_or_else(|| {
+                        "The connector stopped before Haarness Cloud registered this computer"
+                            .into()
+                    })
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    // Cloud sees the connector a moment after it registers; a short wait
+    // lets the first answer say "on" instead of "connecting".
+    let mut access = host_access(client, paths, true).await?;
+    for _ in 0..10 {
+        if access.state != AccessState::Connecting {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        access = host_access(client, paths, true).await?;
+    }
+    Ok(access)
+}
+/// Make this computer unreachable from Cloud: stop every connector that
+/// makes it a host of the configured Cloud. Their registrations stay, so
+/// phones keep the computer (shown offline) and turning access on again
+/// reuses them. Local work and shared chats are untouched.
+pub(crate) async fn disable_host(
+    client: &haarness_account::Client,
+    paths: &Paths,
+) -> Result<HostAccess> {
+    let mut access = HostAccess::new(if client.config.signed_in() {
+        AccessState::Off
+    } else {
+        AccessState::SignedOut
+    });
+    for (file, mut identity) in host_identities(paths, client, None)? {
+        stop_connector(&file).await?;
+        access.computer = access
+            .computer
+            .or_else(|| identity["name"].as_str().map(str::to_owned));
+        // Turned off on purpose: why an earlier run gave up no longer applies.
+        if let Some(fields) = identity.as_object_mut()
+            && fields.remove("error").is_some()
+        {
+            super::write_private_json(&file, &identity)?;
+        }
+        // The stop file stays as the sign that access was turned off, so
+        // starting Desktop does not turn it back on.
+        if !file.with_extension("stop").exists() {
+            std::fs::write(file.with_extension("stop"), "stop")?;
+        }
+    }
+    Ok(access)
+}
+/// When Desktop starts: turn access back on if it was on when this computer
+/// last stopped (a restart, not a person turning it off), and restart a
+/// connector another version of Haarness runs, so it speaks this version's
+/// protocol.
+pub(crate) async fn restore_host(
+    client: &haarness_account::Client,
+    paths: &Paths,
+    gateway: &Path,
+) -> Result<HostAccess> {
+    if !client.config.signed_in() {
+        return Ok(HostAccess::new(AccessState::SignedOut));
+    }
+    let Some((account, _)) = host_account(client).await? else {
+        return Ok(HostAccess::new(AccessState::SignedOut));
+    };
+    let file = host_file(paths, client, &account, gateway)?;
+    let Some(identity) = std::fs::read(&file)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    else {
+        return host_access(client, paths, false).await;
+    };
+    let current = identity["version"].as_str() == Some(env!("CARGO_PKG_VERSION"));
+    let turned_off = file.with_extension("stop").exists();
+    if running(&file)? {
+        if current {
+            return host_access(client, paths, true).await;
+        }
+        stop_connector(&file).await?;
+    } else if turned_off || (identity["error"].is_string() && current) {
+        return host_access(client, paths, false).await;
+    }
+    enable_host(client, paths, gateway).await
+}
+/// Stop the connectors that make this computer reachable through the
+/// configured Cloud, except those of `keep` (the account now selected): after
+/// a sign-out none may stay, and after an account switch only the new
+/// account's. Each leaves its stop file, so starting Desktop does not turn
+/// it back on.
+pub(crate) async fn stop_connectors(
+    client: &haarness_account::Client,
+    paths: &Paths,
+    keep: Option<&str>,
+) -> Result<()> {
+    let stops = identities(paths)?
+        .into_iter()
+        .filter(|(_, identity)| {
+            identity["apiUrl"].as_str() == Some(client.config.api_url.as_str())
+                && keep.is_none_or(|keep| identity["accountId"].as_str() != Some(keep))
+        })
+        .map(|(file, _)| async move {
+            if running(&file)? {
+                stop_connector(&file).await?;
+            } else {
+                std::fs::write(file.with_extension("stop"), "stop")?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+    for result in futures::future::join_all(stops).await {
+        result?;
     }
     Ok(())
 }
@@ -1980,6 +2319,187 @@ mod tests {
         assert_eq!(revoked.state, ShareState::Stopped);
         assert_eq!(revoked.url, None);
         drop(lock);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn this_computer_reports_its_access_and_turning_it_off_keeps_it_off() {
+        use axum::{Json, Router, extract::Path as Route, http::StatusCode, routing::get};
+        let root = std::env::temp_dir().join(format!("haarness-remote-host-{}", Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        let (account, host, gone) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let router = Router::new()
+            .route(
+                "/api/v1/key",
+                get(move || async move {
+                    Json(json!({"key":{"id":Uuid::now_v7(),"accountId":account,"label":"Desk","scopes":[]},
+                        "accountName":"Personal"}))
+                }),
+            )
+            .route(
+                "/api/v1/remote-hosts/{id}",
+                get(move |Route(id): Route<Uuid>| async move {
+                    if id == host {
+                        Ok(Json(json!({"id":id,"connected":true})))
+                    } else {
+                        Err(StatusCode::NOT_FOUND)
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = haarness_account::Client::new(
+            haarness_account::Config::new(&api, root.join("cloud"), "test")
+                .unwrap()
+                .with_api_key("hck_fixture".into())
+                .unwrap(),
+        )
+        .unwrap();
+        let access = |check| host_access(&client, &paths, check);
+        assert_eq!(access(true).await.unwrap().state, AccessState::Off);
+
+        // A host connector of this account that holds its lock, and a chat
+        // share, which says nothing about the whole computer.
+        let file = paths.config_dir().join("remote-host.json");
+        let identity = json!({"id":host,"chatId":null,"accountId":account,
+            "apiUrl":client.config.api_url,"name":"Desk","registered":true});
+        std::fs::write(&file, identity.to_string()).unwrap();
+        std::fs::write(
+            paths.config_dir().join("remote-chat.json"),
+            json!({"id":Uuid::now_v7(),"chatId":Uuid::now_v7(),"accountId":account,
+                "apiUrl":client.config.api_url})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(access(false).await.unwrap().state, AccessState::Off);
+        let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let local = access(false).await.unwrap();
+        assert_eq!(
+            (local.state, local.computer.as_deref()),
+            (AccessState::Connecting, Some("Desk"))
+        );
+        let on = access(true).await.unwrap();
+        assert_eq!((on.state, on.organization), (AccessState::On, None));
+
+        // Turning it off stops the connector and leaves the stop file, so
+        // starting Desktop does not turn it back on.
+        let stop = file.with_extension("stop");
+        let connector = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.exists() {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                drop(lock);
+            })
+        };
+        let off = disable_host(&client, &paths).await.unwrap();
+        connector.join().unwrap();
+        assert_eq!(
+            (off.state, off.computer.as_deref()),
+            (AccessState::Off, Some("Desk"))
+        );
+        assert!(file.exists() && stop.exists());
+        let gateway = root.join("Chat folders");
+        assert_eq!(
+            host_file(&paths, &client, &account.to_string(), &gateway).unwrap(),
+            file
+        );
+        let restored = restore_host(&client, &paths, &gateway).await.unwrap();
+        assert_eq!(restored.state, AccessState::Off);
+        assert!(!running(&file).unwrap(), "restoring started a connector");
+
+        // A connector of this version that gave up says why until access
+        // changes again, and starting Desktop leaves it alone.
+        record_exit(&file, &anyhow::anyhow!("Remote host access was revoked"));
+        let mut saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        saved["version"] = json!(env!("CARGO_PKG_VERSION"));
+        std::fs::write(&file, saved.to_string()).unwrap();
+        std::fs::remove_file(&stop).unwrap();
+        let failed = restore_host(&client, &paths, &gateway).await.unwrap();
+        assert_eq!(failed.state, AccessState::Off);
+        assert!(failed.error.unwrap().contains("revoked"));
+        assert!(!running(&file).unwrap(), "restoring started a connector");
+        disable_host(&client, &paths).await.unwrap();
+        assert_eq!(access(true).await.unwrap().error, None);
+
+        // Removed in Cloud while its connector still runs: access is off and
+        // the identity goes, so the next start registers anew.
+        std::fs::write(
+            &file,
+            json!({"id":gone,"chatId":null,"accountId":account,
+                "apiUrl":client.config.api_url,"registered":true})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::remove_file(&stop).unwrap();
+        let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let connector = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.exists() {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                drop(lock);
+            })
+        };
+        assert_eq!(access(true).await.unwrap().state, AccessState::Off);
+        connector.join().unwrap();
+        assert!(!file.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn signing_out_or_switching_accounts_stops_what_the_other_account_reaches() {
+        let root = std::env::temp_dir().join(format!("haarness-remote-switch-{}", Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        let client = haarness_account::Client::new(
+            haarness_account::Config::new("http://127.0.0.1:9", root.join("cloud"), "test")
+                .unwrap()
+                .with_api_key("hck_fixture".into())
+                .unwrap(),
+        )
+        .unwrap();
+        let api = client.config.api_url.to_string();
+        let connector = |name: &str, account: &str, api: &str| {
+            let file = paths.config_dir().join(format!("remote-{name}.json"));
+            std::fs::write(
+                &file,
+                json!({"id":Uuid::now_v7(),"chatId":null,"accountId":account,"apiUrl":api})
+                    .to_string(),
+            )
+            .unwrap();
+            let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
+            fs2::FileExt::lock_exclusive(&lock).unwrap();
+            let stop = file.with_extension("stop");
+            let thread = std::thread::spawn(move || {
+                for _ in 0..250 {
+                    if stop.exists() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                drop(lock);
+            });
+            (file, thread)
+        };
+        let (kept, kept_thread) = connector("kept", "new", &api);
+        let (left, left_thread) = connector("left", "old", &api);
+        let (elsewhere, elsewhere_thread) = connector("elsewhere", "old", "http://other.test/");
+        stop_connectors(&client, &paths, Some("new")).await.unwrap();
+        left_thread.join().unwrap();
+        assert!(left.with_extension("stop").exists());
+        assert!(running(&kept).unwrap() && running(&elsewhere).unwrap());
+        // Signed out: nothing this Cloud reaches keeps running.
+        stop_connectors(&client, &paths, None).await.unwrap();
+        kept_thread.join().unwrap();
+        assert!(kept.with_extension("stop").exists());
+        assert!(running(&elsewhere).unwrap());
+        std::fs::write(elsewhere.with_extension("stop"), "stop").unwrap();
+        elsewhere_thread.join().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
     /// `wait` is `nominal` milliseconds, jittered at most a fifth shorter.
@@ -2227,7 +2747,6 @@ mod tests {
     fn attention(paths: &Paths) -> Arc<remote_attention::Context> {
         remote_attention::Context::new(
             paths,
-            false,
             remote_attention::Timing {
                 debounce: Duration::from_millis(50),
                 settle: Duration::from_millis(300),
@@ -3779,7 +4298,6 @@ mod tests {
         let installed = build.clone();
         let attention = remote_attention::Context::with_executable(
             &computer.paths,
-            false,
             remote_attention::Timing {
                 debounce: Duration::from_millis(50),
                 settle: Duration::from_millis(300),

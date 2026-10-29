@@ -2951,5 +2951,11 @@
   "Updated just now": "อัปเดตเมื่อสักครู่",
   "Plugins updated: {names}": "ปลั๊กอินที่อัปเดต: {names}",
   "Could not update {names}": "อัปเดต {names} ไม่สำเร็จ",
-  "Waiting for you: {plugins}": "รอคุณยืนยัน: {plugins}"
+  "Waiting for you: {plugins}": "รอคุณยืนยัน: {plugins}",
+  "Remote access": "การเข้าถึงระยะไกล",
+  "Open this computer's projects from your phone or any browser": "เปิดโปรเจกต์ของคอมพิวเตอร์เครื่องนี้จากโทรศัพท์หรือเบราว์เซอร์ใดก็ได้",
+  "On. Your phone and any browser signed in to Haarness can open {computer}.": "เปิดอยู่ โทรศัพท์ของคุณและเบราว์เซอร์ใดก็ได้ที่ลงชื่อเข้าใช้ Haarness เปิด {computer} ได้",
+  "Members of {organization} can open it too.": "สมาชิกของ {organization} ก็เปิดได้เช่นกัน",
+  "Remote access is on. Open {computer} from Haarness on your phone or any browser.": "เปิดการเข้าถึงระยะไกลแล้ว เปิด {computer} จาก Haarness บนโทรศัพท์หรือเบราว์เซอร์ใดก็ได้",
+  "Remote access is off": "ปิดการเข้าถึงระยะไกลแล้ว"
 }

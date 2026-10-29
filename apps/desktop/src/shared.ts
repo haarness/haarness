@@ -346,7 +346,7 @@ export interface Bridge {
   pathForFile(file: File): string;
   /** Holds the global shortcut off while Settings records a new one. */
   globalShortcut(action: "suspend" | "resume"): Promise<void>;
-  account(input: { action: string; id?: string; name?: string; repo?: string; configuration?: Record<string, unknown>; page?: string; device?: boolean }): Promise<any>;
+  account(input: { action: string; id?: string; name?: string; repo?: string; configuration?: Record<string, unknown>; page?: string; device?: boolean; change?: "on" | "off"; check?: boolean }): Promise<any>;
   openLink(connection: string | undefined, thread: string | undefined | null, url: string): Promise<"external" | "browser">;
   /** An image on another host as a data URL, fetched by the app without cookies or a referrer; throws why it did not load. */
   remoteImage(url: string): Promise<string>;
