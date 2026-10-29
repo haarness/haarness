@@ -714,3 +714,33 @@ async fn a_chat_runs_no_more_background_commands_than_its_cap_and_archiving_stop
         Some(haarness_protocol::ShellCommandEndedBy::ChatStopped)
     );
 }
+
+#[tokio::test]
+async fn an_agent_command_without_a_deadline_saves_only_the_start_of_its_output() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_timeout_ms = 0;
+    });
+    let thread = chat(&runtime, None).await;
+    let past = haarness_core::OUTPUT_SAVED_LIMIT + 1024 * 1024;
+    let turn = scripted(
+        &runtime,
+        thread,
+        &format!(r#"!tool bash {{"command":"yes 0123456789 | head -c {past}"}}"#),
+        false,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert_eq!(
+        metadata["outputSavedBytes"],
+        haarness_core::OUTPUT_SAVED_LIMIT,
+        "{text:.200}"
+    );
+    let path = metadata["outputPath"].as_str().unwrap();
+    assert_eq!(
+        std::fs::metadata(path).unwrap().len(),
+        haarness_core::OUTPUT_SAVED_LIMIT
+    );
+    let _ = std::fs::remove_file(path);
+}

@@ -430,10 +430,10 @@ pub(crate) async fn run_call(
     call.check_start(request.background)?;
     // A deadline in the foreground saves all of the output; without one
     // (or in the background) only its start.
-    let save_limit = match request.timeout_ms {
-        Some(timeout) if timeout > 0 && !request.background => u64::MAX,
-        None if !request.background => u64::MAX,
-        _ => OUTPUT_SAVED_LIMIT,
+    let save_limit = if call.saves_whole_output(&request) {
+        u64::MAX
+    } else {
+        OUTPUT_SAVED_LIMIT
     };
     let spawned = spawn(
         &request.command,
