@@ -10566,6 +10566,10 @@ impl RunnerTask {
     }
 
     fn tool_enabled(&self, name: &str) -> bool {
+        // Following and stopping commands goes with running them.
+        if matches!(name, "bash_output" | "bash_stop") && !self.tool_enabled("bash") {
+            return false;
+        }
         if name == "preview"
             && self
                 .request

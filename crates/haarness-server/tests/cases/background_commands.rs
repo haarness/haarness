@@ -1012,3 +1012,55 @@ async fn a_commands_end_starts_its_turn_with_the_configuration_of_that_moment() 
     );
     assert!(!second.requests.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn bash_output_and_bash_stop_are_offered_only_where_bash_is() {
+    let workspace = Workspace::new();
+    let (runtime, provider) = commands_runtime(&workspace.0, |_| {});
+    let offered = |provider: &Capturing| {
+        provider
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(&runtime, thread, "hello", true).await;
+    wait_done(&runtime, &turn).await;
+    let tools = offered(&provider);
+    assert!(tools.contains("bash_output") && tools.contains("bash_stop"));
+    // A turn without bash gets neither, and a call of one is refused.
+    let before = provider.requests.lock().unwrap().len();
+    let mut request = turn_request("!tool bash_output {}");
+    request.tools = Some(std::collections::HashMap::from([("bash".into(), false)]));
+    let turn = runtime.start_turn(thread, request).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    for request in &provider.requests.lock().unwrap()[before..] {
+        let tools = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !tools.contains(&"bash")
+                && !tools.contains(&"bash_output")
+                && !tools.contains(&"bash_stop"),
+            "{tools:?}"
+        );
+    }
+    let (text, _) = last_result(&runtime, thread).await;
+    assert!(text.contains("disabled"), "{text}");
+    // Nor an agent whose rules deny bash.
+    let mut engine = haarness_core::PermissionEngine::build_defaults();
+    engine.add_rule(haarness_core::PermissionRule {
+        pattern: "bash:*".into(),
+        decision: haarness_core::PermissionDecision::Deny,
+    });
+    assert!(engine.disables_tool("bash_output") && engine.disables_tool("bash_stop"));
+    assert!(!haarness_core::PermissionEngine::build_defaults().disables_tool("bash_output"));
+}
