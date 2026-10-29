@@ -295,6 +295,26 @@ class Api(Transport):
         """POST /v1/threads/{id}/commands."""
         return cast("T.CommandExecutionResponse", self.request('POST', f'/v1/threads/{self.segment(id)}/commands', body=body, binary_body=False, binary_response=False, options=options))
 
+    def list_shell_commands(self, id: str, *, options: RequestOptions | None = None) -> list[T.ShellCommandInfo]:
+        """GET /v1/threads/{id}/commands."""
+        return cast("list[T.ShellCommandInfo]", self.request('GET', f'/v1/threads/{self.segment(id)}/commands', binary_body=False, binary_response=False, options=options))
+
+    def background_shell_commands(self, id: str, query: T.BackgroundCommandsQuery | None = None, *, options: RequestOptions | None = None) -> list[T.ShellCommandInfo]:
+        """POST /v1/threads/{id}/commands/background."""
+        return cast("list[T.ShellCommandInfo]", self.request('POST', f'/v1/threads/{self.segment(id)}/commands/background', query=query, binary_body=False, binary_response=False, options=options))
+
+    def get_shell_command(self, id: str, command: str, *, options: RequestOptions | None = None) -> T.ShellCommandInfo:
+        """GET /v1/threads/{id}/commands/{command}."""
+        return cast("T.ShellCommandInfo", self.request('GET', f'/v1/threads/{self.segment(id)}/commands/{self.segment(command)}', binary_body=False, binary_response=False, options=options))
+
+    def read_shell_command_output(self, id: str, command: str, query: T.ShellCommandOutputQuery | None = None, *, options: RequestOptions | None = None) -> T.ShellCommandOutput:
+        """GET /v1/threads/{id}/commands/{command}/output."""
+        return cast("T.ShellCommandOutput", self.request('GET', f'/v1/threads/{self.segment(id)}/commands/{self.segment(command)}/output', query=query, binary_body=False, binary_response=False, options=options))
+
+    def stop_shell_command(self, id: str, command: str, *, options: RequestOptions | None = None) -> T.ShellCommandInfo:
+        """POST /v1/threads/{id}/commands/{command}/stop."""
+        return cast("T.ShellCommandInfo", self.request('POST', f'/v1/threads/{self.segment(id)}/commands/{self.segment(command)}/stop', binary_body=False, binary_response=False, options=options))
+
     def queue_input(self, id: str, body: T.QueueInputRequest, *, options: RequestOptions | None = None) -> T.QueueInputResponse:
         """POST /v1/threads/{id}/input."""
         return cast("T.QueueInputResponse", self.request('POST', f'/v1/threads/{self.segment(id)}/input', body=body, binary_body=False, binary_response=False, options=options))
@@ -378,6 +398,10 @@ class Api(Transport):
     def active_turns(self, *, options: RequestOptions | None = None) -> list[T.Turn]:
         """GET /v1/turns/active."""
         return cast("list[T.Turn]", self.request('GET', f'/v1/turns/active', binary_body=False, binary_response=False, options=options))
+
+    def active_shell_commands(self, *, options: RequestOptions | None = None) -> list[T.ShellCommandInfo]:
+        """GET /v1/commands/active."""
+        return cast("list[T.ShellCommandInfo]", self.request('GET', f'/v1/commands/active', binary_body=False, binary_response=False, options=options))
 
     def get_turn(self, id: str, *, options: RequestOptions | None = None) -> T.Turn:
         """GET /v1/turns/{id}."""
@@ -800,6 +824,26 @@ class AsyncApi(AsyncTransport):
         """POST /v1/threads/{id}/commands."""
         return cast("T.CommandExecutionResponse", await self.request('POST', f'/v1/threads/{self.segment(id)}/commands', body=body, binary_body=False, binary_response=False, options=options))
 
+    async def list_shell_commands(self, id: str, *, options: RequestOptions | None = None) -> list[T.ShellCommandInfo]:
+        """GET /v1/threads/{id}/commands."""
+        return cast("list[T.ShellCommandInfo]", await self.request('GET', f'/v1/threads/{self.segment(id)}/commands', binary_body=False, binary_response=False, options=options))
+
+    async def background_shell_commands(self, id: str, query: T.BackgroundCommandsQuery | None = None, *, options: RequestOptions | None = None) -> list[T.ShellCommandInfo]:
+        """POST /v1/threads/{id}/commands/background."""
+        return cast("list[T.ShellCommandInfo]", await self.request('POST', f'/v1/threads/{self.segment(id)}/commands/background', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def get_shell_command(self, id: str, command: str, *, options: RequestOptions | None = None) -> T.ShellCommandInfo:
+        """GET /v1/threads/{id}/commands/{command}."""
+        return cast("T.ShellCommandInfo", await self.request('GET', f'/v1/threads/{self.segment(id)}/commands/{self.segment(command)}', binary_body=False, binary_response=False, options=options))
+
+    async def read_shell_command_output(self, id: str, command: str, query: T.ShellCommandOutputQuery | None = None, *, options: RequestOptions | None = None) -> T.ShellCommandOutput:
+        """GET /v1/threads/{id}/commands/{command}/output."""
+        return cast("T.ShellCommandOutput", await self.request('GET', f'/v1/threads/{self.segment(id)}/commands/{self.segment(command)}/output', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def stop_shell_command(self, id: str, command: str, *, options: RequestOptions | None = None) -> T.ShellCommandInfo:
+        """POST /v1/threads/{id}/commands/{command}/stop."""
+        return cast("T.ShellCommandInfo", await self.request('POST', f'/v1/threads/{self.segment(id)}/commands/{self.segment(command)}/stop', binary_body=False, binary_response=False, options=options))
+
     async def queue_input(self, id: str, body: T.QueueInputRequest, *, options: RequestOptions | None = None) -> T.QueueInputResponse:
         """POST /v1/threads/{id}/input."""
         return cast("T.QueueInputResponse", await self.request('POST', f'/v1/threads/{self.segment(id)}/input', body=body, binary_body=False, binary_response=False, options=options))
@@ -883,6 +927,10 @@ class AsyncApi(AsyncTransport):
     async def active_turns(self, *, options: RequestOptions | None = None) -> list[T.Turn]:
         """GET /v1/turns/active."""
         return cast("list[T.Turn]", await self.request('GET', f'/v1/turns/active', binary_body=False, binary_response=False, options=options))
+
+    async def active_shell_commands(self, *, options: RequestOptions | None = None) -> list[T.ShellCommandInfo]:
+        """GET /v1/commands/active."""
+        return cast("list[T.ShellCommandInfo]", await self.request('GET', f'/v1/commands/active', binary_body=False, binary_response=False, options=options))
 
     async def get_turn(self, id: str, *, options: RequestOptions | None = None) -> T.Turn:
         """GET /v1/turns/{id}."""

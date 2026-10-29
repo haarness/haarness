@@ -13715,6 +13715,9 @@ mod definition_snippets;
 #[path = "cases/zero_window.rs"]
 mod zero_window;
 
+#[path = "cases/background_commands.rs"]
+mod background_commands;
+
 #[tokio::test]
 async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     let workspace =
