@@ -1445,7 +1445,10 @@ impl Reader<'_> {
                     // after it.
                     let rest: Vec<&str> =
                         options.rest.iter().map(|word| word.raw.as_str()).collect();
+                    let moved = !matches!(folder, Moved::No);
+                    self.moved += u32::from(moved);
                     self.nested(&format!("env {split} {}", rest.join(" ")), depth);
+                    self.moved -= u32::from(moved);
                 } else {
                     self.moved_invocation(folder, env_command(options.rest), stdin, source, depth);
                 }
@@ -1462,25 +1465,29 @@ impl Reader<'_> {
                     return;
                 }
                 let rest = after_settings(options.rest, name == "sudo");
-                if rest.is_empty() {
-                    // A shell that reads its commands from standard input.
-                    if options.flags.contains(['s', 'i']) {
-                        self.script(input(), depth);
-                    }
-                    return;
-                }
                 // `-D` and `--chdir` choose the folder; a login shell's `-i`
                 // the user's home, which is not known.
-                let folders: Vec<&Given<'_, '_>> = if name == "sudo" {
+                let sudo = name == "sudo";
+                let folders: Vec<&Given<'_, '_>> = if sudo {
                     options.all(&["D", "chdir"]).collect()
                 } else {
                     Vec::new()
                 };
-                let folder = if name == "sudo" && options.flags.contains('i') {
-                    Moved::Unknown
-                } else {
-                    self.wrapper_folder(&folders, source)
-                };
+                let mut folder = self.wrapper_folder(&folders, source);
+                if sudo && options.flags.contains('i') {
+                    folder = Moved::Unknown;
+                }
+                if rest.is_empty() {
+                    // A shell that reads its commands from standard input,
+                    // where the folder is.
+                    if options.flags.contains(['s', 'i']) {
+                        let moved = !matches!(folder, Moved::No);
+                        self.moved += u32::from(moved);
+                        self.script(input(), depth);
+                        self.moved -= u32::from(moved);
+                    }
+                    return;
+                }
                 self.moved_invocation(folder, rest, stdin, source, depth);
             }
             "coproc" => {
@@ -7808,6 +7815,40 @@ mod wrappers {
             );
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_shell_sudo_starts_in_a_folder_reads_its_script_there() {
+        let workspace = workspace();
+        // The folder of a shell that reads its script from standard input
+        // is checked, and what the script deletes is in that folder.
+        let ssh = analyze("cd ~/.ssh", &workspace).external_dirs;
+        assert!(!ssh.is_empty());
+        for command in [
+            "sudo -D ~/.ssh -s <<'EOF'\ncat id_rsa\nEOF",
+            "echo 'cat id_rsa' | sudo -D ~/.ssh -s",
+            "sudo --chdir ~/.ssh -i <<'EOF'\ncat id_rsa\nEOF",
+        ] {
+            assert_eq!(analyze(command, &workspace).external_dirs, ssh, "{command}");
+        }
+        for command in [
+            "sudo -D /etc -s <<EOF\nrm -rf x\nEOF",
+            "sudo -i <<EOF\nrm -rf x\nEOF",
+            "env -C /etc -S 'rm -rf x'",
+        ] {
+            let deletions = analyze(command, &workspace).deletions;
+            assert!(
+                deletions
+                    .iter()
+                    .any(|deletion| deletion.value == "x" && deletion.moved),
+                "{command}: {deletions:?}"
+            );
+        }
+        let deletions = analyze("sudo -s <<EOF\nrm -rf x\nEOF", &workspace).deletions;
+        assert!(
+            deletions.iter().all(|deletion| !deletion.moved),
+            "{deletions:?}"
+        );
     }
 
     #[test]
