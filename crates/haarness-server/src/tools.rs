@@ -1393,25 +1393,49 @@ fn media_client() -> &'static reqwest::Client {
 
 fn web_client() -> reqwest::Client {
     http_client()
-        // A redirect off the address asked for is not followed: the fetch returns its
-        // address, and fetching that is the model's next call, checked
-        // against the permission rules, so an allowed address cannot lead
-        // past a denied one. The first URL in `previous` is the one asked for.
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() > 10 {
-                attempt.error("too many redirects")
-            } else if attempt
-                .previous()
-                .first()
-                .is_some_and(|first| redirect_leaves(first, attempt.url()).is_none())
-            {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        }))
+        // `fetch_page` follows redirects itself, judging each one.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("the static WebFetch HTTP client configuration is valid")
+}
+
+/// How many redirects one fetch follows before it gives up.
+const WEBFETCH_REDIRECTS: usize = 10;
+
+/// What a fetch judges a redirect by: the webfetch rules of the call's agent
+/// and the address the call asked for, as written.
+struct FetchRules {
+    rules: haarness_core::PermissionEngine,
+    asked: String,
+}
+
+/// Why a fetch does not follow a redirect to `to` that a fetch of `from`
+/// met, or `None` when it does. A redirect off the address asked for is not
+/// followed (see [`redirect_leaves`]), nor is one on it that the call's
+/// rules would deny or ask about, so an allowed address cannot lead past a
+/// denied one: the fetch returns the new address, and fetching that is the
+/// model's next call, checked against the rules like any other.
+fn redirect_stop(
+    from: &url::Url,
+    to: &url::Url,
+    rules: Option<&FetchRules>,
+) -> Option<&'static str> {
+    use haarness_core::PermissionDecision;
+    if let Some(leaves) = redirect_leaves(from, to) {
+        return Some(leaves);
+    }
+    let verdict = rules.map_or(PermissionDecision::Allow, |rules| {
+        haarness_core::webfetch_redirect_verdict(&rules.rules, &rules.asked, to.as_str())
+    });
+    if verdict == PermissionDecision::Allow {
+        return None;
+    }
+    tracing::info!(
+        host = to.host_str().unwrap_or_default(),
+        denied = verdict == PermissionDecision::Deny,
+        "webfetch did not follow a redirect its permission rules do not allow"
+    );
+    Some("which the permission rules do not let this fetch follow")
 }
 
 /// How a redirect leaves the address a fetch asked for, or `None` when it
@@ -1442,13 +1466,14 @@ async fn webfetch(
     client: &reqwest::Client,
     url: url::Url,
     raw: bool,
+    rules: Option<&FetchRules>,
     cancel: &tokio_util::sync::CancellationToken,
     deadline: Duration,
 ) -> CoreResult<ToolOutput> {
     tokio::select! {
         biased;
         () = cancel.cancelled() => Err(CoreError::Cancelled),
-        result = tokio::time::timeout(deadline, fetch_page(client, url, raw)) => {
+        result = tokio::time::timeout(deadline, fetch_page(client, url, raw, rules)) => {
             result.unwrap_or_else(|_| {
                 Err(CoreError::Tool(format!(
                     "The page did not finish loading within {} seconds",
@@ -1459,26 +1484,82 @@ async fn webfetch(
     }
 }
 
+/// Where a redirect response leads, when it names a place.
+fn redirect_target(response: &reqwest::Response) -> Option<url::Url> {
+    response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|location| response.url().join(location).ok())
+}
+
 /// Reads `url` for webfetch; `webfetch` bounds it in time and by Stop.
-async fn fetch_page(client: &reqwest::Client, url: url::Url, raw: bool) -> CoreResult<ToolOutput> {
-    let response = client.get(url.clone()).send().await.map_err(tool_error)?;
-    // `web_client` follows redirects on the address asked for only, so a
-    // redirect that arrives here leads off it.
-    if response.status().is_redirection()
-        && let Some(target) = response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|location| response.url().join(location).ok())
-    {
+/// Redirects are followed here as the HTTP client used to follow them (the
+/// statuses it follows, a `Referer` naming the page before, a user name and
+/// password in `url` sent on while the redirects stay on its host, port and
+/// scheme), but only those [`redirect_stop`] lets through.
+async fn fetch_page(
+    client: &reqwest::Client,
+    url: url::Url,
+    raw: bool,
+    rules: Option<&FetchRules>,
+) -> CoreResult<ToolOutput> {
+    let mut signed_in = !url.username().is_empty() || url.password().is_some();
+    let mut response = client.get(url.clone()).send().await.map_err(tool_error)?;
+    let mut followed = 0;
+    let stop = loop {
+        if !response.status().is_redirection() {
+            break None;
+        }
+        let Some(target) = redirect_target(&response) else {
+            break None;
+        };
+        // Any other redirect status names a place without being followed.
+        if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            let reason =
+                redirect_leaves(&url, &target).unwrap_or("which leaves the address asked for");
+            break Some((target, reason));
+        }
+        if let Some(reason) = redirect_stop(&url, &target, rules) {
+            break Some((target, reason));
+        }
+        if followed == WEBFETCH_REDIRECTS {
+            return Err(CoreError::Tool(format!(
+                "{url} redirects more than {WEBFETCH_REDIRECTS} times"
+            )));
+        }
+        followed += 1;
+        let from = response.url();
+        if from.host_str() != target.host_str()
+            || from.port_or_known_default() != target.port_or_known_default()
+            || from.scheme() != target.scheme()
+        {
+            signed_in = false;
+        }
+        let mut referer = from.clone();
+        let _ = referer.set_username("");
+        let _ = referer.set_password(None);
+        referer.set_fragment(None);
+        // The client signs in with what the address carries: the address
+        // asked for's, never one the server's redirect names.
+        let mut next = target;
+        let _ = next.set_username(if signed_in { url.username() } else { "" });
+        let _ = next.set_password(url.password().filter(|_| signed_in));
+        response = client
+            .get(next)
+            .header(reqwest::header::REFERER, referer.as_str())
+            .send()
+            .await
+            .map_err(tool_error)?;
+    };
+    if let Some((target, reason)) = stop {
         return Ok(ToolOutput {
             text: format!(
-                "{} redirects (HTTP {}) to {target}, {}, so the redirect was not followed. \
-                 Call webfetch with {target} to read it; that fetch is checked against the \
-                 permission rules like any other.",
+                "{} redirects (HTTP {}) to {target}, {reason}, so the redirect was not \
+                 followed. Call webfetch with {target} to read it; that fetch is checked \
+                 against the permission rules like any other.",
                 response.url(),
                 response.status().as_u16(),
-                redirect_leaves(&url, &target).unwrap_or("which leaves the address asked for"),
             ),
             metadata: json!({"redirect": target.as_str()}),
         });
@@ -3283,7 +3364,23 @@ impl Tool for BuiltinTool {
                     return Err(CoreError::Invalid("webfetch URL has no hostname".into()));
                 }
                 let raw = args.get("format").and_then(serde_json::Value::as_str) == Some("raw");
-                webfetch(&self.client, url, raw, &context.cancel, WEBFETCH_TIMEOUT).await
+                let rules = context
+                    .invoker
+                    .as_ref()
+                    .and_then(|invoker| invoker.webfetch_rules())
+                    .map(|rules| FetchRules {
+                        rules,
+                        asked: string(&args, "url").unwrap_or_default().to_owned(),
+                    });
+                webfetch(
+                    &self.client,
+                    url,
+                    raw,
+                    rules.as_ref(),
+                    &context.cancel,
+                    WEBFETCH_TIMEOUT,
+                )
+                .await
             }
             Kind::Todo | Kind::TodoWrite | Kind::TodoRead => Err(CoreError::Tool(
                 "todo state is managed by the runtime task coordinator".into(),
@@ -8719,6 +8816,204 @@ mod webfetch_tests {
         assert!(!server.await.unwrap(), "the redirect was followed");
     }
 
+    /// A server that answers each request by its path from `pages`: a
+    /// `Location` to redirect to (with 302) or a body to send; any other path
+    /// gets a 404. It records each request head.
+    async fn page_server(
+        pages: Vec<(&'static str, Result<&'static str, &'static str>)>,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, request) = accept_request(&listener).await;
+                let path = request.split(' ').nth(1).unwrap_or_default().to_owned();
+                seen.lock().unwrap().push(request);
+                let reply = match pages.iter().find(|(known, _)| *known == path) {
+                    Some((_, Err(location))) => format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    Some((_, Ok(body))) => format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    }
+                };
+                let _ = stream.write_all(reply.as_bytes()).await;
+            }
+        });
+        (address, requests, server)
+    }
+
+    /// An agent turn fetching under `0`, its webfetch rules.
+    struct FetchUnder(haarness_core::PermissionEngine);
+
+    #[async_trait]
+    impl haarness_core::ToolInvoker for FetchUnder {
+        async fn invoke(&self, _name: &str, _arguments: Value) -> CoreResult<ToolOutput> {
+            unreachable!("a fetch never re-enters")
+        }
+        fn side_effectful_for(&self, _name: &str, _arguments: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+        fn webfetch_rules(&self) -> Option<haarness_core::PermissionEngine> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn webfetch_rules(
+        rules: &[(String, haarness_core::PermissionDecision)],
+    ) -> haarness_core::PermissionEngine {
+        let mut engine = haarness_core::PermissionEngine::build_defaults();
+        for (pattern, decision) in rules {
+            engine.add_rule(haarness_core::PermissionRule {
+                pattern: pattern.clone(),
+                decision: *decision,
+            });
+        }
+        engine
+    }
+
+    async fn fetch_under(rules: haarness_core::PermissionEngine, url: String) -> ToolOutput {
+        let mut context = composite_context(&std::env::current_dir().unwrap());
+        context.invoker = Some(Arc::new(FetchUnder(rules)));
+        webfetch_tool()
+            .execute(json!({"url": url}), context)
+            .await
+            .unwrap()
+    }
+
+    fn requested_paths(requests: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.split(' ').nth(1).unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_redirect_on_the_host_is_followed_where_the_rules_allow_it() {
+        let (address, requests, server) =
+            page_server(vec![("/login", Err("/home")), ("/home", Ok("HOME_PAGE"))]).await;
+        let rules = webfetch_rules(&[(
+            format!("webfetch:http://{address}/admin/*"),
+            haarness_core::PermissionDecision::Deny,
+        )]);
+        let output = fetch_under(rules, format!("http://{address}/login")).await;
+        assert_eq!(output.text, "HOME_PAGE");
+        assert_eq!(requested_paths(&requests), ["/login", "/home"]);
+        // As the HTTP client sent it when it followed redirects itself.
+        let followed = requests.lock().unwrap()[1].to_ascii_lowercase();
+        assert!(
+            followed.contains(&format!("referer: http://{address}/login\r\n")),
+            "{followed}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_redirect_into_a_denied_path_is_reported_and_not_followed() {
+        let (address, requests, server) = page_server(vec![
+            ("/login?next=/admin/x", Err("/admin/x")),
+            ("/admin/x", Ok("ADMIN_PAGE")),
+        ])
+        .await;
+        let rules = webfetch_rules(&[(
+            format!("webfetch:http://{address}/admin/*"),
+            haarness_core::PermissionDecision::Deny,
+        )]);
+        let output = fetch_under(rules, format!("http://{address}/login?next=/admin/x")).await;
+        let target = format!("http://{address}/admin/x");
+        assert!(
+            output.text.contains(&format!(
+                "redirects (HTTP 302) to {target}, which the permission rules do not let this \
+                 fetch follow, so the redirect was not followed. Call webfetch with {target}"
+            )),
+            "{}",
+            output.text
+        );
+        assert_eq!(output.metadata["redirect"], target);
+        assert_eq!(requested_paths(&requests), ["/login?next=/admin/x"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_always_for_one_path_does_not_follow_a_redirect_to_a_sibling() {
+        let (address, requests, server) = page_server(vec![
+            ("/docs/start", Err("/docs/moved")),
+            ("/docs/moved", Err("/private/x")),
+            ("/private/x", Ok("PRIVATE_PAGE")),
+        ])
+        .await;
+        let mut rules =
+            webfetch_rules(&[("webfetch:*".into(), haarness_core::PermissionDecision::Ask)]);
+        rules.add_grant(haarness_core::PermissionRule {
+            pattern: format!("webfetch:http://{address}/docs/*"),
+            decision: haarness_core::PermissionDecision::Allow,
+        });
+        let output = fetch_under(rules, format!("http://{address}/docs/start")).await;
+        assert!(
+            output.text.starts_with(&format!(
+                "http://{address}/docs/moved redirects (HTTP 302) to http://{address}/private/x, \
+                 which the permission rules do not let this fetch follow"
+            )),
+            "{}",
+            output.text
+        );
+        assert_eq!(requested_paths(&requests), ["/docs/start", "/docs/moved"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_followed_redirect_signs_in_as_the_address_asked_for_did() {
+        let (address, requests, server) = page_server(vec![
+            ("/start", Err("/next")),
+            ("/next", Err("/last")),
+            ("/last", Ok("SIGNED_IN")),
+        ])
+        .await;
+        let output = webfetch_tool()
+            .execute(
+                json!({"url": format!("http://someone:secret@{address}/start")}),
+                composite_context(&std::env::current_dir().unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.text, "SIGNED_IN");
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        let signed_in = format!(
+            "authorization: basic {}\r\n",
+            STANDARD.encode("someone:secret")
+        );
+        for request in &requests {
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains(&signed_in.to_ascii_lowercase()),
+                "{request}"
+            );
+        }
+        assert!(
+            requests[2]
+                .to_ascii_lowercase()
+                .contains(&format!("referer: http://{address}/next\r\n")),
+            "{}",
+            requests[2]
+        );
+        server.abort();
+    }
+
     const CHUNKED_HEAD: &[u8] =
         b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
 
@@ -8828,6 +9123,7 @@ mod webfetch_tests {
             &web_client(),
             url,
             false,
+            None,
             &CancellationToken::new(),
             Duration::from_millis(300),
         )
