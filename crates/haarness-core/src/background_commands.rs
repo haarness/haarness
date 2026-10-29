@@ -1102,6 +1102,8 @@ pub enum CommandRun {
     Ended {
         reference: ShellCommandRef,
         end: ProcessEnd,
+        /// Who stopped it, when someone did (a person, from its row).
+        stopped_by: Option<ShellCommandEndedBy>,
     },
     /// It runs on in the background: the call's result.
     Background(ToolOutput),
@@ -1301,6 +1303,7 @@ impl ShellCall {
         Ok(CommandRun::Ended {
             reference: reference(&current),
             end,
+            stopped_by: current.ended_by,
         })
     }
 }
@@ -2049,9 +2052,10 @@ mod tests {
         let registry = Arc::new(ShellCommands::default());
         let thread = ThreadId::new();
         let (entry, output, _end) = started(dir.path(), &registry, thread).await;
-        let lines = (0..2000)
-            .map(|line| format!("line-{line:04}-{}\n", "x".repeat(40)))
-            .collect::<String>();
+        let mut lines = String::new();
+        for line in 0..2000 {
+            let _ = writeln!(lines, "line-{line:04}-{}", "x".repeat(40));
+        }
         output.append(lines.as_bytes()).await.unwrap();
         let threads = HashSet::from([thread]);
         let id = entry.info().id;

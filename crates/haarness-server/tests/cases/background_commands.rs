@@ -744,3 +744,36 @@ async fn an_agent_command_without_a_deadline_saves_only_the_start_of_its_output(
     );
     let _ = std::fs::remove_file(path);
 }
+
+#[tokio::test]
+async fn a_foreground_command_a_person_stopped_says_so_in_its_result() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |_| {});
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"printf 'working\n'; sleep 30"}"#,
+        false,
+    )
+    .await;
+    let id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(info) = runtime.shell_commands(thread).await.unwrap().pop()
+                && info.output_bytes > 0
+            {
+                return info.id;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    runtime.stop_shell_command(thread, &id).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    let (text, metadata) = last_result(&runtime, thread).await;
+    assert!(text.contains("The person stopped this command"), "{text}");
+    assert!(text.contains("SIGINT"), "{text}");
+    assert!(text.contains("working"), "{text}");
+    assert_eq!(metadata["command"]["background"], false);
+}
