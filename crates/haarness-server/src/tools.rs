@@ -3075,8 +3075,9 @@ impl Tool for BuiltinTool {
                 let named = context.workspace.clone();
                 let cancel = context.cancel.clone();
                 // The walk reads folders synchronously and `**` follows links
-                // (one to `/` reaches everything), so it runs off the async
-                // workers, stops on Stop and at a budget of matches looked at.
+                // (one to a large folder reaches all of it), so it runs off the
+                // async workers, stops on Stop, at a budget of matches looked
+                // at and at one of folder entries read.
                 let walk = tokio::task::spawn_blocking(move || {
                     glob_walk(
                         &pattern,
@@ -3087,7 +3088,10 @@ impl Tool for BuiltinTool {
                         },
                         &secrets,
                         &cancel,
-                        GLOB_LOOK_LIMIT,
+                        GlobLimits {
+                            matches: GLOB_LOOK_LIMIT,
+                            entries: GLOB_ENTRY_LIMIT,
+                        },
                     )
                 });
                 let found = tokio::select! {
@@ -3101,6 +3105,8 @@ impl Tool for BuiltinTool {
                 );
                 Ok(if found.stopped {
                     with_stop(output, GLOB_LOOK_LIMIT)
+                } else if found.large {
+                    with_read_stop(output, GLOB_ENTRY_LIMIT)
                 } else {
                     output
                 })
@@ -4144,14 +4150,28 @@ impl SecretFilter {
 /// everything there.
 const GLOB_LOOK_LIMIT: usize = 100_000;
 
+/// How many folder entries a glob reads before it stops, whatever it
+/// matches: a backstop for a walk through a very large tree. A `**` never
+/// goes round a link back up the tree (see [`crate::bounded_glob`]).
+const GLOB_ENTRY_LIMIT: usize = 1_000_000;
+
+/// Where a glob stops: after looking at `matches` matches, or after reading
+/// `entries` folder entries.
+struct GlobLimits {
+    matches: usize,
+    entries: usize,
+}
+
 /// What a glob found: its matches, what it left out, and whether it stopped
-/// at a limit (`stopped` for [`GLOB_LOOK_LIMIT`]).
+/// at a limit (`stopped` for [`GLOB_LOOK_LIMIT`], `large` for
+/// [`GLOB_ENTRY_LIMIT`]).
 #[derive(Default)]
 struct GlobFound {
     values: Vec<String>,
     skipped: Skipped,
     partial: bool,
     stopped: bool,
+    large: bool,
 }
 
 /// Where a glob looks: the canonical folder it searches, the canonical
@@ -4163,23 +4183,23 @@ struct GlobScope {
     named: PathBuf,
 }
 
-/// Walk `pattern` (already joined to the scope's root), looking at no more
-/// than `limit` matches. Runs synchronously; the caller keeps it off the async
-/// workers.
+/// Walk `pattern` (already joined to the scope's root) within `limits`.
+/// Runs synchronously; the caller keeps it off the async workers.
 fn glob_walk(
     pattern: &str,
     scope: &GlobScope,
     secrets: &SecretFilter,
     cancel: &tokio_util::sync::CancellationToken,
-    limit: usize,
+    limits: GlobLimits,
 ) -> CoreResult<GlobFound> {
     let mut folders = HashMap::<PathBuf, bool>::new();
     let mut found = GlobFound::default();
-    for (looked, path) in glob::glob(pattern)
+    let stop = cancel.clone();
+    let mut walk = crate::bounded_glob::Walk::new(pattern)
         .map_err(tool_error)?
-        .filter_map(Result::ok)
-        .enumerate()
-    {
+        .entries(limits.entries)
+        .stop_when(move || stop.is_cancelled());
+    for (looked, path) in walk.by_ref().enumerate() {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
@@ -4187,7 +4207,7 @@ fn glob_walk(
             found.partial = true;
             break;
         }
-        if looked == limit {
+        if looked == limits.matches {
             found.partial = true;
             found.stopped = true;
             break;
@@ -4200,9 +4220,9 @@ fn glob_walk(
         }) {
             continue;
         }
-        // `**` follows linked folders: a match in a folder a link takes out
-        // of the project and the searched folder is left out, as a list of
-        // that folder would ask first.
+        // `**` follows linked folders (never one back up the tree): a match
+        // in a folder a link takes out of the project and the searched folder
+        // is left out, as a list of that folder would ask first.
         let parent = path.parent().unwrap_or(&scope.root).to_path_buf();
         let inside = *folders.entry(parent).or_insert_with_key(|parent| {
             parent.canonicalize().is_ok_and(|real| {
@@ -4228,16 +4248,40 @@ fn glob_walk(
                 .to_string(),
         );
     }
+    match walk.cut() {
+        Some(crate::bounded_glob::Cut::Stopped) => return Err(CoreError::Cancelled),
+        Some(crate::bounded_glob::Cut::Large) => {
+            found.partial = true;
+            found.large = true;
+        }
+        None => {}
+    }
     Ok(found)
 }
 
 /// Ends a glob's output saying it stopped at its budget, so an empty or short
 /// list is not read as everything there is.
-fn with_stop(mut output: ToolOutput, limit: usize) -> ToolOutput {
-    let note =
-        format!("(stopped after looking at {limit} matches; narrow the pattern or the path)");
+fn with_stop(output: ToolOutput, limit: usize) -> ToolOutput {
+    with_note(
+        output,
+        &format!("(stopped after looking at {limit} matches; narrow the pattern or the path)"),
+    )
+}
+
+/// Ends a glob's output saying it stopped at its budget of folder entries.
+fn with_read_stop(output: ToolOutput, entries: usize) -> ToolOutput {
+    with_note(
+        output,
+        &format!(
+            "(stopped after reading {entries} folder entries; narrow the pattern or the path)"
+        ),
+    )
+}
+
+/// Ends `output` with `note`, after a blank line when there is text.
+fn with_note(mut output: ToolOutput, note: &str) -> ToolOutput {
     output.text = if output.text.is_empty() {
-        note
+        note.to_owned()
     } else {
         format!("{}\n\n{note}", output.text)
     };
@@ -7885,6 +7929,109 @@ export default workflow({
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    fn limits(matches: usize) -> GlobLimits {
+        GlobLimits {
+            matches,
+            entries: GLOB_ENTRY_LIMIT,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_glob_over_links_back_up_the_tree_ends() {
+        let workspace = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("haarness-glob-loops-{}", uuid::Uuid::now_v7()));
+        for file in ["top.txt", "a/note.txt", "p/x.txt", "q/y.txt"] {
+            let path = workspace.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        std::os::unix::fs::symlink("..", workspace.join("a/up")).unwrap();
+        std::os::unix::fs::symlink(".", workspace.join("a/self")).unwrap();
+        std::os::unix::fs::symlink("../q", workspace.join("p/to-q")).unwrap();
+        std::os::unix::fs::symlink("../p", workspace.join("q/to-p")).unwrap();
+        // On a thread of its own: `glob` walked these links until Stop, and
+        // a test runtime waits for its blocking work before it ends.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let folder = workspace.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let registry = NativeToolRegistry::new(folder.clone());
+            let texts = runtime.block_on(async {
+                let mut texts = Vec::new();
+                for pattern in ["**/*.nothing", "**/*.txt"] {
+                    let output = registry
+                        .get("glob")
+                        .unwrap()
+                        .execute(json!({ "pattern": pattern }), tool_context(&folder))
+                        .await
+                        .unwrap();
+                    texts.push(output.text);
+                }
+                texts
+            });
+            let _ = sender.send(texts);
+        });
+        let texts = receiver
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the globs end by themselves");
+        assert_eq!(texts[0], "");
+        // A link to another folder of the project is still followed.
+        assert_eq!(
+            texts[1],
+            "a/note.txt\np/to-q/y.txt\np/x.txt\nq/to-p/x.txt\nq/y.txt\ntop.txt"
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn a_glob_stops_at_its_budget_of_folder_entries_and_says_so() {
+        let workspace = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("haarness-glob-entries-{}", uuid::Uuid::now_v7()));
+        for file in ["a.txt", "b/c.txt", "d/e.txt", "f/g.txt"] {
+            let path = workspace.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let scope = GlobScope {
+            root: workspace.clone(),
+            workspace: workspace.clone(),
+            named: workspace.clone(),
+        };
+        let secrets = SecretFilter::new(&workspace, ".", &workspace, None);
+        let pattern = workspace.join("**/*.txt").to_string_lossy().into_owned();
+        let cancel = CancellationToken::new();
+        let limits = GlobLimits {
+            matches: 1_000,
+            entries: 5,
+        };
+        let found = glob_walk(&pattern, &scope, &secrets, &cancel, limits).unwrap();
+        assert!(found.large && found.partial && !found.stopped);
+        assert!(found.values.len() < 4, "{:?}", found.values);
+        let all = glob_walk(&pattern, &scope, &secrets, &cancel, limits_entries(100)).unwrap();
+        assert!(!all.large && !all.partial);
+        assert_eq!(all.values.len(), 4);
+        assert_eq!(
+            with_read_stop(output("a.txt".into()), 5).text,
+            "a.txt\n\n(stopped after reading 5 folder entries; narrow the pattern or the path)"
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    fn limits_entries(entries: usize) -> GlobLimits {
+        GlobLimits {
+            matches: 1_000,
+            entries,
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_glob_through_a_link_out_of_the_project_stops_at_its_budget_and_on_stop() {
@@ -7909,16 +8056,16 @@ export default workflow({
         let pattern = workspace.join("**/*").to_string_lossy().into_owned();
         let cancel = CancellationToken::new();
         // Matches left out count against the budget too.
-        let found = glob_walk(&pattern, &scope, &secrets, &cancel, 10).unwrap();
+        let found = glob_walk(&pattern, &scope, &secrets, &cancel, limits(10)).unwrap();
         assert!(found.stopped && found.partial);
         assert!(found.skipped.outside >= 7, "{}", found.skipped.outside);
         assert!(found.values.len() + found.skipped.outside <= 10);
-        let everything = glob_walk(&pattern, &scope, &secrets, &cancel, 1_000).unwrap();
+        let everything = glob_walk(&pattern, &scope, &secrets, &cancel, limits(1_000)).unwrap();
         assert!(!everything.stopped && !everything.partial);
         assert_eq!(everything.skipped.outside, 30);
         cancel.cancel();
         assert!(matches!(
-            glob_walk(&pattern, &scope, &secrets, &cancel, 1_000),
+            glob_walk(&pattern, &scope, &secrets, &cancel, limits(1_000)),
             Err(CoreError::Cancelled)
         ));
         let stopped = with_stop(output(String::new()), 10);
