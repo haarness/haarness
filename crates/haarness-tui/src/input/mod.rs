@@ -54,10 +54,13 @@ fn request_interrupt(app: &mut App, client: &ApiClient, target: InterruptTarget)
     // answer: stopping the session's work is a stop of everything, those
     // commands included, which a stop that answers steering never is.
     let thread = app.thread.id;
+    // A session stop chosen while the main reply still runs (from a child's
+    // view) is a Stop of that reply, which answers steering.
+    let replying = app.root_active_turn.is_some();
     tokio::spawn(async move {
         let result = match target {
             InterruptTarget::Turn(_) => client.interrupt_session(thread, true).await,
-            InterruptTarget::Session(root) => client.interrupt_session(root, false).await,
+            InterruptTarget::Session(root) => client.interrupt_session(root, replying).await,
             InterruptTarget::Quit => return,
         };
         if let Err(error) = result {
@@ -622,7 +625,9 @@ pub async fn handle_key_at(
             } else {
                 app.notice = "Press Ctrl+C again to interrupt".into();
             }
-        } else if app.root_descendant_active_count() > 0 || app.background_command_count() > 0 {
+        } else if app.root_descendant_active_count() > 0 {
+            // Commands left in the background are not stopped this way: the
+            // second press quits, and the server keeps them running.
             let target = InterruptTarget::Session(app.root_thread_id);
             if confirm(&mut app.ctrl_c_action, target) {
                 request_interrupt(app, client, target);
@@ -1179,8 +1184,21 @@ pub async fn handle_key_at(
                 let target = InterruptTarget::Session(app.root_thread_id);
                 if confirm(&mut app.escape_interrupt, target) {
                     request_interrupt(app, client, target);
-                } else {
+                } else if app.root_descendant_active_count() > 0 {
                     app.notice = "Press Esc again to stop session work".into();
+                } else {
+                    // Only commands run: say which work the press stops.
+                    let count = app.background_command_count();
+                    app.notice = if count == 1 {
+                        app.language
+                            .text("Press Esc again to stop 1 command in background")
+                            .to_owned()
+                    } else {
+                        app.language.format(
+                            "Press Esc again to stop {count} commands in background",
+                            &[("count", &count.to_string())],
+                        )
+                    };
                 }
             } else {
                 app.escape_interrupt = None;

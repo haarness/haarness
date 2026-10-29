@@ -44,7 +44,7 @@ pub fn frame(
             app.language.text("only the end of its output is kept"),
         ));
     } else if view.trimmed {
-        body.push(note(app.language.text("earlier output is no longer kept")));
+        body.push(note(app.language.text("earlier output isn't shown here")));
     }
     let rows = view.shown_rows(width.saturating_sub(4));
     // Before its first read lands the view stays quiet a moment: a word that
