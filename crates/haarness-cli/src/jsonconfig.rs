@@ -75,6 +75,9 @@ pub struct JsonLayers {
     pub agent_directories: Vec<PathBuf>,
     /// Human-readable notes (migrations, skipped files) for logs.
     pub notices: Vec<String>,
+    /// Notes worth a warning in the logs: what a person configured that was
+    /// only partly read.
+    pub warnings: Vec<String>,
     /// Existing JSON/JSONC inputs that could not be read or parsed. Startup
     /// may report and continue for compatibility; hot reload rejects the
     /// whole candidate and retains the last-known-good generation.
@@ -165,6 +168,9 @@ pub fn load_layers_with_system(
         apply_json_config(&mut layers, &config_dir.join(name), true);
     }
     let global_providers = layers.native.providers.clone();
+    // The person's Claude Code toggles decide their `~/.claude` files, which
+    // no project layer below may change.
+    layers.native.person_claude_code = Some(super::claude_compat(&layers.native).project);
     layers.global_rule_count = layers.rules.len();
     layers.project = true;
     // Project files override global defaults; nested worktree layers override ancestors.
@@ -234,6 +240,7 @@ pub fn load_layers_with_system(
     // roots so a Haarness resource with the same name wins.
     if compat.any() {
         for (directory, project) in claude_directories(home, workspace, trust) {
+            let compat = compat.files(project);
             if compat.commands() {
                 let commands = directory.join("commands");
                 discover_commands(
@@ -373,13 +380,15 @@ pub fn load_layers_with_system(
 
     // Instructions: global files, then project instruction files from the
     // worktree root down, then configured `instructions` entries and URLs.
-    let claude = compat.instructions();
+    let claude = compat.project.instructions();
     let mut local_files: Vec<(PathBuf, bool)> = Vec::new();
     if let Some(file) = base.and_then(|base| base.entry("AGENTS.md")) {
         local_files.push((file, true));
     }
     local_files.push((config_dir.join("AGENTS.md"), true));
-    if claude && let Some(home) = home {
+    if compat.person.instructions()
+        && let Some(home) = home
+    {
         local_files.push((home.join(".claude/CLAUDE.md"), true));
     }
     for directory in crate::layout::project_directories(workspace)
@@ -407,7 +416,7 @@ pub fn load_layers_with_system(
             urls.push(entry.clone());
             continue;
         }
-        for file in instruction_entry_files(entry, home, workspace, trust) {
+        for file in instruction_entry_files(entry, home, workspace, trust, &mut layers.warnings) {
             let Ok(canonical) = file.canonicalize() else {
                 continue;
             };
@@ -552,7 +561,11 @@ pub fn system_definitions(
 /// `~/.claude` and every project `.claude` directory (worktree root first),
 /// each with whether it is the project's: `~/.claude` stays the person's
 /// when a project folder is the home folder.
-fn claude_directories(home: Option<&Path>, workspace: &Path, trust: bool) -> Vec<(PathBuf, bool)> {
+pub(super) fn claude_directories(
+    home: Option<&Path>,
+    workspace: &Path,
+    trust: bool,
+) -> Vec<(PathBuf, bool)> {
     let mut directories = Vec::new();
     if let Some(home) = home {
         directories.push((home.join(".claude"), false));
@@ -619,23 +632,39 @@ fn trusted_instruction_roots(config_dir: &Path, home: Option<&Path>) -> Vec<Path
         .collect()
 }
 
+/// How many folder entries one `instructions` glob reads at most: a safety
+/// net far above any folder of instructions (a cache folder beside them
+/// included), never a limit an ordinary entry meets.
+const INSTRUCTION_GLOB_ENTRIES: usize = 1_000_000;
+
 /// Files named by one `instructions` entry: `~/` and absolute entries are
 /// globbed in place; relative entries glob upward from the workspace to the
 /// worktree root and are skipped when project
-/// configuration is disabled.
+/// configuration is disabled. A `**` reads each folder once, so a link back
+/// up the tree cannot keep it walking (see [`haarness_server::bounded_glob`]),
+/// and `warnings` says when an entry reached its budget.
 fn instruction_entry_files(
     entry: &str,
     home: Option<&Path>,
     workspace: &Path,
     trust: bool,
+    warnings: &mut Vec<String>,
 ) -> Vec<PathBuf> {
-    let files = |pattern: String| {
-        glob::glob(&pattern)
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .filter(|path| path.is_file())
-            .collect::<Vec<_>>()
+    use haarness_server::bounded_glob::{Cut, Links, Walk};
+    let configured = entry;
+    let mut files = |pattern: String| {
+        let Ok(walk) = Walk::new(&pattern) else {
+            return Vec::new();
+        };
+        let mut walk = walk.entries(INSTRUCTION_GLOB_ENTRIES).links(Links::Once);
+        let files: Vec<PathBuf> = walk.by_ref().filter(|path| path.is_file()).collect();
+        if walk.cut() == Some(Cut::Large) {
+            warnings.push(format!(
+                "instructions {configured}: stopped after reading {INSTRUCTION_GLOB_ENTRIES} \
+                 folder entries; only the files found by then are used"
+            ));
+        }
+        files
     };
     let entry = match entry.strip_prefix("~/") {
         Some(rest) => {
@@ -3348,6 +3377,76 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn instruction_globs_follow_links_without_going_round_and_skip_nothing_beside_a_large_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-links-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let home = root.join("home");
+        let handbook = home.join("handbook");
+        let workspace = root.join("project");
+        for file in [
+            "handbook/RULES.md",
+            "handbook/team/RULES.md",
+            "handbook/team/oncall/RULES.md",
+            "handbook/.git/RULES.md",
+            "shared/legal/RULES.md",
+        ] {
+            let path = home.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, file).unwrap();
+        }
+        // A cache folder far larger than the rules beside it.
+        fs::create_dir_all(handbook.join(".cache")).unwrap();
+        for index in 0..11_000 {
+            fs::write(handbook.join(format!(".cache/{index:05}.bin")), "").unwrap();
+        }
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        // Two links back up the tree, which `glob` walked for good, and a
+        // folder kept elsewhere.
+        std::os::unix::fs::symlink("..", handbook.join("team/up")).unwrap();
+        std::os::unix::fs::symlink(".", handbook.join("team/here")).unwrap();
+        std::os::unix::fs::symlink("../shared/legal", handbook.join("legal")).unwrap();
+        fs::write(
+            config.join("haarness.json"),
+            serde_json::json!({"instructions": ["~/handbook/**/RULES.md"]}).to_string(),
+        )
+        .unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (config_dir, home_dir) = (config.clone(), home.clone());
+        std::thread::spawn(move || {
+            let _ = sender.send(load_layers(
+                &config_dir,
+                Some(&home_dir),
+                &workspace,
+                true,
+                &[],
+            ));
+        });
+        let layers = receiver
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the configuration loads");
+        // Every rules file once, the linked folder's included; nothing in
+        // the version control folder.
+        assert_eq!(
+            layers.instruction_files[2..],
+            [
+                handbook.join("RULES.md"),
+                handbook.join("legal/RULES.md"),
+                handbook.join("team/RULES.md"),
+                handbook.join("team/oncall/RULES.md"),
+            ],
+            "{:?}",
+            layers.instruction_files
+        );
+        assert!(layers.warnings.is_empty(), "{:?}", layers.warnings);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn claude_code_compatibility_is_opt_in_per_category() {
         let root =
@@ -3522,6 +3621,98 @@ mod tests {
         assert!(disabled.agents.is_empty());
         assert_eq!(disabled.commands.len(), 1);
         assert!(!disabled.instructions.unwrap().contains("HOME_CLAUDE"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_project_decides_only_its_own_claude_code_files() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-claude-scopes-{}", uuid::Uuid::now_v7()));
+        let config = root.join("config");
+        let home = root.join("home");
+        let project = root.join("project");
+        for directory in [
+            config.clone(),
+            home.join(".claude/commands"),
+            home.join(".claude/agents"),
+            home.join(".claude/skills/home-skill"),
+            project.join(".git"),
+            project.join(".claude/commands"),
+            project.join(".claude/agents"),
+            project.join(".claude/skills/project-skill"),
+        ] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        fs::write(home.join(".claude/CLAUDE.md"), "HOME_CLAUDE").unwrap();
+        fs::write(home.join(".claude/commands/home-cmd.md"), "HOME_COMMAND").unwrap();
+        fs::write(
+            home.join(".claude/agents/scout.md"),
+            "---\nname: scout\ndescription: Home scout\n---\nScout.",
+        )
+        .unwrap();
+        fs::write(
+            home.join(".claude/skills/home-skill/SKILL.md"),
+            "---\nname: home-skill\ndescription: Home skill\n---\nHOME_SKILL",
+        )
+        .unwrap();
+        fs::write(project.join("CLAUDE.md"), "PROJECT_CLAUDE").unwrap();
+        fs::write(project.join(".claude/commands/lint.md"), "PROJECT_COMMAND").unwrap();
+        fs::write(
+            project.join(".claude/agents/fixer.md"),
+            "---\nname: fixer\ndescription: Project fixer\n---\nFix.",
+        )
+        .unwrap();
+        fs::write(
+            project.join(".claude/skills/project-skill/SKILL.md"),
+            "---\nname: project-skill\ndescription: Project skill\n---\nPROJECT_SKILL",
+        )
+        .unwrap();
+        let every = r#"{"compatibility":{"claude_code":{"instructions":true,"agents":true,"skills":true,"commands":true}}}"#;
+        let none = r#"{"compatibility":{"claude_code":{"instructions":false,"agents":false,"skills":false,"commands":false}}}"#;
+        let master_off = r#"{"compatibility":{"claude_code":{"enabled":false}}}"#;
+        let every_enabled = r#"{"compatibility":{"claude_code":{"enabled":true,"instructions":true,"agents":true,"skills":true,"commands":true}}}"#;
+        // (the person's setting, the project's, whether the person's files
+        // load, whether the project's do)
+        for (person, theirs, home_files, project_files) in [
+            // A cloned repository cannot switch off the person's files.
+            (every, none, true, false),
+            (every, master_off, true, false),
+            // Nor switch on the person's, though it may switch on its own.
+            ("{}", every, false, true),
+            (every, every, true, true),
+            ("{}", none, false, false),
+            // The person's master switch carries over to a project, which
+            // turns it back on for its own files only.
+            (master_off, every, false, false),
+            (master_off, every_enabled, false, true),
+            // A project that says nothing reads as the person chose.
+            (every, "{}", true, true),
+            ("{}", "{}", false, false),
+        ] {
+            fs::write(config.join("haarness.json"), person).unwrap();
+            fs::write(project.join("haarness.json"), theirs).unwrap();
+            let layers = load_layers(&config, Some(&home), &project, true, &[]);
+            assert!(layers.errors.is_empty(), "{:?}", layers.errors);
+            let case = format!("person {person}, project {theirs}");
+            let instructions = layers.instructions.clone().unwrap_or_default();
+            assert_eq!(instructions.contains("HOME_CLAUDE"), home_files, "{case}");
+            assert_eq!(
+                instructions.contains("PROJECT_CLAUDE"),
+                project_files,
+                "{case}"
+            );
+            let agent = |id: &str| layers.agents.iter().any(|agent| agent.id == id);
+            assert_eq!(agent("scout"), home_files, "{case}");
+            assert_eq!(agent("fixer"), project_files, "{case}");
+            let command = |name: &str| layers.commands.iter().any(|command| command.name == name);
+            assert_eq!(command("home-cmd"), home_files, "{case}");
+            assert_eq!(command("home-skill"), home_files, "{case}");
+            assert_eq!(command("lint"), project_files, "{case}");
+            assert_eq!(command("project-skill"), project_files, "{case}");
+            let compat = super::super::claude_compat(&layers.native);
+            assert_eq!(compat.files(false).any(), home_files, "{case}");
+            assert_eq!(compat.files(true).any(), project_files, "{case}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

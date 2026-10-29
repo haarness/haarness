@@ -363,7 +363,9 @@ async fn gemini_thinking_controls_and_parallel_signed_call_ids() {
         ("gemini-4-argon", "minimal", "thinkingLevel", json!("low")),
         ("gemini-4-argon", "medium", "thinkingLevel", json!("medium")),
         ("gemini-2.5-flash", "minimal", "thinkingBudget", json!(0)),
-        ("gemini-2.5-pro", "low", "thinkingBudget", json!(2048)),
+        // `low` is 2048, but thinking gets at most half of the request's
+        // 1024-token output limit.
+        ("gemini-2.5-pro", "low", "thinkingBudget", json!(512)),
         ("gemini-2.5-pro", "minimal", "thinkingBudget", json!(128)),
     ] {
         let provider = GeminiProvider::new(native(&base, "gemini", model));

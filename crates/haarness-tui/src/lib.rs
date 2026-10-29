@@ -1,6 +1,7 @@
 //! Elegant server-driven terminal client rendered through OpenTUI.
 
 pub mod api;
+mod background;
 mod chrome;
 mod commands;
 mod config;
@@ -381,8 +382,9 @@ async fn run_with_client(
     fork: bool,
     open_in: Option<haarness_protocol::ApprovalMode>,
 ) -> Result<Option<PathBuf>> {
-    // A person at the terminal can stop every turn this UI starts.
-    let mut client = client.attended();
+    // A person at the terminal can stop every turn this UI starts, and sees
+    // the work it leaves running in the background.
+    let mut client = client.attended().follows_background();
     let initial_info = client.info().await.ok();
     // The server waits for a signed-in provider's list while it has no
     // model to show (up to 10 s on a stalled network): the first frame does
@@ -512,6 +514,7 @@ async fn run_with_client(
             .collect();
     }
     app.server_info = server_info;
+    app.hydrate_shell_commands(&client).await;
     app.server_commands = client.commands().await.unwrap_or_default();
     // Workflow definitions are first-class slash commands (for example,
     // `.haarness/workflows/release.ts` becomes `/release`). Hydrate the
@@ -710,7 +713,7 @@ async fn run_with_client(
                 Ok(()) => {
                     event_task.abort();
                     client.disconnect_all_ptys();
-                    client = connection.client.attended();
+                    client = connection.client.attended().follows_background();
                     let update_available = app.update_available.take();
                     app = connection.app;
                     app.update_available = update_available;
@@ -916,6 +919,7 @@ async fn run_with_client(
                                 app.overlay,
                                 crate::state::Overlay::Panel { .. }
                                     | crate::state::Overlay::Diff(_)
+                                    | crate::state::Overlay::CommandOutput
                             )
                         {
                             continue;
@@ -1047,6 +1051,7 @@ async fn run_with_client(
                         if let Ok(turns) = client.active_turns().await {
                             app.hydrate_active_turns(turns);
                         }
+                        app.hydrate_shell_commands(&client).await;
                         app.hydrate_questions(
                             client.pending_questions().await.unwrap_or_default(),
                         );
@@ -1215,6 +1220,7 @@ async fn run_with_client(
                 }
                 app.poll_remote_control(&client);
                 app.poll_chrome(&client);
+                app.poll_command_output(&client);
                 app.poll_logs();
                 if app.goal_refresh_needed && app.tick.is_multiple_of(10) {
                     hydrate_goal_snapshot(&mut app, &client).await;

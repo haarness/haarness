@@ -159,6 +159,15 @@
         ],
         "type": "string"
       },
+      "BackgroundCommandsQuery": {
+        "properties": {
+          "commandId": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
       "BackgroundQuery": {
         "properties": {
           "childThreadId": {
@@ -552,6 +561,10 @@
               "string",
               "null"
             ]
+          },
+          "followsBackground": {
+            "description": "The client shows the chat's background work and follows it up\n(Desktop, the terminal UI, the phone and web apps): an agent's shell\ncommand in the turn that starts, and in the turns its background\nresults start, moves to the background after\n`execution.shell_move_after_ms` instead of holding the reply. Without\nit a command stays in the foreground until it ends or reaches its\ndeadline, as before, and one the agent starts in the background stops\nat `execution.shell_timeout_ms` (`background-commands.v1`).",
+            "type": "boolean"
           },
           "model": {
             "type": [
@@ -1587,6 +1600,10 @@
           },
           "attended": {
             "description": "A person can stop the turn a prompt command starts (see\n[`StartTurnRequest::attended`]).",
+            "type": "boolean"
+          },
+          "followsBackground": {
+            "description": "The client follows background work up (see\n[`StartTurnRequest::follows_background`]) in the turn a prompt\ncommand starts.",
             "type": "boolean"
           },
           "model": {
@@ -3029,6 +3046,74 @@
             "type": "object"
           },
           {
+            "description": "Durable checkpoint of a shell command in the background, written when\nit starts there or moves there and when it ends (a command that ends\nin the foreground has its `tool_result` instead). After a restart the\nlast one of a command says how it ended, `interrupted` when Haarness\nstopped while it ran.",
+            "properties": {
+              "call_id": {
+                "description": "The `bash` call that started it.",
+                "type": "string"
+              },
+              "command_id": {
+                "type": "string"
+              },
+              "ended_at": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "exit_code": {
+                "format": "int32",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "moved_by": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ShellCommandMovedBy"
+                  }
+                ]
+              },
+              "signal": {
+                "description": "The signal that ended it (`SIGTERM`), when one did.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "started_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/components/schemas/ShellCommandState"
+              },
+              "tail": {
+                "description": "The end of its output so far, at most 4 KiB, cut on a character.",
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "command_state"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "call_id",
+              "command_id",
+              "state",
+              "started_at",
+              "type"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "action": {
                 "type": "string"
@@ -4181,6 +4266,10 @@
             "description": "Queued by a person who can stop the turn it starts (see\n`StartTurnRequest::attended`).",
             "type": "boolean"
           },
+          "followsBackground": {
+            "description": "Queued by a client that follows background work up (see\n`StartTurnRequest::follows_background`).",
+            "type": "boolean"
+          },
           "id": {
             "$ref": "#/components/schemas/RequestId"
           },
@@ -4986,6 +5075,10 @@
           "delivery": {
             "$ref": "#/components/schemas/InputDelivery",
             "description": "Steer by default for compatibility; queue waits for an idle boundary."
+          },
+          "followsBackground": {
+            "description": "The client follows background work up (see\n[`StartTurnRequest::follows_background`]), kept with a queued message\nuntil it runs.",
+            "type": "boolean"
           },
           "preview": {
             "description": "Whether the submitting client can show sandboxed file previews. Text\nclients say `false`; `None` keeps the chat's recorded value so a\nphone or a background result does not change the tools or prompt.",
@@ -5862,6 +5955,290 @@
         ],
         "type": "object"
       },
+      "ShellCommandEndedBy": {
+        "description": "What ended a command that did not end on its own.",
+        "enum": [
+          "person",
+          "agent",
+          "time_limit",
+          "turn_ended",
+          "chat_stopped",
+          "shutdown",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "ShellCommandInfo": {
+        "description": "One shell command an agent ran (`GET /v1/threads/{id}/commands`, the\n`command.updated` event).",
+        "properties": {
+          "background": {
+            "description": "It runs, or ran, in the background: its call returned before it\nended, and its end is told to the chat.",
+            "type": "boolean"
+          },
+          "backgroundAt": {
+            "description": "When it went to the background.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "callId": {
+            "description": "That call, by the id of its `tool_call` item.",
+            "type": "string"
+          },
+          "command": {
+            "description": "The command line as it runs (after any hook rewrote it), cut to its\nfirst 8 KiB.",
+            "type": "string"
+          },
+          "deliversNotice": {
+            "description": "Its end will be told to its chat in a hidden message (a background\ncommand of a root chat). A subagent's commands, and commands still in\nthe foreground, deliver nothing.",
+            "type": "boolean"
+          },
+          "endedAt": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "endedBy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ShellCommandEndedBy",
+                "description": "What stopped it, when it did not end on its own."
+              }
+            ]
+          },
+          "exitCode": {
+            "description": "Its exit code, once it exited with one.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The command's id, as the agent names it to `bash_output` and\n`bash_stop`, unique on this server.",
+            "type": "string"
+          },
+          "movedBy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ShellCommandMovedBy",
+                "description": "How it came to the background."
+              }
+            ]
+          },
+          "movesAt": {
+            "description": "When it moves to the background by itself, while it runs in the\nforeground of a chat whose client follows background work.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outputBytes": {
+            "description": "How much it has printed, stdout and stderr together, in bytes.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rootThreadId": {
+            "$ref": "#/components/schemas/ThreadId",
+            "description": "The topmost chat of that chat's tree."
+          },
+          "signal": {
+            "description": "The signal that ended it (`SIGTERM`), when one did.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "startedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ShellCommandState"
+          },
+          "stopsAt": {
+            "description": "When its time limit stops it, while it runs with one.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "threadId": {
+            "$ref": "#/components/schemas/ThreadId",
+            "description": "The chat whose agent ran it (a subagent's chat for its commands)."
+          },
+          "turnId": {
+            "$ref": "#/components/schemas/TurnId",
+            "description": "The turn whose `bash` call started it."
+          },
+          "workdir": {
+            "description": "The folder it runs in, when the call named one; otherwise it runs in\nthe chat's folder.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "threadId",
+          "rootThreadId",
+          "turnId",
+          "callId",
+          "command",
+          "background",
+          "state",
+          "startedAt",
+          "outputBytes",
+          "deliversNotice"
+        ],
+        "type": "object"
+      },
+      "ShellCommandMovedBy": {
+        "description": "How a command came to run in the background.",
+        "enum": [
+          "agent",
+          "person",
+          "limit",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "ShellCommandOutput": {
+        "description": "`GET /v1/threads/{id}/commands/{command}/output`: a page of what the\ncommand printed, stdout and stderr together in the order they came.\nOffsets are bytes from the start of the whole output; a page is cut on\ncharacter boundaries, so a character split between two reads of the\ncommand's pipes is never broken. The text is as printed, terminal escapes\nincluded.",
+        "properties": {
+          "cursor": {
+            "description": "Where `text` ends: the `cursor` of the next read.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "exitCode": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "more": {
+            "description": "Output past `cursor` is already there to read.",
+            "type": "boolean"
+          },
+          "settled": {
+            "description": "The command has ended and all its output is in: `size` is final.",
+            "type": "boolean"
+          },
+          "size": {
+            "description": "How much the command has printed so far.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "description": "Where `text` starts. More than the `cursor` asked for when the output\nbefore it is no longer kept (a long-running command keeps its first\n64 MiB and its last part).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ShellCommandState"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "start",
+          "cursor",
+          "size",
+          "more",
+          "settled",
+          "state"
+        ],
+        "type": "object"
+      },
+      "ShellCommandOutputEvent": {
+        "description": "The `command.output` event: a command printed more, up to `size` bytes in\nall. At most one a second per command; read the text from `/output`.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "size": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "size"
+        ],
+        "type": "object"
+      },
+      "ShellCommandOutputQuery": {
+        "properties": {
+          "cursor": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "tail": {
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "ShellCommandRef": {
+        "description": "`metadata.command` of the result of every agent `bash` call: the command\nbehind it, which a client follows by `id`.",
+        "properties": {
+          "background": {
+            "description": "The call returned while the command ran on in the background.",
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "startedAt": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "background",
+          "startedAt"
+        ],
+        "type": "object"
+      },
+      "ShellCommandState": {
+        "description": "Where a command is in its life. `running` and `stopping` are live; the\nothers are ends. Clients read `exited` with `exitCode` 0 as completed.",
+        "enum": [
+          "running",
+          "stopping",
+          "exited",
+          "stopped",
+          "timed_out",
+          "interrupted",
+          "unknown"
+        ],
+        "type": "string"
+      },
       "ShellRequest": {
         "properties": {
           "command": {
@@ -5947,6 +6324,10 @@
               "string",
               "null"
             ]
+          },
+          "followsBackground": {
+            "description": "The client shows the chat's background work and follows it up\n(Desktop, the terminal UI, the phone and web apps): an agent's shell\ncommand in the turn that starts, and in the turns its background\nresults start, moves to the background after\n`execution.shell_move_after_ms` instead of holding the reply. Without\nit a command stays in the foreground until it ends or reaches its\ndeadline, as before, and one the agent starts in the background stops\nat `execution.shell_timeout_ms` (`background-commands.v1`).",
+            "type": "boolean"
           },
           "model": {
             "type": [
@@ -6119,6 +6500,12 @@
           },
           "background": {
             "description": "Background results this chat is still owed.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "backgroundCommands": {
+            "description": "Shell commands of this chat's tree running in the background. They\nare not in `background`: a server may run for hours, and the chat is\ndone while it does. Each delivers its end when it ends, as a turn of\nits own. Servers before `background-commands.v1` leave it out.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -7974,6 +8361,35 @@
                 "schema": {
                   "items": {
                     "$ref": "#/components/schemas/CommandInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/commands/active": {
+      "get": {
+        "operationId": "active_shell_commands",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ShellCommandInfo"
                   },
                   "type": "array"
                 }
@@ -10683,6 +11099,42 @@
       }
     },
     "/v1/threads/{id}/commands": {
+      "get": {
+        "operationId": "list_shell_commands",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ShellCommandInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
       "post": {
         "operationId": "execute_command",
         "parameters": [
@@ -10721,6 +11173,205 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CommandExecutionResponse"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/threads/{id}/commands/background": {
+      "post": {
+        "operationId": "background_shell_commands",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "commandId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ShellCommandInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/threads/{id}/commands/{command}": {
+      "get": {
+        "operationId": "get_shell_command",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "command",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShellCommandInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/threads/{id}/commands/{command}/output": {
+      "get": {
+        "operationId": "read_shell_command_output",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "command",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tail",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShellCommandOutput"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/threads/{id}/commands/{command}/stop": {
+      "post": {
+        "operationId": "stop_shell_command",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "command",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShellCommandInfo"
                 }
               }
             },

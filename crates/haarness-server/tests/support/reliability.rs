@@ -9,7 +9,7 @@ use std::sync::{
 
 struct Script {
     authenticated: bool,
-    rounds: Vec<Vec<ProviderEvent>>,
+    rounds: Vec<Vec<CoreResult<ProviderEvent>>>,
     calls: AtomicUsize,
     requests: Mutex<Vec<ProviderRequest>>,
 }
@@ -41,9 +41,7 @@ impl ModelProvider for Script {
             .calls
             .fetch_add(1, Ordering::SeqCst)
             .min(self.rounds.len() - 1);
-        Ok(Box::pin(stream::iter(
-            self.rounds[index].clone().into_iter().map(Ok),
-        )))
+        Ok(Box::pin(stream::iter(self.rounds[index].clone())))
     }
 }
 #[derive(Default)]
@@ -116,6 +114,19 @@ fn setup(
 }
 fn setup_authenticated(
     rounds: Vec<Vec<ProviderEvent>>,
+    config: RuntimeConfig,
+    authenticated: bool,
+) -> (PathBuf, AgentRuntime, Arc<Script>, Arc<Hooks>) {
+    let rounds = rounds
+        .into_iter()
+        .map(|round| round.into_iter().map(Ok).collect())
+        .collect();
+    setup_streams(rounds, config, authenticated)
+}
+/// Rounds whose streams can also end in an error, as a connection that
+/// breaks partway does.
+fn setup_streams(
+    rounds: Vec<Vec<CoreResult<ProviderEvent>>>,
     config: RuntimeConfig,
     authenticated: bool,
 ) -> (PathBuf, AgentRuntime, Arc<Script>, Arc<Hooks>) {
@@ -280,6 +291,297 @@ async fn reliability_incomplete_tool_calls_are_closed_without_execution() {
     assert!(!directory.join("must-not-exist").exists());
     assert!(provider.requests.lock().unwrap()[1].messages.iter().any(|message| matches!(message, ProviderMessage::ToolResult {call_id,..} if call_id == "unfinished")));
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// How a connection that breaks partway through a response reaches the
+/// runtime: reqwest's body errors with their causes, and a Haarness router's
+/// words for an upstream that fell silent or broke off.
+const CUTS: [&str; 4] = [
+    "request or response body error: connection reset by peer (os error 54)",
+    "error decoding response body: connection closed before message completed",
+    "upstream stream became idle",
+    "upstream stream failed: error decoding response body",
+];
+
+fn cut(message: &str) -> CoreResult<ProviderEvent> {
+    Err(CoreError::Provider(message.into()))
+}
+
+fn recovery_note(request: &ProviderRequest) -> bool {
+    request.messages.iter().any(|message| matches!(message, ProviderMessage::Text {content,..} if content.contains("Continue from the saved partial response")))
+}
+
+#[tokio::test]
+async fn reliability_connection_cut_after_output_continues_from_the_partial_answer() {
+    for message in CUTS {
+        let (directory, runtime, provider, hooks) = setup_streams(
+            vec![
+                vec![Ok(text("partial answer")), Ok(usage()), cut(message)],
+                vec![Ok(text("rest of it")), Ok(usage()), Ok(finish("completed"))],
+            ],
+            RuntimeConfig::default(),
+            true,
+        );
+        let thread = echo_thread(&runtime).await;
+        let turn = runtime
+            .start_turn(thread.id, turn_request("cut"))
+            .await
+            .unwrap();
+        let finished = settled(&runtime, &turn).await;
+        assert_eq!(
+            finished.status,
+            TurnStatus::Completed,
+            "{message}: {:?}",
+            finished.error
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2, "{message}");
+        let items = runtime.items(thread.id, None).await.unwrap();
+        let answers = items
+            .iter()
+            .filter_map(|item| match &item.data {
+                ItemData::AssistantMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(answers, ["partial answer", "rest of it"], "{message}");
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item.data, ItemData::Error { .. })),
+            "{message}"
+        );
+        assert!(recovery_note(&provider.requests.lock().unwrap()[1]));
+        assert!(hooks.failures.lock().unwrap().is_empty(), "{message}");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn reliability_connection_cut_after_a_tool_call_closes_it_without_running_it() {
+    let call = ProviderEvent::ToolCall {
+        call_id: "cut-call".into(),
+        name: "write".into(),
+        arguments: serde_json::json!({"path":"must-not-exist","content":"bad"}),
+        provider_metadata: Value::Null,
+    };
+    let (directory, runtime, provider, _) = setup_streams(
+        vec![
+            vec![Ok(call), cut(CUTS[0])],
+            vec![Ok(text("recovered")), Ok(finish("completed"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("cut tool"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert!(!directory.join("must-not-exist").exists());
+    assert!(
+        provider.requests.lock().unwrap()[1]
+            .messages
+            .iter()
+            .any(|message| matches!(message,
+        ProviderMessage::ToolResult {call_id,is_error:true,..} if call_id == "cut-call"))
+    );
+    // What the model reads, and the person sees on the call, in plain words.
+    assert!(runtime.items(thread.id, None).await.unwrap().iter().any(|item| matches!(&item.data,
+        ItemData::ToolResult {call_id,output,is_error:true,..} if call_id == "cut-call"
+            && output == "The connection to Echo broke off before this call ran, so it did not run.")));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_connection_cut_before_any_output_sends_the_request_again() {
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            // What a chunked body that ends early reads as, which nothing
+            // retried before.
+            vec![
+                Ok(ProviderEvent::ContentStarted),
+                cut("error decoding response body: unexpected EOF during chunk size line"),
+            ],
+            vec![Ok(text("answered")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("cut first"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    {
+        let requests = provider.requests.lock().unwrap();
+        // Nothing reached the person, so the same request is sent again.
+        assert!(!recovery_note(&requests[1]));
+        assert_eq!(
+            serde_json::to_value(&requests[0].messages).unwrap(),
+            serde_json::to_value(&requests[1].messages).unwrap()
+        );
+    }
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, ItemData::Error { .. }))
+    );
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_connection_cut_after_the_response_finished_loses_nothing() {
+    // A text answer: one request, nothing to continue.
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![vec![
+            Ok(text("whole answer")),
+            Ok(usage()),
+            Ok(finish("stop")),
+            cut(CUTS[0]),
+        ]],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("finished then cut"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(
+        |item| matches!(&item.data, ItemData::AssistantMessage {text} if text == "whole answer")
+    ));
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, ItemData::Error { .. }))
+    );
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+
+    // A finished response's tool calls run as usual.
+    let call = ProviderEvent::ToolCall {
+        call_id: "finished-call".into(),
+        name: "bash".into(),
+        arguments: serde_json::json!({"command":"printf ran >> ran.txt"}),
+        provider_metadata: Value::Null,
+    };
+    let (directory, runtime, provider, _) = setup_streams(
+        vec![
+            vec![Ok(call), Ok(finish("tool_calls")), cut(CUTS[1])],
+            vec![Ok(text("after the call")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("finished call then cut"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        std::fs::read_to_string(directory.join("ran.txt")).unwrap(),
+        "ran"
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert!(requests[1].messages.iter().any(|message| matches!(message,
+        ProviderMessage::ToolResult {call_id,is_error:false,..} if call_id == "finished-call")));
+    assert!(!recovery_note(&requests[1]));
+    drop(requests);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_connection_cut_every_time_fails_after_the_recoveries() {
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![vec![Ok(text("partial")), cut(CUTS[0])]],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("cut always"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(finished.status, TurnStatus::Failed);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    // Plain words, never the transport's: the turn's error is what every
+    // client shows, and the error row says the same.
+    let plain = "The connection to Echo kept breaking off mid-answer. Check the network connection, then send a message to continue.";
+    assert_eq!(finished.error.as_deref(), Some(plain));
+    assert!(
+        runtime
+            .items(thread.id, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|item| matches!(&item.data, ItemData::Error { message, .. } if message == plain))
+    );
+    assert_eq!(hooks.failures.lock().unwrap().len(), 1);
+    assert_eq!(hooks.failures.lock().unwrap()[0]["error"], "incomplete");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_error_the_provider_sends_after_output_is_not_retried() {
+    for message in [
+        r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        "invalid SSE JSON: EOF while parsing an object at line 1 column 12",
+    ] {
+        let (directory, runtime, provider, hooks) = setup_streams(
+            vec![
+                vec![Ok(text("partial")), cut(message)],
+                vec![Ok(text("must not be asked")), Ok(finish("completed"))],
+            ],
+            RuntimeConfig::default(),
+            true,
+        );
+        let thread = echo_thread(&runtime).await;
+        let turn = runtime
+            .start_turn(thread.id, turn_request("explicit"))
+            .await
+            .unwrap();
+        assert_eq!(
+            settled(&runtime, &turn).await.status,
+            TurnStatus::Failed,
+            "{message}"
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1, "{message}");
+        assert_eq!(hooks.failures.lock().unwrap()[0]["error"], "provider");
+        assert!(runtime.items(thread.id, None).await.unwrap().iter().any(
+            |item| matches!(&item.data, ItemData::AssistantMessage {text} if text == "partial")
+        ));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
 
 #[tokio::test]

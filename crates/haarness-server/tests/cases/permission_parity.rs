@@ -1483,3 +1483,278 @@ async fn parity_a_read_of_where_sign_ins_are_kept_asks_a_person_even_in_yolo() {
             .contains("sk-fixture-secret")
     );
 }
+
+/// A site whose `/login` sends a visitor on to the page its `next` names,
+/// recording each path asked for.
+async fn redirecting_site() -> (
+    std::net::SocketAddr,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = paths.clone();
+    let site = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => head.extend_from_slice(&buffer[..count]),
+                }
+            }
+            let head = String::from_utf8_lossy(&head).into_owned();
+            let path = head.split(' ').nth(1).unwrap_or_default().to_owned();
+            seen.lock().unwrap().push(path.clone());
+            let reply = match path.split_once("?next=") {
+                Some(("/login", next)) => format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {next}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                ),
+                _ => format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\npage {path}",
+                    path.len() + 5
+                ),
+            };
+            let _ = stream.write_all(reply.as_bytes()).await;
+        }
+    });
+    (address, paths, site)
+}
+
+#[tokio::test]
+async fn parity_webfetch_redirects_meet_the_rules_in_turns_and_direct_calls() {
+    let fixture = Fixture::new();
+    let (address, paths, site) = redirecting_site().await;
+    let mut config = RuntimeConfig::default();
+    config
+        .base_rules
+        .push(rule(&format!("webfetch:http://{address}/admin/*"), D::Deny));
+    let runtime = runtime(&fixture.0, config, None);
+    let thread = echo_thread(&runtime).await;
+    let stopped = format!(
+        "redirects (HTTP 302) to http://{address}/admin/x, which a permission rule denies, so the \
+         redirect was not followed."
+    );
+    for next in ["/admin/x", "/home"] {
+        let url = format!("http://{address}/login?next={next}");
+        let turn = send(
+            &runtime,
+            &thread,
+            &format!("!tool webfetch {}", json!({ "url": url })),
+        )
+        .await;
+        assert_success(&runtime, &thread, &turn).await;
+        let (turned, _) = tool_outputs(&runtime, &thread).await.pop().unwrap();
+        // A workflow's own fetch, outside a turn, meets the same rules.
+        let direct = runtime
+            .run_direct_tool(
+                thread.id,
+                "webfetch",
+                json!({ "url": url }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!direct.is_error, "{}", direct.output.text);
+        for output in [turned, direct.output.text] {
+            if next == "/admin/x" {
+                assert!(output.contains(&stopped), "{output}");
+            } else {
+                assert_eq!(output, "page /home");
+            }
+        }
+    }
+    assert!(
+        !paths.lock().unwrap().iter().any(|path| path == "/admin/x"),
+        "{:?}",
+        paths.lock().unwrap()
+    );
+    assert_eq!(
+        paths
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| *path == "/home")
+            .count(),
+        2
+    );
+    site.abort();
+}
+
+#[tokio::test]
+async fn parity_searches_leave_out_files_a_read_rule_denies_in_turns_and_direct_calls() {
+    let fixture = Fixture::new();
+    for (file, text) in [
+        ("private/key.txt", "needle private"),
+        ("public/readme.md", "needle public"),
+    ] {
+        let path = fixture.0.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let mut config = RuntimeConfig::default();
+    config.base_rules.push(rule("read:private/*", D::Deny));
+    let runtime = runtime(&fixture.0, config, None);
+    let thread = echo_thread(&runtime).await;
+    for (name, arguments, found) in [
+        (
+            "grep",
+            json!({"pattern": "needle", "path": "."}),
+            "public/readme.md:1:needle public",
+        ),
+        ("glob", json!({"pattern": "**/*.*"}), "public/readme.md"),
+    ] {
+        let turn = send(&runtime, &thread, &format!("!tool {name} {arguments}")).await;
+        assert_success(&runtime, &thread, &turn).await;
+        let (turned, _) = tool_outputs(&runtime, &thread).await.pop().unwrap();
+        // A workflow's own search, outside a turn, meets the same rules.
+        let direct = runtime
+            .run_direct_tool(thread.id, name, arguments, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!direct.is_error, "{}", direct.output.text);
+        for output in [turned, direct.output.text] {
+            assert!(output.contains(found), "{name}: {output}");
+            assert!(!output.contains("key.txt"), "{name}: {output}");
+            assert!(
+                output.ends_with("(skipped 1 file a read rule denies)"),
+                "{name}: {output}"
+            );
+        }
+    }
+    // A direct read of the file itself is refused before it runs.
+    let read = runtime
+        .run_direct_tool(
+            thread.id,
+            "read",
+            json!({"path": "private/key.txt"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(read.is_error, "{}", read.output.text);
+    assert!(!read.output.text.contains("needle"), "{}", read.output.text);
+}
+
+#[tokio::test]
+async fn parity_searches_leave_out_files_an_active_skill_denies_reading() {
+    let fixture = Fixture::new();
+    for (file, text) in [
+        ("private/key.txt", "needle private"),
+        ("public/readme.md", "needle public"),
+    ] {
+        let path = fixture.0.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let mut config = RuntimeConfig::default();
+    for (name, call) in [
+        ("search-grep", json!({"pattern": "needle", "path": "."})),
+        ("search-glob", json!({"pattern": "**/*.*"})),
+    ] {
+        let tool = name.trim_start_matches("search-");
+        config.commands.push(haarness_protocol::CommandInfo {
+            execution: haarness_protocol::DefinitionExecution {
+                disallowed_tools: vec!["Read(private/*)".into()],
+                ..haarness_protocol::DefinitionExecution::default()
+            },
+            name: name.into(),
+            description: "search without the private folder".into(),
+            source: None,
+            agent: None,
+            model: None,
+            argument_hint: None,
+            template: format!("!tool {tool} {call}"),
+            plugin: None,
+        });
+    }
+    let runtime = runtime(&fixture.0, config, None);
+    let thread = echo_thread(&runtime).await;
+    for name in ["search-grep", "search-glob"] {
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                StartTurnRequest {
+                    command: Some(name.into()),
+                    ..turn_request("")
+                },
+            )
+            .await
+            .unwrap();
+        assert_success(&runtime, &thread, &turn).await;
+        let (output, _) = tool_outputs(&runtime, &thread).await.pop().unwrap();
+        assert!(output.contains("public/readme.md"), "{name}: {output}");
+        assert!(!output.contains("key.txt"), "{name}: {output}");
+        assert!(
+            output.ends_with("(skipped 1 file a read rule denies)"),
+            "{name}: {output}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn parity_a_command_that_denies_reading_still_brings_its_own_files() {
+    let fixture = Fixture::new();
+    std::fs::create_dir_all(fixture.0.join("src")).unwrap();
+    std::fs::write(fixture.0.join("src/lib.txt"), "MARK_LIB_CONTENT needle").unwrap();
+    let mut config = RuntimeConfig::default();
+    for (name, template) in [
+        ("given", "Review only this file: @src/lib.txt".to_owned()),
+        (
+            "search-none",
+            format!("!tool grep {}", json!({"pattern": "needle", "path": "."})),
+        ),
+    ] {
+        config.commands.push(haarness_protocol::CommandInfo {
+            execution: haarness_protocol::DefinitionExecution {
+                disallowed_tools: vec!["Read".into()],
+                ..haarness_protocol::DefinitionExecution::default()
+            },
+            name: name.into(),
+            description: "review only the files given".into(),
+            source: None,
+            agent: None,
+            model: None,
+            argument_hint: None,
+            template,
+            plugin: None,
+        });
+    }
+    let runtime = runtime(&fixture.0, config, None);
+    let thread = echo_thread(&runtime).await;
+    let run = |name: &'static str| {
+        let runtime = &runtime;
+        let thread = &thread;
+        async move {
+            let turn = runtime
+                .start_turn(
+                    thread.id,
+                    StartTurnRequest {
+                        command: Some(name.into()),
+                        ..turn_request("")
+                    },
+                )
+                .await
+                .unwrap();
+            assert_success(runtime, thread, &turn).await;
+        }
+    };
+    // The command's own `@` file comes with it, though it takes reading
+    // away from the turn.
+    run("given").await;
+    let items = serde_json::to_string(&runtime.items(thread.id, None).await.unwrap()).unwrap();
+    assert!(items.contains("MARK_LIB_CONTENT"), "{items}");
+    assert!(!items.contains("File context omitted"), "{items}");
+    // A search in such a turn finds nothing to read.
+    run("search-none").await;
+    let (output, _) = tool_outputs(&runtime, &thread).await.pop().unwrap();
+    assert!(!output.contains("lib.txt"), "{output}");
+    assert!(
+        output.ends_with("(skipped 1 file a read rule denies)"),
+        "{output}"
+    );
+}

@@ -78,7 +78,11 @@ const MULTIEDIT_DESCRIPTION: &str = "Apply several exact replacements to one UTF
 
 const APPLY_PATCH_DESCRIPTION: &str = "Apply a V4A patch envelope across one or more files. Use *** Begin Patch and *** End Patch, with an explicit *** Add File, *** Update File, or *** Delete File header for every operation. Prefix every line of a new file with '+'. Update hunks use @@ locators and must include enough unchanged context to identify exactly one location; use a unique locator instead of a bare brace. *** Move to may follow an Update File header. If verification reports ambiguity, read the region and retry with more context. Prefer this tool for coordinated or multi-file text edits.";
 
-const BASH_DESCRIPTION: &str = "Run a terminal command through the workspace shell. Use bash for builds, tests, git, package managers, process inspection, and other terminal operations. Do not use it for ordinary file reading, listing, searching, writing, or editing when read, list, glob, grep, write, edit, or apply_patch can express the operation more clearly. Ripgrep (rg) is bundled and available on PATH for searches requiring flags or pipelines beyond the grep/glob tools; no installation is needed. Use workdir instead of 'cd <dir> && ...'. Quote paths containing spaces. timeout is milliseconds, defaults to the configured deadline (normally 120000), and has no fixed upper limit; set 0 for no deadline. Output includes the exit code and combined stdout/stderr. Do not create commits or push unless the user explicitly asks, and do not use destructive git or filesystem operations without clear authorization.";
+const BASH_DESCRIPTION: &str = "Run a terminal command through the workspace shell. Use bash for builds, tests, git, package managers, process inspection, and other terminal operations. Do not use it for ordinary file reading, listing, searching, writing, or editing when read, list, glob, grep, write, edit, or apply_patch can express the operation more clearly. Ripgrep (rg) is bundled and available on PATH for searches requiring flags or pipelines beyond the grep/glob tools; no installation is needed. Use workdir instead of 'cd <dir> && ...'. Quote paths containing spaces. timeout is milliseconds, defaults to the configured deadline (normally 120000), and has no fixed upper limit; set 0 for no deadline. Output includes the exit code and combined stdout/stderr. Do not create commits or push unless the user explicitly asks, and do not use destructive git or filesystem operations without clear authorization. Set run_in_background for a command that keeps running or takes minutes, such as a dev server, a file watcher, or a full build or test suite: the call returns at once with the command's id, you keep working, and when it ends a message gives its exit status and the last lines it printed. Meanwhile read its output with bash_output, which can also wait for it, and end it with bash_stop. Keep quick commands, and any command whose result your next step needs, in the foreground, and wait for a background one with bash_output when the answer depends on it. Never start a lasting process with a trailing & or nohup; use run_in_background so Haarness can follow and stop it. A timeout you give limits the whole run, in the background too. In some chats a foreground command that runs long moves to the background by itself; its result then says so and gives its id.";
+
+const BASH_OUTPUT_DESCRIPTION: &str = "Follow the shell commands bash started in this chat. With an id it returns what that command printed since your last read of it (at most 30 KB; tail_lines keeps only the last lines), whether it still runs or how it ended, and a cursor to read from later. Without an id it lists the chat's commands with their ids and states. wait_seconds waits up to that long before answering: until the command ends (until=exit, the default), until it prints nothing for quiet_seconds (until=quiet), or until a line matches pattern (until=match); a match is looked for from your last read of that command on, earlier output in that span included. A foreground command's result already holds its output; use this for commands in the background.";
+
+const BASH_STOP_DESCRIPTION: &str = "Stop a shell command bash started in this chat, by its id, with every process it started. By default it is interrupted, then terminated, then killed, with a short grace period between the steps; signal sends that one signal instead (INT, TERM or KILL). Stopping a command that already ended changes nothing. The result gives how it ended and the end of its output.";
 
 const WEBFETCH_DESCRIPTION: &str = "Fetch a fully formed HTTP or HTTPS URL as a read-only operation. HTML is converted to markdown by default; use format='raw' only when the original response body is required. Prefer a more targeted connected tool when one exists for the requested service or data. Large results may be truncated with a path to the full output.";
 /// A body larger than this is refused while it is read: a server that sends
@@ -266,6 +270,8 @@ impl NativeToolRegistry {
             Kind::MultiEdit,
             Kind::ApplyPatch,
             Kind::Bash,
+            Kind::BashOutput,
+            Kind::BashStop,
             Kind::WebFetch,
             Kind::Question,
             Kind::Todo,
@@ -1393,25 +1399,79 @@ fn media_client() -> &'static reqwest::Client {
 
 fn web_client() -> reqwest::Client {
     http_client()
-        // A redirect off the address asked for is not followed: the fetch returns its
-        // address, and fetching that is the model's next call, checked
-        // against the permission rules, so an allowed address cannot lead
-        // past a denied one. The first URL in `previous` is the one asked for.
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() > 10 {
-                attempt.error("too many redirects")
-            } else if attempt
-                .previous()
-                .first()
-                .is_some_and(|first| redirect_leaves(first, attempt.url()).is_none())
-            {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        }))
+        // `fetch_page` follows redirects itself, judging each one.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("the static WebFetch HTTP client configuration is valid")
+}
+
+/// How many redirects one fetch follows before it gives up.
+const WEBFETCH_REDIRECTS: usize = 10;
+
+/// What a fetch judges a redirect by: the webfetch rules of the call's agent
+/// and the address the call asked for, as written.
+struct FetchRules {
+    rules: haarness_core::PermissionEngine,
+    asked: String,
+}
+
+/// Why a fetch does not follow a redirect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectStop {
+    /// It leaves the address asked for, as the reason says.
+    Leaves(&'static str),
+    /// A permission rule denies its address.
+    Denied,
+    /// Its address needs an approval this fetch did not get.
+    Unapproved,
+}
+
+/// Why a fetch of `asked` does not follow a redirect from `from` (the
+/// address that answered) to `to`, or `None` when it does. A redirect off
+/// the address asked for is not followed (see [`redirect_leaves`]), nor one
+/// from https back to plain http, nor one whose new address the call's
+/// rules do not let it reach (see
+/// [`haarness_core::webfetch_redirect_verdict`]), so an allowed address
+/// cannot lead past a denied one.
+fn redirect_stop(
+    asked: &url::Url,
+    from: &url::Url,
+    to: &url::Url,
+    rules: Option<&FetchRules>,
+) -> Option<RedirectStop> {
+    use haarness_core::PermissionDecision;
+    if let Some(leaves) = redirect_leaves(asked, to) {
+        return Some(RedirectStop::Leaves(leaves));
+    }
+    if from.scheme() == "https" && to.scheme() == "http" {
+        return Some(RedirectStop::Leaves(
+            "which leaves https for unencrypted http",
+        ));
+    }
+    let verdict = rules.map_or(PermissionDecision::Allow, |rules| {
+        haarness_core::webfetch_redirect_verdict(&rules.rules, &rules.asked, to.as_str())
+    });
+    if verdict == PermissionDecision::Allow {
+        return None;
+    }
+    tracing::info!(
+        host = to.host_str().unwrap_or_default(),
+        denied = verdict == PermissionDecision::Deny,
+        "webfetch did not follow a redirect its permission rules do not allow"
+    );
+    Some(if verdict == PermissionDecision::Deny {
+        RedirectStop::Denied
+    } else {
+        RedirectStop::Unapproved
+    })
+}
+
+/// Whether a request to `to` goes to the same place as one to `from`: the
+/// same scheme, host and port, where the HTTP client sent a sign-in on.
+fn same_origin(from: &url::Url, to: &url::Url) -> bool {
+    from.scheme() == to.scheme()
+        && from.host_str() == to.host_str()
+        && from.port_or_known_default() == to.port_or_known_default()
 }
 
 /// How a redirect leaves the address a fetch asked for, or `None` when it
@@ -1442,13 +1502,14 @@ async fn webfetch(
     client: &reqwest::Client,
     url: url::Url,
     raw: bool,
+    rules: Option<&FetchRules>,
     cancel: &tokio_util::sync::CancellationToken,
     deadline: Duration,
 ) -> CoreResult<ToolOutput> {
     tokio::select! {
         biased;
         () = cancel.cancelled() => Err(CoreError::Cancelled),
-        result = tokio::time::timeout(deadline, fetch_page(client, url, raw)) => {
+        result = tokio::time::timeout(deadline, fetch_page(client, url, raw, rules)) => {
             result.unwrap_or_else(|_| {
                 Err(CoreError::Tool(format!(
                     "The page did not finish loading within {} seconds",
@@ -1459,26 +1520,93 @@ async fn webfetch(
     }
 }
 
+/// Where a redirect response leads, when it names a place.
+fn redirect_target(response: &reqwest::Response) -> Option<url::Url> {
+    response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        // As the HTTP client read it: any UTF-8, not only visible ASCII.
+        .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
+        .and_then(|location| response.url().join(location).ok())
+}
+
 /// Reads `url` for webfetch; `webfetch` bounds it in time and by Stop.
-async fn fetch_page(client: &reqwest::Client, url: url::Url, raw: bool) -> CoreResult<ToolOutput> {
-    let response = client.get(url.clone()).send().await.map_err(tool_error)?;
-    // `web_client` follows redirects on the address asked for only, so a
-    // redirect that arrives here leads off it.
-    if response.status().is_redirection()
-        && let Some(target) = response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|location| response.url().join(location).ok())
-    {
+/// Redirects are followed here as the HTTP client used to follow them (the
+/// statuses it follows, a `Referer` naming the page before, a user name and
+/// password in `url` sent on while the redirects stay on its host, port and
+/// scheme), but only those [`redirect_stop`] lets through.
+async fn fetch_page(
+    client: &reqwest::Client,
+    url: url::Url,
+    raw: bool,
+    rules: Option<&FetchRules>,
+) -> CoreResult<ToolOutput> {
+    let mut signed_in = !url.username().is_empty() || url.password().is_some();
+    let mut response = client.get(url.clone()).send().await.map_err(tool_error)?;
+    let mut followed = 0;
+    let stop = loop {
+        if !response.status().is_redirection() {
+            break None;
+        }
+        let Some(target) = redirect_target(&response) else {
+            break None;
+        };
+        // Any other redirect status names a place without being followed.
+        if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            let reason =
+                redirect_leaves(&url, &target).unwrap_or("which leaves the address asked for");
+            break Some((target, RedirectStop::Leaves(reason)));
+        }
+        if let Some(stop) = redirect_stop(&url, response.url(), &target, rules) {
+            break Some((target, stop));
+        }
+        if followed == WEBFETCH_REDIRECTS {
+            return Err(CoreError::Tool(format!(
+                "{url} redirects more than {WEBFETCH_REDIRECTS} times"
+            )));
+        }
+        followed += 1;
+        let from = response.url();
+        signed_in &= same_origin(from, &target);
+        // Never from https to http: `redirect_stop` stops those, so the
+        // `Referer` the client sent on every followed redirect goes too.
+        let mut referer = from.clone();
+        let _ = referer.set_username("");
+        let _ = referer.set_password(None);
+        referer.set_fragment(None);
+        // The client signs in with what the address carries: the address
+        // asked for's, never one the server's redirect names.
+        let mut next = target;
+        let _ = next.set_username(if signed_in { url.username() } else { "" });
+        let _ = next.set_password(url.password().filter(|_| signed_in));
+        response = client
+            .get(next)
+            .header(reqwest::header::REFERER, referer.as_str())
+            .send()
+            .await
+            .map_err(tool_error)?;
+    };
+    if let Some((target, stop)) = stop {
+        let (from, status) = (response.url(), response.status().as_u16());
+        let reason = match stop {
+            RedirectStop::Denied => {
+                return Ok(ToolOutput {
+                    text: format!(
+                        "{from} redirects (HTTP {status}) to {target}, which a permission rule \
+                         denies, so the redirect was not followed. This is configured policy — \
+                         do not fetch that address."
+                    ),
+                    metadata: json!({"redirect": target.as_str(), "denied": true}),
+                });
+            }
+            RedirectStop::Leaves(reason) => reason,
+            RedirectStop::Unapproved => "which the permission rules do not let this fetch follow",
+        };
         return Ok(ToolOutput {
             text: format!(
-                "{} redirects (HTTP {}) to {target}, {}, so the redirect was not followed. \
-                 Call webfetch with {target} to read it; that fetch is checked against the \
-                 permission rules like any other.",
-                response.url(),
-                response.status().as_u16(),
-                redirect_leaves(&url, &target).unwrap_or("which leaves the address asked for"),
+                "{from} redirects (HTTP {status}) to {target}, {reason}, so the redirect was not \
+                 followed. Call webfetch with {target} to read it; that fetch is checked against \
+                 the permission rules like any other."
             ),
             metadata: json!({"redirect": target.as_str()}),
         });
@@ -2510,6 +2638,8 @@ enum Kind {
     MultiEdit,
     ApplyPatch,
     Bash,
+    BashOutput,
+    BashStop,
     WebFetch,
     Question,
     /// Legacy Haarness spelling retained for existing providers/scripts.
@@ -2688,9 +2818,33 @@ impl Tool for BuiltinTool {
                 json!({
                     "command":{"type":"string","description":"Shell command to execute."},
                     "timeout":{"type":"integer","minimum":0,"description":"Optional timeout in milliseconds; defaults to the configured deadline (normally 120000). Zero disables the deadline."},
-                    "workdir":{"type":"string","description":"Workspace-relative or absolute working directory. Omit to use the workspace; prefer this over a cd prefix."}
+                    "workdir":{"type":"string","description":"Workspace-relative or absolute working directory. Omit to use the workspace; prefer this over a cd prefix."},
+                    "run_in_background":{"type":"boolean","default":false,"description":"Return at once with the command's id and let it run on; you are told when it ends."}
                 }),
                 vec!["command"],
+            ),
+            Kind::BashOutput => (
+                "bash_output",
+                BASH_OUTPUT_DESCRIPTION,
+                json!({
+                    "id":{"type":"string","minLength":1,"description":"The command's id, from its bash result. Omit it to list this chat's commands."},
+                    "wait_seconds":{"type":"integer","minimum":0,"maximum":300,"default":0,"description":"Wait up to this many seconds for what until names before answering; 0 answers at once."},
+                    "until":{"type":"string","enum":["exit","quiet","match"],"default":"exit","description":"What a wait waits for: the command ending (exit), no output for quiet_seconds (quiet), or a line matching pattern (match)."},
+                    "pattern":{"type":"string","minLength":1,"description":"For until=match: a regular expression in Rust syntax, matched against each line; begin it with (?i) to ignore case."},
+                    "quiet_seconds":{"type":"integer","minimum":1,"maximum":300,"default":5,"description":"For until=quiet: how many seconds without output count as quiet."},
+                    "cursor":{"type":"integer","minimum":0,"description":"Read from this cursor, from an earlier result, instead of from your last read."},
+                    "tail_lines":{"type":"integer","minimum":1,"maximum":2000,"description":"Keep only the last this many lines of what is returned."}
+                }),
+                vec![],
+            ),
+            Kind::BashStop => (
+                "bash_stop",
+                BASH_STOP_DESCRIPTION,
+                json!({
+                    "id":{"type":"string","minLength":1,"description":"The command's id, from its bash result or bash_output."},
+                    "signal":{"type":"string","enum":["INT","TERM","KILL"],"description":"Send only this signal instead of the interrupt, terminate, kill sequence."}
+                }),
+                vec!["id"],
             ),
             Kind::WebFetch => (
                 "webfetch",
@@ -2987,13 +3141,14 @@ impl Tool for BuiltinTool {
                 let rules = context
                     .invoker
                     .as_ref()
-                    .and_then(|invoker| invoker.read_rules());
+                    .and_then(|invoker| invoker.search_read_rules());
                 let secrets = SecretFilter::new(&context.workspace, requested, &root, rules);
                 let named = context.workspace.clone();
                 let cancel = context.cancel.clone();
                 // The walk reads folders synchronously and `**` follows links
-                // (one to `/` reaches everything), so it runs off the async
-                // workers, stops on Stop and at a budget of matches looked at.
+                // (one to a large folder reaches all of it), so it runs off the
+                // async workers, stops on Stop, at a budget of matches looked
+                // at and at one of folder entries read.
                 let walk = tokio::task::spawn_blocking(move || {
                     glob_walk(
                         &pattern,
@@ -3004,7 +3159,10 @@ impl Tool for BuiltinTool {
                         },
                         &secrets,
                         &cancel,
-                        GLOB_LOOK_LIMIT,
+                        GlobLimits {
+                            matches: GLOB_LOOK_LIMIT,
+                            entries: GLOB_ENTRY_LIMIT,
+                        },
                     )
                 });
                 let found = tokio::select! {
@@ -3018,6 +3176,8 @@ impl Tool for BuiltinTool {
                 );
                 Ok(if found.stopped {
                     with_stop(output, GLOB_LOOK_LIMIT)
+                } else if found.large {
+                    with_read_stop(output, GLOB_ENTRY_LIMIT)
                 } else {
                     output
                 })
@@ -3030,7 +3190,7 @@ impl Tool for BuiltinTool {
                 let rules = context
                     .invoker
                     .as_ref()
-                    .and_then(|invoker| invoker.read_rules());
+                    .and_then(|invoker| invoker.search_read_rules());
                 let secrets = SecretFilter::new(&context.workspace, requested, &root, rules);
                 // The walker searches a file it is given whatever its filters
                 // say, so a secret-named or denied one, or a link to one, is
@@ -3239,6 +3399,13 @@ impl Tool for BuiltinTool {
             }
             Kind::Bash => {
                 let command = string(&args, "command")?;
+                let background =
+                    args.get("run_in_background").and_then(Value::as_bool) == Some(true);
+                if background && context.execution.shell_call.is_none() {
+                    return Err(CoreError::Invalid(
+                        "run_in_background is for an agent's commands in its turn; run this command in the foreground".into(),
+                    ));
+                }
                 let workdir = match args.get("workdir") {
                     Some(value) => {
                         let value = value.as_str().ok_or_else(|| {
@@ -3254,19 +3421,39 @@ impl Tool for BuiltinTool {
                     }
                     None => context.workspace.clone(),
                 };
-                let timeout = args
+                let given = args
                     .get("timeout")
                     .or_else(|| args.get("timeout_ms"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(context.execution.shell_timeout_ms);
+                    .and_then(Value::as_u64);
+                let agent = (!context.execution.person_shell).then_some(context.thread_id);
+                if let Some(call) = &context.execution.shell_call {
+                    return crate::shell::run_call(
+                        call,
+                        haarness_core::CommandRequest {
+                            command: command.to_owned(),
+                            cwd: workdir.clone(),
+                            workdir: args
+                                .get("workdir")
+                                .and_then(Value::as_str)
+                                .map(|_| workdir.display().to_string()),
+                            timeout_ms: given,
+                            background,
+                        },
+                        &context.cancel,
+                        &tool_output_dir(),
+                        &context.execution.shell_env,
+                        agent,
+                    )
+                    .await;
+                }
                 crate::shell::run(
                     command,
                     &workdir,
-                    timeout,
+                    given.unwrap_or(context.execution.shell_timeout_ms),
                     &context.cancel,
                     &tool_output_dir(),
                     &context.execution.shell_env,
-                    (!context.execution.person_shell).then_some(context.thread_id),
+                    agent,
                 )
                 .await
             }
@@ -3283,10 +3470,31 @@ impl Tool for BuiltinTool {
                     return Err(CoreError::Invalid("webfetch URL has no hostname".into()));
                 }
                 let raw = args.get("format").and_then(serde_json::Value::as_str) == Some("raw");
-                webfetch(&self.client, url, raw, &context.cancel, WEBFETCH_TIMEOUT).await
+                let rules = context
+                    .invoker
+                    .as_ref()
+                    .and_then(|invoker| invoker.webfetch_rules())
+                    .map(|rules| FetchRules {
+                        rules,
+                        asked: string(&args, "url").unwrap_or_default().to_owned(),
+                    });
+                webfetch(
+                    &self.client,
+                    url,
+                    raw,
+                    rules.as_ref(),
+                    &context.cancel,
+                    WEBFETCH_TIMEOUT,
+                )
+                .await
             }
             Kind::Todo | Kind::TodoWrite | Kind::TodoRead => Err(CoreError::Tool(
                 "todo state is managed by the runtime task coordinator".into(),
+            )),
+            // The runtime answers them in an agent's turn, where its
+            // commands are.
+            Kind::BashOutput | Kind::BashStop => Err(CoreError::Invalid(
+                "bash_output and bash_stop follow an agent's commands, in its turn".into(),
             )),
             Kind::Question => Err(CoreError::Tool(
                 "question requires an interactive permission/question reply channel".into(),
@@ -4045,14 +4253,30 @@ impl SecretFilter {
 /// everything there.
 const GLOB_LOOK_LIMIT: usize = 100_000;
 
+/// How many folder entries a glob reads through links before it stops,
+/// whatever it matches: a backstop for a link to a very large folder. Every
+/// folder reached without a link is read whatever its size, as before, and a
+/// `**` never goes round a link back up the tree (see
+/// [`crate::bounded_glob`]).
+const GLOB_ENTRY_LIMIT: usize = 1_000_000;
+
+/// Where a glob stops: after looking at `matches` matches, or after reading
+/// `entries` folder entries through links.
+struct GlobLimits {
+    matches: usize,
+    entries: usize,
+}
+
 /// What a glob found: its matches, what it left out, and whether it stopped
-/// at a limit (`stopped` for [`GLOB_LOOK_LIMIT`]).
+/// at a limit (`stopped` for [`GLOB_LOOK_LIMIT`], `large` for
+/// [`GLOB_ENTRY_LIMIT`]).
 #[derive(Default)]
 struct GlobFound {
     values: Vec<String>,
     skipped: Skipped,
     partial: bool,
     stopped: bool,
+    large: bool,
 }
 
 /// Where a glob looks: the canonical folder it searches, the canonical
@@ -4064,23 +4288,23 @@ struct GlobScope {
     named: PathBuf,
 }
 
-/// Walk `pattern` (already joined to the scope's root), looking at no more
-/// than `limit` matches. Runs synchronously; the caller keeps it off the async
-/// workers.
+/// Walk `pattern` (already joined to the scope's root) within `limits`.
+/// Runs synchronously; the caller keeps it off the async workers.
 fn glob_walk(
     pattern: &str,
     scope: &GlobScope,
     secrets: &SecretFilter,
     cancel: &tokio_util::sync::CancellationToken,
-    limit: usize,
+    limits: GlobLimits,
 ) -> CoreResult<GlobFound> {
     let mut folders = HashMap::<PathBuf, bool>::new();
     let mut found = GlobFound::default();
-    for (looked, path) in glob::glob(pattern)
+    let stop = cancel.clone();
+    let mut walk = crate::bounded_glob::Walk::new(pattern)
         .map_err(tool_error)?
-        .filter_map(Result::ok)
-        .enumerate()
-    {
+        .linked_entries(limits.entries)
+        .stop_when(move || stop.is_cancelled());
+    for (looked, path) in walk.by_ref().enumerate() {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
@@ -4088,7 +4312,7 @@ fn glob_walk(
             found.partial = true;
             break;
         }
-        if looked == limit {
+        if looked == limits.matches {
             found.partial = true;
             found.stopped = true;
             break;
@@ -4101,9 +4325,9 @@ fn glob_walk(
         }) {
             continue;
         }
-        // `**` follows linked folders: a match in a folder a link takes out
-        // of the project and the searched folder is left out, as a list of
-        // that folder would ask first.
+        // `**` follows linked folders (never one back up the tree): a match
+        // in a folder a link takes out of the project and the searched folder
+        // is left out, as a list of that folder would ask first.
         let parent = path.parent().unwrap_or(&scope.root).to_path_buf();
         let inside = *folders.entry(parent).or_insert_with_key(|parent| {
             parent.canonicalize().is_ok_and(|real| {
@@ -4129,16 +4353,42 @@ fn glob_walk(
                 .to_string(),
         );
     }
+    match walk.cut() {
+        Some(crate::bounded_glob::Cut::Stopped) => return Err(CoreError::Cancelled),
+        Some(crate::bounded_glob::Cut::Large) => {
+            found.partial = true;
+            found.large = true;
+        }
+        None => {}
+    }
     Ok(found)
 }
 
 /// Ends a glob's output saying it stopped at its budget, so an empty or short
 /// list is not read as everything there is.
-fn with_stop(mut output: ToolOutput, limit: usize) -> ToolOutput {
-    let note =
-        format!("(stopped after looking at {limit} matches; narrow the pattern or the path)");
+fn with_stop(output: ToolOutput, limit: usize) -> ToolOutput {
+    with_note(
+        output,
+        &format!("(stopped after looking at {limit} matches; narrow the pattern or the path)"),
+    )
+}
+
+/// Ends a glob's output saying it stopped at its budget of folder entries
+/// read through links.
+fn with_read_stop(output: ToolOutput, entries: usize) -> ToolOutput {
+    with_note(
+        output,
+        &format!(
+            "(stopped after reading {entries} folder entries through links; narrow the pattern \
+             or the path)"
+        ),
+    )
+}
+
+/// Ends `output` with `note`, after a blank line when there is text.
+fn with_note(mut output: ToolOutput, note: &str) -> ToolOutput {
     output.text = if output.text.is_empty() {
-        note
+        note.to_owned()
     } else {
         format!("{}\n\n{note}", output.text)
     };
@@ -7786,6 +8036,114 @@ export default workflow({
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    fn limits(matches: usize) -> GlobLimits {
+        GlobLimits {
+            matches,
+            entries: GLOB_ENTRY_LIMIT,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_glob_over_links_back_up_the_tree_ends() {
+        let workspace = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("haarness-glob-loops-{}", uuid::Uuid::now_v7()));
+        for file in ["top.txt", "a/note.txt", "p/x.txt", "q/y.txt"] {
+            let path = workspace.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        std::os::unix::fs::symlink("..", workspace.join("a/up")).unwrap();
+        std::os::unix::fs::symlink(".", workspace.join("a/self")).unwrap();
+        std::os::unix::fs::symlink("../q", workspace.join("p/to-q")).unwrap();
+        std::os::unix::fs::symlink("../p", workspace.join("q/to-p")).unwrap();
+        // On a thread of its own: `glob` walked these links until Stop, and
+        // a test runtime waits for its blocking work before it ends.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let folder = workspace.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let registry = NativeToolRegistry::new(folder.clone());
+            let texts = runtime.block_on(async {
+                let mut texts = Vec::new();
+                for pattern in ["**/*.nothing", "**/*.txt"] {
+                    let output = registry
+                        .get("glob")
+                        .unwrap()
+                        .execute(json!({ "pattern": pattern }), tool_context(&folder))
+                        .await
+                        .unwrap();
+                    texts.push(output.text);
+                }
+                texts
+            });
+            let _ = sender.send(texts);
+        });
+        let texts = receiver
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the globs end by themselves");
+        assert_eq!(texts[0], "");
+        // A link to another folder of the project is still followed.
+        assert_eq!(
+            texts[1],
+            "a/note.txt\np/to-q/y.txt\np/x.txt\nq/to-p/x.txt\nq/y.txt\ntop.txt"
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_glob_stops_at_its_budget_of_entries_read_through_links_and_says_so() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("haarness-glob-entries-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        for file in ["workspace/a.txt", "workspace/b/c.txt", "workspace/d/e.txt"] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        std::os::unix::fs::symlink("d", workspace.join("z-linked")).unwrap();
+        let scope = GlobScope {
+            root: workspace.clone(),
+            workspace: workspace.clone(),
+            named: workspace.clone(),
+        };
+        let secrets = SecretFilter::new(&workspace, ".", &workspace, None);
+        let pattern = workspace.join("**/*.txt").to_string_lossy().into_owned();
+        let cancel = CancellationToken::new();
+        // Every folder reached without a link is read whatever the budget, as on a
+        // repository far larger than it; only the linked folder is cut.
+        let found = glob_walk(&pattern, &scope, &secrets, &cancel, limits_entries(0)).unwrap();
+        assert!(found.large && found.partial && !found.stopped);
+        assert_eq!(found.values, ["a.txt", "b/c.txt", "d/e.txt"]);
+        let all = glob_walk(&pattern, &scope, &secrets, &cancel, limits_entries(100)).unwrap();
+        assert!(!all.large && !all.partial);
+        assert_eq!(
+            all.values,
+            ["a.txt", "b/c.txt", "d/e.txt", "z-linked/e.txt"]
+        );
+        assert_eq!(
+            with_read_stop(output("a.txt".into()), 5).text,
+            "a.txt\n\n(stopped after reading 5 folder entries through links; narrow the pattern \
+             or the path)"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn limits_entries(entries: usize) -> GlobLimits {
+        GlobLimits {
+            matches: 1_000,
+            entries,
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_glob_through_a_link_out_of_the_project_stops_at_its_budget_and_on_stop() {
@@ -7810,16 +8168,16 @@ export default workflow({
         let pattern = workspace.join("**/*").to_string_lossy().into_owned();
         let cancel = CancellationToken::new();
         // Matches left out count against the budget too.
-        let found = glob_walk(&pattern, &scope, &secrets, &cancel, 10).unwrap();
+        let found = glob_walk(&pattern, &scope, &secrets, &cancel, limits(10)).unwrap();
         assert!(found.stopped && found.partial);
         assert!(found.skipped.outside >= 7, "{}", found.skipped.outside);
         assert!(found.values.len() + found.skipped.outside <= 10);
-        let everything = glob_walk(&pattern, &scope, &secrets, &cancel, 1_000).unwrap();
+        let everything = glob_walk(&pattern, &scope, &secrets, &cancel, limits(1_000)).unwrap();
         assert!(!everything.stopped && !everything.partial);
         assert_eq!(everything.skipped.outside, 30);
         cancel.cancel();
         assert!(matches!(
-            glob_walk(&pattern, &scope, &secrets, &cancel, 1_000),
+            glob_walk(&pattern, &scope, &secrets, &cancel, limits(1_000)),
             Err(CoreError::Cancelled)
         ));
         let stopped = with_stop(output(String::new()), 10);
@@ -8719,6 +9077,390 @@ mod webfetch_tests {
         assert!(!server.await.unwrap(), "the redirect was followed");
     }
 
+    /// A server that answers each request by its path from `pages`: a
+    /// `Location` to redirect to (with 302) or a body to send; any other path
+    /// gets a 404. It records each request head.
+    async fn page_server(
+        pages: Vec<(&'static str, Result<&'static str, &'static str>)>,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, request) = accept_request(&listener).await;
+                let path = request.split(' ').nth(1).unwrap_or_default().to_owned();
+                seen.lock().unwrap().push(request);
+                let reply = match pages.iter().find(|(known, _)| *known == path) {
+                    Some((_, Err(location))) => format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    Some((_, Ok(body))) => format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    }
+                };
+                let _ = stream.write_all(reply.as_bytes()).await;
+            }
+        });
+        (address, requests, server)
+    }
+
+    /// An agent turn fetching under `0`, its webfetch rules.
+    struct FetchUnder(haarness_core::PermissionEngine);
+
+    #[async_trait]
+    impl haarness_core::ToolInvoker for FetchUnder {
+        async fn invoke(&self, _name: &str, _arguments: Value) -> CoreResult<ToolOutput> {
+            unreachable!("a fetch never re-enters")
+        }
+        fn side_effectful_for(&self, _name: &str, _arguments: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+        fn webfetch_rules(&self) -> Option<haarness_core::PermissionEngine> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn webfetch_rules(
+        rules: &[(String, haarness_core::PermissionDecision)],
+    ) -> haarness_core::PermissionEngine {
+        let mut engine = haarness_core::PermissionEngine::build_defaults();
+        for (pattern, decision) in rules {
+            engine.add_rule(haarness_core::PermissionRule {
+                pattern: pattern.clone(),
+                decision: *decision,
+            });
+        }
+        engine
+    }
+
+    async fn fetch_under(rules: haarness_core::PermissionEngine, url: String) -> ToolOutput {
+        let mut context = composite_context(&std::env::current_dir().unwrap());
+        context.invoker = Some(Arc::new(FetchUnder(rules)));
+        webfetch_tool()
+            .execute(json!({"url": url}), context)
+            .await
+            .unwrap()
+    }
+
+    fn requested_paths(requests: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.split(' ').nth(1).unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_redirect_on_the_host_is_followed_where_the_rules_allow_it() {
+        let (address, requests, server) =
+            page_server(vec![("/login", Err("/home")), ("/home", Ok("HOME_PAGE"))]).await;
+        let rules = webfetch_rules(&[(
+            format!("webfetch:http://{address}/admin/*"),
+            haarness_core::PermissionDecision::Deny,
+        )]);
+        let output = fetch_under(rules, format!("http://{address}/login")).await;
+        assert_eq!(output.text, "HOME_PAGE");
+        assert_eq!(requested_paths(&requests), ["/login", "/home"]);
+        // As the HTTP client sent it when it followed redirects itself.
+        let followed = requests.lock().unwrap()[1].to_ascii_lowercase();
+        assert!(
+            followed.contains(&format!("referer: http://{address}/login\r\n")),
+            "{followed}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_redirect_into_a_denied_path_is_reported_and_not_followed() {
+        let (address, requests, server) = page_server(vec![
+            ("/login?next=/admin/x", Err("/admin/x")),
+            ("/admin/x", Ok("ADMIN_PAGE")),
+        ])
+        .await;
+        let rules = webfetch_rules(&[(
+            format!("webfetch:http://{address}/admin/*"),
+            haarness_core::PermissionDecision::Deny,
+        )]);
+        let output = fetch_under(rules, format!("http://{address}/login?next=/admin/x")).await;
+        let target = format!("http://{address}/admin/x");
+        // No advice to fetch what a rule denies.
+        assert_eq!(
+            output.text,
+            format!(
+                "http://{address}/login?next=/admin/x redirects (HTTP 302) to {target}, which a \
+                 permission rule denies, so the redirect was not followed. This is configured \
+                 policy — do not fetch that address."
+            )
+        );
+        assert_eq!(output.metadata["redirect"], target);
+        assert_eq!(output.metadata["denied"], true);
+        assert_eq!(requested_paths(&requests), ["/login?next=/admin/x"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_always_for_one_path_does_not_follow_a_redirect_to_a_sibling() {
+        let (address, requests, server) = page_server(vec![
+            ("/docs/start", Err("/docs/moved")),
+            ("/docs/moved", Err("/private/x")),
+            ("/private/x", Ok("PRIVATE_PAGE")),
+        ])
+        .await;
+        let mut rules =
+            webfetch_rules(&[("webfetch:*".into(), haarness_core::PermissionDecision::Ask)]);
+        rules.add_grant(haarness_core::PermissionRule {
+            pattern: format!("webfetch:http://{address}/docs/*"),
+            decision: haarness_core::PermissionDecision::Allow,
+        });
+        let output = fetch_under(rules, format!("http://{address}/docs/start")).await;
+        assert!(
+            output.text.starts_with(&format!(
+                "http://{address}/docs/moved redirects (HTTP 302) to http://{address}/private/x, \
+                 which the permission rules do not let this fetch follow"
+            )),
+            "{}",
+            output.text
+        );
+        assert_eq!(requested_paths(&requests), ["/docs/start", "/docs/moved"]);
+        server.abort();
+    }
+
+    /// A server that answers each path with its status: a redirect to the
+    /// `Location` given, or a page with the body given. It records each
+    /// request line.
+    async fn status_server(
+        routes: Vec<(String, u16, String)>,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, request) = accept_request(&listener).await;
+                let line = request.lines().next().unwrap_or_default().to_owned();
+                let path = line.split(' ').nth(1).unwrap_or_default().to_owned();
+                seen.lock().unwrap().push(line);
+                let reply = match routes.iter().find(|(known, ..)| *known == path) {
+                    Some((_, status, location)) if (300..400).contains(status) => format!(
+                        "HTTP/1.1 {status} Moved\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    Some((_, status, body)) => format!(
+                        "HTTP/1.1 {status} OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    }
+                };
+                let _ = stream.write_all(reply.as_bytes()).await;
+            }
+        });
+        (address, requests, server)
+    }
+
+    #[tokio::test]
+    async fn a_fetch_follows_ten_redirects_and_no_more() {
+        let mut routes: Vec<(String, u16, String)> = (0..11)
+            .map(|hop| (format!("/r{hop}"), 302, format!("/r{}", hop + 1)))
+            .collect();
+        routes.push(("/r11".into(), 200, "LAST".into()));
+        let (address, requests, server) = status_server(routes.clone()).await;
+        let error = webfetch_tool()
+            .execute(
+                json!({"url": format!("http://{address}/r0")}),
+                composite_context(&std::env::current_dir().unwrap()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("redirects more than 10 times"),
+            "{error}"
+        );
+        // The first address and the ten redirects it was given.
+        assert_eq!(requests.lock().unwrap().len(), 11);
+        server.abort();
+        // Ten are followed.
+        routes[10] = ("/r10".into(), 200, "TENTH".into());
+        let (address, requests, server) = status_server(routes).await;
+        let output = webfetch_tool()
+            .execute(
+                json!({"url": format!("http://{address}/r0")}),
+                composite_context(&std::env::current_dir().unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.text, "TENTH");
+        assert_eq!(requests.lock().unwrap().len(), 11);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn redirect_statuses_are_followed_as_the_client_followed_them() {
+        for status in [301, 302, 303, 307, 308] {
+            let (address, requests, server) = status_server(vec![
+                ("/start".into(), status, "/end".into()),
+                ("/end".into(), 200, "END".into()),
+            ])
+            .await;
+            let output = webfetch_tool()
+                .execute(
+                    json!({"url": format!("http://{address}/start")}),
+                    composite_context(&std::env::current_dir().unwrap()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(output.text, "END", "{status}");
+            // A fetch only reads: every redirect is followed with GET.
+            assert_eq!(
+                *requests.lock().unwrap(),
+                ["GET /start HTTP/1.1", "GET /end HTTP/1.1"],
+                "{status}"
+            );
+            server.abort();
+        }
+        // Other redirect statuses name a place without being followed.
+        for status in [300, 304] {
+            let (address, requests, server) = status_server(vec![
+                ("/start".into(), status, "/end".into()),
+                ("/end".into(), 200, "END".into()),
+            ])
+            .await;
+            let output = webfetch_tool()
+                .execute(
+                    json!({"url": format!("http://{address}/start")}),
+                    composite_context(&std::env::current_dir().unwrap()),
+                )
+                .await
+                .unwrap();
+            assert!(
+                output.text.starts_with(&format!(
+                    "http://{address}/start redirects (HTTP {status}) to http://{address}/end, \
+                     which leaves the address asked for"
+                )),
+                "{status}: {}",
+                output.text
+            );
+            assert_eq!(requests.lock().unwrap().len(), 1, "{status}");
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_location_in_utf8_is_followed() {
+        let (address, requests, server) = status_server(vec![
+            ("/start".into(), 302, "/café".into()),
+            ("/caf%C3%A9".into(), 200, "CAFE".into()),
+        ])
+        .await;
+        let output = webfetch_tool()
+            .execute(
+                json!({"url": format!("http://{address}/start")}),
+                composite_context(&std::env::current_dir().unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.text, "CAFE");
+        assert_eq!(requests.lock().unwrap()[1], "GET /caf%C3%A9 HTTP/1.1");
+        server.abort();
+    }
+
+    #[test]
+    fn a_sign_in_and_plain_http_stay_behind_a_change_of_scheme() {
+        let url = |value: &str| url::Url::parse(value).unwrap();
+        // The sign-in goes on to the same scheme, host and port only.
+        assert!(same_origin(
+            &url("http://a.example/x"),
+            &url("http://a.example/y")
+        ));
+        for (from, to) in [
+            ("http://a.example/", "https://a.example/"),
+            ("http://a.example/", "http://a.example:8080/"),
+            ("https://a.example/", "https://b.example/"),
+        ] {
+            assert!(!same_origin(&url(from), &url(to)), "{from} -> {to}");
+        }
+        // Back from https to http is judged against the address that
+        // answered, not only the one asked for.
+        assert_eq!(
+            redirect_stop(
+                &url("http://a.example/start"),
+                &url("https://a.example/secure"),
+                &url("http://a.example/plain"),
+                None,
+            ),
+            Some(RedirectStop::Leaves(
+                "which leaves https for unencrypted http"
+            ))
+        );
+        assert_eq!(
+            redirect_stop(
+                &url("http://a.example/start"),
+                &url("http://a.example/next"),
+                &url("http://a.example/plain"),
+                None,
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_followed_redirect_signs_in_as_the_address_asked_for_did() {
+        let (address, requests, server) = page_server(vec![
+            ("/start", Err("/next")),
+            ("/next", Err("/last")),
+            ("/last", Ok("SIGNED_IN")),
+        ])
+        .await;
+        let output = webfetch_tool()
+            .execute(
+                json!({"url": format!("http://someone:secret@{address}/start")}),
+                composite_context(&std::env::current_dir().unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.text, "SIGNED_IN");
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        let signed_in = format!(
+            "authorization: basic {}\r\n",
+            STANDARD.encode("someone:secret")
+        );
+        for request in &requests {
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains(&signed_in.to_ascii_lowercase()),
+                "{request}"
+            );
+        }
+        assert!(
+            requests[2]
+                .to_ascii_lowercase()
+                .contains(&format!("referer: http://{address}/next\r\n")),
+            "{}",
+            requests[2]
+        );
+        server.abort();
+    }
+
     const CHUNKED_HEAD: &[u8] =
         b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
 
@@ -8828,6 +9570,7 @@ mod webfetch_tests {
             &web_client(),
             url,
             false,
+            None,
             &CancellationToken::new(),
             Duration::from_millis(300),
         )

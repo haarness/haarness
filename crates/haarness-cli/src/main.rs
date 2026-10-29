@@ -511,8 +511,14 @@ struct RunArgs {
     /// Output plain assistant text or newline-delimited JSON records.
     #[arg(long, value_enum, default_value_t = RunFormat::Default)]
     format: RunFormat,
-    /// Wait for background subagents and workflows launched by the model.
-    /// Without this flag, they continue on the workspace server.
+    /// Wait for background subagents, workflows and shell commands launched
+    /// by the model, and for what the agent says when they end. The shell
+    /// commands waited for are those started in the chat once the run's turn
+    /// began (with --session or --continue, others' too: give
+    /// --background-timeout-ms there). Shell commands the agent starts in the
+    /// background stop at execution.shell_timeout_ms; a run that stops
+    /// waiting (the timeout, Ctrl-C) stops those it waited for. Without this
+    /// flag, they continue on the workspace server.
     #[arg(long)]
     wait_background: bool,
     /// Maximum background wait in milliseconds; implies --wait-background.
@@ -2811,14 +2817,10 @@ fn skill_roots(
     if let Some(home) = home.as_deref() {
         roots.push((home.join(".agents/skills"), true, None));
     }
-    if claude_compat(file_config).skills() {
-        if let Some(home) = home.as_deref() {
-            roots.push((home.join(".claude/skills"), true, None));
-        }
-        if trust {
-            for directory in layout::project_directories(workspace) {
-                roots.push((directory.join(".claude/skills"), true, None));
-            }
+    let claude = claude_compat(file_config);
+    for (directory, project) in jsonconfig::claude_directories(home.as_deref(), workspace, trust) {
+        if claude.files(project).skills() {
+            roots.push((directory.join("skills"), true, None));
         }
     }
     roots.push((paths.skills.clone(), true, None));
@@ -3962,9 +3964,28 @@ async fn execute_schedule(
             )
             .await?;
         turn_id = Some(turn.id.0);
-        wait_for_turn_client(&client, turn.id, &RunWatch::scheduled()).await?;
-        let response =
-            assistant_messages_for_turn(client.items(thread.id).await?, turn.id).join("\n");
+        let watch = RunWatch::scheduled();
+        wait_for_turn_client(&client, turn.id, &watch).await?;
+        // A scheduled run waits for the commands it left running in the
+        // background (each stops at its time limit) and for what the agent
+        // says when they end.
+        let mut waited = false;
+        loop {
+            watch.answer(&client, thread.id).await?;
+            let commands = background_commands_client(&client, thread.id, turn.id).await?;
+            if commands.settled() && client.active_turn(thread.id).await?.is_none() {
+                break;
+            }
+            waited = true;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let items = client.items(thread.id).await?;
+        let response = if waited {
+            assistant_messages_since_turn(items, turn.id)
+        } else {
+            assistant_messages_for_turn(items, turn.id)
+        }
+        .join("\n");
         Result::<String>::Ok(response)
     }
     .await;
@@ -4840,7 +4861,12 @@ async fn run_command(
         }
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
-        stop_on_signal(&client, thread.id, goal, async {
+        let waits_for_background = args.wait_background || args.background_timeout_ms.is_some();
+        // The run's own turn: what it waits for and stops started there or
+        // after it (a chat it continues may run others' commands).
+        let run_turn = std::sync::OnceLock::new();
+        let stop_from = waits_for_background.then_some(&run_turn);
+        stop_on_signal(&client, thread.id, goal, stop_from, async {
             // Auto and Yolo answer requests without a person; with nobody
             // to ask, a run refuses what still needs one and goes on.
             let answers = approvals
@@ -4952,6 +4978,10 @@ async fn run_command(
                         command: args
                             .command
                             .map(|command| command.trim_start_matches('/').to_owned()),
+                        // A one-shot run does not follow background work up:
+                        // a long command keeps its deadline in the foreground,
+                        // and one the agent starts in the background stops
+                        // at execution.shell_timeout_ms, as in a schedule.
                         ..Default::default()
                     },
                 )
@@ -4968,6 +4998,7 @@ async fn run_command(
                 earlier.put_back(&client, thread.id).await;
             }
             let turn = discard_refused_chat(&client, &thread, created, turn).await?;
+            let _ = run_turn.set(turn.id);
             let printed_through = if goal {
                 let result =
                     wait_for_goal_client(&client, thread.id, goal_idle_timeout(), &watch).await;
@@ -4992,6 +5023,7 @@ async fn run_command(
             settle_cli_subagents_client(
                 &client,
                 thread.id,
+                turn.id,
                 wait_background,
                 args.background_timeout_ms,
                 args.format,
@@ -6568,6 +6600,7 @@ async fn stop_on_signal<T>(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
     goal: bool,
+    waited_from: Option<&std::sync::OnceLock<TurnId>>,
     work: impl Future<Output = Result<T>>,
 ) -> Result<T> {
     let status = tokio::select! {
@@ -6586,7 +6619,12 @@ async fn stop_on_signal<T>(
                 .goal_action(thread_id, &GoalActionRequest::Pause)
                 .await;
         }
-        client.interrupt_session(thread_id, false).await
+        let stopped = client.interrupt_session(thread_id, false).await;
+        // A run that waited for its commands leaves none of them running.
+        if let Some(turn) = waited_from.and_then(std::sync::OnceLock::get) {
+            stop_background_commands_client(client, thread_id, *turn).await;
+        }
+        stopped
     };
     tokio::select! {
         stopped = tokio::time::timeout(Duration::from_secs(10), stop) => match stopped {
@@ -6788,6 +6826,7 @@ async fn print_run_output_client(
 async fn settle_cli_subagents_client(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
+    run_turn: TurnId,
     wait: bool,
     timeout_ms: Option<u64>,
     format: RunFormat,
@@ -6797,26 +6836,45 @@ async fn settle_cli_subagents_client(
 ) -> Result<()> {
     let active = client.background_tasks(thread_id).await?;
     let parent_turn = client.active_turn(thread_id).await?;
-    if !wait && active.is_empty() && parent_turn.is_none() {
+    let commands = background_commands_client(client, thread_id, run_turn).await?;
+    if !wait && active.is_empty() && parent_turn.is_none() && commands.running == 0 {
         return Ok(());
     }
     if !wait {
-        // Completion delivery removes the child from the task registry as
-        // soon as its synthetic parent turn is admitted. That follow-up is
-        // still background work from a one-shot client's point of view.
-        let count = active.len().max(usize::from(parent_turn.is_some()));
-        if format == RunFormat::Json {
-            println!(
-                "{}",
-                json!({"type":"background_subagent", "status":"detached", "count":count})
-            );
-        } else {
-            eprintln!(
-                "{} background subagent{} continue{} on the Haarness server.",
-                count,
-                if count == 1 { "" } else { "s" },
-                if count == 1 { "s" } else { "" }
-            );
+        if !active.is_empty() || parent_turn.is_some() {
+            // Completion delivery removes the child from the task registry as
+            // soon as its synthetic parent turn is admitted. That follow-up is
+            // still background work from a one-shot client's point of view.
+            let count = active.len().max(usize::from(parent_turn.is_some()));
+            if format == RunFormat::Json {
+                println!(
+                    "{}",
+                    json!({"type":"background_subagent", "status":"detached", "count":count})
+                );
+            } else {
+                eprintln!(
+                    "{} background subagent{} continue{} on the Haarness server.",
+                    count,
+                    if count == 1 { "" } else { "s" },
+                    if count == 1 { "s" } else { "" }
+                );
+            }
+        }
+        if commands.running > 0 {
+            let count = commands.running;
+            if format == RunFormat::Json {
+                println!(
+                    "{}",
+                    json!({"type":"background_command", "status":"detached", "count":count})
+                );
+            } else {
+                eprintln!(
+                    "{} background command{} keep{} running on the Haarness server.",
+                    count,
+                    if count == 1 { "" } else { "s" },
+                    if count == 1 { "s" } else { "" }
+                );
+            }
         }
         return Ok(());
     }
@@ -6826,16 +6884,33 @@ async fn settle_cli_subagents_client(
         watch.answer(client, thread_id).await?;
         let tasks = client.background_tasks(thread_id).await?;
         let parent_turn = client.active_turn(thread_id).await?;
-        if tasks.is_empty() && parent_turn.is_none() {
+        let commands = background_commands_client(client, thread_id, run_turn).await?;
+        if tasks.is_empty() && parent_turn.is_none() && commands.settled() {
             break;
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            anyhow::bail!(
-                "background wait timed out; {} subagent{} continue{} on the Haarness server",
-                tasks.len(),
-                if tasks.len() == 1 { "" } else { "s" },
-                if tasks.len() == 1 { "s" } else { "" }
-            );
+            // A run that stops waiting leaves no command it waited for.
+            let stopped = stop_background_commands_client(client, thread_id, run_turn).await;
+            let mut parts = Vec::new();
+            if !tasks.is_empty() {
+                parts.push(format!(
+                    "{} subagent{} continue{} on the Haarness server",
+                    tasks.len(),
+                    if tasks.len() == 1 { "" } else { "s" },
+                    if tasks.len() == 1 { "s" } else { "" }
+                ));
+            }
+            if stopped > 0 {
+                parts.push(format!(
+                    "{stopped} background command{} {} stopped",
+                    if stopped == 1 { "" } else { "s" },
+                    if stopped == 1 { "was" } else { "were" }
+                ));
+            }
+            if parts.is_empty() {
+                anyhow::bail!("background wait timed out");
+            }
+            anyhow::bail!("background wait timed out; {}", parts.join(", and "));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -6893,6 +6968,84 @@ async fn settle_cli_subagents_client(
         anyhow::bail!("background subagent failed: {}", failures.join("; "));
     }
     Ok(())
+}
+
+/// The agents' commands of a chat a run waits for: those running in the
+/// background, and those that ended there and whose end has not reached the
+/// chat yet.
+struct BackgroundCommands {
+    running: usize,
+    untold: usize,
+}
+
+impl BackgroundCommands {
+    fn settled(&self) -> bool {
+        self.running == 0 && self.untold == 0
+    }
+}
+
+/// Stop the chat's commands still running that the turn `since` or a
+/// later one started; answers how many it stopped.
+async fn stop_background_commands_client(
+    client: &haarness_tui::api::ApiClient,
+    thread_id: ThreadId,
+    since: TurnId,
+) -> usize {
+    let Ok(commands) = client.shell_commands(thread_id).await else {
+        return 0;
+    };
+    let mut stopped = 0;
+    for command in commands
+        .iter()
+        .filter(|command| command.state.is_live() && command.turn_id.0 >= since.0)
+    {
+        if client
+            .stop_shell_command(thread_id, &command.id)
+            .await
+            .is_ok()
+        {
+            stopped += 1;
+        }
+    }
+    stopped
+}
+
+/// Turn ids grow with time, so `since` and the turns after it are those a
+/// run started, and those its commands' ends started.
+async fn background_commands_client(
+    client: &haarness_tui::api::ApiClient,
+    thread_id: ThreadId,
+    since: TurnId,
+) -> Result<BackgroundCommands> {
+    let commands = client
+        .shell_commands(thread_id)
+        .await?
+        .into_iter()
+        .filter(|command| command.turn_id.0 >= since.0)
+        .collect::<Vec<_>>();
+    let running = commands
+        .iter()
+        .filter(|command| command.background && command.state.is_live())
+        .count();
+    let ended = commands
+        .iter()
+        .filter(|command| !command.state.is_live() && command.delivers_notice)
+        .map(|command| format!("<command id=\"{}\"", command.id))
+        .collect::<Vec<_>>();
+    let untold = if ended.is_empty() {
+        0
+    } else {
+        let items = client.items(thread_id).await?;
+        ended
+            .iter()
+            .filter(|tag| {
+                !items.iter().any(|item| {
+                    matches!(&item.data, ItemData::UserMessage { text, .. } if text.starts_with(tag.as_str()))
+                })
+            })
+            .count()
+    };
+    Ok(BackgroundCommands { running, untold })
 }
 
 async fn settle_cli_workflows_client(
@@ -7054,6 +7207,29 @@ fn assistant_messages_for_turn(
     items
         .into_iter()
         .filter(|item| item.turn_id == Some(turn_id))
+        .filter_map(|item| match item.data {
+            ItemData::AssistantMessage { text } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The assistant's messages from turn `turn_id` on: its own, and those of
+/// the turns started after it (the ends of its commands in the background).
+fn assistant_messages_since_turn(
+    items: Vec<haarness_protocol::Item>,
+    turn_id: TurnId,
+) -> Vec<String> {
+    let Some(first) = items
+        .iter()
+        .find(|item| item.turn_id == Some(turn_id))
+        .map(|item| item.sequence)
+    else {
+        return Vec::new();
+    };
+    items
+        .into_iter()
+        .filter(|item| item.sequence >= first)
         .filter_map(|item| match item.data {
             ItemData::AssistantMessage { text } => Some(text),
             _ => None,
@@ -7270,6 +7446,8 @@ struct HotReloadCandidate {
     formatter: haarness_language::FormatterConfig,
     memory_context: String,
     notices: Vec<String>,
+    /// Logged as warnings (see `jsonconfig::JsonLayers::warnings`).
+    warnings: Vec<String>,
     watch: ReloadWatch,
 }
 
@@ -7278,7 +7456,7 @@ struct HotReloadCandidate {
 /// is on, and files named by `instructions` entries.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct ReloadWatch {
-    claude: ClaudeCodeCompatibility,
+    claude: ClaudeCompat,
     instruction_files: Vec<PathBuf>,
     /// Folders that hold only agent definitions (`…/agents`, `…/agent`), so
     /// the scan can tell an edit to them apart from every other source.
@@ -7406,7 +7584,7 @@ impl HotReloadController {
             .with_browser(self.browser.clone())
             .with_management(self.management.clone())
             .with_language(self.language.clone())
-            .with_claude_instructions(claude_compat(&sources.file_config).instructions()),
+            .with_claude_instructions(claude_compat(&sources.file_config).project.instructions()),
         );
         let hooks = (!sources.json_layers.hooks.is_empty()).then(|| {
             Arc::new(haarness_server::ConfiguredHooks::new(
@@ -7453,6 +7631,7 @@ impl HotReloadController {
             memory_context,
             watch: ReloadWatch::from_layers(&sources.json_layers),
             notices,
+            warnings: sources.json_layers.warnings.clone(),
         })
     }
 
@@ -7623,6 +7802,9 @@ impl HotReloadController {
                 for notice in &candidate.notices {
                     tracing::info!("config: {notice}");
                 }
+                for warning in &candidate.warnings {
+                    tracing::warn!("config: {warning}");
+                }
                 if let Some(hooks) = candidate.hooks.clone() {
                     let detail = json!({"source": "reload", "cwd": self.workspace});
                     tokio::spawn(async move {
@@ -7701,6 +7883,50 @@ const SYSTEM_CONFIG_ENTRIES: [&str; 14] = [
     "plugins/local",
 ];
 
+/// The Claude Code files and folders a reload watches, each where the
+/// toggles that cover it say to: the person's in `~/.claude` itself, and a
+/// project's in each project folder and its `.claude`.
+fn claude_watch_roots(
+    claude: &ClaudeCompat,
+    home: Option<&Path>,
+    workspace: &Path,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut add = |toggles: &ClaudeCodeCompatibility, folder: &Path, instructions: &[&str]| {
+        if toggles.instructions() {
+            roots.extend(instructions.iter().map(|name| folder.join(name)));
+        }
+        for (on, name) in [
+            (toggles.agents(), ".claude/agents"),
+            (toggles.commands(), ".claude/commands"),
+            (toggles.skills(), ".claude/skills"),
+        ] {
+            if on {
+                roots.push(folder.join(name));
+            }
+        }
+    };
+    if let Some(home) = home {
+        add(&claude.person, home, &[".claude/CLAUDE.md"]);
+    }
+    for directory in layout::project_directories(workspace) {
+        add(
+            &claude.project,
+            &directory,
+            &[
+                "CLAUDE.md",
+                "AGENTS.local.md",
+                "CLAUDE.local.md",
+                "CONTEXT.md",
+                "CONTEXT.local.md",
+                ".claude/CLAUDE.md",
+                ".claude/CLAUDE.local.md",
+            ],
+        );
+    }
+    roots
+}
+
 /// A digest of the content of every runtime source. It changes only when a
 /// source's content does: timestamps, folder metadata, editor scratch files
 /// and OAuth token refreshes leave it alone.
@@ -7776,41 +8002,11 @@ fn runtime_source_fingerprint_for(
     roots.push(config_dir.join("plugins/local"));
     roots.push(config_dir.join("agent"));
     roots.extend(watch.instruction_files.iter().cloned());
-    let claude = &watch.claude;
-    if claude.any() {
-        let mut claude_roots = |base: &Path, project: bool| {
-            if claude.instructions() {
-                roots.push(base.join("CLAUDE.md"));
-                if project {
-                    for name in [
-                        "AGENTS.local.md",
-                        "CLAUDE.local.md",
-                        "CONTEXT.md",
-                        "CONTEXT.local.md",
-                        ".claude/CLAUDE.md",
-                        ".claude/CLAUDE.local.md",
-                    ] {
-                        roots.push(base.join(name));
-                    }
-                }
-            }
-            if claude.agents() {
-                roots.push(base.join(".claude/agents"));
-            }
-            if claude.commands() {
-                roots.push(base.join(".claude/commands"));
-            }
-            if claude.skills() {
-                roots.push(base.join(".claude/skills"));
-            }
-        };
-        if let Some(home) = haarness_protocol::home_dir() {
-            claude_roots(&home.join(".claude"), false);
-        }
-        for directory in layout::project_directories(workspace) {
-            claude_roots(&directory, true);
-        }
-    }
+    roots.extend(claude_watch_roots(
+        &watch.claude,
+        haarness_protocol::home_dir().as_deref(),
+        workspace,
+    ));
     for directory in layout::project_directories(workspace) {
         for name in [
             "haarness.json",
@@ -8111,6 +8307,9 @@ async fn application_at(
     for notice in migration_notices.iter().chain(&json_layers.notices) {
         tracing::info!("config: {notice}");
     }
+    for warning in &json_layers.warnings {
+        tracing::warn!("config: {warning}");
+    }
     for error in &json_layers.errors {
         tracing::warn!("config: {error}");
     }
@@ -8187,7 +8386,7 @@ async fn application_at(
         .with_browser(browser.clone())
         .with_management(management.clone())
         .with_language(language.clone())
-        .with_claude_instructions(claude_compat(&file_config).instructions()),
+        .with_claude_instructions(claude_compat(&file_config).project.instructions()),
     );
     let extensions = extensions::load(paths, workspace, trust).await?;
     let tools = extensions.wrap_tools(tools).await?;
@@ -10052,6 +10251,11 @@ struct FileConfig {
     base_mcp: std::collections::BTreeSet<String>,
     /// Opt-in discovery of Claude Code home/project files.
     compatibility: Option<CompatibilitySection>,
+    /// `compatibility.claude_code` as the person's own configuration set it,
+    /// before any project layer: what decides their `~/.claude` files. The
+    /// configuration loader sets it; `None` reads `compatibility` instead.
+    #[serde(skip)]
+    person_claude_code: Option<ClaudeCodeCompatibility>,
     /// Extra skill folders and remote skill indexes (`skills`).
     skills: Option<SkillsSection>,
     /// How Auto's reviewer works. The configuration loader merges it layer
@@ -10085,7 +10289,8 @@ struct CompatibilitySection {
 
 /// `compatibility.claude_code`: every category defaults to off, and
 /// `enabled = false` switches all of them off regardless of the individual
-/// toggles (the application master switch).
+/// toggles (the application master switch). A project's configuration
+/// decides only the project's own files; see [`ClaudeCompat`].
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 struct ClaudeCodeCompatibility {
@@ -10121,13 +10326,40 @@ impl ClaudeCodeCompatibility {
     }
 }
 
+/// The Claude Code compatibility toggles in effect, by whose files they
+/// decide. The person's `~/.claude` files follow the person's configuration
+/// alone, so a repository's configuration can neither switch them off nor on;
+/// a project's own files (its `CLAUDE.md` family and `.claude` folders) follow
+/// the project's configuration over the person's.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ClaudeCompat {
+    person: ClaudeCodeCompatibility,
+    project: ClaudeCodeCompatibility,
+}
+impl ClaudeCompat {
+    /// The toggles for a project's files, or for the person's.
+    fn files(&self, project: bool) -> &ClaudeCodeCompatibility {
+        if project { &self.project } else { &self.person }
+    }
+    fn any(&self) -> bool {
+        self.person.any() || self.project.any()
+    }
+}
+
 /// The effective Claude Code compatibility toggles of a merged configuration.
-fn claude_compat(config: &FileConfig) -> ClaudeCodeCompatibility {
-    config
+fn claude_compat(config: &FileConfig) -> ClaudeCompat {
+    let project = config
         .compatibility
         .as_ref()
         .and_then(|section| section.claude_code.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    ClaudeCompat {
+        person: config
+            .person_claude_code
+            .clone()
+            .unwrap_or_else(|| project.clone()),
+        project,
+    }
 }
 
 /// `skills`: `paths` are additional skill roots (`~/` and workspace-relative
@@ -17394,6 +17626,57 @@ request_timeout = 0
             assert_ne!(inputs(base.clone()), inputs(changed));
         }
         assert_eq!(super::auth_reload_inputs(b"{not json"), b"{not json");
+    }
+
+    #[test]
+    fn claude_code_folders_are_watched_where_they_are_by_whose_toggles_cover_them() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-claude-watch-{}", uuid::Uuid::now_v7()));
+        let home = root.join("home");
+        let project = root.join("project");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        let every = super::ClaudeCodeCompatibility {
+            enabled: None,
+            instructions: Some(true),
+            agents: Some(true),
+            skills: Some(true),
+            commands: Some(true),
+        };
+        let person_only = super::ClaudeCompat {
+            person: every.clone(),
+            project: super::ClaudeCodeCompatibility::default(),
+        };
+        assert_eq!(
+            super::claude_watch_roots(&person_only, Some(&home), &project),
+            [
+                home.join(".claude/CLAUDE.md"),
+                home.join(".claude/agents"),
+                home.join(".claude/commands"),
+                home.join(".claude/skills"),
+            ]
+        );
+        let project_only = super::ClaudeCompat {
+            person: super::ClaudeCodeCompatibility::default(),
+            project: every,
+        };
+        let roots = super::claude_watch_roots(&project_only, Some(&home), &project);
+        assert!(
+            roots.iter().all(|root| root.starts_with(&project)),
+            "{roots:?}"
+        );
+        for expected in [
+            "CLAUDE.md",
+            ".claude/CLAUDE.md",
+            ".claude/agents",
+            ".claude/skills",
+        ] {
+            assert!(roots.contains(&project.join(expected)), "{expected}");
+        }
+        assert!(
+            super::claude_watch_roots(&super::ClaudeCompat::default(), Some(&home), &project)
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

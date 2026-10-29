@@ -29,11 +29,15 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    both run again without asking while `cat ~/.ssh/config` and `cat ~/.netrc` still ask.
 10. workdir_home: a line run with `~` as its `workdir`, from a project under the home folder, asks for the
    home folder alone beside the file it names there, with no rule and with only `~/.gitconfig` allowed.
+11. wrappers: an `rm *` deny refuses `rm` after `time A=1`, `env A+=1`, `env 'A B=1'`, `coproc`, and on the line
+   after a line of two assignments (`! rm …`, `{ rm …; }`); the folder `env -C` or `--chdir` names outside the
+   project asks before the line runs, and so does a path that leaves the project from it, while one that stays
+   in the project from there runs.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
 toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins, holding_always,
-workdir_home). No model is
+workdir_home, wrappers). No model is
 called; nothing outside the fixture is touched.
 """
 import json
@@ -430,10 +434,47 @@ def case_workdir_home():
     passed('a line run with ~ as its workdir asks for the home folder itself, also with ~/.gitconfig allowed')
 
 
+def case_wrappers():
+    """What a wrapper or a shell word runs meets the rules, and the folder a wrapper picks asks."""
+    _, env = environment('wrappers')
+    denied = project('wrappers', {'permission': {'bash': {'rm *': 'deny'}}})
+    for command in ['time A=1 rm -rf victim', 'time -p A=$(pwd) B+=x rm -rf victim', 'env A+=1 rm -rf victim',
+                    "env 'A B=1' rm -rf victim", 'coproc rm -rf victim', 'A=1 B=2\n! rm -rf victim',
+                    'A=1 B=2\n{ rm -rf victim; }']:
+        (denied / 'victim').mkdir(exist_ok=True)
+        try:
+            output = bash(env, denied, command)
+        finally:
+            stop(env, denied)
+        assert "is denied by permission rule 'bash:rm *'" in output, (command, output)
+        assert (denied / 'victim').is_dir(), f'{command!r} deleted victim'
+    passed('an rm deny refuses rm after time or env with assignments, behind coproc, and after a line of '
+           'assignments')
+    folder = project('wrappers-folder', REVIEW)
+    (folder / 'sub').mkdir()
+    (folder / 'README.md').write_text('# wrapped read\n')
+    outside = folder.parent / 'outside'
+    outside.mkdir()
+    (outside / 'secret').write_text('outside secret\n')
+    try:
+        for line in [f'env -C {outside} cat secret', f'env --chdir={outside} cat secret',
+                     'env -C sub cat ../../outside/secret']:
+            output = bash(env, folder, line, code=1)
+            assert 'Stopped:' in output and str(outside) in output, (line, output)
+            assert 'outside secret' not in output, (line, output)
+        # macOS's env has no -C: the line may fail, but it is not asked about.
+        output = bash(env, folder, 'env -C sub cat ../README.md')
+        assert 'Stopped' not in output, output
+    finally:
+        stop(env, folder)
+    passed('the folder env -C or --chdir names outside the project asks before the line runs, and so does a path '
+           'that leaves the project from it; one that stays inside from there runs')
+
+
 CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
          'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev,
          'action_case': case_action_case, 'sign_ins': case_sign_ins, 'holding_always': case_holding_always,
-         'workdir_home': case_workdir_home}
+         'workdir_home': case_workdir_home, 'wrappers': case_wrappers}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]

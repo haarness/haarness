@@ -488,6 +488,9 @@ pub enum Overlay {
     Chrome,
     /// `/btw`: the open chat's side chat; the state lives in `App::side`.
     SideChat,
+    /// One shell command's output, full screen; the state lives in
+    /// `App::command_view`.
+    CommandOutput,
 }
 
 /// What the workflow inspector is showing: a durable run, or a definition you
@@ -600,7 +603,8 @@ impl Overlay {
             | Self::ProviderLogin
             | Self::RemoteControl
             | Self::Chrome
-            | Self::SideChat => false,
+            | Self::SideChat
+            | Self::CommandOutput => false,
         }
     }
 }
@@ -828,6 +832,10 @@ pub struct App {
     pub parent_stack: Vec<Thread>,
     /// Live child-agent progress by `task` call id.
     pub children: std::collections::HashMap<String, ChildTask>,
+    /// The agents' shell commands this client follows (`background.rs`).
+    pub(crate) shell_commands: crate::background::ShellCommands,
+    /// The command whose output is open full screen.
+    pub(crate) command_view: Option<crate::background::CommandView>,
     /// Every unanswered permission prompt in this root conversation, oldest
     /// first — including prompts raised on child-agent threads.
     pub pending_permissions: Vec<PendingPermissionInfo>,
@@ -1200,6 +1208,8 @@ impl App {
             root_active_turn: None,
             parent_stack: Vec::new(),
             children,
+            shell_commands: crate::background::ShellCommands::default(),
+            command_view: None,
             pending_permissions: Vec::new(),
             auto_permissions: false,
             approval_reviewer: false,
@@ -2682,7 +2692,8 @@ impl App {
             | Overlay::ProviderLogin
             | Overlay::RemoteControl
             | Overlay::Chrome
-            | Overlay::SideChat => 0,
+            | Overlay::SideChat
+            | Overlay::CommandOutput => 0,
             Overlay::Options { ref entries, .. } => self.filtered_options(entries).len(),
             Overlay::None | Overlay::Panel { .. } | Overlay::Diff(_) => self
                 .slash_suggestions()
@@ -2995,6 +3006,9 @@ impl App {
             || (!self.parent_stack.is_empty() && thread.id == self.root_thread_id);
         let working =
             (current && self.active_turn.is_some()) || self.active_tree_turn_count(thread.id) > 0;
+        // A chat whose only work is a command left running (a dev server) is
+        // done, as its notifications say; it still has something running.
+        let in_background = !working && self.shell_commands.running_in_background(thread.id) > 0;
         let language = self.language;
         let mut detail = Vec::new();
         // What the chat waits for comes first, where truncation never
@@ -3015,6 +3029,8 @@ impl App {
         }
         if working && waiting.is_none() {
             detail.push(language.text("working").to_owned());
+        } else if in_background && waiting.is_none() {
+            detail.push(language.text("running in background").to_owned());
         }
         if thread.archived {
             detail.push(language.text("archived").to_owned());
@@ -3341,7 +3357,8 @@ impl App {
             | Overlay::ProviderLogin
             | Overlay::RemoteControl
             | Overlay::Chrome
-            | Overlay::SideChat => None,
+            | Overlay::SideChat
+            | Overlay::CommandOutput => None,
         }
     }
 }

@@ -2,7 +2,29 @@ import { PreviewBanner } from "./PreviewBanner";
 import { McpAppView } from "./McpAppView";
 import { payloadFor as mcpAppPayload, type Payload as McpAppPayload } from "./mcp-app";
 import { previewInfo } from "./preview-actions";
-import { t } from "./i18n";
+import { language, t } from "./i18n";
+import type { ShellCommandInfo } from "@haarness/sdk";
+import {
+  backgroundCommands,
+  commandsOffered,
+  followCommand,
+  liveClock,
+  stopCommand,
+} from "./background-work";
+import {
+  commandForCall,
+  commandForgotten,
+  commandRef,
+  commandStatus,
+  commandView,
+  elapsed,
+  liveCommand,
+  ranFor,
+  screenText,
+  goneKey,
+  stepCallId,
+  type CommandCheckpoint,
+} from "./shell-commands";
 import {
   For,
   Index,
@@ -10,6 +32,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  on,
   onCleanup,
 } from "solid-js";
 import {
@@ -43,6 +66,7 @@ import {
   toolInput,
   toolName,
   toolTitle,
+  toolTarget,
   imageName,
   toolFailed,
   toolVerb,
@@ -68,6 +92,16 @@ export function ToolActivity(props: {
   settled?: boolean;
   /** Its turn is waiting for the person to approve a request. */
   waiting?: boolean;
+  /** The call, by which its row finds the shell command the server reports. */
+  call?: { threadId: string; turnId?: string | null; callId: string };
+  /** The last checkpoint its chat keeps of its command in the background. */
+  checkpoint?: CommandCheckpoint;
+  /** The last checkpoint of a `batch` step's command, by the step's call id. */
+  checkpointFor?: (callId: string) => CommandCheckpoint | undefined;
+  /** A command's line by its id, from the chat's own calls. */
+  commandLine?: (id: string) => string | undefined;
+  /** A command listed on its own (Still running), without a call row. */
+  command?: ShellCommandInfo;
 }) {
   const [open, setOpen] = createSignal(!!props.expanded);
   let pressed: SelectionMark | undefined;
@@ -91,15 +125,97 @@ export function ToolActivity(props: {
         }
       : describeTool(props.name, props.args),
   );
+  const store = useApp();
+  /** What the row names: a step reading or stopping a command by its id
+   * names the command, once Desktop knows it. */
+  const target = () => {
+    const own = shape().target;
+    if (own || !["bash_output", "bash_stop"].includes(toolName(props.name))) return own;
+    const id = (props.args as { id?: unknown } | undefined)?.id;
+    // Once the server has forgotten it, the chat's own call still names it.
+    const line = typeof id === "string" ? (store.state.shellCommands[id]?.command ?? props.commandLine?.(id)) : undefined;
+    return line ? toolTarget({ command: line }) : "";
+  };
+  // A shell command the server reports (`background-commands.v1`): one in
+  // the background, or a foreground one while it runs. Its row says how it
+  // stands, follows its output and can stop it or send it to the background.
+  const offered = commandsOffered();
+  // A batch's step is one when its batch says which call it is.
+  const shell = () => toolName(props.name) === "bash" && (!props.nested || !!props.call);
+  const ref = createMemo(() => commandRef(props.result?.metadata));
+  const info = createMemo(() => {
+    const found = props.command
+      ? (store.state.shellCommands[props.command.id] ?? props.command)
+      : !shell() || !offered()
+        ? undefined
+        : ref()
+          ? store.state.shellCommands[ref()!.id]
+          : props.call
+            ? commandForCall(Object.values(store.state.shellCommands), props.call)
+            : undefined;
+    // A row shows its own chat's command: a fork's copied row is not the
+    // original's, which runs on in the chat it was forked from.
+    if (!found || store.state.commandsGone[goneKey(found.threadId, found.id)]) return undefined;
+    return props.call && found.threadId !== props.call.threadId ? undefined : found;
+  });
+  /** A batch with a step whose command runs on in the background says so
+   * while it does; the step itself, opened, says how it stands. */
+  const stepsInBackground = () => {
+    const call = props.call;
+    if (!batch().length || !call || !offered()) return false;
+    return Object.values(store.state.shellCommands).some(
+      (command) =>
+        command.turnId === call.turnId &&
+        command.threadId === call.threadId &&
+        command.callId.startsWith(call.callId + ":") &&
+        command.background &&
+        liveCommand(command.state) &&
+        !store.state.commandsGone[goneKey(command.threadId, command.id)],
+    );
+  };
+  /**
+   * The command this row's checkpoint names does not run for this chat: the
+   * server answered that this chat no longer has it, listed this chat's
+   * commands without it, or reports it as another chat's (a fork names the
+   * commands of the chat it came from).
+   */
+  const forgotten = () => {
+    const id = props.checkpoint?.command_id ?? ref()?.id;
+    const thread = props.call?.threadId;
+    return commandForgotten({
+      id,
+      thread,
+      reported: !!info(),
+      owner: id ? store.state.shellCommands[id]?.threadId : undefined,
+      gone: (key) => !!store.state.commandsGone[key],
+      listed: !!thread && !!store.state.commandsListed[thread],
+    });
+  };
+  const command = createMemo(() =>
+    shell() || props.command
+      ? commandView({ result: props.result, info: info(), checkpoint: props.checkpoint, forgotten: forgotten() })
+      : undefined,
+  );
+  /** The call returned while its command ran on: the result is only the
+   * runtime's note to the model, and the row follows the command instead. */
+  const background = () => !!command()?.background;
+  const commandLive = () => liveCommand(command()?.state);
+  const commandWord = createMemo(() => (background() ? commandStatus(command()!) : undefined));
   const status = () =>
-    props.result
-      ? toolFailed(props.name, props.result) ||
-        batch().some((step) => toolFailed(step.name, step.result))
-        ? "failed"
-        : "done"
-      : props.nested
-        ? "pending"
-        : "running";
+    background()
+      ? commandLive()
+        ? "running"
+        : commandWord()?.tone === "failed"
+          ? "failed"
+          : "done"
+      : props.result
+        ? toolFailed(props.name, props.result) ||
+          batch().some((step) => toolFailed(step.name, step.result))
+          ? "failed"
+          : "done"
+        : props.nested
+          ? "pending"
+          : "running";
   // Waiting on the person is not work in motion: the row rests and says so.
   const waiting = () => !!props.waiting && !props.result && !props.settled;
   const live = () =>
@@ -114,13 +230,17 @@ export function ToolActivity(props: {
   const blocked = createMemo(() => reviewBlock(props.result));
   const verb = () => {
     if (blocked() !== undefined) return t("Stopped by Auto's reviewer");
-    const form = props.result
-      ? props.result.is_error
-        ? shape().attempt
+    const form = background()
+      ? commandLive()
+        ? shape().doing
         : shape().verb
-      : props.settled
-        ? shape().attempt
-        : shape().doing;
+      : props.result
+        ? props.result.is_error
+          ? shape().attempt
+          : shape().verb
+        : props.settled
+          ? shape().attempt
+          : shape().doing;
     return batch().length ? form : toolVerb(form);
   };
   const changes = createMemo(() =>
@@ -132,7 +252,123 @@ export function ToolActivity(props: {
   const output = createMemo(
     () => props.result && (blocked() || resultText(props.name, props.result)),
   );
-  const exit = () => exitStatus(props.name, props.result);
+  const exit = () =>
+    background()
+      ? commandWord()?.key === "exit {code}"
+        ? command()!.exitCode
+        : undefined
+      : exitStatus(props.name, props.result);
+  /** How the command in the background stands, after its badge: how long it
+   * has run, Stopping…, or how it ended (a non-zero exit is the exit chip). */
+  const now = liveClock(() => background() && command()?.state === "running");
+  const commandState = () => {
+    const word = commandWord();
+    if (!word || word.key === "exit {code}") return "";
+    if (word.key === "Running")
+      return ranFor(elapsed(command()!.startedAt, now()) ?? 0, language());
+    return t(word.key);
+  };
+  /** Moved by itself after running long: the badge says when. */
+  const movedAfter = () => {
+    const view = command();
+    if (view?.movedBy !== "limit") return undefined;
+    const after = elapsed(view.startedAt, view.backgroundAt);
+    return after === undefined ? undefined : t("Sent to the background after {time}", { time: ranFor(after, language()) });
+  };
+  // Stop on any command the server reports running; Send to background on a
+  // foreground one of the chat itself (a subagent's commands never move).
+  const [busy, setBusy] = createSignal<"" | "stop" | "move">("");
+  const stoppable = () => {
+    const value = info();
+    return value && liveCommand(value.state) ? value : undefined;
+  };
+  const movable = () => {
+    const value = info();
+    return value && value.state === "running" && !value.background && value.threadId === value.rootThreadId
+      ? value
+      : undefined;
+  };
+  const stop = async () => {
+    const value = stoppable();
+    if (!value || busy()) return;
+    setBusy("stop");
+    try {
+      await stopCommand(store, value);
+    } finally {
+      setBusy("");
+    }
+  };
+  const move = async () => {
+    const value = movable();
+    if (!value || busy()) return;
+    setBusy("move");
+    try {
+      await backgroundCommands(store, value.threadId, value.id);
+    } finally {
+      setBusy("");
+    }
+  };
+  /** The width the summary keeps free for the row's controls, which sit
+   * beside it rather than in it, so pressing one never opens the row. */
+  const [room, setRoom] = createSignal(0);
+  const measure = (element: HTMLElement) => {
+    const observer = new ResizeObserver(() => setRoom(element.offsetWidth));
+    observer.observe(element);
+    onCleanup(() => {
+      observer.disconnect();
+      setRoom(0);
+    });
+  };
+  /** The command's output while it runs or once it ran in the background,
+   * read live while the row is open. */
+  /** The row is a fork's copy of another chat's command: it has nothing of
+   * its own to show. */
+  const copied = () => {
+    if (info()) return false;
+    const id = props.checkpoint?.command_id ?? ref()?.id;
+    const owner = id ? store.state.shellCommands[id]?.threadId : undefined;
+    return (
+      (!!owner && !!props.call && owner !== props.call.threadId) ||
+      (props.checkpoint?.state === "interrupted" && !props.checkpoint.ended_at)
+    );
+  };
+  // A command the server reports for this chat, or one its checkpoint says
+  // runs while the chat's commands could not be listed; a read that finds it
+  // gone settles this chat's row alone.
+  const following = () =>
+    (!!info() && (background() || !props.result)) ||
+    (background() && commandLive() && !!props.call && !forgotten());
+  const followed = followCommand({
+    id: () => info()?.id ?? command()?.id,
+    thread: () => info()?.threadId ?? props.call?.threadId,
+    active: () => open() && following(),
+  });
+  /** What the open row shows of a command's output: what was followed, or
+   * else what its last checkpoint kept. Undefined for a foreground command,
+   * whose result holds its output. */
+  const liveOutput = () => {
+    if (copied()) return { text: "", read: true, cut: false, none: true };
+    if (!background() && !following()) return undefined;
+    const view = followed();
+    // What was read stays, also once the server has let the command go.
+    if (view && (!view.gone || view.read)) return view;
+    // Not followed (the server no longer lists it): its last checkpoint.
+    if (!commandLive() || view?.gone)
+      return { text: screenText(command()?.tail ?? ""), read: true, cut: false };
+    return { text: "", read: false, cut: false };
+  };
+  /** An open command keeps its newest output in view, unless the reader
+   * scrolled up in it. */
+  let outputBox: HTMLPreElement | undefined;
+  let pinned = true;
+  createEffect(
+    on(
+      () => liveOutput()?.text,
+      () => {
+        if (outputBox && pinned) outputBox.scrollTop = outputBox.scrollHeight;
+      },
+    ),
+  );
   // A question's answer, after it: the row then says what was asked and
   // what came back, in the reader's own type.
   const question = () => toolName(props.name) === "question";
@@ -141,7 +377,6 @@ export function ToolActivity(props: {
   // An MCP tool whose server pairs it with a page: the page shows under the
   // row, once its server's apps are known to be on. With them off the row is
   // the plain tool, also for a result from before they were turned off.
-  const store = useApp();
   const connection = () => store.state.connection?.id ?? "";
   const payload = createMemo<McpAppPayload | undefined>(
     () => (props.nested || props.result?.is_error ? undefined : mcpAppPayload(props.name, props.result?.metadata)),
@@ -187,7 +422,37 @@ export function ToolActivity(props: {
   };
   return (
     <>
-    <Show when={toolName(props.name) === "preview" && props.result && !props.result.is_error && previewInfo(props.result.metadata)} fallback={<details
+    <Show when={toolName(props.name) === "preview" && props.result && !props.result.is_error && previewInfo(props.result.metadata)} fallback={<>
+    {/* Before the row, so the keyboard reaches them ahead of an open
+        output; they are drawn over the summary's end. */}
+    <Show when={stoppable() || (movable() && !background())}>
+      <div class="tool-controls" ref={measure}>
+        <Show when={movable()}>
+          <button
+            type="button"
+            class="tool-action"
+            aria-label={`${t("Send to background")}: ${target()}`}
+            disabled={!!busy()}
+            onClick={() => void store.run(move)}
+          >
+            {t("Send to background")}
+          </button>
+        </Show>
+        <Show when={stoppable()}>
+          <button
+            type="button"
+            class="icon-button tool-stop"
+            aria-label={`${stoppable()!.state === "stopping" ? t("Stopping…") : t("Stop this command")}: ${target()}`}
+            title={stoppable()!.state === "stopping" ? t("Stopping…") : t("Stop this command")}
+            disabled={stoppable()!.state === "stopping" || busy() === "stop"}
+            onClick={() => void store.run(stop)}
+          >
+            <Icon name="stop" size="xs" filled />
+          </button>
+        </Show>
+      </div>
+    </Show>
+    <details
       class="tool-call"
       classList={{
         "tool-child": props.nested,
@@ -217,8 +482,8 @@ export function ToolActivity(props: {
           <Show when={!waiting()}>
             <strong>{verb()}</strong>
           </Show>
-          <span class="tool-target" title={toolTitle(props.args, shape().target)}>
-            <SpelledText text={shape().target} />
+          <span class="tool-target" title={toolTitle(props.args, target())}>
+            <SpelledText text={target()} />
           </span>
           <Show when={answer()}>
             <span class="tool-answer" title={answer()}>
@@ -238,7 +503,7 @@ export function ToolActivity(props: {
             )}
           </Show>
         </Shimmer>
-        <Show when={exit()}>
+        <Show when={!background() && exit()}>
           {(code) => <span class="tool-chip tool-exit">{t("exit {code}", { code: String(code()) })}</span>}
         </Show>
         <Show when={ranInChrome(props.name, props.args, props.result)}>
@@ -246,6 +511,21 @@ export function ToolActivity(props: {
         </Show>
         <Show when={answeredByHook(props.name, props.result)}>
           <span class="tool-chip">{t("Answered by hook")}</span>
+        </Show>
+        <Show when={(background() && !props.command) || stepsInBackground()}>
+          <span class="tool-chip" title={movedAfter()}>
+            {t("In background")}
+          </span>
+        </Show>
+        {/* How it ended comes after its badge; a non-zero exit as the
+            exit chip a foreground command's row shows. */}
+        <Show when={background() && exit()}>
+          {(code) => <span class="tool-chip tool-exit">{t("exit {code}", { code: String(code()) })}</span>}
+        </Show>
+        <Show when={commandState()}>
+          <span class="tool-state" data-tone={commandWord()?.tone}>
+            {commandState()}
+          </span>
         </Show>
         <Show when={live()}>
           <span class="sr-only">
@@ -257,6 +537,9 @@ export function ToolActivity(props: {
         </Show>
         <Show when={status() === "pending" && props.settled}>
           <span class="tool-status">{t("No result")}</span>
+        </Show>
+        <Show when={room()}>
+          <span class="tool-controls-room" style={{ width: room() + "px" }} aria-hidden="true" />
         </Show>
         <Icon name="chevron" size="xs" class="tool-chevron" />
       </summary>
@@ -284,21 +567,54 @@ export function ToolActivity(props: {
                         </pre>
                       </Show>
                       <Show
-                        when={props.result}
+                        when={liveOutput()}
                         fallback={
-                          <p class="tool-empty">
-                            {props.settled
-                              ? t("No result was recorded.")
-                              : t("Waiting for output…")}
-                          </p>
+                          <Show
+                            when={props.result}
+                            fallback={
+                              <p class="tool-empty">
+                                {props.settled
+                                  ? t("No result was recorded.")
+                                  : t("Waiting for output…")}
+                              </p>
+                            }
+                          >
+                            <Show
+                              when={output()}
+                              fallback={<p class="tool-empty">{t("No output")}</p>}
+                            >
+                              <pre class="tool-output">{output()}</pre>
+                            </Show>
+                          </Show>
                         }
                       >
-                        <Show
-                          when={output()}
-                          fallback={<p class="tool-empty">{t("No output")}</p>}
-                        >
-                          <pre class="tool-output">{output()}</pre>
-                        </Show>
+                        {(shown) => (
+                          <Show
+                            when={shown().text}
+                            fallback={
+                              <Show when={!("none" in shown())}>
+                                <p class="tool-empty">
+                                  {shown().read ? t("No output") : t("Waiting for output…")}
+                                </p>
+                              </Show>
+                            }
+                          >
+                            <pre
+                              class="tool-output"
+                              ref={(element) => {
+                                outputBox = element;
+                                pinned = true;
+                                element.scrollTop = element.scrollHeight;
+                              }}
+                              onScroll={(event) => {
+                                const box = event.currentTarget;
+                                pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 8;
+                              }}
+                            >
+                              {shown().cut ? "…\n" + shown().text : shown().text}
+                            </pre>
+                          </Show>
+                        )}
                       </Show>
                       <Show when={image()} keyed>
                         {(found) => <ReadImage image={found} alt={imageName(props.args)} />}
@@ -340,14 +656,20 @@ export function ToolActivity(props: {
           >
             <div class="tool-children">
               <Index each={batch()}>
-                {(step) => (
-                  <ToolActivity
-                    name={step().name}
-                    args={step().args}
-                    result={step().result}
-                    nested
-                    settled={!!props.result}
-                  />
+                {(step, index) => (
+                  // A step's own Stop sits beside it, as a call's does.
+                  <div class="tool-step">
+                    <ToolActivity
+                      name={step().name}
+                      args={step().args}
+                      result={step().result}
+                      nested
+                      settled={!!props.result}
+                      call={props.call && { ...props.call, callId: stepCallId(props.call.callId, index) }}
+                      checkpoint={props.call && props.checkpointFor?.(stepCallId(props.call.callId, index))}
+                      commandLine={props.commandLine}
+                    />
+                  </div>
                 )}
               </Index>
             </div>
@@ -365,7 +687,8 @@ export function ToolActivity(props: {
           </Show>
         </div>
       </Show>
-    </details>}><PreviewBanner metadata={props.result?.metadata} /></Show>
+    </details>
+    </>}><PreviewBanner metadata={props.result?.metadata} /></Show>
     <Show when={app()} keyed>
       {(value) => (
         <McpAppView

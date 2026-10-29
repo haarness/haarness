@@ -14,6 +14,7 @@ pub const SECTION_TODOS: usize = 1;
 pub const SECTION_MCP: usize = 2;
 pub const SECTION_CONTEXT: usize = 3;
 pub const SECTION_RECENT: usize = 4;
+pub const SECTION_BACKGROUND: usize = 5;
 const MAX_TODO_ROWS: usize = 10;
 
 pub fn sidebar_lines(app: &App, width: usize, height: usize) -> TaggedLines {
@@ -184,6 +185,53 @@ pub fn sidebar_lines(app: &App, width: usize, height: usize) -> TaggedLines {
                 );
             }
         });
+    }
+
+    // Commands in the background: a dev server, a watcher, a long build.
+    // Like the agents, the section is there only while it has something.
+    let commands = app.background_commands();
+    if !commands.is_empty() {
+        section(
+            app,
+            &mut out,
+            SECTION_BACKGROUND,
+            "background",
+            |app, out| {
+                for info in commands {
+                    let row = crate::background::CommandRow::of_info(info);
+                    let (marker, color) = task_state_style(row.task_state(), app.tick, theme);
+                    let state = row
+                        .ending(app.language)
+                        .or_else(|| row.elapsed())
+                        .unwrap_or_else(|| app.language.text("running").to_owned());
+                    let target = HitTarget::CommandOpen(info.id.clone());
+                    out.push_tagged(
+                        Line::new(vec![
+                            Span::new(format!("  {marker} "), color),
+                            Span::new(
+                                single_line(
+                                    &crate::background::command_line(&info.command),
+                                    width.saturating_sub(5),
+                                ),
+                                if info.state.is_live() {
+                                    theme.text
+                                } else {
+                                    theme.muted
+                                },
+                            ),
+                        ]),
+                        target.clone(),
+                    );
+                    out.push_tagged(
+                        line(
+                            format!("    {}", single_line(&state, width.saturating_sub(4))),
+                            theme.muted,
+                        ),
+                        target,
+                    );
+                }
+            },
+        );
     }
 
     // MCP servers (fetched when the sidebar opens).

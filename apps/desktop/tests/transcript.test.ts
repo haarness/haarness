@@ -588,7 +588,7 @@ const haarnessTools = [
   "agent_manage", "command_manage",
   "cloud_agent_manage", "cloud_workspace", "cloud_agent_session", "cloud_chat", "cloud_schedule", "memory_list", "memory_search",
   "memory_read", "memory_save", "memory_delete", "task_abort", "agent_switch", "session_manage",
-  "session_rename", "session_message", "session_wait", "StructuredOutput",
+  "session_rename", "session_message", "session_wait", "StructuredOutput", "bash_output", "bash_stop",
 ];
 
 test("each of Haarness's own tools reads as what it does, never as its id or another family's verb", () => {
@@ -637,6 +637,19 @@ test("each of Haarness's own tools reads as what it does, never as its id or ano
   });
   assert.equal(describeTool("mcp_resource_list", { server: "docs" }).target, "docs");
   assert.equal(describeTool("mcp_resource_list", {}).target, "");
+  // A command in the background is read, waited for and stopped by its id,
+  // which the row never names; it never reads as a command that was run.
+  assert.equal(describeTool("bash_output", { id: "cmd_4f2a" }).verb, "Checked a command");
+  assert.equal(describeTool("bash_output", { id: "cmd_4f2a" }).target, "");
+  assert.deepEqual(describeTool("bash_output", { id: "cmd_4f2a", wait_seconds: 60, until: "match", pattern: "ready" }), {
+    icon: "terminal",
+    verb: "Waited for a command",
+    doing: "Waiting for a command",
+    attempt: "Tried to wait for a command",
+    target: "",
+  });
+  assert.equal(describeTool("bash_stop", { id: "cmd_4f2a", signal: "TERM" }).doing, "Stopping a command");
+  assert.equal(toolActivity("bash_stop"), "Stopping a command");
   assert.equal(toolActivity("mcp_resource_read"), "Reading an MCP resource");
   // A tool of someone else's is still named, or guessed from its name.
   assert.equal(describeTool("acme_zap", {}).verb, "acme_zap");

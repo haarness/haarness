@@ -116,6 +116,10 @@ const namedTools: Record<string, { icon: IconName } & Verbs> = {
   memory_save: { icon: "book", ...verbs("Saved a memory", "Saving a memory", "Tried to save a memory") },
   memory_delete: { icon: "trash", ...verbs("Deleted a memory", "Deleting a memory", "Tried to delete a memory") },
   task_abort: { icon: "stop", ...verbs("Stopped a task", "Stopping a task", "Tried to stop a task") },
+  // A shell command in the background, read and stopped by its id. The row
+  // names the command when Desktop knows it (ToolActivity).
+  bash_output: { icon: "terminal", ...verbs("Checked a command", "Checking a command", "Tried to check a command") },
+  bash_stop: { icon: "stop", ...verbs("Stopped a command", "Stopping a command", "Tried to stop a command") },
   agent_switch: { icon: "agents", ...verbs("Switched agents", "Switching agents", "Tried to switch agents") },
   session_manage: { icon: "chat", ...verbs("Managed chats", "Managing chats", "Tried to manage chats") },
   session_rename: { icon: "chat", ...verbs("Renamed a chat", "Renaming a chat", "Tried to rename a chat") },
@@ -234,6 +238,8 @@ export function describeTool(name: string, args: unknown): ToolShape {
     const value = name === "mcp_resource_read" ? record?.uri : record?.server;
     return { ...known, target: typeof value === "string" ? spelledOutText(value.trim()) : "" };
   }
+  if (name === "bash_output" && typeof record?.wait_seconds === "number" && record.wait_seconds > 0)
+    return { ...known, ...waitVerbs, target: "" };
   if (name === "load_tool" && Array.isArray(record?.queries))
     return { ...known, target: targetList(record.queries.filter((query): query is string => typeof query === "string").map(spelledOutText)) };
   if (known && !familyTools.has(name) && !["execute", "skill", "question", "todo", "todowrite", "todoread"].includes(name))
@@ -279,6 +285,8 @@ const browserVerbs: Record<string, Verbs> = {
   network_get: verbs("Read a network request", "Reading a network request", "Tried to read a network request"),
 };
 const checkVerbs = verbs("Checked", "Checking", "Tried to check");
+/** `bash_output` waiting for its command to end, go quiet or print a line. */
+const waitVerbs = verbs("Waited for a command", "Waiting for a command", "Tried to wait for a command");
 const uncheckVerbs = verbs("Unchecked", "Unchecking", "Tried to uncheck");
 /** Catalog keys a tool row can show, for the catalog guard. */
 export const toolVerbKeys = [
@@ -289,6 +297,7 @@ export const toolVerbKeys = [
       ...Object.values(browserVerbs),
       checkVerbs,
       uncheckVerbs,
+      waitVerbs,
     ].flatMap(({ verb, doing, attempt }) => [verb, doing, attempt]),
   ),
 ];

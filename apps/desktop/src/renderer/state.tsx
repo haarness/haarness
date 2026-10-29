@@ -102,6 +102,7 @@ import { chatFolderPath, newChatFolder } from "./chat-folder";
 import { createProjectOverview } from "./project-overview";
 import { carryDraft } from "./draft-carry";
 import { commandBody, messageBody } from "./send-request";
+import { BACKGROUND_COMMANDS, goneKey, laterCommand, liveCommand } from "./shell-commands";
 import { checkAttachments, fileAttachments, type Attachment } from "./media";
 import type { SearchEntry } from "./search";
 import { requestedReasoning } from "./reasoning";
@@ -121,6 +122,14 @@ import {
 export type Pane = "chat" | "files" | "diff";
 
 interface State extends Live {
+  shellCommands: Record<string, T.ShellCommandInfo>;
+  commandOutput: Record<string, number>;
+  /** Chats whose commands the server has listed since the project opened:
+   * a command of theirs it did not list is no longer running. */
+  commandsListed: Record<string, boolean>;
+  /** Commands the server answered it no longer has, by `goneKey` (the chat
+   * asked about them, then the command). */
+  commandsGone: Record<string, boolean>;
   modelRecents: ModelKey[];
   /** This device's mode for new chats per project, and per-chat choices
    * for servers that predate shared approval modes. */
@@ -254,6 +263,10 @@ function createApp(saved?: Preferences) {
     streams: {},
     tasks: {},
     reviews: {},
+    shellCommands: {},
+    commandOutput: {},
+    commandsListed: {},
+    commandsGone: {},
     providers: [],
     agents: [],
     commands: [],
@@ -655,16 +668,31 @@ function createApp(saved?: Preferences) {
       set("catalogVersion", (n) => n + 1);
     });
   }
+  /** The agents' shell commands: those running in any chat, for the
+   * sidebar, and every one of `thread`'s tree the server still lists, for its
+   * rows and its Still running panel. None from an older server. */
+  async function readShellCommands(thread: string) {
+    if (!state.connection?.info.capabilities.includes(BACKGROUND_COMMANDS)) return [];
+    const [running, listed] = await Promise.all([
+      api<T.ShellCommandInfo[]>("activeShellCommands"),
+      thread ? api<T.ShellCommandInfo[]>("listShellCommands", thread) : [],
+    ]);
+    return [...running, ...listed];
+  }
   async function refresh() {
     const current = generation;
     const journal: T.EventEnvelope[] = [];
     journals.add(journal);
+    const listed = state.selected;
     try {
       const values = await Promise.all([
         api<T.Thread[]>("listThreads", { archived: true }),
         api<T.Turn[]>("activeTurns"),
         api<T.PendingPermissionInfo[]>("listPermissions"),
         api<T.PendingQuestionInfo[]>("listQuestions"),
+        // A failed read leaves the commands as they were: rows still show
+        // what their chat's checkpoints say.
+        readShellCommands(listed).catch(() => undefined),
       ]);
       if (current !== generation) return;
       batch(() => {
@@ -672,6 +700,14 @@ function createApp(saved?: Preferences) {
         set("turns", reconcile(values[1], { key: "id" }));
         set("permissions", values[2]);
         set("questions", values[3]);
+        if (values[4]) {
+          set(
+            "shellCommands",
+            reconcile(Object.fromEntries(values[4].map((command) => [command.id, command]))),
+          );
+          if (listed && state.connection?.info.capabilities.includes(BACKGROUND_COMMANDS))
+            set("commandsListed", listed, true);
+        }
         // Replay before painting so an old snapshot cannot briefly hide a live
         // activity or approval, then recreate it from the newer events.
         for (const event of journal)
@@ -728,6 +764,21 @@ function createApp(saved?: Preferences) {
     // Remembered as soon as it is chosen, not once its history has loaded: a
     // reload or quit in between brought back the chat shown before.
     void window.haarness.storage("session:" + connection, id);
+    // The chat's commands, the ones that ended lately too, for its rows.
+    if (state.connection?.info.capabilities.includes(BACKGROUND_COMMANDS))
+      void api<T.ShellCommandInfo[]>("listShellCommands", id)
+        .then((commands) => {
+          if (current !== selection || state.connection?.id !== connection) return;
+          batch(() => {
+            for (const command of commands) {
+              const known = state.shellCommands[command.id];
+              const next = laterCommand(known, command);
+              if (next !== known) set("shellCommands", command.id, reconcile(next));
+            }
+            set("commandsListed", id, true);
+          });
+        })
+        .catch(() => {});
     try {
       if (!options.fresh) {
         const items = await api<T.Item[]>("listItems", id);
@@ -1314,6 +1365,10 @@ function createApp(saved?: Preferences) {
       set("questions", []);
       set("streams", {});
       set("tasks", {});
+      set("shellCommands", {});
+      set("commandOutput", {});
+      set("commandsListed", {});
+      set("commandsGone", {});
       set("providers", []);
       set("agents", []);
       set("commands", []);
@@ -1620,6 +1675,7 @@ function createApp(saved?: Preferences) {
                   turns: state.turns,
                   permissions: state.permissions,
                   questions: state.questions,
+                  commands: Object.values(state.shellCommands).filter((command) => liveCommand(command.state)),
                 }
               : undefined,
           bridge: window.haarness,
@@ -1672,11 +1728,26 @@ function createApp(saved?: Preferences) {
             conversationRoot(live.threads, turn.threadId),
           ]),
         );
+        // Chats whose agent left a command running in the background: they
+        // are done, and still have work going (a dev server, a watcher).
+        const commands =
+          live === state ? Object.values(state.shellCommands) : (indexes()[location.id]?.commands ?? []);
+        const background = new Set(
+          commands
+            .filter(
+              (command) =>
+                command.background &&
+                liveCommand(command.state) &&
+                !state.commandsGone[goneKey(command.threadId, command.id)],
+            )
+            .map((command) => command.rootThreadId),
+        );
         return (live?.threads ?? []).map((thread) => ({
           key: sessionKey(location.id, thread.id),
           location,
           thread,
           running: running.has(thread.id),
+          background: background.has(thread.id),
           waiting: live?.permissions.some(
             (item) => (item.rootThreadId ?? item.threadId) === thread.id,
           )
@@ -1981,6 +2052,10 @@ function createApp(saved?: Preferences) {
         tabHistory = [];
         set("streams", {});
         set("tasks", {});
+        set("shellCommands", {});
+        set("commandOutput", {});
+        set("commandsListed", {});
+        set("commandsGone", {});
         set("connection", reconcile(view));
         set("activeServer", serverKey(view));
         set("permissions", []);

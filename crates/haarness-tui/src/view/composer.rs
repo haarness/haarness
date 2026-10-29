@@ -731,12 +731,25 @@ fn right_segments(app: &App, width: usize) -> (Vec<Vec<Span>>, usize) {
         return running_segments(app, theme);
     }
     let background = app.root_descendant_active_count();
+    // Commands left running in the background: a dev server may run for
+    // hours while the chat is done, so they are counted quietly.
+    let commands = app.background_command_count();
+    let running_commands = (commands > 0).then(|| {
+        app.language.count(
+            commands as u64,
+            "1 command in background",
+            "{count} commands in background",
+        )
+    });
     if background > 0 {
-        let activity = if background == 1 {
+        let mut activity = if background == 1 {
             "1 child turn running".to_owned()
         } else {
             format!("{background} child turns running")
         };
+        if let Some(commands) = &running_commands {
+            activity = format!("{activity} · {commands}");
+        }
         let target = InterruptTarget::Session(app.root_thread_id);
         let hint = if app
             .ctrl_c_action
@@ -801,7 +814,31 @@ fn right_segments(app: &App, width: usize) -> (Vec<Vec<Span>>, usize) {
         (format!("{fill}{flow}{cost}"), format!("{fill}{flow}"), flow)
     });
     // A notice that fits nowhere whole is cut to the room the band has left
-    // (`status_band`), not to a fixed share of it.
+    // (`status_band`), not to a fixed share of it. Commands in the background
+    // stay beside it while there is room, and take its place once it fades.
+    if let Some(commands) = running_commands {
+        let mut variants = Vec::new();
+        let tiers = usage.map_or_else(Vec::new, |(full, medium, flow)| vec![full, medium, flow]);
+        let lead = if notice.is_empty() {
+            commands.clone()
+        } else {
+            format!("{notice}   {commands}")
+        };
+        for tier in tiers {
+            variants.push(plain(format!("{lead}   {tier}"), theme.muted));
+        }
+        variants.push(plain(lead, theme.muted));
+        // Narrow, a notice that answers what was just done keeps its place;
+        // an older one gives it to the commands.
+        if !notice.is_empty() {
+            if app.notice_is_fresh(std::time::Instant::now()) {
+                variants.push(plain(notice.clone(), theme.muted));
+            } else {
+                variants.push(plain(commands, theme.muted));
+            }
+        }
+        return detail(variants);
+    }
     match (notice.is_empty(), usage) {
         (false, Some((full, medium, flow))) => detail(vec![
             plain(format!("{notice}   {full}"), theme.muted),

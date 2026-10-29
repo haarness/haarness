@@ -1500,9 +1500,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
             // block can be separated from the one before it.
             let mut emitted_reasoning: Option<Value> = None;
             let mut json_output = String::new();
+            // What broke the stream after its finish reason arrived: the
+            // response is complete, so it finishes first and this follows,
+            // for the runtime to judge.
+            let mut broken_after_finish = None;
             while let Some(event)=events.next().await{
                 let event = match event {
                     Ok(event) => event,
+                    Err(error) if finish_reason.is_some() => {
+                        broken_after_finish = Some(error);
+                        break;
+                    }
                     Err(error) => {
                         // Usage that already arrived was billed; keep it.
                         if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
@@ -1644,6 +1652,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
             let reason = finish_reason.unwrap_or_else(||"incomplete".into());
             crate::log_blocked_finish(&provider_id, &reason, request_id.as_deref(), response_id.as_deref());
             yield ProviderEvent::Finished{reason};
+            if let Some(error) = broken_after_finish {
+                Err::<(), _>(error)?;
+            }
         }))
     }
 }
@@ -2360,6 +2371,123 @@ mod tests {
             [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
             "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".into(),
         )
+    }
+
+    /// A server that streams `events` in a chunked body and then closes the
+    /// connection without ending the body, as a connection cut short does.
+    async fn cut_after(events: Vec<&'static str>) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // The whole request, so closing never cuts it off.
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if body.len() >= length {
+                        break;
+                    }
+                }
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n")
+                .await
+                .unwrap();
+            for event in events {
+                let frame = format!("data: {event}\n\n");
+                socket
+                    .write_all(format!("{:x}\r\n{frame}\r\n", frame.len()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            socket.flush().await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn a_connection_cut_after_the_finish_reason_finishes_the_response_first() {
+        let request = || ProviderRequest {
+            model: "compat-test".into(),
+            system: "sys".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "read it".into(),
+            }],
+            tools: vec![],
+            reasoning_effort: None,
+            output_schema: None,
+            parameters: haarness_core::RequestParameters::default(),
+        };
+        let provider = |base_url| {
+            OpenAiCompatibleProvider::new(CompatibleInstance {
+                id: "compat".into(),
+                name: "Compatible".into(),
+                base_url,
+                api_key: None,
+                models: vec!["compat-test".into()],
+                discover_models: false,
+                server_output_limit: false,
+                replay_observed_reasoning: false,
+                model_defaults: CompatibleModelDefaults::default(),
+                assume_authenticated: true,
+                headers: crate::ProviderHeaders::default(),
+            })
+        };
+        let call = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]}}]}"#;
+        // The finish reason arrived: the call and the finish come first, then
+        // what broke the stream.
+        let finished = provider(
+            cut_after(vec![
+                call,
+                r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            ])
+            .await,
+        )
+        .stream(request(), CancellationToken::new())
+        .await
+        .unwrap()
+        .filter(|event| std::future::ready(!matches!(event, Ok(ProviderEvent::ContentStarted))))
+        .collect::<Vec<_>>()
+        .await;
+        assert!(
+            matches!(&finished[0], Ok(ProviderEvent::ToolCall { call_id, name, .. }) if call_id == "c1" && name == "read"),
+            "{finished:?}"
+        );
+        assert!(
+            matches!(&finished[1], Ok(ProviderEvent::Finished { reason }) if reason == "tool_calls"),
+            "{finished:?}"
+        );
+        assert!(
+            matches!(&finished[2], Err(haarness_core::CoreError::Provider(message)) if message.contains("body")),
+            "{finished:?}"
+        );
+        assert_eq!(finished.len(), 3);
+        // Before the finish reason, the response is cut short: only the error.
+        let cut = provider(cut_after(vec![call]).await)
+            .stream(request(), CancellationToken::new())
+            .await
+            .unwrap()
+            .filter(|event| std::future::ready(!matches!(event, Ok(ProviderEvent::ContentStarted))))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(cut.as_slice(), [Err(haarness_core::CoreError::Provider(_))]),
+            "{cut:?}"
+        );
     }
 
     #[tokio::test]

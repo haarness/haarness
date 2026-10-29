@@ -71,7 +71,9 @@ import { parseModel, selectModel } from "./model-selection";
 import { carriedReasoning } from "./reasoning";
 import { AgentTask } from "./AgentTask";
 import { Shimmer } from "./Shimmer";
-import { agentTasks, taskKey, type AgentTask as Task } from "./agent-tasks";
+import { agentTasks, agentTaskStatus, taskKey, type AgentTask as Task } from "./agent-tasks";
+import { commandCheckpoints, commandLines, sentOutcome, type CommandCheckpoint } from "./shell-commands";
+import { backgroundCommands, commandsOffered } from "./background-work";
 import { createDictation } from "./dictation";
 import { FolderPicker } from "./FolderPicker";
 import { PlanDock } from "./PlanDock";
@@ -1280,6 +1282,22 @@ export function Session() {
             },
           ]
         : []),
+      ...(canSendToBackground()
+        ? [
+            {
+              key: "send-to-background",
+              group: "Chat actions",
+              name: t("Send to background"),
+              keywords: "background detach continue move commands subagents",
+              icon: "running" as const,
+              hint: state.preferences.shortcuts.background
+                ? shortcutLabel(state.preferences.shortcuts.background, state.platform)
+                : undefined,
+              disabled: sending(),
+              action: () => void app.run(sendToBackground),
+            },
+          ]
+        : []),
       ...state.commands.map((command) => ({
         key: "slash:" + command.name,
         group: "Slash commands",
@@ -1298,6 +1316,61 @@ export function Session() {
   const tasks = createMemo(() =>
     agentTasks(retainedItems(state.items, thread())),
   );
+  /** Each background command's last checkpoint, which its call's row reads. */
+  const checkpoints = createMemo(() =>
+    commandCheckpoints(retainedItems(state.items, thread())),
+  );
+  /** Each command's line by its id, which a step reading or stopping it names. */
+  const lines = createMemo(() => commandLines(retainedItems(state.items, thread())));
+  const commandLine = (id: string) => lines().get(id);
+  /* File → Send to background (no key unless the person gives it one): the
+     reply carries on without waiting for its running commands and
+     subagents, which go on in the background. With nothing to move it does
+     nothing. */
+  const commandsOn = commandsOffered();
+  const movableCommands = () =>
+    Object.values(state.shellCommands).some(
+      (command) =>
+        command.rootThreadId === state.selected &&
+        command.threadId === command.rootThreadId &&
+        command.state === "running" &&
+        !command.background,
+    );
+  const movableSubagents = () =>
+    [...tasks().values()].some((task) => agentTaskStatus(task, state.tasks?.[task.key]) === "running");
+  const canSendToBackground = () =>
+    commandsOn() && !!active() && editable() && (movableCommands() || movableSubagents());
+  const [sending, setSending] = createSignal(false);
+  async function sendToBackground() {
+    const thread = state.selected;
+    if (!canSendToBackground() || sending()) return;
+    setSending(true);
+    try {
+      const askCommands = movableCommands();
+      const askSubagents = movableSubagents();
+      const [commands, subagents] = await Promise.allSettled([
+        askCommands ? backgroundCommands(app, thread) : undefined,
+        askSubagents ? app.api<T.BackgroundTaskInfo[]>("promoteBackgroundTasks", thread, {}) : undefined,
+      ]);
+      // Subagents went while the chat's limit held every command back: that
+      // is said quietly, as no failure.
+      const outcome = sentOutcome({
+        commands: askCommands ? commands : undefined,
+        subagents: askSubagents ? subagents : undefined,
+        heldBack: new Error(t("This chat can't send more commands to the background right now.")),
+      });
+      if (outcome.error !== undefined) throw outcome.error;
+      if (outcome.note !== undefined)
+        app.notify(outcome.note instanceof Error ? outcome.note.message : String(outcome.note), "blocked");
+    } finally {
+      setSending(false);
+    }
+  }
+  onCleanup(
+    window.haarness.onEvent((event) => {
+      if (event.kind === "menu" && event.data === "send-to-background") void app.run(sendToBackground);
+    }),
+  );
   const plan = createMemo(() => currentPlan(state.items, thread()));
   const todos = () => plan()?.items ?? [];
   const rows = createMemo(() =>
@@ -1310,6 +1383,8 @@ export function Session() {
           "permission_request",
           "question",
           "todo",
+          // A command's checkpoints show on its call's row.
+          "command_state",
         ].includes(item.data.type) &&
         !(item.data.type === "user_message" && item.data.synthetic) &&
         !(item.data.type === "reasoning" && state.preferences.thinking === "hide") &&
@@ -2534,6 +2609,14 @@ export function Session() {
                       rows()[row.index],
                       thread()?.revert?.sequence,
                     )}
+                    checkpoint={(() => {
+                      const item = rows()[row.index];
+                      return item?.data.type === "tool_call"
+                        ? checkpoints().get(taskKey(item.turnId, item.data.call_id))
+                        : undefined;
+                    })()}
+                    checkpointFor={(call) => checkpoints().get(taskKey(rows()[row.index]?.turnId, call))}
+                    commandLine={commandLine}
                     reply={reply(rows()[row.index])}
                     fork={() => app.run(() => fork(rows()[row.index]))}
                   />
@@ -3259,6 +3342,11 @@ function Message(props: {
   item: T.Item;
   result?: T.Item;
   task?: Task;
+  /** A shell command's last checkpoint, for its call's row. */
+  checkpoint?: CommandCheckpoint;
+  /** A batch step's, by the step's call id. */
+  checkpointFor?: (callId: string) => CommandCheckpoint | undefined;
+  commandLine?: (id: string) => string | undefined;
   fork: () => Promise<unknown>;
   /** The message is the current Find match. */
   matched?: boolean;
@@ -3458,6 +3546,14 @@ function Message(props: {
                   args={tool().arguments}
                   result={result()}
                   id={props.item.id}
+                  call={{
+                    threadId: props.item.threadId,
+                    turnId: props.item.turnId,
+                    callId: tool().call_id,
+                  }}
+                  checkpoint={props.checkpoint}
+                  checkpointFor={props.checkpointFor}
+                  commandLine={props.commandLine}
                   expanded={!app.state.preferences.compactTools}
                   waiting={awaitsApproval(app.state.permissions, {
                     threadId: props.item.threadId,

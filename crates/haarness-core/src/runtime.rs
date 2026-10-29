@@ -18,8 +18,8 @@ use haarness_protocol::{
     GoalUpdatedEvent, GoalVerdict, Item, ItemData, ItemId, PendingPermissionInfo,
     PendingQuestionInfo, PermissionReply, PermissionReplyDecision, QuestionReply,
     QueueInputRequest, QueueInputResponse, RequestId, SessionArchive, SessionArchiveImportResult,
-    StartTurnRequest, Thread, ThreadActivity, ThreadId, TodoCheckpoint, TodoEntry,
-    ToolCatalogResponse, Turn, TurnId, TurnStatus, UpdateThreadRequest,
+    ShellCommandInfo, ShellCommandOutput, StartTurnRequest, Thread, ThreadActivity, ThreadId,
+    TodoCheckpoint, TodoEntry, ToolCatalogResponse, Turn, TurnId, TurnStatus, UpdateThreadRequest,
 };
 use parking_lot::{Mutex, RwLock};
 use serde_json::json;
@@ -306,6 +306,9 @@ struct BackgroundTask {
     delivery_auto_approve: bool,
     delivery_unattended: bool,
     delivery_tools: Option<HashMap<String, bool>>,
+    /// The turn its result starts keeps the launching client's
+    /// `follows_background`.
+    delivery_follows_background: bool,
     suppress_delivery: AtomicBool,
     /// Stopped because the server is shutting down: its checkpoint is left
     /// in the background, so the next start tells the parent it stopped.
@@ -837,9 +840,10 @@ fn is_provider_transient(error: &CoreError) -> bool {
     if is_provider_usage_limit(error) {
         return false;
     }
-    // A provider that sent nothing for the configured limit: its request was
-    // closed, and another may well be answered.
-    if crate::stream_stall_silence(error).is_some() {
+    // A provider that sent nothing for the configured limit, or a connection
+    // that broke before anything reached the person: another request may
+    // well be answered.
+    if is_stream_cut(error) {
         return true;
     }
     let message = message.to_ascii_lowercase();
@@ -859,6 +863,73 @@ fn is_provider_transient(error: &CoreError) -> bool {
     ]
     .iter()
     .any(|marker| message.contains(marker))
+}
+
+/// How a response that broke off in transit is worded: reqwest's errors for
+/// a body that could not be read to its end (whatever the cause beneath,
+/// a reset or an HTTP/2 stream error), hyper's and the system's words for a
+/// connection cut partway, and a Haarness router's for an upstream that
+/// fell silent while it relayed the answer.
+const STREAM_CUT: [&str; 5] = [
+    "request or response body error",
+    "error decoding response body",
+    "connection reset",
+    "connection closed before message completed",
+    "stream became idle",
+];
+
+/// Whether a response stopped because its connection broke or fell silent,
+/// not because the provider reported an error. After output has begun, such
+/// a cut is continued like a response cut short; an error the provider sent
+/// itself (an error event, which arrives as JSON) still fails the turn.
+fn is_stream_cut(error: &CoreError) -> bool {
+    let CoreError::Provider(message) = error else {
+        return false;
+    };
+    crate::stream_stall_silence(error).is_some() || is_transport_cut(message)
+}
+
+/// Whether `message` is a transport's words for a connection that broke
+/// (`STREAM_CUT`) rather than a provider's error event, which arrives as JSON.
+fn is_transport_cut(message: &str) -> bool {
+    if provider_error_fields(message).is_some() {
+        return false;
+    }
+    let message = message.to_ascii_lowercase();
+    // A body read to its end that is not the JSON expected ("error decoding
+    // response body: expected value at line 1 column 1", a captive portal's
+    // page) is an answer, not a cut: it fails at once.
+    if names_json_position(&message) {
+        return false;
+    }
+    STREAM_CUT.iter().any(|marker| message.contains(marker))
+}
+
+/// Whether `message` names a place in a JSON text the way a JSON parser
+/// does ("at line 1 column 1").
+fn names_json_position(message: &str) -> bool {
+    message.match_indices("at line ").any(|(at, marker)| {
+        let rest = &message[at + marker.len()..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        digits > 0
+            && rest[digits..]
+                .strip_prefix(" column ")
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    })
+}
+
+/// What a tool call says when the response that carried it was cut short
+/// and it was closed without running. A broken connection is said in plain
+/// words, never the transport's ("error decoding response body: Connection
+/// reset by peer (os error 54)"), which the log keeps.
+fn closed_call_reason(error: &CoreError, provider: Option<&str>) -> String {
+    match error {
+        CoreError::ProviderIncomplete(inner) if is_transport_cut(inner) => format!(
+            "The connection to {} broke off before this call ran, so it did not run.",
+            provider.unwrap_or("the provider")
+        ),
+        error => error.to_string(),
+    }
 }
 
 /// Retries for a transient provider failure before any output, waiting 2,
@@ -1289,12 +1360,17 @@ pub fn refusal_reason(error: &CoreError) -> String {
 }
 
 /// `describe_error`, except that a request the provider refused for its size
-/// in bytes is said plainly instead of repeating the 413. With `advice`, for
-/// the person, it also says what to do: the chat as a whole is what is too
-/// large (its files, the ones the model read among them, or its text behind
-/// a small limit), which compacting does not always make smaller. Without,
-/// for a model that started the work, it only says what happened.
+/// in bytes is said plainly instead of repeating the 413, and a connection
+/// that broke once the provider had answered (`describe_cut`) in plain words.
+/// With `advice`, for the person, it also says what to do: the chat as a
+/// whole is what is too large (its files, the ones the model read among them,
+/// or its text behind a small limit), which compacting does not always make
+/// smaller. Without, for a model that started the work, it only says what
+/// happened.
 fn describe_failure(error: &CoreError, provider: Option<&str>, advice: bool) -> String {
+    if let Some(words) = describe_cut(error, provider, advice) {
+        return words;
+    }
     if let CoreError::Provider(raw) = error
         && is_provider_oversized_request(error)
     {
@@ -1324,9 +1400,49 @@ fn describe_failure(error: &CoreError, provider: Option<&str>, advice: bool) -> 
     describe_error(error, provider)
 }
 
+/// A connection that broke after the provider had answered, in plain words
+/// rather than the transport's ("error decoding response body: Connection
+/// reset by peer (os error 54)"), which the log keeps: one that kept breaking
+/// mid-answer until the recoveries ran out, or one that broke before the
+/// answer began, every time it was retried. A request that never reached the
+/// provider ("error sending request") is not one: it could not be reached.
+/// With `advice` it also says what to do. `None` for any other failure.
+fn describe_cut(error: &CoreError, provider: Option<&str>, advice: bool) -> Option<String> {
+    let name = provider.unwrap_or("the provider");
+    let (happened, next) = match error {
+        CoreError::ProviderIncomplete(inner) if is_transport_cut(inner) => (
+            format!("The connection to {name} kept breaking off mid-answer."),
+            "Check the network connection, then send a message to continue.",
+        ),
+        CoreError::Provider(raw)
+            if is_transport_cut(raw)
+                && !raw.to_ascii_lowercase().contains("error sending request") =>
+        {
+            (
+                format!("The connection to {name} broke off before it answered."),
+                "Check the network connection, then try again.",
+            )
+        }
+        _ => return None,
+    };
+    Some(if advice {
+        format!("{happened} {next}")
+    } else {
+        happened
+    })
+}
+
 /// `user_facing_error`, naming the provider (when known) that has no
 /// credentials or refused them, so the fix is clear: connect it again.
 fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
+    // A provider that fell silent after it began, whose recoveries ran out,
+    // is named as silent, as it is before any output.
+    if let CoreError::ProviderIncomplete(inner) = error {
+        let silent = CoreError::Provider(inner.clone());
+        if crate::stream_stall_silence(&silent).is_some() {
+            return describe_error(&silent, provider);
+        }
+    }
     let CoreError::Provider(raw) = error else {
         return error.to_string();
     };
@@ -1651,6 +1767,8 @@ pub struct AgentRuntime {
     subagents: SubagentSlots,
     background_tasks: Arc<BackgroundTasks>,
     background_ledger: Arc<BackgroundLedger>,
+    /// The agents' shell commands, foreground and background, of every chat.
+    shell_commands: Arc<crate::background_commands::ShellCommands>,
     memory_context: Arc<RwLock<String>>,
     live_commands: Arc<RwLock<Vec<haarness_protocol::CommandInfo>>>,
     live_agents: Arc<RwLock<Vec<crate::CustomAgent>>>,
@@ -1812,6 +1930,7 @@ impl AgentRuntime {
             subagents: Arc::new(Mutex::new(HashMap::new())),
             background_tasks: Arc::new(DashMap::new()),
             background_ledger: Arc::new(BackgroundLedger::default()),
+            shell_commands: Arc::default(),
             memory_context: Arc::new(RwLock::new(String::new())),
             live_commands: Arc::new(RwLock::new(commands)),
             live_agents: Arc::new(RwLock::new(agents)),
@@ -2441,6 +2560,28 @@ impl AgentRuntime {
                 json!(item),
             );
         }
+        // So is a shell command that ran in the background.
+        for item in self
+            .repository
+            .recover_interrupted_commands(&commands::interrupted_report)
+            .await?
+        {
+            let root = match self.repository.get_thread(item.thread_id).await {
+                Ok(thread) => self.resolve_root(&thread).await,
+                Err(_) => item.thread_id,
+            };
+            if matches!(item.data, ItemData::CommandState { .. }) {
+                info!(chat = %item.thread_id, "recorded a background command the restart stopped");
+            }
+            self.events.publish_scoped(
+                "item.created",
+                Some(item.thread_id),
+                Some(root),
+                item.turn_id,
+                Some(item.id),
+                json!(item),
+            );
+        }
 
         // A process restart cannot retain the provider/tool program counter.
         // Never leave a durable goal claiming to be actively pursuing while
@@ -2651,6 +2792,7 @@ impl AgentRuntime {
                             text: request.text,
                             attachments: request.attachments,
                             attended: request.attended,
+                            follows_background: request.follows_background,
                         },
                     )
                     .await?;
@@ -2671,6 +2813,7 @@ impl AgentRuntime {
                         text: request.text,
                         attachments: request.attachments,
                         attended: request.attended,
+                        follows_background: request.follows_background,
                     },
                 )
                 .await?;
@@ -2739,6 +2882,7 @@ impl AgentRuntime {
                             .map(|preview| HashMap::from([("preview".into(), preview)])),
                         command: None,
                         attended: input.attended,
+                        follows_background: input.follows_background,
                     },
                     Vec::new(),
                     None,
@@ -2939,6 +3083,7 @@ impl AgentRuntime {
                         tools: tools.clone(),
                         command: None,
                         attended: request.attended,
+                        follows_background: request.follows_background,
                     },
                     Vec::new(),
                     None,
@@ -3255,6 +3400,13 @@ impl AgentRuntime {
             json!(thread),
         );
         if archiving && thread.archived {
+            // An archived chat's commands stop, untold.
+            if let Ok(threads) = self.thread_tree_ids(id).await {
+                self.stop_commands_of(
+                    &threads,
+                    haarness_protocol::ShellCommandEndedBy::ChatStopped,
+                );
+            }
             if let Some(hooks) = &self.components().hooks {
                 let call = self.hook_call(&thread, None).await;
                 hooks.session_end(&call, "archived").await;
@@ -3713,14 +3865,166 @@ impl AgentRuntime {
             Some(turn) => Some(self.repository.get_turn(turn).await?),
             None => None,
         };
+        let background_commands = self
+            .shell_commands
+            .running_in_background(&self.command_threads(id).await?);
         // Last: a turn that started and ended between two reads of a chat
         // that looks quiet is the newest here.
         let last_turn = self.repository.last_turn(id).await?;
         Ok(ThreadActivity {
             active_turn,
             background,
+            background_commands,
             last_turn,
         })
+    }
+
+    /// `thread` and the chats under it that have commands listed now: what
+    /// a client polling a chat's commands reads, without listing every chat.
+    /// A root chat's commands carry it as their root; a chat under one is
+    /// found among the ancestors of the chats that have commands.
+    async fn command_threads(&self, thread: ThreadId) -> CoreResult<HashSet<ThreadId>> {
+        let asked = self.repository.get_thread(thread).await?;
+        let mut inside = HashSet::from([thread]);
+        let listed = self
+            .shell_commands
+            .all(|_| true)
+            .into_iter()
+            .map(|entry| {
+                let info = entry.info();
+                (info.thread_id, info.root_thread_id)
+            })
+            .collect::<HashSet<_>>();
+        for (candidate, root) in listed {
+            if candidate == thread || inside.contains(&candidate) {
+                continue;
+            }
+            if asked.parent_id.is_none() {
+                if root == thread {
+                    inside.insert(candidate);
+                }
+                continue;
+            }
+            let mut current = candidate;
+            for _ in 0..16 {
+                let Ok(parent) = self.repository.get_thread(current).await else {
+                    break;
+                };
+                match parent.parent_id {
+                    Some(parent) if parent == thread => {
+                        inside.insert(candidate);
+                        break;
+                    }
+                    Some(parent) => current = parent,
+                    None => break,
+                }
+            }
+        }
+        Ok(inside)
+    }
+
+    /// The agents' shell commands in `thread` and the chats under it:
+    /// running ones first, then those that ended in the last ten minutes.
+    pub async fn shell_commands(&self, thread: ThreadId) -> CoreResult<Vec<ShellCommandInfo>> {
+        let threads = self.command_threads(thread).await?;
+        Ok(self.shell_commands.list(Some(&threads)))
+    }
+
+    /// Running shell commands of every chat.
+    #[must_use]
+    pub fn active_shell_commands(&self) -> Vec<ShellCommandInfo> {
+        self.shell_commands
+            .list(None)
+            .into_iter()
+            .filter(|info| info.state.is_live())
+            .collect()
+    }
+
+    /// The command `id` of `thread` or a chat under it.
+    async fn shell_command_entry(
+        &self,
+        thread: ThreadId,
+        id: &str,
+    ) -> CoreResult<Arc<crate::background_commands::CommandEntry>> {
+        let threads = self.command_threads(thread).await?;
+        self.shell_commands
+            .get(id)
+            .filter(|entry| threads.contains(&entry.info().thread_id))
+            .ok_or_else(|| CoreError::NotFound(format!("command {id}")))
+    }
+
+    /// The command `id` of `thread` or a chat under it.
+    pub async fn shell_command(&self, thread: ThreadId, id: &str) -> CoreResult<ShellCommandInfo> {
+        Ok(self.shell_command_entry(thread, id).await?.info())
+    }
+
+    /// A page of what the command `id` printed: from `cursor` (from its
+    /// start when `None`), or its last `limit` bytes with `tail`; at most
+    /// `limit` bytes (64 KiB when `None`, 1 MiB at most).
+    pub async fn shell_command_output(
+        &self,
+        thread: ThreadId,
+        id: &str,
+        cursor: Option<u64>,
+        limit: Option<u64>,
+        tail: bool,
+    ) -> CoreResult<ShellCommandOutput> {
+        let entry = self.shell_command_entry(thread, id).await?;
+        crate::background_commands::client_page(&entry, cursor, limit, tail).await
+    }
+
+    /// Stop the command `id` of `thread` or a chat under it, for a person.
+    /// It reads `stopping` until its process has exited, then `stopped`;
+    /// stopping a command that already ended changes nothing.
+    pub async fn stop_shell_command(
+        &self,
+        thread: ThreadId,
+        id: &str,
+    ) -> CoreResult<ShellCommandInfo> {
+        let entry = self.shell_command_entry(thread, id).await?;
+        Ok(self.stop_command_for_person(&entry))
+    }
+
+    /// Send `thread`'s running foreground commands (the one `id` when given)
+    /// to the background, for a person. A command that cannot move (a
+    /// subagent's, one already ended) is a conflict when it was named, and
+    /// left out otherwise.
+    pub async fn background_shell_commands(
+        &self,
+        thread: ThreadId,
+        id: Option<&str>,
+    ) -> CoreResult<Vec<ShellCommandInfo>> {
+        use haarness_protocol::ShellCommandMovedBy;
+        if let Some(id) = id {
+            let entry = self.shell_command_entry(thread, id).await?;
+            entry
+                .send_to_background(ShellCommandMovedBy::Person)
+                .await
+                .map_err(|refusal| CoreError::Conflict(refusal.to_string()))?;
+            return Ok(vec![entry.info()]);
+        }
+        let threads = self.command_threads(thread).await?;
+        let mut moved = Vec::new();
+        let mut held = None;
+        for entry in self.shell_commands.live(|entry| {
+            let info = entry.info();
+            !info.background && threads.contains(&info.thread_id)
+        }) {
+            match entry.send_to_background(ShellCommandMovedBy::Person).await {
+                Ok(()) => moved.push(entry.info()),
+                Err(refusal @ crate::background_commands::MoveRefusal::AtCap(_)) => {
+                    held = Some(refusal);
+                }
+                // A subagent's or an ended command is left where it is.
+                Err(_) => {}
+            }
+        }
+        // Nothing moved because the chat is at its cap: say so, so a
+        // client can tell the person why.
+        if let (true, Some(held)) = (moved.is_empty(), held) {
+            return Err(CoreError::Conflict(held.to_string()));
+        }
+        Ok(moved)
     }
 
     /// Let the background count read the workflow runs a thread launched
@@ -3963,6 +4267,18 @@ impl AgentRuntime {
         answer_steer: bool,
     ) -> CoreResult<u64> {
         let thread_ids = self.thread_tree_ids(root).await?;
+        // A stop while the chat replies ends the reply and its foreground
+        // commands and leaves its commands in the background running (a dev
+        // server outlives a change of course). An explicit stop while it is
+        // idle is a stop of everything, those commands included; a
+        // composer's Stop (`answer_steer`) that lands just after the reply
+        // ended is not.
+        if !answer_steer && !self.active.contains_key(&root) {
+            self.stop_commands_of(
+                &thread_ids,
+                haarness_protocol::ShellCommandEndedBy::ChatStopped,
+            );
+        }
 
         let tasks = self
             .background_tasks
@@ -5420,6 +5736,16 @@ impl AgentRuntime {
         {
             execution.shell_env = hooks.shell_env(thread_id, &workspace).await;
         }
+        // A fetch judges a redirect it would follow, and a search the files
+        // it lists, by the rules the call was checked under (built for this
+        // tool, as a turn's are), an Always given just now included.
+        let invoker = DIRECT_RULE_TOOLS.contains(&name).then(|| {
+            let mut rules = engine.clone();
+            for rule in self.session_rules.lock().iter().cloned() {
+                rules.add_grant(rule);
+            }
+            Arc::new(DirectRules(rules)) as Arc<dyn crate::ToolInvoker>
+        });
         let (mut output, is_error) = match allowed {
             Ok(()) => {
                 match tool
@@ -5432,7 +5758,7 @@ impl AgentRuntime {
                             workspace: workspace.clone(),
                             authorized_external_paths,
                             cancel: cancel.clone(),
-                            invoker: None,
+                            invoker,
                         },
                     )
                     .await
@@ -6526,6 +6852,8 @@ impl AgentRuntime {
         active.changed.notify_waiters();
         drop(admission_guard);
         let task = Arc::new(RunnerTask {
+            live_components: self.components.clone(),
+            live_reload_gate: self.reload_gate.clone(),
             repository: self.repository.clone(),
             providers: components.providers.clone(),
             tools: components.tools.clone(),
@@ -6559,6 +6887,7 @@ impl AgentRuntime {
             subagents: self.subagents.clone(),
             background_tasks: self.background_tasks.clone(),
             background_ledger: self.background_ledger.clone(),
+            shell_commands: self.shell_commands.clone(),
             depth: 0,
             root_thread_id: root,
             parent: None,
@@ -6842,6 +7171,17 @@ impl AgentRuntime {
     /// cancellation cleanup, after which any straggler is made durably
     /// interrupted so a restart can never display a phantom running turn.
     pub async fn interrupt_active_turns(&self, reason: &str) -> CoreResult<u64> {
+        // Commands stop beside the turns, and the server waits for them
+        // too (as long as for the turns) so their ends are recorded first.
+        let commands = self.stop_commands_for_shutdown().await;
+        let (turns, ()) = tokio::join!(
+            self.interrupt_turns_for_shutdown(reason),
+            Self::settle_commands(commands, std::time::Duration::from_secs(5)),
+        );
+        turns
+    }
+
+    async fn interrupt_turns_for_shutdown(&self, reason: &str) -> CoreResult<u64> {
         for task in self
             .background_tasks
             .iter()
@@ -6936,6 +7276,11 @@ impl AgentRuntime {
 }
 
 struct RunnerTask {
+    /// The runtime's current generation and reload gate, for work that
+    /// outlives this turn (a command's end, hours later) and must start on
+    /// the configuration of that moment.
+    live_components: Arc<RwLock<Arc<RuntimeComponents>>>,
+    live_reload_gate: Arc<AsyncRwLock<()>>,
     repository: Arc<dyn ThreadRepository>,
     providers: Arc<dyn ProviderRegistry>,
     tools: Arc<dyn ToolRegistry>,
@@ -6976,6 +7321,7 @@ struct RunnerTask {
     subagents: SubagentSlots,
     background_tasks: Arc<BackgroundTasks>,
     background_ledger: Arc<BackgroundLedger>,
+    shell_commands: Arc<crate::background_commands::ShellCommands>,
     depth: u8,
     /// Root of this turn's conversation; equals `thread.id` unless this is a
     /// child-agent turn.
@@ -7047,6 +7393,41 @@ struct TurnToolInvoker {
     sequence: std::sync::atomic::AtomicUsize,
 }
 
+/// `rules` bounded by an active skill's: what its `disallowed-tools` denies
+/// refuses the call, so it refuses a redirect there too, and a search leaves
+/// out a file it denies reading.
+fn with_skill_rules(mut rules: PermissionEngine, skill: Vec<PermissionRule>) -> PermissionEngine {
+    rules.add_inherited_ceiling([skill]);
+    rules
+}
+
+/// What a fetch or a search run outside a turn (a workflow's or a person's
+/// own call) may ask of its caller: only the rules it was checked under.
+struct DirectRules(PermissionEngine);
+
+/// The tools run outside a turn that ask their caller for rules: those that
+/// read [`crate::ToolInvoker::read_rules`] or
+/// [`crate::ToolInvoker::webfetch_rules`] and nothing else of it.
+const DIRECT_RULE_TOOLS: [&str; 3] = ["webfetch", "grep", "glob"];
+
+#[async_trait::async_trait]
+impl crate::ToolInvoker for DirectRules {
+    fn read_rules(&self) -> Option<PermissionEngine> {
+        Some(self.0.clone())
+    }
+    fn webfetch_rules(&self) -> Option<PermissionEngine> {
+        Some(self.0.clone())
+    }
+    async fn invoke(&self, name: &str, _arguments: serde_json::Value) -> CoreResult<ToolOutput> {
+        Err(CoreError::Tool(format!(
+            "{name} cannot be called from inside a fetch"
+        )))
+    }
+    fn side_effectful_for(&self, _name: &str, _arguments: &serde_json::Value) -> CoreResult<bool> {
+        Ok(true)
+    }
+}
+
 /// A definition's `!` snippet on its way to the shell tool: the text its
 /// permissions are judged on, the text that runs, and that text's values.
 pub(crate) struct DefinitionShell<'a> {
@@ -7076,6 +7457,19 @@ impl crate::ToolInvoker for TurnToolInvoker {
     }
     fn read_rules(&self) -> Option<PermissionEngine> {
         Some(self.runner.permission_engine_for_tool(&self.agent, "read"))
+    }
+    fn search_read_rules(&self) -> Option<PermissionEngine> {
+        Some(with_skill_rules(
+            self.runner.permission_engine_for_tool(&self.agent, "read"),
+            self.runner.skill_rules.lock().clone(),
+        ))
+    }
+    fn webfetch_rules(&self) -> Option<PermissionEngine> {
+        Some(with_skill_rules(
+            self.runner
+                .permission_engine_for_tool(&self.agent, "webfetch"),
+            self.runner.skill_rules.lock().clone(),
+        ))
     }
     fn instructions_in_context(&self) -> Option<crate::instructions::InContext> {
         Some(Arc::clone(&self.runner.instructions_in_context))
@@ -8216,6 +8610,9 @@ impl RunnerTask {
                 }
             }
         }
+        // A subagent's commands stop with its turn, before its last
+        // checkpoint; every other command of the turn may now tell its end.
+        self.end_turn_commands().await;
         // Capture any tail after the last provider event (including tool or
         // question waits on an error path) before changing goal status.
         let _ = self.checkpoint_goal_accounting(None).await;
@@ -9468,6 +9865,14 @@ impl RunnerTask {
                     let event = match event {
                         Ok(event) => event,
                         Err(error_value) => {
+                            // Some providers keep reading after the event that
+                            // finishes a response (Gemini's finish reason, the
+                            // Responses API's `response.completed`): a cut then
+                            // loses nothing, and the round stands as finished.
+                            if finished && is_stream_cut(&error_value) {
+                                tracing::debug!(thread = %self.thread.id, error = %error_value, "connection broke after the response finished");
+                                break;
+                            }
                             record_span_error(&provider_span, &error_value);
                             // Providers check images before they answer, so a
                             // refusal arrives before anything was streamed.
@@ -9516,12 +9921,12 @@ impl RunnerTask {
                                     .await?;
                                 continue 'provider_round;
                             }
-                            // A provider that falls silent after it began is
-                            // recovered like a response cut short.
-                            let stalled = saw_provider_event
-                                && crate::stream_stall_silence(&error_value).is_some();
+                            // A response that broke off after it began (its
+                            // connection was cut, or the provider fell silent)
+                            // is recovered like a response cut short.
+                            let cut = saw_provider_event && is_stream_cut(&error_value);
                             blocked = Some(match error_value {
-                                CoreError::Provider(message) if stalled => {
+                                CoreError::Provider(message) if cut => {
                                     CoreError::ProviderIncomplete(message)
                                 }
                                 error_value => error_value,
@@ -9806,15 +10211,18 @@ impl RunnerTask {
                     wrote_text,
                 });
                 if let Some(error) = blocked {
-                    for (call_id, name, _) in calls {
-                        self.publish_item(ItemData::ToolResult {
-                            call_id,
-                            name,
-                            output: error.to_string(),
-                            is_error: true,
-                            metadata: serde_json::Value::Null,
-                        })
-                        .await?;
+                    if !calls.is_empty() {
+                        let reason = closed_call_reason(&error, Some(&provider.info().name));
+                        for (call_id, name, _) in calls {
+                            self.publish_item(ItemData::ToolResult {
+                                call_id,
+                                name,
+                                output: reason.clone(),
+                                is_error: true,
+                                metadata: serde_json::Value::Null,
+                            })
+                            .await?;
+                        }
                     }
                     if matches!(error, CoreError::ProviderIncomplete(_)) && recoveries < 3 {
                         recoveries += 1;
@@ -10155,6 +10563,9 @@ impl RunnerTask {
                     if name == "task" {
                         self.release_task_delivery(&call_id);
                     }
+                    // A command it started (in a batch or a code block too)
+                    // may now tell its end.
+                    self.release_command_delivery(&call_id);
                 }
             }
         })
@@ -10357,6 +10768,10 @@ impl RunnerTask {
     }
 
     fn tool_enabled(&self, name: &str) -> bool {
+        // Following and stopping commands goes with running them.
+        if matches!(name, "bash_output" | "bash_stop") && !self.tool_enabled("bash") {
+            return false;
+        }
         if name == "preview"
             && self
                 .request
@@ -11092,6 +11507,11 @@ impl RunnerTask {
         {
             execution.shell_env = hooks.shell_env(self.thread.id, &self.workspace).await;
         }
+        // An agent's command is registered, so it can be followed and moved
+        // to the background; a definition's snippet runs as it always did.
+        if name == "bash" && definition_shell.is_none() {
+            execution.shell_call = Some(self.shell_call(call_id));
+        }
         // A snippet was judged with its folders filled in; unless a hook
         // rewrote it, the shell runs it with its references, reading the
         // values from its environment, so a folder name is never shell text.
@@ -11123,6 +11543,8 @@ impl RunnerTask {
         }
         let result = if matches!(name, "todo" | "todowrite") {
             self.record_todo(&arguments).await.map(plain_tool_output)
+        } else if matches!(name, "bash_output" | "bash_stop") {
+            self.command_tool(name, &arguments).await
         } else if name == "todoread" {
             let thread = self.repository.get_thread(self.thread.id).await?;
             let items = self.repository.list_items(self.thread.id, None).await?;
@@ -12253,6 +12675,9 @@ impl RunnerTask {
             tools,
             command: None,
             attended: self.request.attended,
+            // A subagent's commands never move to the background by
+            // themselves: its parent waits for its answer, not for a person.
+            follows_background: false,
         };
         let (turn, user, _) = self
             .repository
@@ -12311,6 +12736,8 @@ impl RunnerTask {
             .permission_engine(self.request.agent.as_deref().unwrap_or(&self.thread.agent))
             .boundary();
         let child_task = Arc::new(RunnerTask {
+            live_components: self.live_components.clone(),
+            live_reload_gate: self.live_reload_gate.clone(),
             repository: self.repository.clone(),
             providers: self.providers.clone(),
             tools: self.tools.clone(),
@@ -12345,6 +12772,7 @@ impl RunnerTask {
             subagents: self.subagents.clone(),
             background_tasks: self.background_tasks.clone(),
             background_ledger: self.background_ledger.clone(),
+            shell_commands: self.shell_commands.clone(),
             depth: self.depth + 1,
             root_thread_id: self.root_thread_id,
             parent: Some(ParentLink {
@@ -12416,6 +12844,7 @@ impl RunnerTask {
             } else {
                 None
             },
+            delivery_follows_background: self.request.follows_background,
             suppress_delivery: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             ended: AtomicBool::new(false),
@@ -12619,6 +13048,7 @@ impl RunnerTask {
                             attachments: Vec::new(),
                             resources: Vec::new(),
                             synthetic: true,
+                            follows_background: task.delivery_follows_background,
                             ..Default::default()
                         },
                         task.delivery_auto_approve,
@@ -12681,6 +13111,7 @@ impl RunnerTask {
             subagents: self.subagents.clone(),
             background_tasks: self.background_tasks.clone(),
             background_ledger: self.background_ledger.clone(),
+            shell_commands: self.shell_commands.clone(),
             memory_context: self.memory_context.clone(),
             live_commands: self.live_commands.clone(),
             live_agents: self.live_agents.clone(),
@@ -15074,10 +15505,12 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
     // A fetch also meets the rules for the address it really reads, so case,
     // a user name, a trailing dot, the default port or `..` cannot step
     // around a rule written for the plain address.
-    if name == "webfetch"
-        && let Some(pattern) = webfetch_pattern(&target)
-    {
-        patterns.push(pattern);
+    if name == "webfetch" {
+        for pattern in webfetch_patterns(&target) {
+            if !patterns.contains(&pattern) {
+                patterns.push(pattern);
+            }
+        }
     }
     let mut resolved = Vec::new();
     // A list through a link meets the rules for the folder it really lists.
@@ -15163,36 +15596,138 @@ fn resource_server_pattern(server: &str) -> String {
         .collect()
 }
 
-/// The address a fetch of `target` reads, written the way rules name it:
+/// The other ways rules may name the address a fetch of `target` reads:
 /// scheme and host in lower case, without a user name or password, a
-/// trailing dot on the host, the default port or `.`/`..` path segments.
-/// `None` when `target` is already written that way or is not an http(s)
-/// URL.
-fn webfetch_pattern(target: &str) -> Option<String> {
-    let mut url = url::Url::parse(target.trim()).ok()?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return None;
+/// trailing dot on the host, the default port, `.`/`..` path segments or a
+/// `#` fragment (which never reaches the server), and with the letters,
+/// digits and `-._~` of its path written plainly where `%` codes spell them
+/// (a server reads `/%61dmin` as `/admin`). An address with no path is also
+/// written with its `/` (the page it reads), and a host the address spells
+/// in punycode also in Unicode, as a rule may name it. Empty when `target`
+/// is already written that way or is not an http(s) URL.
+fn webfetch_patterns(target: &str) -> Vec<String> {
+    let Ok(mut url) = url::Url::parse(target.trim()) else {
+        return Vec::new();
+    };
+    if !matches!(url.scheme(), "http" | "https")
+        || url.set_username("").is_err()
+        || url.set_password(None).is_err()
+    {
+        return Vec::new();
     }
-    url.set_username("").ok()?;
-    url.set_password(None).ok()?;
+    url.set_fragment(None);
     if let Some(host) = url
         .host_str()
         .and_then(|host| host.strip_suffix('.'))
         .map(str::to_owned)
+        && url.set_host(Some(&host)).is_err()
     {
-        url.set_host(Some(&host)).ok()?;
+        return Vec::new();
     }
-    let mut pattern = url.to_string();
+    let path = plain_unreserved(url.path());
+    if path != url.path() {
+        url.set_path(&path);
+    }
+    let mut forms = vec![url.to_string()];
     // The parser writes `https://example.com` as `https://example.com/`; the
-    // same page either way, so a rule for the form written still settles it.
-    if url.path() == "/"
-        && url.query().is_none()
-        && url.fragment().is_none()
-        && !target.trim().ends_with('/')
-    {
-        pattern.pop();
+    // same page either way, so a rule for the form written settles it too.
+    let written = target.trim();
+    let written = written
+        .split_once('#')
+        .map_or(written, |(address, _)| address);
+    if url.path() == "/" && url.query().is_none() && !written.ends_with('/') {
+        let mut bare = forms[0].clone();
+        bare.pop();
+        forms.insert(0, bare);
     }
-    (pattern != target).then_some(pattern)
+    if let Some(host) = url.host_str()
+        && host.split('.').any(|label| label.starts_with("xn--"))
+        && let (unicode, Ok(())) = idna::domain_to_unicode(host)
+        && unicode != host
+    {
+        let ascii = format!("://{host}");
+        let spelled = format!("://{unicode}");
+        let unicode: Vec<String> = forms
+            .iter()
+            .map(|form| form.replacen(&ascii, &spelled, 1))
+            .collect();
+        forms.extend(unicode);
+    }
+    forms.retain(|form| form != target);
+    forms.dedup();
+    forms
+}
+
+/// `path` with each `%` code for a letter, a digit, `-`, `.`, `_` or `~`
+/// replaced by the character: the same address either way (RFC 3986).
+fn plain_unreserved(path: &str) -> String {
+    let mut plain = String::with_capacity(path.len());
+    let mut rest = path;
+    while let Some(at) = rest.find('%') {
+        plain.push_str(&rest[..at]);
+        let code = rest
+            .get(at + 1..at + 3)
+            .filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            .filter(|byte| byte.is_ascii_alphanumeric() || b"-._~".contains(byte));
+        if let Some(byte) = code {
+            plain.push(char::from(byte));
+            rest = &rest[at + 3..];
+        } else {
+            plain.push('%');
+            rest = &rest[at + 1..];
+        }
+    }
+    plain.push_str(rest);
+    plain
+}
+
+/// Whether a fetch of `asked` follows a redirect to `hop` on the address it
+/// asked for, under `rules`, the webfetch rules of the call's agent: `Allow`
+/// follows it, while `Deny` (a rule denies `hop`) and `Ask` (`hop` needs an
+/// approval this call did not get) stop the fetch there. Both addresses meet
+/// the rules as the call does, as written and as really read. A hop the rules
+/// allow is followed; one they ask about only when the call was itself asked
+/// about under a rule for the whole tool (`"webfetch": "ask"`), whose answer
+/// was not about one address. So neither an Allow once for `/login` nor an
+/// allow or Always for `/docs/*` opens `/admin`.
+pub fn webfetch_redirect_verdict(
+    rules: &PermissionEngine,
+    asked: &str,
+    hop: &str,
+) -> PermissionDecision {
+    let judged = |target: &str| -> Vec<crate::permissions::Evaluation> {
+        std::iter::once(target.to_owned())
+            .chain(webfetch_patterns(target))
+            .map(|pattern| rules.evaluate_detailed(&format!("webfetch:{pattern}")))
+            .collect()
+    };
+    // Asked about, and only under rules about the whole tool.
+    let asks_about_the_tool = |evaluations: &[crate::permissions::Evaluation]| {
+        evaluations
+            .iter()
+            .any(|evaluation| evaluation.decision == PermissionDecision::Ask)
+            && evaluations.iter().all(|evaluation| {
+                evaluation.decision == PermissionDecision::Allow
+                    || (evaluation.decision == PermissionDecision::Ask
+                        && evaluation.matched.as_deref().is_none_or(whole_tool_rule))
+            })
+    };
+    let hop = judged(hop);
+    if hop
+        .iter()
+        .any(|evaluation| evaluation.decision == PermissionDecision::Deny)
+    {
+        PermissionDecision::Deny
+    } else if hop
+        .iter()
+        .all(|evaluation| evaluation.decision == PermissionDecision::Allow)
+        || (asks_about_the_tool(&hop) && asks_about_the_tool(&judged(asked)))
+    {
+        PermissionDecision::Allow
+    } else {
+        PermissionDecision::Ask
+    }
 }
 
 /// The path a file tool opens for `target`, when links or `..` make it a
@@ -15270,6 +15805,8 @@ fn resolved_pattern(workspace: &Path, target: &str, resolved: &Path) -> Option<S
     };
     (pattern != target).then_some(pattern)
 }
+
+mod commands;
 
 #[cfg(test)]
 mod permission_corpus;
@@ -19320,12 +19857,17 @@ mod tests {
             (plan.patterns, denied)
         };
         // An address written plainly is checked once, as written.
-        for url in [
-            "https://docs.example/guide",
-            "https://docs.example",
-            "https://docs.example/",
-        ] {
+        for url in ["https://docs.example/guide", "https://docs.example/"] {
             assert_eq!(plan(url), (vec![url.to_owned()], false), "{url}");
+        }
+        // One with no path also as the page it reads, `/`, so a rule for
+        // every page of the host holds for it, with or without a fragment.
+        assert_eq!(
+            plan("https://docs.example").0,
+            vec!["https://docs.example", "https://docs.example/"]
+        );
+        for url in ["https://denied.example", "https://denied.example#part"] {
+            assert!(plan(url).1, "{url}");
         }
         assert_eq!(
             plan("https://denied.example/secret"),
@@ -19346,8 +19888,187 @@ mod tests {
                 vec![url.to_owned(), "https://denied.example/secret".to_owned()]
             );
         }
+        // So do the address without its fragment, and its path with the
+        // letters a `%` code spells written plainly.
+        for (url, read) in [
+            (
+                "https://denied.example/secret#part",
+                "https://denied.example/secret",
+            ),
+            (
+                "https://denied.example/%73ecret",
+                "https://denied.example/secret",
+            ),
+            (
+                "https://Denied.Example/%73%45cret%7e#x",
+                "https://denied.example/sEcret~",
+            ),
+        ] {
+            let (patterns, _) = plan(url);
+            assert_eq!(patterns, vec![url.to_owned(), read.to_owned()], "{url}");
+        }
+        assert!(plan("https://denied.example/%73ecret").1);
+        assert!(plan("https://denied.example/secret#part").1);
+        // The `/` written before a fragment stays.
+        assert_eq!(
+            plan("https://docs.example/#top").0,
+            vec!["https://docs.example/#top", "https://docs.example/"]
+        );
+        assert_eq!(
+            plan("https://docs.example#top").0,
+            vec![
+                "https://docs.example#top",
+                "https://docs.example",
+                "https://docs.example/"
+            ]
+        );
+        // A host in punycode also meets a rule that names it in Unicode.
+        let books = crate::PermissionEngine::new(vec![crate::PermissionRule {
+            pattern: "webfetch:https://bücher.example/*".into(),
+            decision: crate::PermissionDecision::Deny,
+        }]);
+        let (patterns, _) = plan("https://xn--bcher-kva.example/list");
+        assert_eq!(
+            patterns,
+            vec![
+                "https://xn--bcher-kva.example/list",
+                "https://bücher.example/list"
+            ]
+        );
+        assert!(patterns.iter().any(|pattern| {
+            books.evaluate(&format!("webfetch:{pattern}")) == crate::PermissionDecision::Deny
+        }));
+        // Other codes stay as written: `%2F` is not a folder's `/`.
+        assert_eq!(
+            plan("https://docs.example/a%2Fb%20c%zz%4"),
+            (
+                vec!["https://docs.example/a%2Fb%20c%zz%4".to_owned()],
+                false
+            )
+        );
         // Another port is another address.
         assert!(!plan("https://denied.example:8443/secret").1);
+    }
+
+    #[test]
+    fn a_redirect_on_the_address_asked_for_is_followed_only_where_its_approval_reaches() {
+        use crate::PermissionDecision::{Allow, Ask, Deny};
+        let rule = |pattern: &str, decision| crate::PermissionRule {
+            pattern: pattern.into(),
+            decision,
+        };
+        let engine = |rules: &[(&str, crate::PermissionDecision)]| {
+            let mut engine = crate::PermissionEngine::build_defaults();
+            for (pattern, decision) in rules {
+                engine.add_rule(rule(pattern, *decision));
+            }
+            engine
+        };
+        let verdict = |engine: &crate::PermissionEngine, asked: &str, hop: &str| {
+            super::webfetch_redirect_verdict(engine, asked, hop)
+        };
+        let login = "https://intra.example/login?next=/admin/x";
+        // Under the defaults every hop is followed, as before.
+        let defaults = crate::PermissionEngine::build_defaults();
+        assert_eq!(
+            verdict(&defaults, login, "https://intra.example/admin/x"),
+            Allow
+        );
+        // A path a rule denies is not reached through a redirect, in any
+        // spelling of it.
+        let denied = engine(&[("webfetch:https://intra.example/admin/*", Deny)]);
+        for hop in [
+            "https://intra.example/admin/x",
+            "https://someone@intra.example/admin/x",
+            "https://intra.example./admin/x",
+            "https://intra.example/public/../admin/x",
+            "https://intra.example/%61dmin/x",
+            "https://intra.example/admin/x#top",
+        ] {
+            assert_eq!(verdict(&denied, login, hop), Deny, "{hop}");
+        }
+        // A skill's `disallowed-tools` holds on a redirect too, and a rule
+        // that names a host in Unicode holds for the punycode a redirect
+        // arrives in.
+        let skill = haarness_protocol::DefinitionExecution {
+            disallowed_tools: vec!["WebFetch(https://intra.example/admin/*)".into()],
+            ..haarness_protocol::DefinitionExecution::default()
+        };
+        let skilled = super::with_skill_rules(
+            crate::PermissionEngine::build_defaults(),
+            crate::definitions::skill_rules(&skill, "/workspace"),
+        );
+        assert_eq!(
+            verdict(&skilled, login, "https://intra.example/admin/x"),
+            Deny
+        );
+        assert_eq!(
+            verdict(&skilled, login, "https://intra.example/home"),
+            Allow
+        );
+        let books = engine(&[("webfetch:https://bücher.example/private/*", Deny)]);
+        for hop in [
+            "https://xn--bcher-kva.example/private/x",
+            "https://bücher.example/private/x",
+        ] {
+            assert_eq!(
+                verdict(&books, "https://xn--bcher-kva.example/", hop),
+                Deny,
+                "{hop}"
+            );
+        }
+        assert_eq!(verdict(&denied, login, "https://intra.example/home"), Allow);
+        // `"webfetch": "ask"`: the call's approval was for the tool, and the
+        // hop asks the same question.
+        let ask_all = engine(&[("webfetch:*", Ask)]);
+        assert_eq!(
+            verdict(&ask_all, login, "https://intra.example/home"),
+            Allow
+        );
+        // A rule that asks about a path still asks after a redirect, whether
+        // the call itself was allowed or asked about for the whole tool.
+        let ask_admin = engine(&[("webfetch:https://intra.example/admin/*", Ask)]);
+        assert_eq!(
+            verdict(&ask_admin, login, "https://intra.example/admin/x"),
+            Ask
+        );
+        let ask_both = engine(&[
+            ("webfetch:*", Ask),
+            ("webfetch:https://intra.example/admin/*", Ask),
+        ]);
+        assert_eq!(
+            verdict(&ask_both, login, "https://intra.example/admin/x"),
+            Ask
+        );
+        // An approval of one address under a rule about a host never opens
+        // another page of it.
+        let ask_host = engine(&[("webfetch:https://intra.example/*", Ask)]);
+        assert_eq!(verdict(&ask_host, login, "https://intra.example/home"), Ask);
+        // An allow, or an Always, for one path covers that path only.
+        let mut docs = engine(&[
+            ("webfetch:*", Ask),
+            ("webfetch:https://intra.example/docs/*", Allow),
+        ]);
+        let start = "https://intra.example/docs/start";
+        assert_eq!(
+            verdict(&docs, start, "https://intra.example/docs/moved"),
+            Allow
+        );
+        assert_eq!(verdict(&docs, start, "https://intra.example/private"), Ask);
+        let mut always = engine(&[("webfetch:*", Ask)]);
+        always.add_grant(rule("webfetch:https://intra.example/docs/*", Allow));
+        assert_eq!(
+            verdict(&always, start, "https://intra.example/private"),
+            Ask
+        );
+        // An Always for the whole tool opens what is not denied.
+        docs.add_grant(rule("webfetch:*", Allow));
+        docs.add_rule(rule("webfetch:https://intra.example/admin/*", Deny));
+        assert_eq!(
+            verdict(&docs, start, "https://intra.example/private"),
+            Allow
+        );
+        assert_eq!(verdict(&docs, start, "https://intra.example/admin/x"), Deny);
     }
 
     #[test]
@@ -19408,6 +20129,37 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_connection_is_a_cut_but_an_error_the_provider_sent_is_not() {
+        let provider = |message: &str| CoreError::Provider(message.into());
+        for cut in [
+            // reqwest's words for a body read that failed, with its cause.
+            "request or response body error: connection reset by peer (os error 54)",
+            "request or response body error: error reading a body from connection: stream error received: unexpected internal error encountered",
+            "error decoding response body: connection closed before message completed",
+            "request or response body error: unexpected EOF during chunk size line",
+            // A Haarness router whose upstream fell silent, or broke off.
+            "upstream stream became idle",
+            "upstream stream failed: error decoding response body",
+            "the provider sent nothing for 5 minutes",
+        ] {
+            assert!(super::is_stream_cut(&provider(cut)), "{cut}");
+        }
+        for failed in [
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            r#"{"type":"response.failed","response":{"error":{"code":"server_error","message":"The connection reset while processing."}}}"#,
+            "invalid SSE JSON: EOF while parsing an object at line 1 column 12",
+            "HTTP 400 Bad Request: invalid tool schema",
+            "provider returned a tool call without a call ID or name",
+        ] {
+            assert!(!super::is_stream_cut(&provider(failed)), "{failed}");
+        }
+        assert!(!super::is_stream_cut(&CoreError::ProviderIncomplete(
+            "connection reset".into()
+        )));
+        assert!(!super::is_stream_cut(&CoreError::Cancelled));
+    }
+
+    #[test]
     fn busy_or_unreachable_providers_are_retried_but_limits_and_bad_requests_are_not() {
         let provider = |message: &str| CoreError::Provider(message.into());
         for retried in [
@@ -19415,6 +20167,14 @@ mod tests {
             "HTTP 529: overloaded_error",
             "HTTP 502 Bad Gateway",
             "error sending request for url (https://api.example/v1/messages)",
+            // A connection that broke while the response began, wrapped as
+            // reqwest's body error whatever broke it (a reset, Windows'
+            // 10054, an HTTP/2 stream error), or a router's silent upstream.
+            "request or response body error: connection reset by peer (os error 54)",
+            "request or response body error: An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "request or response body error: error reading a body from connection: stream error received: unexpected internal error encountered",
+            "error decoding response body: unexpected EOF during chunk size line",
+            "upstream stream became idle",
         ] {
             assert!(
                 super::is_provider_transient(&provider(retried)),
@@ -19617,6 +20377,103 @@ mod tests {
         assert!(!super::is_region_unavailable(
             "HTTP 400 Bad Request: location is required"
         ));
+    }
+
+    #[test]
+    fn a_connection_that_broke_is_said_in_plain_words() {
+        // Broke after the answer began, until the recoveries ran out.
+        for transport in [
+            "error decoding response body: Connection reset by peer (os error 54)",
+            "request or response body error: An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "upstream stream became idle",
+        ] {
+            let ended = CoreError::ProviderIncomplete(transport.into());
+            assert_eq!(
+                super::describe_failure(&ended, Some("Anthropic"), true),
+                "The connection to Anthropic kept breaking off mid-answer. Check the network connection, then send a message to continue."
+            );
+            // A model that started the work reads what happened, no advice.
+            assert_eq!(
+                super::describe_failure(&ended, Some("Anthropic"), false),
+                "The connection to Anthropic kept breaking off mid-answer."
+            );
+            assert_eq!(
+                super::user_facing_error(&ended),
+                "The connection to the provider kept breaking off mid-answer."
+            );
+            assert_eq!(
+                super::closed_call_reason(&ended, Some("Anthropic")),
+                "The connection to Anthropic broke off before this call ran, so it did not run."
+            );
+        }
+        // Broke before the answer began, on every retry: the provider was
+        // reached, so it is not "could not reach".
+        for transport in [
+            "error decoding response body: unexpected EOF during chunk size line",
+            "request or response body error: connection reset by peer (os error 54)",
+            "request or response body error: An existing connection was forcibly closed by the remote host. (os error 10054)",
+            "request or response body error: error reading a body from connection: stream error received: unexpected internal error encountered",
+            "upstream stream became idle",
+        ] {
+            let broke = CoreError::Provider(transport.into());
+            assert_eq!(
+                super::describe_failure(&broke, Some("Anthropic"), true),
+                "The connection to Anthropic broke off before it answered. Check the network connection, then try again."
+            );
+            assert_eq!(
+                super::describe_failure(&broke, Some("Anthropic"), false),
+                "The connection to Anthropic broke off before it answered."
+            );
+            let shown = super::describe_failure(&broke, None, true);
+            assert!(
+                !shown.contains("os error") && !shown.contains("decoding"),
+                "{shown}"
+            );
+        }
+        // A request that never reached the provider could not reach it.
+        let unreached = CoreError::Provider(
+            "error sending request for url (https://api.anthropic.com/v1/messages): connection closed before message completed".into(),
+        );
+        assert!(
+            super::describe_failure(&unreached, Some("Anthropic"), true)
+                .starts_with("Could not reach Anthropic at api.anthropic.com.")
+        );
+        // A provider that fell silent after it began is named as silent.
+        let silent =
+            CoreError::ProviderIncomplete("the provider sent nothing for 5 minutes".into());
+        assert_eq!(
+            super::describe_failure(&silent, Some("Anthropic"), true),
+            "Anthropic sent nothing for 5 minutes, so the request was stopped. Try again, or check the network connection."
+        );
+        // Other endings keep their words.
+        let missing = CoreError::ProviderIncomplete("missing completion event".into());
+        assert_eq!(
+            super::describe_failure(&missing, None, true),
+            "Provider response ended before completion (missing completion event)."
+        );
+        assert_eq!(
+            super::closed_call_reason(&missing, Some("Anthropic")),
+            "Provider response ended before completion (missing completion event)."
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_an_answer_not_a_cut() {
+        // A captive portal's page read whole where JSON was expected.
+        for answer in [
+            "error decoding response body: expected value at line 1 column 1",
+            "Bedrock returned error decoding response body: EOF while parsing a value at line 3 column 0",
+        ] {
+            let error = CoreError::Provider(answer.into());
+            assert!(!super::is_stream_cut(&error), "{answer}");
+            assert!(!super::is_provider_transient(&error), "{answer}");
+            assert!(super::describe_failure(&error, None, true).starts_with("Provider error: "));
+        }
+        assert!(super::names_json_position(
+            "expected value at line 12 column 40"
+        ));
+        assert!(!super::names_json_position("upstream stream became idle"));
+        assert!(!super::names_json_position("failed at line 3"));
     }
 
     #[test]

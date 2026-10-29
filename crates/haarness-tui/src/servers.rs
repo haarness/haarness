@@ -481,6 +481,7 @@ async fn prepare(client: ApiClient, previous: &App) -> Result<Connection> {
         app.workflow_invalid = catalog.invalid;
     }
     app.hydrate_active_turns(client.active_turns().await?);
+    app.hydrate_shell_commands(&client).await;
     app.hydrate_questions(client.pending_questions().await?);
     app.hydrate_permissions(client.pending_permissions().await?, &client)
         .await;

@@ -30,6 +30,8 @@ pub async fn handle_mouse(
                 viewer.scroll_by(-3);
             } else if matches!(app.overlay, Overlay::SideChat) {
                 app.wheel_side_chat(true);
+            } else if matches!(app.overlay, Overlay::CommandOutput) {
+                app.wheel_command_output(true);
             } else if matches!(app.overlay, Overlay::Panel { .. } | Overlay::Chrome) {
                 app.overlay_scroll = app.overlay_scroll.saturating_sub(3);
             } else {
@@ -46,6 +48,8 @@ pub async fn handle_mouse(
                 viewer.scroll_by(3);
             } else if matches!(app.overlay, Overlay::SideChat) {
                 app.wheel_side_chat(false);
+            } else if matches!(app.overlay, Overlay::CommandOutput) {
+                app.wheel_command_output(false);
             } else if matches!(app.overlay, Overlay::Panel { .. } | Overlay::Chrome) {
                 app.overlay_scroll = app
                     .overlay_scroll
@@ -201,6 +205,7 @@ async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> 
         HitTarget::WorkflowOpen(run_id) => {
             app.open_workflow_run(run_id, client).await?;
         }
+        HitTarget::CommandOpen(id) => app.open_command_output(&id, Some(client)),
         HitTarget::ChildParent => {
             app.leave_child(client).await?;
         }

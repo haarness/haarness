@@ -27,13 +27,14 @@ use haarness_protocol::{
     PendingPermissionInfo, PendingQuestionInfo, PermissionReply, PluginActionRequest, PluginInfo,
     ProviderInfo, PtyCreateRequest, PtyId, PtyInfo, PtyUpdateRequest, QuestionReply,
     QueueInputRequest, QueueInputResponse, ReviewFile, SCHEMA_VERSION, SESSION_ARCHIVE_CAPABILITY,
-    ServerInfo, SessionArchive, SessionArchiveImportRequest, SessionArchiveImportResult, SkillInfo,
-    StartTurnRequest, Thread, ThreadActivity, ThreadId, ToolCatalogResponse, ToolSettingsUpdate,
-    Turn, TurnId, UpdateThreadRequest, WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY,
-    WorkflowId, WorkflowRun, WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest,
-    WorkspaceCreateRequest, WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse,
-    WorkspaceRefsResponse, WorkspaceRemoveRequest, WorkspaceResetRequest,
-    WorkspaceResolveRefRequest, WorkspaceResolveRefResponse,
+    ServerInfo, SessionArchive, SessionArchiveImportRequest, SessionArchiveImportResult,
+    ShellCommandInfo, ShellCommandOutput, SkillInfo, StartTurnRequest, Thread, ThreadActivity,
+    ThreadId, ToolCatalogResponse, ToolSettingsUpdate, Turn, TurnId, UpdateThreadRequest,
+    WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY, WorkflowId, WorkflowRun,
+    WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest, WorkspaceCreateRequest,
+    WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse, WorkspaceRefsResponse,
+    WorkspaceRemoveRequest, WorkspaceResetRequest, WorkspaceResolveRefRequest,
+    WorkspaceResolveRefResponse,
 };
 use haarness_pty::{PtyManager, PtySubscription};
 use haarness_workflow_catalog::{CatalogError, WorkflowCatalog};
@@ -144,6 +145,10 @@ pub async fn serve_with_host(
     .await
 }
 
+/// The output files of gone processes' background commands are swept once
+/// per process, by the first server it starts.
+static SWEPT_COMMAND_FILES: std::sync::Once = std::sync::Once::new();
+
 // Retain the same async startup API as serve for existing callers.
 #[allow(clippy::unused_async)]
 pub async fn serve_with_access(
@@ -165,6 +170,20 @@ pub async fn serve_with_access(
                 .map_or(0, |workflows| workflows.pending_deliveries(thread))
         }));
     }
+    // Output files of commands in the background that a gone process left
+    // (a crash, more output than memory kept): once per process.
+    SWEPT_COMMAND_FILES.call_once(|| {
+        let folder = crate::tools::tool_output_dir();
+        tokio::task::spawn_blocking(move || {
+            let removed = crate::shell::sweep_background_files(&folder);
+            if removed > 0 {
+                tracing::info!(
+                    removed,
+                    "removed output files of commands a gone process left"
+                );
+            }
+        });
+    });
     let language = state.language.clone();
     let ptys = Arc::new(PtyManager::new(
         state.workspace.clone(),
@@ -259,7 +278,22 @@ pub async fn serve_with_access(
         )
         .route(
             "/threads/{id}/commands",
-            post(execute_command).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+            post(execute_command)
+                .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
+                .get(list_shell_commands),
+        )
+        .route(
+            "/threads/{id}/commands/background",
+            post(background_shell_commands),
+        )
+        .route("/threads/{id}/commands/{command}", get(get_shell_command))
+        .route(
+            "/threads/{id}/commands/{command}/output",
+            get(read_shell_command_output),
+        )
+        .route(
+            "/threads/{id}/commands/{command}/stop",
+            post(stop_shell_command),
         )
         .route(
             "/threads/{id}/input",
@@ -298,6 +332,7 @@ pub async fn serve_with_access(
         .merge(crate::browser::routes())
         .route("/session-archives/import", post(import_session_archive))
         .route("/turns/active", get(active_turns))
+        .route("/commands/active", get(active_shell_commands))
         .route("/turns/{id}", get(get_turn))
         .route("/turns/{id}/interrupt", post(interrupt_turn))
         .route("/turns/{id}/wait", get(wait_turn))
@@ -810,6 +845,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             haarness_protocol::RESOURCE_MENTIONS_CAPABILITY.into(),
             PTY_CAPABILITY.into(),
             SESSION_ARCHIVE_CAPABILITY.into(),
+            haarness_protocol::BACKGROUND_COMMANDS_CAPABILITY.into(),
         ]
         .into_iter()
         .chain(
@@ -979,6 +1015,7 @@ async fn reset_workspace(
     Json(request): Json<WorkspaceResetRequest>,
 ) -> ApiResult<Json<WorkspaceOperationResponse>> {
     let manager = workspace_manager(&state)?;
+    stop_commands_in_workspace(&state, &manager, &reference).await;
     let response =
         tokio::task::spawn_blocking(move || manager.reset_worktree(&reference, &request))
             .await
@@ -993,12 +1030,35 @@ async fn remove_workspace(
     Json(request): Json<WorkspaceRemoveRequest>,
 ) -> ApiResult<Json<WorkspaceOperationResponse>> {
     let manager = workspace_manager(&state)?;
+    stop_commands_in_workspace(&state, &manager, &reference).await;
     let response =
         tokio::task::spawn_blocking(move || manager.remove_worktree(&reference, &request))
             .await
             .map_err(|error| CoreError::Storage(error.to_string()))?
             .map_err(workspace_api_error)?;
     Ok(Json(response))
+}
+
+/// A worktree about to be reset or removed: the agents' commands of this
+/// server that run in it stop first, so none holds or writes files in it.
+async fn stop_commands_in_workspace(
+    state: &ServerState,
+    manager: &Arc<WorkspaceManager>,
+    reference: &str,
+) {
+    let (manager, reference) = (Arc::clone(manager), reference.to_owned());
+    if let Ok(Ok(workspace)) = tokio::task::spawn_blocking(move || manager.get(&reference)).await {
+        let stopped = state
+            .runtime
+            .stop_commands_in(std::path::Path::new(&workspace.path))
+            .await;
+        if stopped > 0 {
+            tracing::info!(
+                stopped,
+                "stopped commands running in a worktree being changed"
+            );
+        }
+    }
 }
 
 async fn cleanup_workspace(
@@ -2847,6 +2907,79 @@ async fn promote_background_tasks(
             .promote_subagents(id, query.child_thread_id)
             .await?,
     ))
+}
+/// The agents' shell commands of a chat and the chats under it: running
+/// ones first, then those that ended in the last ten minutes.
+async fn list_shell_commands(
+    State(state): State<ServerState>,
+    Path(id): Path<ThreadId>,
+) -> ApiResult<Json<Vec<ShellCommandInfo>>> {
+    Ok(Json(state.runtime.shell_commands(id).await?))
+}
+async fn get_shell_command(
+    State(state): State<ServerState>,
+    Path((id, command)): Path<(ThreadId, String)>,
+) -> ApiResult<Json<ShellCommandInfo>> {
+    Ok(Json(state.runtime.shell_command(id, &command).await?))
+}
+/// A page of a command's output: from `cursor` (its start when absent), or
+/// with `tail=true` its last `limit` bytes; `limit` defaults to 64 KiB and
+/// is at most 1 MiB.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShellCommandOutputQuery {
+    cursor: Option<u64>,
+    limit: Option<u64>,
+    #[serde(default)]
+    tail: bool,
+}
+async fn read_shell_command_output(
+    State(state): State<ServerState>,
+    Path((id, command)): Path<(ThreadId, String)>,
+    Query(query): Query<ShellCommandOutputQuery>,
+) -> ApiResult<Json<ShellCommandOutput>> {
+    Ok(Json(
+        state
+            .runtime
+            .shell_command_output(id, &command, query.cursor, query.limit, query.tail)
+            .await?,
+    ))
+}
+/// Stop a command for a person; repeating it changes nothing.
+async fn stop_shell_command(
+    State(state): State<ServerState>,
+    Path((id, command)): Path<(ThreadId, String)>,
+) -> ApiResult<Json<ShellCommandInfo>> {
+    Ok(Json(state.runtime.stop_shell_command(id, &command).await?))
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackgroundCommandsQuery {
+    command_id: Option<String>,
+}
+/// Send a chat tree's running foreground commands, or the one named, to the
+/// background. Subagents move with `/background`.
+async fn background_shell_commands(
+    State(state): State<ServerState>,
+    Path(id): Path<ThreadId>,
+    Query(query): Query<BackgroundCommandsQuery>,
+) -> ApiResult<Json<Vec<ShellCommandInfo>>> {
+    // A refusal is a sentence a client shows as it is.
+    state
+        .runtime
+        .background_shell_commands(id, query.command_id.as_deref())
+        .await
+        .map(Json)
+        .map_err(|error| match error {
+            CoreError::Conflict(message) => {
+                ApiFailure(CoreError::Conflict(message.clone()), Some(message))
+            }
+            other => other.into(),
+        })
+}
+/// Running commands of every chat, as `/turns/active` lists turns.
+async fn active_shell_commands(State(state): State<ServerState>) -> Json<Vec<ShellCommandInfo>> {
+    Json(state.runtime.active_shell_commands())
 }
 /// `resume=true` is the interactive Stop: steering the agent has not read yet
 /// gets an answer instead of being dropped. Programmatic stops omit it.

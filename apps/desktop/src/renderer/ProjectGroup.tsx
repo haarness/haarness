@@ -818,6 +818,7 @@ export function SessionList(props: {
                 aria-description={
                   [
                     row().waiting && t(row().waiting),
+                    !row().waiting && !row().running && row().background && t("Working in background"),
                     !props.project && !props.location
                       ? t("Project {name}", { name: place()?.text ?? "" })
                       : "",
@@ -845,6 +846,7 @@ export function SessionList(props: {
                       classList={{
                         running: !row().waiting && row().running,
                         waiting: !!row().waiting,
+                        background: !row().waiting && !row().running && row().background,
                       }}
                       aria-hidden="true"
                     />
@@ -1162,6 +1164,7 @@ function ScheduledSessions(props: { rows: Conversation[] }) {
                                   classList={{
                                     running: !row().waiting && row().running,
                                     waiting: !!row().waiting,
+                                    background: !row().waiting && !row().running && row().background,
                                   }}
                                   aria-hidden="true"
                                 />
