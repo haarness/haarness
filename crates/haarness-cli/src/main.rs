@@ -512,11 +512,13 @@ struct RunArgs {
     #[arg(long, value_enum, default_value_t = RunFormat::Default)]
     format: RunFormat,
     /// Wait for background subagents, workflows and shell commands launched
-    /// by the model, and for what the agent says when they end. Shell
-    /// commands the agent starts in the background stop at
-    /// execution.shell_timeout_ms; a run that stops waiting (the timeout,
-    /// Ctrl-C) stops them. Without this flag, they continue on the
-    /// workspace server.
+    /// by the model, and for what the agent says when they end. The shell
+    /// commands waited for are those started in the chat once the run's turn
+    /// began (with --session or --continue, others' too: give
+    /// --background-timeout-ms there). Shell commands the agent starts in the
+    /// background stop at execution.shell_timeout_ms; a run that stops
+    /// waiting (the timeout, Ctrl-C) stops those it waited for. Without this
+    /// flag, they continue on the workspace server.
     #[arg(long)]
     wait_background: bool,
     /// Maximum background wait in milliseconds; implies --wait-background.
