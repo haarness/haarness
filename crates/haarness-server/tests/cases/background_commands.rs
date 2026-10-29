@@ -1064,3 +1064,48 @@ async fn bash_output_and_bash_stop_are_offered_only_where_bash_is() {
     assert!(engine.disables_tool("bash_output") && engine.disables_tool("bash_stop"));
     assert!(!haarness_core::PermissionEngine::build_defaults().disables_tool("bash_output"));
 }
+
+#[tokio::test]
+async fn archiving_a_chat_while_a_command_stops_tells_nobody() {
+    use haarness_protocol::ShellCommandEndedBy;
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_stop_grace_ms = 1_500;
+    });
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"trap '' INT; printf ready; sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let id = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    command_until(&runtime, thread, &id, |info| info.output_bytes > 0).await;
+    // A person stops it; it ignores the interrupt, and the chat is
+    // archived before the terminate.
+    runtime.stop_shell_command(thread, &id).await.unwrap();
+    runtime
+        .update_thread(
+            thread,
+            haarness_protocol::UpdateThreadRequest {
+                title: None,
+                archived: Some(true),
+                agent: None,
+                provider: None,
+                model: None,
+                ultracode: None,
+            },
+        )
+        .await
+        .unwrap();
+    let ended = command_until(&runtime, thread, &id, |info| !info.state.is_live()).await;
+    assert_eq!(ended.ended_by, Some(ShellCommandEndedBy::ChatStopped));
+    assert!(!ended.delivers_notice);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(notices(&runtime, thread).await.is_empty());
+}
