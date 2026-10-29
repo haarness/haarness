@@ -468,7 +468,7 @@ impl ManagementService {
             changed |= check("global").await;
             let refreshed = tokio::task::spawn_blocking({
                 let data = data.clone();
-                move || plugins::marketplace_update_all(&data, true)
+                move || plugins::in_background(|| plugins::marketplace_update_all(&data, true))
             })
             .await
             .unwrap_or_default();
