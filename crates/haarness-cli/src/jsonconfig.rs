@@ -3581,6 +3581,7 @@ mod tests {
         let every = r#"{"compatibility":{"claude_code":{"instructions":true,"agents":true,"skills":true,"commands":true}}}"#;
         let none = r#"{"compatibility":{"claude_code":{"instructions":false,"agents":false,"skills":false,"commands":false}}}"#;
         let master_off = r#"{"compatibility":{"claude_code":{"enabled":false}}}"#;
+        let every_enabled = r#"{"compatibility":{"claude_code":{"enabled":true,"instructions":true,"agents":true,"skills":true,"commands":true}}}"#;
         // (the person's setting, the project's, whether the person's files
         // load, whether the project's do)
         for (person, theirs, home_files, project_files) in [
@@ -3591,6 +3592,10 @@ mod tests {
             ("{}", every, false, true),
             (every, every, true, true),
             ("{}", none, false, false),
+            // The person's master switch carries over to a project, which
+            // turns it back on for its own files only.
+            (master_off, every, false, false),
+            (master_off, every_enabled, false, true),
             // A project that says nothing reads as the person chose.
             (every, "{}", true, true),
             ("{}", "{}", false, false),
