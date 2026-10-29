@@ -105,9 +105,13 @@ pub struct ProcessEnd {
     pub exit_code: Option<i32>,
     /// The signal that ended it (`SIGTERM`).
     pub signal: Option<String>,
-    /// Processes it started were still running after it ended, and were
-    /// stopped with it (`server &` in a command).
+    /// Processes it started were still running after it ended (`server &`
+    /// in a command), holding its output open, and were stopped with it.
     pub leftovers: bool,
+    /// Some of them were out of reach (a process in a session of its own)
+    /// and still held its output open after the stop: they run on, and
+    /// their output is no longer read.
+    pub leftovers_running: bool,
     /// Reading its output failed; it was stopped.
     pub error: Option<String>,
 }

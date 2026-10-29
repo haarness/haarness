@@ -453,9 +453,11 @@ carries `{id, size}`, at most once a second per command, when it printed more
 
 The result of every agent `bash` call carries `metadata.command`:
 `{id, background, startedAt}` (a call that ran out of time or was stopped
-answers with an error instead; its command is still listed), and `metadata.leftovers: true` when the command
-ended while processes it started (`server &`) still ran and were stopped with
-it; any `bash` call, a person's too, no longer waits for those. Once a command
+answers with an error instead; its command is still listed), and
+`metadata.leftovers: true` when the command ended while processes it started
+(`server &`) still held its output open and were stopped with it, with
+`leftoversRunning: true` too when some were out of its process group's reach
+and run on; any `bash` call, a person's too, no longer waits for those. Once a command
 has ended, `deliversNotice` says whether its end was told to its chat: not for
 one the agent stopped itself, or one stopped with its chat, its subagent's turn
 or Haarness. Hooks get `Notification` events `command_moved` (with

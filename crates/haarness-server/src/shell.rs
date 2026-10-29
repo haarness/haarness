@@ -245,6 +245,7 @@ async fn pump(mut pump: Pump) {
     let mut heard_at = tokio::time::Instant::now();
     let mut stopped_leftovers: Option<tokio::time::Instant> = None;
     let mut leftovers = false;
+    let mut leftovers_running = false;
     let mut failure = None;
     while out_open || err_open || status.is_none() {
         // Quiet counts from the command's end or its latest output after
@@ -292,6 +293,7 @@ async fn pump(mut pump: Pump) {
                 if stopped_leftovers.is_some() {
                     // Something outside the group still holds the output
                     // open (a process that left it): stop reading.
+                    leftovers_running = true;
                     break;
                 }
                 leftovers = true;
@@ -351,6 +353,7 @@ async fn pump(mut pump: Pump) {
         exit_code,
         signal,
         leftovers,
+        leftovers_running,
         error: failure,
     }));
 }
@@ -502,6 +505,7 @@ async fn ended_output(
     let stdout_text = String::from_utf8_lossy(stdout_kept);
     let stdout_lines = stdout_text.lines().count();
     let mut metadata = json!({"exit":exit,"truncated":truncated,"stdout": if stdout_lines > SHOWN_LINES { last_lines(&stdout_text, SHOWN_LINES) } else { stdout_text.clone().into_owned() }});
+    let agents = command.is_some();
     if let Some(command) = command {
         metadata["command"] = command;
     }
@@ -542,9 +546,20 @@ async fn ended_output(
     );
     if end.leftovers {
         metadata["leftovers"] = json!(true);
-        text.push_str(
-            "\n(It left processes running, started with & or in the background of the shell, and they were stopped when it ended. For a server or another process that should keep running, use run_in_background.)",
-        );
+        text.push_str(if end.leftovers_running {
+            "\n(It left processes running that held its output open after it ended. Some were out of its reach and still run; their output is no longer read.)"
+        } else {
+            "\n(It left processes running that held its output open after it ended, started with & or in the background of the shell; they were stopped with it.)"
+        });
+        if end.leftovers_running {
+            metadata["leftoversRunning"] = json!(true);
+        }
+        // Only the agent can run it otherwise.
+        if agents {
+            text.push_str(
+                " For a server or another process that should keep running, use run_in_background.",
+            );
+        }
     }
     ToolOutput { text, metadata }
 }
@@ -891,6 +906,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leftovers_that_escape_the_command_are_said_to_run_on_and_a_person_gets_no_advice() {
+        let root = fixture();
+        let pid = root.join("escaped.pid");
+        // A child in a session of its own (`ssh -f`, a daemon) that holds
+        // the command's output open: out of reach of its process group.
+        let escape = format!(
+            "/usr/bin/python3 -c 'import os,time\nif os.fork()==0:\n    os.setsid(); open(\"{}\",\"w\").write(str(os.getpid())); time.sleep(20)'; echo parent-done",
+            pid.display()
+        );
+        let output = run(
+            &escape,
+            &root,
+            0,
+            &CancellationToken::new(),
+            &root,
+            &BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let escaped = std::fs::read_to_string(&pid).unwrap();
+        let _ = std::process::Command::new("kill")
+            .args(["-9", escaped.trim()])
+            .status();
+        assert_eq!(output.metadata["leftovers"], true);
+        assert_eq!(output.metadata["leftoversRunning"], true, "{}", output.text);
+        assert!(output.text.contains("still run"), "{}", output.text);
+        assert!(!output.text.contains("were stopped"), "{}", output.text);
+        // A person's own command gets no advice meant for the agent.
+        assert!(
+            !output.text.contains("run_in_background"),
+            "{}",
+            output.text
+        );
+        let output = run(
+            "sleep 30 & echo started",
+            &root,
+            0,
+            &CancellationToken::new(),
+            &root,
+            &BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(output.text.contains("were stopped"), "{}", output.text);
+        assert!(
+            !output.text.contains("run_in_background"),
+            "{}",
+            output.text
+        );
+        assert!(output.metadata.get("leftoversRunning").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn a_process_that_keeps_printing_after_the_command_ended_is_stopped() {
         let root = fixture();
         let output = tokio::time::timeout(
@@ -973,7 +1044,7 @@ mod tests {
             .success();
         assert!(!alive, "sleep {pid} still runs");
         assert_eq!(output.metadata["leftovers"], true);
-        assert!(output.text.contains("run_in_background"), "{}", output.text);
+        assert!(output.text.contains("were stopped"), "{}", output.text);
         std::fs::remove_dir_all(root).unwrap();
     }
 
