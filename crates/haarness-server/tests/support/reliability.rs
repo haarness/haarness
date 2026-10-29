@@ -422,14 +422,15 @@ async fn reliability_connection_cut_before_any_output_sends_the_request_again() 
         finished.error
     );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
-    let requests = provider.requests.lock().unwrap();
-    // Nothing reached the person, so the same request is sent again.
-    assert!(!recovery_note(&requests[1]));
-    assert_eq!(
-        serde_json::to_value(&requests[0].messages).unwrap(),
-        serde_json::to_value(&requests[1].messages).unwrap()
-    );
-    drop(requests);
+    {
+        let requests = provider.requests.lock().unwrap();
+        // Nothing reached the person, so the same request is sent again.
+        assert!(!recovery_note(&requests[1]));
+        assert_eq!(
+            serde_json::to_value(&requests[0].messages).unwrap(),
+            serde_json::to_value(&requests[1].messages).unwrap()
+        );
+    }
     let items = runtime.items(thread.id, None).await.unwrap();
     assert!(
         !items
