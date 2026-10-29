@@ -4090,8 +4090,8 @@ const RUNS_IN_SHELL: &[&str] = &["time", "trap", "mapfile", "readarray", "enable
 ///
 /// Only the `cd`s and `pushd`s at the start of the chain are followed, each
 /// plain: one folder [`plain_path`] takes that is a folder now (not a `pushd
-/// +N` place in the folder stack), with no assignment, substitution or word
-/// after a redirect. After them, every step is read from the folder they
+/// +N` place in the folder stack), with no assignment, substitution (a
+/// redirect's included) or word after a redirect. After them, every step is read from the folder they
 /// reached while each step before it is a command that cannot move the
 /// shell: a program written as a literal name that is not a builtin
 /// [`moves_shell`] or [`RUNS_IN_SHELL`] names. Any other step (a pipeline, a
@@ -4136,12 +4136,15 @@ fn chain_folders(
             }
         }
         let words = words(command, source);
+        // A substitution, also one a redirect writes to (`> >(…)`), runs
+        // before the step does, and may make a link where it goes.
         let plain = command
             .named_children(&mut command.walk())
             .all(|child| child.kind() != "variable_assignment")
             && !has_substitution(command)
             && redirects.iter().all(|redirect| {
                 redirect.kind() == "file_redirect"
+                    && !has_substitution(*redirect)
                     && redirect
                         .children_by_field_name("destination", &mut redirect.walk())
                         .count()
@@ -5873,6 +5876,8 @@ mod regression {
             "cd sub && $run && cat ../x",
             "pushd sub && pushd +1 && cat ../x",
             "cd sub && popd && cat ../x",
+            "cd sub > >(cat) && cat ../x",
+            "cd sub 2> \"$(mktemp)\" && cat ../x",
             "cd sub && cat ../x | head",
             "cd sub || cat ../x",
             "env cd sub && cat ../x",
@@ -7961,6 +7966,10 @@ mod wrappers {
             (
                 "A=1 env -C src cat ../README.md",
                 "A=1 cd src && cat ../README.md",
+            ),
+            (
+                "env -C src cat ../README.md > >(cat)",
+                "cd src > >(cat) && cat ../README.md",
             ),
         ] {
             let analysis = analyze(wrapped, &workspace);
