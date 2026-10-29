@@ -1536,8 +1536,8 @@ async fn parity_webfetch_redirects_meet_the_rules_in_turns_and_direct_calls() {
     let runtime = runtime(&fixture.0, config, None);
     let thread = echo_thread(&runtime).await;
     let stopped = format!(
-        "redirects (HTTP 302) to http://{address}/admin/x, which the permission rules do not let \
-         this fetch follow"
+        "redirects (HTTP 302) to http://{address}/admin/x, which a permission rule denies, so the \
+         redirect was not followed."
     );
     for next in ["/admin/x", "/home"] {
         let url = format!("http://{address}/login?next={next}");
