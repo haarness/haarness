@@ -1584,3 +1584,58 @@ async fn parity_webfetch_redirects_meet_the_rules_in_turns_and_direct_calls() {
     );
     site.abort();
 }
+
+#[tokio::test]
+async fn parity_searches_leave_out_files_a_read_rule_denies_in_turns_and_direct_calls() {
+    let fixture = Fixture::new();
+    for (file, text) in [
+        ("private/key.txt", "needle private"),
+        ("public/readme.md", "needle public"),
+    ] {
+        let path = fixture.0.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let mut config = RuntimeConfig::default();
+    config.base_rules.push(rule("read:private/*", D::Deny));
+    let runtime = runtime(&fixture.0, config, None);
+    let thread = echo_thread(&runtime).await;
+    for (name, arguments, found) in [
+        (
+            "grep",
+            json!({"pattern": "needle", "path": "."}),
+            "public/readme.md:1:needle public",
+        ),
+        ("glob", json!({"pattern": "**/*.*"}), "public/readme.md"),
+    ] {
+        let turn = send(&runtime, &thread, &format!("!tool {name} {arguments}")).await;
+        assert_success(&runtime, &thread, &turn).await;
+        let (turned, _) = tool_outputs(&runtime, &thread).await.pop().unwrap();
+        // A workflow's own search, outside a turn, meets the same rules.
+        let direct = runtime
+            .run_direct_tool(thread.id, name, arguments, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!direct.is_error, "{}", direct.output.text);
+        for output in [turned, direct.output.text] {
+            assert!(output.contains(found), "{name}: {output}");
+            assert!(!output.contains("key.txt"), "{name}: {output}");
+            assert!(
+                output.ends_with("(skipped 1 file a read rule denies)"),
+                "{name}: {output}"
+            );
+        }
+    }
+    // A direct read of the file itself is refused before it runs.
+    let read = runtime
+        .run_direct_tool(
+            thread.id,
+            "read",
+            json!({"path": "private/key.txt"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(read.is_error, "{}", read.output.text);
+    assert!(!read.output.text.contains("needle"), "{}", read.output.text);
+}
