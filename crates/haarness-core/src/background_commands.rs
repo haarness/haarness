@@ -631,8 +631,20 @@ impl CommandEntry {
             let mut stopping = self.stopping.lock();
             match *stopping {
                 // A stop is under way: a kill speeds it up, one signal is
-                // sent, anything else waits for it.
+                // sent, anything else waits for it. A stop of everything
+                // (the chat's, Haarness's) takes it over, so nobody is told
+                // of an end it decided.
                 Some(cause) if !cause.soft => {
+                    if matches!(
+                        ended_by,
+                        ShellCommandEndedBy::ChatStopped | ShellCommandEndedBy::Shutdown
+                    ) {
+                        *stopping = Some(StopCause {
+                            ended_by,
+                            state: cause.state,
+                            soft: false,
+                        });
+                    }
                     match sequence {
                         StopSequence::Now => self.process.control.signal(StopSignal::Kill),
                         StopSequence::Only(signal) => self.process.control.signal(signal),
