@@ -3109,7 +3109,7 @@ impl Tool for BuiltinTool {
                 let rules = context
                     .invoker
                     .as_ref()
-                    .and_then(|invoker| invoker.read_rules());
+                    .and_then(|invoker| invoker.search_read_rules());
                 let secrets = SecretFilter::new(&context.workspace, requested, &root, rules);
                 let named = context.workspace.clone();
                 let cancel = context.cancel.clone();
@@ -3158,7 +3158,7 @@ impl Tool for BuiltinTool {
                 let rules = context
                     .invoker
                     .as_ref()
-                    .and_then(|invoker| invoker.read_rules());
+                    .and_then(|invoker| invoker.search_read_rules());
                 let secrets = SecretFilter::new(&context.workspace, requested, &root, rules);
                 // The walker searches a file it is given whatever its filters
                 // say, so a secret-named or denied one, or a link to one, is

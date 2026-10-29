@@ -1695,3 +1695,66 @@ async fn parity_searches_leave_out_files_an_active_skill_denies_reading() {
         );
     }
 }
+
+#[tokio::test]
+async fn parity_a_command_that_denies_reading_still_brings_its_own_files() {
+    let fixture = Fixture::new();
+    std::fs::create_dir_all(fixture.0.join("src")).unwrap();
+    std::fs::write(fixture.0.join("src/lib.txt"), "MARK_LIB_CONTENT needle").unwrap();
+    let mut config = RuntimeConfig::default();
+    for (name, template) in [
+        ("given", "Review only this file: @src/lib.txt".to_owned()),
+        (
+            "search-none",
+            format!("!tool grep {}", json!({"pattern": "needle", "path": "."})),
+        ),
+    ] {
+        config.commands.push(haarness_protocol::CommandInfo {
+            execution: haarness_protocol::DefinitionExecution {
+                disallowed_tools: vec!["Read".into()],
+                ..haarness_protocol::DefinitionExecution::default()
+            },
+            name: name.into(),
+            description: "review only the files given".into(),
+            source: None,
+            agent: None,
+            model: None,
+            argument_hint: None,
+            template,
+            plugin: None,
+        });
+    }
+    let runtime = runtime(&fixture.0, config, None);
+    let thread = echo_thread(&runtime).await;
+    let run = |name: &'static str| {
+        let runtime = &runtime;
+        let thread = &thread;
+        async move {
+            let turn = runtime
+                .start_turn(
+                    thread.id,
+                    StartTurnRequest {
+                        command: Some(name.into()),
+                        ..turn_request("")
+                    },
+                )
+                .await
+                .unwrap();
+            assert_success(runtime, thread, &turn).await;
+        }
+    };
+    // The command's own `@` file comes with it, though it takes reading
+    // away from the turn.
+    run("given").await;
+    let items = serde_json::to_string(&runtime.items(thread.id, None).await.unwrap()).unwrap();
+    assert!(items.contains("MARK_LIB_CONTENT"), "{items}");
+    assert!(!items.contains("File context omitted"), "{items}");
+    // A search in such a turn finds nothing to read.
+    run("search-none").await;
+    let (output, _) = tool_outputs(&runtime, &thread).await.pop().unwrap();
+    assert!(!output.contains("lib.txt"), "{output}");
+    assert!(
+        output.ends_with("(skipped 1 file a read rule denies)"),
+        "{output}"
+    );
+}

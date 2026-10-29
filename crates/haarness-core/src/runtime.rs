@@ -7120,6 +7120,9 @@ impl crate::ToolInvoker for TurnToolInvoker {
         Some(self.runner.workspace.to_string_lossy().into_owned())
     }
     fn read_rules(&self) -> Option<PermissionEngine> {
+        Some(self.runner.permission_engine_for_tool(&self.agent, "read"))
+    }
+    fn search_read_rules(&self) -> Option<PermissionEngine> {
         Some(with_skill_rules(
             self.runner.permission_engine_for_tool(&self.agent, "read"),
             self.runner.skill_rules.lock().clone(),
