@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { commandBody, messageBody } from "../src/renderer/send-request";
 
-test("a message says a person can stop the turn it starts, with what it always sent", () => {
+test("a message says a person can stop the turn it starts and follows its background work, with what it always sent", () => {
   assert.deepEqual(
     messageBody({
       delivery: "steer",
@@ -22,6 +22,7 @@ test("a message says a person can stop the turn it starts, with what it always s
       requestId: "0190-request",
       reasoningEffort: "high",
       attended: true,
+      followsBackground: true,
     },
   );
   const queued = messageBody({
@@ -32,11 +33,13 @@ test("a message says a person can stop the turn it starts, with what it always s
     requestId: "0190-queued",
   });
   assert.equal(queued.attended, true);
+  // Kept with a queued message until it runs.
+  assert.equal(queued.followsBackground, true);
   assert.equal("reasoningEffort" in queued, false);
   assert.equal("resources" in queued, false);
 });
 
-test("a slash command says a person can stop the turn it starts", () => {
+test("a slash command says a person can stop the turn it starts and follows its background work", () => {
   assert.deepEqual(
     commandBody({
       name: "test",
@@ -50,6 +53,7 @@ test("a slash command says a person can stop the turn it starts", () => {
       arguments: "--watch",
       requestId: "0190-command",
       attended: true,
+      followsBackground: true,
     },
   );
   const reasoned = commandBody({
