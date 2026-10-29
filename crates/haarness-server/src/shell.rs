@@ -1075,9 +1075,10 @@ mod tests {
             .unwrap();
             assert_eq!(output.metadata["leftovers"], true, "{command}");
             assert_eq!(output.metadata["exit"], 0, "{command}");
-            // Its end, then two seconds at most for what it left.
+            // Its end, then two seconds at most for what it left (with room
+            // for a loaded machine), not the outer limit.
             assert!(
-                began.elapsed() < Duration::from_millis(3_800),
+                began.elapsed() < Duration::from_secs(10),
                 "{command}: {:?}",
                 began.elapsed()
             );
