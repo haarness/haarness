@@ -512,6 +512,34 @@ impl CommandPolicy {
     }
 }
 
+/// Why a command cannot move to the background, in words a client shows
+/// as they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MoveRefusal {
+    Ended,
+    InBackground,
+    Subagent,
+    /// Its chat runs this many commands there already.
+    AtCap(usize),
+}
+
+impl std::fmt::Display for MoveRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ended => formatter.write_str("That command has already ended."),
+            Self::InBackground => {
+                formatter.write_str("That command already runs in the background.")
+            }
+            Self::Subagent => formatter.write_str("A subagent's command stays with its subagent."),
+            Self::AtCap(running) => write!(
+                formatter,
+                "This chat already runs {running} command{} in the background.",
+                if *running == 1 { "" } else { "s" }
+            ),
+        }
+    }
+}
+
 /// What stops a command, once something asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StopCause {
@@ -603,35 +631,42 @@ impl CommandEntry {
         self.info()
     }
 
-    /// Whether its chat runs as many commands in the background as it may.
-    fn chat_at_cap(&self) -> bool {
+    /// How many commands its chat runs in the background, when that is as
+    /// many as it may.
+    fn chat_at_cap(&self) -> Option<usize> {
         let cap = self.policy.per_chat;
-        let Some(listed) = self.listed.upgrade() else {
-            return false;
-        };
+        let listed = self.listed.upgrade()?;
         let (id, thread) = {
             let info = self.info.borrow();
             (info.id.clone(), info.thread_id)
         };
-        cap > 0
-            && listed
-                .live(|entry| {
-                    let info = entry.info.borrow();
-                    info.background && info.thread_id == thread && info.id != id
-                })
-                .len()
-                >= cap
+        let running = listed
+            .live(|entry| {
+                let info = entry.info.borrow();
+                info.background && info.thread_id == thread && info.id != id
+            })
+            .len();
+        (cap > 0 && running >= cap).then_some(running)
     }
 
-    /// Send it to the background while it runs in the foreground. Answers
-    /// whether it moved. One whose chat runs as many commands in the
+    /// Send it to the background while it runs in the foreground, or say
+    /// why it cannot go. One whose chat runs as many commands in the
     /// background as it may stays in the foreground; when its time to move
     /// came (`Limit`), it gets the deadline it would have had otherwise.
-    pub(crate) fn move_to_background(&self, by: ShellCommandMovedBy) -> bool {
+    pub(crate) fn move_to_background(&self, by: ShellCommandMovedBy) -> Result<(), MoveRefusal> {
         if by == ShellCommandMovedBy::Person && !self.policy.movable {
-            return false;
+            return Err(MoveRefusal::Subagent);
         }
-        if self.chat_at_cap() {
+        {
+            let info = self.info.borrow();
+            if info.background {
+                return Err(MoveRefusal::InBackground);
+            }
+            if info.state != ShellCommandState::Running {
+                return Err(MoveRefusal::Ended);
+            }
+        }
+        if let Some(running) = self.chat_at_cap() {
             if by == ShellCommandMovedBy::Limit {
                 let held = self.policy.held_deadline;
                 self.info.send_if_modified(|info| {
@@ -652,12 +687,17 @@ impl CommandEntry {
                     self.publish();
                 }
             }
-            return false;
+            return Err(MoveRefusal::AtCap(running));
         }
         let now = Utc::now();
-        let mut moved = false;
+        let mut refused = None;
         self.info.send_if_modified(|info| {
-            if info.background || info.state != ShellCommandState::Running {
+            if info.background {
+                refused = Some(MoveRefusal::InBackground);
+                return false;
+            }
+            if info.state != ShellCommandState::Running {
+                refused = Some(MoveRefusal::Ended);
                 return false;
             }
             info.background = true;
@@ -666,25 +706,26 @@ impl CommandEntry {
             info.moves_at = None;
             info.stops_at = self.policy.stops_at(info.started_at, Some(now));
             info.delivers_notice = self.policy.delivers_notice;
-            moved = true;
             true
         });
-        if moved {
-            self.process.output.limit_saving(OUTPUT_SAVED_LIMIT);
-            self.wake.notify_one();
+        if let Some(refused) = refused {
+            return Err(refused);
         }
-        moved
+        self.process.output.limit_saving(OUTPUT_SAVED_LIMIT);
+        self.wake.notify_one();
+        Ok(())
     }
 
-    /// Send it to the background for `by`, telling clients and its chat.
-    /// Answers whether it moved.
-    pub(crate) async fn send_to_background(&self, by: ShellCommandMovedBy) -> bool {
-        if !self.move_to_background(by) {
-            return false;
-        }
+    /// Send it to the background for `by`, telling clients and its chat,
+    /// or say why it cannot go.
+    pub(crate) async fn send_to_background(
+        &self,
+        by: ShellCommandMovedBy,
+    ) -> Result<(), MoveRefusal> {
+        self.move_to_background(by)?;
         self.publish();
         self.hooks.backgrounded(self, Some(by)).await;
-        true
+        Ok(())
     }
 
     /// Stop it, by `ended_by`. Answers whether a stop began (false when it
@@ -855,7 +896,10 @@ impl CommandEntry {
                     continue;
                 }
                 if info.moves_at.is_some_and(|at| at <= now)
-                    && self.send_to_background(ShellCommandMovedBy::Limit).await
+                    && self
+                        .send_to_background(ShellCommandMovedBy::Limit)
+                        .await
+                        .is_ok()
                 {
                     continue;
                 }

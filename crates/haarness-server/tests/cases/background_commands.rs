@@ -1345,3 +1345,129 @@ async fn a_command_held_at_the_cap_says_so_and_a_deadline_before_the_move_wins()
         began.elapsed()
     );
 }
+
+#[tokio::test]
+async fn a_move_that_cannot_happen_says_why_in_plain_words() {
+    let workspace = Workspace::new();
+    let (runtime, _) = commands_runtime(&workspace.0, |settings| {
+        settings.shell_background_per_chat = 1;
+    });
+    let handle = activity_server(runtime.clone(), None, &workspace.0).await;
+    let base = format!("http://{}", handle.address);
+    let refusal = |path: String| {
+        let base = base.clone();
+        async move {
+            let response = reqwest::Client::new()
+                .post(format!("{base}/v1/{path}"))
+                .bearer_auth("activity-token")
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: Value = response.json().await.unwrap();
+            (
+                status,
+                body["message"].as_str().unwrap_or_default().to_owned(),
+            )
+        }
+    };
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    let server = last_result(&runtime, thread).await.1["command"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let conflict = reqwest::StatusCode::CONFLICT;
+    assert_eq!(
+        refusal(format!(
+            "threads/{thread}/commands/background?commandId={server}"
+        ))
+        .await,
+        (
+            conflict,
+            "That command already runs in the background.".to_owned()
+        )
+    );
+    // A foreground command while the chat is at its cap: moving all moves
+    // nothing, and says why.
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 30"}"#,
+        false,
+    )
+    .await;
+    let held = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(info) = runtime
+                .shell_commands(thread)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|info| !info.background)
+            {
+                return info.id;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        refusal(format!("threads/{thread}/commands/background")).await,
+        (
+            conflict,
+            "This chat already runs 1 command in the background.".to_owned()
+        )
+    );
+    runtime.stop_shell_command(thread, &held).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    command_until(&runtime, thread, &held, |info| !info.state.is_live()).await;
+    assert_eq!(
+        refusal(format!(
+            "threads/{thread}/commands/background?commandId={held}"
+        ))
+        .await,
+        (conflict, "That command has already ended.".to_owned())
+    );
+    runtime.stop_shell_command(thread, &server).await.unwrap();
+    // A subagent's foreground command.
+    let other = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        other,
+        r#"!tool task {"prompt":"!tool bash {\"command\":\"sleep 30\"}","description":"Waits"}"#,
+        true,
+    )
+    .await;
+    let child = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(info) = runtime.shell_commands(other).await.unwrap().pop() {
+                return info.id;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        refusal(format!(
+            "threads/{other}/commands/background?commandId={child}"
+        ))
+        .await,
+        (
+            conflict,
+            "A subagent's command stays with its subagent.".to_owned()
+        )
+    );
+    runtime.interrupt_thread_tree(other).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    handle.shutdown().await.unwrap();
+}

@@ -3884,22 +3884,32 @@ impl AgentRuntime {
         use haarness_protocol::ShellCommandMovedBy;
         if let Some(id) = id {
             let entry = self.shell_command_entry(thread, id).await?;
-            if !entry.send_to_background(ShellCommandMovedBy::Person).await {
-                return Err(CoreError::Conflict(format!(
-                    "Command {id} cannot move to the background: it has ended, already runs there, belongs to a subagent, or its chat runs as many commands there as it may"
-                )));
-            }
+            entry
+                .send_to_background(ShellCommandMovedBy::Person)
+                .await
+                .map_err(|refusal| CoreError::Conflict(refusal.to_string()))?;
             return Ok(vec![entry.info()]);
         }
         let threads = self.command_threads(thread).await?;
         let mut moved = Vec::new();
+        let mut held = None;
         for entry in self.shell_commands.live(|entry| {
             let info = entry.info();
             !info.background && threads.contains(&info.thread_id)
         }) {
-            if entry.send_to_background(ShellCommandMovedBy::Person).await {
-                moved.push(entry.info());
+            match entry.send_to_background(ShellCommandMovedBy::Person).await {
+                Ok(()) => moved.push(entry.info()),
+                Err(refusal @ crate::background_commands::MoveRefusal::AtCap(_)) => {
+                    held = Some(refusal);
+                }
+                // A subagent's or an ended command is left where it is.
+                Err(_) => {}
             }
+        }
+        // Nothing moved because the chat is at its cap: say so, so a
+        // client can tell the person why.
+        if let (true, Some(held)) = (moved.is_empty(), held) {
+            return Err(CoreError::Conflict(held.to_string()));
         }
         Ok(moved)
     }
