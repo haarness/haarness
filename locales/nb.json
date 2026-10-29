@@ -2922,6 +2922,7 @@
   "{count} moved to background · results will return here": "{count} flyttet til bakgrunnen · resultatene kommer tilbake hit",
   "This command can't move to the background": "Denne kommandoen kan ikke flyttes til bakgrunnen",
   "stopped what it left running": "det den lot kjøre, ble stoppet",
+  "left processes running": "etterlot prosesser som kjører",
   "Press Esc again to stop 1 command in background": "Trykk Esc igjen for å stoppe 1 kommando i bakgrunnen",
   "Press Esc again to stop {count} commands in background": "Trykk Esc igjen for å stoppe {count} kommandoer i bakgrunnen",
   "1 tool call": "1 verktøykall",

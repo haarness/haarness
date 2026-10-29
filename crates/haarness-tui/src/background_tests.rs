@@ -533,7 +533,8 @@ async fn background_with_a_command_id_moves_that_command_or_says_why_not() {
     app.execute_command("/background c7", &client)
         .await
         .unwrap();
-    assert_eq!(app.notice, "This command can't move to the background");
+    // The server's own words say why.
+    assert_eq!(app.notice, "it ended");
     assert!(
         requested(&seen)
             .iter()
@@ -1793,4 +1794,98 @@ async fn background_from_a_childs_view_promotes_that_childs_own_subagents_too() 
             "{expected} missing: {lines:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn ctrl_x_at_the_chats_cap_says_the_servers_words() {
+    let thread = fixture_thread();
+    let (client, _) = recording_server(|line, _| {
+        if line.contains("/commands/background") {
+            (
+                "409 Conflict",
+                serde_json::json!({"code": "conflict", "message": "This chat runs 16 commands in the background, as many as it may", "retryable": false})
+                    .to_string(),
+            )
+        } else {
+            ("200 OK", "[]".into())
+        }
+    })
+    .await;
+    let mut app = app_on(&thread, vec![]);
+    app.composer.set_text("draft".into());
+    let action = crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        &client,
+    )
+    .await;
+    assert!(action.is_ok(), "no error card");
+    assert_eq!(
+        app.notice,
+        "This chat runs 16 commands in the background, as many as it may"
+    );
+    assert_eq!(app.composer.text(), "draft");
+}
+
+#[test]
+fn a_person_stopping_a_foreground_command_reads_stopped_and_leftovers_running_say_so() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let call = |sequence, call: &str, command: &str| {
+        message_item_for_turn(
+            sequence,
+            &thread,
+            turn,
+            ItemData::ToolCall {
+                call_id: call.into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({ "command": command }),
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    let result = |sequence, call: &str, output: &str, metadata| {
+        message_item_for_turn(
+            sequence,
+            &thread,
+            turn,
+            ItemData::ToolResult {
+                call_id: call.into(),
+                name: "bash".into(),
+                output: output.into(),
+                is_error: false,
+                metadata,
+            },
+        )
+    };
+    let items = vec![
+        call(1, "call-1", "npm test"),
+        result(
+            2,
+            "call-1",
+            "exit: 130\nrunning…",
+            serde_json::json!({"exit": 130, "stoppedBy": "person",
+                "command": {"id": "c1", "background": false, "startedAt": Utc::now()}}),
+        ),
+        call(3, "call-2", "setsid server &"),
+        result(
+            4,
+            "call-2",
+            "exit: 0\n",
+            serde_json::json!({"exit": 0, "leftovers": true, "leftoversRunning": true,
+                "command": {"id": "c2", "background": false, "startedAt": Utc::now()}}),
+        ),
+    ];
+    let app = app_on(&thread, items);
+    let rows = frame_text(&app, (100, 30));
+    let stopped = row_with(&rows, "bash npm test");
+    assert!(
+        stopped.contains('⊘') && stopped.contains("stopped"),
+        "{stopped}"
+    );
+    assert!(!stopped.contains("exit 130"), "{stopped}");
+    assert!(
+        row_with(&rows, "bash setsid server &").contains("·  left processes running"),
+        "{rows:#?}"
+    );
 }

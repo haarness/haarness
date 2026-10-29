@@ -2922,6 +2922,7 @@
   "{count} moved to background · results will return here": "{count} in den Hintergrund verschoben · die Ergebnisse kommen hierher zurück",
   "This command can't move to the background": "Dieser Befehl kann nicht in den Hintergrund",
   "stopped what it left running": "zurückgelassene Prozesse gestoppt",
+  "left processes running": "hat laufende Prozesse hinterlassen",
   "Press Esc again to stop 1 command in background": "Esc erneut drücken, um 1 Befehl im Hintergrund zu stoppen",
   "Press Esc again to stop {count} commands in background": "Esc erneut drücken, um {count} Befehle im Hintergrund zu stoppen",
   "1 tool call": "1 Tool-Aufruf",

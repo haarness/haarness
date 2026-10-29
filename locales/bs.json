@@ -2922,6 +2922,7 @@
   "{count} moved to background · results will return here": "Premješteno u pozadinu: {count} · rezultati će se vratiti ovdje",
   "This command can't move to the background": "Ova komanda ne može u pozadinu",
   "stopped what it left running": "zaustavljeno ono što je ostavila da radi",
+  "left processes running": "ostavila je pokrenute procese",
   "Press Esc again to stop 1 command in background": "Pritisni Esc ponovo da zaustaviš 1 komandu u pozadini",
   "Press Esc again to stop {count} commands in background": "Pritisni Esc ponovo da zaustaviš komande u pozadini: {count}",
   "1 tool call": "1 poziv alata",

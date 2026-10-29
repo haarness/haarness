@@ -2922,6 +2922,7 @@
   "{count} moved to background · results will return here": "{count} moved to background · results will return here",
   "This command can't move to the background": "This command can't move to the background",
   "stopped what it left running": "stopped what it left running",
+  "left processes running": "left processes running",
   "Press Esc again to stop 1 command in background": "Press Esc again to stop 1 command in background",
   "Press Esc again to stop {count} commands in background": "Press Esc again to stop {count} commands in background",
   "1 tool call": "1 tool call",

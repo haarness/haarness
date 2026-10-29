@@ -591,7 +591,19 @@ impl App {
                 subagents += client.promote_background_tasks(*parent, None).await?.len();
             }
             let moved = if commands {
-                client.send_commands_to_background(chat, None).await?.len()
+                match client.send_commands_to_background(chat, None).await {
+                    Ok(moved) => moved.len(),
+                    // The chat runs as many commands there as it may: the
+                    // server says so in its own words.
+                    Err(error)
+                        if crate::api::refusal_status(&error)
+                            == Some(reqwest::StatusCode::CONFLICT) =>
+                    {
+                        self.notice = error.to_string();
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 0
             };
@@ -657,12 +669,19 @@ impl App {
                 }
                 Ok(Some(moved.len()))
             }
+            // Ended, already there, a subagent's, or the chat's cap: the
+            // server's words say which.
             Err(error)
                 if crate::api::refusal_status(&error) == Some(reqwest::StatusCode::CONFLICT) =>
             {
-                self.language
-                    .text("This command can't move to the background")
-                    .clone_into(&mut self.notice);
+                let said = error.to_string();
+                self.notice = if said.trim().is_empty() {
+                    self.language
+                        .text("This command can't move to the background")
+                        .to_owned()
+                } else {
+                    said
+                };
                 Ok(None)
             }
             Err(error) if gone(&error) => Ok(Some(0)),

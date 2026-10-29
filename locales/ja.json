@@ -2922,6 +2922,7 @@
   "{count} moved to background · results will return here": "{count} 件をバックグラウンドへ移動しました · 結果はここに戻ります",
   "This command can't move to the background": "このコマンドはバックグラウンドへ移動できません",
   "stopped what it left running": "残したプロセスを停止",
+  "left processes running": "実行中のプロセスが残っています",
   "Press Esc again to stop 1 command in background": "もう一度 Esc を押すとバックグラウンドのコマンド 1 件を停止します",
   "Press Esc again to stop {count} commands in background": "もう一度 Esc を押すとバックグラウンドのコマンド {count} 件を停止します",
   "1 tool call": "ツール呼び出し 1 回",

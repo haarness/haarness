@@ -2922,6 +2922,7 @@
   "{count} moved to background · results will return here": "نُقل {count} إلى الخلفية · ستعود النتائج إلى هنا",
   "This command can't move to the background": "لا يمكن نقل هذا الأمر إلى الخلفية",
   "stopped what it left running": "أُوقفت العمليات التي تركها تعمل",
+  "left processes running": "ترك عمليات قيد التشغيل",
   "Press Esc again to stop 1 command in background": "اضغط Esc مرة أخرى لإيقاف أمر واحد في الخلفية",
   "Press Esc again to stop {count} commands in background": "اضغط Esc مرة أخرى لإيقاف الأوامر في الخلفية: {count}",
   "1 tool call": "استدعاء أداة واحد",

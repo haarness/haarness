@@ -2922,6 +2922,7 @@
   "{count} moved to background · results will return here": "{count}개를 백그라운드로 옮겼습니다 · 결과가 여기로 돌아옵니다",
   "This command can't move to the background": "이 명령은 백그라운드로 옮길 수 없습니다",
   "stopped what it left running": "남겨 둔 프로세스를 중지함",
+  "left processes running": "실행 중인 프로세스를 남김",
   "Press Esc again to stop 1 command in background": "Esc를 한 번 더 누르면 백그라운드 명령 1개를 중지합니다",
   "Press Esc again to stop {count} commands in background": "Esc를 한 번 더 누르면 백그라운드 명령 {count}개를 중지합니다",
   "1 tool call": "도구 호출 1회",
