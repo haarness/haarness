@@ -364,9 +364,9 @@ running, the follow-up is queued without another child or completion watcher. Th
 child continues on the server and its terminal result is injected into the
 parent automatically. `/background [child-id]` promotes an already-running
 foreground child without cancelling or restarting it, and `/tasks` opens its
-live transcript. `haarness run --wait-background` drains background subagents
-and workflows for headless callers; without it they remain owned by the
-workspace server. At most four child agents run at a time per delegation depth
+live transcript. `haarness run --wait-background` drains background subagents,
+workflows and shell commands for headless callers; without it they remain
+owned by the workspace server. At most four child agents run at a time per delegation depth
 (`execution.subagent_concurrency`, see
 [execution budgets](PERMISSIONS-AND-EXECUTION.md#configure-execution-budgets)).
 
@@ -374,6 +374,49 @@ Commands the agent runs carry `AGENT=1`, `HAARNESS=1`, `AI_AGENT=haarness` and
 `HAARNESS_SESSION_ID` (the chat they run in), so scripts can tell an agent's
 command from a person's; a person's own `!` commands and terminals get none of
 them. See [Permissions and execution](PERMISSIONS-AND-EXECUTION.md).
+
+### Commands in the background
+
+An agent can keep a shell command running while it works on: `bash` with
+`run_in_background: true` answers at once with the command's id, and when the
+command ends the chat gets a hidden message with its exit code and the last 40
+lines of its output, which starts a turn when the chat is idle (as a background
+subagent's result does). The agent reads a command's output, lists the chat's
+commands or waits for one with `bash_output` (until it ends, prints nothing for
+a while, or prints a line matching a pattern, searching from where it last
+read) and stops one with `bash_stop` (interrupt, terminate, then kill,
+`execution.shell_stop_grace_ms` apart, with every process it started). Its
+instructions say to run servers, watchers and multi-minute builds or test
+suites this way, and never to leave a process running with a trailing `&` or
+`nohup`: a command that ends while something it started that way still runs
+now returns at once, stops what it left, and says so.
+
+In a chat open in Desktop, the terminal UI, the phone and web apps, or a
+`haarness run --wait-background`, an agent's foreground command that has no
+`timeout` of its own moves to the background by itself once it has run for
+`execution.shell_move_after_ms` (a minute), and the reply goes on while a slow
+build runs; you can also send one there sooner. Everywhere else (an editor over ACP,
+scripts and SDK calls, `haarness run` without the flag, schedules) a
+foreground command stays in the foreground until it ends or reaches its
+deadline, as before. A command in the background is stopped after
+`execution.shell_background_max_ms` (no limit by default) or the `timeout` the
+agent gave; where nothing follows it up, after `execution.shell_timeout_ms`.
+A subagent's commands never move, and its background commands stop, untold,
+when its turn ends. Your own `!` commands and a workflow's `shell()` always
+run in the foreground.
+
+Stop while the agent replies ends the reply and its foreground commands and
+leaves commands in the background running, so a dev server survives a change
+of course, and so does a click on Stop that lands just after the reply ended;
+an explicit stop of everything while nothing runs (Esc Esc in the terminal UI)
+stops them too, and so does archiving the chat. A command ended by a person or its time limit tells the agent; one the
+agent stopped itself does not. `haarness run --wait-background` and scheduled
+runs wait for their commands and print what the agent says when they end;
+without the flag `run` reports how many keep running on the server. A command
+running when Haarness stops is stopped with it; after the next start its chat
+gets a hidden note and a notice that it was cut off, and no turn starts by
+itself. Clients follow commands through
+[`/v1/threads/{id}/commands`](API.md#agent-commands-in-the-background).
 
 Every provider request receives one provider-neutral system scaffold with the
 exact provider/model ID, working directory, git-repository status, OS,
