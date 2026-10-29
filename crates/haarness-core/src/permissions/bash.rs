@@ -3267,8 +3267,13 @@ pub fn is_obviously_read_only(command: &str) -> bool {
     while let Some(node) = stack.pop() {
         // Even a read-only command can write through `>`/`>>`. Staying
         // conservative for input and descriptor redirects keeps this check
-        // independent of shell-specific redirect semantics.
-        if node.kind() == "redirected_statement" {
+        // independent of shell-specific redirect semantics. The parser hangs
+        // a function definition's redirect on the definition (`cat() { echo
+        // x; } > notes.md; cat` writes `notes.md`), so any redirect counts.
+        if matches!(
+            node.kind(),
+            "redirected_statement" | "file_redirect" | "heredoc_redirect" | "herestring_redirect"
+        ) {
             return false;
         }
         if node.kind() == "command" {
@@ -5034,6 +5039,9 @@ mod tests {
             "git status --short && rg -n 'unsafe|token' crates"
         ));
         assert!(is_obviously_read_only("sleep 1"));
+        for command in ["git status", "ls | head", "cat a | grep b"] {
+            assert!(is_obviously_read_only(command), "{command}");
+        }
     }
 
     #[test]
@@ -5051,6 +5059,12 @@ mod tests {
             "echo changed > file",
             "./looks-safe status",
             "cargo test",
+            // The parser hangs a function definition's redirect on the
+            // definition: each call writes through it.
+            "cat() { echo changed; } > notes.md; cat",
+            "f() { cat a; } >> log.txt; f",
+            "f() { cat a; } 2> err.txt; f",
+            "f() { cat; } < input; f",
         ] {
             assert!(!is_obviously_read_only(command), "{command}");
         }
