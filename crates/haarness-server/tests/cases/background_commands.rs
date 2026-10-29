@@ -964,3 +964,51 @@ async fn following_a_chats_commands_never_lists_every_chat() {
     assert_eq!(store.lists.load(Ordering::SeqCst), 0);
     runtime.stop_shell_command(thread, &id).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_commands_end_starts_its_turn_with_the_configuration_of_that_moment() {
+    let workspace = Workspace::new();
+    let (runtime, first) = commands_runtime(&workspace.0, |_| {});
+    let thread = chat(&runtime, None).await;
+    let turn = scripted(
+        &runtime,
+        thread,
+        r#"!tool bash {"command":"sleep 1","run_in_background":true}"#,
+        true,
+    )
+    .await;
+    wait_done(&runtime, &turn).await;
+    // The configuration is reloaded while the command runs.
+    let second = Capturing::default();
+    let mut config = haarness_core::RuntimeConfig::default();
+    config.base_rules.push(haarness_core::PermissionRule {
+        pattern: "*".into(),
+        decision: haarness_core::PermissionDecision::Allow,
+    });
+    assert!(runtime.replace_components_when_idle(
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(second.clone()) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(NativeToolRegistry::new(workspace.0.clone())),
+        String::new(),
+        config,
+        None,
+        || {},
+    ));
+    let before = first.requests.lock().unwrap().len();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while notices(&runtime, thread).await.is_empty()
+            || runtime.active_turn(thread).await.unwrap().is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        first.requests.lock().unwrap().len(),
+        before,
+        "the notice's turn ran on the configuration the command started with"
+    );
+    assert!(!second.requests.lock().unwrap().is_empty());
+}
