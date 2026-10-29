@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
-import { providerBrand, providerBrands } from "../src/provider-brands";
+import {
+  isRouterConnection,
+  providerBrand,
+  providerBrands,
+} from "../src/provider-brands";
 
 test("provider identity uses explicit aliases without misbranding compatible gateways", () => {
   assert.equal(providerBrand("anthropic"), "anthropic");
@@ -20,6 +24,23 @@ test("provider identity uses explicit aliases without misbranding compatible gat
     "__proto__",
   ])
     assert.equal(providerBrand(value), undefined);
+});
+
+test("a connected Haarness Router is told apart from Haarness Cloud and other providers", () => {
+  for (const id of ["router", "router_2", "router_12", " Router "])
+    assert.equal(isRouterConnection(id), true, id);
+  for (const id of [
+    undefined,
+    "",
+    "haarness",
+    "haarness-cloud",
+    "openrouter",
+    "router-proxy",
+    "router_",
+    "router_two",
+    "my_router",
+  ])
+    assert.equal(isRouterConnection(id), false, String(id));
 });
 
 test("every registered brand ships a passive, locally attributed SVG", () => {

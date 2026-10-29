@@ -47,6 +47,13 @@ export const providerBrands = {
   "meta-llama": "meta",
 } as const;
 
+/** A Haarness Router connected to this server: connecting one names the first
+ * `router`, the next `router_2` and so on. It shows the router's own mark, the
+ * one Connect gives it, not the neutral one that reads as Haarness Cloud. */
+export function isRouterConnection(id?: string | null): boolean {
+  return /^router(?:_\d+)?$/.test(id?.trim().toLowerCase() ?? "");
+}
+
 export function providerBrand(id?: string | null): string | undefined {
   const key = id?.trim().toLowerCase();
   return key && Object.hasOwn(providerBrands, key)
