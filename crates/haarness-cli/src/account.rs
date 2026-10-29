@@ -226,7 +226,7 @@ pub async fn login(args: &LoginArgs) -> Result<()> {
     }
     Ok(())
 }
-pub async fn account(args: &AccountArgs, config_dir: &std::path::Path) -> Result<()> {
+pub async fn account(args: &AccountArgs, paths: &super::Paths) -> Result<()> {
     let client = client()?;
     if args.watch_billing {
         let mut watcher = haarness_account::billing::watch(client);
@@ -252,7 +252,22 @@ pub async fn account(args: &AccountArgs, config_dir: &std::path::Path) -> Result
             Some("remote-hosts") if !client.config.signed_in() => {
                 json!({"loggedIn":false,"items":[]})
             }
-            Some("remote-hosts") => super::remote_cloud::computers(&client, config_dir).await?,
+            Some("remote-hosts") => {
+                super::remote_cloud::computers(&client, paths.config_dir()).await?
+            }
+            Some("remote-access") => remote_access(&client, paths, &input).await?,
+            // A computer reachable through Cloud stays reachable only for the
+            // account signed in on it.
+            Some("logout") => {
+                super::remote_cloud::stop_connectors(&client, paths, None).await?;
+                rpc(&client, input).await?
+            }
+            Some("select") => {
+                let status = rpc(&client, input).await?;
+                let kept = status["selectedAccountId"].as_str();
+                super::remote_cloud::stop_connectors(&client, paths, kept).await?;
+                status
+            }
             _ => rpc(&client, input).await?,
         };
         println!("{value}");
@@ -307,9 +322,12 @@ pub async fn account(args: &AccountArgs, config_dir: &std::path::Path) -> Result
     }
     Ok(())
 }
-pub async fn logout() -> Result<()> {
+pub async fn logout(paths: &super::Paths) -> Result<()> {
     let client = client()?;
     let signed_in = client.config.signed_in();
+    if signed_in && client.config.api_key().is_none() {
+        super::remote_cloud::stop_connectors(&client, paths, None).await?;
+    }
     client.logout().await?;
     println!(
         "{}",
@@ -320,6 +338,28 @@ pub async fn logout() -> Result<()> {
         }
     );
     Ok(())
+}
+/// Desktop's remote access control: whether this computer can be reached
+/// from Cloud (`change` absent), and turning that on, off, or back on when
+/// Desktop starts (`restore`). Desktop names its chat home as `chatHome`,
+/// the project that routes Cloud's requests.
+async fn remote_access(client: &Client, paths: &super::Paths, input: &Value) -> Result<Value> {
+    use super::remote_cloud;
+    let gateway = || {
+        input["chatHome"]
+            .as_str()
+            .filter(|path| std::path::Path::new(path).is_absolute())
+            .map(std::path::PathBuf::from)
+            .context("Missing chat home folder")
+    };
+    let access = match input["change"].as_str() {
+        None => remote_cloud::host_access(client, paths, input["check"] == true).await?,
+        Some("on") => remote_cloud::enable_host(client, paths, &gateway()?).await?,
+        Some("off") => remote_cloud::disable_host(client, paths).await?,
+        Some("restore") => remote_cloud::restore_host(client, paths, &gateway()?).await?,
+        Some(other) => bail!("Unknown remote access change {other}"),
+    };
+    Ok(serde_json::to_value(access)?)
 }
 fn id(input: &Value) -> Result<&str> {
     let id = input["id"].as_str().context("Missing resource id")?;

@@ -2951,5 +2951,11 @@
   "Updated just now": "剛剛已更新",
   "Plugins updated: {names}": "已更新的外掛：{names}",
   "Could not update {names}": "無法更新 {names}",
-  "Waiting for you: {plugins}": "等待你確認：{plugins}"
+  "Waiting for you: {plugins}": "等待你確認：{plugins}",
+  "Remote access": "遠端存取",
+  "Open this computer's projects from your phone or any browser": "在手機或任何瀏覽器上開啟這台電腦的專案",
+  "On. Your phone and any browser signed in to Haarness can open {computer}.": "已開啟。已登入 Haarness 的手機和任何瀏覽器都能開啟 {computer}。",
+  "Members of {organization} can open it too.": "{organization} 的成員也能開啟它。",
+  "Remote access is on. Open {computer} from Haarness on your phone or any browser.": "遠端存取已開啟。在手機上的 Haarness 或任何瀏覽器中開啟 {computer}。",
+  "Remote access is off": "遠端存取已關閉"
 }

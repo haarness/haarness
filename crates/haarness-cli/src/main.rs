@@ -1522,9 +1522,9 @@ async fn cli_main() -> Result<()> {
     // Analytics must not register workspaces, migrate databases, start daemons or load credentials.
     match &cli.command {
         Some(Command::Login(args)) => return account::login(args).await,
-        Some(Command::Logout) => return account::logout().await,
+        Some(Command::Logout) => return account::logout(&base_paths).await,
         Some(Command::Account(args)) => {
-            return account::account(args, base_paths.config_dir()).await;
+            return account::account(args, &base_paths).await;
         }
         Some(Command::Cloud(args)) => return account::cloud(args).await,
         Some(Command::Profile(args)) => {
@@ -4299,12 +4299,21 @@ async fn serve_command(
     } else {
         address
     };
+    // The chat home runs with project configuration off, which concerns the
+    // chat home alone: the projects it starts for Cloud have it on, as
+    // Desktop opens them.
+    let chat_home = paths.workspace_id.as_deref().is_some_and(|id| {
+        paths
+            .workspace_manager()
+            .and_then(|manager| Ok(manager.get(id)?))
+            .is_ok_and(|registered| registered.chat_home)
+    });
     let host = Arc::new(remote::Host {
         paths: paths.clone(),
         workspace: workspace.clone(),
         url: format!("http://{upstream_address}"),
         token: token.clone(),
-        trust,
+        trust: trust || chat_home,
         locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
     });
     let access_fingerprint = Some(access.fingerprint(&token));
@@ -8551,7 +8560,7 @@ async fn auth_command(
                 provider.to_ascii_lowercase().as_str(),
                 "haarness" | "haarness-cloud"
             ) {
-                return account::logout().await;
+                return account::logout(paths).await;
             }
             if store.remove(&provider)? {
                 println!("Removed {provider} credential");

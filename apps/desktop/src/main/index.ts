@@ -262,6 +262,25 @@ const send = (win: BrowserWindow, event: DesktopEvent) => {
 const browserHost = createBrowserHost(send);
 const broadcast = (event: DesktopEvent) =>
   windows.forEach((win) => send(win, event));
+/** One change of remote access at a time, so two windows' clicks cannot
+ * start two connectors. */
+let accessQueue: Promise<unknown> = Promise.resolve();
+/**
+ * Remote access: whether this whole computer can be reached from Haarness
+ * Cloud (the title bar's control). The chat home routes Cloud's requests to
+ * every project, so this computer is reached even with no project open. A
+ * change, and what starting Desktop restores, reaches every window.
+ */
+function remoteAccess(change?: "on" | "off" | "restore", check?: boolean) {
+  if (!change) return chatHomeFolder().then((chatHome) => accountRequest({ action: "remote-access", check: !!check, chatHome }));
+  const next = accessQueue.then(async () => {
+    const access = await accountRequest({ action: "remote-access", change, chatHome: await chatHomeFolder() });
+    broadcast({ kind: "menu", data: { action: "remote-access", access } });
+    return access;
+  });
+  accessQueue = next.catch(() => {});
+  return next;
+}
 const notificationReady = new Set<number>();
 const notificationPending = new Map<number, NotificationTarget>();
 const notifications = createNotifications({
@@ -850,8 +869,9 @@ function installHandlers() {
     return data().values[key] ?? null;
   });
   handle("account", async (win, raw: unknown) => {
-    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "routers", "select-router", "agents", "workspaces", "workspace", "create-workspace", "workspace-start", "workspace-stop", "billing", "billing-state", "usage", "web", "remote-hosts"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "workspaces", "workspace-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
+    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "routers", "select-router", "agents", "workspaces", "workspace", "create-workspace", "workspace-start", "workspace-stop", "billing", "billing-state", "usage", "web", "remote-hosts", "remote-access"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "workspaces", "workspace-settings"]).optional(), device: z.boolean().optional(), change: z.enum(["on", "off"]).optional(), check: z.boolean().optional() }).strict().parse(raw);
     if (input.action === "billing-state") return billingState();
+    if (input.action === "remote-access") return remoteAccess(input.change, input.check);
     if (input.action === "cancel") { cancelAccountLogin(); return null; }
     const closed: string[] = [];
     if (input.action === "login") {
@@ -2342,6 +2362,8 @@ else {
       initialized = true;
       createWindow();
       void refreshProjects().catch(() => {});
+      // Remote access left on stays on across restarts.
+      void remoteAccess("restore").catch((error) => console.warn("Haarness remote access: could not restore: " + String(error)));
       setupChromeOnLaunch();
       void updaterMade.then(() => updater?.start());
       if (app.isPackaged) app.setAsDefaultProtocolClient("haarness");

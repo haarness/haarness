@@ -2951,5 +2951,11 @@
   "Updated just now": "Upravo ažurirano",
   "Plugins updated: {names}": "Ažurirani plugini: {names}",
   "Could not update {names}": "Nije moguće ažurirati {names}",
-  "Waiting for you: {plugins}": "Čeka vas: {plugins}"
+  "Waiting for you: {plugins}": "Čeka vas: {plugins}",
+  "Remote access": "Daljinski pristup",
+  "Open this computer's projects from your phone or any browser": "Otvorite projekte ovog računara s telefona ili u bilo kojem pregledniku",
+  "On. Your phone and any browser signed in to Haarness can open {computer}.": "Uključeno. Vaš telefon i svaki preglednik prijavljen na Haarness mogu otvoriti {computer}.",
+  "Members of {organization} can open it too.": "Članovi organizacije {organization} također ga mogu otvoriti.",
+  "Remote access is on. Open {computer} from Haarness on your phone or any browser.": "Daljinski pristup je uključen. Otvorite {computer} iz Haarnessa na telefonu ili u bilo kojem pregledniku.",
+  "Remote access is off": "Daljinski pristup je isključen"
 }

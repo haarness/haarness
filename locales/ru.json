@@ -2951,5 +2951,11 @@
   "Updated just now": "Только что обновлено",
   "Plugins updated: {names}": "Обновлены плагины: {names}",
   "Could not update {names}": "Не удалось обновить {names}",
-  "Waiting for you: {plugins}": "Ждёт вашего решения: {plugins}"
+  "Waiting for you: {plugins}": "Ждёт вашего решения: {plugins}",
+  "Remote access": "Удалённый доступ",
+  "Open this computer's projects from your phone or any browser": "Открывайте проекты этого компьютера с телефона или в любом браузере",
+  "On. Your phone and any browser signed in to Haarness can open {computer}.": "Включён. Ваш телефон и любой браузер, где выполнен вход в Haarness, могут открыть {computer}.",
+  "Members of {organization} can open it too.": "Участники {organization} тоже могут его открыть.",
+  "Remote access is on. Open {computer} from Haarness on your phone or any browser.": "Удалённый доступ включён. Откройте {computer} в Haarness на телефоне или в любом браузере.",
+  "Remote access is off": "Удалённый доступ выключен"
 }

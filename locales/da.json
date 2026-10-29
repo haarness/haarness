@@ -2951,5 +2951,11 @@
   "Updated just now": "Opdateret lige nu",
   "Plugins updated: {names}": "Opdaterede plugins: {names}",
   "Could not update {names}": "{names} kunne ikke opdateres",
-  "Waiting for you: {plugins}": "Venter på dig: {plugins}"
+  "Waiting for you: {plugins}": "Venter på dig: {plugins}",
+  "Remote access": "Fjernadgang",
+  "Open this computer's projects from your phone or any browser": "Åbn denne computers projekter fra din telefon eller en hvilken som helst browser",
+  "On. Your phone and any browser signed in to Haarness can open {computer}.": "Til. Din telefon og enhver browser, der er logget ind på Haarness, kan åbne {computer}.",
+  "Members of {organization} can open it too.": "Medlemmer af {organization} kan også åbne den.",
+  "Remote access is on. Open {computer} from Haarness on your phone or any browser.": "Fjernadgang er slået til. Åbn {computer} fra Haarness på din telefon eller i en hvilken som helst browser.",
+  "Remote access is off": "Fjernadgang er slået fra"
 }
