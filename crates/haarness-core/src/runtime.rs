@@ -5420,6 +5420,15 @@ impl AgentRuntime {
         {
             execution.shell_env = hooks.shell_env(thread_id, &workspace).await;
         }
+        // A fetch judges a redirect it would follow by the rules it was
+        // checked under, an Always given just now included, as in a turn.
+        let invoker = (name == "webfetch").then(|| {
+            let mut rules = engine.clone();
+            for rule in self.session_rules.lock().iter().cloned() {
+                rules.add_grant(rule);
+            }
+            Arc::new(FetchRules(rules)) as Arc<dyn crate::ToolInvoker>
+        });
         let (mut output, is_error) = match allowed {
             Ok(()) => {
                 match tool
@@ -5432,7 +5441,7 @@ impl AgentRuntime {
                             workspace: workspace.clone(),
                             authorized_external_paths,
                             cancel: cancel.clone(),
-                            invoker: None,
+                            invoker,
                         },
                     )
                     .await
@@ -7047,6 +7056,25 @@ struct TurnToolInvoker {
     sequence: std::sync::atomic::AtomicUsize,
 }
 
+/// What a fetch run outside a turn (a workflow's or a person's own call)
+/// may ask of its caller: only the webfetch rules it was checked under.
+struct FetchRules(PermissionEngine);
+
+#[async_trait::async_trait]
+impl crate::ToolInvoker for FetchRules {
+    fn webfetch_rules(&self) -> Option<PermissionEngine> {
+        Some(self.0.clone())
+    }
+    async fn invoke(&self, name: &str, _arguments: serde_json::Value) -> CoreResult<ToolOutput> {
+        Err(CoreError::Tool(format!(
+            "{name} cannot be called from inside a fetch"
+        )))
+    }
+    fn side_effectful_for(&self, _name: &str, _arguments: &serde_json::Value) -> CoreResult<bool> {
+        Ok(true)
+    }
+}
+
 /// A definition's `!` snippet on its way to the shell tool: the text its
 /// permissions are judged on, the text that runs, and that text's values.
 pub(crate) struct DefinitionShell<'a> {
@@ -7076,6 +7104,12 @@ impl crate::ToolInvoker for TurnToolInvoker {
     }
     fn read_rules(&self) -> Option<PermissionEngine> {
         Some(self.runner.permission_engine_for_tool(&self.agent, "read"))
+    }
+    fn webfetch_rules(&self) -> Option<PermissionEngine> {
+        Some(
+            self.runner
+                .permission_engine_for_tool(&self.agent, "webfetch"),
+        )
     }
     fn instructions_in_context(&self) -> Option<crate::instructions::InContext> {
         Some(Arc::clone(&self.runner.instructions_in_context))
@@ -15195,6 +15229,54 @@ fn webfetch_pattern(target: &str) -> Option<String> {
     (pattern != target).then_some(pattern)
 }
 
+/// Whether a fetch of `asked` follows a redirect to `hop` on the address it
+/// asked for, under `rules`, the webfetch rules of the call's agent: `Allow`
+/// follows it, while `Deny` (a rule denies `hop`) and `Ask` (`hop` needs an
+/// approval this call did not get) stop the fetch there. Both addresses meet
+/// the rules as the call does, as written and as really read. A hop the rules
+/// allow is followed; one they ask about only when the call was itself asked
+/// about under a rule for the whole tool (`"webfetch": "ask"`), whose answer
+/// was not about one address. So neither an Allow once for `/login` nor an
+/// allow or Always for `/docs/*` opens `/admin`.
+pub fn webfetch_redirect_verdict(
+    rules: &PermissionEngine,
+    asked: &str,
+    hop: &str,
+) -> PermissionDecision {
+    let judged = |target: &str| -> Vec<crate::permissions::Evaluation> {
+        std::iter::once(target.to_owned())
+            .chain(webfetch_pattern(target))
+            .map(|pattern| rules.evaluate_detailed(&format!("webfetch:{pattern}")))
+            .collect()
+    };
+    // Asked about, and only under rules about the whole tool.
+    let asks_about_the_tool = |evaluations: &[crate::permissions::Evaluation]| {
+        evaluations
+            .iter()
+            .any(|evaluation| evaluation.decision == PermissionDecision::Ask)
+            && evaluations.iter().all(|evaluation| {
+                evaluation.decision == PermissionDecision::Allow
+                    || (evaluation.decision == PermissionDecision::Ask
+                        && evaluation.matched.as_deref().is_none_or(whole_tool_rule))
+            })
+    };
+    let hop = judged(hop);
+    if hop
+        .iter()
+        .any(|evaluation| evaluation.decision == PermissionDecision::Deny)
+    {
+        PermissionDecision::Deny
+    } else if hop
+        .iter()
+        .all(|evaluation| evaluation.decision == PermissionDecision::Allow)
+        || (asks_about_the_tool(&hop) && asks_about_the_tool(&judged(asked)))
+    {
+        PermissionDecision::Allow
+    } else {
+        PermissionDecision::Ask
+    }
+}
+
 /// The path a file tool opens for `target`, when links or `..` make it a
 /// different file from the one the path names. It is written the way the
 /// model wrote the target (workspace-relative when that was), so rules meet
@@ -19348,6 +19430,95 @@ mod tests {
         }
         // Another port is another address.
         assert!(!plan("https://denied.example:8443/secret").1);
+    }
+
+    #[test]
+    fn a_redirect_on_the_address_asked_for_is_followed_only_where_its_approval_reaches() {
+        use crate::PermissionDecision::{Allow, Ask, Deny};
+        let rule = |pattern: &str, decision| crate::PermissionRule {
+            pattern: pattern.into(),
+            decision,
+        };
+        let engine = |rules: &[(&str, crate::PermissionDecision)]| {
+            let mut engine = crate::PermissionEngine::build_defaults();
+            for (pattern, decision) in rules {
+                engine.add_rule(rule(pattern, *decision));
+            }
+            engine
+        };
+        let verdict = |engine: &crate::PermissionEngine, asked: &str, hop: &str| {
+            super::webfetch_redirect_verdict(engine, asked, hop)
+        };
+        let login = "https://intra.example/login?next=/admin/x";
+        // Under the defaults every hop is followed, as before.
+        let defaults = crate::PermissionEngine::build_defaults();
+        assert_eq!(
+            verdict(&defaults, login, "https://intra.example/admin/x"),
+            Allow
+        );
+        // A path a rule denies is not reached through a redirect, in any
+        // spelling of it.
+        let denied = engine(&[("webfetch:https://intra.example/admin/*", Deny)]);
+        for hop in [
+            "https://intra.example/admin/x",
+            "https://someone@intra.example/admin/x",
+            "https://intra.example./admin/x",
+            "https://intra.example/public/../admin/x",
+        ] {
+            assert_eq!(verdict(&denied, login, hop), Deny, "{hop}");
+        }
+        assert_eq!(verdict(&denied, login, "https://intra.example/home"), Allow);
+        // `"webfetch": "ask"`: the call's approval was for the tool, and the
+        // hop asks the same question.
+        let ask_all = engine(&[("webfetch:*", Ask)]);
+        assert_eq!(
+            verdict(&ask_all, login, "https://intra.example/home"),
+            Allow
+        );
+        // A rule that asks about a path still asks after a redirect, whether
+        // the call itself was allowed or asked about for the whole tool.
+        let ask_admin = engine(&[("webfetch:https://intra.example/admin/*", Ask)]);
+        assert_eq!(
+            verdict(&ask_admin, login, "https://intra.example/admin/x"),
+            Ask
+        );
+        let ask_both = engine(&[
+            ("webfetch:*", Ask),
+            ("webfetch:https://intra.example/admin/*", Ask),
+        ]);
+        assert_eq!(
+            verdict(&ask_both, login, "https://intra.example/admin/x"),
+            Ask
+        );
+        // An approval of one address under a rule about a host never opens
+        // another page of it.
+        let ask_host = engine(&[("webfetch:https://intra.example/*", Ask)]);
+        assert_eq!(verdict(&ask_host, login, "https://intra.example/home"), Ask);
+        // An allow, or an Always, for one path covers that path only.
+        let mut docs = engine(&[
+            ("webfetch:*", Ask),
+            ("webfetch:https://intra.example/docs/*", Allow),
+        ]);
+        let start = "https://intra.example/docs/start";
+        assert_eq!(
+            verdict(&docs, start, "https://intra.example/docs/moved"),
+            Allow
+        );
+        assert_eq!(verdict(&docs, start, "https://intra.example/private"), Ask);
+        let mut always = engine(&[("webfetch:*", Ask)]);
+        always.add_grant(rule("webfetch:https://intra.example/docs/*", Allow));
+        assert_eq!(
+            verdict(&always, start, "https://intra.example/private"),
+            Ask
+        );
+        // An Always for the whole tool opens what is not denied.
+        docs.add_grant(rule("webfetch:*", Allow));
+        docs.add_rule(rule("webfetch:https://intra.example/admin/*", Deny));
+        assert_eq!(
+            verdict(&docs, start, "https://intra.example/private"),
+            Allow
+        );
+        assert_eq!(verdict(&docs, start, "https://intra.example/admin/x"), Deny);
     }
 
     #[test]

@@ -1483,3 +1483,104 @@ async fn parity_a_read_of_where_sign_ins_are_kept_asks_a_person_even_in_yolo() {
             .contains("sk-fixture-secret")
     );
 }
+
+/// A site whose `/login` sends a visitor on to the page its `next` names,
+/// recording each path asked for.
+async fn redirecting_site() -> (
+    std::net::SocketAddr,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = paths.clone();
+    let site = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => head.extend_from_slice(&buffer[..count]),
+                }
+            }
+            let head = String::from_utf8_lossy(&head).into_owned();
+            let path = head.split(' ').nth(1).unwrap_or_default().to_owned();
+            seen.lock().unwrap().push(path.clone());
+            let reply = match path.split_once("?next=") {
+                Some(("/login", next)) => format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {next}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                ),
+                _ => format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\npage {path}",
+                    path.len() + 5
+                ),
+            };
+            let _ = stream.write_all(reply.as_bytes()).await;
+        }
+    });
+    (address, paths, site)
+}
+
+#[tokio::test]
+async fn parity_webfetch_redirects_meet_the_rules_in_turns_and_direct_calls() {
+    let fixture = Fixture::new();
+    let (address, paths, site) = redirecting_site().await;
+    let mut config = RuntimeConfig::default();
+    config
+        .base_rules
+        .push(rule(&format!("webfetch:http://{address}/admin/*"), D::Deny));
+    let runtime = runtime(&fixture.0, config, None);
+    let thread = echo_thread(&runtime).await;
+    let stopped = format!(
+        "redirects (HTTP 302) to http://{address}/admin/x, which the permission rules do not let \
+         this fetch follow"
+    );
+    for next in ["/admin/x", "/home"] {
+        let url = format!("http://{address}/login?next={next}");
+        let turn = send(
+            &runtime,
+            &thread,
+            &format!("!tool webfetch {}", json!({ "url": url })),
+        )
+        .await;
+        assert_success(&runtime, &thread, &turn).await;
+        let (turned, _) = tool_outputs(&runtime, &thread).await.pop().unwrap();
+        // A workflow's own fetch, outside a turn, meets the same rules.
+        let direct = runtime
+            .run_direct_tool(
+                thread.id,
+                "webfetch",
+                json!({ "url": url }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!direct.is_error, "{}", direct.output.text);
+        for output in [turned, direct.output.text] {
+            if next == "/admin/x" {
+                assert!(output.contains(&stopped), "{output}");
+            } else {
+                assert_eq!(output, "page /home");
+            }
+        }
+    }
+    assert!(
+        !paths.lock().unwrap().iter().any(|path| path == "/admin/x"),
+        "{:?}",
+        paths.lock().unwrap()
+    );
+    assert_eq!(
+        paths
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| *path == "/home")
+            .count(),
+        2
+    );
+    site.abort();
+}

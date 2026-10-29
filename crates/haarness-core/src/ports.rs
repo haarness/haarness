@@ -722,6 +722,12 @@ pub trait ToolInvoker: Send + Sync {
     fn read_rules(&self) -> Option<crate::PermissionEngine> {
         None
     }
+    /// The rules this call's agent fetches pages under, so a fetch judges a
+    /// redirect on the address it asked for by the same rules as the address
+    /// itself (see [`crate::webfetch_redirect_verdict`]).
+    fn webfetch_rules(&self) -> Option<crate::PermissionEngine> {
+        None
+    }
     /// The nested instruction files this call's model can already see, for
     /// `read` to attach each one only while it is out of view. `None`
     /// outside an agent's turn, where the tool keeps its own record.
