@@ -2950,5 +2950,6 @@
   "Up to date": "Up to date",
   "Updated just now": "Updated just now",
   "Plugins updated: {names}": "Plugins updated: {names}",
-  "Could not update {names}": "Could not update {names}"
+  "Could not update {names}": "Could not update {names}",
+  "Waiting for you: {plugins}": "Waiting for you: {plugins}"
 }

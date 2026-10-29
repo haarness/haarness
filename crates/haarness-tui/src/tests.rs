@@ -23166,6 +23166,14 @@ fn a_plugin_marketplace_refresh_reads_as_one_line() {
         ]})),
         "team is up to date"
     );
+    // An update that waits says for which plugin and why.
+    assert_eq!(
+        notice(serde_json::json!({"marketplaces": [
+            {"name": "team", "status": "updated", "plugins": [], "unlisted": [],
+             "held": [{"plugin": "kit", "reason": "asks for more: new hooks"}], "failed": []}
+        ]})),
+        "team updated · waiting for you: kit (asks for more: new hooks)"
+    );
     assert_eq!(
         notice(serde_json::json!({"marketplaces": [
             {"name": "team", "status": "updated", "plugins": ["kit"], "unlisted": ["old"],

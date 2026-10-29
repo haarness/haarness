@@ -2950,5 +2950,6 @@
   "Up to date": "Güncel",
   "Updated just now": "Az önce güncellendi",
   "Plugins updated: {names}": "Güncellenen eklentiler: {names}",
-  "Could not update {names}": "{names} güncellenemedi"
+  "Could not update {names}": "{names} güncellenemedi",
+  "Waiting for you: {plugins}": "Onayınızı bekliyor: {plugins}"
 }

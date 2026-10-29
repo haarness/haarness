@@ -11056,13 +11056,23 @@ fn marketplace_refresh_lines(refresh: &plugins::MarketplaceRefresh) -> Vec<Strin
             "  Updated plugins: {}. A running Haarness server will reload them when active work is idle.",
             refresh.plugins.join(", ")
         ));
-    } else if refresh.status == "updated" {
+    } else if refresh.status == "updated" && refresh.held.is_empty() && refresh.failed.is_empty() {
         lines.push("  No installed plugin changed.".into());
     }
     for plugin in &refresh.unlisted {
         lines.push(format!(
             "  {name} no longer lists {plugin}; it stays installed as it is."
         ));
+    }
+    for held in &refresh.held {
+        lines.push(if held.reason == "has local edits" {
+            format!("  {} has local edits, so it was not updated.", held.plugin)
+        } else {
+            format!(
+                "  {} was not updated: it {}. `haarness plugin update {}` installs it.",
+                held.plugin, held.reason, held.plugin
+            )
+        });
     }
     for failure in &refresh.failed {
         lines.push(format!(
@@ -11141,6 +11151,14 @@ fn plugin_command(
             println!(
                 "Marketplace '{name}' registered. Install with: haarness plugin install <plugin>@{name}"
             );
+            if plugins::marketplace_sources(&paths.data)
+                .get(&name)
+                .is_some_and(|source| source.auto_update)
+            {
+                println!(
+                    "It updates automatically; `haarness plugin marketplace auto-update {name} --off` stops that."
+                );
+            }
         }
         PluginCommand::Install { spec } => {
             let plugin = plugins::install(&paths.data, spec)?;
@@ -11185,9 +11203,19 @@ fn plugin_command(
                 println!("No plugins installed.");
             } else {
                 println!("Plugins:");
+                let records = plugins::installed(&paths.data);
                 for plugin in installed {
+                    let held = records
+                        .get(&plugin.name)
+                        .filter(|record| {
+                            plugin.source == "haarness"
+                                && record.path.to_string_lossy() == plugin.path
+                        })
+                        .and_then(|record| record.held.as_deref())
+                        .map(|reason| format!("  (update waits: {reason})"))
+                        .unwrap_or_default();
                     println!(
-                        "  {}  {}  {}  {}",
+                        "  {}  {}  {}  {}{held}",
                         if plugin.enabled { "●" } else { "○" },
                         plugin.name,
                         plugin.source,

@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use haarness_protocol::{PluginActionRequest, PluginInfo};
@@ -31,6 +32,14 @@ pub struct InstalledPlugin {
     pub enabled: bool,
     #[serde(default)]
     pub description: String,
+    /// A digest of the files Haarness installed, so an update can tell local
+    /// edits. Records from before it was kept have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// Why the automatic update of it waits ("has local edits", "asks for
+    /// more: new hooks").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
 }
 
 fn plugins_root(data: &Path) -> PathBuf {
@@ -553,30 +562,114 @@ fn git<S: AsRef<std::ffi::OsStr>>(args: impl IntoIterator<Item = S>) -> Result<(
     git_output(args).map(drop)
 }
 
-/// [`git`], returning what it printed.
+/// [`git`], returning what it printed. A clone or fetch gets ten minutes, a
+/// question to a remote one, anything else thirty seconds.
 fn git_output<S: AsRef<std::ffi::OsStr>>(args: impl IntoIterator<Item = S>) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ALLOW_PROTOCOL", "file:git:http:https:ssh")
-        .output()
-        .context("running git")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Git quotes the remote's address, which can carry a token.
-        bail!(
-            "{}",
-            haarness_core::redact::urls_in(
-                stderr
-                    .lines()
-                    .rev()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("git failed")
-                    .trim()
-            )
-        );
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_os_string())
+        .collect::<Vec<_>>();
+    let limit = if args.iter().any(|arg| arg == "clone" || arg == "fetch") {
+        Duration::from_secs(600)
+    } else if args.iter().any(|arg| arg == "ls-remote") {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(30)
+    };
+    git_output_within(&args, limit)
+}
+
+/// The `ssh` git runs: never asking anything, and giving up on a host that
+/// does not answer. A command the person set keeps its own options.
+fn ssh_command() -> Option<String> {
+    const OPTIONS: &str = "-o BatchMode=yes -o ConnectTimeout=15";
+    match std::env::var("GIT_SSH_COMMAND") {
+        Ok(command) if !command.trim().is_empty() => Some(format!("{command} {OPTIONS}")),
+        // `GIT_SSH` names a program that takes no options; leave it alone.
+        _ if std::env::var_os("GIT_SSH").is_some() => None,
+        _ => Some(format!("ssh {OPTIONS}")),
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Runs git without a terminal: no prompt, no input (a background server
+/// that reads the terminal is stopped by it), a transfer that stalls for 30
+/// seconds fails, and the whole run is killed, with what it started, once
+/// `limit` has passed. Output goes to files, so a helper git leaves running
+/// cannot hold this up.
+fn git_output_within(args: &[std::ffi::OsString], limit: Duration) -> Result<String> {
+    let scratch = std::env::temp_dir();
+    let nonce = uuid::Uuid::now_v7();
+    let out_path = scratch.join(format!("haarness-git-{nonce}.out"));
+    let err_path = scratch.join(format!("haarness-git-{nonce}.err"));
+    let result = (|| -> Result<String> {
+        let mut command = Command::new("git");
+        command
+            .args([
+                "-c",
+                "http.lowSpeedLimit=1000",
+                "-c",
+                "http.lowSpeedTime=30",
+            ])
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ALLOW_PROTOCOL", "file:git:http:https:ssh")
+            .stdin(std::process::Stdio::null())
+            .stdout(fs::File::create(&out_path)?)
+            .stderr(fs::File::create(&err_path)?);
+        if let Some(ssh) = ssh_command() {
+            command.env("GIT_SSH_COMMAND", ssh);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // Its own group, so what it starts (ssh, a remote helper) is
+            // stopped with it.
+            command.process_group(0);
+        }
+        let mut child = command.spawn().context("running git")?;
+        let deadline = std::time::Instant::now() + limit;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                #[cfg(unix)]
+                if let Ok(pid) = i32::try_from(child.id()) {
+                    let _ = nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(pid),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!(
+                    "git did not finish within {} seconds, so it was stopped",
+                    limit.as_secs()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        if !status.success() {
+            let stderr = fs::read(&err_path).unwrap_or_default();
+            let stderr = String::from_utf8_lossy(&stderr);
+            // Git quotes the remote's address, which can carry a token.
+            bail!(
+                "{}",
+                haarness_core::redact::urls_in(
+                    stderr
+                        .lines()
+                        .rev()
+                        .find(|line| !line.trim().is_empty())
+                        .unwrap_or("git failed")
+                        .trim()
+                )
+            );
+        }
+        Ok(String::from_utf8_lossy(&fs::read(&out_path)?).into_owned())
+    })();
+    let _ = fs::remove_file(&out_path);
+    let _ = fs::remove_file(&err_path);
+    result
 }
 
 /// The commit a checkout holds.
@@ -597,27 +690,38 @@ fn origin_url(checkout: &Path) -> Option<String> {
 }
 
 /// The commit `reference` (the default branch when `None`) names in the
-/// repository at `url`, asked without cloning. A tag answers with the commit
-/// it points to.
+/// repository at `url`, asked without cloning. A name is looked up as git's
+/// `--branch` reads it: the branch, else the tag (the commit an annotated tag
+/// points to), matched by full name, so `v1` never means `feature/v1`.
 fn remote_commit(url: &str, reference: Option<&str>) -> Result<String> {
     checked_git_value(url, "URL")?;
     let reference = reference
         .map(|reference| checked_git_value(reference, "ref"))
-        .transpose()?
-        .unwrap_or("HEAD");
+        .transpose()?;
     let shown = haarness_core::redact::url(url);
-    let listed = git_output(["ls-remote", "--", url, reference])
-        .with_context(|| format!("could not reach {shown}"))?;
-    let lines = listed
+    let wanted = match reference {
+        None => vec!["HEAD".to_owned()],
+        Some(full) if full.starts_with("refs/") => vec![format!("{full}^{{}}"), full.to_owned()],
+        Some(name) => vec![
+            format!("refs/heads/{name}"),
+            format!("refs/tags/{name}^{{}}"),
+            format!("refs/tags/{name}"),
+        ],
+    };
+    let mut args = vec!["ls-remote".to_owned(), "--".to_owned(), url.to_owned()];
+    // The peeled `^{}` name is asked for by itself: git lists it only then.
+    args.extend(wanted.iter().cloned());
+    let listed = git_output(&args).with_context(|| format!("could not reach {shown}"))?;
+    let refs = listed
         .lines()
         .filter_map(|line| line.split_once('\t'))
-        .collect::<Vec<_>>();
-    lines
+        .map(|(commit, name)| (name.trim(), commit.trim()))
+        .collect::<BTreeMap<_, _>>();
+    wanted
         .iter()
-        .find(|(_, name)| name.ends_with("^{}"))
-        .or_else(|| lines.first())
-        .map(|(commit, _)| (*commit).to_owned())
-        .with_context(|| format!("{shown} has no {reference}"))
+        .find_map(|name| refs.get(name.as_str()))
+        .map(|commit| (*commit).to_owned())
+        .with_context(|| format!("{shown} has no {}", reference.unwrap_or("HEAD")))
 }
 
 fn checked_git_value<'a>(value: &'a str, what: &str) -> Result<&'a str> {
@@ -823,62 +927,120 @@ fn materialize_plugin_tree(source: &Path, destination: &Path) -> Result<()> {
 }
 
 /// Serializes changes to registered marketplaces across Haarness processes:
-/// a refresh swapping a clone, a registration, a setting.
+/// a refresh swapping a clone, a registration, a setting. Never held while
+/// git runs.
 fn marketplaces_lock(data: &Path) -> Result<fs::File> {
     fs::create_dir_all(data)?;
     crate::desktop::editor_lock(data, "plugin-marketplaces")
 }
 
-/// Register a marketplace from a git URL or a local directory. A Git one
-/// follows new commits of its repository from then on.
-pub fn marketplace_add(data: &Path, source: &str) -> Result<String> {
-    let _lock = marketplaces_lock(data)?;
-    let local = local_path(source).unwrap_or_else(|| PathBuf::from(source));
-    let mut origin = None;
-    let root = if local.exists() {
-        local.canonicalize()?
-    } else if local_path(source).is_some() {
-        bail!("{source} does not exist");
-    } else {
-        // Normalize owner/repo shorthand to a GitHub URL.
-        let url = git_url(source);
-        let staging = plugins_root(data).join("marketplaces/.staging");
-        git_clone(&url, &staging)?;
-        let name = manifest_of(&staging)?.name;
-        safe_name(&name, "marketplace")?;
-        let destination = owned_clone(data, &name);
-        if destination.exists() {
-            fs::remove_dir_all(&destination)?;
-        }
-        fs::rename(&staging, &destination)?;
-        origin = Some(url);
-        destination
-    };
-    let manifest = manifest_of(&root)?;
-    safe_name(&manifest.name, "marketplace")?;
-    let mut marketplaces: BTreeMap<String, PathBuf> = read_map(&marketplaces_file(data));
-    let mut sources = marketplace_sources(data);
-    match origin {
-        Some(url) => {
-            sources.insert(
-                manifest.name.clone(),
-                MarketplaceSource {
-                    source: url,
-                    auto_update: true,
-                    commit: head_commit(&root).ok(),
-                    updated_at: Some(now()),
-                },
-            );
-        }
-        // A folder is read as it is; nothing to fetch.
-        None => {
-            sources.remove(&manifest.name);
-        }
+/// Serializes every change to `installed.json` across Haarness processes,
+/// held only while it is read, changed and written (and a fetched plugin
+/// moved into place), never while git runs.
+fn installed_lock(data: &Path) -> Result<fs::File> {
+    fs::create_dir_all(data)?;
+    crate::desktop::editor_lock(data, "plugins-installed")
+}
+
+/// Reads `installed.json`, lets `change` edit it and writes it back, all
+/// under [`installed_lock`]. Nothing is written when `change` fails.
+fn change_installed<T>(
+    data: &Path,
+    change: impl FnOnce(&mut BTreeMap<String, InstalledPlugin>) -> Result<T>,
+) -> Result<T> {
+    let _lock = installed_lock(data)?;
+    let mut plugins = installed(data);
+    let value = change(&mut plugins)?;
+    write_map(&installed_file(data), &plugins)?;
+    Ok(value)
+}
+
+/// Moves `staging` to `destination`, keeping what was there until the move
+/// has worked.
+fn swap_into(staging: &Path, destination: &Path) -> Result<()> {
+    let parent = destination.parent().unwrap_or(destination);
+    let leaf = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("folder");
+    let backup = parent.join(format!(".{leaf}.previous-{}", uuid::Uuid::now_v7()));
+    let had = destination.exists();
+    if had {
+        fs::rename(destination, &backup)?;
     }
-    marketplaces.insert(manifest.name.clone(), root);
+    if let Err(error) = fs::rename(staging, destination) {
+        if had {
+            let _ = fs::rename(&backup, destination);
+        }
+        return Err(error.into());
+    }
+    if had {
+        let _ = fs::remove_dir_all(&backup);
+    }
+    Ok(())
+}
+
+/// Register a marketplace from a git URL or a local directory. A Git one
+/// follows new commits of its repository from then on. The clone is made
+/// before the registrations are locked, so a slow host holds nobody up.
+pub fn marketplace_add(data: &Path, source: &str) -> Result<String> {
+    let local = local_path(source).unwrap_or_else(|| PathBuf::from(source));
+    if local.exists() {
+        let root = local.canonicalize()?;
+        let manifest = manifest_of(&root)?;
+        safe_name(&manifest.name, "marketplace")?;
+        let _lock = marketplaces_lock(data)?;
+        let mut marketplaces = marketplaces(data);
+        let mut sources = marketplace_sources(data);
+        // A folder is read as it is; nothing to fetch.
+        sources.remove(&manifest.name);
+        marketplaces.insert(manifest.name.clone(), root);
+        write_map(&marketplaces_file(data), &marketplaces)?;
+        write_map(&sources_file(data), &sources)?;
+        return Ok(manifest.name);
+    }
+    if local_path(source).is_some() {
+        bail!("{source} does not exist");
+    }
+    // Normalize owner/repo shorthand to a GitHub URL.
+    let url = git_url(source);
+    let staging = plugins_root(data)
+        .join("marketplaces")
+        .join(format!(".add-{}", uuid::Uuid::now_v7()));
+    let checked = git_clone(&url, &staging).and_then(|()| {
+        let manifest = manifest_of(&staging)?;
+        safe_name(&manifest.name, "marketplace")?;
+        let commit = head_commit(&staging).ok();
+        Ok((manifest.name, commit))
+    });
+    let (name, commit) = match checked {
+        Ok(checked) => checked,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+    let _lock = marketplaces_lock(data)?;
+    let destination = owned_clone(data, &name);
+    if let Err(error) = swap_into(&staging, &destination) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    let mut marketplaces = marketplaces(data);
+    let mut sources = marketplace_sources(data);
+    sources.insert(
+        name.clone(),
+        MarketplaceSource {
+            source: url,
+            auto_update: true,
+            commit,
+            updated_at: Some(now()),
+        },
+    );
+    marketplaces.insert(name.clone(), destination);
     write_map(&marketplaces_file(data), &marketplaces)?;
     write_map(&sources_file(data), &sources)?;
-    Ok(manifest.name)
+    Ok(name)
 }
 
 /// What [`marketplace_update`] did to one marketplace.
@@ -898,6 +1060,8 @@ pub struct MarketplaceRefresh {
     pub plugins: Vec<String>,
     /// Installed plugins the marketplace no longer lists, left as they are.
     pub unlisted: Vec<String>,
+    /// Installed plugins whose new version waits for the person, with why.
+    pub held: Vec<PluginHeld>,
     /// Installed plugins that could not be updated, with why.
     pub failed: Vec<PluginFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -908,6 +1072,12 @@ pub struct MarketplaceRefresh {
 pub struct PluginFailure {
     pub plugin: String,
     pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginHeld {
+    pub plugin: String,
+    pub reason: String,
 }
 
 impl MarketplaceRefresh {
@@ -945,23 +1115,65 @@ fn source_of(data: &Path, name: &str) -> Result<MarketplaceSource> {
     })
 }
 
-fn save_source(data: &Path, name: &str, source: MarketplaceSource) -> Result<()> {
+/// Changes one marketplace's recorded source as it is on disk now (or as
+/// `found` says, for one with no record yet). Callers hold
+/// [`marketplaces_lock`], so a setting changed meanwhile is kept.
+fn edit_source(
+    data: &Path,
+    name: &str,
+    found: &MarketplaceSource,
+    edit: impl FnOnce(&mut MarketplaceSource),
+) -> Result<MarketplaceSource> {
     let mut sources = marketplace_sources(data);
+    let mut source = sources.get(name).cloned().unwrap_or_else(|| found.clone());
+    edit(&mut source);
     if sources.get(name) != Some(&source) {
-        sources.insert(name.to_owned(), source);
+        sources.insert(name.to_owned(), source.clone());
         write_map(&sources_file(data), &sources)?;
+    }
+    Ok(source)
+}
+
+/// After a stop between the two renames of a swap the clone is missing and
+/// its previous copy sits beside it: put that back. Copies left by a swap
+/// that finished are removed. Callers hold [`marketplaces_lock`].
+fn recover_clone(data: &Path, name: &str) -> Result<()> {
+    let clone = owned_clone(data, name);
+    let parent = plugins_root(data).join("marketplaces");
+    let prefix = format!(".{name}.previous-");
+    let mut previous = fs::read_dir(&parent)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|leaf| leaf.starts_with(&prefix))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    // Names end in a time-ordered id: the last is the newest.
+    previous.sort();
+    if !clone.exists()
+        && let Some(newest) = previous.pop()
+    {
+        fs::rename(&newest, &clone)?;
+    }
+    for stale in previous {
+        let _ = fs::remove_dir_all(stale);
     }
     Ok(())
 }
 
 /// Fetch a registered Git marketplace again when its repository has new
 /// commits, then update each installed plugin of it whose files changed.
-/// The new clone replaces the old one only once it is complete and still
-/// names itself the same; anything that fails before that leaves the old
-/// clone in place.
+/// The new clone is made without holding any lock and replaces the old one
+/// only once it is complete and still names itself the same; anything that
+/// fails before that leaves the old clone in place.
 pub fn marketplace_update(data: &Path, name: &str) -> Result<MarketplaceRefresh> {
     safe_name(name, "marketplace")?;
-    let _lock = marketplaces_lock(data)?;
     let root = marketplaces(data)
         .remove(name)
         .with_context(|| format!("unknown marketplace {name}; add it first"))?;
@@ -969,30 +1181,34 @@ pub fn marketplace_update(data: &Path, name: &str) -> Result<MarketplaceRefresh>
         return Ok(MarketplaceRefresh::new(name, "folder"));
     }
     let clone = owned_clone(data, name);
-    let mut source = source_of(data, name)?;
+    {
+        let _lock = marketplaces_lock(data)?;
+        recover_clone(data, name)?;
+    }
+    let found = source_of(data, name)?;
     let current = head_commit(&clone).ok();
-    let remote = remote_commit(&source.source, None)?;
+    let remote = remote_commit(&found.source, None)?;
     // Unchanged only when the clone and the record both hold the remote's
     // commit; a record that disagrees is put right by fetching again.
     if current.as_deref() == Some(remote.as_str())
-        && source
+        && found
             .commit
             .as_deref()
             .is_none_or(|commit| commit == remote)
     {
         // A marketplace registered before sources were recorded keeps one now.
-        source.commit.clone_from(&current);
-        save_source(data, name, source)?;
+        let _lock = marketplaces_lock(data)?;
+        edit_source(data, name, &found, |source| {
+            source.commit.clone_from(&current);
+        })?;
         return Ok(MarketplaceRefresh {
             commit: current,
             ..MarketplaceRefresh::new(name, "unchanged")
         });
     }
     let parent = plugins_root(data).join("marketplaces");
-    let nonce = uuid::Uuid::now_v7();
-    let staging = parent.join(format!(".{name}.refresh-{nonce}"));
-    let backup = parent.join(format!(".{name}.previous-{nonce}"));
-    let fetched = git_clone(&source.source, &staging).and_then(|()| {
+    let staging = parent.join(format!(".{name}.refresh-{}", uuid::Uuid::now_v7()));
+    let fetched = git_clone(&found.source, &staging).and_then(|()| {
         let manifest = manifest_of(&staging)?;
         if manifest.name != name {
             bail!(
@@ -1009,36 +1225,62 @@ pub fn marketplace_update(data: &Path, name: &str) -> Result<MarketplaceRefresh>
             return Err(error);
         }
     };
-    let before = manifest_of(&clone)
-        .map(|manifest| {
-            manifest
-                .plugins
-                .into_iter()
-                .map(|plugin| (plugin.name, plugin.source))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
     let commit = head_commit(&staging).unwrap_or(remote);
-    source.commit = Some(commit.clone());
-    source.updated_at = Some(now());
-    let swapped = (|| -> Result<()> {
-        fs::rename(&clone, &backup)?;
-        if let Err(error) = fs::rename(&staging, &clone) {
-            let _ = fs::rename(&backup, &clone);
-            return Err(error.into());
+    let before = {
+        let _lock = marketplaces_lock(data)?;
+        recover_clone(data, name)?;
+        let now_current = head_commit(&clone).ok();
+        if now_current != current {
+            // Another Haarness replaced it meanwhile and updates its plugins.
+            let _ = fs::remove_dir_all(&staging);
+            return Ok(MarketplaceRefresh {
+                commit: now_current,
+                ..MarketplaceRefresh::new(name, "unchanged")
+            });
         }
-        if let Err(error) = save_source(data, name, source) {
-            let _ = fs::rename(&clone, &staging);
-            let _ = fs::rename(&backup, &clone);
-            return Err(error);
+        let before = manifest_of(&clone)
+            .map(|manifest| {
+                manifest
+                    .plugins
+                    .into_iter()
+                    .map(|plugin| (plugin.name, plugin.source))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let backup = parent.join(format!(".{name}.previous-{}", uuid::Uuid::now_v7()));
+        let had = clone.exists();
+        let swapped = (|| -> Result<()> {
+            if had {
+                fs::rename(&clone, &backup)?;
+            }
+            if let Err(error) = fs::rename(&staging, &clone) {
+                if had {
+                    let _ = fs::rename(&backup, &clone);
+                }
+                return Err(error.into());
+            }
+            let recorded = edit_source(data, name, &found, |source| {
+                source.commit = Some(commit.clone());
+                source.updated_at = Some(now());
+            });
+            if let Err(error) = recorded {
+                let _ = fs::rename(&clone, &staging);
+                if had {
+                    let _ = fs::rename(&backup, &clone);
+                }
+                return Err(error);
+            }
+            Ok(())
+        })();
+        if let Err(error) = swapped {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error.context(format!("{name} was not updated")));
         }
-        Ok(())
-    })();
-    if let Err(error) = swapped {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(error.context(format!("{name} was not updated")));
-    }
-    let _ = fs::remove_dir_all(&backup);
+        if had {
+            let _ = fs::remove_dir_all(&backup);
+        }
+        before
+    };
     let mut refresh = MarketplaceRefresh {
         commit: Some(commit),
         previous: current,
@@ -1052,17 +1294,10 @@ pub fn marketplace_update(data: &Path, name: &str) -> Result<MarketplaceRefresh>
             refresh.unlisted.push(plugin);
             continue;
         };
-        let stale = plugin_is_stale(data, &clone, &plugin, &record, before.get(&plugin), entry)
-            .and_then(|stale| {
-                if stale {
-                    update(data, &plugin).map(|_| true)
-                } else {
-                    Ok(false)
-                }
-            });
-        match stale {
-            Ok(true) => refresh.plugins.push(plugin),
-            Ok(false) => {}
+        match refresh_plugin(data, &clone, &plugin, &record, before.get(&plugin), entry) {
+            Ok(Refreshed::Updated) => refresh.plugins.push(plugin),
+            Ok(Refreshed::Unchanged) => {}
+            Ok(Refreshed::Held(reason)) => refresh.held.push(PluginHeld { plugin, reason }),
             Err(error) => refresh.failed.push(PluginFailure {
                 plugin,
                 error: format!("{error:#}"),
@@ -1091,13 +1326,88 @@ pub fn marketplace_update_all(data: &Path, only_followed: bool) -> Vec<Marketpla
         .collect()
 }
 
-/// Whether the files `update` would install for `plugin` differ from the
-/// installed ones. A plugin inside the marketplace compares its folders; one
-/// fetched from its own repository is stale when its entry changed or, when
-/// it follows a branch, that branch moved.
-fn plugin_is_stale(
+/// What refreshing one installed plugin did.
+enum Refreshed {
+    Updated,
+    Unchanged,
+    /// Its new version waits for the person: local edits, or it asks to run
+    /// more than the installed one.
+    Held(String),
+}
+
+/// The automatic update of one installed plugin after its marketplace was
+/// fetched again. It never replaces local edits, and a version that would
+/// add hooks, MCP servers or programs waits for `plugin update`; either way
+/// the record says why.
+fn refresh_plugin(
     data: &Path,
     clone: &Path,
+    plugin: &str,
+    record: &InstalledPlugin,
+    before: Option<&serde_json::Value>,
+    entry: &MarketplacePlugin,
+) -> Result<Refreshed> {
+    let outcome = (|| -> Result<Refreshed> {
+        if !plugin_may_have_changed(data, plugin, record, before, entry)? {
+            return Ok(Refreshed::Unchanged);
+        }
+        if locally_modified(record)? {
+            return Ok(Refreshed::Held("has local edits".into()));
+        }
+        let staged = stage_plugin(data, &record.marketplace, plugin, clone, entry)?;
+        let installed_tree = record
+            .path
+            .exists()
+            .then(|| plugin_tree_digest(&record.path));
+        if let Some(Ok(digest)) = &installed_tree
+            && plugin_tree_digest(&staged.plugin()).ok().as_ref() == Some(digest)
+        {
+            staged.discard();
+            return Ok(Refreshed::Unchanged);
+        }
+        if record.path.exists() {
+            let more = asks_for_more(&record.path, &staged.plugin());
+            if !more.is_empty() {
+                staged.discard();
+                return Ok(Refreshed::Held(format!(
+                    "asks for more: {}",
+                    more.join(", ")
+                )));
+            }
+        }
+        install_staged(
+            data,
+            plugin,
+            &record.marketplace,
+            staged,
+            &entry.description,
+            true,
+        )?;
+        Ok(Refreshed::Updated)
+    })()?;
+    // Say why it waits, or that nothing does any more.
+    let held = match &outcome {
+        Refreshed::Held(reason) => Some(reason.clone()),
+        _ => None,
+    };
+    if !matches!(outcome, Refreshed::Updated) && record.held != held {
+        change_installed(data, |plugins| {
+            if let Some(current) = plugins.get_mut(plugin) {
+                current.held.clone_from(&held);
+            }
+            Ok(())
+        })?;
+    }
+    Ok(outcome)
+}
+
+/// A cheap first look: whether the files `update` would install for
+/// `plugin` may differ from the installed ones. A plugin inside the
+/// marketplace compares its folders; one fetched from its own repository may
+/// have changed when its entry changed or, when it follows a branch, that
+/// branch moved.
+fn plugin_may_have_changed(
+    data: &Path,
     plugin: &str,
     record: &InstalledPlugin,
     before: Option<&serde_json::Value>,
@@ -1111,23 +1421,8 @@ fn plugin_is_stale(
         .join(&record.marketplace)
         .join(plugin);
     match &entry.source {
-        serde_json::Value::String(source)
-            if !(source.contains("://")
-                || source.starts_with("git@")
-                || source.to_ascii_lowercase().ends_with(".git")) =>
-        {
-            if !safe_relative_plugin_source(source) {
-                bail!("plugin {plugin} has an unsafe relative source path");
-            }
-            let candidate = clone.join(source).canonicalize()?;
-            if !candidate.starts_with(clone.canonicalize()?) {
-                bail!(
-                    "plugin source must stay inside marketplace {}",
-                    clone.display()
-                );
-            }
-            Ok(plugin_tree_digest(&candidate)? != plugin_tree_digest(&record.path)?)
-        }
+        // Compared once fetched: copying a folder costs little.
+        serde_json::Value::String(source) if !is_git_source(source) => Ok(true),
         serde_json::Value::String(url) => {
             Ok(head_commit(&cache).ok() != Some(remote_commit(url, None)?))
         }
@@ -1137,26 +1432,171 @@ fn plugin_is_stale(
                 // Pinned to one commit, which the entry did not change.
                 return Ok(false);
             }
-            let url = match object
-                .get("source")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("github")
-            {
-                "github" => object
-                    .get("repo")
-                    .and_then(serde_json::Value::as_str)
-                    .map(git_url),
-                "url" | "git-subdir" => object
-                    .get("url")
-                    .and_then(serde_json::Value::as_str)
-                    .map(git_url),
-                _ => None,
+            let Some(url) = git_source_url(object) else {
+                return Ok(false);
             };
-            let Some(url) = url else { return Ok(false) };
             Ok(head_commit(&cache).ok() != Some(remote_commit(&url, revision.reference)?))
         }
         _ => Ok(false),
     }
+}
+
+fn is_git_source(source: &str) -> bool {
+    source.contains("://")
+        || source.starts_with("git@")
+        || source.to_ascii_lowercase().ends_with(".git")
+}
+
+fn git_source_url(object: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    match object
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("github")
+    {
+        "github" => object
+            .get("repo")
+            .and_then(serde_json::Value::as_str)
+            .map(git_url),
+        "url" | "git-subdir" => object
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .map(git_url),
+        _ => None,
+    }
+}
+
+/// Whether an installed plugin's files differ from what Haarness installed.
+/// A record from before digests were kept cannot tell, and counts as not.
+fn locally_modified(record: &InstalledPlugin) -> Result<bool> {
+    match &record.digest {
+        Some(digest) if record.path.exists() => Ok(plugin_tree_digest(&record.path)? != *digest),
+        _ => Ok(false),
+    }
+}
+
+/// What a new version of a plugin may run that the installed one may not:
+/// hooks, MCP servers, or programs (files it may execute) that are new or
+/// changed.
+fn asks_for_more(installed: &Path, new: &Path) -> Vec<&'static str> {
+    let mut more = Vec::new();
+    let (old_hooks, new_hooks) = (plugin_hooks(installed), plugin_hooks(new));
+    if new_hooks != old_hooks && !new_hooks.is_empty() {
+        more.push(if old_hooks.is_empty() {
+            "new hooks"
+        } else {
+            "changed hooks"
+        });
+    }
+    let (old_servers, new_servers) = (mcp_servers(installed), mcp_servers(new));
+    if new_servers
+        .keys()
+        .any(|server| !old_servers.contains_key(server))
+    {
+        more.push("new MCP servers");
+    } else if new_servers
+        .iter()
+        .any(|(server, config)| old_servers.get(server) != Some(config))
+    {
+        more.push("changed MCP servers");
+    }
+    let old_programs = programs(installed);
+    if programs(new)
+        .iter()
+        .any(|program| !old_programs.contains(program))
+    {
+        more.push("new programs");
+    }
+    more
+}
+
+fn plugin_manifest(root: &Path) -> serde_json::Value {
+    fs::read_to_string(root.join(".claude-plugin/plugin.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// A JSON file of the plugin as text when it does not parse, so a broken
+/// file still counts as changed.
+fn plugin_json(root: &Path, relative: &str) -> Option<serde_json::Value> {
+    if !safe_relative(relative) {
+        return None;
+    }
+    let text = fs::read_to_string(root.join(relative)).ok()?;
+    Some(serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)))
+}
+
+/// Every hook definition a plugin brings: `hooks/hooks.json` and the
+/// manifest's `hooks` (inline, or the file it names).
+fn plugin_hooks(root: &Path) -> Vec<serde_json::Value> {
+    let mut hooks = Vec::new();
+    hooks.extend(plugin_json(root, "hooks/hooks.json"));
+    match plugin_manifest(root).get("hooks") {
+        Some(serde_json::Value::String(path)) => {
+            hooks.extend(plugin_json(root, path.trim_start_matches("./")));
+        }
+        Some(serde_json::Value::Null) | None => {}
+        Some(inline) => hooks.push(inline.clone()),
+    }
+    hooks
+}
+
+/// A plugin's MCP servers by name: `.mcp.json` and the manifest's
+/// `mcpServers` (inline, or the file it names).
+fn mcp_servers(root: &Path) -> BTreeMap<String, serde_json::Value> {
+    let mut servers = BTreeMap::new();
+    let mut add = |value: Option<serde_json::Value>| {
+        let Some(value) = value else { return };
+        let list = value.get("mcpServers").cloned().unwrap_or(value);
+        match list {
+            serde_json::Value::Object(list) => servers.extend(list),
+            other => {
+                servers.insert(String::new(), other);
+            }
+        }
+    };
+    add(plugin_json(root, ".mcp.json"));
+    match plugin_manifest(root).get("mcpServers") {
+        Some(serde_json::Value::String(path)) => {
+            add(plugin_json(root, path.trim_start_matches("./")))
+        }
+        Some(serde_json::Value::Null) | None => {}
+        Some(inline) => add(Some(inline.clone())),
+    }
+    servers
+}
+
+/// The files of a plugin someone may run directly: those marked executable.
+fn programs(root: &Path) -> std::collections::BTreeSet<PathBuf> {
+    let mut found = std::collections::BTreeSet::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if entry.file_name() == ".git" {
+                    continue;
+                }
+                let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                    continue;
+                };
+                if metadata.is_dir() {
+                    pending.push(entry.path());
+                } else if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+                    if let Ok(relative) = entry.path().strip_prefix(root) {
+                        found.insert(relative.to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = root;
+    found
 }
 
 /// A digest of a plugin's files as Haarness installs them: names, kinds,
@@ -1200,7 +1640,6 @@ pub fn marketplace_auto_update(
     enabled: bool,
 ) -> Result<MarketplaceSource> {
     safe_name(name, "marketplace")?;
-    let _lock = marketplaces_lock(data)?;
     let root = marketplaces(data)
         .remove(name)
         .with_context(|| format!("unknown marketplace {name}; add it first"))?;
@@ -1209,10 +1648,9 @@ pub fn marketplace_auto_update(
             "{name} is a folder on this computer, which Haarness reads as it is; there is nothing to fetch"
         );
     }
-    let mut source = source_of(data, name)?;
-    source.auto_update = enabled;
-    save_source(data, name, source.clone())?;
-    Ok(source)
+    let found = source_of(data, name)?;
+    let _lock = marketplaces_lock(data)?;
+    edit_source(data, name, &found, |source| source.auto_update = enabled)
 }
 
 /// A source that names a folder on this computer: absolute, `~/…`, `./…` or
@@ -1223,6 +1661,219 @@ fn local_path(spec: &str) -> Option<PathBuf> {
     }
     let relative = [".", ".."].contains(&spec) || spec.starts_with("./") || spec.starts_with("../");
     (relative || Path::new(spec).is_absolute()).then(|| PathBuf::from(spec))
+}
+
+/// A marketplace plugin's files fetched into a folder beside its cache, not
+/// installed yet.
+struct StagedPlugin {
+    /// What replaces the cache folder.
+    root: PathBuf,
+    /// The plugin inside it, for a `path` in a repository.
+    subdir: Option<PathBuf>,
+}
+
+impl StagedPlugin {
+    fn plugin(&self) -> PathBuf {
+        self.subdir
+            .as_ref()
+            .map_or_else(|| self.root.clone(), |subdir| self.root.join(subdir))
+    }
+
+    fn discard(self) {
+        let _ = fs::remove_dir_all(self.root);
+    }
+}
+
+/// Fetches (git) or copies (a folder of the marketplace) a plugin's files
+/// into a staging folder beside its cache. Nothing installed changes.
+fn stage_plugin(
+    data: &Path,
+    market: &str,
+    name: &str,
+    root: &Path,
+    entry: &MarketplacePlugin,
+) -> Result<StagedPlugin> {
+    let parent = plugins_root(data).join("cache").join(market);
+    fs::create_dir_all(&parent)?;
+    let staging = parent.join(format!(".{name}.fetch-{}", uuid::Uuid::now_v7()));
+    let staged = (|| -> Result<StagedPlugin> {
+        let subdir = match &entry.source {
+            serde_json::Value::String(source) if is_git_source(source) => {
+                git_clone(source, &staging)?;
+                None
+            }
+            serde_json::Value::String(source) => {
+                if !safe_relative_plugin_source(source) {
+                    bail!("plugin {name} has an unsafe relative source path");
+                }
+                let candidate = root.join(source);
+                let root = root.canonicalize()?;
+                let candidate = candidate.canonicalize().with_context(|| {
+                    format!("plugin source {} does not exist", candidate.display())
+                })?;
+                if !candidate.starts_with(&root) {
+                    bail!(
+                        "plugin source must stay inside marketplace {}",
+                        root.display()
+                    );
+                }
+                if !candidate.is_dir() {
+                    bail!("plugin source {} does not exist", candidate.display());
+                }
+                materialize_plugin_tree(&candidate, &staging)?;
+                None
+            }
+            serde_json::Value::Object(object) => {
+                let kind = object
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("github");
+                if !matches!(kind, "github" | "url" | "git-subdir") {
+                    bail!("unsupported plugin source type {kind} for {name}");
+                }
+                let source = git_source_url(object).with_context(|| {
+                    if kind == "github" {
+                        "github plugin source needs repo"
+                    } else {
+                        "plugin source needs url"
+                    }
+                })?;
+                // `git-subdir` requires a path; Anthropic's own marketplace
+                // also gives some `url` sources one, so honour it there too.
+                let subdir = match (kind, object.get("path").and_then(serde_json::Value::as_str)) {
+                    ("git-subdir", None) => bail!("git-subdir plugin source needs path"),
+                    ("git-subdir" | "url", Some(subdir)) => {
+                        if !safe_relative(subdir) {
+                            bail!("plugin {name} has an unsafe git subdirectory path");
+                        }
+                        Some(subdir)
+                    }
+                    _ => None,
+                };
+                git_checkout(&source, &GitRevision::of(object), &staging)?;
+                match subdir {
+                    Some(subdir) => {
+                        let target = staging.join(subdir);
+                        let checkout = staging.canonicalize()?;
+                        let target = target.canonicalize().with_context(|| {
+                            format!("plugin subdirectory {subdir} does not exist")
+                        })?;
+                        if !target.starts_with(&checkout) || !target.is_dir() {
+                            bail!("plugin subdirectory must stay inside its repository");
+                        }
+                        Some(target.strip_prefix(&checkout)?.to_path_buf())
+                    }
+                    None => None,
+                }
+            }
+            _ => bail!("unsupported plugin source for {name}"),
+        };
+        let staged = StagedPlugin {
+            root: staging.clone(),
+            subdir,
+        };
+        let plugin = staged.plugin();
+        if !plugin.join(".claude-plugin/plugin.json").exists() && !plugin.join("commands").exists()
+        {
+            bail!("{name} does not look like a plugin (no .claude-plugin/plugin.json)");
+        }
+        Ok(staged)
+    })();
+    if staged.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    staged
+}
+
+/// Moves a staged plugin into its cache and records it, under
+/// [`installed_lock`]. A plugin already installed keeps whether it is on;
+/// with `existing`, one removed while it was fetched stays removed.
+fn install_staged(
+    data: &Path,
+    name: &str,
+    market: &str,
+    staged: StagedPlugin,
+    description: &str,
+    existing: bool,
+) -> Result<InstalledPlugin> {
+    let cache = plugins_root(data).join("cache").join(market).join(name);
+    let result = change_installed(data, |plugins| {
+        let current = plugins.get(name);
+        if existing && current.is_none_or(|current| current.marketplace != market) {
+            bail!("{name} was removed while it was being updated, so it stays removed");
+        }
+        swap_into(&staged.root, &cache)?;
+        let path = match &staged.subdir {
+            Some(subdir) => cache.join(subdir).canonicalize()?,
+            None => cache.clone(),
+        };
+        let plugin = InstalledPlugin {
+            marketplace: market.to_owned(),
+            digest: plugin_tree_digest(&path).ok(),
+            path,
+            enabled: current.is_none_or(|current| current.enabled),
+            description: description.to_owned(),
+            held: None,
+        };
+        plugins.insert(name.to_owned(), plugin.clone());
+        Ok(plugin)
+    });
+    if result.is_err() {
+        staged.discard();
+    }
+    result
+}
+
+/// The marketplace entry `spec` names: `name@marketplace`, or `name` when
+/// only one marketplace is registered.
+fn marketplace_entry(
+    data: &Path,
+    spec: &str,
+) -> Result<(String, String, PathBuf, MarketplacePlugin)> {
+    let marketplaces = marketplaces(data);
+    let (name, market) = match spec.split_once('@') {
+        Some((name, market)) => (name.to_owned(), market.to_owned()),
+        None => {
+            if marketplaces.len() == 1 {
+                let market = marketplaces.keys().next().cloned().unwrap_or_default();
+                (spec.to_owned(), market)
+            } else if marketplaces.is_empty() {
+                bail!(
+                    "{spec} is not a folder on this computer, and no plugin marketplace has been added to install it from"
+                );
+            } else {
+                bail!(
+                    "Say which marketplace to install {spec} from: {spec}@<marketplace> (added: {})",
+                    marketplaces.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
+            }
+        }
+    };
+    safe_name(&name, "plugin")?;
+    safe_name(&market, "marketplace")?;
+    let root = marketplaces
+        .get(&market)
+        .with_context(|| format!("unknown marketplace {market}; add it first"))?
+        .clone();
+    let entry = manifest_of(&root)?
+        .plugins
+        .into_iter()
+        .find(|plugin| plugin.name == name)
+        .with_context(|| format!("marketplace {market} has no plugin {name}"))?;
+    Ok((name, market, root, entry))
+}
+
+/// Refuses to replace a plugin whose installed files were edited, as
+/// marketplace installs do.
+fn refuse_local_edits(data: &Path, name: &str) -> Result<()> {
+    if let Some(record) = installed(data).get(name)
+        && locally_modified(record)?
+    {
+        bail!(
+            "{name} was modified locally; preserve your edits, then remove it and install it again"
+        );
+    }
+    Ok(())
 }
 
 /// Install `name@marketplace` (or `name` when only one marketplace exists),
@@ -1256,161 +1907,49 @@ pub fn install(data: &Path, spec: &str) -> Result<InstalledPlugin> {
             .context("local plugin manifest needs name")?
             .to_owned();
         safe_name(&name, "plugin")?;
-        let plugin = InstalledPlugin {
-            marketplace: "local".into(),
-            path,
-            enabled: true,
-            description: manifest
-                .get("description")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-        };
-        let mut plugins = installed(data);
-        plugins.insert(name, plugin.clone());
-        write_map(&installed_file(data), &plugins)?;
-        return Ok(plugin);
+        let description = manifest
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        return change_installed(data, |plugins| {
+            let plugin = InstalledPlugin {
+                marketplace: "local".into(),
+                path,
+                enabled: plugins.get(&name).is_none_or(|current| current.enabled),
+                description,
+                digest: None,
+                held: None,
+            };
+            plugins.insert(name, plugin.clone());
+            Ok(plugin)
+        });
     }
     // Plugin names never contain a path separator.
     let name = spec.split_once('@').map_or(spec, |(name, _)| name);
     if local_path(spec).is_some() || name.contains(['/', '\\']) {
         bail!("{spec} does not exist");
     }
-    let marketplaces: BTreeMap<String, PathBuf> = read_map(&marketplaces_file(data));
-    let (name, market) = match spec.split_once('@') {
-        Some((name, market)) => (name.to_owned(), market.to_owned()),
-        None => {
-            if marketplaces.len() == 1 {
-                let market = marketplaces.keys().next().cloned().unwrap_or_default();
-                (spec.to_owned(), market)
-            } else if marketplaces.is_empty() {
-                bail!(
-                    "{spec} is not a folder on this computer, and no plugin marketplace has been added to install it from"
-                );
-            } else {
-                bail!(
-                    "Say which marketplace to install {spec} from: {spec}@<marketplace> (added: {})",
-                    marketplaces.keys().cloned().collect::<Vec<_>>().join(", ")
-                );
-            }
-        }
-    };
-    safe_name(&name, "plugin")?;
-    safe_name(&market, "marketplace")?;
-    let root = marketplaces
-        .get(&market)
-        .with_context(|| format!("unknown marketplace {market}; add it first"))?;
-    let manifest = manifest_of(root)?;
-    let entry = manifest
-        .plugins
-        .iter()
-        .find(|plugin| plugin.name == name)
-        .with_context(|| format!("marketplace {market} has no plugin {name}"))?;
-    let cache = plugins_root(data).join("cache").join(&market).join(&name);
-    let path = match &entry.source {
-        serde_json::Value::String(source) => {
-            if source.contains("://")
-                || source.starts_with("git@")
-                || source.to_ascii_lowercase().ends_with(".git")
-            {
-                git_clone(source, &cache)?;
-                cache.clone()
-            } else {
-                if !safe_relative_plugin_source(source) {
-                    bail!("plugin {name} has an unsafe relative source path");
-                }
-                let candidate = root.join(source);
-                let root = root.canonicalize()?;
-                let candidate = candidate.canonicalize().with_context(|| {
-                    format!("plugin source {} does not exist", candidate.display())
-                })?;
-                if !candidate.starts_with(&root) {
-                    bail!(
-                        "plugin source must stay inside marketplace {}",
-                        root.display()
-                    );
-                }
-                if !candidate.is_dir() {
-                    bail!("plugin source {} does not exist", candidate.display());
-                }
-                materialize_plugin_tree(&candidate, &cache)?;
-                cache.clone()
-            }
-        }
-        serde_json::Value::Object(object) => {
-            let kind = object
-                .get("source")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("github");
-            let source = match kind {
-                "github" => object
-                    .get("repo")
-                    .and_then(serde_json::Value::as_str)
-                    .map(git_url)
-                    .context("github plugin source needs repo")?,
-                "url" | "git-subdir" => object
-                    .get("url")
-                    .and_then(serde_json::Value::as_str)
-                    .map(git_url)
-                    .context("plugin source needs url")?,
-                other => bail!("unsupported plugin source type {other} for {name}"),
-            };
-            // `git-subdir` requires a path; Anthropic's own marketplace also
-            // gives some `url` sources one, so honour it there too.
-            let subdir = match (kind, object.get("path").and_then(serde_json::Value::as_str)) {
-                ("git-subdir", None) => bail!("git-subdir plugin source needs path"),
-                ("git-subdir" | "url", Some(subdir)) => {
-                    if !safe_relative(subdir) {
-                        bail!("plugin {name} has an unsafe git subdirectory path");
-                    }
-                    Some(subdir)
-                }
-                _ => None,
-            };
-            git_checkout(&source, &GitRevision::of(object), &cache)?;
-            if let Some(subdir) = subdir {
-                let target = cache.join(subdir);
-                let canonical_cache = cache.canonicalize()?;
-                let target = target.canonicalize().with_context(|| {
-                    format!("plugin subdirectory {} does not exist", target.display())
-                })?;
-                if !target.starts_with(&canonical_cache) || !target.is_dir() {
-                    bail!("plugin subdirectory must stay inside its repository");
-                }
-                target
-            } else {
-                cache.clone()
-            }
-        }
-        _ => bail!("unsupported plugin source for {name}"),
-    };
-    if !path.join(".claude-plugin/plugin.json").exists() && !path.join("commands").exists() {
-        bail!(
-            "{} does not look like a plugin (no .claude-plugin/plugin.json)",
-            path.display()
-        );
-    }
-    let plugin = InstalledPlugin {
-        marketplace: market,
-        path,
-        enabled: true,
-        description: entry.description.clone(),
-    };
-    let mut plugins = installed(data);
-    plugins.insert(name, plugin.clone());
-    write_map(&installed_file(data), &plugins)?;
-    Ok(plugin)
+    let (name, market, root, entry) = marketplace_entry(data, spec)?;
+    refuse_local_edits(data, &name)?;
+    let staged = stage_plugin(data, &market, &name, &root, &entry)?;
+    install_staged(data, &name, &market, staged, &entry.description, false)
 }
 
 pub fn set_enabled(data: &Path, name: &str, enabled: bool) -> Result<()> {
-    let mut plugins = installed(data);
-    let plugin = plugins
-        .get_mut(name)
-        .with_context(|| format!("plugin {name} is not installed"))?;
-    plugin.enabled = enabled;
-    write_map(&installed_file(data), &plugins)
+    change_installed(data, |plugins| {
+        plugins
+            .get_mut(name)
+            .with_context(|| format!("plugin {name} is not installed"))?
+            .enabled = enabled;
+        Ok(())
+    })
 }
 
+/// Installs the marketplace's current version of an installed plugin, as it
+/// was asked for: it may add hooks, MCP servers or programs. It stays on or
+/// off as it is when the new files are written, and refuses to replace local
+/// edits.
 pub fn update(data: &Path, name: &str) -> Result<InstalledPlugin> {
     let plugin = installed(data)
         .get(name)
@@ -1425,29 +1964,29 @@ pub fn update(data: &Path, name: &str) -> Result<InstalledPlugin> {
         }
         return Ok(plugin);
     }
-    let mut updated = install(data, &format!("{name}@{}", plugin.marketplace))?;
-    if !plugin.enabled {
-        set_enabled(data, name, false)?;
-        updated.enabled = false;
-    }
-    Ok(updated)
+    let (name, market, root, entry) =
+        marketplace_entry(data, &format!("{name}@{}", plugin.marketplace))?;
+    refuse_local_edits(data, &name)?;
+    let staged = stage_plugin(data, &market, &name, &root, &entry)?;
+    install_staged(data, &name, &market, staged, &entry.description, true)
 }
 
 pub fn remove(data: &Path, name: &str) -> Result<()> {
-    let mut plugins = installed(data);
-    let plugin = plugins
-        .remove(name)
-        .with_context(|| format!("plugin {name} is not installed"))?;
-    // Only delete a cache owned by this install. Relative marketplace paths
-    // can be the marketplace root itself and must never remove that registry.
-    let cache = plugins_root(data)
-        .join("cache")
-        .join(&plugin.marketplace)
-        .join(name);
-    if plugin.marketplace != "local" && plugin.path.starts_with(&cache) {
-        let _ = fs::remove_dir_all(cache);
-    }
-    write_map(&installed_file(data), &plugins)
+    change_installed(data, |plugins| {
+        let plugin = plugins
+            .remove(name)
+            .with_context(|| format!("plugin {name} is not installed"))?;
+        // Only delete a cache owned by this install. Relative marketplace paths
+        // can be the marketplace root itself and must never remove that registry.
+        let cache = plugins_root(data)
+            .join("cache")
+            .join(&plugin.marketplace)
+            .join(name);
+        if plugin.marketplace != "local" && plugin.path.starts_with(&cache) {
+            let _ = fs::remove_dir_all(cache);
+        }
+        Ok(())
+    })
 }
 
 pub fn marketplaces(data: &Path) -> BTreeMap<String, PathBuf> {
@@ -1501,6 +2040,18 @@ pub fn marketplace_catalog(data: &Path) -> serde_json::Value {
                 if let (Some(row), Some(origin)) = (row.as_object_mut(), origin.as_object()) {
                     row.extend(origin.clone());
                 }
+                // Installed plugins of it whose automatic update waits, and why.
+                row["held"] = serde_json::Value::Array(
+                    installed
+                        .iter()
+                        .filter(|(_, plugin)| plugin.marketplace == name)
+                        .filter_map(|(plugin, record)| {
+                            record.held.as_ref().map(|reason| {
+                                serde_json::json!({"plugin": plugin, "reason": reason})
+                            })
+                        })
+                        .collect(),
+                );
                 row
             })
             .collect(),
@@ -2422,5 +2973,236 @@ mod tests {
         );
         assert!(apply("marketplace_update", "missing").is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A marketplace with one plugin at `upstream`, registered and installed.
+    fn installed_kit(root: &Path) -> (PathBuf, Upstream, PathBuf) {
+        let data = root.join("data");
+        let upstream = Upstream::new(root);
+        let manifest = market_manifest("team", &["kit"]);
+        upstream.commit(
+            &[
+                files(&[plugin_files("kit", "Version one")]),
+                vec![(".claude-plugin/marketplace.json", manifest.as_str())],
+            ]
+            .concat(),
+            "one",
+        );
+        marketplace_add(&data, &upstream.url).unwrap();
+        let command = install(&data, "kit@team")
+            .unwrap()
+            .path
+            .join("commands/run.md");
+        (data, upstream, command)
+    }
+
+    #[test]
+    fn a_plugin_switched_off_or_removed_while_its_update_is_fetched_stays_so() {
+        let root = std::env::temp_dir().join(format!("haarness-race-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let (data, upstream, command) = installed_kit(&root);
+        upstream.commit(&[("plugins/kit/commands/run.md", "Version two")], "two");
+        marketplace_update(&data, "team").unwrap();
+        let (_, market, clone, entry) = marketplace_entry(&data, "kit@team").unwrap();
+        // Fetched, then switched off before the new files are recorded.
+        let staged = stage_plugin(&data, &market, "kit", &clone, &entry).unwrap();
+        set_enabled(&data, "kit", false).unwrap();
+        install_staged(&data, "kit", &market, staged, "", true).unwrap();
+        assert!(!installed(&data)["kit"].enabled);
+        // Fetched, then removed: it stays removed, and nothing is left behind.
+        let staged = stage_plugin(&data, &market, "kit", &clone, &entry).unwrap();
+        let staging = staged.root.clone();
+        remove(&data, "kit").unwrap();
+        let error = install_staged(&data, "kit", &market, staged, "", true).unwrap_err();
+        assert!(error.to_string().contains("stays removed"), "{error}");
+        assert!(!installed(&data).contains_key("kit"));
+        assert!(!staging.exists() && !command.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_automatic_update_keeps_local_edits_and_waits_for_plugins_that_ask_for_more() {
+        let root = std::env::temp_dir().join(format!("haarness-held-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let (data, upstream, command) = installed_kit(&root);
+        assert!(installed(&data)["kit"].digest.is_some());
+        // Local edits are never replaced, by the refresh or by hand.
+        fs::write(&command, "My own version").unwrap();
+        upstream.commit(&[("plugins/kit/commands/run.md", "Version two")], "two");
+        let refresh = marketplace_update(&data, "team").unwrap();
+        assert!(refresh.plugins.is_empty());
+        assert_eq!(refresh.held[0].plugin, "kit");
+        assert_eq!(refresh.held[0].reason, "has local edits");
+        assert_eq!(fs::read_to_string(&command).unwrap(), "My own version");
+        assert_eq!(
+            installed(&data)["kit"].held.as_deref(),
+            Some("has local edits")
+        );
+        assert_eq!(
+            marketplace_catalog(&data)[0]["held"],
+            serde_json::json!([{"plugin": "kit", "reason": "has local edits"}])
+        );
+        assert!(
+            update(&data, "kit")
+                .unwrap_err()
+                .to_string()
+                .contains("modified locally")
+        );
+        assert_eq!(fs::read_to_string(&command).unwrap(), "My own version");
+        // Edits undone, the next refresh updates it and the hold is gone.
+        fs::write(&command, "Version one").unwrap();
+        upstream.commit(&[("plugins/kit/commands/other.md", "More")], "three");
+        let refresh = marketplace_update(&data, "team").unwrap();
+        assert_eq!(refresh.plugins, ["kit"]);
+        assert_eq!(fs::read_to_string(&command).unwrap(), "Version two");
+        assert!(installed(&data)["kit"].held.is_none());
+
+        // A version that adds hooks, an MCP server or a program waits for
+        // the person; `plugin update` installs it.
+        for (path, body, reason) in [
+            (
+                "plugins/kit/hooks/hooks.json",
+                r#"{"hooks":{"SessionStart":[]}}"#,
+                "asks for more: new hooks",
+            ),
+            (
+                "plugins/kit/.mcp.json",
+                r#"{"mcpServers":{"docs":{"command":"docs"}}}"#,
+                "asks for more: new MCP servers",
+            ),
+        ] {
+            upstream.commit(&[(path, body)], reason);
+            let refresh = marketplace_update(&data, "team").unwrap();
+            assert!(refresh.plugins.is_empty(), "{reason}");
+            assert_eq!(refresh.held[0].reason, reason);
+            let installed_file = installed(&data)["kit"]
+                .path
+                .join(path.trim_start_matches("plugins/kit/"));
+            assert!(!installed_file.exists(), "{reason}");
+            assert_eq!(installed(&data)["kit"].held.as_deref(), Some(reason));
+            update(&data, "kit").unwrap();
+            assert!(installed_file.exists(), "{reason}");
+            assert!(installed(&data)["kit"].held.is_none());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = upstream.work.join("plugins/kit/bin/run.sh");
+            fs::create_dir_all(script.parent().unwrap()).unwrap();
+            fs::write(&script, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            upstream.commit(&[], "program");
+            let refresh = marketplace_update(&data, "team").unwrap();
+            assert_eq!(refresh.held[0].reason, "asks for more: new programs");
+            // An ordinary file of a plugin that already has its hooks is no reason.
+            update(&data, "kit").unwrap();
+            upstream.commit(&[("plugins/kit/commands/run.md", "Version three")], "text");
+            let refresh = marketplace_update(&data, "team").unwrap();
+            assert_eq!(refresh.plugins, ["kit"]);
+            assert!(refresh.held.is_empty());
+        }
+        // Changed hooks wait too.
+        upstream.commit(
+            &[("plugins/kit/hooks/hooks.json", r#"{"hooks":{"Stop":[]}}"#)],
+            "changed hooks",
+        );
+        assert_eq!(
+            marketplace_update(&data, "team").unwrap().held[0].reason,
+            "asks for more: changed hooks"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_clone_lost_between_the_two_renames_of_a_swap_comes_back() {
+        let root = std::env::temp_dir().join(format!("haarness-lost-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let (data, upstream, command) = installed_kit(&root);
+        let clone = owned_clone(&data, "team");
+        let head = head_commit(&clone).unwrap();
+        // Stopped after moving the clone aside: it is put back.
+        let aside = plugins_root(&data)
+            .join("marketplaces")
+            .join(format!(".team.previous-{}", uuid::Uuid::now_v7()));
+        fs::rename(&clone, &aside).unwrap();
+        assert_eq!(
+            marketplace_update(&data, "team").unwrap().status,
+            "unchanged"
+        );
+        assert_eq!(head_commit(&clone).unwrap(), head);
+        assert!(!aside.exists());
+        // Gone with nothing to put back: it is cloned again.
+        fs::remove_dir_all(&clone).unwrap();
+        upstream.commit(&[("plugins/kit/commands/run.md", "Version two")], "two");
+        let refresh = marketplace_update(&data, "team").unwrap();
+        assert_eq!(refresh.status, "updated");
+        assert_eq!(refresh.plugins, ["kit"]);
+        assert_eq!(fs::read_to_string(&command).unwrap(), "Version two");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_ref_means_that_branch_or_tag_and_nothing_ending_in_the_same_name() {
+        let root = std::env::temp_dir().join(format!("haarness-refs-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let upstream = Upstream::new(&root);
+        let tagged = upstream.commit(&[("file", "one")], "one");
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
+                    .args(args)
+                    .current_dir(&upstream.work)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        run(&["tag", "-a", "v1", "-m", "release"]);
+        run(&["push", "-q", "origin", "v1"]);
+        // A branch whose name ends in the tag's, on another commit.
+        run(&["checkout", "-q", "-b", "feature/v1"]);
+        fs::write(upstream.work.join("file"), "two").unwrap();
+        run(&["commit", "-qam", "two"]);
+        run(&["push", "-q", "origin", "feature/v1"]);
+        let feature = head_commit(&upstream.work).unwrap();
+        run(&["checkout", "-q", "main"]);
+        assert_eq!(remote_commit(&upstream.url, Some("v1")).unwrap(), tagged);
+        assert_eq!(
+            remote_commit(&upstream.url, Some("feature/v1")).unwrap(),
+            feature
+        );
+        assert_eq!(remote_commit(&upstream.url, Some("main")).unwrap(), tagged);
+        assert_eq!(remote_commit(&upstream.url, None).unwrap(), tagged);
+        assert!(remote_commit(&upstream.url, Some("1")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_never_waits_on_a_terminal_or_a_silent_host() {
+        // No input: a command that reads it ends at once.
+        let args = ["-c", "alias.reads=!cat", "reads"]
+            .map(std::ffi::OsString::from)
+            .to_vec();
+        assert_eq!(
+            git_output_within(&args, Duration::from_secs(20)).unwrap(),
+            ""
+        );
+        // A host that accepts and never answers is given up on.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/market.git", listener.local_addr().unwrap());
+        let started = std::time::Instant::now();
+        let args = ["ls-remote", "--", &url, "HEAD"]
+            .map(std::ffi::OsString::from)
+            .to_vec();
+        let error = git_output_within(&args, Duration::from_secs(2)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("did not finish within 2 seconds"),
+            "{error}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        drop(listener);
     }
 }

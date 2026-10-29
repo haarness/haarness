@@ -2950,5 +2950,6 @@
   "Up to date": "最新です",
   "Updated just now": "たった今更新しました",
   "Plugins updated: {names}": "更新したプラグイン: {names}",
-  "Could not update {names}": "{names} を更新できませんでした"
+  "Could not update {names}": "{names} を更新できませんでした",
+  "Waiting for you: {plugins}": "確認待ち: {plugins}"
 }
