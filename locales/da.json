@@ -2942,5 +2942,13 @@
   "Your free trial didn't start: that card was already used for a trial.": "Din gratis prøveperiode startede ikke: kortet er allerede brugt til en prøveperiode.",
   "The attachments come to {size}, over the {limit} limit for media in one message": "Vedhæftningerne fylder {size}, over grænsen på {limit} for medier i én besked",
   "its images and PDFs would take the message over the 20 MiB limit for media": "dens billeder og PDF'er ville bringe beskeden over grænsen på 20 MiB for medier",
-  "{name} is {size}, over the {limit} limit for media in one message": "{name} fylder {size}, over grænsen på {limit} for medier i én besked"
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} fylder {size}, over grænsen på {limit} for medier i én besked",
+  "Marketplaces": "Marketplaces",
+  "Update automatically": "Opdater automatisk",
+  "Update {name} automatically": "Opdater {name} automatisk",
+  "Fetched {time}": "Hentet {time}",
+  "Up to date": "Opdateret",
+  "Updated just now": "Opdateret lige nu",
+  "Plugins updated: {names}": "Opdaterede plugins: {names}",
+  "Could not update {names}": "{names} kunne ikke opdateres"
 }

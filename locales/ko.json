@@ -2942,5 +2942,13 @@
   "Your free trial didn't start: that card was already used for a trial.": "무료 체험이 시작되지 않았습니다. 이 카드는 이미 체험에 사용되었습니다.",
   "The attachments come to {size}, over the {limit} limit for media in one message": "첨부 파일이 모두 {size}로, 메시지 하나에 담을 수 있는 미디어 한도 {limit}를 넘습니다",
   "its images and PDFs would take the message over the 20 MiB limit for media": "이 리소스의 이미지와 PDF를 더하면 메시지가 미디어 한도 20 MiB를 넘습니다",
-  "{name} is {size}, over the {limit} limit for media in one message": "{name}의 크기는 {size}로, 메시지 하나에 담을 수 있는 미디어 한도 {limit}를 넘습니다"
+  "{name} is {size}, over the {limit} limit for media in one message": "{name}의 크기는 {size}로, 메시지 하나에 담을 수 있는 미디어 한도 {limit}를 넘습니다",
+  "Marketplaces": "마켓플레이스",
+  "Update automatically": "자동으로 업데이트",
+  "Update {name} automatically": "{name} 자동으로 업데이트",
+  "Fetched {time}": "가져옴: {time}",
+  "Up to date": "최신 상태",
+  "Updated just now": "방금 업데이트됨",
+  "Plugins updated: {names}": "업데이트된 플러그인: {names}",
+  "Could not update {names}": "{names}을(를) 업데이트할 수 없습니다"
 }

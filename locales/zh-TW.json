@@ -2942,5 +2942,13 @@
   "Your free trial didn't start: that card was already used for a trial.": "免費試用未開始：這張卡已用於試用。",
   "The attachments come to {size}, over the {limit} limit for media in one message": "附件共 {size}，超過了單則訊息 {limit} 的媒體上限",
   "its images and PDFs would take the message over the 20 MiB limit for media": "其中的圖片和 PDF 會使訊息超出 20 MiB 的媒體上限",
-  "{name} is {size}, over the {limit} limit for media in one message": "{name} 大小為 {size}，超過了單則訊息 {limit} 的媒體上限"
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} 大小為 {size}，超過了單則訊息 {limit} 的媒體上限",
+  "Marketplaces": "市集",
+  "Update automatically": "自動更新",
+  "Update {name} automatically": "自動更新 {name}",
+  "Fetched {time}": "取得於 {time}",
+  "Up to date": "已是最新",
+  "Updated just now": "剛剛已更新",
+  "Plugins updated: {names}": "已更新的外掛：{names}",
+  "Could not update {names}": "無法更新 {names}"
 }

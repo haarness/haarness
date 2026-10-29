@@ -2942,5 +2942,13 @@
   "Your free trial didn't start: that card was already used for a trial.": "Your free trial didn't start: that card was already used for a trial.",
   "The attachments come to {size}, over the {limit} limit for media in one message": "The attachments come to {size}, over the {limit} limit for media in one message",
   "its images and PDFs would take the message over the 20 MiB limit for media": "its images and PDFs would take the message over the 20 MiB limit for media",
-  "{name} is {size}, over the {limit} limit for media in one message": "{name} is {size}, over the {limit} limit for media in one message"
+  "{name} is {size}, over the {limit} limit for media in one message": "{name} is {size}, over the {limit} limit for media in one message",
+  "Marketplaces": "Marketplaces",
+  "Update automatically": "Update automatically",
+  "Update {name} automatically": "Update {name} automatically",
+  "Fetched {time}": "Fetched {time}",
+  "Up to date": "Up to date",
+  "Updated just now": "Updated just now",
+  "Plugins updated: {names}": "Plugins updated: {names}",
+  "Could not update {names}": "Could not update {names}"
 }
