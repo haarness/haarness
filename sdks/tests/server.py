@@ -10,6 +10,7 @@ import secrets
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -275,7 +276,16 @@ class Fixture:
             self.process.stdout.close()
         if hasattr(self, "log"):
             self.log.close()
-        self.tmp.cleanup()
+        # Windows lets go of a program's file a moment after the program ends.
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                self.tmp.cleanup()
+                break
+            except PermissionError:
+                if os.name != "nt" or time.monotonic() > deadline:
+                    raise
+                time.sleep(0.2)
 
     def __enter__(self):
         try:
