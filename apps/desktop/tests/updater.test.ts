@@ -685,7 +685,8 @@ test("a rename Windows holds for a moment (an antivirus scan) is tried again; ot
   assert.equal(await readFile(join(dir, "b"), "utf8"), "x");
   await assert.rejects(renameSoon(join(dir, "missing"), join(dir, "c"), async () => {}), { code: "ENOENT" });
   // Held the whole time: tried ten times, waiting a little longer each time, then the error.
-  if (process.getuid?.() !== 0) {
+  // Windows keeps no write permission on a folder, so only a lock could hold it there.
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
     const { chmod } = await import("node:fs/promises");
     await mkdir(join(dir, "locked"));
     await chmod(join(dir, "locked"), 0o555);

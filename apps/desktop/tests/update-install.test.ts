@@ -17,7 +17,7 @@ function helper(args: string[]) {
   return spawnSync("/bin/sh", ["-c", HELPER, "sh", ...args], { encoding: "utf8", timeout: 30_000 });
 }
 
-test("how a copy updates follows where it runs and what it may write", async () => {
+test("how a copy updates follows where it runs and what it may write", { skip: process.platform === "win32" }, async () => {
   const root = await temporary();
   const bundle = join(root, "Applications", "Haarness.app");
   await mkdir(join(bundle, "Contents", "MacOS"), { recursive: true });

@@ -382,8 +382,10 @@ function reader(files: Record<string, File | Uint8Array> = {}, hold = false) {
   };
 }
 
+// Not timers: on Windows each one waits a clock tick (about 15ms), longer
+// than the recheck times these tests hold.
 const settle = async () => {
-  for (let index = 0; index < 6; index++) await new Promise((done) => setTimeout(done, 0));
+  for (let index = 0; index < 6; index++) await new Promise((done) => setImmediate(done));
 };
 
 function heard() {
@@ -653,15 +655,18 @@ test("a file written over and over is read at most once a second for the replies
   const source = reader({ "a.png": png });
   requestProjectImage("project", "a.png", source.read, new AbortController().signal);
   await settle();
+  const started = performance.now();
   for (let write = 0; write < 30; write++) {
     hear({ type: "files.updated", payload: { path: "a.png" } });
     await wait(5);
   }
   await settle();
-  // Thirty writes within about 150ms: a few reads, one per 60ms here, not thirty.
+  // Thirty writes within about 150ms (more where timers are coarse): a few
+  // reads, one per 60ms here, not thirty.
   await wait(80);
   await settle();
-  assert.ok(source.calls.length >= 2 && source.calls.length <= 5, String(source.calls.length));
+  const most = 2 + Math.floor((performance.now() - started) / 60);
+  assert.ok(source.calls.length >= 2 && source.calls.length <= Math.min(most, 10), String(source.calls.length));
 });
 
 test("a wall clock set back holds no re-read off", async () => {

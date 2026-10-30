@@ -6,15 +6,15 @@ import { join } from "node:path";
 import { cliCacheFolder, daemonRunning, servedFolder } from "../src/main/daemon-record";
 
 test("the CLI's cache folder is found as haarness finds it", () => {
-  assert.equal(cliCacheFolder({ HAARNESS_DATA_DIR: "/d" }, "/home/me"), "/d/cache");
-  assert.equal(cliCacheFolder({ HAARNESS_HOME: "/h" }, "/home/me"), "/h/cache");
+  assert.equal(cliCacheFolder({ HAARNESS_DATA_DIR: "/d" }, "/home/me"), join("/d", "cache"));
+  assert.equal(cliCacheFolder({ HAARNESS_HOME: "/h" }, "/home/me"), join("/h", "cache"));
   // HAARNESS_HOME must be absolute, or haarness refuses to start at all.
   assert.equal(cliCacheFolder({ HAARNESS_HOME: "h" }, "/home/me"), undefined);
-  assert.equal(cliCacheFolder({ XDG_CACHE_HOME: "/x" }, "/home/me"), "/x/haarness");
-  assert.equal(cliCacheFolder({ XDG_CACHE_HOME: "x" }, "/home/me"), "/home/me/.cache/haarness");
-  assert.equal(cliCacheFolder({}, "/home/me"), "/home/me/.cache/haarness");
+  assert.equal(cliCacheFolder({ XDG_CACHE_HOME: "/x" }, "/home/me"), join("/x", "haarness"));
+  assert.equal(cliCacheFolder({ XDG_CACHE_HOME: "x" }, "/home/me"), join("/home/me", ".cache", "haarness"));
+  assert.equal(cliCacheFolder({}, "/home/me"), join("/home/me", ".cache", "haarness"));
   // A relative data folder is not one haarness would use.
-  assert.equal(cliCacheFolder({ HAARNESS_DATA_DIR: "d" }, "/home/me"), "/home/me/.cache/haarness");
+  assert.equal(cliCacheFolder({ HAARNESS_DATA_DIR: "d" }, "/home/me"), join("/home/me", ".cache", "haarness"));
 });
 
 test("a server counts as the record's only on the terms of the Chrome bridge's judge()", () => {
