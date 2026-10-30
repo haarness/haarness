@@ -396,7 +396,13 @@ pub fn file_left_out(
         return Some(CREDENTIALS_FILE);
     }
     let rules: ImportFilter<'_> = if trusted || inside { &|_| None } else { omit };
-    left_out(&canonical, root.as_deref(), rules)
+    // A rule may name the file as it was written rather than where it
+    // really is: through a folder link, or Windows' short 8.3 folder names.
+    left_out(&canonical, root.as_deref(), rules).or_else(|| {
+        (path.is_absolute() && path != canonical)
+            .then(|| rules(path))
+            .flatten()
+    })
 }
 
 /// Why [`file_left_out`] leaves out a file that holds credentials.

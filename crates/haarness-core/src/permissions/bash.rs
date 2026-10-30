@@ -4419,7 +4419,17 @@ fn resolve_path(path: &Path, depth: u8) -> PathBuf {
                     continue;
                 }
                 match std::fs::symlink_metadata(&resolved) {
-                    Err(_) => missing = true,
+                    Err(_) => {
+                        missing = true;
+                        // The folders that exist, as the system spells them
+                        // (Windows' short 8.3 names are its long ones).
+                        if let Some(real) = resolved
+                            .parent()
+                            .and_then(|parent| dunce::canonicalize(parent).ok())
+                        {
+                            resolved = real.join(name);
+                        }
+                    }
                     Ok(metadata) if metadata.file_type().is_symlink() => {
                         let Ok(target) = std::fs::read_link(&resolved) else {
                             return PathBuf::from("/");
@@ -6045,8 +6055,8 @@ mod regression {
         let root = std::env::temp_dir().join(format!("haarness-tilde-{}", uuid::Uuid::now_v7()));
         let workspace = root.join("project");
         std::fs::create_dir_all(&workspace).unwrap();
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
+        // Where the reader takes `~` to be (Windows sets no HOME).
+        let home = haarness_protocol::home_dir()
             .filter(|home| home.is_absolute())
             .unwrap_or_else(|| PathBuf::from("/"));
         let home = resolve(&home, "");
