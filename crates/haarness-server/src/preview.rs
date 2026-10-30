@@ -33,8 +33,7 @@ pub fn versions_folder(workspace: &Path) -> Option<PathBuf> {
 fn directory(workspace: &Path) -> Result<PathBuf, Failure> {
     let root = crate::data_folder().ok_or_else(|| bad("Preview storage is unavailable"))?;
     Ok(root.join("preview").join(files::hash(
-        workspace
-            .canonicalize()
+        dunce::canonicalize(workspace)
             .map_err(bad)?
             .to_string_lossy()
             .as_bytes(),
@@ -183,14 +182,9 @@ impl Tool for PreviewTool {
         // The file API and the saved versions are the project folder's; a
         // chat with a folder of its own previews files in that folder, named
         // from the project folder as the file panel opens them.
-        let root = self
-            .0
-            .canonicalize()
-            .map_err(|e| CoreError::Tool(e.to_string()))?;
-        let folder = context
-            .workspace
-            .canonicalize()
-            .map_err(|e| CoreError::Tool(e.to_string()))?;
+        let root = dunce::canonicalize(&self.0).map_err(|e| CoreError::Tool(e.to_string()))?;
+        let folder =
+            dunce::canonicalize(&context.workspace).map_err(|e| CoreError::Tool(e.to_string()))?;
         tokio::task::spawn_blocking(move || {
             // `~/site/index.html` is in the home folder, as for the other file tools.
             let requested = haarness_core::expand_home(arguments["filePath"].as_str().unwrap());
@@ -365,7 +359,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("haarness-preview-mode-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).unwrap();
-        let workspace = root.canonicalize().unwrap();
+        let workspace = dunce::canonicalize(&root).unwrap();
         let hash = record(&workspace, b"<h1>private</h1>").unwrap();
         let folder = directory(&workspace).unwrap();
         assert_eq!(mode(&folder), 0o700);
@@ -381,7 +375,7 @@ mod tests {
             std::env::temp_dir().join(format!("haarness-preview-home-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(root.join("~")).unwrap();
         fs::write(root.join("~/page.html"), "<h1>in the project</h1>").unwrap();
-        let workspace = root.canonicalize().unwrap();
+        let workspace = dunce::canonicalize(&root).unwrap();
         // Versions a test records stay out of the real app-data folder.
         if let Some(project) = directories::ProjectDirs::from("dev", "haarness", "haarness") {
             assert!(

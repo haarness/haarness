@@ -136,15 +136,14 @@ enum Command {
 
 pub async fn run(paths: &super::Paths, workspace: &Path, args: &ProfileArgs) -> Result<()> {
     let roots = Roots {
-        config: paths
-            .config
-            .parent()
-            .context("config directory unavailable")?
-            .canonicalize()?,
-        data: paths.data.canonicalize()?,
-        project: workspace
-            .canonicalize()
-            .context("canonicalize profile workspace")?,
+        config: dunce::canonicalize(
+            paths
+                .config
+                .parent()
+                .context("config directory unavailable")?,
+        )?,
+        data: dunce::canonicalize(&paths.data)?,
+        project: dunce::canonicalize(workspace).context("canonicalize profile workspace")?,
     };
     let result = match &args.command {
         Command::Save {
@@ -421,9 +420,7 @@ fn destination(path: &Path) -> Result<PathBuf> {
     let parent = path.parent().context("archive path has no parent")?;
     // Resolve a user-selected directory, but never resolve a symlink at the output filename.
     std::fs::create_dir_all(parent)?;
-    Ok(parent
-        .canonicalize()?
-        .join(path.file_name().context("archive filename missing")?))
+    Ok(dunce::canonicalize(parent)?.join(path.file_name().context("archive filename missing")?))
 }
 
 fn remote(args: &ProfileArgs) -> Result<(reqwest::Client, reqwest::Url)> {

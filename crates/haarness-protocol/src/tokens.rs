@@ -528,8 +528,14 @@ impl MediaShape {
             };
             (mime, decode_base64(prefix), size, pdf)
         } else {
-            let path = source.strip_prefix("file://").unwrap_or(source);
-            let path = Path::new(path);
+            // A file URL as it names a path here (`file:///C:/x` on Windows).
+            let url_path = source
+                .starts_with("file://")
+                .then(|| url::Url::parse(source).ok()?.to_file_path().ok())
+                .flatten();
+            let path = url_path
+                .as_deref()
+                .unwrap_or_else(|| Path::new(source.strip_prefix("file://").unwrap_or(source)));
             let mime = mime_for_extension(path);
             let Ok(metadata) = std::fs::metadata(path) else {
                 return Self::by_mime(&mime, 0);
@@ -847,7 +853,7 @@ mod tests {
         std::fs::write(&path, png(800, 600)).unwrap();
         assert_eq!(Tokenizer::Claude.media(path.to_str().unwrap()), 641);
         assert_eq!(
-            Tokenizer::Claude.media(&format!("file://{}", path.display())),
+            Tokenizer::Claude.media(url::Url::from_file_path(&path).unwrap().as_ref()),
             641
         );
         // Unreadable sources fall back to a large image rather than zero.

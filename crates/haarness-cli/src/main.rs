@@ -1631,10 +1631,7 @@ async fn cli_main() -> Result<()> {
         command_name,
         !long_running && io::stderr().is_terminal(),
     )?;
-    let workspace = cli
-        .workspace
-        .canonicalize()
-        .context("canonicalize workspace")?;
+    let workspace = dunce::canonicalize(&cli.workspace).context("canonicalize workspace")?;
     let workspace_manager = base_paths.workspace_manager()?;
     let current_workspace = if cli.chat_home {
         workspace_manager.register_chat_home(&workspace)
@@ -5069,8 +5066,7 @@ fn run_attachments(files: &[PathBuf]) -> Result<Vec<String>> {
     files
         .iter()
         .map(|path| {
-            let resolved = path
-                .canonicalize()
+            let resolved = dunce::canonicalize(path)
                 .with_context(|| format!("cannot read attachment {}", path.display()))?;
             if resolved.is_dir() {
                 anyhow::bail!(
@@ -7337,9 +7333,7 @@ fn compose_runtime_sources(
         haarness_core::PermissionRule {
             pattern: format!(
                 "external_directory:{}/tool-output/*",
-                paths
-                    .data
-                    .canonicalize()
+                dunce::canonicalize(&paths.data)
                     .unwrap_or_else(|_| paths.data.clone())
                     .display()
             ),
@@ -7348,12 +7342,12 @@ fn compose_runtime_sources(
     );
     runtime_config.read_roots = skill_roots
         .iter()
-        .filter_map(|(path, _, _)| path.canonicalize().ok())
+        .filter_map(|(path, _, _)| dunce::canonicalize(path).ok())
         .collect();
     runtime_config.read_roots.extend(
         plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust)
             .into_iter()
-            .filter_map(|path| path.canonicalize().ok()),
+            .filter_map(|path| dunce::canonicalize(&path).ok()),
     );
     runtime_config.read_roots.sort();
     runtime_config.read_roots.dedup();
@@ -8463,7 +8457,8 @@ async fn application_at(
     if let Ok(common) = common
         && common.status.success()
     {
-        let identity = PathBuf::from(String::from_utf8(common.stdout)?.trim()).canonicalize()?;
+        let identity =
+            dunce::canonicalize(PathBuf::from(String::from_utf8(common.stdout)?.trim()))?;
         runtime = runtime.with_repository_approvals(Arc::new(
             haarness_store::RepositoryApprovals::open(
                 &paths.data.join("repository-approvals.sqlite3"),
@@ -12729,10 +12724,8 @@ fn system_folder_change_from(
     discovery: &RuntimeDiscovery,
 ) -> Option<String> {
     let wanted = wanted?;
-    let real = |path: &Path| {
-        path.canonicalize()
-            .unwrap_or_else(|_| path.components().collect())
-    };
+    let real =
+        |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.components().collect());
     match discovery.system_config_dir.as_deref() {
         Some(current) if real(Path::new(current)) == real(wanted) => None,
         Some(current) => Some(format!("reads the system folder {current}")),
@@ -13306,8 +13299,7 @@ mod tests {
             ffi::OsString,
             path::{Path, PathBuf},
         };
-        let root = std::env::temp_dir()
-            .canonicalize()
+        let root = dunce::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!("haarness-global-config-{}", uuid::Uuid::now_v7()));
         let home = root.join("home");
@@ -15551,7 +15543,7 @@ request_timeout = 0
     ) -> (Paths, PathBuf, FakeServer, RuntimeDiscovery) {
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
-        let workspace = workspace.canonicalize().unwrap();
+        let workspace = dunce::canonicalize(&workspace).unwrap();
         let paths = Paths::new(Some(&root.join("state"))).unwrap();
         let mut info = fixture_server_info(vec![
             WORKSPACE_HISTORY_CAPABILITY.into(),
@@ -16493,11 +16485,12 @@ request_timeout = 0
         );
         assert!(error.contains("--yolo"), "{error}");
         // It names the rule that would allow it, and where it goes.
-        let folder = root.canonicalize().unwrap();
+        let folder = dunce::canonicalize(&root).unwrap();
+        // The folder as JSON writes it (Windows' backslashes doubled).
+        let pattern = serde_json::to_string(&format!("{}/*", folder.display())).unwrap();
         assert!(
             error.contains(&format!(
-                r#"by adding {{"permission":{{"external_directory":{{"{}/*":"allow"}}}}}} to haarness.json in the project or ~/.config/haarness/haarness.json"#,
-                folder.display()
+                r#"by adding {{"permission":{{"external_directory":{{{pattern}:"allow"}}}}}} to haarness.json in the project or ~/.config/haarness/haarness.json"#
             )),
             "{error}"
         );
@@ -16517,7 +16510,9 @@ request_timeout = 0
         assert_ne!(stopped, TurnStatus::Completed);
         server.shutdown().await.unwrap();
         drop(runtime);
-        std::fs::remove_dir_all(root).unwrap();
+        // Windows will not remove the store's files while a closing turn
+        // still holds them: what is left is in the temporary folder.
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// `run --yolo` on a server that is not a yolo server: a request its own
@@ -16655,7 +16650,9 @@ request_timeout = 0
         assert_eq!(headless.refused(), 1, "it exits with EXIT_REFUSED");
         server.shutdown().await.unwrap();
         drop(runtime);
-        std::fs::remove_dir_all(root).unwrap();
+        // Windows will not remove the store's files while a closing turn
+        // still holds them: what is left is in the temporary folder.
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -16769,7 +16766,9 @@ request_timeout = 0
         assert!(!outside.exists());
         server.shutdown().await.unwrap();
         drop(runtime);
-        std::fs::remove_dir_all(root).unwrap();
+        // Windows will not remove the store's files while a closing turn
+        // still holds them: what is left is in the temporary folder.
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

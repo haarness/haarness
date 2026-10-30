@@ -206,13 +206,13 @@ impl Walk {
     /// Whether the folder the link at `link` leads to holds the link, or a
     /// folder the walk came through to reach it.
     fn leads_back(&mut self, link: &Path) -> bool {
-        let Ok(target) = fs::canonicalize(link) else {
+        let Ok(target) = dunce::canonicalize(link) else {
             return true;
         };
         link.ancestors().skip(1).any(|folder| {
             self.real
                 .entry(folder.to_path_buf())
-                .or_insert_with(|| fs::canonicalize(folder).ok())
+                .or_insert_with(|| dunce::canonicalize(folder).ok())
                 .as_ref()
                 .is_some_and(|real| real.starts_with(&target))
         })
@@ -383,7 +383,7 @@ fn real_path(entry: &Entry) -> Option<PathBuf> {
     entry
         .real
         .clone()
-        .or_else(|| fs::canonicalize(&entry.path).ok())
+        .or_else(|| dunce::canonicalize(&entry.path).ok())
 }
 
 /// How much of `pattern` is its root (`/`, or a drive on Windows), as
@@ -427,10 +427,12 @@ mod tests {
     use super::*;
 
     fn tree(name: &str, files: &[&str]) -> PathBuf {
-        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "haarness-bounded-glob-{name}-{}",
-            uuid::Uuid::now_v7()
-        ));
+        let root = dunce::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "haarness-bounded-glob-{name}-{}",
+                uuid::Uuid::now_v7()
+            ));
         for file in files {
             let path = root.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -452,27 +454,36 @@ mod tests {
 
     #[test]
     fn an_ordinary_tree_gives_what_glob_gives_in_its_order() {
+        // A folder whose name glob would read as a pattern; Windows allows
+        // no `*` or `?` in a name, so there only the brackets.
+        let name = if cfg!(windows) {
+            "handbook [x]"
+        } else {
+            "handbook [x]*?"
+        };
+        let files = [
+            "RULES.md",
+            "a.md",
+            "abc.md",
+            "aXc.md",
+            "b.txt",
+            "c.md",
+            ".hidden.md",
+            ".config/x.md",
+            "style/tone.md",
+            "style/b.md",
+            "style/guide/review.md",
+            "b/style/x.md",
+            "team/RULES.md",
+            "team/oncall/RULES.md",
+            "1/2/3/4/5/6/7/8/9/10/RULES.md",
+        ]
+        .map(|file| format!("{name}/{file}"));
         let root = tree(
             "ordinary",
-            &[
-                "handbook [x]*?/RULES.md",
-                "handbook [x]*?/a.md",
-                "handbook [x]*?/abc.md",
-                "handbook [x]*?/aXc.md",
-                "handbook [x]*?/b.txt",
-                "handbook [x]*?/c.md",
-                "handbook [x]*?/.hidden.md",
-                "handbook [x]*?/.config/x.md",
-                "handbook [x]*?/style/tone.md",
-                "handbook [x]*?/style/b.md",
-                "handbook [x]*?/style/guide/review.md",
-                "handbook [x]*?/b/style/x.md",
-                "handbook [x]*?/team/RULES.md",
-                "handbook [x]*?/team/oncall/RULES.md",
-                "handbook [x]*?/1/2/3/4/5/6/7/8/9/10/RULES.md",
-            ],
+            &files.iter().map(String::as_str).collect::<Vec<_>>(),
         );
-        let handbook = root.join("handbook [x]*?");
+        let handbook = root.join(name);
         fs::create_dir_all(handbook.join("empty")).unwrap();
         let escaped = Pattern::escape(&handbook.to_string_lossy());
         for pattern in [

@@ -409,7 +409,7 @@ pub fn load_layers_with_system(
     let mut urls = Vec::new();
     let mut seen: HashSet<PathBuf> = local_files
         .iter()
-        .filter_map(|(file, _)| file.canonicalize().ok())
+        .filter_map(|(file, _)| dunce::canonicalize(file).ok())
         .collect();
     for entry in &layers.instruction_sources {
         if entry.starts_with("https://") || entry.starts_with("http://") {
@@ -417,7 +417,7 @@ pub fn load_layers_with_system(
             continue;
         }
         for file in instruction_entry_files(entry, home, workspace, trust, &mut layers.warnings) {
-            let Ok(canonical) = file.canonicalize() else {
+            let Ok(canonical) = dunce::canonicalize(&file) else {
                 continue;
             };
             if !seen.insert(canonical.clone()) {
@@ -628,7 +628,7 @@ fn trusted_instruction_roots(config_dir: &Path, home: Option<&Path>) -> Vec<Path
     }
     roots
         .into_iter()
-        .filter_map(|root| root.canonicalize().ok())
+        .filter_map(|root| dunce::canonicalize(&root).ok())
         .collect()
 }
 
@@ -1735,8 +1735,8 @@ fn plugin_reference(root: &Path, reference: &str) -> Option<PathBuf> {
         return None;
     }
     let target = root.join(reference.trim_start_matches("./"));
-    let canonical_root = root.canonicalize().ok()?;
-    let canonical_target = target.canonicalize().ok()?;
+    let canonical_root = dunce::canonicalize(root).ok()?;
+    let canonical_target = dunce::canonicalize(&target).ok()?;
     canonical_target
         .starts_with(canonical_root)
         .then_some(canonical_target)
@@ -1769,8 +1769,7 @@ fn left_out_definition(path: &Path, kind: &str, notices: &mut Vec<String>) -> bo
     if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return false;
     }
-    let Some(reason) = path
-        .canonicalize()
+    let Some(reason) = dunce::canonicalize(path)
         .ok()
         .and_then(|real| haarness_core::instructions::left_out(&real, None, &|_| None))
     else {
@@ -2410,13 +2409,33 @@ fn edit_json_file(
     // haarness.json would be left behind in the person's repository.
     #[cfg(unix)]
     let lock = fs::File::open(parent)?;
+    // Windows cannot lock a folder, so its writers lock a file named after
+    // the folder in the temporary folder instead; without one they can
+    // write (no TEMP gives the Windows folder), beside the file, removed
+    // once the edit is done.
     #[cfg(not(unix))]
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path.with_extension("write.lock"))?;
+    let (lock, beside) = {
+        use sha2::{Digest as _, Sha256};
+        let folder = dunce::canonicalize(parent)?;
+        let digest = Sha256::digest(folder.to_string_lossy().to_lowercase().as_bytes());
+        let name = format!("{digest:x}");
+        let name = &name[..24];
+        let open = |path: &Path| {
+            fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(path)
+        };
+        match open(&std::env::temp_dir().join(format!("haarness-config-{name}.lock"))) {
+            Ok(lock) => (lock, None),
+            Err(_) => {
+                let beside = path.with_extension("write.lock");
+                (open(&beside)?, Some(beside))
+            }
+        }
+    };
     fs2::FileExt::lock_exclusive(&lock)?;
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -2445,12 +2464,23 @@ fn edit_json_file(
         Ok(())
     })();
     let _ = fs::remove_file(temporary);
+    #[cfg(not(unix))]
+    if let Some(beside) = beside {
+        drop(lock);
+        let _ = fs::remove_file(beside);
+    }
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `path`, written with `/`, joined with this system's separator, as
+    /// the paths Haarness reports are.
+    fn native(path: &str) -> PathBuf {
+        path.split('/').collect()
+    }
 
     /// A minimal HTTP/1.1 server on a random loopback port that answers
     /// each `(path, body)` route and 404s everything else. Runs until the
@@ -3075,8 +3105,8 @@ mod tests {
         ] {
             fs::create_dir_all(dir).unwrap();
         }
-        let store = home.join(".st/data/auth.json");
-        let older = home.join(".st/auth.json");
+        let store = home.join(native(".st/data/auth.json"));
+        let older = home.join(native(".st/auth.json"));
         fs::write(&store, "SIGN_IN_SECRET").unwrap();
         fs::write(&older, "OLDER_SIGN_IN_SECRET").unwrap();
         fs::write(home.join(".ssh/id_ed25519"), "KEY_SECRET").unwrap();
@@ -3084,23 +3114,28 @@ mod tests {
         haarness_core::record_credential_store(store.clone(), false);
         haarness_core::record_credential_store(older.clone(), false);
         fs::write(config.join("AGENTS.md"), "GLOBAL_BODY").unwrap();
+        // Written by JSON, which doubles Windows' backslashes.
         fs::write(
             config.join("haarness.json"),
-            format!(
-                r#"{{"permission":{{"read":{{"{}/*":"deny","{}/*":"deny","*AGENTS.md":"deny"}}}}}}"#,
-                home.join(".ssh").display(),
-                home.join("private").display()
-            ),
+            serde_json::json!({"permission": {"read": {
+                format!("{}/*", home.join(".ssh").display()): "deny",
+                format!("{}/*", home.join("private").display()): "deny",
+                "*AGENTS.md": "deny"
+            }}})
+            .to_string(),
         )
         .unwrap();
         // The project names a store and a key by `instructions`, and its
         // AGENTS.md is a link to another store.
         fs::write(
             project.join("haarness.json"),
-            format!(
-                r#"{{"instructions":["~/.st/data/auth.json","~/.ssh/id_ed25519","~/private/notes.md","{}"]}}"#,
-                store.display()
-            ),
+            serde_json::json!({"instructions": [
+                "~/.st/data/auth.json",
+                "~/.ssh/id_ed25519",
+                "~/private/notes.md",
+                store.display().to_string()
+            ]})
+            .to_string(),
         )
         .unwrap();
         #[cfg(unix)]
@@ -3752,9 +3787,15 @@ mod tests {
         .unwrap();
         let broken = "---\ndescription: Broken\nallowed-tools:\n  - Bash(git commit: *)\n---\nBody";
         let skipped = [
-            ("command", workspace.join(".claude/commands/broken.md")),
-            ("agent", workspace.join(".claude/agents/broken.md")),
-            ("skill", workspace.join(".claude/skills/broken/SKILL.md")),
+            (
+                "command",
+                workspace.join(native(".claude/commands/broken.md")),
+            ),
+            ("agent", workspace.join(native(".claude/agents/broken.md"))),
+            (
+                "skill",
+                workspace.join(native(".claude/skills/broken/SKILL.md")),
+            ),
         ];
         for (_, path) in &skipped {
             fs::write(path, broken).unwrap();
@@ -3834,19 +3875,19 @@ mod tests {
         let skipped = [
             (
                 "agent",
-                workspace.join(".haarness/agents/scripted.md"),
+                workspace.join(native(".haarness/agents/scripted.md")),
                 "---js\nmodule.exports = { permission: {} }\n---\nDo anything.",
                 "JavaScript frontmatter is not supported",
             ),
             (
                 "command",
-                workspace.join(".haarness/commands/scripted.md"),
+                workspace.join(native(".haarness/commands/scripted.md")),
                 "---coffee\ndescription: 'x'\n---\nRun it.",
                 "frontmatter language \"coffee\" is not supported",
             ),
             (
                 "skill",
-                workspace.join(".haarness/skills/scripted/SKILL.md"),
+                workspace.join(native(".haarness/skills/scripted/SKILL.md")),
                 "---javascript\n({ name: 'scripted' })\n---\nSteps.",
                 "JavaScript frontmatter is not supported",
             ),

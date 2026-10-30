@@ -41,16 +41,14 @@ pub(crate) fn read_runtime_file(path: &Path) -> Result<RuntimeDiscovery> {
 }
 
 pub(crate) fn comparable_workspace(workspace: &Path) -> PathBuf {
-    workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf())
+    dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf())
 }
 
 /// `<path>:<dev>:<inode>:<length>:<mtime ns>` of an executable (no device or
 /// inode outside Unix). A rebuild or an in-place upgrade changes it even when
 /// the version does not.
 pub(crate) fn executable_fingerprint(path: &Path) -> Result<String> {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let metadata = fs::metadata(&path)
         .with_context(|| format!("cannot inspect Haarness executable {}", path.display()))?;
     let modified = metadata

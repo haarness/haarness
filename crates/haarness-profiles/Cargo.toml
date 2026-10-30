@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+dunce.workspace = true
 fs2.workspace = true
 jsonc-parser.workspace = true
 serde.workspace = true

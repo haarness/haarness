@@ -311,13 +311,13 @@ fn configuration_path(paths: &Paths, workspace: &Path, id: &str) -> Result<PathB
     } else {
         paths.config.parent().context("Missing config directory")?
     };
-    let root = root.canonicalize()?;
+    let root = dunce::canonicalize(root)?;
     let mut existing = path.as_path();
     while !existing.exists() {
         existing = existing.parent().context("Invalid configuration path")?;
     }
     ensure!(
-        existing.canonicalize()?.starts_with(root),
+        dunce::canonicalize(existing)?.starts_with(root),
         "Configuration symlink escapes its root"
     );
     Ok(path)
@@ -594,9 +594,7 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Serialize editor read/compare/write operations across native CLI processes.
 pub(super) fn editor_lock(data: &Path, resource: &str) -> anyhow::Result<std::fs::File> {
-    let path = data
-        .canonicalize()?
-        .join(format!(".desktop-{resource}.lock"));
+    let path = dunce::canonicalize(data)?.join(format!(".desktop-{resource}.lock"));
     haarness_profiles::check_path(&path)?;
     let mut options = std::fs::OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);

@@ -197,8 +197,7 @@ pub fn paths_from_paste(
             .metadata()
             .map_err(|error| format!("Cannot read {}: {error}", path.display()))?
             .len();
-        let canonical = path
-            .canonicalize()
+        let canonical = dunce::canonicalize(&path)
             .map_err(|error| format!("Cannot resolve {}: {error}", path.display()))?
             .display()
             .to_string();
@@ -324,6 +323,10 @@ fn decode_path(value: &str) -> Option<PathBuf> {
     Some(PathBuf::from(unescape(unquoted)))
 }
 
+/// Whether a backslash escapes the next character in a dropped path. On
+/// Windows it separates folders, and terminals quote a path with a space.
+const BACKSLASH_ESCAPES: bool = !cfg!(windows);
+
 /// Small shell-word reader for the forms terminal emulators emit when files
 /// are dropped: quoted paths or spaces escaped with a backslash.
 fn shellish_words(value: &str) -> Vec<String> {
@@ -337,7 +340,7 @@ fn shellish_words(value: &str) -> Vec<String> {
             escaped = false;
             continue;
         }
-        if character == '\\' && quote != Some('\'') {
+        if BACKSLASH_ESCAPES && character == '\\' && quote != Some('\'') {
             escaped = true;
             continue;
         }
@@ -369,6 +372,9 @@ fn shellish_words(value: &str) -> Vec<String> {
 }
 
 fn unescape(value: &str) -> String {
+    if !BACKSLASH_ESCAPES {
+        return value.to_owned();
+    }
     let mut result = String::with_capacity(value.len());
     let mut escaped = false;
     for character in value.chars() {
@@ -400,11 +406,23 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn shellish_words_handle_terminal_drop_escaping() {
         assert_eq!(
             shellish_words("/tmp/one\\ file.png '/tmp/two file.mp4'"),
             vec!["/tmp/one file.png", "/tmp/two file.mp4"]
+        );
+    }
+
+    /// Windows terminals quote a dropped path with a space, and its
+    /// backslashes separate folders.
+    #[cfg(windows)]
+    #[test]
+    fn shellish_words_read_windows_drops() {
+        assert_eq!(
+            shellish_words(r#""C:\shots\one file.png" C:\clips\two.mp4"#),
+            vec![r"C:\shots\one file.png", r"C:\clips\two.mp4"]
         );
     }
 
@@ -414,14 +432,19 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let image = root.join("screen shot.png");
         std::fs::write(&image, b"png fixture").unwrap();
-        let escaped = image.display().to_string().replace(' ', "\\ ");
+        // As a terminal drops it: a space escaped, or the path quoted on Windows.
+        let escaped = if cfg!(windows) {
+            format!("\"{}\"", image.display())
+        } else {
+            image.display().to_string().replace(' ', "\\ ")
+        };
 
         let paths = paths_from_paste(&escaped, &[], Language::English, false)
             .unwrap()
             .unwrap();
         assert_eq!(
             paths,
-            vec![image.canonicalize().unwrap().display().to_string()]
+            vec![dunce::canonicalize(&image).unwrap().display().to_string()]
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -548,7 +571,7 @@ mod tests {
         assert_eq!(
             paths_from_paste(real.to_str().unwrap(), &[], Language::English, false),
             Ok(Some(vec![
-                real.canonicalize().unwrap().display().to_string()
+                dunce::canonicalize(&real).unwrap().display().to_string()
             ]))
         );
 
@@ -601,7 +624,7 @@ mod tests {
                 .set_len(12 * 1024 * 1024)
                 .unwrap();
         }
-        let attached = vec![first.canonicalize().unwrap().display().to_string()];
+        let attached = vec![dunce::canonicalize(&first).unwrap().display().to_string()];
         assert!(
             paths_from_paste(second.to_str().unwrap(), &[], Language::English, false)
                 .unwrap()

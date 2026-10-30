@@ -842,20 +842,18 @@ impl LanguageService {
     }
 
     fn canonical_workspace(&self) -> PathBuf {
-        self.workspace
-            .canonicalize()
-            .unwrap_or_else(|_| self.workspace.clone())
+        dunce::canonicalize(&self.workspace).unwrap_or_else(|_| self.workspace.clone())
     }
 
     /// `root` canonical, when it is the project folder or a folder inside it.
     fn root(&self, root: &Path) -> Option<PathBuf> {
-        let root = root.canonicalize().ok()?;
+        let root = dunce::canonicalize(root).ok()?;
         root.starts_with(self.canonical_workspace()).then_some(root)
     }
 }
 
 fn inside(root: &Path, path: &Path) -> bool {
-    path.canonicalize().is_ok_and(|path| path.starts_with(root))
+    dunce::canonicalize(path).is_ok_and(|path| path.starts_with(root))
 }
 
 /// Leave out of the answer a language server started for the chat folder
@@ -898,7 +896,7 @@ fn elsewhere(place: &serde_json::Map<String, Value>, root: &Path, project: &Path
         .and_then(|uri| url::Url::parse(uri).ok())
         .and_then(|url| url.to_file_path().ok())
         .is_some_and(|path| {
-            let path = path.canonicalize().unwrap_or(path);
+            let path = dunce::canonicalize(&path).unwrap_or(path);
             path.starts_with(project) && !path.starts_with(root)
         })
 }
@@ -1416,8 +1414,25 @@ fn executable_available(
         .get("PATH")
         .map(std::ffi::OsString::from)
         .or_else(|| std::env::var_os("PATH"));
+    // Windows finds `rust-analyzer` as `rust-analyzer.exe`: a name without
+    // an extension is also looked for with each one PATHEXT lists.
+    let mut names = vec![program.clone()];
+    if cfg!(windows) && path.extension().is_none() {
+        let extensions = environment
+            .get("PATHEXT")
+            .cloned()
+            .or_else(|| std::env::var("PATHEXT").ok())
+            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+        names.extend(
+            extensions
+                .split(';')
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| format!("{program}{extension}")),
+        );
+    }
     search_path.is_some_and(|search_path| {
-        std::env::split_paths(&search_path).any(|directory| directory.join(&program).is_file())
+        std::env::split_paths(&search_path)
+            .any(|directory| names.iter().any(|name| directory.join(name).is_file()))
     })
 }
 
@@ -1634,7 +1649,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("haarness-places-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(base.join("home/2026-10-24/a")).unwrap();
         std::fs::create_dir_all(base.join("home/2026-10-24/b")).unwrap();
-        let project = base.join("home").canonicalize().unwrap();
+        let project = dunce::canonicalize(base.join("home")).unwrap();
         let root = project.join("2026-10-24/a");
         let uri = |path: PathBuf| url::Url::from_file_path(path).unwrap().to_string();
         let mine = uri(root.join("a.rs"));

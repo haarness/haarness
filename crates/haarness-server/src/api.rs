@@ -2157,7 +2157,8 @@ async fn search_files(
             let Ok(relative) = entry.path().strip_prefix(&workspace) else {
                 continue;
             };
-            let path = relative.display().to_string();
+            // Written with `/`, as the listing writes its paths.
+            let path = relative.to_string_lossy().replace('\\', "/");
             if let Some(score) = fuzzy_score(&path.to_ascii_lowercase(), &needle) {
                 scored.push((score, path));
             }

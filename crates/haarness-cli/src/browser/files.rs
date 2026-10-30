@@ -105,7 +105,7 @@ impl Uploads {
             use std::os::unix::fs::PermissionsExt as _;
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
         }
-        let root = super::discovery::plain(root.canonicalize()?);
+        let root = super::discovery::plain(dunce::canonicalize(&root)?);
         if let Ok(entries) = fs::read_dir(&root) {
             for entry in entries.flatten() {
                 let old = entry
@@ -243,10 +243,7 @@ pub(crate) fn read_download(
         return Err("the path is not absolute".into());
     }
     let name = path.file_name().ok_or("the path names no file")?;
-    let parent = path
-        .parent()
-        .ok_or("the path names no folder")?
-        .canonicalize()
+    let parent = dunce::canonicalize(path.parent().ok_or("the path names no folder")?)
         .map(super::discovery::plain)
         .map_err(|_| "its folder does not exist".to_owned())?;
     let resolved = parent.join(name);

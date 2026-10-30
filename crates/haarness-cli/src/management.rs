@@ -1648,7 +1648,7 @@ impl ManagementService {
 
     fn command_root(&self, scope: Scope) -> PathBuf {
         match scope {
-            Scope::Local => self.workspace.join(".haarness/commands"),
+            Scope::Local => self.workspace.join(".haarness").join("commands"),
             Scope::Global => self
                 .paths
                 .config
@@ -1726,7 +1726,7 @@ impl ManagementService {
 
     fn skill_root(&self, scope: Scope) -> PathBuf {
         match scope {
-            Scope::Local => self.workspace.join(".haarness/skills"),
+            Scope::Local => self.workspace.join(".haarness").join("skills"),
             Scope::Global => self.paths.skills.clone(),
         }
     }
@@ -1741,7 +1741,7 @@ impl ManagementService {
 
     fn agent_root(&self, scope: Scope) -> PathBuf {
         match scope {
-            Scope::Local => self.workspace.join(".haarness/agents"),
+            Scope::Local => self.workspace.join(".haarness").join("agents"),
             Scope::Global => self
                 .paths
                 .config
@@ -1856,10 +1856,9 @@ impl ManagementService {
 fn in_system_folder(path: &Path) -> bool {
     crate::layout::system_config_dir().is_some_and(|base| {
         path.starts_with(&base)
-            || path
-                .canonicalize()
+            || dunce::canonicalize(path)
                 .ok()
-                .zip(base.canonicalize().ok())
+                .zip(dunce::canonicalize(&base).ok())
                 .is_some_and(|(path, base)| path.starts_with(base))
     })
 }
@@ -1888,15 +1887,11 @@ fn same_command(
 }
 
 pub(super) fn memory_root_for(paths: &Paths, workspace: &Path) -> PathBuf {
-    let canonical = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
+    let canonical = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
     // Layout migration intentionally aliases the application data directory.
     // Resolve that trusted root, while still rejecting links below it.
-    paths
-        .data
-        .canonicalize()
+    dunce::canonicalize(&paths.data)
         .unwrap_or_else(|_| paths.data.clone())
         .join("memory")
         .join(format!("{digest:x}"))
@@ -2591,9 +2586,8 @@ fn write_plugin_manifest(
 }
 
 fn copy_tree(source: &Path, target: &Path) -> Result<()> {
-    let source = source
-        .canonicalize()
-        .with_context(|| format!("resolve {}", source.display()))?;
+    let source =
+        dunce::canonicalize(source).with_context(|| format!("resolve {}", source.display()))?;
     if !source.is_dir() {
         bail!("import source {} is not a directory", source.display());
     }
@@ -2608,7 +2602,7 @@ fn copy_tree_inner(root: &Path, source: &Path, target: &Path) -> Result<()> {
         let target_path = target.join(entry.file_name());
         let metadata = fs::symlink_metadata(&source_path)?;
         if metadata.file_type().is_symlink() {
-            let resolved = source_path.canonicalize()?;
+            let resolved = dunce::canonicalize(&source_path)?;
             if !resolved.starts_with(root) {
                 bail!(
                     "import symlink escapes its source root: {}",
@@ -2942,6 +2936,9 @@ mod tests {
     use haarness_providers::CredentialStore;
     use haarness_server::FilesystemSkillRegistry;
 
+    /// The Python fixtures run with: Windows has no `python3` command.
+    const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
     #[test]
     fn an_import_path_from_the_home_folder_is_read_there() {
         let home = haarness_protocol::home_dir().unwrap();
@@ -2972,7 +2969,7 @@ mod tests {
         let mcp = Arc::new(NativeMcpRegistry::default());
         let config: haarness_protocol::McpConfigureRequest = serde_json::from_value(json!({
             "transport": "stdio",
-            "command": "python3",
+            "command": PYTHON,
             "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/../haarness-mcp/tests/fixtures/names.py")],
             "env": {"LABEL": "Docs Server", "TOOLS": "[\"files.read\"]"},
             "enabled": true
@@ -3061,7 +3058,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("haarness-memory-editor-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let workspace = root.join("project");
         fs::create_dir_all(&workspace).unwrap();
         let paths = Paths::new(Some(&root.join("home"))).unwrap();
@@ -3451,9 +3448,17 @@ mod tests {
         // keeps every byte, with or without a replacement body.
         let broken =
             "---\ndescription: Broken\nallowed-tools:\n  - Bash(git commit: *)\n---\nBody\n";
-        let command = workspace.join(".haarness/commands/broken.md");
-        let agent = workspace.join(".haarness/agents/broken.md");
-        let skill = workspace.join(".haarness/skills/broken/SKILL.md");
+        // Joined as Haarness joins them, so the paths it reports match on Windows too.
+        let command = workspace
+            .join(".haarness")
+            .join("commands")
+            .join("broken.md");
+        let agent = workspace.join(".haarness").join("agents").join("broken.md");
+        let skill = workspace
+            .join(".haarness")
+            .join("skills")
+            .join("broken")
+            .join("SKILL.md");
         for path in [&command, &agent, &skill] {
             fs::write(path, broken).unwrap();
         }

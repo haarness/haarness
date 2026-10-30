@@ -432,7 +432,7 @@ impl SqliteSnapshotStore {
         } else {
             link.parent().unwrap_or(&self.workspace).join(target)
         };
-        let Ok(canonical) = candidate.canonicalize() else {
+        let Ok(canonical) = dunce::canonicalize(&candidate) else {
             return Ok(false);
         };
         if !canonical.starts_with(&self.workspace) {
@@ -940,7 +940,7 @@ fn open_connection(database: impl AsRef<Path>) -> CoreResult<Connection> {
 /// The canonical folder a store manages: a folder, and never the
 /// operating-system home folder.
 fn snapshot_root(workspace: PathBuf) -> CoreResult<PathBuf> {
-    let workspace = workspace.canonicalize().map_err(|error| {
+    let workspace = dunce::canonicalize(&workspace).map_err(|error| {
         CoreError::Storage(format!(
             "cannot canonicalize snapshot workspace {}: {error}",
             workspace.display()
@@ -1587,9 +1587,7 @@ fn matches_configured_home(
     configured_homes: impl IntoIterator<Item = OsString>,
 ) -> bool {
     configured_homes.into_iter().any(|home| {
-        PathBuf::from(home)
-            .canonicalize()
-            .is_ok_and(|canonical| canonical == workspace)
+        dunce::canonicalize(PathBuf::from(home)).is_ok_and(|canonical| canonical == workspace)
     })
 }
 
@@ -1714,8 +1712,7 @@ fn scan_live_entry(
     if metadata.file_type().is_symlink() {
         let target_value = fs::read_link(target).map_err(io_error)?;
         let data = os_string_bytes(target_value.into_os_string());
-        let points_to_directory = target
-            .canonicalize()
+        let points_to_directory = dunce::canonicalize(target)
             .ok()
             .is_some_and(|canonical| canonical.starts_with(workspace) && canonical.is_dir());
         return Ok(Some(ManifestEntry {
@@ -2615,7 +2612,7 @@ mod tests {
     fn exact_canonical_home_directory_is_detected() {
         let root = std::env::temp_dir().join(format!("haarness-home-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(root.join("child")).unwrap();
-        let canonical = root.canonicalize().unwrap();
+        let canonical = dunce::canonicalize(&root).unwrap();
         assert!(matches_configured_home(
             &canonical,
             [root.join("child/..").into_os_string()]

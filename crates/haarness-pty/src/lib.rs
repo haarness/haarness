@@ -322,7 +322,7 @@ impl PtyManager {
     }
 
     fn resolve_cwd(&self, requested: Option<&str>) -> CoreResult<PathBuf> {
-        let workspace = self.inner.workspace.canonicalize().map_err(pty_error)?;
+        let workspace = dunce::canonicalize(&self.inner.workspace).map_err(pty_error)?;
         let candidate = requested.map_or_else(
             || workspace.clone(),
             |cwd| {
@@ -334,7 +334,7 @@ impl PtyManager {
                 }
             },
         );
-        let candidate = candidate.canonicalize().map_err(pty_error)?;
+        let candidate = dunce::canonicalize(&candidate).map_err(pty_error)?;
         if !candidate.starts_with(&workspace) {
             return Err(CoreError::PermissionDenied(
                 "PTY working directory must be inside the active workspace".into(),
@@ -819,7 +819,9 @@ mod tests {
             directory,
             ..PtyCreateRequest::default()
         };
-        let first = project.canonicalize().unwrap().join("2026-10-24/first");
+        let first = dunce::canonicalize(&project)
+            .unwrap()
+            .join("2026-10-24/first");
         let opened = manager
             .create(shell(Some("2026-10-24/first".into())))
             .unwrap();

@@ -74,7 +74,7 @@ pub(crate) fn plain(path: PathBuf) -> PathBuf {
 
 /// `path` with links resolved, when it exists; as given otherwise.
 pub(crate) fn canonical(path: &Path) -> PathBuf {
-    plain(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+    plain(dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
 }
 
 /// The root `Paths::new` would use with this environment, resolved without
