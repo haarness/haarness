@@ -18,7 +18,7 @@ impl Fixture {
         let root =
             std::env::temp_dir().join(format!("haarness-chat-folders-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(root.join("home")).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         Self {
             workspace: root.join("home"),
             root,
@@ -95,9 +95,24 @@ async fn turn(runtime: &AgentRuntime, thread: ThreadId, prompt: &str) {
     );
 }
 
+/// The shell command that prints the folder it runs in: Windows runs one
+/// in cmd.exe, where that is `echo %CD%` (a bare `cd` reads as the home folder).
+const PWD: &str = if cfg!(windows) { "echo %CD%" } else { "pwd -P" };
+
+/// What [`PWD`] prints in `folder`: one line, ended by CRLF in cmd.exe.
+fn printed_line(folder: &std::path::Path) -> String {
+    let end = if cfg!(windows) { "\r\n" } else { "\n" };
+    format!("{}{end}", folder.display())
+}
+
+/// The `bash` tool's result for [`PWD`] in `folder`.
+fn printed(folder: &std::path::Path) -> String {
+    format!("exit: 0\n{}", printed_line(folder))
+}
+
 /// The model's `bash` call printing its working folder.
 fn pwd() -> String {
-    format!("!tool bash {}", json!({ "command": "pwd -P" }))
+    format!("!tool bash {}", json!({ "command": PWD }))
 }
 
 /// The output of the last `name` result of `thread`.
@@ -222,7 +237,7 @@ async fn a_chats_hooks_run_in_its_own_folder() {
     }
     let ran = last_result(&runtime, own.id, "bash").await;
     assert!(ran.contains(&folder(&own).display().to_string()), "{ran}");
-    runtime.run_shell(own.id, "pwd -P".into()).await.unwrap();
+    runtime.run_shell(own.id, PWD.into()).await.unwrap();
     std::fs::remove_dir(folder(&gone)).unwrap();
     for thread in [&own, &gone] {
         runtime.update_thread(thread.id, archived()).await.unwrap();
@@ -277,7 +292,7 @@ async fn a_chat_home_chats_hooks_take_its_folder_as_their_project() {
     let runtime = runtime.with_hooks(Arc::new(recording_hooks(&fixture.workspace, &log)));
     let thread = chat(&runtime, None).await.unwrap();
     turn(&runtime, thread.id, &pwd()).await;
-    runtime.run_shell(thread.id, "pwd -P".into()).await.unwrap();
+    runtime.run_shell(thread.id, PWD.into()).await.unwrap();
     runtime.update_thread(thread.id, archived()).await.unwrap();
     let own = folder(&thread);
     assert!(own.starts_with(&fixture.workspace) && own != fixture.workspace);
@@ -663,13 +678,13 @@ async fn a_chat_works_in_its_folder_and_a_sibling_s_folder_is_outside() {
         turn(&runtime, thread.id, &pwd()).await;
         assert_eq!(
             last_result(&runtime, thread.id, "bash").await,
-            format!("exit: 0\n{}\n", folder(thread).display())
+            printed(&folder(thread))
         );
     }
-    let person = runtime.run_shell(a.id, "pwd -P".into()).await.unwrap();
+    let person = runtime.run_shell(a.id, PWD.into()).await.unwrap();
     assert!(
         matches!(&person.data, ItemData::ToolResult { output, .. }
-            if *output == format!("exit: 0\n{}\n", folder(&a).display())),
+            if *output == printed(&folder(&a))),
         "{:?}",
         person.data
     );
@@ -677,14 +692,14 @@ async fn a_chat_works_in_its_folder_and_a_sibling_s_folder_is_outside() {
         .run_workflow_tool(
             b.id,
             "bash",
-            json!({"command": "pwd -P"}),
+            json!({"command": PWD}),
             CancellationToken::new(),
         )
         .await
         .unwrap();
     assert_eq!(
         workflow.output.metadata["stdout"],
-        format!("{}\n", folder(&b).display())
+        printed_line(&folder(&b))
     );
 
     // The prompt names it as the working folder.
@@ -876,7 +891,7 @@ async fn children_and_forks_work_in_their_parent_s_folder() {
     let fixture = Fixture::new();
     let (runtime, _) = fixture.runtime();
     let parent = chat(&runtime, Some("2026-10-24/parent")).await.unwrap();
-    turn(&runtime, parent.id, &tasks_prompt(1, "pwd -P")).await;
+    turn(&runtime, parent.id, &tasks_prompt(1, PWD)).await;
     let child = runtime
         .list_threads(false)
         .await
@@ -887,14 +902,14 @@ async fn children_and_forks_work_in_their_parent_s_folder() {
     assert_eq!(child.directory, parent.directory);
     assert_eq!(
         last_result(&runtime, child.id, "bash").await,
-        format!("exit: 0\n{}\n", folder(&parent).display())
+        printed(&folder(&parent))
     );
     let fork = runtime.fork_thread(parent.id, None, None).await.unwrap();
     assert_eq!(fork.directory, parent.directory);
     turn(&runtime, fork.id, &pwd()).await;
     assert_eq!(
         last_result(&runtime, fork.id, "bash").await,
-        format!("exit: 0\n{}\n", folder(&parent).display())
+        printed(&folder(&parent))
     );
     // A chat a workflow starts under it (a parent and no folder named).
     let workflow_chat = runtime
@@ -957,7 +972,7 @@ async fn a_deleted_chat_folder_is_made_again_for_its_next_turn() {
     assert!(folder(&thread).is_dir());
     assert_eq!(
         last_result(&runtime, thread.id, "bash").await,
-        format!("exit: 0\n{}\n", folder(&thread).display())
+        printed(&folder(&thread))
     );
 }
 
@@ -970,7 +985,7 @@ async fn an_ordinary_chat_works_in_the_project_folder_as_before() {
     turn(&runtime, thread.id, &pwd()).await;
     assert_eq!(
         last_result(&runtime, thread.id, "bash").await,
-        format!("exit: 0\n{}\n", fixture.workspace.display())
+        printed(&fixture.workspace)
     );
     turn(
         &runtime,
@@ -1022,7 +1037,7 @@ async fn in_the_chat_home_every_chat_works_in_a_folder_of_its_own() {
     turn(&runtime, plain.id, &pwd()).await;
     assert_eq!(
         last_result(&runtime, plain.id, "bash").await,
-        format!("exit: 0\n{}\n", folder(&plain).display())
+        printed(&folder(&plain))
     );
     let other = chat(&runtime, None).await.unwrap();
     assert_ne!(other.directory, plain.directory);
@@ -1099,7 +1114,7 @@ async fn an_imported_chat_in_the_chat_home_gets_a_folder_of_its_own() {
     turn(&runtime, source.id, &pwd()).await;
     assert_eq!(
         last_result(&runtime, source.id, "bash").await,
-        format!("exit: 0\n{}\n", folder(&imported).display())
+        printed(&folder(&imported))
     );
     // Imported into a project, it works in the project folder.
     let another = Fixture::new();
@@ -1134,13 +1149,13 @@ async fn a_chat_stored_without_a_folder_gets_one_before_it_works_in_the_chat_hom
     assert_eq!(folder(&now), fresh(&fixture, &now));
     assert_eq!(
         last_result(&runtime, legacy.id, "bash").await,
-        format!("exit: 0\n{}\n", folder(&now).display())
+        printed(&folder(&now))
     );
     // A person's own command there too.
-    let item = runtime.run_shell(legacy.id, "pwd -P".into()).await.unwrap();
+    let item = runtime.run_shell(legacy.id, PWD.into()).await.unwrap();
     assert!(
         matches!(&item.data, ItemData::ToolResult { output, .. }
-            if *output == format!("exit: 0\n{}\n", folder(&now).display())),
+            if *output == printed(&folder(&now))),
         "{:?}",
         item.data
     );
@@ -1357,11 +1372,8 @@ async fn ignore_files_above_the_chat_home_hide_nothing_from_its_chats() {
     std::fs::write(folder(&a).join(".ignore"), "*.log\n").unwrap();
     std::fs::write(folder(&a).join("sub/a.log"), "needle").unwrap();
     std::fs::write(folder(&a).join("sub/b.txt"), "needle").unwrap();
-    // As grep writes it on this system.
-    let kept = std::path::Path::new("sub")
-        .join("b.txt")
-        .display()
-        .to_string();
+    // As grep writes it: with `/`, on Windows too.
+    let kept = "sub/b.txt";
     turn(
         &runtime,
         a.id,
@@ -1369,7 +1381,7 @@ async fn ignore_files_above_the_chat_home_hide_nothing_from_its_chats() {
     )
     .await;
     let found = last_result(&runtime, a.id, "grep").await;
-    assert!(found.contains(&kept) && !found.contains("a.log"), "{found}");
+    assert!(found.contains(kept) && !found.contains("a.log"), "{found}");
     let found = runtime
         .run_direct_tool(
             a.id,
@@ -1381,7 +1393,7 @@ async fn ignore_files_above_the_chat_home_hide_nothing_from_its_chats() {
         .unwrap()
         .output
         .text;
-    assert!(found.contains(&kept) && !found.contains("a.log"), "{found}");
+    assert!(found.contains(kept) && !found.contains("a.log"), "{found}");
 
     std::fs::create_dir_all(folder(&a).join("node_modules/dep")).unwrap();
     std::fs::write(folder(&a).join("node_modules/dep/plan.js"), "").unwrap();

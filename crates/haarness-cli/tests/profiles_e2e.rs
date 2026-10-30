@@ -16,7 +16,7 @@ impl Fixture {
         let root =
             std::env::temp_dir().join(format!("haarness-profiles-e2e-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         for name in ["source", "target", "cloud"] {
             fs::create_dir_all(root.join(name).join("workspace")).unwrap();
         }

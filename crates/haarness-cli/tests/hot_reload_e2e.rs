@@ -10,12 +10,15 @@ use serde_json::{Value, json};
 use tokio::{net::TcpListener, process::Command, time::timeout};
 use uuid::Uuid;
 
+/// The Python fixtures run with: Windows has no `python3` command.
+const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
 const TOKEN: &str = "hot-reload-e2e-token";
 
 #[tokio::test]
 async fn capability_management_disables_execution_and_survives_restart() {
     let root = TestDirectory::new();
-    let root_path = root.0.canonicalize().unwrap();
+    let root_path = dunce::canonicalize(&root.0).unwrap();
     let workspace = root_path.join("workspace");
     let data = root_path.join("data");
     let home = root_path.join("home");
@@ -674,7 +677,7 @@ async fn unchanged_sources_neither_reload_nor_respawn_mcp_servers() {
         workspace.join(".haarness/haarness.json"),
         serde_json::to_string_pretty(&json!({
             "mcp": {"counter": {
-                "command": "python3",
+                "command": PYTHON,
                 "args": [fixture],
                 "env": {"LAUNCH_LOG": launches, "CALL_LOG": directory.0.join("calls")}
             }},

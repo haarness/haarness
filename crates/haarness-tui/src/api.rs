@@ -3210,7 +3210,9 @@ mod tests {
         let mut reconnected = false;
         let mut received_event = false;
         while !(resync && reconnected && received_event) {
-            match tokio::time::timeout(Duration::from_secs(3), events.recv())
+            // Windows takes a second or two to refuse a connection to the
+            // daemon that went, which the retries meet first.
+            match tokio::time::timeout(Duration::from_secs(10), events.recv())
                 .await
                 .unwrap()
                 .unwrap()

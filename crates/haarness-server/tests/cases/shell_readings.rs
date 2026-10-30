@@ -12,7 +12,7 @@ impl Fixture {
         let path =
             std::env::temp_dir().join(format!("haarness-shell-readings-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&path).unwrap();
-        Self(path.canonicalize().unwrap())
+        Self(dunce::canonicalize(&path).unwrap())
     }
 }
 impl Drop for Fixture {
@@ -105,6 +105,8 @@ async fn a_deny_for_rm_refuses_rm_inside_bash_c_eval_and_wrappers() {
     }
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_ask_for_a_command_asks_through_an_assignment_and_shows_the_whole_command() {
     let fixture = Fixture::new();
@@ -143,6 +145,8 @@ async fn an_ask_for_a_command_asks_through_an_assignment_and_shows_the_whole_com
     );
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_allowed_wrapper_under_bash_ask_runs_without_a_new_question() {
     let fixture = Fixture::new();
@@ -506,6 +510,8 @@ async fn a_command_too_long_to_read_under_an_ask_waits_for_a_person_in_auto_and_
     assert!(!fixture.0.join("hi.txt").exists());
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_line_too_large_to_read_asks_a_person_after_an_always_and_keeps_its_outside_paths() {
     let fixture = Fixture::new();

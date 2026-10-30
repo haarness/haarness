@@ -39,7 +39,7 @@ fn a_run_with_a_data_dir_saves_long_tool_output_inside_it() {
     for folder in ["home", "workspace", "data"] {
         fs::create_dir_all(root.join(folder)).unwrap();
     }
-    let root = root.canonicalize().unwrap();
+    let root = dunce::canonicalize(&root).unwrap();
     // Output too long to keep in the conversation is saved to a file.
     let output = haarness(
         &root,
@@ -144,7 +144,7 @@ fn the_run_of_an_unregistered_schedule_registers_nothing_either() {
     for folder in ["home", "workspace", "data"] {
         fs::create_dir_all(root.join(folder)).unwrap();
     }
-    let root = root.canonicalize().unwrap();
+    let root = dunce::canonicalize(&root).unwrap();
     // Set at all, even empty, the variable skips registering.
     for (name, skip) in [("fixture", "1"), ("empty", "")] {
         let output = haarness_with(

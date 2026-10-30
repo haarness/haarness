@@ -40,10 +40,13 @@ async fn a_queue_of_prompts_announces_finished_once_after_its_last_turn() {
     let mut app = away(&thread);
     let client = offline_client();
 
+    // Inside the grace whatever the event costs: an offline daemon takes
+    // Windows a second or two to refuse.
+    let finishing = Instant::now();
     app.reduce(finished(thread.id, "completed"), &client)
         .await
         .unwrap();
-    app.release_completions(Instant::now());
+    app.release_completions(finishing);
     assert_eq!(app.pending_notification, None, "held through the grace");
     assert_eq!(toast(&app), None);
 

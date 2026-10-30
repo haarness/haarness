@@ -5,6 +5,7 @@
 //! snippet whose output was cut says so in the prompt.
 use super::*;
 use haarness_core::{PermissionDecision, PermissionRule};
+#[cfg(unix)]
 use haarness_protocol::{InputDelivery, ItemData, QueueInputRequest, ThreadId};
 use serde_json::json;
 use std::path::PathBuf;
@@ -14,7 +15,7 @@ impl Fixture {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("haarness-snippets-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&path).unwrap();
-        Self(path.canonicalize().unwrap())
+        Self(dunce::canonicalize(&path).unwrap())
     }
 }
 impl Drop for Fixture {
@@ -120,14 +121,17 @@ fn run_command(name: &str) -> StartTurnRequest {
 }
 
 /// As Desktop, the terminal UI and an editor over ACP send it.
+#[cfg(unix)]
 fn attended(mut request: StartTurnRequest) -> StartTurnRequest {
     request.attended = true;
     request
 }
 
+#[cfg(unix)]
 const LOAD_SKILL: &str = "!tool slowskill {}";
 
 /// What the last `slowskill` call in `thread` returned, and whether it failed.
+#[cfg(unix)]
 async fn skill_result(runtime: &AgentRuntime, thread: ThreadId) -> (String, bool) {
     runtime
         .items(thread, None)
@@ -147,10 +151,12 @@ async fn skill_result(runtime: &AgentRuntime, thread: ThreadId) -> (String, bool
         .expect("the skill's result")
 }
 
+#[cfg(unix)]
 fn finished(result: &(String, bool)) -> bool {
     !result.1 && result.0 == "SKILL finished"
 }
 
+#[cfg(unix)]
 fn timed_out(result: &(String, bool)) -> bool {
     result.1 && result.0.contains("timed out after 300 ms")
 }
@@ -169,6 +175,8 @@ fn sent(requests: &std::sync::Mutex<Vec<ProviderRequest>>, prefix: &str) -> Opti
     })
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_person_s_command_waits_for_a_snippet_past_the_shell_deadline() {
     let fixture = Fixture::new();
@@ -223,6 +231,8 @@ async fn a_person_s_command_waits_for_a_snippet_past_the_shell_deadline() {
     );
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn stop_ends_a_snippet_that_does_not_end() {
     let fixture = Fixture::new();
@@ -249,6 +259,8 @@ async fn stop_ends_a_snippet_that_does_not_end() {
     assert!(sent(&requests, "Never:").is_none(), "nothing is sent");
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_scheduled_run_keeps_the_shell_deadline_for_a_snippet() {
     let fixture = Fixture::new();
@@ -283,6 +295,8 @@ async fn a_scheduled_run_keeps_the_shell_deadline_for_a_snippet() {
     assert!(sent(&requests, "Slow:").is_none());
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_turn_no_client_says_a_person_can_stop_keeps_the_shell_deadline() {
     let fixture = Fixture::new();
@@ -326,6 +340,8 @@ async fn a_turn_no_client_says_a_person_can_stop_keeps_the_shell_deadline() {
     assert!(timed_out(&result), "{result:?}");
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_person_s_message_runs_a_skill_s_snippet_past_the_deadline_on_every_path() {
     let fixture = Fixture::new();

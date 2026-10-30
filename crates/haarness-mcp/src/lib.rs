@@ -4146,6 +4146,8 @@ mod tests {
     /// The helper is shell text: a `${VAR}` value that holds shell syntax
     /// stays plain text, written bare, in double quotes or in single quotes,
     /// and a plugin root with a space is one word.
+    // A POSIX shell helper: Windows runs headers helpers in cmd.exe.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_headers_helper_reads_references_as_plain_text() {
         let root =
@@ -4158,11 +4160,10 @@ mod tests {
             r#"printf '{"X-Double":"%s","X-Bare":"%s"}' "$1" "$2""#,
         )
         .unwrap();
-        let value = format!(
-            "v $(touch {}) `touch {}`",
-            marker.display(),
-            marker.display()
-        );
+        // With `/` between folders: the helper prints the value into JSON,
+        // where Windows' backslashes would be escapes.
+        let shown = marker.display().to_string().replace('\\', "/");
+        let value = format!("v $(touch {shown}) `touch {shown}`");
         let config: McpConfigureRequest = serde_json::from_value(json!({
             "transport": "streamable_http", "url": "https://example.test/mcp",
             "env": {"FIXTURE_VALUE": value, "CLAUDE_PLUGIN_ROOT": plugin.display().to_string()},
@@ -4536,9 +4537,12 @@ fn transport_failure(error: &CoreError) -> bool {
 mod recovery_tests {
     use super::*;
 
+    /// The Python fixtures run with: Windows has no `python3` command.
+    const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
     fn config(log: &Path, delay: &str) -> McpConfigureRequest {
         serde_json::from_value(serde_json::json!({
-            "transport": "stdio", "command": "python3",
+            "transport": "stdio", "command": PYTHON,
             "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/recovery.py")],
             "env": {"CALL_LOG": log, "INIT_DELAY": delay},
             "enabled": true, "timeoutMs": 2000
@@ -4574,7 +4578,7 @@ mod recovery_tests {
             .configure(
                 "app",
                 serde_json::from_value(serde_json::json!({
-                    "transport": "stdio", "command": "python3",
+                    "transport": "stdio", "command": PYTHON,
                     "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/app.py")],
                     "enabled": true
                 }))
@@ -4645,7 +4649,7 @@ mod recovery_tests {
     async fn a_server_with_its_apps_off_is_a_plain_mcp_server() {
         let config = |apps: Option<bool>| -> McpConfigureRequest {
             let mut config: McpConfigureRequest = serde_json::from_value(serde_json::json!({
-                "transport": "stdio", "command": "python3",
+                "transport": "stdio", "command": PYTHON,
                 "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/app.py")],
                 "enabled": true
             }))
@@ -4696,7 +4700,7 @@ mod recovery_tests {
     async fn tool_list_changed_refreshes_connected_catalog() {
         let registry = NativeMcpRegistry::default();
         registry.configure("catalog", serde_json::from_value(serde_json::json!({
-            "transport":"stdio", "command":"python3", "args":[concat!(env!("CARGO_MANIFEST_DIR"),"/tests/fixtures/catalog.py")],"enabled":true
+            "transport":"stdio", "command": PYTHON, "args":[concat!(env!("CARGO_MANIFEST_DIR"),"/tests/fixtures/catalog.py")],"enabled":true
         })).unwrap()).await.unwrap();
         assert!(
             registry
@@ -4734,7 +4738,7 @@ mod recovery_tests {
     /// each call with `label`, the tool name it got and the folder it runs in.
     fn names_config(label: &str, tools: &[&str]) -> McpConfigureRequest {
         serde_json::from_value(serde_json::json!({
-            "transport": "stdio", "command": "python3",
+            "transport": "stdio", "command": PYTHON,
             "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/names.py")],
             "env": {"LABEL": label, "TOOLS": serde_json::to_string(tools).unwrap()},
             "enabled": true
@@ -4824,8 +4828,8 @@ mod recovery_tests {
         for folder in [project.join("tools/mcp"), elsewhere.clone()] {
             std::fs::create_dir_all(folder).unwrap();
         }
-        let project = std::fs::canonicalize(&project).unwrap();
-        let elsewhere = std::fs::canonicalize(&elsewhere).unwrap();
+        let project = dunce::canonicalize(&project).unwrap();
+        let elsewhere = dunce::canonicalize(&elsewhere).unwrap();
         assert_ne!(std::env::current_dir().unwrap(), project);
         let registry = NativeMcpRegistry::default().in_folder(&project);
         for (server, cwd, expected) in [
@@ -4843,7 +4847,7 @@ mod recovery_tests {
             assert_eq!(info.status, "connected", "{server}: {:?}", info.detail);
             let answer = called(&registry, server, &format!("mcp__{server}__where")).await;
             assert_eq!(
-                std::fs::canonicalize(answer["cwd"].as_str().unwrap()).unwrap(),
+                dunce::canonicalize(answer["cwd"].as_str().unwrap()).unwrap(),
                 expected,
                 "{server}"
             );
@@ -4854,7 +4858,8 @@ mod recovery_tests {
             registry.servers.read()["relative"].config.cwd.as_deref(),
             Some("tools/mcp")
         );
-        std::fs::remove_dir_all(root).unwrap();
+        // Windows will not remove the folder a stopping server still runs in.
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -4885,6 +4890,8 @@ mod recovery_tests {
     }
 
     /// A remote server's headers helper runs where a local server would.
+    // A POSIX shell helper: Windows runs headers helpers in cmd.exe.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_headers_helper_runs_in_the_project_folder() {
         let root = std::env::temp_dir().join(format!(
@@ -4892,7 +4899,7 @@ mod recovery_tests {
             uuid::Uuid::now_v7()
         ));
         std::fs::create_dir_all(root.join("auth")).unwrap();
-        let project = std::fs::canonicalize(&root).unwrap();
+        let project = dunce::canonicalize(&root).unwrap();
         let marker = project.join("ran-in.txt");
         let registry = NativeMcpRegistry::default().in_folder(&project);
         let config: McpConfigureRequest = serde_json::from_value(serde_json::json!({
@@ -4917,7 +4924,7 @@ mod recovery_tests {
     #[tokio::test]
     async fn catalog_changes_reach_the_live_registry_after_a_generation_swap() {
         let config: McpConfigureRequest = serde_json::from_value(serde_json::json!({
-            "transport":"stdio", "command":"python3",
+            "transport":"stdio", "command": PYTHON,
             "args":[concat!(env!("CARGO_MANIFEST_DIR"),"/tests/fixtures/catalog.py")],"enabled":true
         }))
         .unwrap();
@@ -5473,14 +5480,18 @@ mod recovery_tests {
                 .text,
             "pong"
         );
-        assert_eq!(std::fs::read_to_string(&log).unwrap(), "called\n");
+        // Python writes a line end as `\r\n` on Windows.
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap().replace("\r\n", "\n"),
+            "called\n"
+        );
         registry.disconnect("fixture").await.unwrap();
         std::fs::remove_file(log).unwrap();
     }
 
     fn flood_config(dir: &Path, flood_init: bool) -> McpConfigureRequest {
         serde_json::from_value(serde_json::json!({
-            "transport": "stdio", "command": "python3",
+            "transport": "stdio", "command": PYTHON,
             "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/flood.py")],
             "env": {
                 "LAUNCH_LOG": dir.join("launches"),
@@ -5616,7 +5627,7 @@ mod recovery_tests {
             .configure(
                 "docs",
                 serde_json::from_value(serde_json::json!({
-                    "transport": "stdio", "command": "python3",
+                    "transport": "stdio", "command": PYTHON,
                     "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/resources.py")],
                     "env": {"CANCEL_LOG": cancels}, "enabled": true
                 }))
@@ -5663,7 +5674,7 @@ mod recovery_tests {
         // A read waits as long as the server's connection timeout, and no
         // longer.
         let mut quick: McpConfigureRequest = serde_json::from_value(serde_json::json!({
-            "transport": "stdio", "command": "python3",
+            "transport": "stdio", "command": PYTHON,
             "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/resources.py")],
             "env": {"CANCEL_LOG": dir.join("quick-cancels")}, "enabled": true
         }))
@@ -5698,7 +5709,7 @@ mod recovery_tests {
             .configure(
                 "docs",
                 serde_json::from_value(serde_json::json!({
-                    "transport": "stdio", "command": "python3",
+                    "transport": "stdio", "command": PYTHON,
                     "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/resources.py")],
                     "env": {"CANCEL_LOG": cancels}, "enabled": true
                 }))
@@ -5818,7 +5829,7 @@ mod recovery_tests {
             .configure(
                 "catalog",
                 serde_json::from_value(serde_json::json!({
-                    "transport":"stdio", "command":"python3",
+                    "transport":"stdio", "command": PYTHON,
                     "args":[concat!(env!("CARGO_MANIFEST_DIR"),"/tests/fixtures/catalog.py")],
                     "env":{"FAIL_REFRESH":"1"}, "enabled":true
                 }))

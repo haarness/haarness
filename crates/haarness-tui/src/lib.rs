@@ -1284,12 +1284,12 @@ fn resume_command(
 ) -> String {
     let here = std::env::current_dir()
         .ok()
-        .and_then(|path| path.canonicalize().ok());
+        .and_then(|path| dunce::canonicalize(&path).ok());
     let workspace = info
         .and_then(|info| info.workspace.as_deref())
         .filter(|workspace| {
             let path = std::path::Path::new(workspace);
-            here.as_deref() != Some(path.canonicalize().as_deref().unwrap_or(path))
+            here.as_deref() != Some(dunce::canonicalize(path).as_deref().unwrap_or(path))
         });
     match workspace {
         Some(workspace) => format!(

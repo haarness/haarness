@@ -268,7 +268,13 @@ mod tests {
         let output = version(&binary);
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("ripgrep {VERSION}")));
-        fs::write(&binary, "damaged").unwrap();
+        // Windows may hold a program it just ran for a moment (a virus scan).
+        let mut attempt = 0;
+        while let Err(error) = fs::write(&binary, "damaged") {
+            assert!(attempt < 50 && error.raw_os_error() == Some(32), "{error}");
+            attempt += 1;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         assert_eq!(extract(cache.path()).unwrap(), binary);
         assert!(valid_binary(&binary).unwrap());
         fs::remove_file(&binary).unwrap();

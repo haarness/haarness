@@ -9,7 +9,7 @@ impl Fixture {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("haarness-parity-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&path).unwrap();
-        Self(path.canonicalize().unwrap())
+        Self(dunce::canonicalize(&path).unwrap())
     }
 }
 impl Drop for Fixture {
@@ -117,6 +117,8 @@ async fn parity_default_depth_still_prevents_recursive_delegation() {
     assert_eq!(runtime.list_threads(false).await.unwrap().len(), 2);
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn parity_definition_shell_asks_then_expands_stdout_and_preserves_failure() {
     let fixture = Fixture::new();
@@ -565,7 +567,7 @@ async fn parity_repository_grants_cross_worktrees_and_preserve_other_repositorie
         ["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
     );
     let db = fixture.0.join("approvals.sqlite");
-    let common = main.join(".git").canonicalize().unwrap();
+    let common = dunce::canonicalize(main.join(".git")).unwrap();
     let store = Arc::new(haarness_store::RepositoryApprovals::open(&db, &common).unwrap());
     let mut config = RuntimeConfig {
         approval_mode: haarness_protocol::ApprovalMode::Review,

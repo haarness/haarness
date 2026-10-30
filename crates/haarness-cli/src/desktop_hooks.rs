@@ -287,7 +287,7 @@ mod tests {
     fn desktop_hook_edits_preserve_siblings_and_reject_stale_revisions() {
         let temp = std::env::temp_dir().join(format!("haarness-hooks-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&temp).unwrap();
-        let temp = temp.canonicalize().unwrap();
+        let temp = dunce::canonicalize(&temp).unwrap();
         let workspace = temp.join("project");
         fs::create_dir_all(&workspace).unwrap();
         let paths = Paths::new(Some(&temp.join("home"))).unwrap();

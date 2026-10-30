@@ -1826,9 +1826,7 @@ mod tests {
             ));
             assert_eq!(
                 attachments,
-                &[workspace
-                    .join("pixel.png")
-                    .canonicalize()
+                &[dunce::canonicalize(workspace.join("pixel.png"))
                     .unwrap()
                     .display()
                     .to_string()]

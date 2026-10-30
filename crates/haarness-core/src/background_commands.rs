@@ -2474,8 +2474,15 @@ mod tests {
             StopSequence::Graceful(Duration::from_millis(50)),
         ));
         assert_eq!(entry.info().state, ShellCommandState::Stopping);
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        // The process ignores the interrupt; the terminate ends it.
+        // The process ignores the interrupt; once the wait is over the
+        // terminate comes (Windows' timers tick every 15 ms or so).
+        for _ in 0..200 {
+            if signals.0.lock().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The terminate ends it.
         end.send_replace(Some(ProcessEnd {
             signal: Some("SIGTERM".into()),
             ..ProcessEnd::default()
