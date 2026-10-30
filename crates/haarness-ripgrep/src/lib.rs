@@ -246,11 +246,26 @@ fn shell_with_binary(script: &str, binary: Option<&Path>) -> io::Result<Command>
 mod tests {
     use super::*;
 
+    /// `binary --version`. A child another test forked while the binary was
+    /// written holds it open for writing until that child starts its own
+    /// program, and Linux will not run a file open for writing meanwhile.
+    fn version(binary: &Path) -> std::process::Output {
+        for _ in 0..50 {
+            match Command::new(binary).arg("--version").output() {
+                Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                output => return output.unwrap(),
+            }
+        }
+        panic!("{} stayed busy", binary.display());
+    }
+
     #[test]
     fn bundled_binary_runs_and_repairs_damage() {
         let cache = tempfile::tempdir().unwrap();
         let binary = extract(cache.path()).unwrap();
-        let output = Command::new(&binary).arg("--version").output().unwrap();
+        let output = version(&binary);
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("ripgrep {VERSION}")));
         fs::write(&binary, "damaged").unwrap();

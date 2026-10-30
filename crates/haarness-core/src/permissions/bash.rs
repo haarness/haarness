@@ -5513,7 +5513,9 @@ mod tests {
     fn cd_contributes_directory_checks_but_no_command_pattern() {
         let analysis = analyze("cd /tmp", &workspace());
         assert!(analysis.patterns.is_empty(), "{analysis:?}");
-        assert_eq!(analysis.external_dirs, vec!["/private/tmp/*"]);
+        // As the system resolves it: /private/tmp on macOS.
+        let tmp = std::fs::canonicalize("/tmp").unwrap();
+        assert_eq!(analysis.external_dirs, vec![format!("{}/*", tmp.display())]);
     }
 
     #[test]
