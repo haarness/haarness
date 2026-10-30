@@ -856,8 +856,9 @@ async fn a_reload_does_not_wait_for_a_provider_slow_to_list_its_models() {
         .spawn()
         .expect("launch Haarness server");
     wait_until_listening(address).await;
-    // Past the start: the list the server asked for gave up by now.
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    // It listens before it starts, which waits a few seconds for the lists:
+    // an answer means it has started, and its reloads are watched.
+    get_json(&Client::new(), address, "/info").await;
 
     std::fs::write(&agents, "Use spaces.\n").expect("edit instructions");
     let edited = std::time::Instant::now();
@@ -865,8 +866,10 @@ async fn a_reload_does_not_wait_for_a_provider_slow_to_list_its_models() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert_eq!(line_count(&reloads), 1, "the edit did not reload");
+    // A reload that waited would take the list's 10 s; a debug build on a
+    // busy machine takes a second or two without waiting.
     assert!(
-        edited.elapsed() < Duration::from_millis(2500),
+        edited.elapsed() < Duration::from_secs(5),
         "the reload waited {:?} for the model list",
         edited.elapsed()
     );
