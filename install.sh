@@ -67,6 +67,11 @@ default_desktop_dir() {
   fi
 }
 
+# The process ids of a Desktop running from this copy of the app (`ps` names a macOS process by its full path).
+running_desktop() {
+  ps -axo pid=,comm= 2>/dev/null | awk -v app="$1/Contents/MacOS/Haarness" '{ pid = $1; sub(/^ *[0-9]+ /, ""); if ($0 == app) print pid }'
+}
+
 # FUSE 2 mounts an AppImage; Ubuntu has not installed it by default since 22.04.
 has_fuse2() {
   { ldconfig -p || /sbin/ldconfig -p; } 2>/dev/null | grep -q 'libfuse\.so\.2'
@@ -76,7 +81,7 @@ has_fuse2() {
 # Desktop install leaves the CLI that was just installed.
 install_product() (
   set -e
-  product=$1 destination=$2
+  product=$1 destination=$2 running=
   # name: the file installed; title: what messages call it.
   case "$product:$os" in
     cli:*) kind=binary; name=haarness; title=Haarness;;
@@ -189,10 +194,31 @@ install_product() (
     [ -d "$stage/app/Haarness.app" ] || { echo 'Invalid Desktop archive' >&2; exit 1; }
     clear_quarantine "$stage/app/Haarness.app"
     ensure_signature "$stage/app/Haarness.app"
+    # A Desktop open from this copy would be left running on deleted files. It quits as ⌘Q has it quit (asking
+    # about unsaved file edits first) and opens again once the new copy is in place; one that stays open is
+    # left as it was.
+    running=$(running_desktop "$destination/$name")
+    if [ -n "$running" ]; then
+      echo 'Closing Haarness Desktop to update it; it opens again when done.'
+      kill -TERM $running 2>/dev/null || true
+      # Up to a minute (tests wait less), looking every half second.
+      wait_for=${HAARNESS_DESKTOP_QUIT_SECONDS:-60}
+      case "$wait_for" in ''|*[!0-9]*) wait_for=60;; esac
+      waited=0
+      while [ -n "$(running_desktop "$destination/$name")" ]; do
+        if [ "$waited" -ge $((wait_for * 2)) ]; then
+          echo 'Haarness Desktop is still open, so it was left as it was; close it and run this again.' >&2
+          exit 1
+        fi
+        sleep 0.5
+        waited=$((waited + 1))
+      done
+    fi
     # Keep the old app recoverable until the replacement is in place.
     [ ! -e "$destination/$name" ] || mv "$destination/$name" "$stage/previous.app"
     if ! mv "$stage/app/Haarness.app" "$destination/$name"; then
       [ ! -e "$stage/previous.app" ] || mv "$stage/previous.app" "$destination/$name"
+      [ -z "$running" ] || open "$destination/$name" >/dev/null 2>&1 || true
       exit 1
     fi
   else
@@ -267,6 +293,8 @@ ENTRY
   elif [ "$os" = linux ]; then
     printf 'Start Haarness from your applications menu, or run %s/haarness-desktop.\n' "$destination"
     has_fuse2 || echo 'Installing FUSE 2 (libfuse2; libfuse2t64 on Ubuntu 24.04 and later) lets it start faster.'
+  elif [ -n "$running" ] && open "$destination/$name" >/dev/null 2>&1; then
+    echo 'Haarness Desktop is open again.'
   else
     printf 'Open %s/%s to launch Desktop.\n' "$destination" "$name"
   fi
