@@ -192,6 +192,7 @@ enum Probe {
         group: i32,
         start: String,
     },
+    #[cfg_attr(not(unix), allow(dead_code))]
     Gone,
     /// This system could not say.
     Unknown,
@@ -365,7 +366,7 @@ fn probe(pid: i32) -> Probe {
     parse_ps_line(&listing).unwrap_or(Probe::Unknown)
 }
 
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg_attr(not(all(unix, not(target_os = "linux"))), allow(dead_code))]
 fn parse_ps_line(line: &str) -> Option<Probe> {
     let mut fields = line.split_whitespace();
     let group = fields.next()?.parse().ok()?;

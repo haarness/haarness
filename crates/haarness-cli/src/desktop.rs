@@ -372,13 +372,9 @@ fn desktop_candidates(
     ];
     #[cfg(all(unix, not(target_os = "macos")))]
     return search_path
-        .map(|value| {
-            std::env::split_paths(value)
-                .map(|directory| directory.join("haarness-desktop"))
-                .collect()
-        })
-        .unwrap_or_default()
         .into_iter()
+        .flat_map(|value| std::env::split_paths(value))
+        .map(|directory| directory.join("haarness-desktop"))
         .chain([
             home.join(".local/bin/haarness-desktop"),
             PathBuf::from("/opt/Haarness/haarness-desktop"),
