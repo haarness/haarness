@@ -2122,6 +2122,7 @@ fn set_file_mode(file: &File, mode: Option<u32>) -> CoreResult<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // same signature as on Unix, where setting it can fail
 fn set_file_mode(_file: &File, _mode: Option<u32>) -> CoreResult<()> {
     Ok(())
 }

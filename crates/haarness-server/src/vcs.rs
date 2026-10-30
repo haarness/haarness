@@ -1365,6 +1365,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn sorted_names(diffs: &HashMap<String, ReviewFile>) -> Vec<&str> {
         let mut names: Vec<_> = diffs.keys().map(String::as_str).collect();
         names.sort_unstable();
@@ -1752,6 +1753,7 @@ mod tests {
 
     /// Gives `relative` a new modification time, so Git refreshes its entry
     /// in the index (and writes the index) though its content is unchanged.
+    #[cfg(unix)]
     fn touch_later(repo: &Path, relative: &str) {
         fs::File::options()
             .write(true)

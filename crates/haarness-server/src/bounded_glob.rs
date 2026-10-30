@@ -555,6 +555,7 @@ mod tests {
 
     /// Runs `walk` on a thread of its own, so a walk that never ends fails
     /// the test instead of holding it.
+    #[cfg(unix)]
     fn ends(walk: Walk) -> Vec<PathBuf> {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

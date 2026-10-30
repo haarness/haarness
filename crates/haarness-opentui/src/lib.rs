@@ -639,6 +639,7 @@ fn set_private_permissions(file: &fs::File) -> Result<(), OpenTuiError> {
     Ok(())
 }
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // same signature as on Unix, where it can fail
 fn set_private_permissions(_file: &fs::File) -> Result<(), OpenTuiError> {
     Ok(())
 }

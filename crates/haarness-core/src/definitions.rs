@@ -1276,9 +1276,11 @@ mod tests {
     }
 
     /// Runs each `!` snippet in `sh`, as the agent's shell tool does.
+    #[cfg(unix)]
     struct ShellInvoker {
         workspace: String,
     }
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl crate::ToolInvoker for ShellInvoker {
         fn workspace(&self) -> Option<String> {
@@ -1596,10 +1598,12 @@ mod tests {
     }
 
     /// An invoker in a turn that `stop` stops.
+    #[cfg(unix)]
     struct InTurn {
         workspace: PathBuf,
         stop: tokio_util::sync::CancellationToken,
     }
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl crate::ToolInvoker for InTurn {
         fn workspace(&self) -> Option<String> {

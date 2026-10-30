@@ -514,6 +514,7 @@ mod tests {
 
     /// Waits for the record to name `pid` with its start time, read on a
     /// thread of its own.
+    #[cfg(unix)]
     fn dated(path: &Path, pid: u32) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !std::fs::read_to_string(path)

@@ -126,6 +126,7 @@ fn set_private(file: &std::fs::File) -> std::io::Result<()> {
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
 }
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // same signature as on Unix, where it can fail
 fn set_private(_file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }

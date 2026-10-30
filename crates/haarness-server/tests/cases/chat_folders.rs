@@ -340,6 +340,7 @@ async fn a_guard_still_refuses_after_the_chats_folder_goes_mid_turn() {
     assert!(!fixture.workspace.join("notes.md").exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_chat_folder_is_made_inside_numbered_when_taken_and_refused_outside() {
     let fixture = Fixture::new();

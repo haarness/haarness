@@ -1776,6 +1776,7 @@ fn mcp_servers(root: &Path) -> BTreeMap<String, serde_json::Value> {
 
 /// The files of a plugin someone may run directly: those marked executable.
 fn programs(root: &Path) -> std::collections::BTreeSet<PathBuf> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut found = std::collections::BTreeSet::new();
     #[cfg(unix)]
     {

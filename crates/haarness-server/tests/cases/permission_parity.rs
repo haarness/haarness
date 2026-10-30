@@ -195,6 +195,7 @@ async fn parity_installed_helpers_are_readable_but_secrets_and_symlink_escapes_s
         .await
         .unwrap();
     assert!(!result.is_error);
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut checks = vec![
         ("read", json!({"path":skills.join(".env")})),
         (
@@ -321,6 +322,7 @@ async fn parity_secret_reads_follow_the_file_really_opened_and_spare_node_module
 
 /// A hook that allows a read unless its path ends in `.env`, as Claude Code
 /// hooks commonly do, logging each input it is given.
+#[cfg(unix)]
 fn env_guard_hooks(workspace: &Path, event: &str, log: &Path) -> Arc<dyn haarness_core::HookPort> {
     let allow = if event == "PreToolUse" {
         r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#
@@ -1113,6 +1115,7 @@ async fn parity_a_request_names_the_call_that_asks() {
 }
 
 /// A runtime whose one command (`probe`) runs `template` with `execution`.
+#[cfg(unix)]
 fn snippet_runtime(
     workspace: &Path,
     rules: Vec<PermissionRule>,
@@ -1151,6 +1154,7 @@ fn snippet_runtime(
     (runtime, requests)
 }
 
+#[cfg(unix)]
 fn script(path: &Path, body: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -1161,12 +1165,14 @@ fn script(path: &Path, body: &str) {
     }
 }
 
+#[cfg(unix)]
 async fn probe(runtime: &AgentRuntime, thread: &Thread, arguments: &str) -> Turn {
     let mut request = turn_request(arguments);
     request.command = Some("probe".into());
     runtime.start_turn(thread.id, request).await.unwrap()
 }
 
+#[cfg(unix)]
 fn permission_request(
     items: &[haarness_protocol::Item],
 ) -> Option<(String, Vec<String>, Vec<String>)> {

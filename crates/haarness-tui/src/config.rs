@@ -941,10 +941,12 @@ fn overlay(base: toml::Value, over: toml::Value) -> toml::Value {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::write_whole;
     use super::{
         BackgroundMode, STATE_FILE, STATE_LOCK, STATE_LOCK_WAIT, UnreadTheme, add_theme_entries,
         adopt_legacy_files, merge_tui_settings, parse_background_mode, read_state,
-        resolve_config_dir, save_state_in, write_whole,
+        resolve_config_dir, save_state_in,
     };
     use std::path::PathBuf;
 

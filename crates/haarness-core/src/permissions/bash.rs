@@ -6563,6 +6563,7 @@ mod readings {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn deletions_outside_the_project_are_placed_where_they_lead() {
         let root =

@@ -5,7 +5,7 @@
 /// processes it starts. Windows hands every inheritable handle to a child,
 /// whatever its own stdio is, so a long-lived server started by `haarness run`
 /// (or by Desktop) held the caller's output pipe: `haarness run … | tail`,
-/// or PowerShell capturing the output, waited until that server exited.
+/// or `powershell` capturing the output, waited until that server exited.
 /// Children given `Stdio::inherit()` still get them: the standard library
 /// duplicates each one for the child.
 #[cfg(windows)]

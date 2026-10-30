@@ -789,7 +789,9 @@ async fn a_permission_request_hook_allowing_other_input_leaves_the_prompt_to_the
 
 /// A `PermissionRequest` hook that allows, handing back the input it was
 /// shown unchanged, as some hooks always fill `updatedInput`.
+#[cfg(unix)]
 struct EchoingAllow(std::sync::Mutex<Vec<Value>>);
+#[cfg(unix)]
 #[async_trait]
 impl HookPort for EchoingAllow {
     async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {

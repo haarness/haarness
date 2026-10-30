@@ -7736,8 +7736,10 @@ export default workflow({
     }
 
     /// An agent turn whose rules deny reading `private/*`.
+    #[cfg(unix)]
     struct DenyPrivate(PathBuf);
 
+    #[cfg(unix)]
     #[async_trait]
     impl haarness_core::ToolInvoker for DenyPrivate {
         async fn invoke(&self, _name: &str, _arguments: Value) -> CoreResult<ToolOutput> {
@@ -8036,6 +8038,7 @@ export default workflow({
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     fn limits(matches: usize) -> GlobLimits {
         GlobLimits {
             matches,
@@ -8137,6 +8140,7 @@ export default workflow({
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     fn limits_entries(entries: usize) -> GlobLimits {
         GlobLimits {
             matches: 1_000,

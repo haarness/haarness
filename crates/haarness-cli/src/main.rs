@@ -4644,6 +4644,7 @@ async fn terminate_unreachable_server(pid: u32) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unused_async)] // awaited like the Unix one
 async fn terminate_unreachable_server(pid: u32) -> Result<()> {
     anyhow::bail!(
         "Haarness server {pid} owns the workspace lease but is unreachable; stop that process with the platform task manager"

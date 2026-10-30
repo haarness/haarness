@@ -14035,6 +14035,7 @@ async fn a_reply_image_is_read_only_from_inside_the_project_wherever_its_links_l
         ),
         (Some("base64"), Some("image/png"), Some(encoded.as_str()))
     );
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut refused = vec![
         (
             "../outside/secret.png".to_owned(),

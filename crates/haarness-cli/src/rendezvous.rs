@@ -100,6 +100,7 @@ pub(crate) fn set_private(file: &fs::File) -> Result<()> {
     Ok(())
 }
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // same signature as on Unix, where it can fail
 pub(crate) fn set_private(_file: &fs::File) -> Result<()> {
     Ok(())
 }

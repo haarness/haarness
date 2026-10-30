@@ -3182,7 +3182,8 @@ mod tests {
         haarness_core::record_credential_store(store.clone(), false);
         fs::write(project.join(".haarness/commands/plain.md"), "PLAIN_COMMAND").unwrap();
         fs::write(project.join(".haarness/agents/plain.md"), "PLAIN_AGENT").unwrap();
-        let mut skipped = Vec::new();
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut skipped: Vec<std::path::PathBuf> = Vec::new();
         #[cfg(unix)]
         for kind in ["commands", "agents"] {
             for (name, target) in [("notes", &store), ("settings", &project.join(".env"))] {

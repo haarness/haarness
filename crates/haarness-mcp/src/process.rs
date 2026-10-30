@@ -77,6 +77,7 @@ impl Process {
         })
     }
 
+    #[cfg_attr(not(unix), allow(clippy::unused_self))]
     fn stop(&mut self) {
         #[cfg(unix)]
         if let Some(pid) = self.pid.take().filter(|pid| *pid > 1) {
