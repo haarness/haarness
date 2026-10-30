@@ -2923,7 +2923,14 @@ impl AgentRuntime {
                     self.publish_input_queue(id).await?;
                     Ok(Some(turn))
                 }
-                Err(CoreError::Conflict(_)) if self.active.contains_key(&id) => Ok(None),
+                // Another turn was running: the message waits in the queue,
+                // and that turn's end runs it. It reads the queue only once it
+                // has left `active`, so this holds though it has ended since.
+                Err(CoreError::Conflict(message))
+                    if message == crate::CHAT_BUSY || self.active.contains_key(&id) =>
+                {
+                    Ok(None)
+                }
                 Err(CoreError::Conflict(_))
                     if selected.is_none()
                         && self.input_queue(id).await?.revision != queue.revision =>
