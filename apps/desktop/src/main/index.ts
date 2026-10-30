@@ -4,7 +4,7 @@ import { browserLinkDestination } from "../browser-settings";
 import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-data";
 import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
-import { exportLogs, logLevel } from "./logs";
+import { desktopLog, exportLogs, logLevel } from "./logs";
 import { createUpdater, type Updater } from "./updater";
 import { detectInstall, freeSpace, launchInstall, macTeam, openInstaller, removeLeftovers, stageAppImage, stageMacApp } from "./update-install";
 import type { UpdateState } from "../updates";
@@ -189,6 +189,9 @@ const commandOwners = new Map<string, number>();
 const sideQuestions = new Map<string, { owner: number; abort: AbortController }>();
 /** Windows whose keyboard is in the side chat, where ⌘W closes its thread in front. */
 const sideChatKeyboard = new Set<number>();
+/** When each window last reloaded a page that stopped; one that stops again sooner asks. */
+const pageReloads = new Map<number, number>();
+const PAGE_RELOAD_EVERY_MS = 60_000;
 const terminals = terminalSockets<PtyConnection>();
 /** Connections waiting to try again; a wake ends their wait. */
 const retries = retryWaits();
@@ -1953,22 +1956,31 @@ function createWindow() {
       }
     },
   );
-  win.webContents.on("render-process-gone", () => {
+  win.webContents.on("render-process-gone", (_event, details) => {
     resumeShortcut(win.id);
     voice.stop(win.id);
-    if (!quitting && !win.isDestroyed())
-      void dialog
-        .showMessageBox(win, {
-          type: "error",
-          message: say("The window stopped responding."),
-          detail: say("Your tasks keep running when you close this window."),
-          buttons: [say("Reload window"), say("Close")],
-        })
-        .then((result) => {
-          if (quitting || win.isDestroyed()) return;
-          if (result.response === 0) win.reload();
-          else win.close();
-        });
+    void desktopLog(`a window's page stopped: ${details.reason}, exit code ${details.exitCode}`);
+    if (quitting || win.isDestroyed()) return;
+    // Tasks run in the servers, not the page: a page that stops comes back on
+    // its own, and only one that keeps stopping asks what to do.
+    const now = Date.now();
+    if (now - (pageReloads.get(win.id) ?? -Infinity) > PAGE_RELOAD_EVERY_MS) {
+      pageReloads.set(win.id, now);
+      win.reload();
+      return;
+    }
+    void dialog
+      .showMessageBox(win, {
+        type: "error",
+        message: say("The window stopped responding."),
+        detail: say("Your tasks keep running when you close this window."),
+        buttons: [say("Reload window"), say("Close")],
+      })
+      .then((result) => {
+        if (quitting || win.isDestroyed()) return;
+        if (result.response === 0) win.reload();
+        else win.close();
+      });
   });
   win.on("close", () => {
     const [width, height] = win.getSize();
@@ -2027,6 +2039,7 @@ function createWindow() {
     for (const side of sideQuestions.values())
       if (side.owner === win.id) side.abort.abort();
     sideChatKeyboard.delete(win.id);
+    pageReloads.delete(win.id);
     terminals.close(win.id);
     answerers.forget(win.id);
     shownServers.delete(win.id);
@@ -2414,6 +2427,12 @@ else {
   });
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();
+  });
+  app.on("child-process-gone", (_event, details) => {
+    if (details.reason === "clean-exit") return;
+    void desktopLog(
+      `${details.name ?? details.serviceName ?? details.type} stopped: ${details.reason}, exit code ${details.exitCode}`,
+    );
   });
   app.on("will-quit", () => {
     globalShortcut.unregisterAll();

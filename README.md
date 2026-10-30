@@ -18,8 +18,8 @@
   <a href="locales/README.md"><img alt="17 interface languages" src="https://img.shields.io/badge/languages-17-eae5dd?style=flat-square&labelColor=232120"></a>
 </p>
 
-**Haarness is the harness around the model** — the tools, memory and guard rails that let AI do real
-work and show you every step. One open-source agent works in your project from a terminal UI, a desktop
+**Haarness is an AI assistant that does the work, not just the talking.** You see every step, and it
+asks before anything that matters. One open-source agent works in your project from a terminal UI, a desktop
 app, your editor, scripts and CI, and keeps going in [Haarness Cloud](https://haarness.ai) when you
 close the lid.
 

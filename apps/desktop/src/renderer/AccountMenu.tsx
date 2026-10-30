@@ -253,9 +253,11 @@ export function AccountMenu(props: {
             <>
               <Icon name="cloud" size="md" />
               <span class="account-nav-label">
-                {account().loggedIn
-                  ? account().user?.displayName || t("Haarness account")
-                  : t("Sign in to Haarness")}
+                <span class="account-nav-name">
+                  {account().loggedIn
+                    ? account().user?.displayName || t("Haarness account")
+                    : t("Sign in to Haarness")}
+                </span>
                 <Show when={navSummary()}>{text => <small>{text()}</small>}</Show>
               </span>
             </>
