@@ -6526,7 +6526,9 @@ async fn undo_restores_the_files_a_persons_shell_command_wrote() {
         tokio::fs::read_to_string(workspace.join("old.txt"))
             .await
             .unwrap(),
-        "changed"
+        "changed",
+        "{:?}",
+        result.data
     );
     runtime.revert(thread.id, None).await.unwrap();
     assert!(!workspace.join("note.txt").exists());
