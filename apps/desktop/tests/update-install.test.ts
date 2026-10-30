@@ -68,8 +68,9 @@ test("the install helper swaps the app once Haarness exits, and reopens it", { s
   assert.equal(run.status, 0, run.stderr);
   assert.equal(await readFile(join(target, "version"), "utf8"), "9.9.9");
   assert.deepEqual(JSON.parse(await readFile(result, "utf8")), { version: "9.9.9", ok: true, reason: "" });
-  // Nothing left beside it, and the staged copy moved rather than copied.
-  assert.deepEqual((await readdir(root)).sort(), ["Haarness.app", "result.json", "updates"].concat(await stat(opened).then(() => ["opened"], () => [])).sort());
+  // Nothing left beside it, and the staged copy moved rather than copied. The
+  // reopened app may write its file at any moment; it is checked below.
+  assert.deepEqual((await readdir(root)).filter((name) => name !== "opened").sort(), ["Haarness.app", "result.json", "updates"]);
   assert.equal(await stat(staged).catch(() => null), null);
   for (let index = 0; index < 50 && !(await stat(opened).catch(() => null)); index++) await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal((await readFile(opened, "utf8")).trim(), "reopened");
