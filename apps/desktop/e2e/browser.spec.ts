@@ -1058,10 +1058,13 @@ test("application restart restores tab URLs, invalidates old refs and reconnects
       }
     })
     .toBe(before.tabs.length);
+  // Each tab reads its URL once its page has loaded again.
+  await expect
+    .poll(async () =>
+      (await tool("tabs_list")).value.tabs.map((tab: any) => tab.url),
+    )
+    .toEqual(before.tabs.map((tab: any) => tab.url));
   const after = (await tool("tabs_list")).value;
-  expect(after.tabs.map((tab: any) => tab.url)).toEqual(
-    before.tabs.map((tab: any) => tab.url),
-  );
   expect(after.tabs[0].generation).toBeGreaterThan(before.tabs[0].generation);
   await tool("snapshot", { tabID: focused });
   expect(errors).toEqual([]);
