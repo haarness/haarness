@@ -330,17 +330,29 @@ mod limit_tests {
 mod tests {
     #[test]
     fn traversal_is_complete_and_excludes_unrelated_processes_and_cycles() {
-        let mut snapshot =
-            String::from("1 7000\n7000 7002\n7001 7000\n7002 7001\n9000 1\ninvalid\n");
-        for pid in 10000..10150 {
-            use std::fmt::Write as _;
-            let _ = writeln!(snapshot, "{pid} 7002");
+        use std::fmt::Write as _;
+        // Past the largest pid a system gives out, so none is this test's own,
+        // which the traversal leaves out.
+        const BASE: i32 = 1_000_000_000;
+        let mut snapshot = String::new();
+        for (pid, parent) in [
+            (1, BASE + 7000),
+            (BASE + 7000, BASE + 7002),
+            (BASE + 7001, BASE + 7000),
+            (BASE + 7002, BASE + 7001),
+            (BASE + 9000, 1),
+        ] {
+            let _ = writeln!(snapshot, "{pid} {parent}");
         }
-        let children = super::descendants(&snapshot, 7000);
+        snapshot.push_str("invalid\n");
+        for pid in BASE + 10000..BASE + 10150 {
+            let _ = writeln!(snapshot, "{pid} {}", BASE + 7002);
+        }
+        let children = super::descendants(&snapshot, BASE + 7000);
         assert_eq!(children.len(), 152);
-        assert!(children.contains(&10149));
-        assert!(!children.contains(&7000));
-        assert!(!children.contains(&9000));
+        assert!(children.contains(&(BASE + 10149)));
+        assert!(!children.contains(&(BASE + 7000)));
+        assert!(!children.contains(&(BASE + 9000)));
         assert!(!children.contains(&1));
     }
 }
