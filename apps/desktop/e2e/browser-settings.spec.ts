@@ -1,4 +1,6 @@
 import {
+  macOnlyControls,
+  selfUpdateControls,
   settingsControls,
   settingsTitles,
 } from "../src/renderer/settings-catalog";
@@ -514,7 +516,22 @@ test("settings search keeps long results readable in narrow, scaled, light and d
 test("every settings control is discoverable and focused from Settings and global search", async () => {
   test.setTimeout(300000);
   await openSettings();
-  for (const [section, title] of settingsControls) {
+  // A test build does not update itself, so its updates switch is not shown,
+  // and search does not offer it.
+  for (const title of selfUpdateControls) {
+    await settings().getByRole("textbox", { name: "Filter settings" }).fill(title);
+    await expect(
+      settings()
+        .getByRole("navigation", { name: "Settings search results" })
+        .getByRole("button", { name: new RegExp(`^${title} Settings`) }),
+    ).toHaveCount(0);
+  }
+  const shown = settingsControls.filter(
+    ([, title]) =>
+      !selfUpdateControls.has(title) &&
+      (process.platform === "darwin" || !macOnlyControls.has(title)),
+  );
+  for (const [section, title] of shown) {
     await test.step("Settings search: " + title, async () => {
       await settings()
         .getByRole("textbox", { name: "Filter settings" })

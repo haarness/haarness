@@ -430,8 +430,12 @@ test("a notification survives reload and restores a minimized window without rep
     "Echo: reload destination marker",
   );
   await expect(composer()).toHaveValue("unsent alpha draft 日本");
-  await win.evaluate((win) => win.minimize());
-  await expect.poll(() => win.evaluate((win) => win.isMinimized())).toBe(true);
+  // A Linux test display has no window manager, so nothing minimizes there.
+  const minimizes = process.platform !== "linux";
+  if (minimizes) {
+    await win.evaluate((win) => win.minimize());
+    await expect.poll(() => win.evaluate((win) => win.isMinimized())).toBe(true);
+  }
   await turn(clients[1], second, "minimized destination marker");
   await clickNotification(await notification(second.title));
   await selected(

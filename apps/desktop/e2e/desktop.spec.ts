@@ -7177,6 +7177,9 @@ test("workspace panes stay beside chat, resize, preserve drafts and adapt to a s
     .click();
   await page.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect(page.locator(".xterm-screen")).toBeVisible();
+  // The terminal takes the focus once its shell is connected: a key pressed
+  // before that could reach it instead of the handle.
+  await expect(page.locator(".terminal-dock .xterm-helper-textarea")).toBeFocused();
   await page
     .getByRole("separator", { name: "Resize terminal" })
     .press("ArrowUp");
@@ -12819,7 +12822,11 @@ async function outlineSession(prompts: string[]) {
     const turn = await client.startTurn(id, { requestId: crypto.randomUUID(), text });
     await client.waitTurn(turn.id, { timeout_ms: 20000 });
   }
-  await expect(page.locator(".transcript")).toContainText("Echo: " + prompts.at(-1)!.split("\n")[0]);
+  // The window draws what the server already finished; a slow machine takes
+  // longer than the usual wait to catch up on many turns.
+  await expect(page.locator(".transcript")).toContainText("Echo: " + prompts.at(-1)!.split("\n")[0], {
+    timeout: 60_000,
+  });
   return id;
 }
 const outline = () => page.locator(".outline");
