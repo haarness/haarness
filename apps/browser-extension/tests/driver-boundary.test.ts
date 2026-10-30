@@ -8,9 +8,10 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const root = new URL("..", import.meta.url).pathname;
-const driver = new URL("../../../packages/browser-driver/", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
+const driver = fileURLToPath(new URL("../../../packages/browser-driver/", import.meta.url));
 
 function files(directory: string, out: string[] = []) {
   for (const name of readdirSync(directory)) {
@@ -23,7 +24,8 @@ function files(directory: string, out: string[] = []) {
 
 /** Source without comments, which may name browser APIs. */
 const code = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-const sources = files(join(root, "src")).map((path) => ({ path: relative(root, path), source: code(readFileSync(path, "utf8")) }));
+// Paths as the tests name them, with forward slashes on Windows too.
+const sources = files(join(root, "src")).map((path) => ({ path: relative(root, path).replaceAll("\\", "/"), source: code(readFileSync(path, "utf8")) }));
 
 // Under tsx the driver's schemas come from the driver's own copy of effect,
 // which this package's effect cannot decode with (it fails at runtime, not in

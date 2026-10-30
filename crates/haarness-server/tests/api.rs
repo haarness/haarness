@@ -7855,9 +7855,31 @@ async fn a_client_that_reads_nothing_for_a_while_keeps_its_place_and_every_word(
         None,
         serde_json::json!({"text": "x".repeat(8 * 1024 * 1024)}),
     );
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Its first bytes in the socket show the connection took it, which in a
+    // debug build takes longer than the deltas below take to publish.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut peeked = vec![0_u8; 4096];
+        let marker = b"event: item.created";
+        loop {
+            let seen = connection.peek(&mut peeked).await.unwrap();
+            if peeked[..seen]
+                .windows(marker.len())
+                .any(|window| window == marker)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the large event reaches the socket");
     let mut written = String::new();
     for word in 0..5000 {
+        // In bursts, as a model writes: a debug build's connection takes each
+        // event slower than a loop with no pause publishes it.
+        if word % 500 == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         let word = format!("w{word} ");
         written.push_str(&word);
         runtime.events().publish(
