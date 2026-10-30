@@ -3,7 +3,7 @@
 the CLI and Desktop (skipped with --no-desktop or HAARNESS_NO_DESKTOP=1), and Haarness Router: HAARNESS_PRODUCT=router
 and install-router.sh, the same script with router as its default product. HAARNESS_ROUTER_BIN installs a real router
 build through it too."""
-import hashlib, http.server, os, platform, pty, shutil, subprocess, tempfile, threading, sys
+import hashlib, http.server, os, platform, pty, shutil, signal, subprocess, tempfile, threading, sys
 from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 from e2e_env import clean_env
@@ -169,6 +169,37 @@ with tempfile.TemporaryDirectory(prefix='haarness-install-both-') as d:
         assert (root/'bin'/'haarness').is_file() and not (root/'apps'/desktop_name).exists()
         assert 'Haarness Desktop was not installed (the CLI is)' in r.stderr and 'No preview release of Haarness desktop' in r.stderr,r.stderr
         print('PASS: a Desktop failure is reported and leaves the CLI installed')
+        if macos:
+            # A Desktop open from the copy being replaced is asked to quit as ⌘Q asks it, and opens again from the new
+            # copy; one that stays open (its unsaved-edits question answered "Keep editing") keeps its copy. The
+            # stand-in app only sleeps (a copy of the system's sleep does not run outside /bin); `open` only notes what
+            # it was asked to open.
+            shim=d/'shim';shim.mkdir()
+            subprocess.run(['cc','-x','c','-o',str(shim/'sleeper'),'-'],input='#include <unistd.h>\nint main(void){sleep(120);return 0;}\n',
+                           text=True,check=True)
+            (shim/'open').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$OPEN_LOG"\n');(shim/'open').chmod(0o755)
+            for name,stays in (('running',False),('stays-open',True)):
+                old=d/name/'apps'/'Haarness.app';(old/'Contents'/'MacOS').mkdir(parents=True);(old/'previous').write_text('')
+                shutil.copy(shim/'sleeper',old/'Contents'/'MacOS'/'Haarness')
+                app=subprocess.Popen([str(old/'Contents'/'MacOS'/'Haarness')],
+                                     preexec_fn=(lambda: signal.signal(signal.SIGTERM,signal.SIG_IGN)) if stays else None)
+                opened=d/f'{name}.open'
+                try:
+                    root,r=run(name,extra={'PATH':f'{shim}:{os.environ["PATH"]}','OPEN_LOG':str(opened),'HAARNESS_DESKTOP_QUIT_SECONDS':'2'})
+                    assert r.returncode==0 and (root/'bin'/'haarness').is_file(),(name,r.stdout,r.stderr)
+                    if stays:
+                        assert app.poll() is None and (old/'previous').exists() and not opened.exists(),(name,r.stdout,r.stderr)
+                        assert 'Haarness Desktop is still open, so it was left as it was' in r.stderr,r.stderr
+                        assert 'Haarness Desktop was not installed (the CLI is)' in r.stderr,r.stderr
+                    else:
+                        assert app.wait(5)==-signal.SIGTERM,(name,r.stdout,r.stderr)
+                        assert not (old/'previous').exists() and (old/'Contents'/'MacOS'/'Haarness').read_text()=='#!/bin/sh\n'
+                        assert opened.read_text()==f'{old}\n' and 'Haarness Desktop is open again.' in r.stdout,(r.stdout,r.stderr)
+                        assert 'Closing Haarness Desktop to update it' in r.stdout,r.stdout
+                    assert sorted(p.name for p in (root/'apps').iterdir())==['Haarness.app'],list((root/'apps').iterdir())
+                finally:
+                    app.kill();app.wait()
+            print('PASS: a Desktop open from the copy being replaced quits and opens again; one that stays open keeps its copy')
         if not macos:
             root,r=run('headless',extra={'DISPLAY':None})
             assert r.returncode==0 and 'No graphical session' in r.stdout,(r.stdout,r.stderr)
