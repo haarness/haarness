@@ -1,7 +1,9 @@
 # Link the C runtime statically on Windows, so haarness.exe (standalone and in
 # Desktop) starts on a clean machine without the Visual C++ Redistributable.
+# The main thread gets the 8 MiB stack it has on Linux and macOS: Windows gives
+# 1 MiB, and the async main runs on it, which a debug build overflows at start.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:8388608"]
 
 [target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:8388608"]
