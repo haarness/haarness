@@ -73,3 +73,8 @@ python3 make-index.py                # rebuild the contact sheet
 ```
 
 Then copy the chosen files here and re-export the PNGs and `icon.ico`.
+
+The app icon's H spans 55% of the tile's width, larger than the logo system
+draws it, so it holds its own beside other apps in the Dock and taskbar. Set a
+newly copied `app-icon.svg` and `app-icon-light.svg` back to that size before
+exporting.
