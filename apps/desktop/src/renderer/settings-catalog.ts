@@ -107,6 +107,8 @@ export const settingsControls = [
 ] as const;
 /** Rows Settings shows on macOS only, so search offers them only there. */
 export const macOnlyControls: ReadonlySet<string> = new Set(["Option as Meta key"]);
+/** Rows Settings shows only for a copy that updates itself and restarts. */
+export const selfUpdateControls: ReadonlySet<string> = new Set(["Download updates automatically"]);
 export const shortcutTitles: Record<string, string> = {
   new: "New chat",
   settings: "Settings",
