@@ -4705,7 +4705,7 @@ async fn tui_command(
     }
 }
 /// Whether reading stdin would return immediately (data waiting, or the
-/// writer already closed it). Non-Unix targets keep the old always-read path.
+/// writer already closed it).
 #[cfg(unix)]
 fn stdin_ready_now() -> bool {
     use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
@@ -4721,9 +4721,9 @@ fn stdin_ready_now() -> bool {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn stdin_ready_now() -> bool {
-    true
+    haarness_opentui::stdin_ready_now()
 }
 
 async fn run_command(

@@ -237,6 +237,8 @@ pub struct ColorSupport {
 /// ignores a bit simply falls back to plain text in the span's colors.
 mod handles;
 pub use handles::keep_standard_handles_from_children;
+#[cfg(windows)]
+pub use handles::stdin_ready_now;
 
 pub mod attr {
     pub const NONE: u32 = 0;
