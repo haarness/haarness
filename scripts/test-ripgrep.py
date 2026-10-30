@@ -121,7 +121,10 @@ def main():
         assert f"ripgrep {version}" in run("rg --version")
         print("PASS running server repairs a corrupt or deleted executable")
 
-        command = 'rg -n needle "source space/café.txt" > pty-rg.txt 2> pty-rg-error.txt'
+        # cmd.exe does not read the backslash-escaped quotes Windows writes for
+        # an argument with quotes inside, so there the file is found by a glob.
+        command = ("rg -n needle -g café.txt > pty-rg.txt 2> pty-rg-error.txt" if os.name == "nt"
+                   else 'rg -n needle "source space/café.txt" > pty-rg.txt 2> pty-rg-error.txt')
         pty = api("/ptys", {"command": "cmd.exe" if os.name == "nt" else "/bin/sh",
                              "args": ["/C" if os.name == "nt" else "-c", command]})
         try:
