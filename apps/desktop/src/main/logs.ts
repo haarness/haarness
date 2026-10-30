@@ -1,5 +1,6 @@
 import { app, dialog, shell, type BrowserWindow } from "electron";
 import { spawn } from "node:child_process";
+import { appendFile, mkdir, rename, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { DETAILED_LOGGING, logsFileName, type ExportedLogs, type LogLevelStatus } from "../diagnostics";
@@ -58,6 +59,34 @@ function run(args: string[]) {
         });
       }),
   );
+}
+
+/** Past this, desktop.log starts over and the previous one is kept as desktop.log.1. */
+const DESKTOP_LOG_LIMIT = 5 * 1024 * 1024;
+let desktopLogFolder: Promise<string> | undefined;
+let desktopLogWrites = Promise.resolve();
+
+/**
+ * Notes what happened to Desktop's own processes (a window's page, Chromium's
+ * helpers) in desktop.log beside the CLI's logs, so an export carries it:
+ * opened from the Dock or Finder, Desktop has no terminal to say it in.
+ */
+export function desktopLog(message: string) {
+  const line = `${new Date().toISOString()} ${process.pid} app  WARN haarness_desktop: ${message}\n`;
+  desktopLogFolder ??= run(["level"])
+    .then((value) => z.object({ logs: z.string() }).parse(value).logs)
+    .catch(() => app.getPath("logs"));
+  desktopLogWrites = desktopLogWrites
+    .then(async () => {
+      const folder = await desktopLogFolder!;
+      const path = join(folder, "desktop.log");
+      await mkdir(folder, { recursive: true });
+      if (((await stat(path).catch(() => undefined))?.size ?? 0) > DESKTOP_LOG_LIMIT)
+        await rename(path, join(folder, "desktop.log.1"));
+      await appendFile(path, line);
+    })
+    .catch(() => {});
+  return desktopLogWrites;
 }
 
 /** The raised level now, or Detailed logging turned on (debug for 30 minutes) or off. */

@@ -465,20 +465,27 @@ button.account-connect:hover:not(:disabled) {
   flex: none;
   color: var(--muted);
 }
+/* The name and the plan share one line; the plan moves under the name only
+   when the sidebar is too narrow for both. */
 .account-nav-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--s2);
   min-width: 0;
   text-align: start;
+}
+.account-nav-name,
+.account-nav-label small {
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .account-nav-label small {
-  display: block;
-  margin-top: 2px;
   color: var(--muted);
   font-size: var(--ui-xs);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 @media (max-width: 560px) {
