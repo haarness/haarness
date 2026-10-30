@@ -377,7 +377,7 @@ fn desktop_candidates(
                 .map(|directory| directory.join("haarness-desktop"))
                 .collect()
         })
-        .unwrap_or_else(Vec::new)
+        .unwrap_or_default()
         .into_iter()
         .chain([
             home.join(".local/bin/haarness-desktop"),
