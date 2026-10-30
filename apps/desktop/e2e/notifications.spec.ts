@@ -430,9 +430,10 @@ test("a notification survives reload and restores a minimized window without rep
     "Echo: reload destination marker",
   );
   await expect(composer()).toHaveValue("unsent alpha draft 日本");
-  // A Linux test display has no window manager, so nothing minimizes there.
-  const minimizes = process.platform !== "linux";
-  if (minimizes) {
+  // A Linux test display has no window manager to minimize a window, so
+  // there it is hidden instead, as in the background.
+  if (process.platform === "linux") await background();
+  else {
     await win.evaluate((win) => win.minimize());
     await expect.poll(() => win.evaluate((win) => win.isMinimized())).toBe(true);
   }

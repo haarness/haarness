@@ -121,10 +121,16 @@ def main():
         assert f"ripgrep {version}" in run("rg --version")
         print("PASS running server repairs a corrupt or deleted executable")
 
-        command = 'rg -n needle "source space/café.txt" > pty-rg.txt'
+        command = 'rg -n needle "source space/café.txt" > pty-rg.txt 2> pty-rg-error.txt'
         pty = api("/ptys", {"command": "cmd.exe" if os.name == "nt" else "/bin/sh",
                              "args": ["/C" if os.name == "nt" else "-c", command]})
-        until(lambda: (fixture.workspace / "pty-rg.txt").exists() and (fixture.workspace / "pty-rg.txt").read_text(encoding="utf-8"))
+        try:
+            until(lambda: (fixture.workspace / "pty-rg.txt").exists() and (fixture.workspace / "pty-rg.txt").read_text(encoding="utf-8"))
+        except AssertionError:
+            # What the terminal's command said instead, when it ran at all.
+            error = fixture.workspace / "pty-rg-error.txt"
+            raise AssertionError("the terminal's rg wrote nothing: "
+                                 + (error.read_text(encoding="utf-8", errors="replace") if error.exists() else "it did not run"))
         assert "2:needle café" in (fixture.workspace / "pty-rg.txt").read_text(encoding="utf-8")
         api("/ptys/" + pty["id"], method="DELETE")
         print("PASS real server PTY executes bundled rg")

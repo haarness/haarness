@@ -73,8 +73,8 @@ test.afterAll(async () => {
 test("a page that stops reloads on its own, and one that stops again soon asks", async () => {
   const first = await pagePid();
   await crashPage();
-  await expect.poll(reloaded, { timeout: 30000 }).not.toBe(0);
-  expect(await reloaded()).not.toBe(first);
+  // A page from another process: the crash can land after the first look.
+  await expect.poll(async () => ![0, first].includes(await reloaded()), { timeout: 30000 }).toBe(true);
   await expect.poll(drawn, { timeout: 30000 }).toBe(true);
   expect(await boxes()).toEqual([]);
   await expect.poll(desktopLog).toMatch(/^\d{4}-\d\d-\d\dT\S+ \d+ app  WARN haarness_desktop: a window's page stopped: [a-z-]+, exit code -?\d+$/m);
@@ -83,8 +83,7 @@ test("a page that stops reloads on its own, and one that stops again soon asks",
   const second = await reloaded();
   await crashPage();
   await expect.poll(boxes).toEqual(["The window stopped responding."]);
-  await expect.poll(reloaded, { timeout: 30000 }).not.toBe(0);
-  expect(await reloaded()).not.toBe(second);
+  await expect.poll(async () => ![0, second].includes(await reloaded()), { timeout: 30000 }).toBe(true);
   await expect.poll(drawn, { timeout: 30000 }).toBe(true);
   expect((await desktopLog()).match(/a window's page stopped/g)).toHaveLength(2);
 });
