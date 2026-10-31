@@ -19253,6 +19253,14 @@ fn model_picker_uses_friendly_names_and_only_connected_models() {
     );
     app.overlay_filter = "astra".into();
     assert_eq!(app.filtered_models(), ["openai/gpt-6-astra"]);
+    // Words match in any order, against the provider's name too.
+    let provider_name = app.providers[0].name.to_ascii_lowercase();
+    app.overlay_filter = format!("astra {provider_name}");
+    assert_eq!(app.filtered_models(), ["openai/gpt-6-astra"]);
+    app.overlay_filter = "6 gpt".into();
+    assert_eq!(app.filtered_models(), ["openai/gpt-6-astra"]);
+    app.overlay_filter = "astra luna".into();
+    assert!(app.filtered_models().is_empty());
     app.providers[0].authenticated = false;
     assert!(app.filtered_models().is_empty());
 }

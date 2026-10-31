@@ -3239,25 +3239,29 @@ impl App {
         let query = self.overlay_filter.to_ascii_lowercase();
         let mut providers: Vec<_> = self.providers.iter().filter(|p| p.authenticated).collect();
         providers.sort_by_key(|provider| !provider.authenticated);
+        // Every word of the query, in any order, across the model's id, name
+        // and provider: "openrouter haiku" among hundreds of routed models.
+        let words: Vec<&str> = query.split_whitespace().collect();
         let mut models: Vec<String> = providers
             .iter()
             .flat_map(|provider| {
                 provider
                     .models
                     .iter()
-                    .map(move |model| format!("{}/{}", provider.id, model.id))
+                    .map(move |model| (provider, format!("{}/{}", provider.id, model.id)))
             })
-            .filter(|model| {
-                query.is_empty()
-                    || model.to_ascii_lowercase().contains(&query)
-                    || haarness_protocol::model_display_id(model)
-                        .to_ascii_lowercase()
-                        .contains(&query)
-                    || self
-                        .model_label(model)
-                        .to_ascii_lowercase()
-                        .contains(&query)
+            .filter(|(provider, model)| {
+                let haystack = [
+                    model.clone(),
+                    haarness_protocol::model_display_id(model),
+                    self.model_label(model),
+                    provider.name.clone(),
+                ]
+                .join(" ")
+                .to_ascii_lowercase();
+                words.iter().all(|word| haystack.contains(word))
             })
+            .map(|(_, model)| model)
             .collect();
         models.sort_by_key(|model| {
             (
