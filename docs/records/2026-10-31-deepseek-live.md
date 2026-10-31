@@ -17,6 +17,7 @@ The legacy names `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are stil
 | The listing's name is "DeepSeek-V4.1-Flash". | Read so in the picker and status line. | "DeepSeek V4.1 Flash", "DeepSeek V4 Pro". |
 | Image input (top-level `input_modalities`) and levels (`effort.supported_levels`) were read only from Haarness's built-in table. | Behind a router Flash took no images and offered no levels. | Read from the listing wherever it appears. |
 | Behind a router, DeepSeek's reasoning never went back after a tool call. | 400 "The `reasoning_content` in the thinking mode must be passed back"; turns with tools failed. | A `deepseek/` model behind a Haarness Router gets its reasoning back on every assistant message, as from DeepSeek itself. |
+| In a structured turn, text the model wrote before a tool call was saved after it (left unforced, DeepSeek writes "I'll read the file first." beside the call). | One run in three refused: "An assistant message with 'tool_calls' must be followed by tool messages". | Narration is saved before its call; for OpenAI-compatible providers text that came with calls joins their message. |
 | A provider's 402 read "DeepSeek rejected the request: Insufficient Balance". | Did not say what helps. | "Your DeepSeek account is out of credit (Insufficient Balance). Add credit with DeepSeek, then try again." (OpenRouter too.) |
 
 Haarness Router (its own repository) changed as well: DeepSeek's profile now carries reasoning and image input
