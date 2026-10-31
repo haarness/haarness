@@ -14528,11 +14528,13 @@ fn stated_window(info: Option<&haarness_protocol::ModelInfo>) -> Option<u64> {
         .filter(|window| *window > 0)
 }
 
-/// Match Haarness's ordinary OpenAI GPT-5 default: ask for balanced reasoning
-/// so the Responses API can return a visible reasoning summary even when the
-/// user did not choose an explicit `/reasoning` variant. Other providers and
-/// models keep their own defaults; an explicit turn or config value always
-/// wins before this fallback is consulted.
+/// Ask an OpenAI reasoning model for balanced reasoning when no level was
+/// chosen, so the Responses API returns a visible reasoning summary. Whether
+/// a model takes it is the catalog's say: any OpenAI model that lists
+/// `medium`, whatever its id, so a model released later needs no change here
+/// and one that lists no `medium` keeps its provider default. Other providers
+/// keep their own defaults; an explicit turn or config value always wins
+/// before this fallback is consulted.
 fn default_visible_reasoning_effort(
     models: &[haarness_protocol::ModelInfo],
     provider_id: &str,
@@ -14542,10 +14544,6 @@ fn default_visible_reasoning_effort(
         return None;
     }
     let metadata = model_metadata(models, requested).filter(|model| model.reasoning)?;
-    let id = metadata.id.to_ascii_lowercase();
-    if !id.starts_with("gpt-5") || id.contains("gpt-5-pro") {
-        return None;
-    }
     metadata
         .reasoning_efforts
         .iter()
@@ -14594,8 +14592,6 @@ fn supported_reasoning_effort(
 /// is authoritative: no advertised efforts means the request stays unset and
 /// the provider keeps its own default. Claude-compatible models intentionally
 /// cap at xhigh, even when a gateway also advertises max.
-const ULTRACODE_EFFORT_ORDER: [&str; 7] = haarness_protocol::REASONING_EFFORTS;
-
 fn ultracode_reasoning_effort(
     models: &[haarness_protocol::ModelInfo],
     provider_id: &str,
@@ -14612,13 +14608,10 @@ fn ultracode_reasoning_effort(
     {
         return Some("xhigh".into());
     }
-    ULTRACODE_EFFORT_ORDER.iter().rev().find_map(|candidate| {
-        metadata
-            .reasoning_efforts
-            .iter()
-            .any(|effort| effort == candidate)
-            .then(|| (*candidate).to_owned())
-    })
+    // The strongest level the model lists, `max` when it has it; a level
+    // this release does not know ranks strongest, as everywhere.
+    haarness_protocol::nearest_reasoning_effort(&metadata.reasoning_efforts, "max")
+        .map(str::to_owned)
 }
 
 /// Detect the one-turn keyword. It is case-insensitive and
@@ -17767,6 +17760,21 @@ mod tests {
             super::ultracode_reasoning_effort(&[provider_default], "custom", "opaque-reasoner")
                 .is_none()
         );
+
+        // A level this release does not know is the strongest a model has
+        // only when it lists nothing at max.
+        let mut newer = model_info("reasoner-2", 128_000);
+        newer.reasoning = true;
+        newer.reasoning_efforts = ["low", "high", "ultra"].map(str::to_owned).to_vec();
+        assert_eq!(
+            super::ultracode_reasoning_effort(&[newer.clone()], "custom", "reasoner-2").as_deref(),
+            Some("ultra")
+        );
+        newer.reasoning_efforts = ["low", "max", "ultra"].map(str::to_owned).to_vec();
+        assert_eq!(
+            super::ultracode_reasoning_effort(&[newer], "custom", "reasoner-2").as_deref(),
+            Some("max")
+        );
     }
 
     #[test]
@@ -17793,11 +17801,26 @@ mod tests {
 
         let mut pro = model_info("gpt-5-pro", 400_000);
         pro.reasoning = true;
-        pro.reasoning_efforts = ["medium"].map(str::to_owned).to_vec();
+        pro.reasoning_efforts = ["high"].map(str::to_owned).to_vec();
         assert!(
             super::default_visible_reasoning_effort(&[pro], "openai", "gpt-5-pro").is_none(),
-            "Haarness leaves gpt-5-pro on its provider default"
+            "a model that lists no medium keeps its provider default"
         );
+
+        // A model released after this build follows its catalog entry, not
+        // its id.
+        for id in ["gpt-7", "o9-mini", "astra-2"] {
+            let mut later = model_info(id, 400_000);
+            later.reasoning = true;
+            later.reasoning_efforts = ["low", "medium", "high", "ultra"]
+                .map(str::to_owned)
+                .to_vec();
+            assert_eq!(
+                super::default_visible_reasoning_effort(&[later], "openai", id).as_deref(),
+                Some("medium"),
+                "{id}"
+            );
+        }
     }
 
     #[test]
