@@ -8031,15 +8031,48 @@ fn runtime_source_fingerprint_for(
     }
     let SourceScan {
         next,
-        hasher,
-        without_agents,
+        mut hasher,
+        mut without_agents,
         ..
     } = scan;
+    // A local runtime started or quit after this server began (LM Studio's
+    // server is usually started by hand) changes the providers on offer.
+    let listening = local_runtimes_listening();
+    hasher.update(listening.as_bytes());
+    without_agents.update(listening.as_bytes());
     digests.files = next;
     Ok(SourceFingerprint {
         all: format!("{:x}", hasher.finalize()),
         without_agents: format!("{:x}", without_agents.finalize()),
     })
+}
+
+/// Which local model runtimes accept connections on their usual ports
+/// (Ollama 11434, LM Studio 1234), checked at most every few seconds: a
+/// refused connection on this computer answers at once and sends nothing
+/// to a runtime that is up.
+fn local_runtimes_listening() -> String {
+    static LAST: parking_lot::Mutex<Option<(Instant, String)>> = parking_lot::Mutex::new(None);
+    let mut last = LAST.lock();
+    if let Some((at, listening)) = last.as_ref()
+        && at.elapsed() < Duration::from_secs(3)
+    {
+        return listening.clone();
+    }
+    let listening = [("ollama", 11_434), ("lmstudio", 1_234)]
+        .into_iter()
+        .filter(|(_, port)| {
+            std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], *port)),
+                Duration::from_millis(100),
+            )
+            .is_ok()
+        })
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>()
+        .join(",");
+    *last = Some((Instant::now(), listening.clone()));
+    listening
 }
 
 /// Files larger than this stand in by size and timestamp instead of being

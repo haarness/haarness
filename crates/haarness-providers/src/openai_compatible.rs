@@ -332,9 +332,58 @@ impl OpenAiCompatibleProvider {
                     Some(model)
                 })
                 .collect();
+            let models = if self.id == "ollama" {
+                self.ollama_details(base, models).await
+            } else {
+                models
+            };
             return Some(crate::merge_discovered_models(self.models.clone(), models));
         }
         None
+    }
+
+    /// What Ollama knows of each installed model (`/api/show`): whether it
+    /// reads images, calls tools and thinks, and its context window. Its
+    /// OpenAI-style list names the models and nothing more. A model runs on
+    /// this computer, so its price is nothing.
+    async fn ollama_details(&self, base: &str, models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+        let root = base.strip_suffix("/v1").unwrap_or(base).to_owned();
+        let details = futures::future::join_all(models.iter().map(|model| {
+            let request = self
+                .client
+                .post(format!("{root}/api/show"))
+                .json(&json!({"model": model.id}))
+                .timeout(std::time::Duration::from_secs(3));
+            async move {
+                request
+                    .send()
+                    .await
+                    .ok()?
+                    .error_for_status()
+                    .ok()?
+                    .json::<Value>()
+                    .await
+                    .ok()
+            }
+        }))
+        .await;
+        models
+            .into_iter()
+            .zip(details)
+            .map(|(mut model, details)| {
+                if let Some(details) = details {
+                    apply_ollama_details(&mut model, &details);
+                }
+                model.pricing.get_or_insert(ModelPricing {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                    long_context: None,
+                });
+                model
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -1125,6 +1174,39 @@ fn deepseek_charge(model: &str, at: chrono::DateTime<chrono::Utc>, usage: &Value
     let completion = count("completion_tokens");
     (prompt > 0.0 || completion > 0.0)
         .then(|| ((prompt - hit) * input + hit * cache_read + completion * output) / 1_000_000.0)
+}
+
+/// One model's `/api/show` answer from Ollama, into what Haarness offers.
+fn apply_ollama_details(model: &mut ModelInfo, details: &Value) {
+    let capabilities: Vec<&str> = details["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !capabilities.is_empty() {
+        model.images = capabilities.contains(&"vision");
+        model.tools = capabilities.contains(&"tools");
+        model.reasoning = capabilities.contains(&"thinking");
+        // Ollama turns thinking off with `none`; gpt-oss always thinks.
+        model.reasoning_efforts = if !model.reasoning {
+            Vec::new()
+        } else if model.id.starts_with("gpt-oss") {
+            ["low", "medium", "high"].map(str::to_owned).to_vec()
+        } else {
+            ["none", "low", "medium", "high"]
+                .map(str::to_owned)
+                .to_vec()
+        };
+    }
+    // `<architecture>.context_length`, e.g. `qwen3_5.context_length`.
+    if let Some(window) = details["model_info"].as_object().and_then(|info| {
+        info.iter()
+            .find(|(key, _)| key.ends_with(".context_length"))
+            .and_then(|(_, value)| value.as_u64())
+    }) {
+        model.context_window = Some(window);
+    }
 }
 
 fn is_chat_completion_model(provider: &str, entry: &Value, id: &str) -> bool {
@@ -2219,8 +2301,8 @@ mod tests {
 
     use super::{
         CompatibleInstance, CompatibleModelDefaults, OpenAiCompatibleProvider,
-        append_reasoning_details, deepseek_charge, deepseek_peak, discovered_model_info,
-        model_info, openai_compatible_media_message,
+        append_reasoning_details, apply_ollama_details, deepseek_charge, deepseek_peak,
+        discovered_model_info, model_info, openai_compatible_media_message,
     };
 
     #[derive(Clone, Default)]
@@ -3192,6 +3274,32 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn ollama_details_say_what_a_local_model_can_do() {
+        let mut qwen = model_info("ollama", "qwen3.8:27b", CompatibleModelDefaults::default());
+        // Qwen 3.8 27B, as Ollama's `/api/show` described it.
+        apply_ollama_details(
+            &mut qwen,
+            &json!({
+                "capabilities": ["completion", "vision", "tools", "thinking"],
+                "model_info": {"general.architecture": "qwen3_5", "qwen3_5.context_length": 262_144}
+            }),
+        );
+        assert!(qwen.images && qwen.tools && qwen.reasoning);
+        assert_eq!(qwen.reasoning_efforts, ["none", "low", "medium", "high"]);
+        assert_eq!(qwen.context_window, Some(262_144));
+        let mut oss = model_info("ollama", "gpt-oss:20b", CompatibleModelDefaults::default());
+        apply_ollama_details(
+            &mut oss,
+            &json!({"capabilities": ["completion", "tools", "thinking"]}),
+        );
+        assert_eq!(oss.reasoning_efforts, ["low", "medium", "high"]);
+        assert!(!oss.images);
+        let mut plain = model_info("ollama", "llama-small", CompatibleModelDefaults::default());
+        apply_ollama_details(&mut plain, &json!({"capabilities": ["completion"]}));
+        assert!(!plain.tools && !plain.reasoning && plain.reasoning_efforts.is_empty());
     }
 
     #[test]
