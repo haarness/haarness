@@ -782,12 +782,13 @@ function installHandlers() {
     const target = notificationPending.get(win.id) ?? null;
     return target;
   });
-  handle("boot", async () => ({
+  handle("boot", async (win) => ({
     preferences: data().preferences,
     recent: data().recent,
     servers: data().servers,
     version: app.getVersion(),
     platform: process.platform,
+    fullScreen: win.isFullScreen(),
     // Settings shows this computer's own paths under it as ~.
     home: homedir(),
     chatHome: await chatHomePath().then((workspace) => ({
@@ -1919,6 +1920,9 @@ function createWindow() {
     },
   });
   windows.add(win);
+  // Full screen hides macOS's window buttons; the title bar gives their room back.
+  win.on("enter-full-screen", () => send(win, { kind: "window", data: { fullScreen: true } }));
+  win.on("leave-full-screen", () => send(win, { kind: "window", data: { fullScreen: false } }));
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(external(url)).catch(() => {});
     return { action: "deny" };

@@ -208,10 +208,6 @@ test("opening a project enables its chats, remembers that choice, and never sele
   await expect(page.locator(".conversation-empty h2")).toHaveText(
     "What should we work on in chosen-project?",
   );
-  await page.getByRole("button", { name: "Explore code", exact: true }).click();
-  await expect(composer).toHaveValue(
-    "Explain the architecture of this project",
-  );
   await composer.fill("project-home-proof");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await expect(page.locator(".transcript")).toContainText(
@@ -389,8 +385,9 @@ test("legacy general chats reopen as a regular project with history and drafts i
     "Folder for new chat: " + recent.project!.name,
   );
   expect(recent.chatHome).toBeUndefined();
+  // The heading's project name switches project, like the chip.
   await expect(
-    page.getByRole("button", { name: "Explore code", exact: true }),
+    page.locator(".conversation-empty h2").getByRole("button", { name: recent.project!.name, exact: true }),
   ).toBeVisible();
   await page.reload();
   await expect(page.locator(".application")).toHaveAttribute(

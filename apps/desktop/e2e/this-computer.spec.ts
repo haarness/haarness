@@ -171,7 +171,8 @@ test("chats without a project: a ready first launch, a folder of their own on on
   await ready();
   expect(await loadingMarkSeen()).toBe(false);
   await expect(page.getByRole("region", { name: "Project home" })).toHaveCount(0);
-  await expect(page.getByLabel("Chat starters")).toHaveCount(0);
+  // No folder: the heading names no project to switch from.
+  await expect(page.locator(".conversation-empty h2").getByRole("button")).toHaveCount(0);
   // This computer alone: nothing to switch to.
   await expect(page.getByRole("button", { name: "Switch server", exact: true })).toHaveCount(0);
   await expect(section().getByRole("button", { name: "New chat in This computer", exact: true })).toBeVisible();

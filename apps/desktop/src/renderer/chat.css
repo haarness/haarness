@@ -1370,13 +1370,32 @@ html[dir="rtl"] .tool-target {
 .empty-start .transcript-tail {
   display: none;
 }
-/* Placed from the top of the window, not centred in what the message box
-   leaves: a chip or a second line in the box below never moves it. */
+/* A new chat is one group: the mark, the question and the message box under
+   it, together a little above the middle of the window. The room above is
+   set from the window alone, so a box that grows (a second line, an
+   attachment) takes the room below and the question holds still. */
+.conversation.empty-start::before,
+.conversation.empty-start::after {
+  content: "";
+}
+.conversation.empty-start::before {
+  flex: 0 1 auto;
+  height: max(0px, calc(50% - 190px));
+}
+.conversation.empty-start::after {
+  flex: 1 1 0;
+}
+.empty-start .transcript-frame {
+  flex: 0 1 auto;
+}
+.empty-start .transcript {
+  padding-top: 0;
+}
 .conversation-empty {
   width: 100%;
   max-width: var(--measure);
-  margin: max(0px, calc(50vh - 330px)) 0 auto;
-  padding: var(--s8) 0 var(--s7);
+  margin: 0;
+  padding: var(--s5) 0 var(--s6);
   text-align: center;
   animation: fade-up var(--slow) var(--ease);
 }
@@ -1387,6 +1406,11 @@ html[dir="rtl"] .tool-target {
   font-size: 56px;
   line-height: 1;
   margin-bottom: var(--s6);
+}
+.conversation-empty .start-mark {
+  font-size: 44px;
+  margin-bottom: var(--s5);
+  opacity: 0.8;
 }
 .conversation-empty h2 {
   font-size: 27px;
@@ -1406,15 +1430,39 @@ html[dir="rtl"] .tool-target {
 .conversation-empty .heading-project {
   white-space: nowrap;
 }
+/* The project's name opens the folder picker: a quiet dotted line says it
+   can be pressed, and it takes the text colour on hover. */
 .conversation-empty .heading-project-name {
   display: inline-block;
   max-width: calc(100% - 1.5ch);
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
   vertical-align: bottom;
+  text-decoration: underline dotted color-mix(in srgb, var(--muted) 70%, transparent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 0.18em;
+  cursor: pointer;
+  transition: text-decoration-color var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+.conversation-empty .heading-project-name:hover:not(:disabled),
+.conversation-empty .heading-project-name[aria-expanded="true"] {
+  background: none;
+  text-decoration-color: var(--text);
+}
+.conversation-empty .heading-project-name:active:not(:disabled) {
+  transform: none;
 }
 /* Where replies come from when only a local runtime offers a model: a quiet
-   line under the starters, not a card. */
+   line under the question, not a card. */
 /* It reads as one sentence, so it wraps like one: inline pieces, not a row. */
 .conversation-empty .local-model-hint {
   margin: var(--s6) auto 0;
@@ -1447,96 +1495,19 @@ html[dir="rtl"] .tool-target {
   background: none;
   color: var(--primary-hover);
 }
-.suggestions {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin-top: var(--s7);
-  gap: var(--s2);
-}
-.suggestions button {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: flex-start;
-  min-width: 0;
-  min-height: 118px;
-  padding: var(--s3);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-lg);
-  background: transparent;
-  color: var(--text);
-  text-align: start;
-  white-space: normal;
-  gap: var(--s3);
-  transition:
-    background var(--fast) var(--ease),
-    border-color var(--fast) var(--ease),
-    transform var(--fast) var(--ease);
-}
-.suggestions button:hover {
-  background: var(--hover);
-  border-color: color-mix(in srgb, var(--muted) 34%, transparent);
-  transform: translateY(-1px);
-}
-.suggestions button:active:not(:disabled) {
-  transform: none;
-}
-.starter-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--r-sm);
-  background: var(--primary-soft);
-  color: var(--primary);
-}
-.suggestions button:nth-child(2) .starter-icon {
-  color: var(--syntax-keyword);
-  background: color-mix(in srgb, var(--syntax-keyword) 13%, transparent);
-}
-.suggestions button:nth-child(3) .starter-icon {
-  color: var(--green);
-  background: var(--green-soft);
-}
-.suggestions button:nth-child(4) .starter-icon {
-  color: var(--accent);
-  background: var(--accent-soft);
-}
-.starter-copy {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s0);
-}
-.starter-copy strong {
-  font-size: var(--ui-lg);
-  font-weight: 500;
-  line-height: 1.35;
-}
-.starter-copy > span {
-  color: var(--muted);
-  font-size: var(--ui-sm);
-  line-height: 1.45;
-}
 @container (max-width: 660px) {
   .conversation-empty {
-    margin-top: max(0px, calc(50vh - 380px));
-    padding: var(--s6) 0;
+    padding: var(--s4) 0 var(--s5);
   }
   .conversation-empty h2 {
     font-size: 23px;
   }
-  .suggestions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--s2);
-    margin-top: var(--s6);
-  }
-  .suggestions button {
-    min-height: 90px;
-  }
   .start-mark {
     margin-bottom: var(--s4);
     font-size: 46px;
+  }
+  .conversation-empty .start-mark {
+    font-size: 38px;
   }
 }
 
