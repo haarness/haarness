@@ -111,3 +111,28 @@ Found on the way, fixed in Haarness:
 Left for a decision: the managed router hides upstream error words by design, so an upstream 429 ("retry
 shortly") arrives as a generic rate limit, and a refusal as "upstream returned HTTP 400"; every Cloud user's
 OpenRouter turn draws on one OpenRouter balance, which needs auto top-up before this is announced.
+
+Then, live on production as Cloud 20261031-0df3925 (router 69c070d):
+
+- Reasoning reaches clients once: Cloud's own stream writer handles the router's reasoning-with-details event
+  (one chunk; the details alone when reasoning is excluded) and merges both into non-streaming replies. A
+  remote chat on Kimi K3 from a Desktop built before the client fix below shows each thought once.
+- Names: 194 of 257 Cloud models reached clients as their raw id (`moonshotai/kimi-k3.1-pro`). The import
+  now keeps the name OpenRouter lists, without the vendor the id says ("Kimi K3.1 Pro", "Grok 4.7"), and
+  `/v1/models` sends it as `display_name` where the upstream gave none.
+- Haarness: the router's "Try again in a moment" is backed off like a busy provider and shown in its words;
+  details that repeat the reasoning text a stream just sent are kept for replay, not shown again.
+
+Every default Cloud provider, on production with only a Cloud sign-in: the live suite (`--providers haarness`)
+passed 10 of 10 on Claude Haiku 5.5, GPT-6 Luna and Gemini 3.8 Flash (direct) and Grok 4.7 and DeepSeek V4
+Flash (OpenRouter): tools over two turns, reasoning at the highest level, images on the vision models,
+structured output and cost. `haarness run -m haarness-cloud/<model>` read a file on each direct vendor and on
+Grok 4.7; the terminal UI found Grok 4.7 by search with its price and long-context tier and ran a tool turn
+($0.04); haarness.ai ran a Cloud workspace on Grok 4.7 (wrote and ran a script) and a remote chat on this
+computer on Kimi K3 from the "Haarness Cloud" group, found by "haarness kimi k3".
+
+Not run: Desktop's own window (its server and catalog are the ones above; nothing here drives the Electron
+window) and the phones (no runnable simulator build; signing a phone in is the owner's). A Cloud router
+that uses the account's own keys (BYOK) can be made and keyed without a web form, through the API the CLI's
+sign-in may call (`POST /api/v1/routers` with `credential_mode: "byok"`, then
+`PUT /api/v1/routers/{id}/credentials/{provider}` with the key); the CLI has no command for it yet.
