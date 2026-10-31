@@ -233,6 +233,40 @@ impl OpenAiCompatibleProvider {
         self.refresh_models(true).await;
         self
     }
+    /// xAI's chat models and their input, from `/language-models`: `/models`
+    /// also lists its image and video generators and says nothing of input.
+    async fn xai_language_models(
+        &self,
+        base: &str,
+        headers: reqwest::header::HeaderMap,
+    ) -> Option<std::collections::HashMap<String, Value>> {
+        let body: Value = self
+            .client
+            .get(format!("{base}/language-models"))
+            .headers(headers)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        Some(
+            body["models"]
+                .as_array()?
+                .iter()
+                .filter_map(|entry| {
+                    Some((
+                        entry["id"].as_str()?.to_owned(),
+                        entry["input_modalities"].clone(),
+                    ))
+                })
+                .collect(),
+        )
+    }
+
     pub(crate) async fn fetch_models(&self) -> Option<Vec<ModelInfo>> {
         if !self.discover_models {
             return None;
@@ -245,6 +279,11 @@ impl OpenAiCompatibleProvider {
             };
             headers.insert(AUTHORIZATION, value);
         }
+        let language_models = if self.id == "xai" {
+            self.xai_language_models(base, headers.clone()).await
+        } else {
+            None
+        };
         let request = self
             .client
             .get(format!("{base}/models"))
@@ -261,7 +300,18 @@ impl OpenAiCompatibleProvider {
             let models: Vec<_> = body["data"]
                 .as_array()?
                 .iter()
+                .filter_map(|entry| match &language_models {
+                    // xAI's chat models, with the input `/models` leaves out.
+                    Some(chat) => {
+                        let inputs = chat.get(entry["id"].as_str()?)?;
+                        let mut entry = entry.clone();
+                        entry["input_modalities"] = inputs.clone();
+                        Some(std::borrow::Cow::Owned(entry))
+                    }
+                    None => Some(std::borrow::Cow::Borrowed(entry)),
+                })
                 .filter_map(|entry| {
+                    let entry = &*entry;
                     let mut model = discovered_model_info(&self.id, entry, self.model_defaults)?;
                     if let Some(efforts) = entry["reasoning_efforts"].as_array() {
                         model.reasoning_efforts = efforts
@@ -318,6 +368,23 @@ impl OpenAiCompatibleProvider {
     }
 
     async fn bearer_token(&self) -> CoreResult<Option<String>> {
+        self.bearer_token_renewed(false).await
+    }
+
+    /// Whether requests carry an OAuth sign-in this provider can renew.
+    fn signed_in_with_oauth(&self) -> bool {
+        self.api_key.is_none()
+            && self.xai_oauth.is_some()
+            && self
+                .stored_credential()
+                .ok()
+                .flatten()
+                .is_some_and(|(_, credential)| credential.oauth_parts().is_some())
+    }
+
+    /// The token to send; `renew` renews an OAuth sign-in even before its
+    /// stated expiry, for a token the server has already refused.
+    async fn bearer_token_renewed(&self, renew: bool) -> CoreResult<Option<String>> {
         if let Some(key) = &self.api_key {
             return Ok(Some(key.expose_secret().to_owned()));
         }
@@ -339,11 +406,14 @@ impl OpenAiCompatibleProvider {
             )));
         };
         let refresh_at = unix_millis().saturating_add(2 * 60 * 1000);
+        let refused = renew
+            .then(|| current.oauth_parts().map(|oauth| oauth.access.to_owned()))
+            .flatten();
         let expires_soon = current.oauth_parts().is_some_and(|oauth| {
             oauth.expires == 0
                 || oauth.expires <= refresh_at
                 || xai_access_token_expiring(oauth.access, Duration::from_secs(2 * 60))
-        });
+        }) || refused.is_some();
         if expires_soon {
             let guard = self.refresh_lock.clone().lock_owned().await;
             stored = self.stored_credential()?;
@@ -351,10 +421,13 @@ impl OpenAiCompatibleProvider {
             let current = credential
                 .as_ref()
                 .ok_or_else(|| CoreError::Provider(format!("{} was logged out", self.name)))?;
+            // Renewed meanwhile by another request when the token is no
+            // longer the refused one.
             if let Some(oauth) = current.oauth_parts()
                 && (oauth.expires == 0
                     || oauth.expires <= refresh_at
-                    || xai_access_token_expiring(oauth.access, Duration::from_secs(2 * 60)))
+                    || xai_access_token_expiring(oauth.access, Duration::from_secs(2 * 60))
+                    || refused.as_deref() == Some(oauth.access))
             {
                 if oauth.refresh.is_empty() {
                     return Err(CoreError::Provider(format!(
@@ -580,24 +653,38 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
         ("xai", "grok-4.3") => {
             info.display_name = "Grok 4.3".into();
             info.reasoning = true;
+            info.images = true;
             info.context_window = Some(1_000_000);
             info.pricing = Some(ModelPricing {
                 input: 1.25,
                 output: 2.50,
-                cache_read: 0.0,
+                cache_read: 0.20,
                 cache_write: 0.0,
-                long_context: None,
+                long_context: Some(haarness_protocol::LongContextPricing {
+                    above_input_tokens: 199_999,
+                    input: 2.50,
+                    output: 5.0,
+                    cache_read: 0.40,
+                    cache_write: 0.0,
+                }),
             });
         }
         ("xai", "grok-build-0.1") => {
             info.display_name = "Grok Build 0.1".into();
+            info.images = true;
             info.context_window = Some(256_000);
             info.pricing = Some(ModelPricing {
                 input: 1.0,
                 output: 2.0,
-                cache_read: 0.0,
+                cache_read: 0.20,
                 cache_write: 0.0,
-                long_context: None,
+                long_context: Some(haarness_protocol::LongContextPricing {
+                    above_input_tokens: 199_999,
+                    input: 2.0,
+                    output: 4.0,
+                    cache_read: 0.40,
+                    cache_write: 0.0,
+                }),
             });
         }
         (
@@ -786,11 +873,13 @@ fn discovered_model_info(
             )
         });
     }
-    // DeepSeek lists its levels as `effort.supported_levels`; its own
-    // provider can also turn thinking off (`none`).
+    // DeepSeek lists its levels as `effort.supported_levels` (its own
+    // provider can also turn thinking off, `none`), xAI as
+    // `capabilities.reasoning_effort`.
     if let Some(efforts) = entry["reasoning_efforts"].as_array().or_else(|| {
         entry
             .pointer("/effort/supported_levels")
+            .or_else(|| entry.pointer("/capabilities/reasoning_effort"))
             .and_then(Value::as_array)
     }) {
         info.reasoning_efforts = (provider == "deepseek")
@@ -855,6 +944,48 @@ fn discovered_model_info(
                 * 1_000_000.0,
             long_context: long_context_override(entry),
         });
+    }
+    // xAI prices in hundredths of a cent per million tokens (12500 is $1.25),
+    // with a long-context tier from `long_context_threshold` prompt tokens.
+    if provider == "xai"
+        && let (Some(input), Some(output)) = (
+            entry.get("prompt_text_token_price").and_then(json_number),
+            entry
+                .get("completion_text_token_price")
+                .and_then(json_number),
+        )
+    {
+        let rate = |key: &str| {
+            entry
+                .get(key)
+                .and_then(json_number)
+                .map(|value| value / 10_000.0)
+        };
+        info.pricing = Some(ModelPricing {
+            input: input / 10_000.0,
+            output: output / 10_000.0,
+            cache_read: rate("cached_prompt_text_token_price").unwrap_or(0.0),
+            cache_write: 0.0,
+            long_context: entry
+                .get("long_context_threshold")
+                .and_then(Value::as_u64)
+                .zip(rate("prompt_text_token_price_long_context"))
+                .zip(rate("completion_text_token_price_long_context"))
+                .map(
+                    |((threshold, input), output)| haarness_protocol::LongContextPricing {
+                        above_input_tokens: threshold.saturating_sub(1),
+                        input,
+                        output,
+                        cache_read: rate("cached_prompt_text_token_price_long_context")
+                            .unwrap_or(0.0),
+                        cache_write: 0.0,
+                    },
+                ),
+        });
+    }
+    if provider == "xai" {
+        // A model that reasons at a fixed depth says so in its id only.
+        info.reasoning |= id.ends_with("-reasoning") && !id.ends_with("-non-reasoning");
     }
     // DeepSeek behind a self-hosted Haarness Router comes without prices: its
     // own rates, at peak (see `deepseek_charge` for what a request cost).
@@ -996,6 +1127,11 @@ fn deepseek_charge(model: &str, at: chrono::DateTime<chrono::Utc>, usage: &Value
 }
 
 fn is_chat_completion_model(provider: &str, entry: &Value, id: &str) -> bool {
+    // xAI serves its multi-agent model only on the Responses API: "Multi
+    // Agent requests are not allowed on chat completions".
+    if provider == "xai" && id.contains("multi-agent") {
+        return false;
+    }
     if entry.get("archived").and_then(Value::as_bool) == Some(true) {
         return false;
     }
@@ -1714,6 +1850,25 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .headers(headers.clone())
             .json(&body);
         let mut response = crate::sse::send(builder, limits).await?;
+        // A sign-in token the server refuses before its stated expiry
+        // (revoked early, a clock off) is renewed once and the request sent
+        // again; a renewal that fails says to sign in again.
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && self.signed_in_with_oauth() {
+            tracing::info!(provider = %self.id, "renewing a refused sign-in");
+            if let Some(key) = self.bearer_token_renewed(true).await? {
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {key}"))
+                        .map_err(|error| CoreError::Provider(error.to_string()))?,
+                );
+                let builder = self
+                    .client
+                    .post(&self.endpoint)
+                    .headers(headers.clone())
+                    .json(&body);
+                response = crate::sse::send(builder, limits).await?;
+            }
+        }
         // OpenRouter refuses a request whose whole output limit the balance
         // can't pay for, however short the reply would be. Ask once more for
         // the output it says it can afford, when that still leaves room to work.
@@ -2342,6 +2497,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_xai_sign_in_is_renewed_once_and_the_request_sent_again() {
+        // xAI refuses a token its stated expiry still covers.
+        async fn chat(headers: axum::http::HeaderMap) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            if headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                == Some("Bearer access-new")
+            {
+                return (
+                    [(CONTENT_TYPE, "text/event-stream")],
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+                    .into_response();
+            }
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Incorrect API key provided"})),
+            )
+                .into_response()
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route("/token", post(xai_refresh))
+            .with_state(calls.clone())
+            .route("/v1/chat/completions", post(chat));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!(
+            "haarness-xai-refused-{}-{}",
+            std::process::id(),
+            crate::auth::unix_millis()
+        ));
+        let store = Arc::new(CredentialStore::new(root.join("auth.json")));
+        let in_an_hour = crate::auth::unix_millis() + 3_600_000;
+        store
+            .set(
+                "xai",
+                &Credential::oauth("access-old".into(), "refresh-old".into(), in_an_hour, None),
+            )
+            .unwrap();
+        let mut provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "xai".into(),
+            name: "xAI".into(),
+            base_url: format!("http://{address}/v1"),
+            api_key: None,
+            models: vec!["grok-test".into()],
+            discover_models: false,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: crate::ProviderHeaders::default(),
+        })
+        .with_auth_store(Some(store.clone()));
+        provider.xai_oauth = Some(XaiOAuthClient::new(XaiOAuthConfig {
+            token_url: format!("http://{address}/token"),
+            device_url: format!("http://{address}/device"),
+            client_id: "test-client".into(),
+            scope: "test".into(),
+            user_agent: "haarness-test".into(),
+        }));
+        let mut request = short_request();
+        request.model = "grok-test".into();
+        let events = provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Ok(ProviderEvent::TextDelta(text)) if text == "ok")),
+            "{events:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .get("xai")
+                .unwrap()
+                .unwrap()
+                .oauth_parts()
+                .unwrap()
+                .access,
+            "access-new"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn custom_api_key_tracks_the_live_auth_store() {
         let root = std::env::temp_dir().join(format!(
             "haarness-custom-auth-{}-{}",
@@ -2886,6 +3133,64 @@ mod tests {
             headers: crate::ProviderHeaders::default(),
         });
         (provider, state)
+    }
+
+    #[test]
+    fn xais_language_models_give_images_levels_and_prices() {
+        // Entries as xAI's `/language-models` listed them.
+        let entry = json!({"id": "grok-4.3", "object": "model", "owned_by": "xai",
+            "input_modalities": ["text", "image"], "output_modalities": ["text"],
+            "prompt_text_token_price": 12500, "cached_prompt_text_token_price": 2000,
+            "completion_text_token_price": 25000, "prompt_text_token_price_long_context": 25000,
+            "cached_prompt_text_token_price_long_context": 4000, "completion_text_token_price_long_context": 50000,
+            "long_context_threshold": 200_000,
+            "capabilities": {"reasoning_effort": ["none", "low", "medium", "high", "xhigh"], "default_reasoning_effort": "low"}});
+        let model =
+            discovered_model_info("xai", &entry, CompatibleModelDefaults::default()).unwrap();
+        assert!(model.images && model.reasoning);
+        assert_eq!(
+            model.reasoning_efforts,
+            ["none", "low", "medium", "high", "xhigh"]
+        );
+        let price = model.pricing.unwrap();
+        assert_eq!(
+            (price.input, price.cache_read, price.output),
+            (1.25, 0.2, 2.5)
+        );
+        let long = price.long_context.unwrap();
+        assert_eq!(
+            (
+                long.above_input_tokens,
+                long.input,
+                long.output,
+                long.cache_read
+            ),
+            (199_999, 2.5, 5.0, 0.4)
+        );
+        let fixed = discovered_model_info(
+            "xai",
+            &json!({"id": "grok-4.20-0309-reasoning", "input_modalities": ["text", "image"]}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert!(fixed.reasoning && fixed.reasoning_efforts.is_empty());
+        assert_eq!(fixed.display_name, "Grok 4.20 Reasoning");
+        let plain = discovered_model_info(
+            "xai",
+            &json!({"id": "grok-4.20-0309-non-reasoning"}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert!(!plain.reasoning);
+        // Served only on the Responses API.
+        assert!(
+            discovered_model_info(
+                "xai",
+                &json!({"id": "grok-4.20-multi-agent-0309"}),
+                CompatibleModelDefaults::default()
+            )
+            .is_none()
+        );
     }
 
     #[test]
