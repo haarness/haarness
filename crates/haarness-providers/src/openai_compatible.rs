@@ -327,6 +327,23 @@ impl OpenAiCompatibleProvider {
     }
 
     async fn bearer_token(&self) -> CoreResult<Option<String>> {
+        self.bearer_token_renewed(false).await
+    }
+
+    /// Whether requests carry an OAuth sign-in this provider can renew.
+    fn signed_in_with_oauth(&self) -> bool {
+        self.api_key.is_none()
+            && self.xai_oauth.is_some()
+            && self
+                .stored_credential()
+                .ok()
+                .flatten()
+                .is_some_and(|(_, credential)| credential.oauth_parts().is_some())
+    }
+
+    /// The token to send; `renew` renews an OAuth sign-in even before its
+    /// stated expiry, for a token the server has already refused.
+    async fn bearer_token_renewed(&self, renew: bool) -> CoreResult<Option<String>> {
         if let Some(key) = &self.api_key {
             return Ok(Some(key.expose_secret().to_owned()));
         }
@@ -348,11 +365,14 @@ impl OpenAiCompatibleProvider {
             )));
         };
         let refresh_at = unix_millis().saturating_add(2 * 60 * 1000);
+        let refused = renew
+            .then(|| current.oauth_parts().map(|oauth| oauth.access.to_owned()))
+            .flatten();
         let expires_soon = current.oauth_parts().is_some_and(|oauth| {
             oauth.expires == 0
                 || oauth.expires <= refresh_at
                 || xai_access_token_expiring(oauth.access, Duration::from_secs(2 * 60))
-        });
+        }) || refused.is_some();
         if expires_soon {
             let guard = self.refresh_lock.clone().lock_owned().await;
             stored = self.stored_credential()?;
@@ -360,10 +380,13 @@ impl OpenAiCompatibleProvider {
             let current = credential
                 .as_ref()
                 .ok_or_else(|| CoreError::Provider(format!("{} was logged out", self.name)))?;
+            // Renewed meanwhile by another request when the token is no
+            // longer the refused one.
             if let Some(oauth) = current.oauth_parts()
                 && (oauth.expires == 0
                     || oauth.expires <= refresh_at
-                    || xai_access_token_expiring(oauth.access, Duration::from_secs(2 * 60)))
+                    || xai_access_token_expiring(oauth.access, Duration::from_secs(2 * 60))
+                    || refused.as_deref() == Some(oauth.access))
             {
                 if oauth.refresh.is_empty() {
                     return Err(CoreError::Provider(format!(
@@ -1786,6 +1809,25 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .headers(headers.clone())
             .json(&body);
         let mut response = crate::sse::send(builder, limits).await?;
+        // A sign-in token the server refuses before its stated expiry
+        // (revoked early, a clock off) is renewed once and the request sent
+        // again; a renewal that fails says to sign in again.
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && self.signed_in_with_oauth() {
+            tracing::info!(provider = %self.id, "renewing a refused sign-in");
+            if let Some(key) = self.bearer_token_renewed(true).await? {
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {key}"))
+                        .map_err(|error| CoreError::Provider(error.to_string()))?,
+                );
+                let builder = self
+                    .client
+                    .post(&self.endpoint)
+                    .headers(headers.clone())
+                    .json(&body);
+                response = crate::sse::send(builder, limits).await?;
+            }
+        }
         // OpenRouter refuses a request whose whole output limit the balance
         // can't pay for, however short the reply would be. Ask once more for
         // the output it says it can afford, when that still leaves room to work.
@@ -2410,6 +2452,98 @@ mod tests {
         let oauth = stored.oauth_parts().unwrap();
         assert_eq!(oauth.access, "access-new");
         assert_eq!(oauth.refresh, "refresh-new");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_refused_xai_sign_in_is_renewed_once_and_the_request_sent_again() {
+        // xAI refuses a token its stated expiry still covers.
+        async fn chat(headers: axum::http::HeaderMap) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            if headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                == Some("Bearer access-new")
+            {
+                return (
+                    [(CONTENT_TYPE, "text/event-stream")],
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+                    .into_response();
+            }
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Incorrect API key provided"})),
+            )
+                .into_response()
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route("/token", post(xai_refresh))
+            .with_state(calls.clone())
+            .route("/v1/chat/completions", post(chat));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!(
+            "haarness-xai-refused-{}-{}",
+            std::process::id(),
+            crate::auth::unix_millis()
+        ));
+        let store = Arc::new(CredentialStore::new(root.join("auth.json")));
+        let in_an_hour = crate::auth::unix_millis() + 3_600_000;
+        store
+            .set(
+                "xai",
+                &Credential::oauth("access-old".into(), "refresh-old".into(), in_an_hour, None),
+            )
+            .unwrap();
+        let mut provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "xai".into(),
+            name: "xAI".into(),
+            base_url: format!("http://{address}/v1"),
+            api_key: None,
+            models: vec!["grok-test".into()],
+            discover_models: false,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: crate::ProviderHeaders::default(),
+        })
+        .with_auth_store(Some(store.clone()));
+        provider.xai_oauth = Some(XaiOAuthClient::new(XaiOAuthConfig {
+            token_url: format!("http://{address}/token"),
+            device_url: format!("http://{address}/device"),
+            client_id: "test-client".into(),
+            scope: "test".into(),
+            user_agent: "haarness-test".into(),
+        }));
+        let mut request = short_request();
+        request.model = "grok-test".into();
+        let events = provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Ok(ProviderEvent::TextDelta(text)) if text == "ok")),
+            "{events:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .get("xai")
+                .unwrap()
+                .unwrap()
+                .oauth_parts()
+                .unwrap()
+                .access,
+            "access-new"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

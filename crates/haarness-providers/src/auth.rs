@@ -290,9 +290,17 @@ impl CredentialStore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(AuthError::Write)?;
         }
+        // A store that links to a file elsewhere (a dotfiles manager, a test
+        // pointing at a real profile) is saved in that file: replacing the
+        // link would leave the file behind with spent sign-in tokens.
+        let target = if self.path.is_symlink() {
+            fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone())
+        } else {
+            self.path.clone()
+        };
         let mut suffix = [0_u8; 8];
         rand::rng().fill_bytes(&mut suffix);
-        let temporary = self.path.with_extension(format!(
+        let temporary = target.with_extension(format!(
             "tmp-{}-{}",
             std::process::id(),
             URL_SAFE_NO_PAD.encode(suffix)
@@ -307,7 +315,7 @@ impl CredentialStore {
             file.write_all(&serde_json::to_vec_pretty(value).map_err(AuthError::Encode)?)
                 .map_err(AuthError::Write)?;
             file.sync_all().map_err(AuthError::Write)?;
-            fs::rename(&temporary, &self.path).map_err(AuthError::Write)
+            fs::rename(&temporary, &target).map_err(AuthError::Write)
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
@@ -1983,5 +1991,34 @@ mod tests {
             openai_residency(&format!("x.{claims}.y")).as_deref(),
             Some("eu")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_store_saves_in_the_file_it_links_to() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-linked-auth-{}-{}",
+            std::process::id(),
+            crate::auth::unix_millis()
+        ));
+        let (real, profile) = (root.join("real"), root.join("profile"));
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(real.join("auth.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(real.join("auth.json"), profile.join("auth.json")).unwrap();
+        let store = CredentialStore::new(profile.join("auth.json"));
+        store
+            .set(
+                "xai",
+                &Credential::oauth("access-new".into(), "refresh-new".into(), 1, None),
+            )
+            .unwrap();
+        assert!(profile.join("auth.json").is_symlink());
+        let saved = CredentialStore::new(real.join("auth.json"))
+            .get("xai")
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.oauth_parts().unwrap().refresh, "refresh-new");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
