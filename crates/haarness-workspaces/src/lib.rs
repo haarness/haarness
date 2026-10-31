@@ -661,7 +661,7 @@ impl WorkspaceManager {
         let retained_branch = live_branch.clone().or_else(|| workspace.branch.clone());
         if std::env::current_dir()
             .ok()
-            .and_then(|directory| directory.canonicalize().ok())
+            .and_then(|directory| dunce::canonicalize(&directory).ok())
             .is_some_and(|directory| directory.starts_with(&path))
         {
             return Err(WorkspaceError::Conflict(
@@ -937,7 +937,7 @@ fn project_identity(path: &Path) -> Result<ProjectIdentity> {
     } else {
         path.join(common)
     };
-    let common = common.canonicalize().map_err(io_error)?;
+    let common = dunce::canonicalize(&common).map_err(io_error)?;
     let root = common
         .file_name()
         .is_some_and(|name| name == ".git")
@@ -946,7 +946,7 @@ fn project_identity(path: &Path) -> Result<ProjectIdentity> {
         .unwrap_or_else(|| PathBuf::from(top.trim()));
     Ok(ProjectIdentity {
         linked: !same_path(Path::new(top.trim()), &root),
-        root: root.canonicalize().map_err(io_error)?,
+        root: dunce::canonicalize(&root).map_err(io_error)?,
         git: true,
     })
 }
@@ -971,7 +971,7 @@ fn requested_worktree_path(
         WorkspaceError::Invalid("worktree path must have a parent directory".into())
     })?;
     fs::create_dir_all(parent).map_err(io_error)?;
-    let parent = parent.canonicalize().map_err(io_error)?;
+    let parent = dunce::canonicalize(parent).map_err(io_error)?;
     let name = absolute.file_name().ok_or_else(|| {
         WorkspaceError::Invalid("worktree path must end in a directory name".into())
     })?;
@@ -1170,7 +1170,7 @@ fn worktree_git_dir(path: &Path) -> Result<PathBuf> {
     } else {
         path.join(git_dir)
     };
-    git_dir.canonicalize().map_err(io_error)
+    dunce::canonicalize(&git_dir).map_err(io_error)
 }
 
 /// Resolve the base exactly as `create_worktree` does. An omitted or blank
@@ -1359,7 +1359,7 @@ fn git_start_error(error: std::io::Error) -> WorkspaceError {
 }
 
 fn canonical_directory(path: &Path) -> Result<PathBuf> {
-    let canonical = path.canonicalize().map_err(io_error)?;
+    let canonical = dunce::canonicalize(path).map_err(io_error)?;
     if !canonical.is_dir() {
         return Err(WorkspaceError::Invalid(format!(
             "workspace is not a directory: {}",
@@ -1402,8 +1402,7 @@ fn workspace_index(registry: &Registry, reference: &str) -> Result<usize> {
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [index] => Ok(*index),
-        [] => Path::new(reference)
-            .canonicalize()
+        [] => dunce::canonicalize(Path::new(reference))
             .ok()
             .and_then(|canonical| {
                 registry
@@ -1733,8 +1732,8 @@ fn slug(value: &str) -> String {
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
-    left.canonicalize().unwrap_or_else(|_| left.to_path_buf())
-        == right.canonicalize().unwrap_or_else(|_| right.to_path_buf())
+    dunce::canonicalize(left).unwrap_or_else(|_| left.to_path_buf())
+        == dunce::canonicalize(right).unwrap_or_else(|_| right.to_path_buf())
 }
 
 fn io_error(error: impl std::fmt::Display) -> WorkspaceError {
@@ -1870,6 +1869,8 @@ mod tests {
         fs::create_dir_all(&child).unwrap();
         let before = fixture.manager.register_local(&child).unwrap();
         command(&root, ["init", "-b", "main"]);
+        // Files as committed, whatever this system's Git converts on checkout.
+        command(&root, ["config", "core.autocrlf", "false"]);
         let main = fixture.manager.register_local(&root).unwrap();
         let after = fixture.manager.register_local(&child).unwrap();
         assert_eq!(before.id, after.id);
@@ -2117,7 +2118,7 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        let slow = fs::canonicalize(&slow).unwrap();
+        let slow = dunce::canonicalize(&slow).unwrap();
         assert!(
             fixture
                 .manager
@@ -2141,6 +2142,8 @@ mod tests {
             let repository = root.join("repository");
             fs::create_dir_all(&repository).unwrap();
             command(&repository, ["init", "-b", "main"]);
+            // Files as committed, whatever this system's Git converts on checkout.
+            command(&repository, ["config", "core.autocrlf", "false"]);
             command(
                 &repository,
                 ["config", "user.email", "test@example.invalid"],
@@ -2831,6 +2834,8 @@ mod tests {
         let repository = root.join("repository");
         fs::create_dir_all(&repository).unwrap();
         command(&repository, ["init", "-b", "main"]);
+        // Files as committed, whatever this system's Git converts on checkout.
+        command(&repository, ["config", "core.autocrlf", "false"]);
         let manager = WorkspaceManager::new(
             root.join("data/workspaces.json"),
             root.join("managed"),
@@ -3029,7 +3034,10 @@ mod tests {
             .manager
             .project_for_workspace(&registered.id)
             .unwrap();
-        assert_eq!(Path::new(&project.root), home.canonicalize().unwrap());
+        assert_eq!(
+            Path::new(&project.root),
+            dunce::canonicalize(&home).unwrap()
+        );
         assert!(!project.git);
         // Registered again as a plain folder (a `--workspace` without the
         // flag, a sidebar folder), it keeps being the chat home.
@@ -3084,6 +3092,8 @@ mod tests {
         let repository = fixture.root.join("other-repository");
         fs::create_dir_all(&repository).unwrap();
         command(&repository, ["init", "-b", "main"]);
+        // Files as committed, whatever this system's Git converts on checkout.
+        command(&repository, ["config", "core.autocrlf", "false"]);
         assert!(matches!(
             fixture.manager.register_chat_home(&repository),
             Err(WorkspaceError::Invalid(message)) if message.contains("Git repository")
@@ -3136,7 +3146,7 @@ mod tests {
                     .unwrap()
                     .root
             ),
-            home.canonicalize().unwrap()
+            dunce::canonicalize(&home).unwrap()
         );
     }
 
@@ -3157,9 +3167,7 @@ mod tests {
             .workspace;
         assert_eq!(
             PathBuf::from(&workspace.path),
-            fixture
-                .root
-                .canonicalize()
+            dunce::canonicalize(&fixture.root)
                 .unwrap()
                 .join("relative-worktree")
         );

@@ -148,7 +148,7 @@ impl Workspace {
             uuid::Uuid::now_v7()
         ));
         std::fs::create_dir_all(&path).unwrap();
-        Self(path.canonicalize().unwrap())
+        Self(dunce::canonicalize(&path).unwrap())
     }
 }
 impl Drop for Workspace {
@@ -257,6 +257,7 @@ async fn notices(runtime: &AgentRuntime, thread: ThreadId) -> Vec<String> {
 }
 
 /// The command checkpoints the chat holds, as (id, state).
+#[cfg(unix)]
 async fn checkpoints(
     runtime: &AgentRuntime,
     thread: ThreadId,
@@ -275,6 +276,8 @@ async fn checkpoints(
         .collect()
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_command_started_in_the_background_returns_at_once_and_tells_its_chat_when_it_ends() {
     use haarness_protocol::ShellCommandState as State;
@@ -402,6 +405,8 @@ async fn a_command_started_in_the_background_returns_at_once_and_tells_its_chat_
     assert_eq!(end.text, "done\n");
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_long_foreground_command_moves_to_the_background_only_where_a_client_follows() {
     use haarness_protocol::{ShellCommandMovedBy, ShellCommandState as State};
@@ -443,6 +448,8 @@ async fn a_long_foreground_command_moves_to_the_background_only_where_a_client_f
     assert!(checkpoints(&runtime, other).await.is_empty());
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_person_moves_and_stops_a_command_and_the_agent_is_told() {
     use haarness_protocol::{ShellCommandEndedBy, ShellCommandMovedBy, ShellCommandState as State};
@@ -623,6 +630,8 @@ async fn a_subagents_background_command_stops_untold_when_its_turn_ends() {
     assert!(notices(&runtime, thread).await.is_empty());
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_agent_reads_waits_for_and_stops_its_commands() {
     use haarness_protocol::ShellCommandState as State;
@@ -745,6 +754,8 @@ async fn an_agent_command_without_a_deadline_saves_only_the_start_of_its_output(
     let _ = std::fs::remove_file(path);
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_foreground_command_a_person_stopped_says_so_in_its_result() {
     let workspace = Workspace::new();
@@ -1065,6 +1076,8 @@ async fn bash_output_and_bash_stop_are_offered_only_where_bash_is() {
     assert!(!haarness_core::PermissionEngine::build_defaults().disables_tool("bash_output"));
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn archiving_a_chat_while_a_command_stops_tells_nobody() {
     use haarness_protocol::ShellCommandEndedBy;
@@ -1110,6 +1123,8 @@ async fn archiving_a_chat_while_a_command_stops_tells_nobody() {
     assert!(notices(&runtime, thread).await.is_empty());
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_chat_at_its_cap_keeps_a_long_command_in_the_foreground() {
     let workspace = Workspace::new();
@@ -1217,6 +1232,8 @@ async fn a_command_a_person_moves_after_the_deadline_gets_its_limit_from_the_mov
     runtime.stop_shell_command(thread, &id).await.unwrap();
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_command_ends_when_its_shell_does_though_what_it_left_never_stops_printing() {
     let workspace = Workspace::new();
@@ -1244,6 +1261,8 @@ async fn a_command_ends_when_its_shell_does_though_what_it_left_never_stops_prin
     }
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_command_already_stopping_when_the_server_stops_records_its_end() {
     use haarness_protocol::ShellCommandState as State;

@@ -346,6 +346,7 @@ fn set_private(file: &fs::File) -> AuthResult<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // same signature as on Unix, where it can fail
 fn set_private(_file: &fs::File) -> AuthResult<()> {
     Ok(())
 }

@@ -31,6 +31,19 @@ def until(check, timeout=20):
     raise AssertionError("Timed out waiting for ripgrep evidence")
 
 
+def released(action, timeout=10):
+    """Runs `action` on a program's file, again while Windows still holds the
+    file of a program that just ended."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return action()
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() > deadline:
+                raise
+            time.sleep(.2)
+
+
 def main():
     fixture = server.Fixture()
     original = server.BINARY
@@ -115,16 +128,25 @@ def main():
         run('rg needle missing-file.txt', 2)
         assert "café" in run('rg needle "source space" | rg café')
         print("PASS server agent turns: bundled resolution, Unicode/spaces, ignores, glob flags, pipeline, exit 0/1/2")
-        rg.write_bytes(b"broken cache")
+        released(lambda: rg.write_bytes(b"broken cache"))
         assert f"ripgrep {version}" in run("rg --version")
-        rg.unlink()
+        released(rg.unlink)
         assert f"ripgrep {version}" in run("rg --version")
         print("PASS running server repairs a corrupt or deleted executable")
 
-        command = 'rg -n needle "source space/café.txt" > pty-rg.txt'
+        # cmd.exe does not read the backslash-escaped quotes Windows writes for
+        # an argument with quotes inside, so there the file is found by a glob.
+        command = ("rg -n needle -g café.txt > pty-rg.txt 2> pty-rg-error.txt" if os.name == "nt"
+                   else 'rg -n needle "source space/café.txt" > pty-rg.txt 2> pty-rg-error.txt')
         pty = api("/ptys", {"command": "cmd.exe" if os.name == "nt" else "/bin/sh",
                              "args": ["/C" if os.name == "nt" else "-c", command]})
-        until(lambda: (fixture.workspace / "pty-rg.txt").exists() and (fixture.workspace / "pty-rg.txt").read_text(encoding="utf-8"))
+        try:
+            until(lambda: (fixture.workspace / "pty-rg.txt").exists() and (fixture.workspace / "pty-rg.txt").read_text(encoding="utf-8"))
+        except AssertionError:
+            # What the terminal's command said instead, when it ran at all.
+            error = fixture.workspace / "pty-rg-error.txt"
+            raise AssertionError("the terminal's rg wrote nothing: "
+                                 + (error.read_text(encoding="utf-8", errors="replace") if error.exists() else "it did not run"))
         assert "2:needle café" in (fixture.workspace / "pty-rg.txt").read_text(encoding="utf-8")
         api("/ptys/" + pty["id"], method="DELETE")
         print("PASS real server PTY executes bundled rg")
@@ -138,7 +160,11 @@ def main():
                 def cli_done():
                     approve()
                     return process.poll() is not None
-                until(cli_done, 60)
+                try:
+                    until(cli_done, 60)
+                except AssertionError:
+                    raise AssertionError("the CLI run did not end: "
+                                         + output_file.read_text(encoding="utf-8", errors="replace")[-3000:])
                 assert process.returncode == 0, output_file.read_text(encoding="utf-8")[-3000:]
             finally:
                 if process.poll() is None:

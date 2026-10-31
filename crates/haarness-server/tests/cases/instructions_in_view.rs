@@ -15,7 +15,7 @@ impl Fixture {
         std::fs::write(path.join("ws/sub/AGENTS.md"), "SUB_FOLDER_RULES").unwrap();
         std::fs::write(path.join("ws/sub/a.txt"), "alpha").unwrap();
         std::fs::write(path.join("ws/sub/b.txt"), "beta").unwrap();
-        Self(path.canonicalize().unwrap())
+        Self(dunce::canonicalize(&path).unwrap())
     }
     fn workspace(&self) -> PathBuf {
         self.0.join("ws")
@@ -103,7 +103,13 @@ async fn reads(runtime: &AgentRuntime, thread: ThreadId, path: &str) -> Vec<Stri
 }
 
 fn rules(workspace: &Path) -> Vec<String> {
-    vec![workspace.join("sub/AGENTS.md").display().to_string()]
+    vec![
+        workspace
+            .join("sub")
+            .join("AGENTS.md")
+            .display()
+            .to_string(),
+    ]
 }
 
 async fn compact(runtime: &AgentRuntime, thread: ThreadId) {

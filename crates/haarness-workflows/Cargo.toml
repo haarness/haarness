@@ -9,6 +9,7 @@ license.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
+dunce.workspace = true
 fs2.workspace = true
 haarness-core = { path = "../haarness-core" }
 haarness-protocol = { path = "../haarness-protocol" }

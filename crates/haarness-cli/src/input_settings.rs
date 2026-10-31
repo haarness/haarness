@@ -336,7 +336,7 @@ mod tests {
         .unwrap();
         let child = f.project.join("child");
         fs::create_dir_all(child.join(".haarness")).unwrap();
-        let path = child.join(".haarness/haarness.jsonc");
+        let path = child.join(".haarness").join("haarness.jsonc");
         fs::write(
             &path,
             "{\n// keep child comment\n\"input\":{\"other\":true},\"unrelated\":123\n}",

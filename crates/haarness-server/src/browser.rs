@@ -1913,7 +1913,7 @@ impl Tool for BrowserTool {
             {
                 let raw = raw.as_str().ok_or_else(|| error("Invalid upload path"))?;
                 let path = haarness_core::resolve_permission_path(&context.workspace, raw);
-                let root = context.workspace.canonicalize().map_err(error)?;
+                let root = dunce::canonicalize(&context.workspace).map_err(error)?;
                 if !path.starts_with(&root)
                     && !context
                         .authorized_external_paths
@@ -1996,10 +1996,8 @@ impl Tool for BrowserTool {
                 .parent()
                 .ok_or_else(|| error("Invalid browser artifact directory"))?;
             tokio::fs::create_dir_all(root).await.map_err(error)?;
-            if !tokio::fs::canonicalize(root)
-                .await
-                .map_err(error)?
-                .starts_with(context.workspace.canonicalize().map_err(error)?)
+            if !dunce::simplified(&tokio::fs::canonicalize(root).await.map_err(error)?)
+                .starts_with(dunce::canonicalize(&context.workspace).map_err(error)?)
             {
                 return Err(error("Browser artifact directory escapes the workspace"));
             }

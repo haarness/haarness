@@ -388,12 +388,13 @@ pub(super) fn grep_walk(
             found.skipped.count(hidden);
             continue;
         }
-        let shown_path = entry
-            .path()
-            .strip_prefix(workspace)
-            .unwrap_or(entry.path())
-            .display()
-            .to_string();
+        // Relative to the project with `/`, as glob and the file listing
+        // write it (Windows writes `\\`); a path outside it as the system does.
+        let shown_path = match entry.path().strip_prefix(workspace) {
+            Ok(relative) if cfg!(windows) => relative.to_string_lossy().replace('\\', "/"),
+            Ok(relative) => relative.display().to_string(),
+            Err(_) => entry.path().display().to_string(),
+        };
         let mut in_file = Vec::new();
         let total = found.matches.len();
         // A file of ordinary size is read whole and checked as UTF-8 once;
@@ -526,10 +527,10 @@ fn grep_files(
 /// The folder among `root`'s parents that is the chat's own folder `chat`,
 /// written as `root` writes it.
 fn chat_folder_above(root: &Path, chat: &Path) -> Option<std::path::PathBuf> {
-    let chat = chat.canonicalize().ok()?;
+    let chat = dunce::canonicalize(chat).ok()?;
     root.ancestors()
         .skip(1)
-        .find(|folder| folder.canonicalize().is_ok_and(|folder| folder == chat))
+        .find(|folder| dunce::canonicalize(folder).is_ok_and(|folder| folder == chat))
         .map(Path::to_path_buf)
 }
 
@@ -593,8 +594,8 @@ impl ChatFolderIgnores {
     /// Those of the folders from `chat` down to `root`; none when `root` is
     /// `chat`, a file, or outside it.
     fn between(chat: &Path, root: &Path) -> Option<Self> {
-        let chat = chat.canonicalize().ok()?;
-        let root = root.canonicalize().ok()?;
+        let chat = dunce::canonicalize(chat).ok()?;
+        let root = dunce::canonicalize(root).ok()?;
         if root == chat || !root.is_dir() || !root.starts_with(&chat) {
             return None;
         }
@@ -736,7 +737,7 @@ mod tests {
     fn grep_leaves_text_that_is_not_utf8_unsearched_as_before() {
         let root = std::env::temp_dir().join(format!("haarness-grep-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         std::fs::write(root.join("utf8.txt"), "hit\n").unwrap();
         std::fs::write(root.join("latin1.txt"), b"hit\ncaf\xe9 hit\n").unwrap();
         let secrets = super::super::SecretFilter::new(&root, ".", &root, None);
@@ -905,7 +906,7 @@ mod tests {
     fn grep_fixture(files: &[(&str, &[u8])]) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!("haarness-grep-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         for (name, body) in files {
             std::fs::write(root.join(name), body).unwrap();
         }

@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { cursorKeys, localeSubsets, usedKeys } from "../build/locales";
 import { format, languages, lookup, parseLanguage } from "../src/core/i18n";
 
-const src = new URL("../src", import.meta.url).pathname;
-const locales = new URL("../../../locales", import.meta.url).pathname;
+const src = fileURLToPath(new URL("../src", import.meta.url));
+const locales = fileURLToPath(new URL("../../../locales", import.meta.url));
 const catalog = (code: string) => JSON.parse(readFileSync(join(locales, `${code}.json`), "utf8")) as Record<string, string>;
 
 function files(directory: string, out: string[] = []) {

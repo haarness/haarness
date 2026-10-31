@@ -7,6 +7,9 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// The Python fixtures run with: Windows has no `python3` command.
+const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
 struct Workspace(PathBuf);
 
 impl Workspace {
@@ -33,7 +36,7 @@ fn fixture(name: &str) -> String {
 
 fn server(extensions: &[&str]) -> LspServerConfig {
     LspServerConfig {
-        command: vec!["python3".into(), fixture("mock_lsp.py")],
+        command: vec![PYTHON.into(), fixture("mock_lsp.py")],
         extensions: extensions.iter().map(|value| (*value).into()).collect(),
         language_ids: BTreeMap::from([
             ("rs".into(), "rust".into()),
@@ -48,11 +51,7 @@ fn server(extensions: &[&str]) -> LspServerConfig {
 
 fn formatter(extensions: &[&str]) -> FormatterDefinition {
     FormatterDefinition {
-        command: vec![
-            "python3".into(),
-            fixture("mock_formatter.py"),
-            "$FILE".into(),
-        ],
+        command: vec![PYTHON.into(), fixture("mock_formatter.py"), "$FILE".into()],
         extensions: extensions.iter().map(|value| (*value).into()).collect(),
         ..FormatterDefinition::default()
     }
@@ -500,7 +499,7 @@ async fn language_servers_and_formatters_never_inherit_the_server_s_private_vari
 #[tokio::test]
 async fn each_chat_folder_gets_its_own_language_server() {
     let workspace = Workspace::new();
-    let root = workspace.0.canonicalize().unwrap();
+    let root = dunce::canonicalize(&workspace.0).unwrap();
     let (a, b) = (root.join("2026-10-24/a"), root.join("2026-10-24/b"));
     for folder in [&a, &b] {
         std::fs::create_dir_all(folder).unwrap();

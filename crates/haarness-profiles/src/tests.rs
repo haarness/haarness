@@ -5,7 +5,7 @@ impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!("haarness-profile-test-{}", Uuid::now_v7()));
         fs::create_dir_all(&root).unwrap();
-        Self(root.canonicalize().unwrap())
+        Self(dunce::canonicalize(&root).unwrap())
     }
     fn roots(&self, name: &str) -> Roots {
         let root = self.0.join(name);

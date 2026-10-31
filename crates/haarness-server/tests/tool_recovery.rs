@@ -572,7 +572,9 @@ async fn documented_legacy_inputs_keep_their_existing_execution_semantics() {
     );
 }
 
+#[cfg(unix)]
 struct ShellEnv;
+#[cfg(unix)]
 #[async_trait]
 impl HookPort for ShellEnv {
     async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
@@ -614,6 +616,8 @@ impl HookPort for ShellEnv {
     }
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn shell_env_hooks_add_variables_without_touching_bash_arguments() {
     let mut config = RuntimeConfig {
@@ -789,7 +793,9 @@ async fn a_permission_request_hook_allowing_other_input_leaves_the_prompt_to_the
 
 /// A `PermissionRequest` hook that allows, handing back the input it was
 /// shown unchanged, as some hooks always fill `updatedInput`.
+#[cfg(unix)]
 struct EchoingAllow(std::sync::Mutex<Vec<Value>>);
+#[cfg(unix)]
 #[async_trait]
 impl HookPort for EchoingAllow {
     async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {

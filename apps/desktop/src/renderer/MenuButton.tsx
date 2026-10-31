@@ -81,14 +81,38 @@ export function MenuButton(props: {
   const id = createUniqueId();
   let handle!: HTMLButtonElement;
   let menu!: HTMLDivElement;
+  /** The item the keyboard is on, by its name, while the menu is open. */
+  let focusedItem: string | undefined;
   const close = (focus = false) => {
     setOpen(false);
     setBranch("");
     if (focus) handle.focus({ preventScroll: true });
   };
+  // A list that changes while the menu is open (the server switcher reads
+  // its computers each time it opens) draws its items again: the keyboard
+  // stays on the item it was on instead of leaving the menu.
+  createEffect(
+    on(
+      () => props.items,
+      () => {
+        const name = focusedItem;
+        if (!open() || !name) return;
+        queueMicrotask(() => {
+          if (!open() || menu?.contains(document.activeElement)) return;
+          menu
+            ?.querySelector<HTMLButtonElement>(`[aria-label="${CSS.escape(name)}"]:not(:disabled)`)
+            ?.focus({ preventScroll: true });
+        });
+      },
+      { defer: true },
+    ),
+  );
   createEffect(
     on(open, (visible) => {
-      if (!visible) return;
+      if (!visible) {
+        focusedItem = undefined;
+        return;
+      }
       props.onOpen?.();
       const outside = (event: Event) => {
         if (
@@ -204,6 +228,9 @@ export function MenuButton(props: {
               left: position().left + "px",
               top: position().top + "px",
               ...(position().width ? { "min-width": position().width + "px" } : {}),
+            }}
+            onFocusIn={(event) => {
+              focusedItem = (event.target as HTMLElement).getAttribute("aria-label") ?? undefined;
             }}
             onKeyDown={(event) => {
               if (event.key === "Escape") {

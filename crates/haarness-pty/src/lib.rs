@@ -322,7 +322,7 @@ impl PtyManager {
     }
 
     fn resolve_cwd(&self, requested: Option<&str>) -> CoreResult<PathBuf> {
-        let workspace = self.inner.workspace.canonicalize().map_err(pty_error)?;
+        let workspace = dunce::canonicalize(&self.inner.workspace).map_err(pty_error)?;
         let candidate = requested.map_or_else(
             || workspace.clone(),
             |cwd| {
@@ -334,7 +334,7 @@ impl PtyManager {
                 }
             },
         );
-        let candidate = candidate.canonicalize().map_err(pty_error)?;
+        let candidate = dunce::canonicalize(&candidate).map_err(pty_error)?;
         if !candidate.starts_with(&workspace) {
             return Err(CoreError::PermissionDenied(
                 "PTY working directory must be inside the active workspace".into(),
@@ -379,16 +379,41 @@ impl PtyManager {
     }
 }
 
+/// What Windows' console asks a terminal before the program in it starts:
+/// where the cursor is.
+const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+
 fn spawn_reader(session: Arc<Session>, mut reader: Box<dyn Read + Send>) {
     thread::Builder::new()
         .name(format!("haarness-pty-read-{}", session.info.lock().id))
         .spawn(move || {
             let mut chunk = vec![0; 64 * 1024];
+            // Windows' console holds the program until the terminal says
+            // where its cursor is, so a terminal no client has opened yet
+            // would never start. The server answers that first question
+            // itself (a new terminal's cursor is at the top left) and keeps
+            // it from clients, whose answer would reach the program later as
+            // typed input.
+            let mut answered = !cfg!(windows);
             loop {
                 match reader.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(length) => {
-                        let bytes = chunk[..length].to_vec();
+                        let mut bytes = chunk[..length].to_vec();
+                        if !answered
+                            && let Some(at) = bytes
+                                .windows(CURSOR_QUERY.len())
+                                .position(|window| window == CURSOR_QUERY)
+                        {
+                            answered = true;
+                            bytes.drain(at..at + CURSOR_QUERY.len());
+                            let mut writer = session.writer.lock();
+                            let _ = writer.write_all(b"\x1b[1;1R").and_then(|()| writer.flush());
+                        }
+                        // An empty message tells clients the program exited.
+                        if bytes.is_empty() {
+                            continue;
+                        }
                         let mut buffer = session.buffer.lock();
                         buffer.append(&bytes);
                         let _ = session.output.send(bytes);
@@ -740,6 +765,39 @@ mod tests {
         assert!(output.contains("UTF-8"), "{output:?}");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_terminal_no_client_opened_runs_its_command() {
+        let folder = std::env::temp_dir().join(format!("haarness-pty-{}", PtyId::new()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let manager = PtyManager::new(folder.clone(), EventBus::new(64));
+        let info = manager
+            .create(PtyCreateRequest {
+                command: Some("cmd.exe".into()),
+                args: vec!["/C".into(), "echo ran> ran.txt".into()],
+                ..PtyCreateRequest::default()
+            })
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while manager.get(info.id).unwrap().status != PtyStatus::Exited {
+            assert!(std::time::Instant::now() < deadline, "the command runs");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            std::fs::read_to_string(folder.join("ran.txt")).unwrap(),
+            "ran\r\n"
+        );
+        // The console's question was answered here, not left to a client.
+        let replay = manager.subscribe(info.id, None).unwrap().replay;
+        assert!(
+            !replay
+                .windows(CURSOR_QUERY.len())
+                .any(|window| window == CURSOR_QUERY),
+            "{replay:?}"
+        );
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
     #[cfg(unix)]
     #[test]
     fn windows_opening_a_terminal_at_once_share_one_shell() {
@@ -819,7 +877,9 @@ mod tests {
             directory,
             ..PtyCreateRequest::default()
         };
-        let first = project.canonicalize().unwrap().join("2026-10-24/first");
+        let first = dunce::canonicalize(&project)
+            .unwrap()
+            .join("2026-10-24/first");
         let opened = manager
             .create(shell(Some("2026-10-24/first".into())))
             .unwrap();

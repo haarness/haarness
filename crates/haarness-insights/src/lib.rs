@@ -223,9 +223,7 @@ pub fn collect_at(
     options.validate()?;
     let registry = read_registry(data)?;
     let project_filter = if options.current_project {
-        let path = workspace
-            .canonicalize()
-            .unwrap_or_else(|_| workspace.to_owned());
+        let path = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_owned());
         Some(
             registry
                 .workspaces

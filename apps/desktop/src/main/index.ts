@@ -1899,6 +1899,9 @@ function createWindow() {
     // draws no frames for a window that was never shown, so every screenshot
     // and visual check would wait forever.
     show: process.env.HAARNESS_DESKTOP_TEST !== "1" || process.platform === "linux",
+    // macOS fits a window to its screen, and a CI runner's is 1024×768: test
+    // runs keep the size they ask for, as a person's larger screen gives it.
+    enableLargerThanScreen: process.env.HAARNESS_DESKTOP_TEST === "1",
     width: state?.width ?? 1420,
     height: state?.height ?? 940,
     minWidth: 900,

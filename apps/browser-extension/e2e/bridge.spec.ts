@@ -167,8 +167,9 @@ test("stops the page from leaving for a site this chat was not allowed", async (
   const open = await bridge.command({ action: { type: "tabs.open", url }, policy: askPolicy, target: { resources: [url], key: "open" } });
   expect(open.result.outcome).toMatchObject({ type: "failure", code: "site-blocked" });
   expect((open.result.outcome as { message: string }).message).toContain(site.other);
-  const urls = await worker.evaluate(() => chrome.tabs.query({}).then((tabs) => tabs.map((tab) => tab.url)));
-  expect(urls.some((entry) => entry?.startsWith(site.other))).toBe(false);
+  // The tab is sent back to a blank page; Chrome's tab list catches up a moment later.
+  const urls = () => worker.evaluate(() => chrome.tabs.query({}).then((tabs) => tabs.map((tab) => tab.url)));
+  await expect.poll(async () => (await urls()).some((entry) => entry?.startsWith(site.other))).toBe(false);
 
   // With localhost approved too, the same redirect lands.
   const allowed = await bridge.command({

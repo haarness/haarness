@@ -1,0 +1,3 @@
+# Checked out with LF everywhere, Windows included: the build embeds prompts,
+# scripts and fixtures as they are in the checkout, and must embed the same.
+* text=auto eol=lf

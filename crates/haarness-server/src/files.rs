@@ -207,7 +207,7 @@ fn inside(root: &Path, canonical: &Path) -> Result<(), Failure> {
 /// `.git`, as `resolve` requires of any parent.
 pub(crate) fn create_parents(root: &Path, value: &str) -> Result<(), Failure> {
     let relative = relative(value)?;
-    let root = root.canonicalize().map_err(bad)?;
+    let root = dunce::canonicalize(root).map_err(bad)?;
     let parent = root
         .join(relative)
         .parent()
@@ -218,7 +218,10 @@ pub(crate) fn create_parents(root: &Path, value: &str) -> Result<(), Failure> {
     while fs::symlink_metadata(existing).is_err() {
         existing = existing.parent().ok_or_else(|| bad("Missing parent"))?;
     }
-    inside(&root, &existing.canonicalize().map_err(io(FOLDER_GONE))?)?;
+    inside(
+        &root,
+        &dunce::canonicalize(existing).map_err(io(FOLDER_GONE))?,
+    )?;
     fs::create_dir_all(&parent).map_err(bad)
 }
 /// `resolve` for a read: the real path the check approved, so a link swapped
@@ -226,14 +229,14 @@ pub(crate) fn create_parents(root: &Path, value: &str) -> Result<(), Failure> {
 /// by the read. Renames and deletes keep `resolve`, which names the link.
 pub(crate) fn resolve_for_read(root: &Path, value: &str) -> Result<PathBuf, Failure> {
     let relative = relative(value)?;
-    let root = root.canonicalize().map_err(bad)?;
-    let canonical = root.join(relative).canonicalize().map_err(io(FILE_GONE))?;
+    let root = dunce::canonicalize(root).map_err(bad)?;
+    let canonical = dunce::canonicalize(root.join(relative)).map_err(io(FILE_GONE))?;
     inside(&root, &canonical)?;
     Ok(canonical)
 }
 pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf, Failure> {
     let relative = relative(value)?;
-    let root = root.canonicalize().map_err(bad)?;
+    let root = dunce::canonicalize(root).map_err(bad)?;
     let path = root.join(relative);
     let (existing, missing) = if create && !path.exists() {
         (
@@ -243,7 +246,7 @@ pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf,
     } else {
         (path.as_path(), FILE_GONE)
     };
-    let canonical = existing.canonicalize().map_err(io(missing))?;
+    let canonical = dunce::canonicalize(existing).map_err(io(missing))?;
     inside(&root, &canonical)?;
     Ok(path)
 }
@@ -251,7 +254,7 @@ pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf,
 /// inside the workspace, outside `.git`, and not the listed folder or one of
 /// its ancestors (which would loop). Dangling links stay files.
 fn browsable_link(root: &Path, listed: &Path, link: &Path) -> bool {
-    let Ok(target) = link.canonicalize() else {
+    let Ok(target) = dunce::canonicalize(link) else {
         return false;
     };
     target.is_dir()
@@ -288,8 +291,8 @@ pub async fn list_files(
     let (base, directory) = root_for(&state, query.thread_id).await?;
     tokio::task::spawn_blocking(move || {
         let path = resolve(&base, &query.path, false).map_err(folder)?;
-        let listed = path.canonicalize().map_err(io(FOLDER_GONE))?;
-        let root = base.canonicalize().map_err(bad)?;
+        let listed = dunce::canonicalize(&path).map_err(io(FOLDER_GONE))?;
+        let root = dunce::canonicalize(&base).map_err(bad)?;
         let mut entries = Vec::new();
         for entry in fs::read_dir(path).map_err(io(FOLDER_GONE))? {
             let entry = entry.map_err(bad)?;
@@ -532,7 +535,7 @@ async fn act(base: PathBuf, input: FileAction) -> Result<Json<serde_json::Value>
             return Err(bad("Select a workspace entry"));
         }
         let path = resolve(&base, &input.path, input.action == "mkdir")?;
-        if path.canonicalize().ok() == base.canonicalize().ok() {
+        if dunce::canonicalize(&path).ok() == dunce::canonicalize(&base).ok() {
             return Err(bad("Select a workspace entry"));
         }
         // Each change is made in the folder the checks approved, held open,
@@ -602,8 +605,8 @@ impl Bound {
     }
 
     fn open(root: &Path, folder: &Path) -> Result<Self, Failure> {
-        let root = root.canonicalize().map_err(bad)?;
-        let real = folder.canonicalize().map_err(io(FOLDER_GONE))?;
+        let root = dunce::canonicalize(root).map_err(bad)?;
+        let real = dunce::canonicalize(folder).map_err(io(FOLDER_GONE))?;
         inside(&root, &real)?;
         #[cfg(unix)]
         {
@@ -635,7 +638,7 @@ impl Bound {
 
     /// The checked path, when it still leads to the folder that was checked.
     fn still(path: &Path) -> Result<&Path, Failure> {
-        if path.canonicalize().ok().as_deref() == Some(path) {
+        if dunce::canonicalize(path).ok().as_deref() == Some(path) {
             Ok(path)
         } else {
             Err(bad("Path escapes the workspace"))
@@ -841,7 +844,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("haarness-save-other-{}", uuid::Uuid::now_v7()));
         fs::create_dir(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         for name in ["held.txt", "other.txt", "gone.txt"] {
             fs::write(root.join(name), "before\n").unwrap();
         }
@@ -901,7 +904,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("haarness-save-lock-{}", uuid::Uuid::now_v7()));
         fs::create_dir(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         fs::write(root.join("notes.txt"), "agent\n").unwrap();
         // An agent's edit holds the file while its formatter runs.
         let held = crate::file_lock::lock(
@@ -1034,7 +1037,7 @@ mod tests {
         let outside = base.join("outside");
         fs::create_dir_all(root.join("sub")).unwrap();
         fs::create_dir_all(&outside).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let held = Bound::open(&root, &root.join("sub")).unwrap();
         // Between the check and the change, the folder is moved aside and a
         // link out of the workspace put in its place.
@@ -1084,7 +1087,7 @@ mod tests {
         let outside = base.join("outside");
         fs::create_dir_all(root.join("drop")).unwrap();
         fs::create_dir_all(&outside).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let drop_box = root.join("drop");
         let mode = |mode| fs::set_permissions(&drop_box, fs::Permissions::from_mode(mode));
         mode(0o300).unwrap();
@@ -1134,7 +1137,7 @@ mod tests {
         let outside = base.join("outside");
         fs::create_dir_all(base.join("sub")).unwrap();
         fs::create_dir_all(&outside).unwrap();
-        let base = base.canonicalize().unwrap();
+        let base = dunce::canonicalize(&base).unwrap();
         let sub = base.join("sub");
         let opened = open_folder(&sub).unwrap();
         let stat = nix::sys::stat::fstat(&opened).unwrap();
@@ -1182,7 +1185,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         let root = std::env::temp_dir().join(format!("haarness-links-{}", uuid::Uuid::now_v7()));
         fs::create_dir(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let nested = root.join("src/nested");
         fs::create_dir_all(&nested).unwrap();
         fs::create_dir(root.join(".git")).unwrap();

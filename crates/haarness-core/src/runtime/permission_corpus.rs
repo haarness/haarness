@@ -50,9 +50,7 @@ fn configurations() -> Vec<(&'static str, Vec<PermissionRule>)> {
 
 /// Answers a person might have given Always to earlier.
 fn remembered() -> Vec<PermissionRule> {
-    let tmp = Path::new("/tmp")
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from("/tmp"));
+    let tmp = dunce::canonicalize(Path::new("/tmp")).unwrap_or_else(|_| PathBuf::from("/tmp"));
     let mut grants: Vec<PermissionRule> = [
         "bash:git status *",
         "bash:npm run *",

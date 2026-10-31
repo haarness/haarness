@@ -83,9 +83,7 @@ pub fn create_inside(root: &Path, [date, name]: [&str; 2]) -> CoreResult<PathBuf
         real_folder(&current)?;
     }
     // Neither part is a link, so this only settles how the disk spells it.
-    let canonical = current
-        .canonicalize()
-        .map_err(|error| unreadable(&current, &error))?;
+    let canonical = dunce::canonicalize(&current).map_err(|error| unreadable(&current, &error))?;
     shaped(&root, &canonical)?;
     Ok(canonical)
 }
@@ -186,9 +184,7 @@ fn exactly(root: &Path, path: &Path) -> CoreResult<PathBuf> {
     let [date, _] = recorded_parts(root, path)?;
     real_folder(&root.join(date))?;
     real_folder(path)?;
-    let canonical = path
-        .canonicalize()
-        .map_err(|error| unreadable(path, &error))?;
+    let canonical = dunce::canonicalize(path).map_err(|error| unreadable(path, &error))?;
     if canonical != path {
         return Err(changed(path));
     }
@@ -237,7 +233,7 @@ fn unreadable(path: &Path, error: &std::io::Error) -> CoreError {
 }
 
 fn canonical_root(root: &Path) -> CoreResult<PathBuf> {
-    root.canonicalize().map_err(|error| {
+    dunce::canonicalize(root).map_err(|error| {
         CoreError::Invalid(format!(
             "Cannot open the project folder {}: {error}",
             root.display()
@@ -270,7 +266,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("haarness-chat-folders-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(path.join("project")).unwrap();
-        Root(path.canonicalize().unwrap())
+        Root(dunce::canonicalize(&path).unwrap())
     }
 
     #[test]

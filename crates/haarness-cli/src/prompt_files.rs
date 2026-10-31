@@ -382,10 +382,9 @@ fn prompt_name(name: &str) -> Result<PromptName> {
 
 fn same_folder(left: &Path, right: &Path) -> bool {
     left == right
-        || left
-            .canonicalize()
+        || dunce::canonicalize(left)
             .ok()
-            .zip(right.canonicalize().ok())
+            .zip(dunce::canonicalize(right).ok())
             .is_some_and(|(left, right)| left == right)
 }
 

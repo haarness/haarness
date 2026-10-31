@@ -11,6 +11,7 @@ base64.workspace = true
 chrono.workspace = true
 crc32fast = "1.5"
 dashmap.workspace = true
+dunce.workspace = true
 futures.workspace = true
 hex.workspace = true
 idna.workspace = true

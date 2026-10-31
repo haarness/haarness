@@ -138,7 +138,8 @@ impl Layout {
         if !source.is_dir() {
             return Ok(());
         }
-        if fs::canonicalize(source).ok() == fs::canonicalize(&target).ok() && target.exists() {
+        if dunce::canonicalize(source).ok() == dunce::canonicalize(&target).ok() && target.exists()
+        {
             return Ok(());
         }
         let fresh = self
@@ -176,7 +177,7 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
         let kind = entry.file_type()?;
         if kind.is_symlink() {
             #[cfg(unix)]
-            if let Ok(resolved) = entry.path().canonicalize() {
+            if let Ok(resolved) = dunce::canonicalize(entry.path()) {
                 std::os::unix::fs::symlink(resolved, &to)?;
             }
         } else if kind.is_dir() {
@@ -241,7 +242,7 @@ pub fn copy_missing(source: &Path, target: &Path) -> Result<()> {
             if entry.file_type()?.is_symlink() {
                 #[cfg(unix)]
                 if !target.join(entry.file_name()).exists() {
-                    let resolved = entry.path().canonicalize()?;
+                    let resolved = dunce::canonicalize(entry.path())?;
                     match std::os::unix::fs::symlink(resolved, target.join(entry.file_name())) {
                         Ok(()) => (),
                         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
@@ -319,7 +320,7 @@ pub fn project_roots(workspace: &Path) -> Vec<PathBuf> {
     ]
     .into_iter()
     .flatten()
-    .filter_map(|path| path.canonicalize().ok())
+    .filter_map(|path| dunce::canonicalize(&path).ok())
     .collect();
     roots.dedup();
     roots
@@ -329,8 +330,7 @@ pub fn project_roots(workspace: &Path) -> Vec<PathBuf> {
 /// paths). A path that does not exist is inside none.
 pub fn real_path_within(path: &Path, roots: &[PathBuf]) -> bool {
     !roots.is_empty()
-        && path
-            .canonicalize()
+        && dunce::canonicalize(path)
             .is_ok_and(|real| roots.iter().any(|root| real.starts_with(root)))
 }
 
@@ -476,9 +476,9 @@ pub fn resource_roots_scoped(
 /// Whether `folder` is one of `listed` that is the person's, as written or
 /// where it really is.
 pub(crate) fn persons_folder(listed: &[(PathBuf, bool)], folder: &Path) -> bool {
-    let real = folder.canonicalize().ok();
+    let real = dunce::canonicalize(folder).ok();
     listed.iter().any(|(known, project)| {
-        !project && (known == folder || real.is_some() && known.canonicalize().ok() == real)
+        !project && (known == folder || real.is_some() && dunce::canonicalize(known).ok() == real)
     })
 }
 
@@ -487,20 +487,28 @@ mod tests {
     use super::*;
     #[test]
     fn planes_follow_xdg_and_single_root_has_precedence() {
-        let home = Path::new("/home/fixture");
-        let layout = Layout::resolve(home, None, |key| {
-            (key == "XDG_CONFIG_HOME").then(|| PathBuf::from("/config"))
+        // Absolute here: Windows needs a drive.
+        let absolute = |path: &str| {
+            PathBuf::from(if cfg!(windows) {
+                format!("C:{path}")
+            } else {
+                path.into()
+            })
+        };
+        let home = absolute("/home/fixture");
+        let layout = Layout::resolve(&home, None, |key| {
+            (key == "XDG_CONFIG_HOME").then(|| absolute("/config"))
         })
         .unwrap();
-        assert_eq!(layout.config, Path::new("/config/haarness"));
+        assert_eq!(layout.config, absolute("/config").join("haarness"));
         assert_eq!(layout.data, home.join(".local/share/haarness"));
-        let isolated = Layout::resolve(home, Some(Path::new("/isolated")), |_| {
-            Some(PathBuf::from("/ignored"))
+        let isolated = Layout::resolve(&home, Some(&absolute("/isolated")), |_| {
+            Some(absolute("/ignored"))
         })
         .unwrap();
-        assert_eq!(isolated.config, Path::new("/isolated/config"));
-        assert_eq!(isolated.state, Path::new("/isolated/state"));
-        assert!(Layout::resolve(home, Some(Path::new("relative")), |_| None).is_err());
+        assert_eq!(isolated.config, absolute("/isolated").join("config"));
+        assert_eq!(isolated.state, absolute("/isolated").join("state"));
+        assert!(Layout::resolve(&home, Some(Path::new("relative")), |_| None).is_err());
     }
     /// The data folder is the person's alone: made so, or narrowed at every
     /// start once it holds Haarness's files (an older build left it open).

@@ -288,7 +288,9 @@ test("a download damaged from every source is not installed; the sidebar offers 
   await expect(updateRow()).toHaveText("Restart to update", { timeout: 60_000 });
   await expect(updateRow()).not.toHaveClass(/failed/);
   expect(await installed()).toBe("0.1.5");
+  // Quitting installs it; the next test starts from the old version again only once that is done.
   await quit();
+  await expect.poll(installed, { timeout: 30_000 }).toBe(NEW);
 });
 
 test("Restart to update with unsaved file edits asks first; keeping them calls the restart off and nothing shuts down", async () => {

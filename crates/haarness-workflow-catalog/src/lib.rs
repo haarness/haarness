@@ -237,7 +237,7 @@ impl WorkflowCatalog {
                 return self;
             }
         };
-        let canonical_root = match root.canonicalize() {
+        let canonical_root = match dunce::canonicalize(&root) {
             Ok(path) => path,
             Err(error) => {
                 self.invalid.push(plugin_invalid(
@@ -258,7 +258,7 @@ impl WorkflowCatalog {
                 continue;
             }
             let target = root.join(entry.trim_start_matches("./"));
-            let canonical = match target.canonicalize() {
+            let canonical = match dunce::canonicalize(&target) {
                 Ok(path) => path,
                 Err(error) if custom => {
                     self.invalid.push(plugin_invalid(
@@ -404,15 +404,12 @@ impl WorkflowCatalog {
     /// a repository subdirectory.
     #[must_use]
     pub fn is_project_path(&self, path: &Path) -> bool {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         self.roots.iter().any(|root| {
             if root.scope != WorkflowRootScope::Project {
                 return false;
             }
-            let candidate = root
-                .path
-                .canonicalize()
-                .unwrap_or_else(|_| root.path.clone());
+            let candidate = dunce::canonicalize(&root.path).unwrap_or_else(|_| root.path.clone());
             canonical == candidate || canonical.starts_with(candidate)
         })
     }
@@ -420,13 +417,11 @@ impl WorkflowCatalog {
     /// Whether `path` is one of a chat's own workflows (a [`WorkflowRootScope::Chat`] root).
     #[must_use]
     pub fn is_chat_path(&self, path: &Path) -> bool {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         self.roots.iter().any(|root| {
             root.scope == WorkflowRootScope::Chat
                 && canonical.starts_with(
-                    root.path
-                        .canonicalize()
-                        .unwrap_or_else(|_| root.path.clone()),
+                    dunce::canonicalize(&root.path).unwrap_or_else(|_| root.path.clone()),
                 )
         })
     }
@@ -462,7 +457,7 @@ impl WorkflowCatalog {
     /// canonical discoveries. This preserves the path/start compatibility
     /// surface without turning workflow start into an arbitrary file reader.
     pub fn read_catalog_path(&self, path: &Path) -> Result<WorkflowSourceResponse, CatalogError> {
-        let canonical = path.canonicalize().map_err(|error| CatalogError::Read {
+        let canonical = dunce::canonicalize(path).map_err(|error| CatalogError::Read {
             path: path.display().to_string(),
             message: error.to_string(),
         })?;
@@ -481,7 +476,7 @@ impl WorkflowCatalog {
 }
 
 fn candidates(root: &WorkflowRoot, invalid: &mut Vec<WorkflowInvalidDefinition>) -> Vec<PathBuf> {
-    let canonical_root = match root.path.canonicalize() {
+    let canonical_root = match dunce::canonicalize(&root.path) {
         Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(error) => {
@@ -509,7 +504,7 @@ fn candidates(root: &WorkflowRoot, invalid: &mut Vec<WorkflowInvalidDefinition>)
         ) {
             continue;
         }
-        let canonical = match path.canonicalize() {
+        let canonical = match dunce::canonicalize(&path) {
             Ok(path) if path.starts_with(&canonical_root) => path,
             Ok(_) => {
                 invalid.push(WorkflowInvalidDefinition {
@@ -1235,22 +1230,36 @@ mod tests {
 
     #[test]
     fn global_workflows_live_in_the_cli_configuration_folder_on_every_os() {
+        // Absolute here: Windows needs a drive.
+        let absolute = |path: &str| {
+            std::path::PathBuf::from(if cfg!(windows) {
+                format!("C:{path}")
+            } else {
+                path.into()
+            })
+        };
         let env = |pairs: &'static [(&'static str, &'static str)]| {
             move |name: &str| {
                 pairs
                     .iter()
                     .find(|(key, _)| *key == name)
-                    .map(|(_, value)| std::ffi::OsString::from(*value))
+                    .map(|(_, value)| {
+                        if value.starts_with('/') {
+                            absolute(value).into_os_string()
+                        } else {
+                            (*value).into()
+                        }
+                    })
             }
         };
-        let home = std::path::Path::new("/home/a");
+        let home = absolute("/home/a");
         assert_eq!(
             global_config_dir(&env(&[("HOME", "/home/a")])),
             Some(home.join(".config/haarness"))
         );
         assert_eq!(
             global_config_dir(&env(&[("HOME", "/home/a"), ("XDG_CONFIG_HOME", "/xdg")])),
-            Some(std::path::PathBuf::from("/xdg/haarness"))
+            Some(absolute("/xdg").join("haarness"))
         );
         // A relative XDG_CONFIG_HOME is ignored, as the XDG rules say.
         assert_eq!(
@@ -1259,19 +1268,19 @@ mod tests {
         );
         assert_eq!(
             global_config_dir(&env(&[("HOME", "/home/a"), ("HAARNESS_HOME", "/opt/h")])),
-            Some(std::path::PathBuf::from("/opt/h/config"))
+            Some(absolute("/opt/h").join("config"))
         );
         assert_eq!(
             global_config_dir(&env(&[
                 ("HAARNESS_HOME", "/opt/h"),
                 ("HAARNESS_DATA_DIR", "/d")
             ])),
-            Some(std::path::PathBuf::from("/d/config"))
+            Some(absolute("/d").join("config"))
         );
         // Windows shells set USERPROFILE and no HOME.
         assert_eq!(
             global_config_dir(&env(&[("USERPROFILE", "/users/a")])),
-            Some(std::path::PathBuf::from("/users/a/.config/haarness"))
+            Some(absolute("/users/a").join(".config/haarness"))
         );
         assert_eq!(global_config_dir(&env(&[])), None);
     }

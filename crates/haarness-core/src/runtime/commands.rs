@@ -431,7 +431,7 @@ impl AgentRuntime {
 
 /// `path` with its links resolved where it exists, for comparing folders.
 fn dunce_like(path: &std::path::Path) -> std::path::PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// What a chat is told of a command in the background that a restart cut

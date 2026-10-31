@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+dunce.workspace = true
 flate2.workspace = true
 haarness-core = { path = "../haarness-core" }
 haarness-protocol = { path = "../haarness-protocol" }

@@ -237,6 +237,8 @@ pub struct ColorSupport {
 /// ignores a bit simply falls back to plain text in the span's colors.
 mod handles;
 pub use handles::keep_standard_handles_from_children;
+#[cfg(windows)]
+pub use handles::stdin_ready_now;
 
 pub mod attr {
     pub const NONE: u32 = 0;
@@ -639,6 +641,7 @@ fn set_private_permissions(file: &fs::File) -> Result<(), OpenTuiError> {
     Ok(())
 }
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // same signature as on Unix, where it can fail
 fn set_private_permissions(_file: &fs::File) -> Result<(), OpenTuiError> {
     Ok(())
 }

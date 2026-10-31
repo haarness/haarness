@@ -241,8 +241,9 @@ test("chats without a project: a ready first launch, a folder of their own on on
   expect(two).toBeTruthy();
   await settled(two.id);
   // The keyboard reaches its rows as any chat rows: Focus sidebar lands on
-  // the open chat's, and the arrows walk them.
-  await page.keyboard.press("Control+Shift+L");
+  // the open chat's, and the arrows walk them. Control+Shift+L on macOS,
+  // Alt+Shift+L elsewhere (as in sidebar.spec.ts).
+  await page.keyboard.press(process.platform === "darwin" ? "Control+Shift+L" : "Alt+Shift+L");
   await expect(page.locator(":focus")).toHaveAttribute("aria-current", "true");
   expect(await page.evaluate(() => !!document.activeElement?.closest(".computer-chats"))).toBe(true);
   await page.keyboard.press("ArrowDown");

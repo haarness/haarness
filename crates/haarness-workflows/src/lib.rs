@@ -439,6 +439,14 @@ impl WorkflowExecutor {
         {
             command.process_group(0);
         }
+        // Windows programs need to know where Windows is: without
+        // `SystemRoot` Bun stops before it runs anything.
+        #[cfg(windows)]
+        for name in ["SystemRoot", "SystemDrive", "windir"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
         command
     }
 
@@ -651,12 +659,15 @@ async fn prepare_source(
     }
     let source_path = match (invocation.dialect, invocation.source_path) {
         (WorkflowDialect::Native, Some(path)) => {
-            let canonical = tokio::fs::canonicalize(&path).await.map_err(|error| {
-                ExecutionErrorKind::InvalidInvocation(format!(
-                    "cannot canonicalize workflow source {}: {error}",
-                    path.display()
-                ))
-            })?;
+            let canonical = tokio::fs::canonicalize(&path)
+                .await
+                .map(|path| dunce::simplified(&path).to_path_buf())
+                .map_err(|error| {
+                    ExecutionErrorKind::InvalidInvocation(format!(
+                        "cannot canonicalize workflow source {}: {error}",
+                        path.display()
+                    ))
+                })?;
             let bytes = tokio::fs::read(&canonical).await.map_err(|error| {
                 ExecutionErrorKind::InvalidInvocation(format!(
                     "cannot read workflow source {}: {error}",

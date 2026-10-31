@@ -1365,6 +1365,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn sorted_names(diffs: &HashMap<String, ReviewFile>) -> Vec<&str> {
         let mut names: Vec<_> = diffs.keys().map(String::as_str).collect();
         names.sort_unstable();
@@ -1508,7 +1509,15 @@ mod tests {
         repo.write("a[1].txt", "new\nextra\n");
         repo.write("a1.txt", "changed\n");
         fs::remove_file(repo.path.join("deleted.txt")).unwrap();
-        repo.write("new *.txt", "untracked\n");
+        // A name git would read as a pattern; Windows allows no `*` in one.
+        repo.write(
+            if cfg!(windows) {
+                "new [x].txt"
+            } else {
+                "new *.txt"
+            },
+            "untracked\n",
+        );
         repo.write("binary", [0, 1, 2]);
         for mode in [DiffMode::WorkingTree, DiffMode::Branch] {
             let eager = diff_selected(&repo.path, mode, 4, false, None, true)
@@ -1752,6 +1761,7 @@ mod tests {
 
     /// Gives `relative` a new modification time, so Git refreshes its entry
     /// in the index (and writes the index) though its content is unchanged.
+    #[cfg(unix)]
     fn touch_later(repo: &Path, relative: &str) {
         fs::File::options()
             .write(true)
@@ -1900,7 +1910,7 @@ mod tests {
         let clone = origin.path.with_extension("partial");
         let output = StdCommand::new("git")
             .args(["clone", "-q", "--filter=blob:none", "--branch", "feature"])
-            .arg(format!("file://{}", origin.path.display()))
+            .arg(url::Url::from_file_path(&origin.path).unwrap().to_string())
             .arg(&clone)
             .output()
             .expect("clone");

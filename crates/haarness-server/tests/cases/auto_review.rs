@@ -18,7 +18,7 @@ impl Workspace {
         let path =
             std::env::temp_dir().join(format!("haarness-auto-review-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&path).unwrap();
-        Self(path.canonicalize().unwrap())
+        Self(dunce::canonicalize(&path).unwrap())
     }
 }
 impl Drop for Workspace {
@@ -237,7 +237,11 @@ async fn auto_approves_what_the_reviewer_allows_and_blocks_what_it_denies() {
         "<action>",
         "\"command\": \"printf no \\u003e blocked.txt\"",
         "\"permission\": \"bash\"",
-        &format!("Working directory: \"{}\"", workspace.0.display()),
+        // As JSON writes it (Windows' backslashes doubled).
+        &format!(
+            "Working directory: {}",
+            serde_json::to_string(&workspace.0.display().to_string()).unwrap()
+        ),
         "No sandbox",
     ] {
         assert!(content.contains(part), "{part} missing from {content}");
@@ -1378,6 +1382,8 @@ async fn the_server_names_the_mode_a_new_chat_starts_in() {
     }
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_refusal_nobody_answered_ends_its_request_alone_in_haarnesss_words() {
     let workspace = Workspace::new();
@@ -1508,6 +1514,8 @@ async fn a_refusal_nobody_answered_ends_its_request_alone_in_haarnesss_words() {
     assert!(long.chars().count() < 520, "{}", long.chars().count());
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn another_chats_agent_naming_a_folder_never_lets_its_deletion_through() {
     let workspace = Workspace::new();

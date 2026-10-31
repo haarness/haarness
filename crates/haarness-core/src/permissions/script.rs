@@ -80,7 +80,7 @@ impl Seal {
     pub async fn holds(&self) -> bool {
         let seal = self.clone();
         let check = tokio::task::spawn_blocking(move || {
-            seal.file.canonicalize().is_ok_and(|real| real == seal.real)
+            dunce::canonicalize(&seal.file).is_ok_and(|real| real == seal.real)
                 && read_bytes(&seal.real).is_some_and(|bytes| digest(&bytes) == seal.digest)
         });
         matches!(
@@ -168,7 +168,7 @@ fn read(script: &ScriptFile, readable: &impl Fn(&Path) -> bool) -> Option<Shown>
         return None;
     }
     let shown = named(file);
-    let real = file.canonicalize().ok()?;
+    let real = dunce::canonicalize(file).ok()?;
     // Swapped for a link there since the walk above.
     if super::bash::in_system_folder(&real) {
         return None;
@@ -238,7 +238,7 @@ fn named(file: &Path) -> PathBuf {
         return lexical;
     }
     file.parent()
-        .and_then(|folder| folder.canonicalize().ok())
+        .and_then(|folder| dunce::canonicalize(folder).ok())
         .zip(file.file_name())
         .map_or(lexical, |(folder, name)| folder.join(name))
 }
@@ -333,7 +333,7 @@ fn plain_shebang(bytes: &[u8]) -> bool {
 /// Whether the interpreter a `#!` line names is a script itself (its own
 /// first bytes `#!`), or cannot be told. A missing one runs nothing.
 fn is_script(interpreter: &Path) -> bool {
-    let Ok(real) = interpreter.canonicalize() else {
+    let Ok(real) = dunce::canonicalize(interpreter) else {
         return false;
     };
     if super::bash::in_system_folder(&real) {
@@ -499,7 +499,7 @@ fn same_file(path: &Path, real: &Path) -> bool {
         one.dev() == other.dev() && one.ino() == other.ino()
     }
     #[cfg(not(unix))]
-    path.canonicalize().is_ok_and(|path| path == real)
+    dunce::canonicalize(path).is_ok_and(|path| path == real)
 }
 
 /// A path as the card shows it: [`displayed`], with its tabs and line
@@ -648,7 +648,7 @@ mod tests {
             let path =
                 std::env::temp_dir().join(format!("haarness-script-{}", uuid::Uuid::now_v7()));
             std::fs::create_dir_all(&path).unwrap();
-            Self(path.canonicalize().unwrap())
+            Self(dunce::canonicalize(&path).unwrap())
         }
         fn write(&self, name: &str, contents: impl AsRef<[u8]>) -> PathBuf {
             let path = self.0.join(name);

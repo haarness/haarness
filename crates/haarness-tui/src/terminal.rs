@@ -311,6 +311,7 @@ fn clipboard_helpers(os: &str) -> &'static [&'static [&'static str]] {
 
 /// Hand `text` to the clipboard tool `command` on its stdin; true when it took
 /// it. A tool that has not exited after `wait` is killed.
+#[cfg_attr(all(test, not(unix)), allow(dead_code))]
 fn run_clipboard_helper(command: &[&str], text: &str, wait: std::time::Duration) -> bool {
     use std::process::{Command, Stdio};
     let Some((program, arguments)) = command.split_first() else {
@@ -578,6 +579,7 @@ pub fn suspend_and_resume() -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // same signature as on Unix, where it can fail
 pub fn suspend_and_resume() -> Result<()> {
     Ok(())
 }
@@ -652,9 +654,11 @@ fn launch(target: &std::ffi::OsStr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::run_clipboard_helper;
     use super::{
         MOUSE_TRACKING_DISABLE, MOUSE_TRACKING_ENABLE, clipboard_helpers, osc_text,
-        panic_ends_the_tui, parse_background_variant, parse_terminal_rgb, run_clipboard_helper,
+        panic_ends_the_tui, parse_background_variant, parse_terminal_rgb,
     };
 
     /// X11 gets the CLIPBOARD selection that Ctrl+Shift+V pastes, from xclip

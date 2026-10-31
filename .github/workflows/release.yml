@@ -24,7 +24,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, platform: mac, arch: arm64, target: aarch64-apple-darwin }
+          - { os: macos-15, platform: mac, arch: arm64, target: aarch64-apple-darwin }
           - { os: macos-15-intel, platform: mac, arch: x64, target: x86_64-apple-darwin }
           # Linux builds link against glibc 2.17 (as OpenTUI and Bun do), not the
           # runner's own, so they run on every maintained distribution.

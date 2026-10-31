@@ -25,6 +25,7 @@ fn haarness(data: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(cwd)
         .env_clear()
+        .envs(windows_env())
         .env("HOME", cwd)
         .env("PATH", "/usr/bin:/bin")
         .output()
@@ -71,27 +72,41 @@ fn logs_commands_register_no_workspace_and_run_from_a_deleted_folder() {
         std::fs::read(data.join("data/haarness.db")).unwrap(),
         b"legacy"
     );
-    // A TUI whose folder was deleted still reads its logs: the shell enters
-    // the folder, removes it, and runs `haarness` from inside it.
-    let gone = root.0.join("gone");
-    std::fs::create_dir_all(&gone).unwrap();
-    let mut command = Command::new("/bin/sh");
-    command
-        .arg("-c")
-        .arg(r#"cd "$1" && rmdir "$1" && exec "$2" --data-dir "$3" logs level --json"#)
-        .arg("sh")
-        .arg(&gone)
-        .arg(env!("CARGO_BIN_EXE_haarness"))
-        .arg(&data)
-        .env_clear()
-        .env("HOME", &home)
-        .env("PATH", "/usr/bin:/bin");
-    let output = command.output().expect("run haarness");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(status["level"], serde_json::Value::Null);
+    // Windows will not remove the folder a process is in, so only elsewhere.
+    #[cfg(unix)]
+    {
+        // A TUI whose folder was deleted still reads its logs: the shell enters
+        // the folder, removes it, and runs `haarness` from inside it.
+        let gone = root.0.join("gone");
+        std::fs::create_dir_all(&gone).unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(r#"cd "$1" && rmdir "$1" && exec "$2" --data-dir "$3" logs level --json"#)
+            .arg("sh")
+            .arg(&gone)
+            .arg(env!("CARGO_BIN_EXE_haarness"))
+            .arg(&data)
+            .env_clear()
+            .envs(windows_env())
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin");
+        let output = command.output().expect("run haarness");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(status["level"], serde_json::Value::Null);
+    }
+}
+
+/// What a cleared environment keeps for Windows, whose programs must know
+/// where Windows is: without `SystemRoot` not even a socket opens. Nothing
+/// elsewhere.
+fn windows_env() -> impl Iterator<Item = (&'static str, std::ffi::OsString)> {
+    ["SystemRoot", "SystemDrive", "windir"]
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
 }

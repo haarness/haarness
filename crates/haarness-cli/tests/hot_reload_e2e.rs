@@ -10,12 +10,15 @@ use serde_json::{Value, json};
 use tokio::{net::TcpListener, process::Command, time::timeout};
 use uuid::Uuid;
 
+/// The Python fixtures run with: Windows has no `python3` command.
+const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
 const TOKEN: &str = "hot-reload-e2e-token";
 
 #[tokio::test]
 async fn capability_management_disables_execution_and_survives_restart() {
     let root = TestDirectory::new();
-    let root_path = root.0.canonicalize().unwrap();
+    let root_path = dunce::canonicalize(&root.0).unwrap();
     let workspace = root_path.join("workspace");
     let data = root_path.join("data");
     let home = root_path.join("home");
@@ -674,7 +677,7 @@ async fn unchanged_sources_neither_reload_nor_respawn_mcp_servers() {
         workspace.join(".haarness/haarness.json"),
         serde_json::to_string_pretty(&json!({
             "mcp": {"counter": {
-                "command": "python3",
+                "command": PYTHON,
                 "args": [fixture],
                 "env": {"LAUNCH_LOG": launches, "CALL_LOG": directory.0.join("calls")}
             }},
@@ -856,8 +859,9 @@ async fn a_reload_does_not_wait_for_a_provider_slow_to_list_its_models() {
         .spawn()
         .expect("launch Haarness server");
     wait_until_listening(address).await;
-    // Past the start: the list the server asked for gave up by now.
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    // It listens before it starts, which waits a few seconds for the lists:
+    // an answer means it has started, and its reloads are watched.
+    get_json(&Client::new(), address, "/info").await;
 
     std::fs::write(&agents, "Use spaces.\n").expect("edit instructions");
     let edited = std::time::Instant::now();
@@ -865,8 +869,10 @@ async fn a_reload_does_not_wait_for_a_provider_slow_to_list_its_models() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert_eq!(line_count(&reloads), 1, "the edit did not reload");
+    // A reload that waited would take the list's 10 s; a debug build on a
+    // busy machine takes a second or two without waiting.
     assert!(
-        edited.elapsed() < Duration::from_millis(2500),
+        edited.elapsed() < Duration::from_secs(5),
         "the reload waited {:?} for the model list",
         edited.elapsed()
     );

@@ -2923,7 +2923,14 @@ impl AgentRuntime {
                     self.publish_input_queue(id).await?;
                     Ok(Some(turn))
                 }
-                Err(CoreError::Conflict(_)) if self.active.contains_key(&id) => Ok(None),
+                // Another turn was running: the message waits in the queue,
+                // and that turn's end runs it. It reads the queue only once it
+                // has left `active`, so this holds though it has ended since.
+                Err(CoreError::Conflict(message))
+                    if message == crate::CHAT_BUSY || self.active.contains_key(&id) =>
+                {
+                    Ok(None)
+                }
                 Err(CoreError::Conflict(_))
                     if selected.is_none()
                         && self.input_queue(id).await?.revision != queue.revision =>
@@ -7794,9 +7801,7 @@ fn script_readable(
     move |path| {
         let read = format!("read:{}", path.display());
         let inside = path.starts_with(&workspace)
-            || workspace
-                .canonicalize()
-                .is_ok_and(|root| path.starts_with(root));
+            || dunce::canonicalize(&workspace).is_ok_and(|root| path.starts_with(root));
         engine.evaluate(&read) == PermissionDecision::Allow
             && skill
                 .as_ref()
@@ -7836,7 +7841,7 @@ async fn script_for_person(
 /// counts too.
 fn script_changed(path: &str, workspace: &Path) -> String {
     let path = Path::new(path);
-    let canonical = workspace.canonicalize().ok();
+    let canonical = dunce::canonicalize(workspace).ok();
     let shown = path
         .strip_prefix(workspace)
         .ok()
@@ -15803,9 +15808,7 @@ fn patch_paths(operation: &crate::patch::FileOp) -> Vec<(&str, ExternalPathKind)
 }
 
 fn resolved_pattern(workspace: &Path, target: &str, resolved: &Path) -> Option<String> {
-    let root = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
+    let root = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     // `~/notes.txt` names the file in the home folder, which leads nowhere else.
     let expanded = crate::permissions::expand_home(target);
     let given = Path::new(expanded.as_ref());
@@ -15826,12 +15829,23 @@ fn resolved_pattern(workspace: &Path, target: &str, resolved: &Path) -> Option<S
             if relative.as_os_str().is_empty() {
                 ".".to_owned()
             } else {
-                relative.to_string_lossy().into_owned()
+                rule_spelling(relative)
             }
         }
         _ => resolved.to_string_lossy().into_owned(),
     };
     (pattern != target).then_some(pattern)
+}
+
+/// A project-relative path as rules spell it, with `/` between folders:
+/// Windows writes `\`, which a rule such as `vendor/*` would not meet.
+fn rule_spelling(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
 }
 
 mod commands;
@@ -16024,6 +16038,8 @@ mod shell_reading_tests {
         assert!(verdicts(&skill, "sudo rm x").contains(&("rm x".to_owned(), Deny)));
     }
 
+    // POSIX shell text with paths of this system: Windows runs commands in cmd.exe.
+    #[cfg(unix)]
     #[test]
     fn a_line_that_names_where_sign_ins_are_kept_asks_a_person_every_time() {
         use PermissionDecision::{Allow, Ask, Deny};
@@ -16143,7 +16159,7 @@ mod shell_reading_tests {
         std::fs::create_dir_all(root.join("outside")).unwrap();
         std::fs::write(project.join("README.md"), "# x\n").unwrap();
         std::os::unix::fs::symlink(root.join("outside"), project.join("vendor/lib")).unwrap();
-        let outside = root.join("outside").canonicalize().unwrap();
+        let outside = dunce::canonicalize(root.join("outside")).unwrap();
         let asked = |arguments: serde_json::Value| {
             ask_plans("bash", &arguments, &project)
                 .into_iter()
@@ -16171,6 +16187,8 @@ mod shell_reading_tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    // POSIX shell text with paths of this system: Windows runs commands in cmd.exe.
+    #[cfg(unix)]
     #[test]
     fn always_on_a_folder_that_holds_the_project_remembers_only_the_files_asked_about() {
         use PermissionDecision::{Allow, Ask, Deny};
@@ -16179,7 +16197,7 @@ mod shell_reading_tests {
         std::fs::create_dir_all(made.join("home/.ssh")).unwrap();
         std::fs::create_dir_all(made.join("home/other")).unwrap();
         std::fs::write(made.join("home/.gitconfig"), "[user]\n").unwrap();
-        let home = made.join("home").canonicalize().unwrap();
+        let home = dunce::canonicalize(made.join("home")).unwrap();
         let project = home.join("work/app");
         let file = |name: &str| home.join(name).display().to_string();
         let folder = |name: &str| format!("{}/*", home.join(name).display());
@@ -16490,9 +16508,7 @@ fn external_path_request(
     } else {
         crate::permissions::resolve_permission_path(workspace, value)
     };
-    let root = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
+    let root = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     if path.starts_with(root) {
         return None;
     }
@@ -16558,8 +16574,11 @@ fn outside_pattern(workspace: &Path, folder: &str, named: Option<(&Path, Named)>
 /// written or where it really is, lies inside `folder`, as written or where
 /// it really is.
 fn holds_project(workspace: &Path, folder: &Path) -> bool {
-    let folders = [Some(folder.to_path_buf()), folder.canonicalize().ok()];
-    let projects = [Some(workspace.to_path_buf()), workspace.canonicalize().ok()];
+    let folders = [Some(folder.to_path_buf()), dunce::canonicalize(folder).ok()];
+    let projects = [
+        Some(workspace.to_path_buf()),
+        dunce::canonicalize(workspace).ok(),
+    ];
     folders.iter().flatten().any(|folder| {
         projects
             .iter()
@@ -19340,10 +19359,16 @@ mod tests {
 
     #[test]
     fn workflow_create_requires_both_workflow_and_edit_authority() {
+        // Absolute here: Windows needs a drive.
+        let workspace = if cfg!(windows) {
+            "C:/workspace"
+        } else {
+            "/workspace"
+        };
         let plans = super::ask_plans(
             "workflow",
             &json!({"action":"create","name":"release"}),
-            std::path::Path::new("/workspace"),
+            std::path::Path::new(workspace),
         );
         assert_eq!(plans.len(), 2);
         assert_eq!(plans[0].permission, "workflow");
@@ -19405,6 +19430,8 @@ mod tests {
         assert!(plans.iter().any(|plan| plan.permission == "read"));
     }
 
+    // /tmp, as Unix systems have it (a link to /private/tmp on macOS).
+    #[cfg(unix)]
     #[test]
     fn external_filesystem_paths_are_gated_before_the_tool_permission() {
         let plans = super::ask_plans(
@@ -19420,7 +19447,7 @@ mod tests {
         assert_eq!(plans[1].permission, "list");
         assert_eq!(plans[1].patterns[0], "/tmp");
         // Where a linked folder really is (macOS's /tmp is /private/tmp).
-        let real = std::path::Path::new("/tmp").canonicalize().unwrap();
+        let real = dunce::canonicalize(std::path::Path::new("/tmp")).unwrap();
         if real != std::path::Path::new("/tmp") {
             assert_eq!(plans[1].patterns[1..], [real.display().to_string()]);
         }
@@ -19428,13 +19455,15 @@ mod tests {
 
     #[test]
     fn a_tool_path_in_the_home_folder_asks_for_that_folder() {
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap();
-        let home = home.canonicalize().unwrap_or(home);
-        let workspace =
-            std::env::temp_dir().join(format!("haarness-tilde-{}", uuid::Uuid::now_v7()));
+        // A home folder of its own beside the project: one that holds the
+        // project (Windows keeps its temporary folder in the home folder)
+        // is asked about for the file alone.
+        let root = std::env::temp_dir().join(format!("haarness-tilde-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
         std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let home = dunce::canonicalize(root.join("home")).unwrap();
+        let _home = crate::permissions::TestHome::set(&home);
         for (tool, arguments) in [
             ("read", json!({"path":"~/notes.txt"})),
             ("write", json!({"path":"~/Desktop/notes.md","content":"x"})),
@@ -19470,7 +19499,7 @@ mod tests {
             assert_eq!(plans[1].patterns, vec![target.to_owned()], "{tool}");
             assert!(plans[1].resolved.is_empty(), "{tool}");
         }
-        std::fs::remove_dir_all(workspace).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// A hook that refuses files in a home folder by their absolute path
@@ -19517,8 +19546,8 @@ mod tests {
                 detail: &serde_json::Value,
             ) -> crate::HookDecision {
                 self.1.lock().push((patterns.to_vec(), detail.clone()));
-                let home = self.0.to_string_lossy().into_owned();
-                let under = |value: &str| value.starts_with(&format!("{home}/"));
+                // Component by component: Windows writes `\\` between folders.
+                let under = |value: &str| std::path::Path::new(value).starts_with(&self.0);
                 let denied = patterns.iter().any(|pattern| under(pattern))
                     || detail["path"].as_str().is_some_and(under);
                 crate::HookDecision {
@@ -19537,8 +19566,8 @@ mod tests {
         let workspace = root.join("work/project");
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(root.join("home")).unwrap();
-        let home = root.join("home").canonicalize().unwrap();
-        let workspace = workspace.canonicalize().unwrap();
+        let home = dunce::canonicalize(root.join("home")).unwrap();
+        let workspace = dunce::canonicalize(&workspace).unwrap();
         let _home = crate::permissions::TestHome::set(&home);
         let hook = DenyHome(home.clone(), parking_lot::Mutex::new(Vec::new()));
         let call = crate::HookCall::new(ThreadId::new());
@@ -19576,6 +19605,8 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    // /tmp, as Unix systems have it (a link to /private/tmp on macOS).
+    #[cfg(unix)]
     #[test]
     fn lsp_uses_file_path_for_tool_and_external_directory_permissions() {
         let plans = super::ask_plans(
@@ -19647,8 +19678,7 @@ mod tests {
         assert!(asks);
         assert_eq!(
             patterns[1],
-            workspace
-                .canonicalize()
+            dunce::canonicalize(&workspace)
                 .unwrap()
                 .join(".env")
                 .display()
@@ -19852,7 +19882,7 @@ mod tests {
         // A move still reads through the link, so the folder it leads to is
         // asked about and its target meets the rules, as before.
         let moved = plans("*** Update File: out.txt\n*** Move to: copy.txt\n@@\n-x\n+y\n");
-        let outside_folder = outside.canonicalize().unwrap();
+        let outside_folder = dunce::canonicalize(&outside).unwrap();
         assert_eq!(moved[0].permission, "external_directory");
         assert_eq!(
             moved[0].external_paths,

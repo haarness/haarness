@@ -356,9 +356,7 @@ impl InstructionDiscovery {
             if seen.len() >= NESTED_INSTRUCTION_LIMIT {
                 break;
             }
-            let key = candidate
-                .canonicalize()
-                .unwrap_or_else(|_| candidate.clone());
+            let key = dunce::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
             if seen.contains(&key) {
                 continue;
             }
@@ -785,10 +783,8 @@ impl Tool for LspTool {
         };
         let requested = string(&arguments, "filePath")?;
         let file = haarness_core::resolve_permission_path(&context.workspace, requested);
-        let root = context
-            .workspace
-            .canonicalize()
-            .unwrap_or_else(|_| context.workspace.clone());
+        let root =
+            dunce::canonicalize(&context.workspace).unwrap_or_else(|_| context.workspace.clone());
         if !file.starts_with(root) && !context.authorized_external_paths.contains(&file) {
             return Err(CoreError::Invalid(
                 "LSP path is outside the workspace and was not authorized".into(),
@@ -829,9 +825,7 @@ fn required_u32(arguments: &Value, name: &str) -> CoreResult<u32> {
 }
 
 fn language_path(workspace: &Path, requested: &str) -> Option<PathBuf> {
-    let workspace = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
+    let workspace = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     let resolved = haarness_core::resolve_permission_path(&workspace, requested);
     resolved.starts_with(&workspace).then_some(resolved)
 }
@@ -929,9 +923,7 @@ async fn refresh_formatted_diffs(
 
 fn append_language_report(output: &mut ToolOutput, workspace: &Path, reports: &[FileReport]) {
     let mut lines = Vec::new();
-    let workspace = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
+    let workspace = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     for report in reports {
         let file = report
             .file
@@ -1876,15 +1868,15 @@ fn in_folder(schedule: &haarness_scheduler::Schedule, folder: &Path) -> bool {
     schedule
         .directory
         .as_deref()
-        .and_then(|directory| directory.canonicalize().ok())
+        .and_then(|directory| dunce::canonicalize(directory).ok())
         .is_some_and(|directory| directory == folder)
 }
 
 /// The call's working folder when it is a chat's own folder rather than the
 /// project folder `project`.
 fn chat_folder(project: &Path, context: &ToolContext) -> Option<PathBuf> {
-    let project = project.canonicalize().ok()?;
-    let folder = context.workspace.canonicalize().ok()?;
+    let project = dunce::canonicalize(project).ok()?;
+    let folder = dunce::canonicalize(&context.workspace).ok()?;
     (folder != project).then_some(folder)
 }
 
@@ -2380,16 +2372,22 @@ async fn create_workflow_file(
                 .into(),
         ));
     }
-    let workspace = tokio::fs::canonicalize(workspace)
-        .await
-        .map_err(tool_error)?;
+    let workspace = dunce::simplified(
+        &tokio::fs::canonicalize(workspace)
+            .await
+            .map_err(tool_error)?,
+    )
+    .to_path_buf();
     let directory = workspace.join(".haarness/workflows");
     tokio::fs::create_dir_all(&directory)
         .await
         .map_err(tool_error)?;
-    let canonical_directory = tokio::fs::canonicalize(&directory)
-        .await
-        .map_err(tool_error)?;
+    let canonical_directory = dunce::simplified(
+        &tokio::fs::canonicalize(&directory)
+            .await
+            .map_err(tool_error)?,
+    )
+    .to_path_buf();
     if !canonical_directory.starts_with(&workspace) {
         return Err(CoreError::PermissionDenied(
             "workflow directory escapes the workspace".into(),
@@ -3133,9 +3131,7 @@ impl Tool for BuiltinTool {
                     ));
                 }
                 let pattern = root.join(pattern).to_string_lossy().into_owned();
-                let workspace = context
-                    .workspace
-                    .canonicalize()
+                let workspace = dunce::canonicalize(&context.workspace)
                     .unwrap_or_else(|_| context.workspace.clone());
                 // A file a `read` rule denies is left out like a secret one.
                 let rules = context
@@ -4021,9 +4017,11 @@ fn unchanged(error: CoreError, several: bool) -> CoreError {
 // Paths resolve where the call works (`ToolContext::workspace`): a chat's own
 // folder, or the project folder.
 fn resolve_existing(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
-    let path = haarness_core::resolve_permission_path(&context.workspace, value)
-        .canonicalize()
-        .map_err(tool_error)?;
+    let path = dunce::canonicalize(haarness_core::resolve_permission_path(
+        &context.workspace,
+        value,
+    ))
+    .map_err(tool_error)?;
     ensure_within(path, context)
 }
 /// A file the tool removes (a delete, the old name of a move): a link
@@ -4039,7 +4037,7 @@ fn resolve_new(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
     }
     let joined = haarness_core::resolve_permission_path(&context.workspace, value);
     if joined.exists() {
-        return ensure_within(joined.canonicalize().map_err(tool_error)?, context);
+        return ensure_within(dunce::canonicalize(&joined).map_err(tool_error)?, context);
     }
     if std::fs::symlink_metadata(&joined).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(CoreError::PermissionDenied(format!(
@@ -4053,11 +4051,10 @@ fn resolve_new(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
     ensure_within(joined, context)
 }
 fn ensure_within(path: PathBuf, context: &ToolContext) -> CoreResult<PathBuf> {
-    let root = context.workspace.canonicalize().map_err(tool_error)?;
+    let root = dunce::canonicalize(&context.workspace).map_err(tool_error)?;
     let output_root = tool_output_dir();
-    let is_tool_output = output_root
-        .canonicalize()
-        .is_ok_and(|output_root| path.starts_with(output_root));
+    let is_tool_output =
+        dunce::canonicalize(&output_root).is_ok_and(|output_root| path.starts_with(output_root));
     let is_authorized_external = context.authorized_external_paths.contains(&path);
     if !path.starts_with(&root) && !is_tool_output && !is_authorized_external {
         return Err(CoreError::PermissionDenied(format!(
@@ -4186,9 +4183,7 @@ impl SecretFilter {
     ) -> Self {
         Self {
             workspaces: [
-                workspace
-                    .canonicalize()
-                    .unwrap_or_else(|_| workspace.to_path_buf()),
+                dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf()),
                 workspace.to_path_buf(),
             ],
             root: root.to_path_buf(),
@@ -4240,7 +4235,7 @@ impl SecretFilter {
     /// [`Self::names_hidden`], or a link that leads to a file left out.
     fn hides(&self, path: &Path) -> Option<Hidden> {
         self.names_hidden(path).or_else(|| {
-            std::fs::canonicalize(path)
+            dunce::canonicalize(path)
                 .ok()
                 .filter(|target| target != path)
                 .and_then(|target| self.judge(&target))
@@ -4330,7 +4325,7 @@ fn glob_walk(
         // is left out, as a list of that folder would ask first.
         let parent = path.parent().unwrap_or(&scope.root).to_path_buf();
         let inside = *folders.entry(parent).or_insert_with_key(|parent| {
-            parent.canonicalize().is_ok_and(|real| {
+            dunce::canonicalize(parent).is_ok_and(|real| {
                 real.starts_with(&scope.root) || real.starts_with(&scope.workspace)
             })
         });
@@ -4346,12 +4341,13 @@ fn glob_walk(
             found.skipped.count(hidden);
             continue;
         }
-        found.values.push(
-            path.strip_prefix(&scope.named)
-                .unwrap_or(&path)
-                .display()
-                .to_string(),
-        );
+        // Relative with `/`, as grep and the file listing write it (Windows
+        // writes `\\`); a path outside the folder as the system does.
+        found.values.push(match path.strip_prefix(&scope.named) {
+            Ok(relative) if cfg!(windows) => relative.to_string_lossy().replace('\\', "/"),
+            Ok(relative) => relative.display().to_string(),
+            Err(_) => path.display().to_string(),
+        });
     }
     match walk.cut() {
         Some(crate::bounded_glob::Cut::Stopped) => return Err(CoreError::Cancelled),
@@ -4449,7 +4445,7 @@ fn same_file(left: &Path, right: &Path) -> bool {
     #[cfg(not(unix))]
     {
         matches!(
-            (left.canonicalize(), right.canonicalize()),
+            (dunce::canonicalize(left), dunce::canonicalize(right)),
             (Ok(left), Ok(right)) if left == right
         )
     }
@@ -5181,9 +5177,9 @@ fn output_preview(text: &str) -> String {
 pub(crate) fn within_chat_home(path: &Path, chat_home: Option<&Path>) -> bool {
     chat_home.is_some_and(|home| {
         path.starts_with(home)
-            || path
-                .canonicalize()
-                .is_ok_and(|path| home.canonicalize().is_ok_and(|home| path.starts_with(home)))
+            || dunce::canonicalize(path).is_ok_and(|path| {
+                dunce::canonicalize(home).is_ok_and(|home| path.starts_with(home))
+            })
     })
 }
 
@@ -5205,6 +5201,9 @@ mod tests {
     use haarness_protocol::{ThreadId, TurnId};
     use haarness_workflow_catalog::WorkflowCatalog;
     use tokio_util::sync::CancellationToken;
+
+    /// The Python fixtures run with: Windows has no `python3` command.
+    const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
 
     type MediaRequests = Arc<parking_lot::Mutex<Vec<(HeaderMap, Value)>>>;
 
@@ -5228,7 +5227,7 @@ mod tests {
                 servers: std::collections::BTreeMap::from([(
                     "mock".into(),
                     haarness_language::LspServerConfig {
-                        command: vec!["python3".into(), language_fixture("mock_lsp.py")],
+                        command: vec![PYTHON.into(), language_fixture("mock_lsp.py")],
                         extensions: vec![".mock".into()],
                         ..haarness_language::LspServerConfig::default()
                     },
@@ -5242,7 +5241,7 @@ mod tests {
                     "mockfmt".into(),
                     haarness_language::FormatterDefinition {
                         command: vec![
-                            "python3".into(),
+                            PYTHON.into(),
                             language_fixture("mock_formatter.py"),
                             "$FILE".into(),
                         ],
@@ -5275,7 +5274,7 @@ mod tests {
         std::fs::write(root.join("crates/AGENTS.md"), "CRATE_RULES").unwrap();
         std::fs::write(root.join("crates/api/CLAUDE.md"), "CLAUDE_RULES").unwrap();
         std::fs::write(root.join("crates/api/src/lib.rs"), "fn api() {}").unwrap();
-        let workspace = root.canonicalize().unwrap();
+        let workspace = dunce::canonicalize(&root).unwrap();
 
         let registry = NativeToolRegistry::new(workspace.clone());
         let read = registry.get("read").unwrap();
@@ -5329,10 +5328,7 @@ mod tests {
         let loaded = with_claude.metadata["loaded"].as_array().unwrap();
         assert_eq!(loaded.len(), 2);
         assert!(
-            loaded[0]
-                .as_str()
-                .unwrap()
-                .ends_with("crates/api/CLAUDE.md"),
+            Path::new(loaded[0].as_str().unwrap()).ends_with("crates/api/CLAUDE.md"),
             "nearest first"
         );
         std::fs::remove_dir_all(root).unwrap();
@@ -5362,7 +5358,7 @@ mod tests {
         std::fs::write(root.join("crates/AGENTS.md"), "CRATE_RULES").unwrap();
         std::fs::write(root.join("crates/api/src/lib.rs"), "fn api() {}").unwrap();
         std::fs::write(root.join("crates/api/src/main.rs"), "fn main() {}").unwrap();
-        let workspace = root.canonicalize().unwrap();
+        let workspace = dunce::canonicalize(&root).unwrap();
         let registry = NativeToolRegistry::new(workspace.clone());
         let read = registry.get("read").unwrap();
         let view = haarness_core::instructions::InContext::default();
@@ -5414,7 +5410,7 @@ mod tests {
         assert_eq!(pdf_output.metadata["mime"], "application/pdf");
         assert_eq!(
             pdf_output.metadata["attachments"][0],
-            pdf.canonicalize().unwrap().display().to_string()
+            dunce::canonicalize(&pdf).unwrap().display().to_string()
         );
 
         let audio_output = registry
@@ -5427,7 +5423,7 @@ mod tests {
         assert_eq!(audio_output.metadata["mime"], "audio/mpeg");
         assert_eq!(
             audio_output.metadata["attachments"][0],
-            audio.canonicalize().unwrap().display().to_string()
+            dunce::canonicalize(&audio).unwrap().display().to_string()
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -5469,8 +5465,7 @@ mod tests {
         assert_eq!(kept.metadata["mime"], "image/png");
         assert_eq!(
             kept.metadata["attachments"][0],
-            root.join("dot.png")
-                .canonicalize()
+            dunce::canonicalize(root.join("dot.png"))
                 .unwrap()
                 .display()
                 .to_string()
@@ -5968,7 +5963,7 @@ mod tests {
                 "trigger": {"type": "cron", "expression": "0 8 * * *"}
             })
         };
-        let canonical = folder.canonicalize().unwrap();
+        let canonical = dunce::canonicalize(&folder).unwrap();
         let in_folder = tool
             .execute(create("from-chat"), context(&folder))
             .await
@@ -5979,7 +5974,10 @@ mod tests {
         );
         assert_eq!(
             in_folder.metadata["schedule"]["workspace"],
-            workspace.canonicalize().unwrap().display().to_string()
+            dunce::canonicalize(&workspace)
+                .unwrap()
+                .display()
+                .to_string()
         );
         let in_project = tool
             .execute(create("from-project"), context(&workspace))
@@ -6192,8 +6190,7 @@ export default workflow({
         let path = PathBuf::from(created["path"].as_str().unwrap());
         assert_eq!(
             path,
-            workspace
-                .canonicalize()
+            dunce::canonicalize(&workspace)
                 .unwrap()
                 .join(".haarness/workflows/safe-audit.ts")
         );
@@ -6240,7 +6237,12 @@ export default workflow({
             .get("bash")
             .unwrap()
             .execute(
-                json!({"command":"pwd; exit 7", "timeout":10_000, "workdir":"nested"}),
+                // Windows runs a command in cmd.exe, where `cd` prints the folder.
+                json!({
+                    "command": if cfg!(windows) { "cd & exit 7" } else { "pwd; exit 7" },
+                    "timeout": 10_000,
+                    "workdir": "nested"
+                }),
                 context.clone(),
             )
             .await
@@ -7016,7 +7018,7 @@ export default workflow({
             return;
         };
         // The mount itself and a folder without letters below it.
-        let sensitive = PathBuf::from(sensitive).canonicalize().unwrap();
+        let sensitive = dunce::canonicalize(PathBuf::from(sensitive)).unwrap();
         let digits = sensitive.join(std::process::id().to_string());
         std::fs::create_dir(&digits).unwrap();
         assert!(!folds_case(&digits));
@@ -7066,7 +7068,7 @@ export default workflow({
         for name in ["a.txt", "b.txt"] {
             std::fs::write(workspace.join(name), "one\ntwo\n").unwrap();
         }
-        let workspace = workspace.canonicalize().unwrap();
+        let workspace = dunce::canonicalize(&workspace).unwrap();
         let registry = NativeToolRegistry::new(workspace.clone());
         // Another call holds both files, so both patches queue for them.
         let held = crate::file_lock::lock(
@@ -7123,7 +7125,7 @@ export default workflow({
                 servers: std::collections::BTreeMap::from([(
                     "slow".into(),
                     haarness_language::LspServerConfig {
-                        command: vec!["python3".into(), language_fixture("mock_lsp.py")],
+                        command: vec![PYTHON.into(), language_fixture("mock_lsp.py")],
                         extensions: vec![".mock".into()],
                         environment: std::collections::BTreeMap::from([(
                             "INIT_DELAY".into(),
@@ -7232,7 +7234,7 @@ export default workflow({
 
         // A call waiting for a file another call holds ends on Stop.
         let held = crate::file_lock::lock(
-            [workspace.join("notes.slow").canonicalize().unwrap()],
+            [dunce::canonicalize(workspace.join("notes.slow")).unwrap()],
             &CancellationToken::new(),
         )
         .await
@@ -7469,11 +7471,9 @@ export default workflow({
             .await;
         assert!(matches!(denied, Err(CoreError::PermissionDenied(_))));
 
-        context.authorized_external_paths.push(
-            external
-                .canonicalize()
-                .expect("external test directory canonicalizes"),
-        );
+        context
+            .authorized_external_paths
+            .push(dunce::canonicalize(&external).expect("external test directory canonicalizes"));
         let allowed = registry
             .get("list")
             .unwrap()
@@ -7572,7 +7572,7 @@ export default workflow({
         }
         std::fs::create_dir_all(workspace.join("conf.env.d")).unwrap();
         // Results name paths relative to the workspace only under its real path.
-        let workspace = workspace.canonicalize().unwrap();
+        let workspace = dunce::canonicalize(&workspace).unwrap();
         // Every file holds the needle and its own name.
         for file in [
             ".env",
@@ -7736,8 +7736,10 @@ export default workflow({
     }
 
     /// An agent turn whose rules deny reading `private/*`.
+    #[cfg(unix)]
     struct DenyPrivate(PathBuf);
 
+    #[cfg(unix)]
     #[async_trait]
     impl haarness_core::ToolInvoker for DenyPrivate {
         async fn invoke(&self, _name: &str, _arguments: Value) -> CoreResult<ToolOutput> {
@@ -7765,7 +7767,7 @@ export default workflow({
         std::fs::create_dir_all(workspace.join("private")).unwrap();
         std::fs::create_dir_all(workspace.join("public")).unwrap();
         // Search output names files relative to the workspace as configured.
-        let workspace = workspace.canonicalize().unwrap();
+        let workspace = dunce::canonicalize(&workspace).unwrap();
         for file in [
             "private/key.txt",
             "private/notes.md",
@@ -7853,7 +7855,7 @@ export default workflow({
         let workspace =
             std::env::temp_dir().join(format!("haarness-search-sign-ins-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(workspace.join("data")).unwrap();
-        let workspace = workspace.canonicalize().unwrap();
+        let workspace = dunce::canonicalize(&workspace).unwrap();
         for file in [
             "data/auth.json",
             "data/auth.json.lock",
@@ -7956,8 +7958,7 @@ export default workflow({
     #[cfg(unix)]
     #[tokio::test]
     async fn a_glob_stays_in_the_folder_it_searches() {
-        let root = std::env::temp_dir()
-            .canonicalize()
+        let root = dunce::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!("haarness-glob-scope-{}", uuid::Uuid::now_v7()));
         let workspace = root.join("workspace");
@@ -8036,6 +8037,7 @@ export default workflow({
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     fn limits(matches: usize) -> GlobLimits {
         GlobLimits {
             matches,
@@ -8046,8 +8048,7 @@ export default workflow({
     #[cfg(unix)]
     #[test]
     fn a_glob_over_links_back_up_the_tree_ends() {
-        let workspace = std::env::temp_dir()
-            .canonicalize()
+        let workspace = dunce::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!("haarness-glob-loops-{}", uuid::Uuid::now_v7()));
         for file in ["top.txt", "a/note.txt", "p/x.txt", "q/y.txt"] {
@@ -8099,8 +8100,7 @@ export default workflow({
     #[cfg(unix)]
     #[test]
     fn a_glob_stops_at_its_budget_of_entries_read_through_links_and_says_so() {
-        let root = std::env::temp_dir()
-            .canonicalize()
+        let root = dunce::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!("haarness-glob-entries-{}", uuid::Uuid::now_v7()));
         let workspace = root.join("workspace");
@@ -8137,6 +8137,7 @@ export default workflow({
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     fn limits_entries(entries: usize) -> GlobLimits {
         GlobLimits {
             matches: 1_000,
@@ -8147,8 +8148,7 @@ export default workflow({
     #[cfg(unix)]
     #[test]
     fn a_glob_through_a_link_out_of_the_project_stops_at_its_budget_and_on_stop() {
-        let root = std::env::temp_dir()
-            .canonicalize()
+        let root = dunce::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!("haarness-glob-budget-{}", uuid::Uuid::now_v7()));
         let workspace = root.join("workspace");
@@ -8219,11 +8219,11 @@ export default workflow({
         );
         assert_eq!(
             workflow_path(workspace, "flows/check.ts"),
-            "/work/project/flows/check.ts"
+            workspace.join("flows/check.ts").display().to_string()
         );
         assert_eq!(
             workflow_path(workspace, "./~/check.ts"),
-            "/work/project/./~/check.ts"
+            workspace.join("./~/check.ts").display().to_string()
         );
     }
 
@@ -8247,7 +8247,7 @@ export default workflow({
     fn read_fixture(name: &str, body: &[u8]) -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!("haarness-read-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         std::fs::write(root.join(name), body).unwrap();
         (root.clone(), root.join(name))
     }
@@ -8265,7 +8265,7 @@ export default workflow({
     async fn read_shows_the_head_of_a_line_that_never_ends() {
         let root = std::env::temp_dir().join(format!("haarness-read-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         // 40 MiB on one line, as a minified bundle or a JSON dump.
         {
             use std::io::Write as _;
@@ -8486,8 +8486,9 @@ export default workflow({
             refused.to_string().contains("holds binary data"),
             "{refused}"
         );
-        std::fs::write(root.join("nul.txt"), b"a\x00b\n").unwrap();
-        let shown = read_text_of(&root, json!({"path":"nul.txt"}))
+        // Not `nul.txt`: Windows reads a file name NUL as its null device.
+        std::fs::write(root.join("zero-byte.txt"), b"a\x00b\n").unwrap();
+        let shown = read_text_of(&root, json!({"path":"zero-byte.txt"}))
             .await
             .unwrap();
         assert_eq!(shown.text, "a\u{0}b");
@@ -8499,7 +8500,7 @@ export default workflow({
     async fn read_refuses_a_pipe_rather_than_waiting_on_it() {
         let root = std::env::temp_dir().join(format!("haarness-read-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         assert!(
             std::process::Command::new("mkfifo")
                 .arg(root.join("pipe"))
@@ -8637,7 +8638,7 @@ export default workflow({
     async fn grep_leaves_the_async_workers_free_and_stop_ends_it() {
         let root = std::env::temp_dir().join(format!("haarness-grep-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let line = format!("{}\n", "w".repeat(200));
         for index in 0..4_000 {
             std::fs::write(root.join(format!("f{index}.txt")), line.repeat(20)).unwrap();

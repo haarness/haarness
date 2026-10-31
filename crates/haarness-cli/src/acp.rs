@@ -313,11 +313,26 @@ impl Service {
         // the turn are skipped below, so each request is taken once.
         self.refresh_pending(thread, &mut approvals, &mut children)
             .await;
+        // A turn that ends while the client shows a request (a background
+        // subagent's, say) leaves it up until it is answered or settled, so
+        // the person's answer is not lost; nothing else is shown meanwhile.
+        let mut ended = None;
         let result = async {
             loop {
-                self.show_next(&mut approvals, &request.session_id, connection, &calls)
-                    .await;
+                if ended.is_none() {
+                    self.show_next(&mut approvals, &request.session_id, connection, &calls)
+                        .await;
+                } else {
+                    // A cancel has no turn left to interrupt.
+                    self.active
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&key);
+                }
                 let showing = approvals.shown.is_some();
+                if !showing && let Some(turn) = ended.take() {
+                    break finish(turn);
+                }
                 let next = tokio::select! {
                     answer = async {
                         match approvals.shown.as_mut() {
@@ -431,17 +446,20 @@ impl Service {
                             continue;
                         }
                         if event.event_type == "turn.finished" {
-                            let finished = serde_json::from_value::<Turn>(event.payload.clone())
-                                .map_err(internal)?;
-                            break finish(finished);
+                            ended = Some(
+                                serde_json::from_value::<Turn>(event.payload.clone())
+                                    .map_err(internal)?,
+                            );
                         }
                     }
                     // Events may have been missed: requests raised or settled
                     // meanwhile are read again from the server.
                     SubscriptionEvent::ResyncRequired(_) => {
-                        let current = self.client.turn(turn.id).await.map_err(internal)?;
-                        if !matches!(current.status, TurnStatus::Queued | TurnStatus::Running) {
-                            break finish(current);
+                        if ended.is_none() {
+                            let current = self.client.turn(turn.id).await.map_err(internal)?;
+                            if !matches!(current.status, TurnStatus::Queued | TurnStatus::Running) {
+                                ended = Some(current);
+                            }
                         }
                         self.refresh_pending(thread, &mut approvals, &mut children)
                             .await;
@@ -497,8 +515,7 @@ impl Service {
                 "Haarness ACP does not yet support additionalDirectories",
             ));
         }
-        let actual = cwd
-            .canonicalize()
+        let actual = dunce::canonicalize(cwd)
             .map_err(|error| invalid(format!("cannot resolve ACP cwd: {error}")))?;
         if actual != self.workspace {
             return Err(invalid(format!(

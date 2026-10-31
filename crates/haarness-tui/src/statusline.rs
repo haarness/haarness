@@ -209,12 +209,21 @@ mod tests {
         );
     }
 
+    /// A POSIX shell script as a status line command: in `sh`, which Git
+    /// brings on Windows, where a shell command goes to cmd.exe.
+    fn posix(script: &str) -> StatusLineCommand {
+        if cfg!(windows) {
+            StatusLineCommand::Argv(vec!["sh".into(), "-c".into(), script.into()])
+        } else {
+            StatusLineCommand::Shell(script.into())
+        }
+    }
+
     #[tokio::test]
     async fn command_receives_context_and_strips_ansi() {
         let config = StatusLineConfig {
-            command: StatusLineCommand::Shell(
-                "read payload; printf '\\033]0;title\\007\\033[31mcontext:%s\\033[0m\\nignored\\n' \"$payload\""
-                    .into(),
+            command: posix(
+                "read payload; printf '\\033]0;title\\007\\033[31mcontext:%s\\033[0m\\nignored\\n' \"$payload\"",
             ),
             refresh_ms: 250,
             timeout_ms: 2_000,
@@ -240,9 +249,8 @@ mod tests {
     #[tokio::test]
     async fn a_line_of_only_escape_sequences_gives_way_to_the_next() {
         let config = StatusLineConfig {
-            command: StatusLineCommand::Shell(
-                "cat >/dev/null; printf '\\033]2;branch\\007\\033[1m\\nmain \\342\\234\\223\\n'"
-                    .into(),
+            command: posix(
+                "cat >/dev/null; printf '\\033]2;branch\\007\\033[1m\\nmain \\342\\234\\223\\n'",
             ),
             refresh_ms: 250,
             timeout_ms: 2_000,

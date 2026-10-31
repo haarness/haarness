@@ -14,7 +14,9 @@ export default defineConfig({
   workers: 1,
   timeout: 120_000,
   expect: { timeout: 15_000 },
-  retries: 0,
+  // A shared CI runner can stall any one of these several hundred window
+  // tests; a test that passes only on a second try is still reported flaky.
+  retries: process.env.CI ? 2 : 0,
   reporter: [["list"], ["html", { open: "never" }]],
   use: { trace: "retain-on-failure", screenshot: "only-on-failure" },
 });

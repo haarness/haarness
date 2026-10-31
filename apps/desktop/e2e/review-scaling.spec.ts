@@ -358,9 +358,7 @@ test("large review navigation, comments, layouts and refresh remain usable", asy
   await expect(
     page.locator(".diff-file").last().locator("header strong"),
   ).toHaveText(fileName(count - 1));
-  await expect(page.locator(".diff-file").last()).toContainText(
-    "before line 50",
-  );
+  // Its last line, once in view: the pane can still grow after one scroll.
   async function visibleEnd(scroll = true) {
     await expect
       .poll(async () => {

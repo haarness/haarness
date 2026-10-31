@@ -38,9 +38,7 @@ pub(crate) const STAMP: &str = ".auto-update-checked";
 /// The stamp of `workspace`'s own round, kept under the data folder.
 pub(crate) fn project_stamp(data: &Path, workspace: &Path) -> std::path::PathBuf {
     use sha2::{Digest, Sha256};
-    let path = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
+    let path = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     let digest = format!("{:x}", Sha256::digest(path.to_string_lossy().as_bytes()));
     data.join("auto-update")
         .join(format!("{}.checked", &digest[..24]))

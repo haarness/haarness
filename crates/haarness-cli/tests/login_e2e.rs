@@ -66,6 +66,7 @@ async fn device_label(desktop: bool) -> String {
         .args(["login", "--json", "--no-browser", "--device"])
         .current_dir(std::env::temp_dir())
         .env_clear()
+        .envs(windows_env())
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", directory.0.join("home"))
         .env("HAARNESS_DATA_DIR", directory.0.join("data"))
@@ -116,4 +117,13 @@ async fn login_names_the_sign_in_after_this_computer_and_the_app() {
         device_label(true).await,
         haarness_account::device_label(true, &computer)
     );
+}
+
+/// What a cleared environment keeps for Windows, whose programs must know
+/// where Windows is: without `SystemRoot` not even a socket opens. Nothing
+/// elsewhere.
+fn windows_env() -> impl Iterator<Item = (&'static str, std::ffi::OsString)> {
+    ["SystemRoot", "SystemDrive", "windir"]
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
 }

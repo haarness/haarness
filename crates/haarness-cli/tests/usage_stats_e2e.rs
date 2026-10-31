@@ -58,6 +58,7 @@ fn haarness(directory: &Path, workspace: &Path, cloud: SocketAddr) -> Command {
         .arg(directory.join("data"))
         .current_dir(workspace)
         .env_clear()
+        .envs(windows_env())
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", directory.join("home"))
         .env("XDG_CONFIG_HOME", directory.join("xdg-config"))
@@ -254,4 +255,13 @@ fn walk(root: &Path) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+/// What a cleared environment keeps for Windows, whose programs must know
+/// where Windows is: without `SystemRoot` not even a socket opens. Nothing
+/// elsewhere.
+fn windows_env() -> impl Iterator<Item = (&'static str, std::ffi::OsString)> {
+    ["SystemRoot", "SystemDrive", "windir"]
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
 }

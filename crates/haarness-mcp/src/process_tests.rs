@@ -1,5 +1,8 @@
 use super::*;
 
+/// The Python fixtures run with: Windows has no `python3` command.
+const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
 fn alive(pid: u32) -> bool {
     std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "stat="])
@@ -30,7 +33,7 @@ async fn gone(log: &Path) {
 
 fn config(log: &Path, delay: &str) -> McpConfigureRequest {
     serde_json::from_value(serde_json::json!({
-        "transport":"stdio", "command":"python3",
+        "transport":"stdio", "command": PYTHON,
         "args":[concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/process_tree.py")],
         "env":{"TREE_LOG":log, "INIT_DELAY":delay}, "timeoutMs":5000, "enabled":true,
     }))
