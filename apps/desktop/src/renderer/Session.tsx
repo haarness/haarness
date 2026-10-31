@@ -95,7 +95,7 @@ import {
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import type * as T from "@haarness/sdk";
 import { useApp } from "./state";
-import { Button, Icon, ago, stringify, type IconName } from "./ui";
+import { Button, Icon, ago, stringify } from "./ui";
 import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
 import { watchOpenImages } from "./ImageViewer";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
@@ -145,40 +145,6 @@ const PLAN_TOOLS = ["todo", "todowrite", "todoread"];
 const OPENED_IN_SIGHT = 80;
 /** How long Auto's reviewer runs before the activity line says so. */
 const REVIEW_NOTICE_MS = 800;
-
-/** Four openings for a conversation in the selected project. */
-interface Starter {
-  icon: IconName;
-  label: string;
-  detail: string;
-  text: string;
-}
-const projectStarters: Starter[] = [
-  {
-    icon: "layers",
-    label: "Explore code",
-    detail: t("Explore and understand code"),
-    text: "Explain the architecture of this project",
-  },
-  {
-    icon: "plus",
-    label: "Build a feature",
-    detail: t("Build a new feature, app, or tool"),
-    text: "Help me build a new feature: ",
-  },
-  {
-    icon: "diff",
-    label: "Review changes",
-    detail: t("Review code and suggest changes"),
-    text: "Review the current changes",
-  },
-  {
-    icon: "code",
-    label: "Fix a problem",
-    detail: t("Fix issues and failures"),
-    text: "Help me investigate and fix this issue: ",
-  },
-];
 
 const history = createHistoryStore((key, value) =>
     window.haarness.storage(key, value),
@@ -2387,6 +2353,11 @@ export function Session() {
       run: () => void app.run(() => app.setWorktreeView(group()!.id, true)),
     },
   ]);
+  /** Opens the message box's folder picker, from the heading's project name. */
+  const chooseFolder = () =>
+    conversation
+      .querySelector<HTMLButtonElement>('.composer-folder[aria-haspopup="dialog"]')
+      ?.click();
   const empty = () =>
     !state.selected &&
     editable() &&
@@ -2503,41 +2474,16 @@ export function Session() {
               </div>
               <h2>
                 {/* Where the chat works is the composer's folder chip; the
-                    heading only says it. */}
+                    project's name in the heading opens the same picker. */}
                 <Show
                   when={!project()?.chatHome && (group()?.label ?? project()?.label)}
                   fallback={t("What should we work on?")}
                 >
                   {/* Show calls this once, untracked: the fragment's
                       expression follows a change of language. */}
-                  {(name) => <>{projectHeading(t("What should we work on in {project}?"), name)}</>}
+                  {(name) => <>{projectHeading(t("What should we work on in {project}?"), name, chooseFolder)}</>}
                 </Show>
               </h2>
-              {/* Starters are about code; a chat without a folder starts
-                  from whatever is typed. */}
-              <Show when={project() && !project()!.chatHome}>
-                <div class="suggestions" aria-label={t("Chat starters")}>
-                  <For each={projectStarters}>
-                    {(item) => (
-                      <button
-                        aria-label={t(item.label)}
-                        onClick={() => {
-                          change(t(item.text));
-                          composer.focus();
-                        }}
-                      >
-                        <span class="starter-icon" aria-hidden="true">
-                          <Icon name={item.icon} size="md" />
-                        </span>
-                        <span class="starter-copy">
-                          <strong>{t(item.label)}</strong>
-                          <span>{t(item.detail)}</span>
-                        </span>
-                      </button>
-                    )}
-                  </For>
-                </div>
-              </Show>
               <Show when={project() && !localHintDismissed() && localModel()}>
                 {(local) => (
                   <p class="local-model-hint">
@@ -3279,16 +3225,22 @@ export function Session() {
  * an ellipsis instead of leaving the mark alone on the next line. A Cloud
  * session's title is often a sentence, which must not end in a full stop
  * before the question mark. */
-function projectHeading(template: string, name: () => string) {
+function projectHeading(template: string, name: () => string, choose: () => void) {
   const [before, after = ""] = template.split("{project}");
   const [, glued = "", rest = ""] = /^(\S*)([\s\S]*)$/.exec(after) ?? [];
   return (
     <>
       {before}
       <span class="heading-project">
-        <span class="heading-project-name" title={name()}>
+        <button
+          type="button"
+          class="heading-project-name"
+          title={name()}
+          aria-haspopup="dialog"
+          onClick={choose}
+        >
           {name().replace(/[.!?。！？]+$/u, "")}
-        </span>
+        </button>
         {glued}
       </span>
       {rest}

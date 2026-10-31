@@ -241,6 +241,17 @@ function ProjectGroup(props: {
             <Icon name="pin" size="xs" class="project-pin" />
           </Show>
         </button>
+        <Button
+          icon="plus"
+          label={t("New chat in {name}", { name: props.project.label })}
+          onClick={() => {
+            const from = document.activeElement;
+            void app.run(async () => {
+              await app.startChat(primaryLocation(props.project).id);
+              focusComposerWhenShown(from);
+            });
+          }}
+        />
         <MenuButton
           label={t("Project options for {name}", { name: props.project.label })}
           icon="more"
@@ -652,7 +663,7 @@ export function ComputerChats() {
   const app = useApp();
   return (
     <section class="computer-chats" aria-label={t("This computer")}>
-      <div class="section-label sidebar-heading">
+      <div class="section-label sidebar-heading hover-actions">
         <span>{t("This computer")}</span>
         <div class="section-label-actions">
           <Button

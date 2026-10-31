@@ -153,6 +153,8 @@ interface State extends Live {
   preferences: Preferences;
   version: string;
   platform: string;
+  /** The window fills its screen (macOS then hides its window buttons). */
+  fullScreen: boolean;
   /** What Desktop knows about a newer version (see updates.ts). */
   update: UpdateState;
   selected: string;
@@ -251,6 +253,7 @@ function createApp(saved?: Preferences) {
     preferences: { ...defaults, ...saved },
     version: "",
     platform: "",
+    fullScreen: false,
     update: { method: "off", status: "idle", checking: false },
     selected: "",
     tabs: [],
@@ -2580,6 +2583,7 @@ function createApp(saved?: Preferences) {
     applyRecent(value.recent);
     set("version", value.version);
     set("platform", value.platform);
+    set("fullScreen", !!value.fullScreen);
     if (value.update) set("update", reconcile(value.update));
     set("chatHomeAt", value.chatHome);
     void followHomeAtLaunch();
@@ -2625,6 +2629,10 @@ function createApp(saved?: Preferences) {
     }
     if (event.kind === "update") {
       set("update", reconcile(event.data as UpdateState));
+      return;
+    }
+    if (event.kind === "window") {
+      set("fullScreen", !!(event.data as { fullScreen?: unknown })?.fullScreen);
       return;
     }
     if (event.kind === "menu") {

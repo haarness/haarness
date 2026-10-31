@@ -329,7 +329,8 @@ export interface DesktopEvent {
     | "menu"
     | "update"
     | "projects"
-    | "btw";
+    | "btw"
+    | "window";
   connection?: string;
   id?: string;
   data: unknown;
@@ -386,6 +387,8 @@ export interface Bridge {
     servers: SavedServer[];
     version: string;
     platform: string;
+    /** Whether the window fills its screen, which hides macOS's window buttons. */
+    fullScreen: boolean;
     /** This computer's home folder. */
     home: string;
     /** Where the chat home (see `ProjectLocation.chatHome`) is, made or

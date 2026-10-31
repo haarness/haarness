@@ -1176,6 +1176,7 @@ export function App() {
         state.connectionStatus === "Connected"
       }
       data-platform={state.platform}
+      data-fullscreen={state.fullScreen ? "" : undefined}
       style={{
         "--sidebar-width": sidebarShown() ? sidebarWidth() + "px" : "0px",
         "--dock-width": dockWidth() + "px",
@@ -1371,7 +1372,10 @@ export function App() {
             <Show when={state.activeServer === localServer.id}>
               <ComputerChats />
             </Show>
-            <div class="section-label sidebar-heading">
+            <div
+              class="section-label sidebar-heading"
+              classList={{ "hover-actions": projects.ordered().length > 0 }}
+            >
               <span>{t("Projects")}</span>
               <div class="section-label-actions">
                 <Button

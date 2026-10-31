@@ -54,6 +54,15 @@
   padding-left: var(--s2);
   min-width: 46px;
 }
+/* Full screen hides the traffic lights, so their room goes too: the toggle
+   lines up with the sidebar's wordmark and rows below it. */
+.application[data-platform="darwin"][data-fullscreen] .window-toolbar {
+  padding-left: var(--s2);
+  min-width: 46px;
+}
+:root[dir="rtl"] .application[data-platform="darwin"][data-fullscreen] .titlebar {
+  padding-left: 0;
+}
 .titlebar-session {
   min-width: 0;
   flex: 1;
@@ -229,6 +238,21 @@
 .sidebar-heading .icon-button:hover {
   opacity: 1;
 }
+/* A heading's controls wait for the pointer or the keyboard, like a
+   project's; Projects keeps its + in view while it is the only way in. */
+.sidebar-heading.hover-actions .icon-button {
+  opacity: 0;
+}
+.sidebar-heading.hover-actions:hover .icon-button,
+.sidebar-heading.hover-actions:has(:focus-visible) .icon-button,
+.sidebar-heading.hover-actions .icon-button[aria-expanded="true"] {
+  opacity: 0.75;
+}
+.sidebar-heading.hover-actions .icon-button:hover,
+.sidebar-heading.hover-actions .icon-button:focus-visible,
+.sidebar-heading.hover-actions .icon-button[aria-expanded="true"] {
+  opacity: 1;
+}
 
 @property --sidebar-scrollbar-opacity {
   syntax: "<percentage>";
@@ -323,7 +347,7 @@
   opacity: 0;
 }
 .project-section-row:hover > .icon-button,
-.project-section-row:focus-within > .icon-button,
+.project-section-row:has(:focus-visible) > .icon-button,
 .project-section-row > .icon-button[aria-expanded="true"] {
   opacity: 1;
 }
@@ -1549,9 +1573,9 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
   opacity: 0;
 }
 .project-row:hover > .icon-button,
-.project-row:focus-within > .icon-button,
+.project-row:has(:focus-visible) > .icon-button,
 .worktree-row:hover > .icon-button,
-.worktree-row:focus-within > .icon-button,
+.worktree-row:has(:focus-visible) > .icon-button,
 .project-row > .icon-button[aria-expanded="true"],
 .worktree-row > .icon-button[aria-expanded="true"] {
   opacity: 1;

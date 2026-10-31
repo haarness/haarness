@@ -2083,7 +2083,7 @@ test("sidebar sections keep drag and keyboard ordering inside and across groups,
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
 });
 
-test("new-chat starting area is project-aware, responsive, and keeps starter prompts editable", async () => {
+test("new-chat starting area is project-aware, centred with its message box, and switches project from its heading", async () => {
   const existing = new Set(
     (await client.listThreads()).map((thread) => thread.id),
   );
@@ -2095,38 +2095,59 @@ test("new-chat starting area is project-aware, responsive, and keeps starter pro
   await expect(start.getByRole("heading")).toHaveText(
     "What should we work on in workspace?",
   );
-  const cards = start.locator(".suggestions").getByRole("button");
-  await expect(cards).toHaveCount(4);
-  const geometry = async () =>
-    cards.evaluateAll((elements) =>
-      elements.map((element) => {
-        const box = element.getBoundingClientRect();
-        return {
-          x: box.x,
-          y: box.y,
-          right: box.right,
-          bottom: box.bottom,
-          width: box.width,
-        };
-      }),
-    );
-  const wide = await geometry();
-  expect(new Set(wide.map((box) => Math.round(box.y))).size).toBe(1);
-  await page.screenshot({ path: "test-results/new-chat-dark.png" });
+  // No canned starters: the question and the message box are the page.
+  await expect(start.getByRole("button")).toHaveCount(1);
   const composer = page.getByRole("textbox", { name: "Message", exact: true });
-  for (const [label, prompt] of [
-    ["Explore code", "Explain the architecture of this project"],
-    ["Build a feature", "Help me build a new feature: "],
-    ["Review changes", "Review the current changes"],
-    ["Fix a problem", "Help me investigate and fix this issue: "],
-  ]) {
-    await start.getByRole("button", { name: label, exact: true }).click();
-    await expect(composer).toHaveValue(prompt);
-    await expect(composer).toBeFocused();
-    expect((await client.listThreads()).map((item) => item.id)).toEqual([
-      ...existing,
-    ]);
-  }
+  const box = page.locator(".composer-area");
+  /** The mark, the question and the message box, as one group in the chat. */
+  const group = async () => {
+    const chat = (await page.locator(".conversation").boundingBox())!;
+    const mark = (await start.locator(".start-mark").boundingBox())!;
+    const heading = (await start.getByRole("heading").boundingBox())!;
+    const area = (await box.boundingBox())!;
+    return {
+      above: mark.y - chat.y,
+      below: chat.y + chat.height - (area.y + area.height),
+      gap: area.y - (heading.y + heading.height),
+      height: chat.height,
+    };
+  };
+  const centred = async () => {
+    const value = await group();
+    // A little above the middle, and the question sits right on the box.
+    expect(value.above).toBeGreaterThan(value.height * 0.12);
+    expect(value.above).toBeLessThan(value.below);
+    expect(value.below).toBeLessThan(value.above * 1.6);
+    expect(value.gap).toBeLessThan(72);
+  };
+  await centred();
+  // The sidebar's heading controls stay out of sight until pointed at.
+  await page.mouse.move(1100, 300);
+  await expect
+    .poll(() =>
+      page
+        .getByRole("button", { name: "Open another project", exact: true })
+        .evaluate((element) => Number(getComputedStyle(element).opacity)),
+    )
+    .toBe(0);
+  await page.screenshot({ path: "test-results/new-chat-dark.png" });
+  // The project's name opens the message box's folder picker.
+  const name = start.getByRole("button", { name: "workspace", exact: true });
+  await expect(name).toHaveAttribute("aria-haspopup", "dialog");
+  await name.click();
+  const picker = page.getByRole("dialog", { name: "Choose a folder", exact: true });
+  await expect(picker).toBeVisible();
+  await expect(picker.getByRole("combobox")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(picker).toHaveCount(0);
+  // Typing more lines grows the box without breaking the group apart.
+  await composer.fill("one\ntwo\nthree\nfour");
+  expect((await group()).gap).toBeLessThan(72);
+  await composer.fill("");
+  await composer.focus();
+  expect((await client.listThreads()).map((item) => item.id)).toEqual([
+    ...existing,
+  ]);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const settings = page.getByRole("dialog", { name: "Settings", exact: true });
   await selectValue(
@@ -2139,21 +2160,20 @@ test("new-chat starting area is project-aware, responsive, and keeps starter pro
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await expect(start).toBeVisible();
   await page.screenshot({ path: "test-results/new-chat-light.png" });
+  await centred();
   await page.setViewportSize({ width: 900, height: 760 });
   // Electron acknowledges the resize before container-query layout settles.
-  await expect.poll(async () => new Set((await geometry()).map((box) => Math.round(box.y))).size).toBe(2);
-  const narrow = await geometry();
-  expect(new Set(narrow.map((box) => Math.round(box.y))).size).toBe(2);
-  expect(
-    narrow.every((box) => box.x >= 0 && box.right <= 900 && box.width >= 120),
-  ).toBe(true);
+  await expect.poll(async () => (await group()).height).toBeLessThan(760);
+  await centred();
+  const narrow = (await start.getByRole("heading").boundingBox())!;
+  expect(narrow.x >= 0 && narrow.x + narrow.width <= 900).toBe(true);
   await expect(composer).toBeVisible();
   await page.screenshot({ path: "test-results/new-chat-narrow.png" });
   // Keep chat below its 660px container breakpoint beside the default panel.
   await page.setViewportSize({ width: 1300, height: 940 });
   await openProjectPanel("Files");
   await expect(page.locator(".file-tree")).toBeVisible();
-  await expect.poll(async () => new Set((await geometry()).map((box) => Math.round(box.y))).size).toBe(2);
+  await centred();
   await expect(composer).toBeVisible();
   await page
     .getByRole("button", { name: "Hide side panel", exact: true })
@@ -2167,6 +2187,9 @@ test("new-chat starting area is project-aware, responsive, and keeps starter pro
   await settings
     .getByRole("button", { name: "Close settings", exact: true })
     .click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await centred();
+  await page.screenshot({ path: "test-results/new-chat-dark-theme.png" });
   await composer.fill("start-page-first-message");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await expect(start).toHaveCount(0);
@@ -2174,6 +2197,61 @@ test("new-chat starting area is project-aware, responsive, and keeps starter pro
     "Echo: start-page-first-message",
   );
   expect(errors).toEqual([]);
+});
+
+test("sidebar controls wait for the pointer, each project's + starts a chat in it, and full screen frees the toggle's corner", async () => {
+  const opacity = (locator: ReturnType<typeof page.locator>) =>
+    locator.evaluate((element) => Number(getComputedStyle(element).opacity));
+  const project = page.getByRole("region", { name: "Project workspace", exact: true });
+  const row = project.locator(".project-row");
+  const plus = row.getByRole("button", { name: "New chat in workspace", exact: true });
+  const options = row.getByRole("button", { name: "Project options for workspace", exact: true });
+  const heading = page.locator(".sidebar-heading").filter({ hasText: "Projects" });
+  const open = heading.getByRole("button", { name: "Open another project", exact: true });
+  const away = async () => {
+    await page.mouse.move(900, 500);
+    await expect.poll(() => opacity(plus)).toBe(0);
+  };
+  // A pressed project name keeps the focus, which no longer keeps its buttons.
+  await row.locator(".project-heading").click();
+  await away();
+  expect(await opacity(options)).toBe(0);
+  expect(await opacity(open)).toBe(0);
+  await row.hover();
+  await expect.poll(() => opacity(plus)).toBe(1);
+  expect(await opacity(options)).toBe(1);
+  await page.screenshot({ path: "test-results/sidebar-project-hover.png", clip: { x: 0, y: 0, width: 420, height: 320 } });
+  await heading.hover();
+  await expect.poll(() => opacity(open)).toBeGreaterThan(0.5);
+  // The keyboard shows them too.
+  await away();
+  await row.locator(".project-heading").focus();
+  await page.keyboard.press("Tab");
+  await expect(plus).toBeFocused();
+  await expect.poll(() => opacity(plus)).toBe(1);
+  // A chat chosen, then the project's +: a new chat there, ready to type.
+  await send("plus-button-before");
+  await expect(page.locator(".transcript")).toContainText("Echo: plus-button-before");
+  await row.hover();
+  await plus.click();
+  await expect(page.locator(".conversation-empty h2")).toHaveText(
+    "What should we work on in workspace?",
+  );
+  await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeFocused();
+  // Full screen hides macOS's window buttons; the toggle takes their place.
+  const toolbar = page.locator(".window-toolbar");
+  const inset = () => toolbar.evaluate((element) => parseFloat(getComputedStyle(element).paddingLeft));
+  const resting = await inset();
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].emit("enter-full-screen"));
+  await expect(page.locator(".application")).toHaveAttribute("data-fullscreen", "");
+  if (process.platform === "darwin") {
+    expect(resting).toBe(78);
+    await expect.poll(inset).toBeLessThan(16);
+  }
+  await page.screenshot({ path: "test-results/sidebar-full-screen.png", clip: { x: 0, y: 0, width: 420, height: 200 } });
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].emit("leave-full-screen"));
+  await expect(page.locator(".application")).not.toHaveAttribute("data-fullscreen", "");
+  await expect.poll(inset).toBe(resting);
 });
 
 async function attachComposerFile(name: string) {
