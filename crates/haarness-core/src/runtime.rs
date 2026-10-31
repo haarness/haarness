@@ -13950,7 +13950,13 @@ fn resolve_definition_model(
     if value.contains('/') {
         return qualified_agent_model("definition", value).map(Some);
     }
-    let release = if crate::definitions::MODEL_FAMILIES.contains(&value) {
+    let known_family = crate::definitions::MODEL_FAMILIES.contains(&value);
+    // A plain word that is no Claude id may be a family added after this
+    // release; it resolves among the Claude models listed now.
+    let new_family = !known_family
+        && crate::definitions::claude_release(value).is_none()
+        && crate::definitions::model_family_word(value);
+    let release = if known_family || new_family {
         None
     } else {
         Some(crate::definitions::claude_release(value).ok_or_else(|| {
@@ -13978,7 +13984,13 @@ fn resolve_definition_model(
             // A family is its newest release, by version, then by id.
             None => models
                 .iter()
-                .filter(|m| m.id.to_lowercase().contains(value))
+                .filter(|m| {
+                    if new_family {
+                        crate::definitions::claude_family_member(&m.id, value)
+                    } else {
+                        m.id.to_lowercase().contains(value)
+                    }
+                })
                 .max_by(|a, b| {
                     let version = crate::definitions::claude_version;
                     (version(&a.id), &a.id).cmp(&(version(&b.id), &b.id))
@@ -17601,6 +17613,8 @@ mod tests {
                 &[
                     "anthropic/claude-opus-5.5",
                     "anthropic/claude-sonnet-5.5",
+                    "anthropic/claude-mythos-5",
+                    "anthropic/claude-mythos-6",
                     "openai/gpt-6.1-sol",
                 ],
             ),
@@ -17633,6 +17647,9 @@ mod tests {
             // Only an unauthenticated catalog lists Fable, so the caller
             // reports the sign-in it needs.
             (None, "fable", Some(("anthropic", "claude-fable-5-1"))),
+            // A family this release does not know is the newest listed
+            // Claude release with that word.
+            (None, "mythos", Some(("cloud", "anthropic/claude-mythos-6"))),
             (None, "inherit", None),
             (None, "acme/custom", Some(("acme", "custom"))),
         ] {
@@ -17649,6 +17666,8 @@ mod tests {
             ),
             ("gpt-6.1-sol", "Unknown model alias gpt-6.1-sol"),
             ("bad-alias", "Unknown model alias bad-alias"),
+            // A word no listed Claude release has.
+            ("sol", "No configured provider has a sol model"),
         ] {
             let message = super::resolve_definition_model(&registry, None, value)
                 .unwrap_err()
@@ -17656,6 +17675,7 @@ mod tests {
             assert!(message.contains(error), "{message}");
         }
         assert!(crate::definitions::unqualified_model("fable"));
+        assert!(crate::definitions::unqualified_model("mythos"));
         assert!(crate::definitions::unqualified_model("claude-opus-5-5"));
         assert!(!crate::definitions::unqualified_model("my-claude-model"));
         assert!(!crate::definitions::unqualified_model(
