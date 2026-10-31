@@ -112,11 +112,16 @@ Found on the way, fixed in Haarness:
   model's reasoning details to the next; the router turned DeepSeek's unsigned details into Claude thinking
   and Anthropic refused every turn after the switch (400). A model's details now go back to that model alone.
   Proven against production: unfixed, DeepSeek then Claude Haiku in one Cloud thread fails with that 400;
-  fixed, both turns complete with their tool calls. Cloud workspaces get it with the next Haarness release.
+  fixed, both turns complete with their tool calls. The managed router now guards this too (Haarness Router:
+  each provider gets back only its own reasoning; Cloud 20261031-0df3925-4365f30), so the released 0.1.14 and
+  Cloud workspaces complete the same switch on production today.
 
 Re-tested on production Cloud 20261031-0df3925 (router one-chunk reasoning, OpenRouter display names): a Cloud
 workspace chat on Claude Haiku 5.5 then DeepSeek V4 Flash shows DeepSeek's thought once and answers with its
 tool call; the terminal UI runs a Cloud DeepSeek turn with a tool call and its cost.
+
+Selecting a router for a computer's Cloud sign-in (`haarness account --router`) sends every Cloud model there:
+a test router with only a DeepSeek key made every Cloud turn on this Mac fail until the default was selected again.
 
 Left for a decision: the managed router hides upstream error words by design, so an upstream 429 ("retry
 shortly") arrives as a generic rate limit, and a refusal as "upstream returned HTTP 400"; every Cloud user's
