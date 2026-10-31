@@ -7,7 +7,8 @@ runs. Haarness Cloud does not reach a person's local runtime; a chat on this com
 haarness.ai does, since it runs here.
 
 Models: on Ollama, Qwen 3.8 27B (thinking, images, tools), Qwen3 Coder 30B (tools), gpt-oss 20B (thinking,
-tools) and DeepSeek R1 14B (thinking); on LM Studio 0.4.28, Qwen3 Coder 30B A3B.
+tools) and DeepSeek R1 14B (thinking); on LM Studio 0.4.28, Qwen 3.8 27B and gpt-oss 20B (MLX builds from
+LM Studio's catalog) and Qwen3 Coder 30B A3B (GGUF).
 
 ## What was wrong
 
@@ -18,7 +19,7 @@ tools) and DeepSeek R1 14B (thinking); on LM Studio 0.4.28, Qwen3 Coder 30B A3B.
 | A picture anywhere in a chat failed every turn on a text-only model. | One photo sent to Claude, or a screenshot a tool returned, made the rest of the chat fail after switching to a local text model. | Only a picture in the newest message is refused ("Qwen3 Coder doesn't read images…"); earlier and tool pictures become a short note to the model. |
 | LM Studio loads a model on first use with its default context (8K here). | Every request was refused: Haarness's instructions and tools alone are over 20K tokens. | A model that isn't loaded, or is loaded with under 32K, is loaded with 64K (or its longest) before the request. It stays loaded, as one loaded in LM Studio does. |
 | LM Studio answers a model it doesn't have with whichever model is loaded. | A typed or deleted model name was answered by a different model. | Refused, with `lms get` to download it. |
-| LM Studio's OpenAI-style list has only ids. | Raw ids, no context window, no price (cost unknown), no reasoning levels. | Names, context, image support, reasoning levels (`capabilities.reasoning.allowed_options`) and a zero price from LM Studio's own list (`/api/v1/models`). |
+| LM Studio's OpenAI-style list has only ids. | Raw ids, no context window, no price (cost unknown), no reasoning levels. | Names, context, image support, reasoning levels (`capabilities.reasoning.allowed_options`, its `off` offered as `none`, the name its API takes) and a zero price from LM Studio's own list (`/api/v1/models`). |
 | A model Ollama hasn't downloaded. | "model 'llama3.2:1b' not found". | The same, plus `ollama pull llama3.2:1b`. |
 | A chat whose runtime has stopped. | "invalid request: unknown provider ollama" in every client. | "Ollama isn't running. Start it on the computer this chat runs on, then send your message again."; `haarness run` adds how to start it. |
 | The terminal UI's home screen named an LM Studio model by its id. | The id beside the name the status bar showed. | The name, as the picker shows it. |
@@ -32,6 +33,8 @@ tools) and DeepSeek R1 14B (thinking); on LM Studio 0.4.28, Qwen3 Coder 30B A3B.
 - gpt-oss 20B on Ollama: all of those but the photo (it reads text only).
 - Qwen3 Coder 30B on Ollama and on LM Studio: tools, structured output, cost and a model switch. On LM
   Studio the run began with the model loaded at 8K; Haarness loaded it again at 64K.
+- Qwen 3.8 27B on LM Studio (MLX): all of the Ollama run's checks, photo included, at `low`, `xhigh`
+  and a level it lacks.
 - gpt-oss 20B on LM Studio (its MLX build): thinking at `low` and `high` and a first tool call pass,
   but a tool call after a tool result mostly comes back broken (`read?` with `{"path":"308...??"}` in
   LM Studio's own log). The prompt LM Studio renders is right, and the same chat passes on Ollama's

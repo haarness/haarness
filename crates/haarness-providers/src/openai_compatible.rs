@@ -1336,12 +1336,14 @@ fn apply_lmstudio_details(model: &mut ModelInfo, entry: &Value) {
     if let Some(vision) = capabilities["vision"].as_bool() {
         model.images = vision;
     }
-    // `{"allowed_options": ["low", "medium", "high"], "default": "low"}`,
-    // passed on as `reasoning_effort`.
+    // `{"allowed_options": ["off", "low", "medium", "xhigh", "on"], …}`,
+    // passed on as `reasoning_effort`, which names `off` `none` (and
+    // refuses `off`); `on` is the model's default.
     if let Some(options) = capabilities["reasoning"]["allowed_options"].as_array() {
         model.reasoning_efforts = options
             .iter()
             .filter_map(Value::as_str)
+            .map(|option| if option == "off" { "none" } else { option })
             .filter(|option| ["none", "minimal", "low", "medium", "high", "xhigh"].contains(option))
             .map(str::to_owned)
             .collect();
@@ -3566,6 +3568,10 @@ mod tests {
         apply_lmstudio_details(&mut model, &thinking);
         assert!(model.reasoning);
         assert_eq!(model.reasoning_efforts, ["low", "medium", "high"]);
+        thinking["capabilities"]["reasoning"] =
+            json!({"allowed_options": ["off", "low", "medium", "xhigh", "on"], "default": "xhigh"});
+        apply_lmstudio_details(&mut model, &thinking);
+        assert_eq!(model.reasoning_efforts, ["none", "low", "medium", "xhigh"]);
         // A model whose longest is short keeps it.
         let mut small = entry(None);
         small["max_context_length"] = json!(16_384);
