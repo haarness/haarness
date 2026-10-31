@@ -10116,13 +10116,11 @@ impl RunnerTask {
                             }
                             self.flush_reasoning_segment(&mut reasoning, thought_from)
                                 .await?;
-                            if self.output_schema.is_none() {
-                                self.flush_assistant_segment(
-                                    &mut text,
-                                    &mut goal_turn_assistant_text,
-                                )
+                            // Text before a call narrates it, in a structured
+                            // turn too: saved first, so the call's result can
+                            // follow the call directly, as strict providers require.
+                            self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text)
                                 .await?;
-                            }
                             thought_from = std::time::Instant::now();
                             self.publish_item(ItemData::ToolCall {
                                 call_id: call_id.clone(),

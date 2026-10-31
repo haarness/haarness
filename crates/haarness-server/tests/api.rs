@@ -5160,6 +5160,65 @@ async fn a_structured_turn_runs_the_calls_its_narration_comes_with() {
 }
 
 #[tokio::test]
+async fn a_structured_turn_keeps_narration_ahead_of_its_call() {
+    // DeepSeek says what it is about to do, then calls the tool.
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let runtime = AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![Arc::new(ScriptedRounds {
+            requests: requests.clone(),
+            rounds: vec![
+                vec![
+                    ProviderEvent::TextDelta("I'll read the file first.".into()),
+                    ProviderEvent::ToolCall {
+                        call_id: "call-read".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "schema.txt"}),
+                        provider_metadata: serde_json::Value::Null,
+                    },
+                ],
+                vec![ProviderEvent::StructuredOutput(
+                    serde_json::json!({"count": 2}),
+                )],
+            ],
+        })
+            as Arc<dyn ModelProvider>])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(256),
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Structured".into()),
+            provider: Some("scripted".into()),
+            model: Some("scripted-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let schema = serde_json::json!({"type":"object","properties":{"count":{"type":"integer"}},"required":["count"],"additionalProperties":false});
+    let turn = runtime
+        .start_workflow_agent_turn(thread.id, thread.id, turn_request("count"), Some(schema))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let requests = requests.lock().unwrap();
+    let second = &requests[1].messages;
+    // The call's result follows the call directly; the narration comes first.
+    let call = second.iter().position(|message| matches!(message, ProviderMessage::ToolCall { call_id, .. } if call_id == "call-read")).expect("call");
+    assert!(
+        matches!(&second[call + 1], ProviderMessage::ToolResult { call_id, .. } if call_id == "call-read"),
+        "{second:?}"
+    );
+    assert!(
+        matches!(&second[call - 1], ProviderMessage::Text { content, .. } if content.contains("read the file first")),
+        "{second:?}"
+    );
+}
+
+#[tokio::test]
 async fn context_overflow_compacts_once_and_replays_without_binary_media() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let provider = OverflowOnce::default();
