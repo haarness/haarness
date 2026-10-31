@@ -1528,6 +1528,11 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             None => "This provider is not connected. Connect it with an API key or by signing in, then try again.".into(),
         };
     }
+    // GitHub accepts the sign-in but the account has no Copilot seat, so
+    // signing in again would not help.
+    if lower.contains("not licensed to use copilot") {
+        return "This GitHub account has no Copilot plan. Turn on Copilot at github.com/settings/copilot, then try again.".into();
+    }
     // Bedrock refuses a wrong API key with 403 "Authentication failed: Please
     // make sure your API Key is valid", or "Invalid API Key format".
     if lower.contains("http 401")
@@ -20563,6 +20568,15 @@ mod tests {
                 Some("Amazon Bedrock")
             ),
             "Amazon Bedrock rejected the API key or sign-in (Invalid bearer token). Connect Amazon Bedrock again to replace it."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    "HTTP 403 Forbidden: unauthorized: not licensed to use Copilot".into()
+                ),
+                Some("GitHub Copilot")
+            ),
+            "This GitHub account has no Copilot plan. Turn on Copilot at github.com/settings/copilot, then try again."
         );
         assert_eq!(
             super::user_facing_error(&CoreError::Provider("HTTP 401 Unauthorized".into())),
