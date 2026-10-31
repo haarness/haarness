@@ -53,7 +53,7 @@ local router listing 368 models.
 - The router names an upstream refusal only by status and code ("upstream returned HTTP 400
   (invalid_request_error)"); the provider's message is withheld on purpose, since it may echo a prompt or a key.
   For a self-hosted router that hides the reason a request failed.
-- In Haarness Cloud with the account's own DeepSeek key, a turn that asks for reasoning is refused; see below.
+- (Resolved below: Cloud with the account's own DeepSeek key works end to end since Cloud 20261031-b79f9a8.)
 
 ## Haarness Cloud with the account's own key
 
@@ -70,6 +70,12 @@ Through it Haarness lists `deepseek/deepseek-flash` and `deepseek/deepseek-v4-pr
   deepseek/…: missing reasoning". The router's built-in DeepSeek profile (router 4365f30) promises text and
   tools only; Haarness asks for reasoning on every turn of a reasoning model. A router DeepSeek profile with
   reasoning and images (not yet pushed) is what lets these turns through. A turn without reasoning was not run.
+- With that profile pushed (router cf03f8c) the refusal stayed: Cloud built every BYOK preset but OpenAI,
+  Anthropic and Gemini as a generic openai-compatible provider, so the router's DeepSeek kind was never used.
+  Presets the router has a kind for (DeepSeek, Groq, Mistral, xAI, Together, Fireworks) now use it, and a BYOK
+  OpenRouter key states what OpenRouter keeps (Cloud 20261031-b79f9a8).
+- Then, through the BYOK router on production: `deepseek-flash` passed tools over two turns, reasoning at the
+  highest level, an image, structured output and cost; `deepseek-v4-pro` the same without the image (4 of 4).
 
 Selecting a router (`haarness account --router`) applies to every client on the computer signed in to that
 account, not to one run: while the BYOK router was selected, other local Cloud runs failed with "Add your
