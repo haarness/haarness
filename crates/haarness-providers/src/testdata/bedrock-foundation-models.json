@@ -1,0 +1,453 @@
+{
+ "modelSummaries": [
+  {
+   "modelId": "anthropic.claude-sonnet-5-5",
+   "modelName": "Claude Sonnet 5.5",
+   "inputModalities": [
+    "TEXT",
+    "IMAGE"
+   ],
+   "outputModalities": [
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "INFERENCE_PROFILE"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": true
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": true
+    }
+   },
+   "converse": {
+    "additionalRequestFieldsSchema": "{\"output_config\":{\"effort\":{\"type\":\"enum\",\"default\":\"high\",\"enum\":[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}},\"hideSamplingParameter\":true}",
+    "maxTokensMaximum": 128000,
+    "userImageTypesSupported": [
+     "jpeg",
+     "png",
+     "gif",
+     "webp"
+    ]
+   }
+  },
+  {
+   "modelId": "anthropic.claude-opus-4-6-v1",
+   "modelName": "Claude Opus 4.6",
+   "inputModalities": [
+    "TEXT",
+    "IMAGE"
+   ],
+   "outputModalities": [
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "INFERENCE_PROFILE"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": true
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": true
+    }
+   },
+   "converse": {
+    "additionalRequestFieldsSchema": "{\"top_k\":{\"type\":\"number\",\"default\":250,\"minimum\":0,\"maximum\":500},\"reasoningConfig\":{\"enabled\":{\"type\":\"boolean\",\"default\":false},\"budgetTokens\":{\"type\":\"enum\",\"default\":\"low\",\"enum\":{\"low\":1024,\"medium\":40000,\"high\":63999},\"minimum\":1024,\"maximum\":63999}}}",
+    "maxTokensMaximum": 128000,
+    "userImageTypesSupported": [
+     "jpeg",
+     "png",
+     "gif",
+     "webp"
+    ]
+   }
+  },
+  {
+   "modelId": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+   "modelName": "Claude Sonnet 4.5",
+   "inputModalities": [
+    "TEXT",
+    "IMAGE"
+   ],
+   "outputModalities": [
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "INFERENCE_PROFILE"
+   ],
+   "modelLifecycle": {
+    "status": "LEGACY"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": true
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": true
+    }
+   },
+   "converse": {
+    "additionalRequestFieldsSchema": "{\"top_k\":{\"type\":\"number\",\"default\":250,\"minimum\":0,\"maximum\":500},\"reasoningConfig\":{\"enabled\":{\"type\":\"boolean\",\"default\":false},\"budgetTokens\":{\"type\":\"integer\",\"default\":2048,\"minimum\":1024,\"maximum\":63999}}}",
+    "maxTokensMaximum": 64000,
+    "userImageTypesSupported": [
+     "jpeg",
+     "png",
+     "gif",
+     "webp"
+    ]
+   }
+  },
+  {
+   "modelId": "openai.gpt-6.1-sol",
+   "modelName": "GPT-6.1 Sol",
+   "inputModalities": [
+    "TEXT",
+    "IMAGE"
+   ],
+   "outputModalities": [
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "INFERENCE_PROFILE"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": true
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": true
+    }
+   },
+   "converse": {
+    "additionalRequestFieldsSchema": "{\"reasoning_config\":{\"type\":\"enum\",\"default\":\"medium\",\"enum\":[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}}",
+    "maxTokensMaximum": 131072,
+    "userImageTypesSupported": [
+     "jpeg",
+     "png",
+     "gif",
+     "webp"
+    ]
+   }
+  },
+  {
+   "modelId": "openai.gpt-oss-120b-1:0",
+   "modelName": "gpt-oss-120b",
+   "inputModalities": [
+    "TEXT"
+   ],
+   "outputModalities": [
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "ON_DEMAND"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": false
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": true
+    }
+   },
+   "converse": {
+    "additionalRequestFieldsSchema": null,
+    "maxTokensMaximum": 128000,
+    "userImageTypesSupported": []
+   }
+  },
+  {
+   "modelId": "openai.gpt-oss-safeguard-20b",
+   "modelName": "GPT OSS Safeguard 20B",
+   "inputModalities": [
+    "TEXT"
+   ],
+   "outputModalities": [
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "ON_DEMAND"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": false
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": true
+    }
+   },
+   "converse": {
+    "additionalRequestFieldsSchema": "{\"reasoningConfig\":{\"enabled\":{\"type\":\"boolean\",\"default\":false}}}",
+    "maxTokensMaximum": 131072,
+    "userImageTypesSupported": []
+   }
+  },
+  {
+   "modelId": "amazon.nova-micro-v1:0",
+   "modelName": "Nova Micro",
+   "inputModalities": [
+    "TEXT"
+   ],
+   "outputModalities": [
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "ON_DEMAND",
+    "INFERENCE_PROFILE"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": true
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": true
+    }
+   },
+   "converse": null
+  },
+  {
+   "modelId": "amazon.nova-micro-v1:0:128k",
+   "modelName": "Nova Micro",
+   "inputModalities": [
+    "TEXT"
+   ],
+   "outputModalities": [
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "PROVISIONED"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": true
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": true
+    }
+   },
+   "converse": null
+  },
+  {
+   "modelId": "amazon.nova-2-multimodal-embeddings-v1:0",
+   "modelName": "Amazon Nova Multimodal Embeddings",
+   "inputModalities": [
+    "TEXT",
+    "IMAGE",
+    "AUDIO",
+    "VIDEO"
+   ],
+   "outputModalities": [
+    "EMBEDDING"
+   ],
+   "inferenceTypesSupported": [
+    "ON_DEMAND"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": false,
+   "explicitPromptCaching": {
+    "isSupported": false
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": false,
+     "sync": false
+    }
+   },
+   "converse": null
+  },
+  {
+   "modelId": "amazon.nova-2-sonic-v1:0",
+   "modelName": "Nova 2 Sonic",
+   "inputModalities": [
+    "SPEECH"
+   ],
+   "outputModalities": [
+    "SPEECH",
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "ON_DEMAND"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": true
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": false
+    }
+   },
+   "converse": null
+  },
+  {
+   "modelId": "deepseek.v3.2",
+   "modelName": "DeepSeek V3.2",
+   "inputModalities": [
+    "TEXT"
+   ],
+   "outputModalities": [
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "ON_DEMAND"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": false
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": true
+    }
+   },
+   "converse": {
+    "additionalRequestFieldsSchema": "{\"reasoningConfig\":{\"enabled\":{\"type\":\"boolean\",\"default\":false}}}",
+    "maxTokensMaximum": 163840,
+    "userImageTypesSupported": []
+   }
+  },
+  {
+   "modelId": "amazon.nova-2-lite-v1:0",
+   "modelName": "Nova 2 Lite",
+   "inputModalities": [
+    "TEXT",
+    "IMAGE",
+    "VIDEO"
+   ],
+   "outputModalities": [
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "INFERENCE_PROFILE"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": true
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": true
+    }
+   },
+   "converse": {
+    "additionalRequestFieldsSchema": "{\"topK\":{\"type\":\"number\",\"default\":50,\"minimum\":1,\"maximum\":100},\"reasoningConfig\":{\"budgetTokens\":{\"type\":\"enum\",\"default\":\"low\",\"minimum\":10000,\"maximum\":64000,\"enum\":{\"low\":10000,\"medium\":40000,\"high\":64000},\"smartSyncEnabled\":true}}}",
+    "maxTokensMaximum": 65535,
+    "userImageTypesSupported": [
+     "jpeg",
+     "png",
+     "gif",
+     "webp"
+    ]
+   }
+  },
+  {
+   "modelId": "amazon.nova-2-5-sonic",
+   "modelName": "Nova 2.5 Sonic",
+   "inputModalities": [
+    "SPEECH",
+    "TEXT"
+   ],
+   "outputModalities": [
+    "SPEECH",
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "ON_DEMAND"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": true
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": false
+    }
+   },
+   "converse": null
+  },
+  {
+   "modelId": "twelvelabs.pegasus-1-5-v1:0",
+   "modelName": "Pegasus v1.5",
+   "inputModalities": [
+    "TEXT",
+    "VIDEO"
+   ],
+   "outputModalities": [
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "INFERENCE_PROFILE"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": false
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": false
+    }
+   },
+   "converse": null
+  }
+ ]
+}

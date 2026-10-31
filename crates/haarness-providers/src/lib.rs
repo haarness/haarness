@@ -2,6 +2,7 @@
 
 mod anthropic;
 pub mod auth;
+mod aws_event_stream;
 mod bedrock;
 pub mod catalog;
 mod cloud;

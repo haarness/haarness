@@ -213,10 +213,10 @@ pub fn guide(provider: &str) -> ConnectGuide {
             methods: vec![method(
                 "api",
                 MethodKind::Api,
-                "Use a bearer token",
-                "An Amazon Bedrock API key",
+                "Use an API key",
+                "Paste a Bedrock API key from the AWS console",
             )],
-            key_url: Some("https://console.aws.amazon.com/bedrock"),
+            key_url: Some("https://console.aws.amazon.com/bedrock/home#/api-keys"),
             env: vec![
                 "AWS_BEARER_TOKEN_BEDROCK",
                 "AWS_ACCESS_KEY_ID",

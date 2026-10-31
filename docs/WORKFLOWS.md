@@ -262,8 +262,7 @@ response starts streaming, so they read the prefix (0.1× input price) instead
 of each writing it again (1.25×). A sibling waits at most 20 seconds from the
 leader's start; a leader that fails, ends empty or is cancelled releases it at
 once, and its own cancellation ends the wait. Only the timing moves: request
-bytes are unchanged. Providers that cache automatically (OpenAI, Gemini) and
-Bedrock are never held back.
+bytes are unchanged. Providers that cache automatically (OpenAI, Gemini) are never held back.
 
 ## Lifecycle and events
 

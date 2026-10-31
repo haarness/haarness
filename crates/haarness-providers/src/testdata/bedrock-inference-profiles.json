@@ -1,0 +1,103 @@
+{
+ "inferenceProfileSummaries": [
+  {
+   "inferenceProfileId": "global.amazon.nova-2-lite-v1:0",
+   "status": "ACTIVE",
+   "models": [
+    {
+     "modelArn": "arn:aws:bedrock:::foundation-model/amazon.nova-2-lite-v1:0"
+    }
+   ]
+  },
+  {
+   "inferenceProfileId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+   "status": "ACTIVE",
+   "models": [
+    {
+     "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0"
+    }
+   ]
+  },
+  {
+   "inferenceProfileId": "us.amazon.nova-micro-v1:0",
+   "status": "ACTIVE",
+   "models": [
+    {
+     "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0"
+    }
+   ]
+  },
+  {
+   "inferenceProfileId": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+   "status": "ACTIVE",
+   "models": [
+    {
+     "modelArn": "arn:aws:bedrock:::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0"
+    }
+   ]
+  },
+  {
+   "inferenceProfileId": "us.amazon.nova-2-lite-v1:0",
+   "status": "ACTIVE",
+   "models": [
+    {
+     "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-2-lite-v1:0"
+    }
+   ]
+  },
+  {
+   "inferenceProfileId": "global.openai.gpt-6.1-sol",
+   "status": "ACTIVE",
+   "models": [
+    {
+     "modelArn": "arn:aws:bedrock:::foundation-model/openai.gpt-6.1-sol"
+    }
+   ]
+  },
+  {
+   "inferenceProfileId": "us.openai.gpt-6.1-sol",
+   "status": "ACTIVE",
+   "models": [
+    {
+     "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/openai.gpt-6.1-sol"
+    }
+   ]
+  },
+  {
+   "inferenceProfileId": "us.anthropic.claude-sonnet-5-5",
+   "status": "ACTIVE",
+   "models": [
+    {
+     "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-5-5"
+    }
+   ]
+  },
+  {
+   "inferenceProfileId": "global.anthropic.claude-sonnet-5-5",
+   "status": "ACTIVE",
+   "models": [
+    {
+     "modelArn": "arn:aws:bedrock:::foundation-model/anthropic.claude-sonnet-5-5"
+    }
+   ]
+  },
+  {
+   "inferenceProfileId": "us.anthropic.claude-opus-4-6-v1",
+   "status": "ACTIVE",
+   "models": [
+    {
+     "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-6-v1"
+    }
+   ]
+  },
+  {
+   "inferenceProfileId": "global.anthropic.claude-opus-4-6-v1",
+   "status": "ACTIVE",
+   "models": [
+    {
+     "modelArn": "arn:aws:bedrock:::foundation-model/anthropic.claude-opus-4-6-v1"
+    }
+   ]
+  }
+ ]
+}

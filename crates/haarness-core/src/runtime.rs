@@ -960,10 +960,16 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
     let lower = message.to_ascii_lowercase();
     let Some((_, rest)) = lower.split_once("retry in ") else {
         // A shared pool upstream that is briefly full ("temporarily
-        // rate-limited upstream. Please retry shortly") backs off as a busy
-        // provider does.
-        return (lower.contains("temporarily rate-limited") || lower.contains("retry shortly"))
-            .then(|| std::time::Duration::from_secs(1 << attempt.min(4)));
+        // rate-limited upstream. Please retry shortly"), Bedrock's throttling
+        // ("Too many requests, please wait before trying again") and a
+        // Bedrock model still loading back off as a busy provider does. A
+        // daily allowance ("Too many tokens per day") is not back in seconds.
+        return ((lower.contains("temporarily rate-limited")
+            || lower.contains("retry shortly")
+            || lower.contains("please wait before trying again")
+            || lower.contains("[modelnotreadyexception]"))
+            && !lower.contains("per day"))
+        .then(|| std::time::Duration::from_secs(1 << attempt.min(4)));
     };
     let advised = advised_wait(rest)? + std::time::Duration::from_secs(1);
     (advised <= LONGEST_ADVISED_WAIT).then_some(advised)
@@ -1520,7 +1526,13 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             None => "This provider is not connected. Connect it with an API key or by signing in, then try again.".into(),
         };
     }
-    if lower.contains("http 401") || lower.contains("status 401") || lower.contains("unauthorized")
+    // Bedrock refuses a wrong API key with 403 "Authentication failed: Please
+    // make sure your API Key is valid", or "Invalid API Key format".
+    if lower.contains("http 401")
+        || lower.contains("status 401")
+        || lower.contains("unauthorized")
+        || (lower.contains("http 403")
+            && (lower.contains("authentication failed") || lower.contains("invalid api key")))
     {
         // `HTTP 401 Unauthorized: invalid x-api-key`: the provider's reason,
         // without a `[code]` prefix or a JSON envelope.
@@ -18101,6 +18113,53 @@ mod tests {
         assert!(joined.contains("\"todos\":[]"));
         assert!(!joined.contains("old anchor"));
         assert!(!joined.contains("first"));
+    }
+
+    #[test]
+    fn bedrock_refusals_are_retried_or_explained_in_its_own_words() {
+        let provider = |message: &str| CoreError::Provider(message.into());
+        // Throttling per minute backs off; a daily allowance fails at once.
+        let throttled = provider(
+            "HTTP 429 Too Many Requests: [ThrottlingException] Too many requests, please wait before trying again.",
+        );
+        assert_eq!(
+            super::retry_delay(&throttled, 2),
+            Some(std::time::Duration::from_secs(4))
+        );
+        let daily = provider(
+            "HTTP 429 Too Many Requests: [ThrottlingException] Too many tokens per day, please wait before trying again.",
+        );
+        assert!(super::retry_delay(&daily, 1).is_none());
+        assert_eq!(
+            super::describe_error(&daily, Some("Amazon Bedrock")),
+            "Amazon Bedrock rate limit or quota reached: Too many tokens per day, please wait before trying again."
+        );
+        assert!(
+            super::retry_delay(
+                &provider("HTTP 503 Service Unavailable: [ServiceUnavailableException] Bedrock is unable to process your request."),
+                1
+            )
+            .is_some()
+        );
+        assert_eq!(
+            super::describe_error(
+                &provider(
+                    "HTTP 403 Forbidden: [AccessDeniedException] Authentication failed: Please make sure your API Key is valid."
+                ),
+                Some("Amazon Bedrock")
+            ),
+            "Amazon Bedrock rejected the API key or sign-in (Authentication failed: Please make sure your API Key is valid). Connect Amazon Bedrock again to replace it."
+        );
+        // A model the account may not use is the request's refusal, not the key's.
+        assert_eq!(
+            super::describe_error(
+                &provider(
+                    "HTTP 403 Forbidden: [AccessDeniedException] anthropic.claude-haiku-5-5 is not available for this account."
+                ),
+                Some("Amazon Bedrock")
+            ),
+            "Amazon Bedrock rejected the request: anthropic.claude-haiku-5-5 is not available for this account."
+        );
     }
 
     #[test]
