@@ -78,3 +78,36 @@ and read another file.
 - The web app's model search matches every word in any order, across label and group (Haarness Cloud).
 - `haarness remote run` and `enable` name a new host after the computer, and `remote hosts` and `remote
   chats` list one readable line each (`--json` for scripts).
+
+## OpenRouter in Haarness Cloud
+
+The managed router held keys for OpenAI, Anthropic and Google only. It now sends every other vendor to
+OpenRouter with the platform's key, so a signed-in person uses those models on Cloud credits with no key of
+their own. OpenAI, Anthropic and Google stay direct.
+
+- Routing: a `"*"` entry in the router's provider map names an aggregator for every prefix the map leaves
+  out, by the model's whole id (`x-ai/grok-4.7`); a direct provider gets its own id as before.
+- Catalog: only models that can work as an agent's are imported: batch-only variants, image and audio
+  generators, OpenRouter's own routers and models without tool calling stay out (257 of 456 offered).
+- Capabilities: an `openai-compatible` provider promised text and tools only, so every turn that asked for
+  reasoning was refused ("no route can preserve the requested features"); a provider can now state what it
+  preserves, and OpenRouter keeps reasoning, its replay and images.
+- Reasoning OpenRouter sends as text and again as details arrived at clients as two chunks and showed twice;
+  the router now sends them as one (Haarness Router; Cloud follows).
+
+Live through Cloud on production (`scripts/test-models-live.py --providers haarness`): Grok 4.7, DeepSeek V4
+Flash, Kimi K3, GLM 5.3, Mistral Medium 3.5, MiniMax M3.1 Flash, and the direct Claude Haiku 5.5, GPT-6 Luna
+and Gemini 3.8 Flash passed tools, two turns, reasoning, structured output, cost and a level the model lacks
+(26 of 31). A Cloud workspace on haarness.ai wrote and ran a script on Grok 4.7, then switched to DeepSeek V4
+Flash in the same chat and changed it.
+
+Found on the way, fixed in Haarness:
+
+- Meta's Muse takes only an automatic tool choice and a router passes the refusal on as a bare 400: a forced
+  call refused with 400 is asked again unforced.
+- A structured-output answer that called tools and narrated them ran none of the calls and asked again,
+  leaving them unanswered, which strict providers refuse; the calls now run.
+
+Left for a decision: the managed router hides upstream error words by design, so an upstream 429 ("retry
+shortly") arrives as a generic rate limit, and a refusal as "upstream returned HTTP 400"; every Cloud user's
+OpenRouter turn draws on one OpenRouter balance, which needs auto top-up before this is announced.
