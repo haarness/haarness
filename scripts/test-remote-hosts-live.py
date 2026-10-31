@@ -123,7 +123,7 @@ def hosts(machine):
 
 def registered(machine):
     """Every host of the account, as Cloud has them."""
-    return json.loads(cli(machine, "remote", "hosts"))["items"]
+    return json.loads(cli(machine, "remote", "hosts", "--json"))["items"]
 
 
 def main():

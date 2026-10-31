@@ -137,7 +137,7 @@ test("remote access makes the whole computer reachable through Cloud, stays as l
     return response.json();
   };
   const listed = (host: string) =>
-    (JSON.parse(cli(["remote", "hosts"])).items as { id: string; connected: boolean; mode: string; name: string }[]).find((item) => item.id === host);
+    (JSON.parse(cli(["remote", "hosts", "--json"])).items as { id: string; connected: boolean; mode: string; name: string }[]).find((item) => item.id === host);
   let host = "";
   try {
     // The project is open in Desktop, with its own server.

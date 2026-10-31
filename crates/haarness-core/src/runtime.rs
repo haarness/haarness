@@ -9905,6 +9905,13 @@ impl RunnerTask {
                     let event = tokio::select! {
                         biased;
                         () = self.cancel.cancelled() => {
+                            // What streamed before the stop was read and paid
+                            // for: it stays, as far as it got. Structured
+                            // output is whole or nothing.
+                            if self.output_schema.is_none() {
+                                self.flush_reasoning_segment(&mut reasoning, thought_from).await?;
+                                self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text).await?;
+                            }
                             // A stopped request has no finished stream to time.
                             self.publish_round_usage(usage, charged, prompt_usage.clone(), &streamed, None, provider_id, &model).await?;
                             return Err(CoreError::Cancelled);
