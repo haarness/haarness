@@ -853,6 +853,18 @@ fn discovered_model_info(
     Some(apply_model_defaults(info, defaults))
 }
 
+/// The text a reasoning detail shows the person: a `reasoning.text`'s text or
+/// a `reasoning.summary`'s summary.
+fn visible_reasoning(detail: &Value) -> Option<&str> {
+    match detail.get("type").and_then(Value::as_str) {
+        Some("reasoning.text") => detail.get("text"),
+        Some("reasoning.summary") => detail.get("summary"),
+        _ => None,
+    }
+    .and_then(Value::as_str)
+    .filter(|text| !text.is_empty())
+}
+
 /// The fewest output tokens worth asking again for after a balance refusal:
 /// below this a reply with a tool call is likely cut off.
 const MIN_AFFORDABLE_OUTPUT: u64 = 4_096;
@@ -1636,6 +1648,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
             // The last detail whose text reached the transcript, so a new
             // block can be separated from the one before it.
             let mut emitted_reasoning: Option<Value> = None;
+            // The plain reasoning text the previous chunk carried.
+            let mut last_direct_reasoning = String::new();
             let mut json_output = String::new();
             // What broke the stream after its finish reason arrived: the
             // response is complete, so it finishes first and this follows,
@@ -1717,20 +1731,25 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     reasoning_content.push_str(reasoning);
                     yield ProviderEvent::ReasoningDelta(reasoning.into());
                 }
+                let previous_direct = std::mem::replace(
+                    &mut last_direct_reasoning,
+                    direct_reasoning.map(|(_, reasoning)| reasoning.to_owned()).unwrap_or_default(),
+                );
                 if let Some(details) = delta.get("reasoning_details") {
                     append_reasoning_details(&mut reasoning_details, details);
+                    // A router can send the same reasoning twice: as text, then
+                    // in its own chunk as details. Details repeating the text
+                    // just shown are kept for replay only.
+                    let repeated = details.as_array().is_some_and(|details| {
+                        let text: String = details.iter().filter_map(visible_reasoning).collect();
+                        !text.is_empty() && text == previous_direct
+                    });
                     if direct_reasoning.is_none()
+                        && !repeated
                         && let Some(details) = details.as_array()
                     {
                         for detail in details {
-                            let visible = match detail.get("type").and_then(Value::as_str) {
-                                Some("reasoning.text") => detail.get("text"),
-                                Some("reasoning.summary") => detail.get("summary"),
-                                _ => None,
-                            }
-                            .and_then(Value::as_str)
-                            .filter(|text| !text.is_empty());
-                            if let Some(text) = visible {
+                            if let Some(text) = visible_reasoning(detail) {
                                 if emitted_reasoning
                                     .as_ref()
                                     .is_some_and(|previous| starts_new_reasoning_block(previous, detail))
@@ -2886,6 +2905,42 @@ mod tests {
                 .as_array()
                 .is_some_and(|tools| !tools.is_empty())
         );
+    }
+
+    #[tokio::test]
+    async fn reasoning_sent_again_as_details_in_its_own_chunk_shows_once() {
+        async fn split(
+            State(state): State<FixtureState>,
+            Json(request): Json<Value>,
+        ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+            state.0.lock().push(request);
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                [
+                    r#"data: {"choices":[{"delta":{"reasoning":"Reading the file.","reasoning_content":"Reading the file."}}]}"#,
+                    r#"data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"Reading the file.","index":0}]}}]}"#,
+                    r#"data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}"#,
+                    "data: [DONE]",
+                ]
+                .join("\n\n")
+                    + "\n\n",
+            )
+        }
+        let (provider, _) = openrouter_fixture(post(split)).await;
+        let events = provider
+            .stream(short_request(), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let reasoning: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(ProviderEvent::ReasoningDelta(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, ["Reading the file."]);
     }
 
     #[tokio::test]

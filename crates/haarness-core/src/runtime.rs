@@ -960,12 +960,14 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
     let lower = message.to_ascii_lowercase();
     let Some((_, rest)) = lower.split_once("retry in ") else {
         // A shared pool upstream that is briefly full ("temporarily
-        // rate-limited upstream. Please retry shortly"), Bedrock's throttling
+        // rate-limited upstream. Please retry shortly", or a Haarness router's
+        // "Try again in a moment"), Bedrock's throttling
         // ("Too many requests, please wait before trying again") and a
         // Bedrock model still loading back off as a busy provider does. A
         // daily allowance ("Too many tokens per day") is not back in seconds.
         return ((lower.contains("temporarily rate-limited")
             || lower.contains("retry shortly")
+            || lower.contains("try again in a moment")
             || lower.contains("please wait before trying again")
             || lower.contains("[modelnotreadyexception]"))
             && !lower.contains("per day"))
@@ -1569,6 +1571,10 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
                 "{} rate limit or quota reached: {reason}",
                 provider.unwrap_or("Provider")
             ),
+            // A Haarness router words the limit as advice already.
+            None if !raw.starts_with("HTTP ") && raw.trim().contains(". ") => {
+                clean_error_text(raw.trim(), 600)
+            }
             None => {
                 "Provider rate limit or quota reached. Wait and retry, or check the account quota."
                     .into()
@@ -20499,6 +20505,18 @@ mod tests {
                 Some("OpenRouter")
             ),
             "OpenRouter rate limit or quota reached: Alibaba: qwen/qwen3.8-flash is temporarily rate-limited upstream. Please retry shortly."
+        );
+        // The managed router's own words for an upstream limit.
+        let routed = CoreError::Provider(
+            "The provider is rate limiting this model right now. Try again in a moment, or choose another model.".into(),
+        );
+        assert_eq!(
+            super::describe_error(&routed, Some("Haarness Cloud")),
+            "The provider is rate limiting this model right now. Try again in a moment, or choose another model."
+        );
+        assert_eq!(
+            super::retry_delay(&routed, 2),
+            Some(std::time::Duration::from_secs(4))
         );
         assert_eq!(
             super::describe_error(
