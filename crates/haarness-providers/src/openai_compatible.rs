@@ -1580,7 +1580,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     let builder = self
                         .client
                         .post(&self.endpoint)
-                        .headers(headers)
+                        .headers(headers.clone())
                         .json(&body);
                     response = crate::sse::send(builder, limits).await?;
                 }
@@ -1592,6 +1592,24 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     return Err(CoreError::Provider(message));
                 }
             }
+        }
+        // Some models take only an automatic tool choice (Meta's Muse), and a
+        // router may pass their refusal on as a bare 400. Ask once more without
+        // forcing the call: the runtime asks for structured output again when
+        // the answer comes back without it.
+        if body.get("tool_choice").is_some()
+            && response.status() == reqwest::StatusCode::BAD_REQUEST
+        {
+            tracing::info!(provider = %self.id, model = %body["model"], "asking again without forcing the tool call");
+            if let Some(object) = body.as_object_mut() {
+                object.remove("tool_choice");
+            }
+            let builder = self
+                .client
+                .post(&self.endpoint)
+                .headers(headers)
+                .json(&body);
+            response = crate::sse::send(builder, limits).await?;
         }
         let request_id = crate::request_id(response.headers());
         let provider_id = self.id.clone();
@@ -2820,6 +2838,53 @@ mod tests {
         assert!(
             usage.is_some() && cost == usage.map(|index| index + 1),
             "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_forced_tool_call_is_asked_again_without_forcing() {
+        // Meta's Muse through OpenRouter, as it answered a live request.
+        async fn auto_only(
+            State(state): State<FixtureState>,
+            Json(request): Json<Value>,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            let forced = request.get("tool_choice").is_some();
+            state.0.lock().push(request);
+            if forced {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"code":400,"message":"Provider returned error","metadata":{"raw":"{\"error\":{\"message\":\"only `\\\"auto\\\"` is supported for `tool_choice`.\"}}","provider_name":"Meta"}}})),
+                )
+                    .into_response();
+            }
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            )
+                .into_response()
+        }
+        let (provider, state) = openrouter_fixture(post(auto_only)).await;
+        let mut request = short_request();
+        request.model = "meta/muse-spark-1.3".into();
+        request.output_schema =
+            Some(json!({"type":"object","properties":{"answer":{"type":"string"}}}));
+        let events = provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        let requests = state.0.lock();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["tool_choice"], "required");
+        assert!(requests[1].get("tool_choice").is_none());
+        // The structured output tool is still offered.
+        assert!(
+            requests[1]["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty())
         );
     }
 

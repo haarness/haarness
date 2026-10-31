@@ -10194,7 +10194,10 @@ impl RunnerTask {
                     if structured_output.is_some() && !calls.is_empty() {
                         structured_output = None;
                     }
-                    let invalid = if !text.trim().is_empty() {
+                    // Text beside tool calls narrates them: the calls run, as
+                    // they would with final output beside them, and asking
+                    // again before they ran would leave them unanswered.
+                    let invalid = if !text.trim().is_empty() && calls.is_empty() {
                         Some("provider returned plain text for a structured-output turn".to_owned())
                     } else if structured_output.is_none() && calls.is_empty() {
                         Some("the model's answer was not in the expected format".to_owned())
@@ -10251,6 +10254,10 @@ impl RunnerTask {
                         )
                         .await?;
                         return Err(CoreError::Provider(message));
+                    }
+                    if !calls.is_empty() {
+                        self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text)
+                            .await?;
                     }
                     if let Some(value) = structured_output {
                         let text = serde_json::to_string(&value).map_err(|error| {

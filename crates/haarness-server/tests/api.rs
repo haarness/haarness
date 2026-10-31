@@ -5066,6 +5066,99 @@ async fn structured_output_in_the_wrong_shape_is_asked_for_again() {
     assert_eq!(rounds, 3);
 }
 
+/// Answers each round with its own events, keeping every request.
+struct ScriptedRounds {
+    requests: Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
+    rounds: Vec<Vec<ProviderEvent>>,
+}
+
+#[async_trait]
+impl ModelProvider for ScriptedRounds {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+
+    fn info(&self) -> ProviderInfo {
+        ScriptedStructured {
+            rounds: Arc::default(),
+            answers: Vec::new(),
+        }
+        .info()
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        if let Some(title) = title_fixture(&request) {
+            return title;
+        }
+        let mut requests = self.requests.lock().unwrap();
+        let round = requests.len().min(self.rounds.len() - 1);
+        requests.push(request);
+        let mut events: Vec<CoreResult<ProviderEvent>> =
+            self.rounds[round].iter().cloned().map(Ok).collect();
+        events.push(Ok(ProviderEvent::Finished {
+            reason: "done".into(),
+        }));
+        Ok(Box::pin(stream::iter(events)))
+    }
+}
+
+#[tokio::test]
+async fn a_structured_turn_runs_the_calls_its_narration_comes_with() {
+    // Meta's Muse reads a file and says so in the same answer.
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let runtime = AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![Arc::new(ScriptedRounds {
+            requests: requests.clone(),
+            rounds: vec![
+                vec![
+                    ProviderEvent::ToolCall {
+                        call_id: "call-read".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "schema.txt"}),
+                        provider_metadata: serde_json::Value::Null,
+                    },
+                    ProviderEvent::TextDelta("Reading your file.".into()),
+                ],
+                vec![ProviderEvent::StructuredOutput(
+                    serde_json::json!({"count": 2}),
+                )],
+            ],
+        })
+            as Arc<dyn ModelProvider>])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(256),
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Structured".into()),
+            provider: Some("scripted".into()),
+            model: Some("scripted-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let schema = serde_json::json!({"type":"object","properties":{"count":{"type":"integer"}},"required":["count"],"additionalProperties":false});
+    let turn = runtime
+        .start_workflow_agent_turn(thread.id, thread.id, turn_request("count"), Some(schema))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    // The second request answers the call; it is not a correction.
+    let second = &requests[1].messages;
+    assert!(second.iter().any(|message| matches!(message, ProviderMessage::ToolResult { call_id, .. } if call_id == "call-read")), "{second:?}");
+    assert!(!second.iter().any(|message| matches!(message, ProviderMessage::Text { content, .. } if content.contains("plain text"))), "{second:?}");
+}
+
 #[tokio::test]
 async fn context_overflow_compacts_once_and_replays_without_binary_media() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
