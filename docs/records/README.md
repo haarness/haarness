@@ -6,6 +6,7 @@ code at its date and is not updated afterwards: for current behaviour, read the
 
 Name new records `YYYY-MM-DD-topic.md` with the date the work was verified, and add a line here.
 
+- [2026-10-31 Ollama and LM Studio, live](2026-10-31-local-runtimes-live.md): popular open models on both runtimes, one at a time, the problems found and fixed (LM Studio's small default context among them), and failure cases.
 - [2026-10-31 xAI, live](2026-10-31-xai-live.md): every local layer on xAI's OAuth sign-in, the chat-model catalog, a refused sign-in renewed, a linked auth store kept, and recovery runs.
 - [2026-10-31 DeepSeek, live](2026-10-31-deepseek-live.md): both models against DeepSeek's API and behind Haarness Router, the problems found and fixed, and recovery runs.
 - [2026-10-31 OpenRouter, live](2026-10-31-openrouter-live.md): every layer against the real service, the twelve problems found and fixed, and recovery runs.
