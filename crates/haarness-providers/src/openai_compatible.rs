@@ -696,6 +696,19 @@ fn discovered_model_info(
         .or_else(|| entry.get("name"))
         .and_then(Value::as_str)
     {
+        // OpenRouter names a model "Vendor: Model"; its id already says the
+        // vendor, and the name alone reads as the native provider's does.
+        let name = match name.split_once(": ") {
+            Some((vendor, model))
+                if provider == "openrouter"
+                    && !vendor.is_empty()
+                    && vendor.len() <= 32
+                    && !model.is_empty() =>
+            {
+                model
+            }
+            _ => name,
+        };
         name.clone_into(&mut info.display_name);
     }
     info.context_window = first_window(
@@ -2221,6 +2234,36 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    #[test]
+    fn openrouter_names_drop_the_vendor_its_id_already_says() {
+        let named = |id: &str, name: &str| {
+            discovered_model_info(
+                "openrouter",
+                &json!({"id": id, "name": name}),
+                CompatibleModelDefaults::default(),
+            )
+            .unwrap()
+            .display_name
+        };
+        assert_eq!(
+            named("anthropic/claude-haiku-5.5", "Anthropic: Claude Haiku 5.5"),
+            "Claude Haiku 5.5"
+        );
+        assert_eq!(named("z-ai/glm-5.3", "Z.ai: GLM 5.3"), "GLM 5.3");
+        assert_eq!(
+            named("openrouter/auto-beta", "Auto Router (Beta)"),
+            "Auto Router (Beta)"
+        );
+        // Another provider's names stay as it gives them.
+        let other = discovered_model_info(
+            "together",
+            &json!({"id": "x/y", "name": "Vendor: Y"}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(other.display_name, "Vendor: Y");
     }
 
     #[test]
