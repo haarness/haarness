@@ -1530,7 +1530,11 @@ mod tests {
                 "extensionSource"
             ]
         );
-        let source = fixture.root.join("install/browser-extension/chrome");
+        let source = fixture
+            .root
+            .join("install")
+            .join("browser-extension")
+            .join("chrome");
         assert_eq!(
             json["extensionSource"],
             json!({"kind": "bundle", "path": source.display().to_string(), "version": "0.1.1-preview.1"})

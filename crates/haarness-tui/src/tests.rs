@@ -24954,7 +24954,12 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
     std::fs::create_dir_all(&root).unwrap();
     let image = root.join("screen shot.png");
     std::fs::write(&image, b"png fixture").unwrap();
-    let dropped = image.display().to_string().replace(' ', "\\ ");
+    // As a terminal drops it: a space escaped, or the path quoted on Windows.
+    let dropped = if cfg!(windows) {
+        format!("\"{}\"", image.display())
+    } else {
+        image.display().to_string().replace(' ', "\\ ")
+    };
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
 
@@ -24970,7 +24975,7 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
     app.paste_into_prompt(&dropped, false);
     assert_eq!(
         app.attachments,
-        vec![image.canonicalize().unwrap().display().to_string()]
+        vec![dunce::canonicalize(&image).unwrap().display().to_string()]
     );
     assert!(app.composer.is_empty());
 

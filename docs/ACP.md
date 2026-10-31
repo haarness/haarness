@@ -46,7 +46,8 @@ version 1.
 - **Approvals** offer *Allow once*, *Allow while Haarness is running* (only when the request allows
   more than once; *Allow in this chat* for a site in the user's Chrome) and *Reject*. The editor is
   asked one request at a time. A request settled first somewhere else (another app, a sibling's
-  answer) is withdrawn with `$/cancel_request`.
+  answer) is withdrawn with `$/cancel_request`. One still shown when the turn ends stays up: the
+  prompt ends once it is answered or settled.
 - **Subagents.** Tool calls and approvals of the subagents and workflow agents a prompt starts arrive
   on the editor's session while that prompt runs, titled `<subagent> · <call>`, with
   `_meta.haarness.childSessionId` and `childTitle`.

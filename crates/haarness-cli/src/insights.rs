@@ -73,7 +73,7 @@ pub fn insights(data: &Path, workspace: &Path, args: &InsightsArgs) -> Result<()
         .output_dir
         .clone()
         .unwrap_or_else(|| data.join("insights/reports"));
-    let path = write_report(&directory, &render_html(&report))?.canonicalize()?;
+    let path = dunce::canonicalize(&write_report(&directory, &render_html(&report))?)?;
     if args.json {
         println!(
             "{}",

@@ -18,7 +18,7 @@ impl Workspace {
         let path =
             std::env::temp_dir().join(format!("haarness-unattended-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&path).unwrap();
-        Self(path.canonicalize().unwrap())
+        Self(dunce::canonicalize(&path).unwrap())
     }
 }
 impl Drop for Workspace {

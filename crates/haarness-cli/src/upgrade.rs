@@ -48,7 +48,7 @@ fn bundled_with_desktop(directory: &std::path::Path) -> bool {
             .is_some_and(|name| name.eq_ignore_ascii_case("resources"))
 }
 pub fn run(args: UpgradeArgs) -> Result<()> {
-    let executable = std::env::current_exe()?.canonicalize()?;
+    let executable = dunce::canonicalize(&std::env::current_exe()?)?;
     let directory = executable
         .parent()
         .context("Cannot determine installation directory")?;

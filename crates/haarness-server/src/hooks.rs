@@ -1847,7 +1847,7 @@ mod tests {
         let hooks = ConfiguredHooks::new(
             ConfiguredHooks::parse_block(&json!({
                 "PostToolUse": [{"hooks": [
-                    {"command": format!("cat > {}", marker.display())},
+                    {"command": format!("cat > '{}'", marker.display())},
                 ]}],
             })),
             std::env::temp_dir(),
@@ -1882,7 +1882,7 @@ mod tests {
                     "PostToolUseFailure": [{"hooks": [{
                         "command": "sh",
                         "args": ["-c", format!(
-                            "printf '%s|%s' '${{CLAUDE_PLUGIN_ROOT}}' \"$HAARNESS_PLUGIN_ROOT\" > {}",
+                            "printf '%s|%s' '${{CLAUDE_PLUGIN_ROOT}}' \"$HAARNESS_PLUGIN_ROOT\" > '{}'",
                             marker.display()
                         )]
                     }]}]
@@ -2315,7 +2315,7 @@ mod tests {
         let mut block = block;
         for groups in block.as_object_mut().unwrap().values_mut() {
             for group in groups.as_array_mut().unwrap() {
-                group["hooks"] = json!([{"command": format!("cat >> {}; echo >> {}", log.display(), log.display())}]);
+                group["hooks"] = json!([{"command": format!("cat >> '{}'; echo >> '{}'", log.display(), log.display())}]);
             }
         }
         let hooks = ConfiguredHooks::new(ConfiguredHooks::parse_block(&block), root.clone());
@@ -2563,7 +2563,7 @@ mod tests {
             uuid::Uuid::now_v7()
         ));
         std::fs::create_dir_all(root.join("home/2026-10-28/chat-1a2b")).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let (project, folder) = (root.join("home"), root.join("home/2026-10-28/chat-1a2b"));
         let log = root.join("hooks.log");
         // One line per run: where the hook ran, the project folder it got
@@ -2779,8 +2779,8 @@ mod tests {
         let made =
             std::env::temp_dir().join(format!("haarness-hook-verbatim-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(made.join("2026-10-28").join("notes")).unwrap();
-        // std's canonical form, as the chat folders are kept.
-        let project = made.canonicalize().unwrap();
+        // std's canonical form, with the verbatim prefix on Windows.
+        let project = std::fs::canonicalize(&made).unwrap();
         let folder = project.join("2026-10-28").join("notes");
         if cfg!(windows) {
             assert!(folder.to_string_lossy().starts_with(r"\\?\"), "{folder:?}");
@@ -2818,7 +2818,7 @@ mod tests {
             uuid::Uuid::now_v7()
         ));
         std::fs::create_dir_all(root.join("home")).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let (project, log) = (root.join("home"), root.join("guard.log"));
         let guard = format!(
             r#"printf '%s|' "$(pwd -P)" >> '{log}'; cat >> '{log}'; echo 'guard: no writes' >&2; exit 2"#,
@@ -2863,7 +2863,7 @@ mod tests {
             let root = std::env::temp_dir().join(format!("{name}-{}", uuid::Uuid::now_v7()));
             std::fs::create_dir_all(&root).unwrap();
             Self {
-                root: root.canonicalize().unwrap(),
+                root: dunce::canonicalize(&root).unwrap(),
                 closed: None,
             }
         }
@@ -3326,7 +3326,7 @@ mod tests {
         let hooks = hooks_for(
             "PreToolUse",
             json!([{
-                "command": format!("head -c 262144 /dev/zero; wc -c > {}", marker.display()),
+                "command": format!("head -c 262144 /dev/zero; wc -c > '{}'", marker.display()),
                 "timeout": 20
             }]),
         );

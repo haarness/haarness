@@ -760,7 +760,7 @@ fn lock(path: &Path) -> Result<File> {
 
 /// Hold across runtime configuration composition so a restore cannot expose a partial generation.
 pub fn configuration_lock(data: &Path) -> Result<File> {
-    let file = lockfile(&data.canonicalize()?.join(".profile-restore.lock"))?;
+    let file = lockfile(&dunce::canonicalize(data)?.join(".profile-restore.lock"))?;
     FileExt::lock_shared(&file)?;
     Ok(file)
 }
@@ -810,8 +810,7 @@ pub struct Catalog {
 impl Catalog {
     pub fn new(data: &Path) -> Self {
         Self {
-            root: data
-                .canonicalize()
+            root: dunce::canonicalize(data)
                 .unwrap_or_else(|_| data.to_path_buf())
                 .join("profiles"),
         }

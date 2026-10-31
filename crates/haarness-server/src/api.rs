@@ -2157,7 +2157,8 @@ async fn search_files(
             let Ok(relative) = entry.path().strip_prefix(&workspace) else {
                 continue;
             };
-            let path = relative.display().to_string();
+            // Written with `/`, as the listing writes its paths.
+            let path = relative.to_string_lossy().replace('\\', "/");
             if let Some(score) = fuzzy_score(&path.to_ascii_lowercase(), &needle) {
                 scored.push((score, path));
             }
@@ -2415,7 +2416,7 @@ mod file_search_tests {
         Listing, PATH_LOOKUPS, PathLookups, explicit_path_suggestions, fuzzy_score, list_folder,
     };
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     /// The scores Desktop's port is pinned to as well.
@@ -2506,7 +2507,7 @@ mod file_search_tests {
     #[cfg(unix)]
     static OFFLINE_RELEASED: AtomicBool = AtomicBool::new(false);
     #[cfg(unix)]
-    static OFFLINE_STARTED: AtomicUsize = AtomicUsize::new(0);
+    static OFFLINE_STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     fn wait_for(released: &AtomicBool) {
         while !released.load(Ordering::SeqCst) {
@@ -3574,6 +3575,8 @@ mod connection_tests {
         super::keep_connections_alive(&mut accepted);
         let socket = socket2::SockRef::from(&accepted);
         assert!(socket.keepalive().unwrap());
+        // Windows sets the idle time but cannot read it back.
+        #[cfg(not(windows))]
         assert_eq!(
             socket.tcp_keepalive_time().unwrap(),
             std::time::Duration::from_secs(60)

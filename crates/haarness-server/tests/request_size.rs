@@ -354,10 +354,12 @@ async fn two_large_pdfs_the_model_read_in_consecutive_turns_fit_in_one_request()
             _ => None,
         })
         .unwrap();
+    // The file named by its absolute path, with this system's separator.
+    let separator = std::path::MAIN_SEPARATOR;
     assert!(
         read.starts_with("PDF read successfully: ")
-            && read.contains("\n[PDF /")
-            && read.ends_with("/first.pdf omitted to keep the request within the provider's limits. It is no longer visible: do not describe it from memory, and read the file again if it is needed.]"),
+            && read.contains("\n[PDF ")
+            && read.ends_with(&format!("{separator}first.pdf omitted to keep the request within the provider's limits. It is no longer visible: do not describe it from memory, and read the file again if it is needed.]")),
         "{read}"
     );
     assert_eq!(fixture.summaries(), 0);

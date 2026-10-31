@@ -23,6 +23,15 @@ use std::{sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+/// Removes a test's folder: on Windows only as far as it can, since a store
+/// or turn that is closing still holds its files there for a moment.
+async fn remove_test_folder(folder: impl AsRef<std::path::Path>) {
+    let removed = tokio::fs::remove_dir_all(folder).await;
+    if !cfg!(windows) {
+        removed.unwrap();
+    }
+}
+
 #[path = "support/content_filter.rs"]
 mod content_filter;
 #[path = "support/reliability.rs"]
@@ -1349,7 +1358,7 @@ async fn undo_rejects_an_active_text_turn_without_cancelling_it() {
     );
     runtime.unrevert(thread.id).await.unwrap();
     assert!(workspace.join("keep.txt").exists());
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    remove_test_folder(root).await;
 }
 
 #[tokio::test]
@@ -1443,7 +1452,7 @@ async fn undo_rejects_an_active_mutation_until_explicitly_stopped() {
             .unwrap(),
         "written\n"
     );
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    remove_test_folder(root).await;
 }
 
 #[tokio::test]
@@ -3462,7 +3471,7 @@ async fn binary_read_attachment_is_persisted_and_replayed_to_the_provider() {
         TurnStatus::Completed
     );
 
-    let canonical = pdf.canonicalize().unwrap().display().to_string();
+    let canonical = dunce::canonicalize(&pdf).unwrap().display().to_string();
     {
         let captured = requests.lock().unwrap();
         assert_eq!(captured.len(), 2, "read completes in one tool round");
@@ -3484,7 +3493,7 @@ async fn binary_read_attachment_is_persisted_and_replayed_to_the_provider() {
             if metadata["attachments"][0] == canonical
                 && metadata["mime"] == "application/pdf"
     )));
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    remove_test_folder(root).await;
 }
 
 #[tokio::test]
@@ -4574,7 +4583,7 @@ async fn namespaced_mutations_still_wait_for_permission() {
                 .unwrap(),
             "hi"
         );
-        tokio::fs::remove_dir_all(workspace).await.unwrap();
+        remove_test_folder(workspace).await;
     }
 }
 
@@ -4616,7 +4625,7 @@ async fn mutating_tools_prompt_and_approval_executes_them() {
     let items = runtime.items(thread.id, None).await.unwrap();
     assert!(items.iter().any(|item| matches!(&item.data,
         haarness_protocol::ItemData::ToolResult { is_error, .. } if !is_error)));
-    tokio::fs::remove_dir_all(workspace).await.unwrap();
+    remove_test_folder(workspace).await;
 }
 
 #[tokio::test]
@@ -4653,7 +4662,7 @@ async fn rejected_permissions_surface_feedback_and_write_nothing() {
     assert!(items.iter().any(|item| matches!(&item.data,
         haarness_protocol::ItemData::ToolResult { is_error, output, .. }
             if *is_error && output.contains("use the docs directory instead"))));
-    tokio::fs::remove_dir_all(workspace).await.unwrap();
+    remove_test_folder(workspace).await;
 }
 
 #[tokio::test]
@@ -4707,7 +4716,7 @@ async fn always_workspace_approval_persists_and_stops_prompting() {
         )),
         "session rule from AlwaysWorkspace should suppress further prompts"
     );
-    tokio::fs::remove_dir_all(workspace).await.unwrap();
+    remove_test_folder(workspace).await;
 }
 
 #[tokio::test]
@@ -5995,7 +6004,7 @@ async fn revert_restores_files_and_unrevert_redoes() {
     );
     assert!(workspace.join("created.txt").exists());
     assert!(workspace.join("second.txt").exists());
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    remove_test_folder(root).await;
 }
 
 /// An echo-provider runtime with snapshots over `workspace` that writes
@@ -6123,7 +6132,7 @@ async fn last_turn_diff_skips_unchanged_turns_and_stops_at_the_undo_boundary() {
             .is_none()
     );
     assert_eq!(last(true, None).await, [added("second.txt", None)]);
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    remove_test_folder(root).await;
 }
 
 #[cfg(unix)]
@@ -6240,7 +6249,7 @@ async fn a_failed_undo_or_redo_changes_nothing_and_can_be_retried() {
         ("after\n".into(), "after\n".into())
     );
     drop(unlock);
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    remove_test_folder(root).await;
 }
 
 #[tokio::test]
@@ -6360,7 +6369,7 @@ async fn next_turn_after_revert_soft_deletes_undone_items() {
         }),
         "forking after revert confirmation must not copy soft-deleted history"
     );
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    remove_test_folder(root).await;
 }
 
 #[tokio::test]
@@ -6443,7 +6452,7 @@ async fn direct_tool_after_undo_commits_the_boundary_before_mutating() {
         runtime.unrevert(thread.id).await.is_err(),
         "redo is unavailable after the direct action commits undo"
     );
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    remove_test_folder(root).await;
 }
 
 /// A runtime over `workspace` with snapshots on and edits allowed.
@@ -6517,7 +6526,9 @@ async fn undo_restores_the_files_a_persons_shell_command_wrote() {
         tokio::fs::read_to_string(workspace.join("old.txt"))
             .await
             .unwrap(),
-        "changed"
+        "changed",
+        "{:?}",
+        result.data
     );
     runtime.revert(thread.id, None).await.unwrap();
     assert!(!workspace.join("note.txt").exists());
@@ -6534,7 +6545,7 @@ async fn undo_restores_the_files_a_persons_shell_command_wrote() {
             .unwrap(),
         "new"
     );
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    remove_test_folder(root).await;
 }
 
 #[tokio::test]
@@ -6587,7 +6598,7 @@ async fn undo_of_a_move_brings_back_the_old_path_and_removes_the_new() {
         "fn one() {}\n"
     );
     assert!(!workspace.join("src/new.rs").exists());
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    remove_test_folder(root).await;
 }
 
 #[tokio::test]
@@ -6992,6 +7003,8 @@ async fn interrupt_resolves_every_pending_child_question() {
     );
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn parallel_task_children_run_concurrently_and_persist_in_order() {
     let workspace = std::env::temp_dir().join(format!(
@@ -7100,9 +7113,11 @@ async fn parallel_task_children_run_concurrently_and_persist_in_order() {
                 && event.root_thread_id == Some(thread.id)),
         "task.updated events land on the parent thread with root attribution"
     );
-    tokio::fs::remove_dir_all(workspace).await.unwrap();
+    remove_test_folder(workspace).await;
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn workspace_tools_match_haarness_and_do_not_serialize_across_threads() {
     let root = std::env::temp_dir().join(format!(
@@ -7260,7 +7275,7 @@ async fn workspace_tools_match_haarness_and_do_not_serialize_across_threads() {
         );
     }
 
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    remove_test_folder(root).await;
 }
 
 #[tokio::test]
@@ -7855,9 +7870,31 @@ async fn a_client_that_reads_nothing_for_a_while_keeps_its_place_and_every_word(
         None,
         serde_json::json!({"text": "x".repeat(8 * 1024 * 1024)}),
     );
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Its first bytes in the socket show the connection took it, which in a
+    // debug build takes longer than the deltas below take to publish.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut peeked = vec![0_u8; 4096];
+        let marker = b"event: item.created";
+        loop {
+            let seen = connection.peek(&mut peeked).await.unwrap();
+            if peeked[..seen]
+                .windows(marker.len())
+                .any(|window| window == marker)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the large event reaches the socket");
     let mut written = String::new();
     for word in 0..5000 {
+        // In bursts, as a model writes: a debug build's connection takes each
+        // event slower than a loop with no pause publishes it.
+        if word % 500 == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         let word = format!("w{word} ");
         written.push_str(&word);
         runtime.events().publish(
@@ -10060,6 +10097,8 @@ async fn command_chains_prompt_once_with_a_pattern_per_command() {
         .unwrap();
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn redirects_outside_the_workspace_ask_even_when_bash_is_allowed() {
     let workspace = std::env::temp_dir().join(format!("haarness-extdir-{}", uuid::Uuid::now_v7()));
@@ -10113,6 +10152,8 @@ async fn redirects_outside_the_workspace_ask_even_when_bash_is_allowed() {
     let _ = tokio::fs::remove_dir_all(&workspace).await;
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn new_files_outside_the_workspace_ask_like_existing_ones() {
     let root = std::env::temp_dir().join(format!("haarness-newpath-{}", uuid::Uuid::now_v7()));
@@ -10140,7 +10181,8 @@ async fn new_files_outside_the_workspace_ask_like_existing_ones() {
         let pending = runtime.pending_permissions();
         assert_eq!(pending[0].permission, "external_directory", "{command}");
         assert!(
-            pending[0].patterns[0].starts_with(&*root.canonicalize().unwrap().to_string_lossy()),
+            pending[0].patterns[0]
+                .starts_with(&*dunce::canonicalize(&root).unwrap().to_string_lossy()),
             "{:?}",
             pending[0].patterns
         );
@@ -10218,8 +10260,8 @@ async fn external_list_asks_then_executes_after_allow_once() {
             if name == "list" && !is_error && output.contains("visible.txt")
     )));
 
-    tokio::fs::remove_dir_all(external).await.unwrap();
-    tokio::fs::remove_dir_all(workspace).await.unwrap();
+    remove_test_folder(external).await;
+    remove_test_folder(workspace).await;
 }
 
 #[tokio::test]
@@ -12491,7 +12533,7 @@ async fn workspace_rest_lifecycle_uses_real_git_and_enforces_activity_leases() {
     );
     assert_eq!(
         std::path::PathBuf::from(&feature.path),
-        std::fs::canonicalize(root.join("api-feature")).unwrap()
+        dunce::canonicalize(root.join("api-feature")).unwrap()
     );
     assert!(std::path::Path::new(&feature.path).is_dir());
 
@@ -13695,6 +13737,8 @@ mod inherited_ceilings;
 #[path = "cases/shell_readings.rs"]
 mod shell_readings;
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[path = "cases/agent_shell.rs"]
 mod agent_shell;
 #[path = "cases/auto_review.rs"]
@@ -13725,7 +13769,7 @@ async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     std::fs::create_dir_all(workspace.join("docs")).unwrap();
     std::fs::write(workspace.join("docs/readme.md"), "# Readme").unwrap();
     // Servers run in their canonical folder (the temporary one is a symlink on macOS).
-    let workspace = workspace.canonicalize().unwrap();
+    let workspace = dunce::canonicalize(&workspace).unwrap();
     let runtime = Arc::new(AgentRuntime::new(
         Arc::new(SqliteStore::in_memory().unwrap()),
         Arc::new(StaticProviderRegistry::new(vec![
@@ -13863,7 +13907,7 @@ async fn a_preview_whose_folder_was_removed_is_restored_into_a_new_folder() {
     std::fs::write(workspace.join("site/index.html"), "<h1>first</h1>").unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&outside, workspace.join("link")).unwrap();
-    let workspace = workspace.canonicalize().unwrap();
+    let workspace = dunce::canonicalize(&workspace).unwrap();
     let shown = haarness_server::preview::PreviewTool(workspace.clone())
         .execute(
             serde_json::json!({"filePath": "site/index.html"}),
@@ -13981,7 +14025,7 @@ async fn a_reply_image_is_read_only_from_inside_the_project_wherever_its_links_l
         symlink(outside.join("secret.png"), workspace.join("escape.png")).unwrap();
         symlink("../outside", workspace.join("shared")).unwrap();
     }
-    let workspace = workspace.canonicalize().unwrap();
+    let workspace = dunce::canonicalize(&workspace).unwrap();
     let runtime = Arc::new(AgentRuntime::new(
         Arc::new(SqliteStore::in_memory().unwrap()),
         Arc::new(StaticProviderRegistry::new(vec![
@@ -14035,6 +14079,7 @@ async fn a_reply_image_is_read_only_from_inside_the_project_wherever_its_links_l
         ),
         (Some("base64"), Some("image/png"), Some(encoded.as_str()))
     );
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut refused = vec![
         (
             "../outside/secret.png".to_owned(),
@@ -14593,7 +14638,7 @@ async fn auto_approves_once_without_a_prompt_and_review_asks() {
         )
         .await;
     assert!(matches!(stale, Err(CoreError::Conflict(_))), "{stale:?}");
-    tokio::fs::remove_dir_all(workspace).await.unwrap();
+    remove_test_folder(workspace).await;
 }
 
 #[tokio::test]
@@ -14680,7 +14725,7 @@ async fn a_configuration_file_edit_waits_for_a_person_even_in_auto() {
         .unwrap();
     wait_done(&runtime, &turn).await;
     assert!(!workspace.join(".haarness/haarness.json").exists());
-    tokio::fs::remove_dir_all(workspace).await.unwrap();
+    remove_test_folder(workspace).await;
 }
 
 #[tokio::test]
@@ -14736,7 +14781,7 @@ async fn turning_auto_on_answers_requests_already_waiting() {
         "clients hear about the change"
     );
     runtime.interrupt(other_turn.id).await.unwrap();
-    tokio::fs::remove_dir_all(workspace).await.unwrap();
+    remove_test_folder(workspace).await;
 }
 
 #[tokio::test]
@@ -14823,7 +14868,7 @@ async fn delegated_agents_follow_the_chats_mode_and_forks_keep_their_own() {
         runtime.approval_mode(fork.id).await.unwrap().mode,
         haarness_protocol::ApprovalMode::Review
     );
-    tokio::fs::remove_dir_all(workspace).await.unwrap();
+    remove_test_folder(workspace).await;
 }
 
 #[path = "cases/resource_mentions.rs"]

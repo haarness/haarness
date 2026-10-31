@@ -374,9 +374,16 @@ test("a newer release than the one staged downloads behind it; the window keeps 
   await second.updater.start();
   await second.updater.check();
   await second.settle();
+  // The download behind the staged update shows nothing until it is staged
+  // in its place, so settling cannot see it end.
+  const old = join(first.dir, "9.9.8", "Haarness.app");
+  for (let index = 0; index < 100; index++) {
+    if (second.updater.state().version === "9.9.9" && !(await stat(old).catch(() => null))) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
   assert.ok(second.states.every((state) => state.status === "ready"), JSON.stringify(second.states.map((state) => state.status)));
   assert.equal(second.updater.state().version, "9.9.9");
-  assert.equal(await stat(join(first.dir, "9.9.8", "Haarness.app")).catch(() => null), null);
+  assert.equal(await stat(old).catch(() => null), null);
   await first.cleanup();
 });
 
@@ -685,7 +692,8 @@ test("a rename Windows holds for a moment (an antivirus scan) is tried again; ot
   assert.equal(await readFile(join(dir, "b"), "utf8"), "x");
   await assert.rejects(renameSoon(join(dir, "missing"), join(dir, "c"), async () => {}), { code: "ENOENT" });
   // Held the whole time: tried ten times, waiting a little longer each time, then the error.
-  if (process.getuid?.() !== 0) {
+  // Windows keeps no write permission on a folder, so only a lock could hold it there.
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
     const { chmod } = await import("node:fs/promises");
     await mkdir(join(dir, "locked"));
     await chmod(join(dir, "locked"), 0o555);

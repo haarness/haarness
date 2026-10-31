@@ -663,7 +663,7 @@ fn lock_state(directory: &std::path::Path, wait: std::time::Duration) -> Option<
 fn write_whole(path: &std::path::Path, body: &str) -> bool {
     // A link whose file is missing cannot be resolved, only read.
     let target = link_target(path)
-        .map(|target| std::fs::canonicalize(path).unwrap_or(target))
+        .map(|target| dunce::canonicalize(path).unwrap_or(target))
         .unwrap_or_else(|| path.to_path_buf());
     let name = target.file_name().map_or_else(
         || "tui-state.toml".into(),
@@ -941,10 +941,12 @@ fn overlay(base: toml::Value, over: toml::Value) -> toml::Value {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::write_whole;
     use super::{
         BackgroundMode, STATE_FILE, STATE_LOCK, STATE_LOCK_WAIT, UnreadTheme, add_theme_entries,
         adopt_legacy_files, merge_tui_settings, parse_background_mode, read_state,
-        resolve_config_dir, save_state_in, write_whole,
+        resolve_config_dir, save_state_in,
     };
     use std::path::PathBuf;
 
@@ -1192,42 +1194,56 @@ mod tests {
 
     #[test]
     fn config_folder_is_the_one_the_cli_uses_on_every_os() {
+        // Absolute here: Windows needs a drive.
+        let absolute = |path: &str| {
+            PathBuf::from(if cfg!(windows) {
+                format!("C:{path}")
+            } else {
+                path.into()
+            })
+        };
         let env = |pairs: &'static [(&str, &str)]| {
             move |key: &str| {
                 pairs
                     .iter()
                     .find(|(name, _)| *name == key)
-                    .map(|(_, value)| std::ffi::OsString::from(value))
+                    .map(|(_, value)| {
+                        if value.starts_with('/') {
+                            absolute(value).into_os_string()
+                        } else {
+                            (*value).into()
+                        }
+                    })
             }
         };
-        let home = Some(PathBuf::from("/Users/someone"));
+        let home = Some(absolute("/Users/someone"));
         // Not ~/Library/Application Support: the server reads ~/.config.
         assert_eq!(
             resolve_config_dir(env(&[]), home.clone()),
-            Some(PathBuf::from("/Users/someone/.config/haarness"))
+            Some(absolute("/Users/someone").join(".config").join("haarness"))
         );
         assert_eq!(
             resolve_config_dir(env(&[("XDG_CONFIG_HOME", "/xdg")]), home.clone()),
-            Some(PathBuf::from("/xdg/haarness"))
+            Some(absolute("/xdg").join("haarness"))
         );
         // A relative XDG value is ignored, as the CLI ignores it.
         assert_eq!(
             resolve_config_dir(env(&[("XDG_CONFIG_HOME", "xdg")]), home.clone()),
-            Some(PathBuf::from("/Users/someone/.config/haarness"))
+            Some(absolute("/Users/someone").join(".config").join("haarness"))
         );
         assert_eq!(
             resolve_config_dir(
                 env(&[("HAARNESS_HOME", "/opt/h"), ("XDG_CONFIG_HOME", "/xdg")]),
                 home.clone()
             ),
-            Some(PathBuf::from("/opt/h/config"))
+            Some(absolute("/opt/h").join("config"))
         );
         assert_eq!(
             resolve_config_dir(
                 env(&[("HAARNESS_DATA_DIR", "/data"), ("HAARNESS_HOME", "/opt/h")]),
                 home
             ),
-            Some(PathBuf::from("/data/config"))
+            Some(absolute("/data").join("config"))
         );
     }
 

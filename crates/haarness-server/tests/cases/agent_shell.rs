@@ -18,7 +18,7 @@ impl Fixture {
         let path =
             std::env::temp_dir().join(format!("haarness-agent-shell-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&path).unwrap();
-        Self(path.canonicalize().unwrap())
+        Self(dunce::canonicalize(&path).unwrap())
     }
 }
 impl Drop for Fixture {
@@ -175,6 +175,8 @@ async fn children(runtime: &AgentRuntime, parent: ThreadId) -> Vec<ThreadId> {
         .collect()
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn agent_commands_name_their_chat_and_a_person_s_own_command_is_not_marked() {
     let fixture = Fixture::new();
@@ -300,6 +302,8 @@ async fn agent_commands_name_their_chat_and_a_person_s_own_command_is_not_marked
     assert_eq!(outputs, [format!("exit: 0\n{}", marked(child))]);
 }
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_shell_env_hook_cannot_unmark_an_agent_command_or_name_another_chat() {
     let fixture = Fixture::new();

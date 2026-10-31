@@ -665,7 +665,7 @@ fn last_lines(text: &str, count: usize) -> String {
 
 /// What a command without a deadline saves of its output, from the start;
 /// the end it shows is kept apart. 64 MiB, as much as a request body.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const SAVED_WITHOUT_DEADLINE: usize = 64 * 1024 * 1024;
 
 /// The newlines in `bytes`; a plain count, not worth a dependency.

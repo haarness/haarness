@@ -49,7 +49,7 @@ fn bundled_with_desktop() -> bool {
     let Ok(executable) = std::env::current_exe() else {
         return false;
     };
-    let executable = executable.canonicalize().unwrap_or(executable);
+    let executable = dunce::canonicalize(&executable).unwrap_or(executable);
     let folder = executable.parent();
     let named = |path: Option<&std::path::Path>, name: &str| {
         path.and_then(std::path::Path::file_name)

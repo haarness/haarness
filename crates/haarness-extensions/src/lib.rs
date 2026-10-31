@@ -131,8 +131,8 @@ impl Config {
 
 /// Resolve only an explicitly installed file/package; never search workspace node_modules.
 pub fn entrypoint(path: &Path) -> Result<PathBuf> {
-    let path = path
-        .canonicalize()
+    // Without Windows' `\\?\` prefix, which Bun's file URLs cannot carry.
+    let path = dunce::canonicalize(path)
         .with_context(|| format!("extension not found: {}", path.display()))?;
     if path.is_file() {
         return Ok(path);
@@ -147,7 +147,7 @@ pub fn entrypoint(path: &Path) -> Result<PathBuf> {
             value.get("exports"),
         ] {
             if let Some(candidate) = candidate.and_then(Value::as_str) {
-                let resolved = path.join(candidate).canonicalize()?;
+                let resolved = dunce::canonicalize(path.join(candidate))?;
                 if !resolved.starts_with(&path) || !resolved.is_file() {
                     bail!("extension entry must be a file inside its package");
                 }
@@ -165,14 +165,13 @@ pub fn entrypoint(path: &Path) -> Result<PathBuf> {
 
 pub fn bun() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("HAARNESS_BUN") {
-        return PathBuf::from(path)
-            .canonicalize()
+        return dunce::canonicalize(PathBuf::from(path))
             .context("HAARNESS_BUN must name an existing Bun executable");
     }
     for root in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
         let path = root.join(if cfg!(windows) { "bun.exe" } else { "bun" });
         if path.is_file() {
-            return Ok(path.canonicalize()?);
+            return Ok(dunce::canonicalize(path)?);
         }
     }
     bail!(

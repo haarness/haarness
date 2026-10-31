@@ -42,6 +42,13 @@ pub struct InstalledPlugin {
     pub held: Option<String>,
 }
 
+/// A short random part for the name of a folder beside a plugin's: git
+/// writes deep inside a clone, and Windows' 260-character paths leave
+/// little room for a whole UUID there. The end of a v7 UUID is random.
+fn short_nonce() -> String {
+    uuid::Uuid::now_v7().simple().to_string()[20..].to_owned()
+}
+
 fn plugins_root(data: &Path) -> PathBuf {
     data.join("plugins")
 }
@@ -62,7 +69,7 @@ fn write_map<T: Serialize>(path: &Path, map: &BTreeMap<String, T>) -> Result<()>
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("state");
-    let temporary = parent.join(format!(".{leaf}.{}.tmp", uuid::Uuid::now_v7()));
+    let temporary = parent.join(format!(".{leaf}.{}.tmp", short_nonce()));
     fs::write(&temporary, serde_json::to_string_pretty(map)?)?;
     if let Err(error) = fs::rename(&temporary, path) {
         let _ = fs::remove_file(&temporary);
@@ -112,10 +119,9 @@ fn owned_clone(data: &Path, name: &str) -> PathBuf {
 fn is_owned_clone(data: &Path, name: &str, root: &Path) -> bool {
     let clone = owned_clone(data, name);
     root == clone
-        || root
-            .canonicalize()
+        || dunce::canonicalize(root)
             .ok()
-            .zip(clone.canonicalize().ok())
+            .zip(dunce::canonicalize(&clone).ok())
             .is_some_and(|(root, clone)| root == clone)
 }
 
@@ -856,7 +862,7 @@ fn git_checkout(url: &str, revision: &GitRevision<'_>, destination: &Path) -> Re
     // Messages name the source with any user name, password or secret query
     // parameter hidden; git itself still gets the address as written.
     let shown = haarness_core::redact::url(url);
-    let nonce = uuid::Uuid::now_v7();
+    let nonce = short_nonce();
     let staging = parent.join(format!(".{leaf}.stage-{nonce}"));
     let backup = parent.join(format!(".{leaf}.backup-{nonce}"));
     let fetched = (|| -> Result<()> {
@@ -911,7 +917,7 @@ fn git_checkout(url: &str, revision: &GitRevision<'_>, destination: &Path) -> Re
 }
 
 pub(crate) fn validate_plugin_tree(root: &Path) -> Result<()> {
-    let root = root.canonicalize()?;
+    let root = dunce::canonicalize(root)?;
     let mut pending = vec![root.clone()];
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(&directory)? {
@@ -922,7 +928,7 @@ pub(crate) fn validate_plugin_tree(root: &Path) -> Result<()> {
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path)?;
             if metadata.file_type().is_symlink() {
-                let resolved = path.canonicalize().with_context(|| {
+                let resolved = dunce::canonicalize(&path).with_context(|| {
                     format!(
                         "plugin symlink target cannot be resolved: {}",
                         path.display()
@@ -999,7 +1005,7 @@ fn materialize_plugin_tree(source: &Path, destination: &Path) -> Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("plugin");
-    let nonce = uuid::Uuid::now_v7();
+    let nonce = short_nonce();
     let staging = parent.join(format!(".{leaf}.stage-{nonce}"));
     let backup = parent.join(format!(".{leaf}.backup-{nonce}"));
     if let Err(error) =
@@ -1061,7 +1067,7 @@ fn swap_into(staging: &Path, destination: &Path) -> Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("folder");
-    let backup = parent.join(format!(".{leaf}.previous-{}", uuid::Uuid::now_v7()));
+    let backup = parent.join(format!(".{leaf}.previous-{}", short_nonce()));
     let had = destination.exists();
     if had {
         fs::rename(destination, &backup)?;
@@ -1084,7 +1090,7 @@ fn swap_into(staging: &Path, destination: &Path) -> Result<()> {
 pub fn marketplace_add(data: &Path, source: &str) -> Result<String> {
     let local = local_path(source).unwrap_or_else(|| PathBuf::from(source));
     if local.exists() {
-        let root = local.canonicalize()?;
+        let root = dunce::canonicalize(&local)?;
         let manifest = manifest_of(&root)?;
         safe_name(&manifest.name, "marketplace")?;
         let _lock = marketplaces_lock(data)?;
@@ -1104,7 +1110,7 @@ pub fn marketplace_add(data: &Path, source: &str) -> Result<String> {
     let url = git_url(source);
     let staging = plugins_root(data)
         .join("marketplaces")
-        .join(format!(".add-{}", uuid::Uuid::now_v7()));
+        .join(format!(".add-{}", short_nonce()));
     let checked = git_clone(&url, &staging).and_then(|()| {
         let manifest = manifest_of(&staging)?;
         safe_name(&manifest.name, "marketplace")?;
@@ -1307,7 +1313,7 @@ pub fn marketplace_update(data: &Path, name: &str) -> Result<MarketplaceRefresh>
         });
     }
     let parent = plugins_root(data).join("marketplaces");
-    let staging = parent.join(format!(".{name}.refresh-{}", uuid::Uuid::now_v7()));
+    let staging = parent.join(format!(".{name}.refresh-{}", short_nonce()));
     let fetched = git_clone(&found.source, &staging).and_then(|()| {
         let manifest = manifest_of(&staging)?;
         if manifest.name != name {
@@ -1347,7 +1353,7 @@ pub fn marketplace_update(data: &Path, name: &str) -> Result<MarketplaceRefresh>
                     .collect::<BTreeMap<_, _>>()
             })
             .unwrap_or_default();
-        let backup = parent.join(format!(".{name}.previous-{}", uuid::Uuid::now_v7()));
+        let backup = parent.join(format!(".{name}.previous-{}", short_nonce()));
         let had = clone.exists();
         let swapped = (|| -> Result<()> {
             if had {
@@ -1776,6 +1782,7 @@ fn mcp_servers(root: &Path) -> BTreeMap<String, serde_json::Value> {
 
 /// The files of a plugin someone may run directly: those marked executable.
 fn programs(root: &Path) -> std::collections::BTreeSet<PathBuf> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut found = std::collections::BTreeSet::new();
     #[cfg(unix)]
     {
@@ -1903,7 +1910,7 @@ fn stage_plugin(
 ) -> Result<StagedPlugin> {
     let parent = plugins_root(data).join("cache").join(market);
     fs::create_dir_all(&parent)?;
-    let staging = parent.join(format!(".{name}.fetch-{}", uuid::Uuid::now_v7()));
+    let staging = parent.join(format!(".{name}.fetch-{}", short_nonce()));
     let staged = (|| -> Result<StagedPlugin> {
         let subdir = match &entry.source {
             serde_json::Value::String(source) if is_git_source(source) => {
@@ -1915,8 +1922,8 @@ fn stage_plugin(
                     bail!("plugin {name} has an unsafe relative source path");
                 }
                 let candidate = root.join(source);
-                let root = root.canonicalize()?;
-                let candidate = candidate.canonicalize().with_context(|| {
+                let root = dunce::canonicalize(root)?;
+                let candidate = dunce::canonicalize(&candidate).with_context(|| {
                     format!("plugin source {} does not exist", candidate.display())
                 })?;
                 if !candidate.starts_with(&root) {
@@ -1962,8 +1969,8 @@ fn stage_plugin(
                 match subdir {
                     Some(subdir) => {
                         let target = staging.join(subdir);
-                        let checkout = staging.canonicalize()?;
-                        let target = target.canonicalize().with_context(|| {
+                        let checkout = dunce::canonicalize(&staging)?;
+                        let target = dunce::canonicalize(&target).with_context(|| {
                             format!("plugin subdirectory {subdir} does not exist")
                         })?;
                         if !target.starts_with(&checkout) || !target.is_dir() {
@@ -2028,7 +2035,7 @@ fn install_staged(
         }
         swap_into(&staged.root, &cache)?;
         let path = match &staged.subdir {
-            Some(subdir) => cache.join(subdir).canonicalize()?,
+            Some(subdir) => dunce::canonicalize(cache.join(subdir))?,
             None => cache.clone(),
         };
         let plugin = InstalledPlugin {
@@ -2123,13 +2130,14 @@ pub fn install(data: &Path, spec: &str) -> Result<InstalledPlugin> {
         let path = if local.is_file()
             && local.file_name().and_then(|name| name.to_str()) == Some("plugin.json")
         {
-            local
-                .parent()
-                .and_then(Path::parent)
-                .context("plugin.json must live under .claude-plugin")?
-                .canonicalize()?
+            dunce::canonicalize(
+                local
+                    .parent()
+                    .and_then(Path::parent)
+                    .context("plugin.json must live under .claude-plugin")?,
+            )?
         } else {
-            local.canonicalize()?
+            dunce::canonicalize(local)?
         };
         if !path.is_dir() {
             bail!("plugin source {} is not a directory", path.display());
@@ -2597,7 +2605,7 @@ mod tests {
 
         let installed = install(&data, plugin.to_str().unwrap()).unwrap();
         assert_eq!(installed.marketplace, "local");
-        assert_eq!(installed.path, plugin.canonicalize().unwrap());
+        assert_eq!(installed.path, dunce::canonicalize(&plugin).unwrap());
         assert!(installed.enabled);
         remove(&data, "local-kit").unwrap();
         assert!(
@@ -2697,7 +2705,7 @@ mod tests {
                 .unwrap();
             commits.push(String::from_utf8(head.stdout).unwrap().trim().to_owned());
         }
-        let url = format!("file://{}", repo.display());
+        let url = url::Url::from_file_path(&repo).unwrap().to_string();
         let market = root.join("market");
         fs::create_dir_all(market.join(".claude-plugin")).unwrap();
         fs::write(
@@ -2803,7 +2811,7 @@ mod tests {
                     "name": "subdir-kit",
                     "source": {
                         "source": "git-subdir",
-                        "url": format!("file://{}", repo.display()),
+                        "url": url::Url::from_file_path(&repo).unwrap().to_string(),
                         "path": "plugins/subdir-kit"
                     }
                 }]
@@ -2859,7 +2867,7 @@ mod tests {
             run(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
             Self {
                 work,
-                url: format!("file://{}", bare.display()),
+                url: url::Url::from_file_path(&bare).unwrap().to_string(),
             }
         }
 
@@ -3102,7 +3110,7 @@ mod tests {
             &marketplaces_file(&data),
             &BTreeMap::from([
                 ("team".to_owned(), clone.clone()),
-                ("fixture".to_owned(), folder.canonicalize().unwrap()),
+                ("fixture".to_owned(), dunce::canonicalize(&folder).unwrap()),
             ]),
         )
         .unwrap();

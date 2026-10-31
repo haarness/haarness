@@ -219,7 +219,7 @@ fn list_directories(
         path.is_absolute(),
         "Use an absolute path on the remote server"
     );
-    let path = path.canonicalize().context("Folder is unavailable")?;
+    let path = dunce::canonicalize(&path).context("Folder is unavailable")?;
     ensure!(path.is_dir(), "Select a folder");
     let prefix = options.prefix.to_lowercase();
     let after = options.after.map(|name| (name.to_lowercase(), name));
@@ -384,11 +384,7 @@ mod tests {
             ..host
         };
         let listing = host.browse(None, BrowseOptions::default()).await.unwrap();
-        let home = directories::BaseDirs::new()
-            .unwrap()
-            .home_dir()
-            .canonicalize()
-            .unwrap();
+        let home = dunce::canonicalize(directories::BaseDirs::new().unwrap().home_dir()).unwrap();
         assert_eq!(listing.path, home.display().to_string());
         let _ = std::fs::remove_dir_all(root);
     }

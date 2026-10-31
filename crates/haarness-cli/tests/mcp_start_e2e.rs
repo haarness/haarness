@@ -16,6 +16,9 @@ use serde_json::{Value, json};
 use tokio::{net::TcpListener, process::Command, time::timeout};
 use uuid::Uuid;
 
+/// The Python fixtures run with: Windows has no `python3` command.
+const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
 const TOKEN: &str = "mcp-start-e2e-token";
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -38,7 +41,7 @@ impl TestDirectory {
     /// each launch to `launches`.
     fn slow_server(&self, delay: &str) -> Value {
         json!({
-            "command": "python3",
+            "command": PYTHON,
             "args": [FIXTURE],
             "env": {
                 "INIT_DELAY": delay,
@@ -398,7 +401,7 @@ async fn stopping_stops_a_server_still_starting_and_the_waits_for_it() {
     let directory = TestDirectory::new();
     let pids = directory.0.join("pids");
     directory.configure(&json!({"tree": {
-        "command": "python3",
+        "command": PYTHON,
         "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/../haarness-mcp/tests/fixtures/process_tree.py")],
         "env": {"TREE_LOG": pids, "INIT_DELAY": "60"},
         "timeoutMs": 90_000

@@ -1397,6 +1397,9 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// The Python fixtures run with: Windows has no `python3` command.
+    const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
     #[tokio::test]
     async fn a_refused_download_says_why() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1511,7 +1514,7 @@ mod tests {
             uuid::Uuid::now_v7()
         ));
         fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let paths = Paths::new(Some(&root.join("home"))).unwrap();
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
@@ -1598,12 +1601,12 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("haarness-mcp-bundle-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let paths = Paths::new(Some(&root.join("data"))).unwrap();
         for (index, prefix) in ["", "wrapped/"].into_iter().enumerate() {
             let workspace = root.join(format!("workspace-{index}"));
             fs::create_dir_all(&workspace).unwrap();
-            let config = json!({"command":"python3", "args":["${CLAUDE_PLUGIN_ROOT}/server.py"]});
+            let config = json!({"command": PYTHON, "args":["${CLAUDE_PLUGIN_ROOT}/server.py"]});
             let bytes = archive(&[
                 (
                     &format!("{prefix}.mcp.json"),
@@ -1643,7 +1646,7 @@ mod tests {
             uuid::Uuid::now_v7()
         ));
         fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let paths = Paths::new(Some(&root.join("data"))).unwrap();
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
@@ -1674,7 +1677,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("haarness-marketplace-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let paths = Paths::new(Some(&root.join("home"))).unwrap();
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
@@ -1745,7 +1748,7 @@ mod tests {
             uuid::Uuid::now_v7()
         ));
         fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let paths = Paths::new(Some(&root.join("home"))).unwrap();
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
@@ -1959,7 +1962,7 @@ mod tests {
             uuid::Uuid::now_v7()
         ));
         fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let paths = Paths::new(Some(&root.join("home"))).unwrap();
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
@@ -2228,7 +2231,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("haarness-receipt-race-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let paths = Paths::new(Some(&root.join("home"))).unwrap();
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();

@@ -79,10 +79,8 @@ pub fn find_in(dir: &Path, claude: bool) -> Vec<PathBuf> {
 /// yield nothing.
 #[must_use]
 pub fn nested(file: &Path, workspace: &Path, claude: bool) -> Vec<PathBuf> {
-    let root = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
-    let target = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    let root = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let target = dunce::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
     let mut out = Vec::new();
     let mut current = target.parent();
     while let Some(dir) = current {
@@ -387,8 +385,8 @@ pub fn file_left_out(
     trusted: bool,
     omit: ImportFilter<'_>,
 ) -> Option<&'static str> {
-    let canonical = path.canonicalize().ok()?;
-    let root = workspace.canonicalize().ok();
+    let canonical = dunce::canonicalize(path).ok()?;
+    let root = dunce::canonicalize(workspace).ok();
     let inside = root
         .as_deref()
         .is_some_and(|root| canonical.starts_with(root));
@@ -398,7 +396,13 @@ pub fn file_left_out(
         return Some(CREDENTIALS_FILE);
     }
     let rules: ImportFilter<'_> = if trusted || inside { &|_| None } else { omit };
-    left_out(&canonical, root.as_deref(), rules)
+    // A rule may name the file as it was written rather than where it
+    // really is: through a folder link, or Windows' short 8.3 folder names.
+    left_out(&canonical, root.as_deref(), rules).or_else(|| {
+        (path.is_absolute() && path != canonical)
+            .then(|| rules(path))
+            .flatten()
+    })
 }
 
 /// Why [`file_left_out`] leaves out a file that holds credentials.
@@ -420,7 +424,7 @@ fn holds_credentials(canonical: &Path) -> bool {
     const NAMES: [&str; 5] = [".netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass"];
     const EXTENSIONS: [&str; 6] = ["pem", "key", "p12", "pfx", "jks", "keystore"];
     let in_folder = haarness_protocol::home_dir()
-        .and_then(|home| home.canonicalize().ok())
+        .and_then(|home| dunce::canonicalize(&home).ok())
         .is_some_and(|home| {
             FOLDERS
                 .iter()
@@ -536,13 +540,13 @@ fn resolve(
                 continue;
             }
             let target = locate(&reference.path, base, home);
-            let Ok(canonical) = target.canonicalize() else {
+            let Ok(canonical) = dunce::canonicalize(&target) else {
                 continue;
             };
             if !canonical.is_file() {
                 continue;
             }
-            let root = workspace.canonicalize().ok();
+            let root = dunce::canonicalize(workspace).ok();
             let inside = root
                 .as_deref()
                 .is_some_and(|workspace| canonical.starts_with(workspace));
@@ -692,7 +696,7 @@ mod tests {
 
     #[test]
     fn nested_discovery_walks_up_to_but_not_including_the_workspace() {
-        let root = temp("nested").canonicalize().unwrap();
+        let root = dunce::canonicalize(temp("nested")).unwrap();
         fs::create_dir_all(root.join("a/b/c")).unwrap();
         fs::write(root.join("AGENTS.md"), "root").unwrap();
         fs::write(root.join("a/AGENTS.md"), "a").unwrap();
@@ -786,7 +790,7 @@ mod tests {
             "@.env\n@.env.example\n@private/notes.md\n@public/notes.md\n@public/link.md\n",
         )
         .unwrap();
-        let private = root.canonicalize().unwrap().join("private");
+        let private = dunce::canonicalize(&root).unwrap().join("private");
         let deny = |file: &Path| {
             file.starts_with(&private)
                 .then_some("a read rule denies it")

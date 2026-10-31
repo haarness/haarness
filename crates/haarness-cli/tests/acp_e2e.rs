@@ -1004,10 +1004,26 @@ async fn a_prompt_a_hook_blocks_is_refused_with_the_hooks_reason() {
     daemon_guard.stop().await;
 }
 
-/// `python3` as an absolute path: ACP takes a stdio server's command as one.
-fn python3() -> PathBuf {
+/// `sh` as an absolute path (Git's `sh.exe` on Windows): ACP takes a stdio
+/// server's command as one.
+fn sh() -> PathBuf {
+    let name = if cfg!(windows) { "sh.exe" } else { "sh" };
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .map(|folder| folder.join("python3"))
+        .map(|folder| folder.join(name))
+        .find(|path| path.is_file())
+        .expect("sh on PATH")
+}
+
+/// `python3` (`python.exe` on Windows, which has no `python3`) as an
+/// absolute path: ACP takes a stdio server's command as one.
+fn python3() -> PathBuf {
+    let name = if cfg!(windows) {
+        "python.exe"
+    } else {
+        "python3"
+    };
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|folder| folder.join(name))
         .find(|path| path.is_file())
         .expect("python3 on PATH")
 }
@@ -1035,7 +1051,7 @@ async fn a_session_with_a_server_slow_to_start_is_set_up_at_once() {
     };
     // Ends without answering, 3 s in: after session/new has returned.
     let late =
-        json!({"name": "late", "command": "/bin/sh", "args": ["-c", "sleep 3; exit 1"], "env": []});
+        json!({"name": "late", "command": sh(), "args": ["-c", "sleep 3; exit 1"], "env": []});
     let started = std::time::Instant::now();
     send(
         &mut stdin,
@@ -1081,11 +1097,18 @@ async fn a_session_with_a_server_slow_to_start_is_set_up_at_once() {
         "the editor was not told a server failed: {messages:?}"
     );
 
+    // A program that ends at once without answering (Git's `sh` on Windows,
+    // reading the Python fixture as shell).
+    let broken = if cfg!(windows) {
+        sh()
+    } else {
+        PathBuf::from("/usr/bin/false")
+    };
     send(
         &mut stdin,
         json!({"jsonrpc":"2.0", "id":12, "method":"session/new",
                "params":{"cwd":workspace,
-                         "mcpServers":[server("broken", PathBuf::from("/usr/bin/false"), "0")]}}),
+                         "mcpServers":[server("broken", broken, "0")]}}),
     )
     .await;
     let mut messages = Vec::new();

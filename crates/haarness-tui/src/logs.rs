@@ -167,6 +167,10 @@ pub(crate) fn export_path(
 /// an export never overwrites someone's notes or a log they typed by mistake.
 pub(crate) fn replaces_other_file(path: &Path) -> bool {
     use std::io::Read as _;
+    // Before opening it: Windows will not open a folder as a file.
+    if path.is_dir() {
+        return true;
+    }
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
     };

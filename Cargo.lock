@@ -1547,6 +1547,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "unicode-width",
+ "url",
  "uuid",
  "zip",
 ]
@@ -1560,6 +1561,7 @@ dependencies = [
  "chrono",
  "crc32fast",
  "dashmap",
+ "dunce",
  "futures",
  "haarness-protocol",
  "hex",
@@ -1609,6 +1611,7 @@ version = "0.1.14"
 dependencies = [
  "anyhow",
  "chrono",
+ "dunce",
  "haarness-core",
  "haarness-protocol",
  "haarness-store",
@@ -1642,6 +1645,7 @@ version = "0.1.14"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "dunce",
  "fs2",
  "futures",
  "haarness-core",
@@ -1683,6 +1687,7 @@ version = "0.1.14"
 dependencies = [
  "anyhow",
  "chrono",
+ "dunce",
  "fs2",
  "jsonc-parser",
  "serde",
@@ -1701,6 +1706,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "url",
  "utoipa",
  "uuid",
 ]
@@ -1838,6 +1844,7 @@ version = "0.1.14"
 dependencies = [
  "async-trait",
  "chrono",
+ "dunce",
  "flate2",
  "haarness-core",
  "haarness-protocol",
@@ -1863,6 +1870,7 @@ dependencies = [
  "chrono",
  "crossterm",
  "directories",
+ "dunce",
  "fs2",
  "futures",
  "haarness-account",
@@ -1894,6 +1902,7 @@ dependencies = [
 name = "haarness-workflow-catalog"
 version = "0.1.14"
 dependencies = [
+ "dunce",
  "haarness-protocol",
  "serde_json",
  "thiserror 2.0.20",
@@ -1908,6 +1917,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
+ "dunce",
  "fs2",
  "haarness-core",
  "haarness-protocol",
@@ -1930,6 +1940,7 @@ name = "haarness-workspaces"
 version = "0.1.14"
 dependencies = [
  "chrono",
+ "dunce",
  "fs2",
  "haarness-core",
  "haarness-protocol",

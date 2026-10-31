@@ -48,7 +48,10 @@ for (const outcome of ["resolve", "reject"] as const) {
       HAARNESS_DESKTOP_TEST: "1",
       ELECTRON_RENDERER_URL: "data:text/html,Startup-test",
     });
-    const child = spawn(electron as unknown as string, [entry], { env });
+    // As Playwright launches Electron on Linux: a CI runner's chrome-sandbox
+    // is not set up to run as root.
+    const flags = process.platform === "linux" ? ["--no-sandbox"] : [];
+    const child = spawn(electron as unknown as string, [...flags, entry], { env });
     let output = "";
     child.stdout.on("data", (data) => {
       output += data;

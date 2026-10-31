@@ -2500,7 +2500,7 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
         let root =
             std::env::temp_dir().join(format!("haarness-ui-auto-update-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let paths = crate::Paths::new(Some(&root.join("home"))).unwrap();
         let workspace = root.join("workspace");
         let skill = workspace.join(".haarness/skills/demo");
@@ -2643,7 +2643,7 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
         use std::sync::Arc;
         let root = std::env::temp_dir().join(format!("haarness-ui-icon-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let paths = crate::Paths::new(Some(&root.join("home"))).unwrap();
         let workspace = root.join("workspace");
         let skill = workspace.join(".haarness/skills/demo");

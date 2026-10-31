@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+dunce.workspace = true
 fs2.workspace = true
 unicode-segmentation = "1.13"
 anyhow.workspace = true

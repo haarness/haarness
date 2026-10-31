@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { createManifest, EXTENSION_ID, EXTENSION_KEY, extensionId, workspaceVersion } from "../manifest.config";
 import { compareVersions, manifestVersion } from "../src/core/version";
 
@@ -30,7 +31,7 @@ test("the manifest key pins the extension ID native messaging allows", () => {
 });
 
 test("the manifest asks for exactly what the extension uses", () => {
-  const version = workspaceVersion(new URL("../../../Cargo.toml", import.meta.url).pathname);
+  const version = workspaceVersion(fileURLToPath(new URL("../../../Cargo.toml", import.meta.url)));
   const manifest = createManifest(version);
   assert.equal(manifest.version_name, version);
   assert.equal(manifest.version, manifestVersion(version));

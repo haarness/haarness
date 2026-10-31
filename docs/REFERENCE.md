@@ -234,7 +234,8 @@ older server that names none leaves ACP to match the call by its input. A reques
 another Haarness app, or covered by a sibling's Reject, which rejects every
 request in the conversation, or Always) is never shown, or is withdrawn with
 `$/cancel_request` when it already is, and an answer that arrives too late is
-ignored. A background subagent that asks while no prompt runs is asked when
+ignored. A request still shown when the turn ends stays up, and the prompt
+ends once it is answered or settled. A background subagent that asks while no prompt runs is asked when
 the next prompt starts, or can be answered from another Haarness app; after a
 reconnect or a gap in the event stream, the requests the server holds are read
 again, so one raised or settled meanwhile is not missed. "Allow

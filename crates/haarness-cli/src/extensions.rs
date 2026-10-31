@@ -144,7 +144,7 @@ pub fn sources(paths: &Paths, workspace: &Path, trust: bool) -> Result<Config> {
                     .context("extension config parent")?
                     .join(&entry.source);
             }
-            if let Ok(source) = entry.source.canonicalize() {
+            if let Ok(source) = dunce::canonicalize(&entry.source) {
                 entry.source = source;
             }
             entry.enabled &= layer.enabled;
@@ -192,7 +192,7 @@ pub fn sources(paths: &Paths, workspace: &Path, trust: bool) -> Result<Config> {
                 && !path.to_string_lossy().ends_with(".d.ts")
                 && !path.to_string_lossy().ends_with(".d.mts")
             {
-                discovered.push(path.canonicalize()?);
+                discovered.push(dunce::canonicalize(&path)?);
             }
         }
     }
@@ -506,7 +506,7 @@ fn normalize_entries(config: &mut Config, config_path: &Path) {
                 .unwrap_or(Path::new("."))
                 .join(&entry.source);
         }
-        if let Ok(path) = entry.source.canonicalize() {
+        if let Ok(path) = dunce::canonicalize(&entry.source) {
             entry.source = path;
         }
     }
@@ -931,7 +931,7 @@ mod tests {
             r#"{"extensions":[["./ext", {"greeting":"declared"}], "not-installed-package"]}"#,
         )
         .unwrap();
-        let source = source.canonicalize().unwrap();
+        let source = dunce::canonicalize(&source).unwrap();
         let config = sources(&paths, &workspace, true).unwrap();
         assert!(config.enabled, "declarations enable the extension system");
         let entry = config
@@ -1003,7 +1003,7 @@ mod tests {
         )
         .unwrap();
         let config = sources(&paths, &root, false).unwrap();
-        let source = source.canonicalize().unwrap();
+        let source = dunce::canonicalize(&source).unwrap();
         let entries: Vec<_> = config
             .entries
             .iter()

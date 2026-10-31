@@ -326,8 +326,16 @@ pub fn resolve_extension(spec: &ExtensionSpec, data: &Path) -> Result<Resolution
             },
         });
     }
+    // A file URL as it names a path here (`file:///C:/x` is `C:\x` on
+    // Windows); a loose one (`file://~/x`, `file://rel`) keeps what follows.
+    let url_path = text
+        .starts_with("file://")
+        .then(|| url::Url::parse(text).ok()?.to_file_path().ok())
+        .flatten();
     let raw = text.strip_prefix("file://").unwrap_or(text);
-    let path = if let Some(rest) = raw.strip_prefix("~/") {
+    let path = if let Some(path) = url_path {
+        path
+    } else if let Some(rest) = raw.strip_prefix("~/") {
         haarness_protocol::home_dir()
             .context("the home folder is unknown (set HOME or USERPROFILE)")?
             .join(rest)
@@ -516,12 +524,14 @@ mod tests {
         };
         assert_eq!(
             entry.source,
-            config_dir.join("ext/index.ts").canonicalize().unwrap()
+            dunce::canonicalize(config_dir.join("ext/index.ts")).unwrap()
         );
         assert_eq!(entry.options, json!({"k":1}));
         assert!(entry.enabled);
         let url = ExtensionSpec {
-            spec: format!("file://{}", config_dir.join("ext/index.ts").display()),
+            spec: url::Url::from_file_path(config_dir.join("ext/index.ts"))
+                .unwrap()
+                .to_string(),
             options: Value::Null,
             file: file.clone(),
         };
