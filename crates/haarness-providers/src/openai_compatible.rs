@@ -1461,6 +1461,18 @@ impl ModelProvider for OpenAiCompatibleProvider {
             }
             match message {
                 ProviderMessage::Text { role, content } => {
+                    // Text that came with tool calls joins their message: a
+                    // call's result must follow the call directly.
+                    if role == "assistant"
+                        && let Some(calls) = messages.last_mut().filter(|last| {
+                            last["role"] == "assistant"
+                                && last.get("tool_calls").is_some()
+                                && last["content"].is_null()
+                        })
+                    {
+                        calls["content"] = json!(content);
+                        continue;
+                    }
                     let mut message = json!({"role":role,"content":content});
                     if replay == ReasoningReplay::Required && role == "assistant" {
                         message["reasoning_content"] = json!("");
@@ -3186,6 +3198,52 @@ mod tests {
             })
             .collect();
         assert_eq!(reasoning, ["Reading the file."]);
+    }
+
+    #[tokio::test]
+    async fn text_beside_tool_calls_joins_their_message() {
+        // DeepSeek refused a history with the text between a call and its result.
+        let (provider, state) = openrouter_fixture(post(completions_recording_headers)).await;
+        let mut request = short_request();
+        request.messages = vec![
+            ProviderMessage::Text {
+                role: "user".into(),
+                content: "read it".into(),
+            },
+            ProviderMessage::ToolCall {
+                call_id: "call-1".into(),
+                name: "read".into(),
+                arguments: json!({"path": "a.txt"}),
+                provider_metadata: Value::Null,
+            },
+            ProviderMessage::Text {
+                role: "assistant".into(),
+                content: "Reading the file.".into(),
+            },
+            ProviderMessage::ToolResult {
+                call_id: "call-1".into(),
+                name: "read".into(),
+                output: "marker".into(),
+                is_error: false,
+                attachments: vec![],
+            },
+        ];
+        let _ = provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let sent = state.0.lock()[0]["messages"].clone();
+        let roles: Vec<&str> = sent
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["system", "user", "assistant", "tool"], "{sent}");
+        assert_eq!(sent[2]["content"], "Reading the file.");
+        assert_eq!(sent[2]["tool_calls"][0]["id"], "call-1");
     }
 
     #[tokio::test]
