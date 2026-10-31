@@ -159,3 +159,11 @@ thoughts into Claude thinking blocks. The OpenAI Responses path refused any deta
 now gets back only the reasoning it can take (Claude's signed or redacted thinking, OpenAI's reasoning items)
 and the rest is left out; the failing workspace chat answered on Claude with its DeepSeek history. Bedrock still
 refuses any replayed reasoning (no Cloud route goes there).
+
+Phones (Cloud 20261031-b79f9a8, router cf03f8c). The iPhone app (main f67c30b, simulator) in a Cloud workspace:
+the picker finds models by any words ("deepseek flash") under Haarness Cloud Router with their names and logos;
+DeepSeek V4 Flash through OpenRouter read a file, its thoughts shown once; the same chat then answered on Claude
+Haiku 5.5 (direct) and on Grok 4.7 (OpenRouter), each reading the file. The Android app (main 9b77f87,
+emulator) opens on sign-in; signing an emulator in to the production account is the owner's, so it was not run
+further. Desktop's own window was not driven. The Cloud catalog also offers OpenRouter's free variants
+("North Mini Code (free)"), which OpenRouter rate-limits hard.
