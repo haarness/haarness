@@ -1009,18 +1009,15 @@ fn merge_discovered_models(
             if let Some(live) = discovered.remove(&model.id) {
                 return Some(live);
             }
-            // Some APIs list only dated snapshots (`claude-haiku-4-5-20251001`)
-            // while configs and chats name the alias (`claude-haiku-4-5`).
-            // Keep the alias, with the live details of its newest snapshot,
-            // so a configured or stored model is still found in the catalog.
+            // Some APIs list only dated snapshots (`claude-haiku-4-5-20251001`,
+            // `gpt-5.4-mini-2026-01-01`) while configs and chats name the
+            // alias. Keep the alias, with the live details of its newest
+            // snapshot, so a configured or stored model is still found.
             let mut snapshots: Vec<_> = discovered
                 .keys()
                 .filter(|id| {
                     id.strip_prefix(model.id.as_str())
-                        .and_then(|rest| rest.strip_prefix('-'))
-                        .is_some_and(|date| {
-                            date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())
-                        })
+                        .is_some_and(catalog::is_snapshot)
                 })
                 .cloned()
                 .collect();
@@ -1113,12 +1110,16 @@ mod tests {
             vec![
                 model("claude-haiku-4-5", "alias"),
                 model("claude-sonnet-4-6", "alias"),
+                model("gpt-5.4-mini", "alias"),
             ],
             vec![
                 model("claude-haiku-4-5-20250101", "older"),
                 model("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
                 model("claude-sonnet-4-6", "Claude Sonnet 4.6"),
                 model("claude-opus-4-5-20251101", "Claude Opus 4.5"),
+                model("gpt-5.4-mini-2025-12-01", "older"),
+                model("gpt-5.4-mini-2026-01-01", "GPT-5.4 mini"),
+                model("gpt-5.4-mini-tuned", "a different model"),
             ],
         );
         let ids: Vec<_> = merged.iter().map(|model| model.id.as_str()).collect();
@@ -1127,10 +1128,13 @@ mod tests {
             [
                 "claude-haiku-4-5",
                 "claude-sonnet-4-6",
+                "gpt-5.4-mini",
+                "gpt-5.4-mini-tuned",
                 "claude-opus-4-5-20251101"
             ]
         );
         assert_eq!(merged[0].display_name, "Claude Haiku 4.5");
+        assert_eq!(merged[2].display_name, "GPT-5.4 mini");
     }
 
     #[test]
