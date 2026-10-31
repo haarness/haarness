@@ -549,6 +549,12 @@ pub enum ProviderEvent {
         cache_read_tokens: u64,
         cache_write_tokens: u64,
     },
+    /// What the provider charged for this request, in US dollars, when it
+    /// says so (OpenRouter's `usage.cost`). It replaces the price-table
+    /// estimate, which a router that picks the model per request has none of.
+    Cost {
+        usd: f64,
+    },
     Finished {
         reason: String,
     },

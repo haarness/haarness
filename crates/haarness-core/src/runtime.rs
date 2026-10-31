@@ -3736,7 +3736,9 @@ impl AgentRuntime {
                             progress(BtwEvent::Delta { text: delta });
                         }
                     }
-                    ProviderEvent::ReasoningDelta(_) | ProviderEvent::ContentStarted => {}
+                    ProviderEvent::ReasoningDelta(_)
+                    | ProviderEvent::ContentStarted
+                    | ProviderEvent::Cost { .. } => {}
                     ProviderEvent::Finished { reason } => {
                         finished = true;
                         if let Some(error) = ProviderEvent::finish_error(&reason) {
@@ -9865,6 +9867,7 @@ impl RunnerTask {
                 let mut text = String::new();
                 let mut reasoning = String::new();
                 let mut usage = None;
+                let mut charged = None;
                 // Everything the model streamed, for the local output estimate
                 // when the provider reports no usage.
                 let mut streamed = String::new();
@@ -9882,7 +9885,7 @@ impl RunnerTask {
                         biased;
                         () = self.cancel.cancelled() => {
                             // A stopped request has no finished stream to time.
-                            self.publish_round_usage(usage, prompt_usage.clone(), &streamed, None, provider_id, &model).await?;
+                            self.publish_round_usage(usage, charged, prompt_usage.clone(), &streamed, None, provider_id, &model).await?;
                             return Err(CoreError::Cancelled);
                         }
                         event = stream.next().instrument(provider_span.clone()) => event,
@@ -9969,7 +9972,9 @@ impl RunnerTask {
                         ProviderEvent::ToolCall { .. }
                         | ProviderEvent::StructuredOutput(_)
                         | ProviderEvent::ContentStarted => true,
-                        ProviderEvent::Usage { .. } | ProviderEvent::Finished { .. } => false,
+                        ProviderEvent::Usage { .. }
+                        | ProviderEvent::Cost { .. }
+                        | ProviderEvent::Finished { .. } => false,
                     };
                     if content {
                         clock.content(tokio::time::Instant::now().into_std());
@@ -10103,6 +10108,7 @@ impl RunnerTask {
                                 cache_write_tokens,
                             ));
                         }
+                        ProviderEvent::Cost { usd } => charged = Some(usd),
                         ProviderEvent::Usage { .. } | ProviderEvent::ContentStarted => {}
                         ProviderEvent::Finished { reason } => {
                             finished = true;
@@ -10170,6 +10176,7 @@ impl RunnerTask {
                             .await?;
                         self.publish_round_usage(
                             usage,
+                            charged,
                             prompt_usage.clone(),
                             &streamed,
                             timing,
@@ -10195,6 +10202,7 @@ impl RunnerTask {
                     if let Some(message) = invalid {
                         self.publish_round_usage(
                             usage,
+                            charged,
                             prompt_usage.clone(),
                             &streamed,
                             timing,
@@ -10220,6 +10228,7 @@ impl RunnerTask {
                 let usage = self
                     .publish_round_usage(
                         usage,
+                        charged,
                         prompt_usage,
                         &streamed,
                         timing,
@@ -10602,11 +10611,13 @@ impl RunnerTask {
     /// Records one provider request: its reported usage, or when the provider
     /// reported none for a request that sent and streamed something, the
     /// local estimate (prepared prompt plus streamed output), marked
-    /// `estimated`, with the request's timing when it finished cleanly.
+    /// `estimated`, with the request's timing when it finished cleanly. What
+    /// the provider `charged`, when it said, is the cost of reported usage.
     /// Returns what was recorded.
     async fn publish_round_usage(
         &self,
         reported: Option<(u64, u64, u64, u64)>,
+        charged: Option<f64>,
         prompt: Option<haarness_protocol::PromptUsage>,
         streamed: &str,
         timing: Option<crate::stream_clock::StreamTiming>,
@@ -10635,13 +10646,15 @@ impl RunnerTask {
             output_tokens,
             cache_read_tokens,
             cache_write_tokens,
-            cost_usd: cost_usd(
-                model_pricing(&self.providers, provider_id, model),
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-            ),
+            cost_usd: charged.filter(|_| !estimated).or_else(|| {
+                cost_usd(
+                    model_pricing(&self.providers, provider_id, model),
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                )
+            }),
             estimated,
             first_token_ms: timing.map(|timing| timing.first_token_ms),
             stream_ms: timing.map(|timing| timing.stream_ms),

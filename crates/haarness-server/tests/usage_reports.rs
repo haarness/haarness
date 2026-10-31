@@ -372,6 +372,31 @@ async fn reported_usage_is_recorded_and_anchors_the_context() {
 }
 
 #[tokio::test]
+async fn a_cost_the_provider_charged_is_the_turn_cost() {
+    // The scripted model has no price: only the charge can price the turn.
+    let (server, provider, root) = server("charged").await;
+    let thread = server.thread().await;
+    provider.push(vec![
+        ProviderEvent::TextDelta("Hello.".into()),
+        usage(1_000, 20),
+        ProviderEvent::Cost { usd: 0.0085 },
+        finished(),
+    ]);
+    provider.push(vec![
+        ProviderEvent::TextDelta("Hello again.".into()),
+        usage(1_100, 20),
+        finished(),
+    ]);
+    server.turn(&thread, "first").await;
+    let usages = server.turn(&thread, "second").await;
+    assert_eq!(usages.len(), 2, "{usages:?}");
+    assert_eq!(usages[0]["cost_usd"], 0.0085, "{:?}", usages[0]);
+    assert!(usages[1]["cost_usd"].is_null(), "{:?}", usages[1]);
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
 async fn without_a_report_the_local_estimate_is_recorded_and_marked() {
     let (server, provider, root) = server("estimated").await;
     let thread = server.thread().await;

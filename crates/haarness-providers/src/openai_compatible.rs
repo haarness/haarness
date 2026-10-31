@@ -790,14 +790,15 @@ fn discovered_model_info(
     }
 
     // OpenRouter and Haarness Cloud publish per-token prices as strings. Convert only this
-    // documented shape; other compatible APIs use different units.
+    // documented shape; other compatible APIs use different units. OpenRouter's
+    // routers, which pick a model per request, list `-1`: their price is unknown.
     if matches!(provider, "openrouter" | "haarness" | "router")
         && let (Some(input), Some(output)) = (
             entry.pointer("/pricing/prompt").and_then(json_number),
             entry.pointer("/pricing/completion").and_then(json_number),
         )
     {
-        info.pricing = Some(ModelPricing {
+        info.pricing = (input >= 0.0 && output >= 0.0).then(|| ModelPricing {
             input: input * 1_000_000.0,
             output: output * 1_000_000.0,
             cache_read: entry
@@ -839,6 +840,21 @@ fn discovered_model_info(
     Some(apply_model_defaults(info, defaults))
 }
 
+/// The fewest output tokens worth asking again for after a balance refusal:
+/// below this a reply with a tool call is likely cut off.
+const MIN_AFFORDABLE_OUTPUT: u64 = 4_096;
+
+/// The output OpenRouter says the balance covers, from its 402 refusal
+/// ("You requested up to 65536 tokens, but can only afford 16000").
+fn affordable_output(body: &str) -> Option<u64> {
+    let detail = crate::sse::provider_error_detail(body)?;
+    let rest = &detail[detail.find("can only afford ")? + "can only afford ".len()..];
+    rest.split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
 fn is_chat_completion_model(provider: &str, entry: &Value, id: &str) -> bool {
     if entry.get("archived").and_then(Value::as_bool) == Some(true) {
         return false;
@@ -878,6 +894,40 @@ fn is_chat_completion_model(provider: &str, entry: &Value, id: &str) -> bool {
                     .iter()
                     .any(|modality| modality.as_str() == Some("text"))
         })
+    {
+        return false;
+    }
+
+    // OpenRouter names the routes each model answers on; batch-only models
+    // list none and refuse a chat.
+    if provider == "openrouter"
+        && entry
+            .get("endpoints")
+            .and_then(Value::as_array)
+            .is_some_and(|routes| {
+                !routes.iter().any(|route| {
+                    route
+                        .as_str()
+                        .is_some_and(|route| route.ends_with("/chat/completions"))
+                })
+            })
+    {
+        return false;
+    }
+
+    // OpenRouter lists image and audio generators beside chat models; their
+    // replies are media a chat can't show. Its routers list image output too
+    // but answer chats in text.
+    if provider == "openrouter"
+        && !id.starts_with("openrouter/")
+        && entry
+            .pointer("/architecture/output_modalities")
+            .and_then(Value::as_array)
+            .is_some_and(|modalities| {
+                modalities
+                    .iter()
+                    .any(|modality| matches!(modality.as_str(), Some("image" | "audio")))
+            })
     {
         return false;
     }
@@ -1225,7 +1275,14 @@ impl ModelProvider for OpenAiCompatibleProvider {
         };
         let mut headers = self.headers.map();
         headers.insert(AUTHORIZATION, value);
-        let request = self.client.get(format!("{base}/models")).headers(headers);
+        // OpenRouter lists its models for any key, a made-up one included;
+        // its `/key` route answers only for a key it knows.
+        let route = if self.id == "openrouter" {
+            "key"
+        } else {
+            "models"
+        };
+        let request = self.client.get(format!("{base}/{route}")).headers(headers);
         crate::key_check::check(&self.name, request).await
     }
     fn explicit_prompt_cache_scope(&self, model: &str) -> Option<String> {
@@ -1412,7 +1469,18 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 requested_tools.push(structured_output_tool(schema));
             }
         }
-        let tools:Vec<_>=requested_tools.into_iter().map(|t|json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":t.input_schema}})).collect();
+        // A forced call to a Gemini model through a gateway meets the bound
+        // Google refuses under forced calling, as the native adapter does.
+        let forced_gemini = structured_output.is_some()
+            && !native_json
+            && model
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with("gemini-"));
+        let tools:Vec<_>=requested_tools.into_iter().map(|t|{
+            let parameters = if forced_gemini { crate::gemini::without_max_items(t.input_schema) } else { t.input_schema };
+            json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":parameters}})
+        }).collect();
         let mut body = json!({"model":model,"messages":messages,"stream":true});
         if self.id != "perplexity" {
             body["stream_options"] = json!({"include_usage": true});
@@ -1473,9 +1541,38 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let builder = self
             .client
             .post(&self.endpoint)
-            .headers(headers)
+            .headers(headers.clone())
             .json(&body);
-        let response = crate::sse::send(builder, limits).await?;
+        let mut response = crate::sse::send(builder, limits).await?;
+        // OpenRouter refuses a request whose whole output limit the balance
+        // can't pay for, however short the reply would be. Ask once more for
+        // the output it says it can afford, when that still leaves room to work.
+        if self.id == "openrouter" && response.status() == reqwest::StatusCode::PAYMENT_REQUIRED {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            let requested = body["max_tokens"].as_u64();
+            match affordable_output(&text).filter(|afford| {
+                *afford >= MIN_AFFORDABLE_OUTPUT && requested.is_none_or(|limit| *afford < limit)
+            }) {
+                Some(afford) => {
+                    tracing::info!(provider = %self.id, requested, afford, "lowering the output limit to what the balance covers");
+                    body["max_tokens"] = json!(afford);
+                    let builder = self
+                        .client
+                        .post(&self.endpoint)
+                        .headers(headers)
+                        .json(&body);
+                    response = crate::sse::send(builder, limits).await?;
+                }
+                None => {
+                    let message = crate::sse::provider_error_detail(&text).map_or_else(
+                        || format!("HTTP {status}"),
+                        |detail| format!("HTTP {status}: {detail}"),
+                    );
+                    return Err(CoreError::Provider(message));
+                }
+            }
+        }
         let request_id = crate::request_id(response.headers());
         let provider_id = self.id.clone();
         let mut events = json_stream(response, cancel, limits);
@@ -1491,6 +1588,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
             let mut finish_reason: Option<String> = None;
             let mut response_id: Option<String> = None;
             let mut usage: Option<(u64, u64, u64, u64)> = None;
+            // What OpenRouter says the request cost, with its usage.
+            let mut charged: Option<f64> = None;
             let mut reasoning_details: Vec<Value> = Vec::new();
             let mut reasoning_content = String::new();
             // The field the server streamed its reasoning in, first seen.
@@ -1514,7 +1613,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     Err(error) => {
                         // Usage that already arrived was billed; keep it.
                         if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
-                            yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens };
+                            yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens }; if let Some(usd) = charged.take() { yield ProviderEvent::Cost { usd }; }
                         }
                         Err::<(), _>(error)?;
                         continue;
@@ -1523,6 +1622,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 // Moonshot reports usage on the choice rather than the chunk.
                 if let Some(chunk_usage) = event.get("usage").filter(|value| value.is_object()).or_else(|| event["choices"][0].get("usage").filter(|value| value.is_object())) {
                     let count = |paths: &[&str]| paths.iter().find_map(|path| chunk_usage.pointer(path).and_then(Value::as_u64)).unwrap_or(0);
+                    if provider_id == "openrouter" {
+                        charged = chunk_usage.get("cost").and_then(Value::as_f64).filter(|cost| *cost >= 0.0).or(charged);
+                    }
                     usage = Some((
                         count(&["/prompt_tokens"]),
                         count(&["/completion_tokens"]),
@@ -1537,9 +1639,16 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 // routers) ends the request; it is not an incomplete reply.
                 if let Some(error) = event.get("error").filter(|error| !error.is_null()) {
                     if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
-                        yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens };
+                        yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens }; if let Some(usd) = charged.take() { yield ProviderEvent::Cost { usd }; }
                     }
-                    let message = error.get("message").and_then(Value::as_str).map_or_else(|| error.to_string(), str::to_owned);
+                    let message = crate::sse::upstream_error(error)
+                        .or_else(|| error.get("message").and_then(Value::as_str).map(str::to_owned))
+                        .unwrap_or_else(|| error.to_string());
+                    // The status the error carries decides whether another try can help.
+                    let message = match error.get("code").and_then(Value::as_u64).and_then(|code| reqwest::StatusCode::from_u16(u16::try_from(code).ok()?).ok()).filter(|status| status.is_client_error() || status.is_server_error()) {
+                        Some(status) => format!("HTTP {status}: {message}"),
+                        None => message,
+                    };
                     Err(CoreError::Provider(message))?;
                 }
                 let delta=&event["choices"][0]["delta"];
@@ -1633,7 +1742,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             if provider_metadata.as_object().is_some_and(serde_json::Map::is_empty) { provider_metadata = Value::Null; }
             // Report usage before the tool calls, whose arguments may not parse.
             if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
-                yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens };
+                yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens }; if let Some(usd) = charged.take() { yield ProviderEvent::Cost { usd }; }
             }
             for (call_id, name, arguments) in calls.drain(..) {
                 if !name.is_empty() {
@@ -2078,6 +2187,56 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_media_generators_stay_out_of_the_picker() {
+        let output = |id: &str, modalities: Value| {
+            discovered_model_info(
+                "openrouter",
+                &json!({"id": id, "architecture": {"output_modalities": modalities}}),
+                CompatibleModelDefaults::default(),
+            )
+        };
+        assert!(output("google/gemini-3-pro-image", json!(["image", "text"])).is_none());
+        assert!(output("openai/gpt-audio", json!(["text", "audio"])).is_none());
+        assert!(output("openrouter/auto", json!(["text", "image"])).is_some());
+        assert!(output("anthropic/claude-haiku-5.5", json!(["text"])).is_some());
+        let routes = |id: &str, endpoints: Value| {
+            discovered_model_info(
+                "openrouter",
+                &json!({"id": id, "endpoints": endpoints}),
+                CompatibleModelDefaults::default(),
+            )
+        };
+        assert!(routes("z-ai/glm-5.3-flash:batch", json!([])).is_none());
+        assert!(
+            routes(
+                "z-ai/glm-5.3-flash",
+                json!(["/api/v1/chat/completions", "/api/v1/responses"])
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn openrouter_routers_have_no_price() {
+        // OpenRouter lists `-1` for a router that picks the model per request.
+        let model = discovered_model_info(
+            "openrouter",
+            &json!({"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(model.display_name, "Auto Router");
+        assert!(model.pricing.is_none(), "{:?}", model.pricing);
+        let free = discovered_model_info(
+            "openrouter",
+            &json!({"id": "openrouter/free", "pricing": {"prompt": "0", "completion": "0"}}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(free.pricing.map(|price| price.output), Some(0.0));
+    }
+
+    #[test]
     fn cloud_catalog_prices_override_builtin_estimates() {
         // The Haarness Cloud provider and a Cloud workspace's own router read the same price list.
         for provider in ["haarness", "router"] {
@@ -2371,6 +2530,264 @@ mod tests {
             [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
             "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".into(),
         )
+    }
+
+    /// OpenRouter's refusal when the balance can't pay for the whole output
+    /// limit, as it answered a live request.
+    async fn completions_short_of_credit(
+        State(state): State<FixtureState>,
+        Json(request): Json<Value>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse as _;
+        let limit = request["max_tokens"].as_u64();
+        state.0.lock().push(request);
+        match limit {
+            Some(limit) if limit <= 16_000 => (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            )
+                .into_response(),
+            _ => (
+                axum::http::StatusCode::PAYMENT_REQUIRED,
+                Json(json!({"error":{"code":402,"message":"This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 16000. To increase, visit https://openrouter.ai/settings/keys and adjust the key's monthly limit"}})),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn openrouter_fixture(
+        handler: axum::routing::MethodRouter<FixtureState>,
+    ) -> (OpenAiCompatibleProvider, FixtureState) {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/chat/completions", handler)
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "openrouter".into(),
+            name: "OpenRouter".into(),
+            base_url: format!("http://{address}"),
+            api_key: Some("test-key".into()),
+            models: vec!["google/gemini-3.5-flash-lite".into()],
+            discover_models: false,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults {
+                max_output_tokens: Some(65_536),
+                ..Default::default()
+            },
+            assume_authenticated: true,
+            headers: crate::ProviderHeaders::default(),
+        });
+        (provider, state)
+    }
+
+    fn short_request() -> ProviderRequest {
+        ProviderRequest {
+            model: "google/gemini-3.5-flash-lite".into(),
+            system: "sys".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            tools: vec![],
+            reasoning_effort: None,
+            output_schema: None,
+            parameters: haarness_core::RequestParameters::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn openrouter_keys_are_checked_where_a_made_up_key_is_refused() {
+        // OpenRouter lists its models for any key; only `/key` knows them.
+        async fn key(headers: axum::http::HeaderMap) -> axum::http::StatusCode {
+            if headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                == Some("Bearer known")
+            {
+                axum::http::StatusCode::OK
+            } else {
+                axum::http::StatusCode::UNAUTHORIZED
+            }
+        }
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route(
+                "/models",
+                axum::routing::get(|| async { Json(json!({"data": []})) }),
+            )
+            .route("/key", axum::routing::get(key))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "openrouter".into(),
+            name: "OpenRouter".into(),
+            base_url: format!("http://{address}"),
+            api_key: None,
+            models: vec![],
+            discover_models: true,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: crate::ProviderHeaders::default(),
+        });
+        assert!(matches!(
+            provider.check_api_key("known").await,
+            haarness_core::KeyCheck::Accepted
+        ));
+        assert!(!matches!(
+            provider.check_api_key("made-up").await,
+            haarness_core::KeyCheck::Accepted
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_upstream_failure_inside_the_stream_keeps_its_status() {
+        async fn unavailable(
+            State(state): State<FixtureState>,
+            Json(request): Json<Value>,
+        ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+            state.0.lock().push(request);
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                ": OPENROUTER PROCESSING\n\ndata: {\"choices\":[],\"error\":{\"code\":502,\"message\":\"data: {\\\"error\\\":{\\\"code\\\":\\\"TimeoutError\\\",\\\"message\\\":\\\"timed out during opening handshake\\\"}}\\n\\n\",\"metadata\":{\"error_type\":\"provider_unavailable\"}}}\n\n".into(),
+            )
+        }
+        let (provider, _) = openrouter_fixture(post(unavailable)).await;
+        let events = provider
+            .stream(short_request(), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let Some(Err(haarness_core::CoreError::Provider(message))) = events.last() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(
+            message,
+            "HTTP 502 Bad Gateway: timed out during opening handshake"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forced_call_to_gemini_through_a_gateway_drops_array_bounds() {
+        let (provider, state) = openrouter_fixture(post(completions_recording_headers)).await;
+        for model in ["google/gemini-3.8-flash", "anthropic/claude-haiku-5.5"] {
+            let mut request = short_request();
+            request.model = model.into();
+            request.output_schema =
+                Some(json!({"type":"object","properties":{"answer":{"type":"string"}}}));
+            request.tools = vec![haarness_core::ToolDefinition {
+                name: "fill".into(),
+                description: "fill a form".into(),
+                input_schema: json!({"type":"object","properties":{"fields":{"type":"array","maxItems":100,"items":{"type":"string"}}}}),
+            }];
+            let _ = provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+        }
+        let requests = state.0.lock();
+        let bound = |index: usize| {
+            requests[index]["tools"][0]["function"]["parameters"]["properties"]["fields"]
+                .get("maxItems")
+                .cloned()
+        };
+        assert_eq!(requests[0]["tool_choice"], "required");
+        assert_eq!(bound(0), None);
+        assert_eq!(bound(1), Some(json!(100)));
+    }
+
+    #[tokio::test]
+    async fn openrouter_says_what_a_request_cost() {
+        async fn charged(
+            State(state): State<FixtureState>,
+            Json(request): Json<Value>,
+        ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+            state.0.lock().push(request);
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11125,\"completion_tokens\":45,\"cost\":0.0085125}}\n\ndata: [DONE]\n\n".into(),
+            )
+        }
+        let (provider, _) = openrouter_fixture(post(charged)).await;
+        let events = provider
+            .stream(short_request(), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let usage = events.iter().position(|event| {
+            matches!(
+                event,
+                Ok(ProviderEvent::Usage {
+                    input_tokens: 11_125,
+                    ..
+                })
+            )
+        });
+        let cost = events.iter().position(|event| matches!(event, Ok(ProviderEvent::Cost { usd }) if (*usd - 0.008_512_5).abs() < 1e-12));
+        assert!(
+            usage.is_some() && cost == usage.map(|index| index + 1),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openrouter_asks_again_for_the_output_the_balance_covers() {
+        let (provider, state) = openrouter_fixture(post(completions_short_of_credit)).await;
+        let events = provider
+            .stream(short_request(), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Ok(ProviderEvent::TextDelta(text)) if text == "ok"))
+        );
+        let requests = state.0.lock();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["max_tokens"], 65_536);
+        assert_eq!(requests[1]["max_tokens"], 16_000);
+    }
+
+    #[tokio::test]
+    async fn openrouter_keeps_its_refusal_when_the_balance_covers_too_little() {
+        async fn nearly_empty(
+            State(state): State<FixtureState>,
+            Json(request): Json<Value>,
+        ) -> (axum::http::StatusCode, Json<Value>) {
+            state.0.lock().push(request);
+            (
+                axum::http::StatusCode::PAYMENT_REQUIRED,
+                Json(
+                    json!({"error":{"code":402,"message":"This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 900."}}),
+                ),
+            )
+        }
+        let (provider, state) = openrouter_fixture(post(nearly_empty)).await;
+        let Err(haarness_core::CoreError::Provider(message)) = provider
+            .stream(short_request(), CancellationToken::new())
+            .await
+        else {
+            panic!("a balance that covers 900 tokens must refuse");
+        };
+        assert!(
+            message.starts_with("HTTP 402 Payment Required: "),
+            "{message}"
+        );
+        assert!(message.contains("can only afford 900"), "{message}");
+        assert_eq!(state.0.lock().len(), 1);
     }
 
     /// A server that streams `events` in a chunked body and then closes the
