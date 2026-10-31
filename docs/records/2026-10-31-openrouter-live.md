@@ -65,12 +65,16 @@ and read another file.
 ## Left for a decision
 
 - A 429 that names neither a wait nor "shortly" still fails at once, for every provider.
-- Stopping an answer mid-stream keeps none of the streamed text and records the stop as an error item
-  ("operation cancelled"), for every provider (native Anthropic too). The terminal hides that item; the web
-  app shows it as a red error card.
 - Haarness Cloud workspaces reach OpenRouter only through a Cloud router holding the person's key; that
   path was not run.
-- The web app's model search (Haarness Cloud) still matches a phrase, field by field: "openrouter haiku"
-  finds nothing there.
-- `haarness remote enable` names a new host "My computer" where earlier hosts carried the Mac's name, and
-  `haarness remote hosts` prints raw JSON.
+
+## Fixed after the live run
+
+- A stopped answer kept none of what streamed (every provider, native Anthropic too) and the web app showed
+  the stop as a red error card. The streamed text and reasoning now stay, ahead of the stop marker the
+  terminal, Desktop and the phones already read as "stopped"; the web app reads it as Stopped too
+  (Haarness Cloud). Proven live in the terminal on OpenRouter: the paragraph that streamed stays, the turn
+  reads "interrupted", and the next answer knows what it had written.
+- The web app's model search matches every word in any order, across label and group (Haarness Cloud).
+- `haarness remote run` and `enable` name a new host after the computer, and `remote hosts` and `remote
+  chats` list one readable line each (`--json` for scripts).
