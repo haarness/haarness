@@ -138,6 +138,7 @@ def main():
             print('PASS: by default a failed CLI install stops before Desktop')
             binary = os.environ.get('HAARNESS_BIN')
             if os.name == 'nt' and binary:
+                state['mode'] = 'ok'
                 state['payload'] = Path(binary).read_bytes()
                 state['version'] = subprocess.check_output([binary, '--version'], text=True).split()[-1]
                 env['HAARNESS_VERSION'] = state['version']
