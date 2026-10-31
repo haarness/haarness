@@ -6,6 +6,7 @@ code at its date and is not updated afterwards: for current behaviour, read the
 
 Name new records `YYYY-MM-DD-topic.md` with the date the work was verified, and add a line here.
 
+- [2026-10-31 xAI, live](2026-10-31-xai-live.md): every local layer on xAI's OAuth sign-in, the chat-model catalog, a refused sign-in renewed, a linked auth store kept, and recovery runs.
 - [2026-10-31 DeepSeek, live](2026-10-31-deepseek-live.md): both models against DeepSeek's API and behind Haarness Router, the problems found and fixed, and recovery runs.
 - [2026-10-31 OpenRouter, live](2026-10-31-openrouter-live.md): every layer against the real service, the twelve problems found and fixed, and recovery runs.
 - [2026-10-31 Amazon Bedrock, live](2026-10-31-bedrock-live.md): model list, key check and refusals against a new AWS account, streaming and recovery through a proxy, and the nine problems found and fixed; no model answered yet.
