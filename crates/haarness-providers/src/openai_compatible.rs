@@ -98,6 +98,10 @@ const REASONING_FIELDS: [&str; 2] = ["reasoning_content", "reasoning"];
 
 /// The metadata key naming the provider whose reasoning a tool call keeps.
 const REASONING_SOURCE: &str = "reasoning_provider";
+/// The model whose reasoning details a tool call carries: they go back to it
+/// alone, as a router serving many models cannot turn one model's opaque
+/// reasoning into another's (Anthropic refuses unsigned thinking).
+const REASONING_MODEL: &str = "reasoning_model";
 
 /// Whether an assistant message's reasoning goes back to the server with it,
 /// so a model keeps its reasoning between tool calls.
@@ -906,6 +910,34 @@ fn visible_reasoning(detail: &Value) -> Option<&str> {
     .filter(|text| !text.is_empty())
 }
 
+/// The reasoning details a tool call's next request may carry to `model`: all
+/// of them when the same model wrote them, none when another did. Of details
+/// kept before they were tagged, a Claude model gets only Anthropic's own: it
+/// refuses another model's unsigned reasoning as thinking.
+fn replayed_details(details: &[Value], written_by: Option<&str>, model: &str) -> Vec<Value> {
+    if let Some(writer) = written_by {
+        return if writer == model {
+            details.to_vec()
+        } else {
+            Vec::new()
+        };
+    }
+    if !model.to_ascii_lowercase().contains("claude") {
+        return details.to_vec();
+    }
+    details
+        .iter()
+        .filter(|detail| {
+            let format = detail["format"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            format.contains("anthropic") || format.contains("claude")
+        })
+        .cloned()
+        .collect()
+}
+
 /// The fewest output tokens worth asking again for after a balance refusal:
 /// below this a reply with a tool call is likely cut off.
 const MIN_AFFORDABLE_OUTPUT: u64 = 4_096;
@@ -1488,11 +1520,18 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     if let Some(details) = provider_metadata
                         .get("reasoning_details")
                         .and_then(Value::as_array)
+                        .map(|details| {
+                            replayed_details(
+                                details,
+                                provider_metadata[REASONING_MODEL].as_str(),
+                                &model,
+                            )
+                        })
                         .filter(|details| !details.is_empty())
                     {
                         // OpenRouter requires these opaque blocks to be
                         // replayed byte-for-byte and in their original order.
-                        message["reasoning_details"] = Value::Array(details.clone());
+                        message["reasoning_details"] = Value::Array(details);
                     }
                     // The reasoning goes back in the field the server sent
                     // it in, so a model keeps its train of thought between
@@ -1712,6 +1751,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         }
         let request_id = crate::request_id(response.headers());
         let provider_id = self.id.clone();
+        let reasoning_model = model.clone();
         // The DeepSeek model whose rates price this request: its own
         // provider's, or one behind a self-hosted router, which reports no
         // price (a Cloud router prices its own).
@@ -1881,7 +1921,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 if response_id.is_none() { response_id = event["id"].as_str().map(str::to_owned); }
             }
             let mut provider_metadata = json!({});
-            if !reasoning_details.is_empty() { provider_metadata["reasoning_details"] = json!(reasoning_details); }
+            if !reasoning_details.is_empty() {
+                provider_metadata["reasoning_details"] = json!(reasoning_details);
+                provider_metadata[REASONING_MODEL] = json!(reasoning_model);
+            }
             // Kept with the provider that produced it (see the replay above).
             match replay {
                 ReasoningReplay::Required => {
@@ -2402,6 +2445,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(other.display_name, "Vendor: Y");
+    }
+
+    #[test]
+    fn reasoning_details_go_back_only_to_the_model_that_wrote_them() {
+        let deepseek =
+            json!({"type": "reasoning.text", "text": "plan", "format": "unknown", "index": 0});
+        let claude = json!({"type": "reasoning.text", "text": "plan", "signature": "sig", "format": "anthropic-claude-v1", "index": 0});
+        let both = [deepseek.clone(), claude.clone()];
+        // Tagged: the writer gets them all, any other model none.
+        assert_eq!(
+            super::replayed_details(
+                &both,
+                Some("deepseek/deepseek-v4-flash"),
+                "deepseek/deepseek-v4-flash"
+            )
+            .len(),
+            2
+        );
+        assert!(
+            super::replayed_details(
+                &both,
+                Some("deepseek/deepseek-v4-flash"),
+                "anthropic/claude-haiku-5.5"
+            )
+            .is_empty()
+        );
+        // Untagged: Claude takes only Anthropic's own; others keep what they had.
+        assert_eq!(
+            super::replayed_details(&both, None, "anthropic/claude-haiku-5.5"),
+            [claude]
+        );
+        assert_eq!(
+            super::replayed_details(&both, None, "x-ai/grok-4.7").len(),
+            2
+        );
     }
 
     #[test]
@@ -3863,6 +3941,7 @@ mod tests {
             ]
         );
         let expected_details = json!({
+            "reasoning_model": "compat-test",
             "reasoning_details": [
                 {
                     "type": "reasoning.text",
