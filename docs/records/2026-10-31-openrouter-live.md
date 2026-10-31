@@ -172,5 +172,11 @@ Grok through Cloud (Cloud 20261031-84d7e26, no own key): Cloud's catalog lists s
 OpenRouter. Grok 4.7 passed tools, reasoning and images earlier; Grok 4.6, 4.5 and 4.3 then passed tools,
 reasoning (high and low), images, a JSON schema answer and a priced turn, and Grok 4.20 and Grok Build 0.1
 (no reasoning levels) passed the same at their single level: 8 of 8. A Cloud router with the account's own xAI
-key was not run: it needs an xAI API key, and this Mac holds only an xAI sign-in, which belongs to this Mac's
-client and is not handed to a server.
+key first failed every Grok turn: the router's `xai` kind carried the conservative compatible profile, so a
+reasoning level was refused ("missing reasoning"), and its listing came from xAI's `/models`, which says nothing
+of image input and mixes in the image and video generators and the Responses-only multi-agent model. The
+router (0fd0022) now gives xAI reasoning, images, parallel tools and structured outputs, and lists models from
+`/language-models`. Proven first on a local Haarness Router (Grok 4.7 at a low level read a picture and called a
+tool), then in Cloud 20261031-d1159e8-0fd0022 with the account's own key: Grok 4.7 and 4.3 at low and xhigh,
+Grok 4.20 reasoning and non-reasoning and Grok Build 0.1 passed tools, reasoning, images, a schema answer and
+a priced turn, 7 of 7. xAI refuses a 16-pixel image as `invalid_image`; ordinary pictures pass.
