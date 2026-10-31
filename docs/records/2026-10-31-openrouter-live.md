@@ -167,3 +167,10 @@ Haiku 5.5 (direct) and on Grok 4.7 (OpenRouter), each reading the file. The Andr
 emulator) opens on sign-in; signing an emulator in to the production account is the owner's, so it was not run
 further. Desktop's own window was not driven. The Cloud catalog also offers OpenRouter's free variants
 ("North Mini Code (free)"), which OpenRouter rate-limits hard.
+
+Grok through Cloud (Cloud 20261031-84d7e26, no own key): Cloud's catalog lists six xAI models, all routed through
+OpenRouter. Grok 4.7 passed tools, reasoning and images earlier; Grok 4.6, 4.5 and 4.3 then passed tools,
+reasoning (high and low), images, a JSON schema answer and a priced turn, and Grok 4.20 and Grok Build 0.1
+(no reasoning levels) passed the same at their single level: 8 of 8. A Cloud router with the account's own xAI
+key was not run: it needs an xAI API key, and this Mac holds only an xAI sign-in, which belongs to this Mac's
+client and is not handed to a server.
