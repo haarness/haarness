@@ -33,18 +33,18 @@ pub struct RemoteArgs {
 enum RemoteCommand {
     /// Connect this machine to Cloud. Keep running under a service supervisor for unattended use.
     Run {
-        /// Name Cloud shows for this computer.
-        #[arg(long, default_value = "My computer")]
-        name: String,
+        /// Name Cloud shows for this computer (default: this computer's own name).
+        #[arg(long)]
+        name: Option<String>,
         /// Publish only this chat and its child chats, instead of host-wide project access.
         #[arg(long = "chat")]
         session: Option<Uuid>,
     },
     /// Start a background connector for this login. Does not install an OS startup service.
     Enable {
-        /// Name Cloud shows for this computer.
-        #[arg(long, default_value = "My computer")]
-        name: String,
+        /// Name Cloud shows for this computer (default: this computer's own name).
+        #[arg(long)]
+        name: Option<String>,
         /// Publish only this chat and its child chats, instead of host-wide project access.
         #[arg(long = "chat")]
         session: Option<Uuid>,
@@ -66,11 +66,19 @@ enum RemoteCommand {
         id: Uuid,
     },
     /// List machines connected to the selected Cloud account.
-    Hosts,
+    Hosts {
+        /// Print the computers as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// List explicitly published chats.
     // `sessions` is the command's name from before shared chats were called chats.
     #[command(alias = "sessions")]
-    Chats,
+    Chats {
+        /// Print the chats as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Revoke Cloud access without deleting any local files or conversations.
     Revoke {
         /// Connector id, as `remote status` shows it.
@@ -202,6 +210,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             anyhow::bail!("Connector did not stop within 15 seconds; inspect its log")
         }
         RemoteCommand::Enable { name, session } => {
+            let name = name.unwrap_or_else(haarness_account::computer_name);
             let status = client.status().await?;
             let account = status["selectedAccountId"]
                 .as_str()
@@ -224,26 +233,44 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             );
             return Ok(());
         }
-        RemoteCommand::Hosts => {
-            println!(
-                "{}",
-                super::account::list_all(
-                    &client,
-                    &format!("/api/v1/remote-hosts{}", account_query(&client))
-                )
-                .await?
-            );
+        RemoteCommand::Hosts { json } => {
+            let hosts = super::account::list_all(
+                &client,
+                &format!("/api/v1/remote-hosts{}", account_query(&client)),
+            )
+            .await?;
+            if json {
+                println!("{hosts}");
+            } else {
+                print!(
+                    "{}",
+                    listing(
+                        &hosts,
+                        host_line,
+                        "No computers are connected to this account. Connect this one with `haarness remote enable`."
+                    )
+                );
+            }
             return Ok(());
         }
-        RemoteCommand::Chats => {
-            println!(
-                "{}",
-                super::account::list_all(
-                    &client,
-                    &format!("/api/v1/remote-sessions{}", account_query(&client))
-                )
-                .await?
-            );
+        RemoteCommand::Chats { json } => {
+            let chats = super::account::list_all(
+                &client,
+                &format!("/api/v1/remote-sessions{}", account_query(&client)),
+            )
+            .await?;
+            if json {
+                println!("{chats}");
+            } else {
+                print!(
+                    "{}",
+                    listing(
+                        &chats,
+                        chat_line,
+                        "No chats are shared. Share one with `haarness remote enable --chat CHAT_ID`."
+                    )
+                );
+            }
             return Ok(());
         }
         RemoteCommand::Revoke { id } => {
@@ -258,6 +285,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             return Ok(());
         }
         RemoteCommand::Run { name, session } => {
+            let name = name.unwrap_or_else(haarness_account::computer_name);
             let status = client.status().await?;
             let account = status["selectedAccountId"]
                 .as_str()
@@ -1359,6 +1387,66 @@ fn local_status(paths: &Paths) -> Result<Vec<Value>> {
 }
 /// One connector for `remote status`: id, name, state, what it shares, and
 /// why it stopped.
+/// One line per item of a Cloud listing (`{"items": [...]}`), or `empty` when
+/// it has none.
+fn listing(list: &Value, line: fn(&Value) -> String, empty: &str) -> String {
+    match list["items"].as_array().filter(|items| !items.is_empty()) {
+        Some(items) => items.iter().map(line).collect(),
+        None => format!("{empty}\n"),
+    }
+}
+
+/// `ID  name  connected  whole computer  0.1.14 macos  last seen 2026-10-31 03:34`.
+fn host_line(host: &Value) -> String {
+    let text = |key: &str| host[key].as_str().unwrap_or_default();
+    let state = if host["connected"] == true {
+        "connected"
+    } else {
+        "offline"
+    };
+    let shares = if text("mode") == "host" {
+        "whole computer"
+    } else {
+        "shared chats"
+    };
+    let mut line = format!("{}  {}  {state}  {shares}", text("id"), text("name"));
+    let build = [&host["metadata"]["version"], &host["metadata"]["platform"]]
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !build.is_empty() {
+        line.push_str("  ");
+        line.push_str(&build);
+    }
+    if let Some(seen) = host["lastSeenAt"]
+        .as_str()
+        .filter(|_| host["connected"] != true)
+    {
+        line.push_str("  last seen ");
+        line.push_str(&seen.replace('T', " ").chars().take(16).collect::<String>());
+    }
+    line.push('\n');
+    line
+}
+
+/// `ID  title  connected  chat THREAD_ID on host HOST_ID`.
+fn chat_line(chat: &Value) -> String {
+    let text = |key: &str| chat[key].as_str().unwrap_or_default();
+    let state = if chat["connected"] == true {
+        "connected"
+    } else {
+        "offline"
+    };
+    format!(
+        "{}  {}  {state}  chat {} on host {}\n",
+        text("id"),
+        text("title"),
+        text("threadId"),
+        text("hostId")
+    )
+}
+
 fn connector_line(connector: &Value) -> String {
     let text = |key: &str| connector[key].as_str().unwrap_or_default();
     let state = if connector["running"] == true {
@@ -2121,6 +2209,31 @@ pub(crate) async fn stop_connectors(
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn computers_and_chats_list_one_readable_line_each() {
+        let hosts = json!({"items": [
+            {"id": "h1", "name": "Alex's MacBook Pro", "mode": "host", "connected": true,
+             "metadata": {"version": "0.1.14", "platform": "macos"}, "lastSeenAt": "2026-10-31T03:34:05.867837Z"},
+            {"id": "h2", "name": "Test Mac", "mode": "sessions", "connected": false,
+             "metadata": {}, "lastSeenAt": "2026-10-29T12:46:02.484730Z"}
+        ]});
+        assert_eq!(
+            listing(&hosts, host_line, "none"),
+            "h1  Alex's MacBook Pro  connected  whole computer  0.1.14 macos\n\
+             h2  Test Mac  offline  shared chats  last seen 2026-10-29 12:46\n"
+        );
+        let chats = json!({"items": [{"id": "s1", "title": "Fix the build", "connected": true,
+            "threadId": "t1", "hostId": "h1", "projectId": "p1"}]});
+        assert_eq!(
+            listing(&chats, chat_line, "none"),
+            "s1  Fix the build  connected  chat t1 on host h1\n"
+        );
+        assert_eq!(
+            listing(&json!({"items": []}), host_line, "No computers."),
+            "No computers.\n"
+        );
+    }
     #[test]
     fn remote_commands_parse_with_global_options() {
         for command in [
@@ -2128,7 +2241,9 @@ mod tests {
             vec!["enable"],
             vec!["status"],
             vec!["hosts"],
+            vec!["hosts", "--json"],
             vec!["chats"],
+            vec!["chats", "--json"],
             // The former name of `chats` still works.
             vec!["sessions"],
             vec!["run", "--chat", "00000000-0000-0000-0000-000000000001"],
