@@ -614,6 +614,7 @@ fn stream_exception(kind: &str, payload: &Value) -> CoreError {
         "modelStreamErrorException" => 424,
         "validationException" => 400,
         "accessDeniedException" => 403,
+        // `internalServerException` and anything unnamed.
         _ => 500,
     };
     let mut name = kind.to_owned();
