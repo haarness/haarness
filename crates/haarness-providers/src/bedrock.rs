@@ -611,10 +611,10 @@ fn stream_exception(kind: &str, payload: &Value) -> CoreError {
     let status = match kind {
         "throttlingException" => 429,
         "serviceUnavailableException" => 503,
-        "internalServerException" => 500,
         "modelStreamErrorException" => 424,
         "validationException" => 400,
         "accessDeniedException" => 403,
+        // `internalServerException` and anything unnamed.
         _ => 500,
     };
     let mut name = kind.to_owned();
@@ -703,7 +703,7 @@ fn model_info(
             info.display_name = haarness_protocol::model_display_name(bare, None);
         }
     }
-    info.id = id.to_owned();
+    id.clone_into(&mut info.id);
     info.reasoning_efforts = match &controls.reasoning {
         Some(Reasoning::Level { levels, .. }) => levels.clone(),
         Some(Reasoning::Budget { switch, budgets }) => switch
