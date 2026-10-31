@@ -1336,6 +1336,17 @@ fn apply_lmstudio_details(model: &mut ModelInfo, entry: &Value) {
     if let Some(vision) = capabilities["vision"].as_bool() {
         model.images = vision;
     }
+    // `{"allowed_options": ["low", "medium", "high"], "default": "low"}`,
+    // passed on as `reasoning_effort`.
+    if let Some(options) = capabilities["reasoning"]["allowed_options"].as_array() {
+        model.reasoning_efforts = options
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|option| ["none", "minimal", "low", "medium", "high", "xhigh"].contains(option))
+            .map(str::to_owned)
+            .collect();
+        model.reasoning = !model.reasoning_efforts.is_empty();
+    }
     model.tools = true;
     model.context_window = Some(lmstudio_context(entry));
 }
@@ -3548,6 +3559,13 @@ mod tests {
         // Loaded too small: Haarness loads it again before a request.
         apply_lmstudio_details(&mut model, &entry(Some(8_192)));
         assert_eq!(model.context_window, Some(65_536));
+        // Its reasoning levels, as LM Studio names them.
+        let mut thinking = entry(None);
+        thinking["capabilities"]["reasoning"] =
+            json!({"allowed_options": ["low", "medium", "high"], "default": "low"});
+        apply_lmstudio_details(&mut model, &thinking);
+        assert!(model.reasoning);
+        assert_eq!(model.reasoning_efforts, ["low", "medium", "high"]);
         // A model whose longest is short keeps it.
         let mut small = entry(None);
         small["max_context_length"] = json!(16_384);
