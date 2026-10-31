@@ -958,7 +958,13 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
         return None;
     };
     let lower = message.to_ascii_lowercase();
-    let (_, rest) = lower.split_once("retry in ")?;
+    let Some((_, rest)) = lower.split_once("retry in ") else {
+        // A shared pool upstream that is briefly full ("temporarily
+        // rate-limited upstream. Please retry shortly") backs off as a busy
+        // provider does.
+        return (lower.contains("temporarily rate-limited") || lower.contains("retry shortly"))
+            .then(|| std::time::Duration::from_secs(1 << attempt.min(4)));
+    };
     let advised = advised_wait(rest)? + std::time::Duration::from_secs(1);
     (advised <= LONGEST_ADVISED_WAIT).then_some(advised)
 }
@@ -1544,8 +1550,18 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
         };
     }
     if is_provider_usage_limit(error) {
-        return "Provider rate limit or quota reached. Wait and retry, or check the account quota."
-            .into();
+        // The provider's own words say which limit and what helps; a bare
+        // code (`insufficient_quota`) says less than the general advice.
+        return match refusal_reason_text(raw).filter(|reason| reason.contains(' ')) {
+            Some(reason) => format!(
+                "{} rate limit or quota reached: {reason}",
+                provider.unwrap_or("Provider")
+            ),
+            None => {
+                "Provider rate limit or quota reached. Wait and retry, or check the account quota."
+                    .into()
+            }
+        };
     }
     if let Some(reason) = refusal_reason_text(raw) {
         return format!(
@@ -20241,6 +20257,20 @@ mod tests {
         let wait = super::retry_delay(&per_minute, 1).unwrap();
         assert!((18..=19).contains(&wait.as_secs()), "{wait:?}");
         assert!(super::retry_delay(&provider("HTTP 429: rate limit exceeded"), 1).is_none());
+        // OpenRouter's answer when a model's shared upstream pool is full.
+        let shared = provider(
+            "HTTP 429 Too Many Requests: Alibaba: qwen/qwen3.8-flash is temporarily \
+             rate-limited upstream. Please retry shortly, or add your own key to accumulate \
+             your rate limits: https://openrouter.ai/settings/integrations",
+        );
+        assert_eq!(
+            super::retry_delay(&shared, 1),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert_eq!(
+            super::retry_delay(&shared, 3),
+            Some(std::time::Duration::from_secs(8))
+        );
         assert!(
             super::retry_delay(
                 &provider("HTTP 429: quota exceeded. Please retry in 7200s."),
@@ -20355,6 +20385,17 @@ mod tests {
         assert_eq!(
             super::user_facing_error(&CoreError::Provider("HTTP 429: insufficient_quota".into())),
             "Provider rate limit or quota reached. Wait and retry, or check the account quota."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    "HTTP 429 Too Many Requests: Alibaba: qwen/qwen3.8-flash is temporarily \
+                     rate-limited upstream. Please retry shortly."
+                        .into()
+                ),
+                Some("OpenRouter")
+            ),
+            "OpenRouter rate limit or quota reached: Alibaba: qwen/qwen3.8-flash is temporarily rate-limited upstream. Please retry shortly."
         );
         assert_eq!(
             super::describe_error(
