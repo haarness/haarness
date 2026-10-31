@@ -6,6 +6,7 @@ code at its date and is not updated afterwards: for current behaviour, read the
 
 Name new records `YYYY-MM-DD-topic.md` with the date the work was verified, and add a line here.
 
+- [2026-10-31 OpenRouter, live](2026-10-31-openrouter-live.md): every layer against the real service, the twelve problems found and fixed, and recovery runs.
 - [2026-10-29 Release 0.1.11](2026-10-29-release-0.1.11.md): Haarness Router ships with every release, installed with `install-router.sh` or `install-router.ps1`, starts from provider keys alone and has a redesigned dashboard; one router page on the website; updates from 0.1.10 proven on macOS, Linux and the TUI.
 - [2026-10-27 Release 0.1.9](2026-10-27-release-0.1.9.md): new command and setting names, wording rewritten in every language, and 0.1.9 the only release on haarness.ai
 - [2026-10-27 Release 0.1.8](2026-10-27-release-0.1.8.md): plain errors on every surface: 0.1.8 with updates proven from 0.1.7 on macOS, Linux and the TUI, Cloud and its 0.1.8 workspace image, iPhone build 2 in TestFlight, the Android bundle built.
