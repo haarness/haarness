@@ -13964,6 +13964,9 @@ mod inherited_ceilings;
 #[path = "cases/shell_readings.rs"]
 mod shell_readings;
 
+#[path = "cases/model_catalog.rs"]
+mod model_catalog;
+
 // POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
 #[cfg(unix)]
 #[path = "cases/agent_shell.rs"]
