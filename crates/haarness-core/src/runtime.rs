@@ -10614,6 +10614,7 @@ impl RunnerTask {
     /// `estimated`, with the request's timing when it finished cleanly. What
     /// the provider `charged`, when it said, is the cost of reported usage.
     /// Returns what was recorded.
+    #[allow(clippy::too_many_arguments)]
     async fn publish_round_usage(
         &self,
         reported: Option<(u64, u64, u64, u64)>,

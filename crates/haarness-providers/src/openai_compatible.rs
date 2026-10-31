@@ -1505,6 +1505,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
             body["response_format"] = json!({"type":"json_schema","json_schema":{"name":STRUCTURED_OUTPUT_TOOL_NAME,"schema":structured_output}});
         } else if structured_output.is_some()
             && !crate::tool_schema::refuses_forced_tool_choice(&model)
+            // Alibaba refuses a forced call while Qwen thinks, which its
+            // reasoning models do unasked.
+            && !(supports_reasoning
+                && model
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|name| name.to_ascii_lowercase().starts_with("qwen")))
         {
             body["tool_choice"] = json!("required");
         }
@@ -2704,6 +2711,38 @@ mod tests {
         assert_eq!(requests[0]["tool_choice"], "required");
         assert_eq!(bound(0), None);
         assert_eq!(bound(1), Some(json!(100)));
+    }
+
+    #[tokio::test]
+    async fn a_thinking_qwen_model_is_asked_for_structured_output_without_a_forced_call() {
+        let (mut provider, state) = openrouter_fixture(post(completions_recording_headers)).await;
+        provider.models = ["qwen/qwen3.8-flash", "qwen/qwen-plain", "z-ai/glm-5.3"]
+            .into_iter()
+            .map(|id| haarness_protocol::ModelInfo {
+                reasoning: id != "qwen/qwen-plain",
+                ..model_info("openrouter", id, CompatibleModelDefaults::default())
+            })
+            .collect();
+        for model in ["qwen/qwen3.8-flash", "qwen/qwen-plain", "z-ai/glm-5.3"] {
+            let mut request = short_request();
+            request.model = model.into();
+            request.output_schema =
+                Some(json!({"type":"object","properties":{"answer":{"type":"string"}}}));
+            let _ = provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+        }
+        let requests = state.0.lock();
+        assert!(
+            requests[0].get("tool_choice").is_none(),
+            "{:?}",
+            requests[0]
+        );
+        assert_eq!(requests[1]["tool_choice"], "required");
+        assert_eq!(requests[2]["tool_choice"], "required");
     }
 
     #[tokio::test]
