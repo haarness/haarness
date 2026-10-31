@@ -731,7 +731,7 @@ fn geography(region: &str) -> &str {
 }
 
 /// The models of a `ListFoundationModels` answer a chat can use: active,
-/// text in and out, streamed through Converse, and not a safety classifier.
+/// text in and out, answered through Converse, and not a safety classifier.
 /// Each is named by the id a request uses: its own where it runs on demand,
 /// else the global inference profile, else the one for this region's
 /// geography.
@@ -788,10 +788,17 @@ fn discovered_models(
         let Some(model) = entry["modelId"].as_str() else {
             continue;
         };
-        let streams = entry
-            .pointer("/inferenceAPIsSupported/converse/streaming")
-            .and_then(Value::as_bool)
-            .unwrap_or_else(|| entry["responseStreamingSupported"] == true);
+        // A chat model answers Converse both whole and streamed; a model
+        // that only streams (speech to speech, video questions) is not one.
+        let converse = |mode: &str| {
+            entry
+                .pointer(&format!("/inferenceAPIsSupported/converse/{mode}"))
+                .and_then(Value::as_bool)
+        };
+        let streams = match (converse("streaming"), converse("sync")) {
+            (Some(streaming), Some(sync)) => streaming && sync,
+            _ => entry["responseStreamingSupported"] == true,
+        };
         if entry.pointer("/modelLifecycle/status") != Some(&json!("ACTIVE"))
             || !has(entry, "inputModalities", "TEXT")
             || !has(entry, "outputModalities", "TEXT")
@@ -1476,8 +1483,8 @@ mod tests {
         let (models, _) = discovered();
         let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
         // On demand where the model runs so, else the global profile; no
-        // embeddings, speech, safety classifiers, provisioned-only or legacy
-        // models.
+        // embeddings, speech, video-only, safety classifiers, provisioned-only
+        // or legacy models.
         assert_eq!(
             ids,
             [

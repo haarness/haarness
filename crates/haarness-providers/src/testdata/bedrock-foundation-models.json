@@ -391,6 +391,63 @@
      "webp"
     ]
    }
+  },
+  {
+   "modelId": "amazon.nova-2-5-sonic",
+   "modelName": "Nova 2.5 Sonic",
+   "inputModalities": [
+    "SPEECH",
+    "TEXT"
+   ],
+   "outputModalities": [
+    "SPEECH",
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "ON_DEMAND"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": true
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": false
+    }
+   },
+   "converse": null
+  },
+  {
+   "modelId": "twelvelabs.pegasus-1-5-v1:0",
+   "modelName": "Pegasus v1.5",
+   "inputModalities": [
+    "TEXT",
+    "VIDEO"
+   ],
+   "outputModalities": [
+    "TEXT"
+   ],
+   "inferenceTypesSupported": [
+    "INFERENCE_PROFILE"
+   ],
+   "modelLifecycle": {
+    "status": "ACTIVE"
+   },
+   "responseStreamingSupported": true,
+   "explicitPromptCaching": {
+    "isSupported": false
+   },
+   "inferenceAPIsSupported": {
+    "converse": {
+     "streaming": true,
+     "sync": false
+    }
+   },
+   "converse": null
   }
  ]
 }
