@@ -53,5 +53,25 @@ local router listing 368 models.
 - The router names an upstream refusal only by status and code ("upstream returned HTTP 400
   (invalid_request_error)"); the provider's message is withheld on purpose, since it may echo a prompt or a key.
   For a self-hosted router that hides the reason a request failed.
-- In Haarness Cloud, DeepSeek is reached through OpenRouter; with an account's own DeepSeek key (BYOK) it was not
-  run.
+- In Haarness Cloud with the account's own DeepSeek key, a turn that asks for reasoning is refused; see below.
+
+## Haarness Cloud with the account's own key
+
+A BYOK router, "DeepSeek (own key)" (`b94770b0-fe3d-436f-ac00-c9f01897643b`, left in place on orex@haarness.ai),
+was made and keyed without a web form: `POST /api/v1/routers` with `credentialMode: "byok"`, then
+`PUT /api/v1/routers/{id}/credentials/deepseek` with the key read from the local credential store by a script.
+Through it Haarness lists `deepseek/deepseek-flash` and `deepseek/deepseek-v4-pro`.
+
+- `deepseek-v4-pro` asked for an OpenRouter key, although the router held a DeepSeek one: the platform prices
+  that id under OpenRouter, which reaches every vendor it has no key for, and a BYOK request took the provider
+  from the price. A model priced under an aggregator by its whole id now goes to the router's own key for its
+  vendor, with the vendor's own model id (Cloud 20261031-00a1a38).
+- Both models are then refused before DeepSeek is asked: "no route can preserve the requested features:
+  deepseek/…: missing reasoning". The router's built-in DeepSeek profile (router 4365f30) promises text and
+  tools only; Haarness asks for reasoning on every turn of a reasoning model. A router DeepSeek profile with
+  reasoning and images (not yet pushed) is what lets these turns through. A turn without reasoning was not run.
+
+Selecting a router (`haarness account --router`) applies to every client on the computer signed in to that
+account, not to one run: while the BYOK router was selected, other local Cloud runs failed with "Add your
+provider key".
+
