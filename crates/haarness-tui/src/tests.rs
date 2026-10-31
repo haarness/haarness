@@ -19358,6 +19358,77 @@ fn model_picker_prioritizes_favorites_then_recents_without_losing_search() {
     assert_eq!(app.filtered_models(), [second]);
 }
 
+/// A chat on a model its provider no longer lists keeps it: the picker shows
+/// it first with a quiet note, and every reasoning level stays on offer.
+#[tokio::test]
+async fn a_chat_on_a_model_no_longer_listed_keeps_it_in_view() {
+    let mut app = selector_fixture();
+    app.model_favorites.clear();
+    app.model_recents.clear();
+    app.thread.model = "gpt-4-retired".into();
+    assert!(app.chat_model_unlisted());
+    assert_eq!(
+        app.filtered_models(),
+        [
+            "openai/gpt-4-retired",
+            "openai/gpt-5.4",
+            "openai/gpt-5.4-mini"
+        ]
+    );
+    let detail = crate::view::menu::model_detail(&app, "openai/gpt-4-retired", "active");
+    assert!(detail.ends_with("active · no longer listed"), "{detail}");
+    assert_eq!(app.model_label("openai/gpt-4-retired"), "GPT-4 Retired");
+    assert_eq!(app.reasoning_levels(), haarness_protocol::REASONING_EFFORTS);
+    app.execute_command("/reasoning xhigh", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.reasoning_effort.as_deref(), Some("xhigh"));
+    app.overlay_filter = "mini".into();
+    assert_eq!(app.filtered_models(), ["openai/gpt-5.4-mini"]);
+    // While the lists load, nothing reads as retired.
+    app.overlay_filter.clear();
+    app.models_loading = true;
+    assert!(!app.chat_model_unlisted());
+}
+
+/// A configured default its provider has since retired gives way to a recent
+/// pick, else the first connected model; one still listed, or whose list
+/// has not come in, stays.
+#[test]
+fn a_configured_default_the_provider_retired_falls_back_quietly() {
+    let app = selector_fixture();
+    let providers = app.providers.clone();
+    let pair = |provider: &str, model: &str| (provider.to_owned(), model.to_owned());
+    let listed = crate::state::listed_default_model;
+    assert_eq!(
+        listed(&providers, pair("openai", "gpt-5.4-mini"), &[]),
+        pair("openai", "gpt-5.4-mini")
+    );
+    assert_eq!(
+        listed(
+            &providers,
+            pair("openai", "gpt-4-retired"),
+            &["openai/gpt-3-gone".into(), "openai/gpt-5.4-mini".into()]
+        ),
+        pair("openai", "gpt-5.4-mini")
+    );
+    assert_eq!(
+        listed(&providers, pair("openai", "gpt-4-retired"), &[]),
+        pair("openai", "gpt-5.4")
+    );
+    // A provider whose list is empty or not signed in decides for itself.
+    assert_eq!(
+        listed(&[], pair("openai", "gpt-4-retired"), &[]),
+        pair("openai", "gpt-4-retired")
+    );
+    let mut signed_out = providers.clone();
+    signed_out[0].authenticated = false;
+    assert_eq!(
+        listed(&signed_out, pair("openai", "gpt-4-retired"), &[]),
+        pair("openai", "gpt-4-retired")
+    );
+}
+
 /// Two TUIs on one config folder, each still holding the model lists it read
 /// at start: what one saves is not undone by the other's next save.
 #[test]

@@ -3676,6 +3676,48 @@ async fn reasoning_effort_reaches_the_provider() {
     );
 }
 
+/// A model whose catalog lists a level this release has never seen (a new
+/// strongest one) gets it as written, and a configured known level is fitted
+/// to the levels it lists.
+#[tokio::test]
+async fn a_level_new_to_this_release_reaches_a_model_that_lists_it() {
+    let provider = Capturing::with_reasoning_efforts(&["low", "high", "ultra"]);
+    let requests = provider.requests.clone();
+    let runtime = AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for (asked, sent) in [("ultra", "ultra"), ("max", "ultra"), ("medium", "high")] {
+        let mut request = turn_request(asked);
+        request.reasoning_effort = Some(asked.into());
+        let turn = runtime.start_turn(thread.id, request).await.unwrap();
+        wait_done(&runtime, &turn).await;
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some(sent),
+            "{asked}"
+        );
+    }
+}
+
 /// A configured `defaults.reasoning_effort` runs every turn that names no
 /// effort; a turn that names the model's default runs without one, and so do
 /// the turns that keep the chat's latest effort, such as a queued prompt.
@@ -3762,7 +3804,9 @@ async fn a_turn_naming_the_model_default_effort_skips_the_configured_one() {
 }
 
 /// `/v1/info` names the configured effort only when there is one, and a turn
-/// may name the model's default; anything else off the scale is refused.
+/// may name the model's default. Levels are an open set: a level this release
+/// has never seen is accepted and fitted to the model's levels; only text
+/// that cannot be a level is refused.
 #[tokio::test]
 async fn info_reports_the_configured_effort_and_turns_accept_the_model_default() {
     async fn server(
@@ -3875,8 +3919,39 @@ async fn info_reports_the_configured_effort_and_turns_accept_the_model_default()
             }))
             .send()
     };
-    let refused = start("deepest").await.unwrap();
+    let refused = start("Very deep!").await.unwrap();
     assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
+    // A level a provider added after this release ranks strongest, so a
+    // model that does not list it runs at its own strongest level.
+    let turn: Turn = start("deepest")
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let finished: Turn = client
+        .get(format!("{base}/v1/turns/{}/wait?timeout_ms=5000", turn.id))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(finished.status, TurnStatus::Completed);
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .reasoning_effort
+            .as_deref(),
+        Some("high")
+    );
     let turn: Turn = start("default")
         .await
         .unwrap()
@@ -13888,6 +13963,9 @@ mod inherited_ceilings;
 
 #[path = "cases/shell_readings.rs"]
 mod shell_readings;
+
+#[path = "cases/model_catalog.rs"]
+mod model_catalog;
 
 // POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
 #[cfg(unix)]

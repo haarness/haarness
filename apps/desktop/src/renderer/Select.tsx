@@ -17,6 +17,8 @@ import { dialogFrame, floatingBox, frameTop, shortestList } from "./native-area"
 export interface SelectOption {
   value: string | number;
   label: string;
+  /** A quiet note after the label in the list, such as "no longer listed". */
+  hint?: string;
   group?: string;
   disabled?: boolean;
   icon?: () => JSX.Element;
@@ -410,6 +412,9 @@ export function Select(props: {
                     >
                       {option.icon?.()}
                       <span class="select-label">{option.label}</span>
+                      <Show when={option.hint}>
+                        <span class="select-hint">{option.hint}</span>
+                      </Show>
                       <Show when={value() === String(option.value)}>
                         <span class="select-check" aria-hidden="true">
                           ✓

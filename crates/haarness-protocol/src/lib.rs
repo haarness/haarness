@@ -86,6 +86,18 @@ pub fn mebibytes(bytes: u64) -> String {
 pub const REASONING_EFFORTS: [&str; 7] =
     ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// Whether `value` reads as a reasoning level a model catalog could list: one
+/// to 24 lowercase ASCII letters, digits, `-` or `_`. The set of levels is
+/// open, so a level a provider adds after this release (`ultra`) is accepted
+/// and fitted to the model with [`nearest_reasoning_effort`].
+#[must_use]
+pub fn is_reasoning_level(value: &str) -> bool {
+    (1..=24).contains(&value.len())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
 /// The reasoning effort a turn names to run at the model's own default when
 /// the configuration names a level (`defaults.reasoning_effort`): without it,
 /// a turn that names no effort runs at the configured one. Servers that report
@@ -1770,6 +1782,28 @@ mod tests {
             Some("high")
         );
         assert_eq!(super::nearest_reasoning_effort(&[], "high"), None);
+    }
+
+    #[test]
+    fn a_level_a_provider_adds_later_reads_as_a_level() {
+        for level in ["high", "xhigh", "ultra", "deep-2", "think_max"] {
+            assert!(super::is_reasoning_level(level), "{level}");
+        }
+        for value in ["", "High", "very high", "x".repeat(25).as_str(), "ultra!"] {
+            assert!(!super::is_reasoning_level(value), "{value}");
+        }
+        // A model that lists a new strongest level runs a request for it
+        // as written, and one asking for it elsewhere gets the strongest.
+        let levels = ["low", "high", "ultra"].map(str::to_owned);
+        assert_eq!(
+            super::nearest_reasoning_effort(&levels, "ultra"),
+            Some("ultra")
+        );
+        let known = ["low", "high"].map(str::to_owned);
+        assert_eq!(
+            super::nearest_reasoning_effort(&known, "ultra"),
+            Some("high")
+        );
     }
 
     #[test]

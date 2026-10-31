@@ -32,6 +32,9 @@ test("switching models retains supported effort and drops unsupported values to 
   assert.equal(reasoningLabel(""), "Model default");
   assert.equal(reasoningLabel("none"), "None");
   assert.equal(reasoningLabel("budget_large"), "Budget large");
+  // A level a provider adds after this release reads by its own word.
+  assert.equal(reasoningLabel("ultra"), "Ultra");
+  assert.equal(reasoningLabel("deep-think"), "Deep think");
   assert.equal(reasoningLabel("xhigh"), "Extra high");
 });
 

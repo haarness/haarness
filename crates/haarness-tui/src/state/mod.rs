@@ -3157,6 +3157,11 @@ impl App {
     }
 
     pub fn reasoning_efforts(&self) -> &[String] {
+        // A model its provider no longer lists may still answer: every
+        // level stays on offer, and the server fits the one chosen.
+        if self.chat_model_unlisted() {
+            return &FULL_REASONING_SCALE;
+        }
         self.providers
             .iter()
             .find(|provider| provider.id == self.thread.provider)
@@ -3168,6 +3173,23 @@ impl App {
             })
             .filter(|model| model.reasoning)
             .map_or(&[], |model| model.reasoning_efforts.as_slice())
+    }
+
+    /// Whether this chat's model is one its signed-in provider no longer
+    /// lists, by a list that has come in: the chat keeps it (the provider
+    /// decides whether it still answers), and the picker says so.
+    pub fn chat_model_unlisted(&self) -> bool {
+        !self.models_loading
+            && !self.thread.model.is_empty()
+            && self.providers.iter().any(|provider| {
+                provider.id == self.thread.provider
+                    && provider.authenticated
+                    && !provider.models.is_empty()
+                    && !provider
+                        .models
+                        .iter()
+                        .any(|model| model.id == self.thread.model)
+            })
     }
 
     /// The levels a pick may name: those the model lists or, for a model that
@@ -3272,6 +3294,21 @@ impl App {
                     .unwrap_or(usize::MAX),
             )
         });
+        // The chat's own model stays in view, at the top, when its provider
+        // no longer lists it.
+        if self.chat_model_unlisted() {
+            let current = format!("{}/{}", self.thread.provider, self.thread.model);
+            let haystack = [
+                current.clone(),
+                haarness_protocol::model_display_id(&current),
+                self.model_label(&current),
+            ]
+            .join(" ")
+            .to_ascii_lowercase();
+            if words.iter().all(|word| haystack.contains(word)) {
+                models.insert(0, current);
+            }
+        }
         models
     }
 
@@ -3644,6 +3681,51 @@ impl App {
         };
         self.last_frame.borrow().painted(anchor, head)
     }
+}
+
+/// Every reasoning level Haarness knows, offered for a model its provider
+/// no longer lists.
+static FULL_REASONING_SCALE: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    haarness_protocol::REASONING_EFFORTS
+        .iter()
+        .map(|level| (*level).to_owned())
+        .collect()
+});
+
+/// The model a new chat takes for the configured default `configured`:
+/// that one while its provider's list has it, or has not come in, or the
+/// provider is not signed in (the provider decides). When the signed-in
+/// provider's list lacks it (the provider retired it), the most recent of
+/// `recents` (`provider/model`) a signed-in provider lists, else the first
+/// connected provider's model, as Desktop chooses.
+pub fn listed_default_model(
+    providers: &[ProviderInfo],
+    configured: (String, String),
+    recents: &[String],
+) -> (String, String) {
+    let lacks = providers.iter().any(|provider| {
+        provider.id == configured.0
+            && provider.authenticated
+            && !provider.models.is_empty()
+            && !provider.models.iter().any(|model| model.id == configured.1)
+    });
+    if !lacks {
+        return configured;
+    }
+    let listed = |provider_id: &str, model_id: &str| {
+        providers.iter().any(|provider| {
+            provider.id == provider_id
+                && provider.authenticated
+                && provider.models.iter().any(|model| model.id == model_id)
+        })
+    };
+    recents
+        .iter()
+        .filter_map(|recent| recent.split_once('/'))
+        .find(|(provider, model)| listed(provider, model))
+        .map(|(provider, model)| (provider.to_owned(), model.to_owned()))
+        .or_else(|| default_connected_model(providers))
+        .unwrap_or(configured)
 }
 
 pub fn default_connected_model(providers: &[ProviderInfo]) -> Option<(String, String)> {
