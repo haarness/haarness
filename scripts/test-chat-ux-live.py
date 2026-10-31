@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Opt-in real-model CLI/TUI chat checks; mutations stay in a disposable project.
 
-Uses OPENAI_API_KEY or the local Haarness API credential in memory. Retains
-synthetic transcripts and mock files for inspection, never the credential.
+Uses OPENAI_API_KEY or the local Haarness API credential in memory. Set
+HAARNESS_UX_PROVIDER (and HAARNESS_UX_MODEL) to run it on another provider
+whose credential the environment carries, such as github-copilot with
+GITHUB_COPILOT_TOKEN. Retains synthetic transcripts and mock files for
+inspection, never the credential.
 """
 import hashlib
 import json
@@ -22,6 +25,7 @@ from e2e_env import clean_env
 
 repo = Path(__file__).resolve().parents[1]
 binary = str(Path(os.environ.get("HAARNESS_BIN", repo / "target/debug/haarness")).resolve())
+provider = os.environ.get("HAARNESS_UX_PROVIDER", "openai")
 model = os.environ.get("HAARNESS_UX_MODEL", "gpt-5.4-mini")
 root = Path(tempfile.mkdtemp(prefix="haarness-chat-ux-"))
 project = root / "mock project"
@@ -30,16 +34,16 @@ project = root / "mock project"
 (project / "fixtures/ledger.txt").write_text("marker=harbor-528\napples=7\npears=11\n", encoding="utf-8")
 (project / "fixtures/calc.py").write_text("def average(values):\n    return sum(values) / len(values)\n", encoding="utf-8")
 (project / "AGENTS.md").write_text("This is a disposable chat test. Only access this project. Keep fixtures unchanged. Put any requested generated files in output/. Do not access credentials, network resources or other directories.\n")
-(project / ".haarness/config.toml").write_text(f'[defaults]\nprovider="openai"\nmodel="{model}"\n[permissions]\nread="allow"\nwrite="allow"\nedit="allow"\nbash="allow"\n')
+(project / ".haarness/config.toml").write_text(f'[defaults]\nprovider="{provider}"\nmodel="{model}"\n[permissions]\nread="allow"\nwrite="allow"\nedit="allow"\nbash="allow"\n')
 subprocess.run(["git", "init", "-q", str(project)], check=True)
 env = clean_env()
 env["HAARNESS_DATA_DIR"] = str(root / "state")
-if not env.get("OPENAI_API_KEY"):
+if provider == "openai" and not env.get("OPENAI_API_KEY"):
     credentials = Path.home() / ".local/share/haarness/auth.json"
     auth = json.loads(credentials.read_text()).get("openai", {}) if credentials.exists() else {}
     if auth.get("type") == "api":
         env["OPENAI_API_KEY"] = auth["key"]
-if not env.get("OPENAI_API_KEY"):
+if provider == "openai" and not env.get("OPENAI_API_KEY"):
     raise SystemExit("Set OPENAI_API_KEY or sign in with a Haarness OpenAI API credential")
 args = [binary, "--workspace", str(project), "--trust-project"]
 session = f"haarness-chat-ux-{os.getpid()}"
@@ -72,7 +76,7 @@ def until(check, label, timeout=150):
 
 def record(label, detail=None):
     checks.append({"name": label, "detail": detail})
-    (root / "results.json").write_text(json.dumps({"model": model, "checks": checks}, indent=2))
+    (root / "results.json").write_text(json.dumps({"provider": provider, "model": model, "checks": checks}, indent=2))
     print("PASS", label, flush=True)
 
 
@@ -89,7 +93,7 @@ def calls(thread):
 def chat(label, prompt, *options):
     before = {t["id"] for t in api("/threads?archived=true")}
     started = time.monotonic()
-    result = subprocess.run(args + ["run", "--provider", "openai", "--model", model, "--no-thinking", *options],
+    result = subprocess.run(args + ["run", "--provider", provider, "--model", model, "--no-thinking", *options],
                             input=prompt, env=env, text=True, capture_output=True, timeout=180)
     (root / f"{label}.stdout").write_text(result.stdout)
     (root / f"{label}.stderr").write_text(result.stderr)
@@ -164,7 +168,7 @@ try:
     assert any(c["name"].lower() in ["bash", "functions.bash"] for c in calls(writer)), "model did not run verification"
     _, out = chat("cli-edit", 'Edit output/space dir/receipt 日本語.txt: change apples+pears=18 to total=18 and append verified=yes on its own line. Preserve the marker. Read it back and verify.', "--session", writer)
     assert (project / "output/space dir/receipt 日本語.txt").read_text() == "harbor-528\ntotal=18\nverified=yes\n"
-    t = api("/threads", {"title":"Live TUI UX", "provider":"openai", "model":model})["id"]
+    t = api("/threads", {"title":"Live TUI UX", "provider":provider, "model":model})["id"]
     # Credentials are inherited from this process by the fixture daemon; the
     # pane gets the isolated state path and never a key in its command line.
     command = e2e_tmux.pane_command(env, [*args, "--thread", t])
