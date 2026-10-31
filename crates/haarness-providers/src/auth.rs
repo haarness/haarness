@@ -33,9 +33,11 @@ const XAI_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
 const XAI_DEVICE_URL: &str = "https://auth.x.ai/oauth2/device/code";
 const XAI_SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
 const XAI_DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
-/// The haarness organization's own GitHub OAuth app, so GitHub's consent
-/// screen names Haarness. Device Flow must stay enabled on it.
-const COPILOT_CLIENT_ID: &str = "Ov23lilZNELsCtpaodR6";
+/// GitHub serves its full Copilot model catalog only to integrations it has
+/// approved; a token from an unapproved OAuth app sees a few legacy models.
+/// Haarness's own app (`Ov23lilZNELsCtpaodR6`, haarness organization) takes
+/// over here once GitHub approves it.
+const COPILOT_CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
 const COPILOT_DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
 pub type AuthResult<T> = Result<T, AuthError>;

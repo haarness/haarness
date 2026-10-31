@@ -1,7 +1,10 @@
 //! Provider-specific cloud transports which reuse Haarness's native wire
 //! parsers after applying each service's endpoint and authentication contract.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use haarness_core::{
@@ -250,6 +253,17 @@ pub struct CopilotProvider {
     auth_store: Option<Arc<CredentialStore>>,
     models: Vec<ModelInfo>,
     live_models: crate::live_models::LiveModels,
+    /// The API each discovered model speaks. A model missing here (catalog
+    /// not loaded, or configured by hand) goes to Chat Completions.
+    wires: std::sync::RwLock<HashMap<String, CopilotWire>>,
+}
+
+/// Which Copilot API a model answers on, from its catalog entry's
+/// `supported_endpoints`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopilotWire {
+    Chat,
+    Responses,
 }
 
 impl CopilotProvider {
@@ -285,6 +299,7 @@ impl CopilotProvider {
             auth_store,
             models,
             live_models: crate::live_models::LiveModels::default(),
+            wires: std::sync::RwLock::default(),
         }
     }
 
@@ -300,15 +315,17 @@ impl CopilotProvider {
         }
     }
 
-    fn request_headers(&self, vision: bool) -> CoreResult<ProviderHeaders> {
+    /// `initiator` is `agent` for a request that only carries tool results
+    /// back: GitHub counts a premium request for each `user` one.
+    fn request_headers(&self, vision: bool, initiator: &str) -> CoreResult<ProviderHeaders> {
         let mut additions = vec![
             (
                 "User-Agent",
                 format!("haarness/{}", env!("CARGO_PKG_VERSION")),
             ),
-            ("X-GitHub-Api-Version", "2026-06-01".into()),
+            ("X-GitHub-Api-Version", "2026-08-01".into()),
             ("Openai-Intent", "conversation-edits".into()),
-            ("x-initiator", "user".into()),
+            ("x-initiator", initiator.into()),
         ];
         if vision {
             additions.push(("Copilot-Vision-Request", "true".into()));
@@ -316,9 +333,9 @@ impl CopilotProvider {
         headers_with(&self.instance.headers, additions)
     }
 
-    /// GitHub's Copilot model catalog includes endpoint capability metadata.
-    /// Haarness exposes only models which advertise Chat Completions, since
-    /// its Copilot adapter does not silently reroute Responses or Messages.
+    /// GitHub's Copilot model catalog lists the endpoints each model answers
+    /// on. Models with Chat Completions use it; models that only speak
+    /// Responses (the GPT-5 and later, Grok and similar families) use that.
     pub async fn discover_models(self) -> Self {
         self.refresh_models(true).await;
         self
@@ -330,7 +347,7 @@ impl CopilotProvider {
         let Ok(token) = self.token() else {
             return None;
         };
-        let Ok(headers) = self.request_headers(false) else {
+        let Ok(headers) = self.request_headers(false, "user") else {
             return None;
         };
         let response = reqwest::Client::new()
@@ -352,7 +369,15 @@ impl CopilotProvider {
                 .get("data")
                 .and_then(serde_json::Value::as_array)
                 .or_else(|| body.as_array())?;
-            let discovered: Vec<_> = entries.iter().filter_map(copilot_model).collect();
+            let (discovered, wires): (Vec<_>, HashMap<_, _>) = entries
+                .iter()
+                .filter_map(copilot_model)
+                .map(|(model, wire)| {
+                    let id = model.id.clone();
+                    (model, (id, wire))
+                })
+                .unzip();
+            *self.wires.write().unwrap() = wires;
             return Some(discovered);
         }
         None
@@ -389,7 +414,33 @@ impl ModelProvider for CopilotProvider {
             .messages
             .iter()
             .any(|message| matches!(message, ProviderMessage::Media { .. }));
-        let headers = self.request_headers(vision)?;
+        let initiator = if matches!(
+            request.messages.last(),
+            Some(ProviderMessage::ToolResult { .. })
+        ) {
+            "agent"
+        } else {
+            "user"
+        };
+        let headers = self.request_headers(vision, initiator)?;
+        let wire = self.wires.read().unwrap().get(&request.model).copied();
+        if wire == Some(CopilotWire::Responses) {
+            let mut request = request;
+            for (name, value) in &headers.map() {
+                if let Ok(value) = value.to_str() {
+                    // A hook's own header for the same name wins.
+                    request
+                        .parameters
+                        .headers
+                        .entry(name.to_string())
+                        .or_insert_with(|| value.to_owned());
+                }
+            }
+            let endpoint = format!("{}/responses", self.instance.base_url.trim_end_matches('/'));
+            return crate::OpenAiProvider::for_endpoint(endpoint, self.token()?)
+                .stream(request, cancel)
+                .await;
+        }
         OpenAiCompatibleProvider::new(CompatibleInstance {
             id: self.instance.id.clone(),
             name: self.instance.name.clone(),
@@ -414,11 +465,15 @@ impl ModelProvider for CopilotProvider {
     }
 }
 
-fn copilot_model(entry: &serde_json::Value) -> Option<ModelInfo> {
+fn copilot_model(entry: &serde_json::Value) -> Option<(ModelInfo, CopilotWire)> {
     if entry
         .get("model_picker_enabled")
         .and_then(serde_json::Value::as_bool)
         == Some(false)
+        || entry
+            .pointer("/policy/state")
+            .and_then(serde_json::Value::as_str)
+            == Some("disabled")
     {
         return None;
     }
@@ -426,24 +481,55 @@ fn copilot_model(entry: &serde_json::Value) -> Option<ModelInfo> {
         .get("supported_endpoints")
         .or_else(|| entry.pointer("/capabilities/supported_endpoints"))
         .and_then(serde_json::Value::as_array);
-    if endpoints.is_some_and(|endpoints| {
-        !endpoints.iter().any(|endpoint| {
-            endpoint
-                .as_str()
-                .is_some_and(|endpoint| endpoint == "chat" || endpoint.contains("chat/completions"))
-        })
-    }) {
-        return None;
-    }
+    // An entry without the list is an older chat model.
+    let wire = match endpoints {
+        None => CopilotWire::Chat,
+        Some(endpoints) => {
+            let lists = |wanted: fn(&str) -> bool| {
+                endpoints
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(wanted)
+            };
+            if lists(|endpoint| endpoint == "chat" || endpoint.contains("chat/completions")) {
+                CopilotWire::Chat
+            } else if lists(|endpoint| endpoint == "/responses" || endpoint == "responses") {
+                CopilotWire::Responses
+            } else {
+                return None;
+            }
+        }
+    };
     let id = entry.get("id")?.as_str()?.to_owned();
     let supports = entry.pointer("/capabilities/supports");
-    let reasoning = id.starts_with('o')
+    // Current catalogs list the efforts a model takes; older ones said
+    // true or nothing.
+    let listed: Vec<String> = supports
+        .and_then(|value| value.get("reasoning_effort"))
+        .and_then(serde_json::Value::as_array)
+        .map(|efforts| {
+            efforts
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let reasoning = !listed.is_empty()
+        || id.starts_with('o')
         || id.starts_with("gpt-5")
         || supports
             .and_then(|value| value.get("reasoning_effort"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-    Some(ModelInfo {
+    let reasoning_efforts = if !listed.is_empty() {
+        listed
+    } else if reasoning {
+        ["low", "medium", "high"].map(str::to_owned).to_vec()
+    } else {
+        Vec::new()
+    };
+    let model = ModelInfo {
         display_name: entry
             .get("name")
             .and_then(serde_json::Value::as_str)
@@ -451,11 +537,7 @@ fn copilot_model(entry: &serde_json::Value) -> Option<ModelInfo> {
             .to_owned(),
         id,
         reasoning,
-        reasoning_efforts: if reasoning {
-            ["low", "medium", "high"].map(str::to_owned).to_vec()
-        } else {
-            Vec::new()
-        },
+        reasoning_efforts,
         images: supports
             .and_then(|value| value.get("vision"))
             .and_then(serde_json::Value::as_bool)
@@ -474,7 +556,8 @@ fn copilot_model(entry: &serde_json::Value) -> Option<ModelInfo> {
             .pointer("/capabilities/limits/max_output_tokens")
             .and_then(serde_json::Value::as_u64),
         pricing: None,
-    })
+    };
+    Some((model, wire))
 }
 
 pub struct VertexProvider {
@@ -686,8 +769,15 @@ mod tests {
     }
 
     async fn collect_text(provider: &dyn ModelProvider) -> Vec<ProviderEvent> {
+        collect_text_with(provider, request()).await
+    }
+
+    async fn collect_text_with(
+        provider: &dyn ModelProvider,
+        request: ProviderRequest,
+    ) -> Vec<ProviderEvent> {
         provider
-            .stream(request(), CancellationToken::new())
+            .stream(request, CancellationToken::new())
             .await
             .unwrap()
             .collect::<Vec<_>>()
@@ -707,15 +797,17 @@ mod tests {
     }
 
     #[test]
-    fn copilot_catalog_filters_non_chat_models_and_maps_capabilities() {
+    fn copilot_catalog_routes_each_model_and_maps_capabilities() {
+        let model = |entry: Value| copilot_model(&entry);
         assert!(
-            copilot_model(&serde_json::json!({
-                "id":"messages-only",
-                "supported_endpoints":["/v1/messages"]
-            }))
-            .is_none()
+            model(serde_json::json!({"id":"messages-only","supported_endpoints":["/v1/messages"]}))
+                .is_none()
         );
-        let model = copilot_model(&serde_json::json!({
+        assert!(
+            model(serde_json::json!({"id":"off","policy":{"state":"disabled"}})).is_none(),
+            "a model the account's policy turns off is not offered"
+        );
+        let (chat, wire) = model(serde_json::json!({
             "id":"gpt-5-test",
             "name":"GPT 5 Test",
             "supported_endpoints":["/chat/completions"],
@@ -725,15 +817,38 @@ mod tests {
             }
         }))
         .unwrap();
-        assert!(model.reasoning);
-        assert!(model.images);
-        assert_eq!(model.context_window, Some(200_000));
-        assert_eq!(model.max_output_tokens, Some(32_000));
-        let unknown = copilot_model(&serde_json::json!({
-            "id":"gpt-5-test",
+        assert_eq!(wire, CopilotWire::Chat);
+        assert!(chat.reasoning);
+        assert!(chat.images);
+        assert_eq!(chat.context_window, Some(200_000));
+        assert_eq!(chat.max_output_tokens, Some(32_000));
+        let (both, wire) = model(serde_json::json!({
+            "id":"claude-test",
+            "supported_endpoints":["/v1/messages","/chat/completions"],
+            "capabilities":{"supports":{"reasoning_effort":["low","high","max"]}}
+        }))
+        .unwrap();
+        assert_eq!(wire, CopilotWire::Chat, "Chat Completions wins when listed");
+        assert!(both.reasoning, "a listed effort means reasoning");
+        assert_eq!(both.reasoning_efforts, ["low", "high", "max"]);
+        let (responses, wire) = model(serde_json::json!({
+            "id":"gpt-6-test",
+            "supported_endpoints":["/responses","ws:/responses"],
+            "capabilities":{"supports":{"reasoning_effort":["none","low","xhigh"]}}
+        }))
+        .unwrap();
+        assert_eq!(wire, CopilotWire::Responses);
+        assert_eq!(responses.reasoning_efforts, ["none", "low", "xhigh"]);
+        let (unknown, wire) = model(serde_json::json!({
+            "id":"gpt-4o",
             "capabilities":{"limits":{"max_context_window_tokens":0}}
         }))
         .unwrap();
+        assert_eq!(
+            wire,
+            CopilotWire::Chat,
+            "an entry without endpoints is a chat model"
+        );
         assert_eq!(unknown.context_window, None, "a listed 0 is no window");
 
         let provider = CopilotProvider::new(
@@ -741,9 +856,93 @@ mod tests {
             None,
         );
         assert_eq!(
-            provider.request_headers(true).unwrap().map()["copilot-vision-request"],
+            provider.request_headers(true, "user").unwrap().map()["copilot-vision-request"],
             "true"
         );
+    }
+
+    async fn copilot_catalog(State(capture): State<Capture>, headers: HeaderMap) -> Json<Value> {
+        capture.0.lock().push((headers, Value::Null));
+        Json(serde_json::json!({"data":[
+            {"id":"chat-model","supported_endpoints":["/chat/completions"]},
+            {"id":"responses-model","supported_endpoints":["/responses"]}
+        ]}))
+    }
+
+    async fn responses_fixture(
+        State(capture): State<Capture>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+        capture.0.lock().push((headers, body));
+        (
+            [(CONTENT_TYPE, "text/event-stream")],
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi from responses\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n".into(),
+        )
+    }
+
+    #[tokio::test]
+    async fn copilot_sends_responses_only_models_to_responses_and_tool_rounds_as_agent() {
+        let capture = Capture::default();
+        let router = Router::new()
+            .route("/models", axum::routing::get(copilot_catalog))
+            .route("/chat/completions", post(openai_fixture))
+            .route("/responses", post(responses_fixture))
+            .with_state(capture.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut native = instance("github-copilot", format!("http://{address}"), "gh-token");
+        native.discover_models = true;
+        let provider = CopilotProvider::new(native, None).discover_models().await;
+        let ids: Vec<_> = provider
+            .info()
+            .models
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(ids, ["chat-model", "responses-model"]);
+
+        let mut responses = request();
+        responses.model = "responses-model".into();
+        responses.messages.push(ProviderMessage::ToolResult {
+            call_id: "call_1".into(),
+            name: "read".into(),
+            output: "done".into(),
+            is_error: false,
+            attachments: Vec::new(),
+        });
+        let events = provider
+            .stream(responses, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(&events[0], Ok(ProviderEvent::TextDelta(text)) if text == "hi from responses")
+        );
+        let mut chat = request();
+        chat.model = "chat-model".into();
+        let events = collect_text_with(&provider, chat).await;
+        assert!(matches!(&events[0], ProviderEvent::TextDelta(text) if text == "hello"));
+
+        let requests = capture.0.lock();
+        let (headers, body) = &requests[1];
+        assert_eq!(body["model"], "responses-model");
+        assert!(body.get("input").is_some(), "the Responses body shape");
+        assert_eq!(headers["authorization"], "Bearer gh-token");
+        assert_eq!(headers["openai-intent"], "conversation-edits");
+        assert_eq!(
+            headers["x-initiator"], "agent",
+            "a tool round is not a new premium request"
+        );
+        let (headers, body) = &requests[2];
+        assert_eq!(body["model"], "chat-model");
+        assert!(
+            body.get("messages").is_some(),
+            "the Chat Completions body shape"
+        );
+        assert_eq!(headers["x-initiator"], "user");
     }
 
     #[tokio::test]
@@ -788,9 +987,51 @@ mod tests {
         assert!(matches!(&events[0], ProviderEvent::TextDelta(text) if text == "hello"));
         let requests = capture.0.lock();
         assert_eq!(requests[0].0["authorization"], "Bearer github-token");
-        assert_eq!(requests[0].0["x-github-api-version"], "2026-06-01");
+        assert_eq!(requests[0].0["x-github-api-version"], "2026-08-01");
         assert_eq!(requests[0].0["openai-intent"], "conversation-edits");
         assert_eq!(requests[0].0["x-initiator"], "user");
+    }
+
+    /// Copilot streams Claude's and Kimi's thinking as `reasoning_text`.
+    async fn copilot_reasoning_fixture(
+        State(capture): State<Capture>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+        capture.0.lock().push((headers, body));
+        (
+            [(CONTENT_TYPE, "text/event-stream")],
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning_text\":\"17 times 23 \"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_text\":\"is 391.\",\"reasoning_opaque\":\"sig\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"391\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".into(),
+        )
+    }
+
+    #[tokio::test]
+    async fn copilot_shows_reasoning_streamed_as_reasoning_text() {
+        let capture = Capture::default();
+        let router = Router::new()
+            .route("/chat/completions", post(copilot_reasoning_fixture))
+            .with_state(capture.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = CopilotProvider::new(
+            instance("github-copilot", format!("http://{address}"), "token"),
+            None,
+        );
+        let events = collect_text(&provider).await;
+        let reasoning: String = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ReasoningDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, "17 times 23 is 391.");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::TextDelta(text) if text == "391"))
+        );
     }
 
     /// Streams reasoning in `reasoning`, as vLLM does, then calls `read`.

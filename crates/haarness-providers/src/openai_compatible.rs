@@ -92,9 +92,10 @@ pub struct CompatibleModelDefaults {
 }
 
 /// The assistant-message fields a server streams its reasoning in, and takes
-/// it back in: `reasoning_content` (DeepSeek, llama.cpp, SGLang) or
-/// `reasoning` (vLLM, Ollama, LM Studio).
-const REASONING_FIELDS: [&str; 2] = ["reasoning_content", "reasoning"];
+/// it back in: `reasoning_content` (DeepSeek, llama.cpp, SGLang),
+/// `reasoning` (vLLM, Ollama, LM Studio) or `reasoning_text` (GitHub
+/// Copilot).
+const REASONING_FIELDS: [&str; 3] = ["reasoning_content", "reasoning", "reasoning_text"];
 
 /// The metadata key naming the provider whose reasoning a tool call keeps.
 const REASONING_SOURCE: &str = "reasoning_provider";

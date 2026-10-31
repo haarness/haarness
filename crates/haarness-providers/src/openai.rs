@@ -200,10 +200,16 @@ impl OpenAiProvider {
 
     #[cfg(test)]
     pub fn for_test(endpoint: String, key: &str) -> Self {
+        Self::for_endpoint(endpoint, key.to_owned())
+    }
+
+    /// A Responses endpoint of another service reached with a bearer key,
+    /// such as GitHub Copilot's: no sign-in renewal and no account catalog.
+    pub(crate) fn for_endpoint(endpoint: String, key: String) -> Self {
         Self {
             client: reqwest::Client::new(),
             endpoint,
-            api_key: Some(SecretString::from(key.to_owned())),
+            api_key: Some(SecretString::from(key)),
             auth_store: None,
             oauth: OpenAiOAuthClient::default(),
             refresh_lock: Arc::default(),

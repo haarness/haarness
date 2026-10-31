@@ -1533,6 +1533,11 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     if lower.contains("not licensed to use copilot") {
         return "This GitHub account has no Copilot plan. Turn on Copilot at github.com/settings/copilot, then try again.".into();
     }
+    // Copilot refuses a model its plan or policy leaves off; some of those
+    // can be switched on in the account's Copilot settings.
+    if provider == Some("GitHub Copilot") && lower.contains("model_not_supported") {
+        return "Your GitHub Copilot plan doesn't include this model. Choose another model, or turn it on at github.com/settings/copilot.".into();
+    }
     // Bedrock refuses a wrong API key with 403 "Authentication failed: Please
     // make sure your API Key is valid", or "Invalid API Key format".
     if lower.contains("http 401")
@@ -20577,6 +20582,15 @@ mod tests {
                 Some("GitHub Copilot")
             ),
             "This GitHub account has no Copilot plan. Turn on Copilot at github.com/settings/copilot, then try again."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    r#"HTTP 400 Bad Request: {"error":{"message":"The requested model is not supported.","code":"model_not_supported","param":"model","type":"invalid_request_error"}}"#.into()
+                ),
+                Some("GitHub Copilot")
+            ),
+            "Your GitHub Copilot plan doesn't include this model. Choose another model, or turn it on at github.com/settings/copilot."
         );
         assert_eq!(
             super::user_facing_error(&CoreError::Provider("HTTP 401 Unauthorized".into())),
