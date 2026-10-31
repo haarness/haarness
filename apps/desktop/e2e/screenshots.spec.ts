@@ -11,7 +11,7 @@ import { stopChatHome } from "./fixtures/chat-home";
 test.describe.configure({ mode: "serial" });
 
 let app: ElectronApplication, page: Page;
-let temporary: string, workspace: string, shots: string, other: string, shapes: string;
+let temporary: string, workspace: string, shots: string, other: string, shapes: string, full: string;
 let binary: string, env: Record<string, string>;
 const errors: string[] = [];
 
@@ -39,10 +39,12 @@ test.beforeAll(async () => {
   shots = join(temporary, "Screenshots folder");
   other = join(temporary, "Elsewhere");
   shapes = join(temporary, "Shapes");
+  full = join(temporary, "Full");
   await mkdir(join(workspace, ".haarness"), { recursive: true });
   await mkdir(shots);
   await mkdir(other);
   await mkdir(shapes);
+  await mkdir(full);
   await writeFile(join(workspace, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
   binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
   env = {
@@ -79,6 +81,9 @@ test.beforeAll(async () => {
     [join(shapes, "Tall.png"), await image(160, 40, 160, 100, 160), 200],
   ];
   const now = Date.now() / 1000;
+  // More screenshots than the dialog has room for, in a screen's shape.
+  const screen = await image(70, 90, 120, 288, 180);
+  for (let index = 1; index <= 24; index++) files.push([join(full, `Shot ${index}.png`), screen, index * 60]);
   for (const [path, data, age] of files) {
     await writeFile(path, Buffer.from(data, "base64"));
     await utimes(path, now - age, now - age);
@@ -305,5 +310,46 @@ test("thumbnails keep each image's shape, and an image too large to draw safely 
   await dialog().screenshot({ path: info.outputPath("screenshots-shapes.png") });
   await dialog().getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(dialog()).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("a folder with more screenshots than fit scrolls, and every tile keeps its preview and name", async ({}, info) => {
+  await page.setViewportSize({ width: 1180, height: 760 });
+  await app.evaluate((_, folder) => (globalThis as unknown as { calls: Calls }).calls.folders.push(folder), full);
+  await page.getByRole("button", { name: "Attach", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Attach screenshots", exact: true }).click();
+  await dialog().getByRole("button", { name: "Choose folder…", exact: true }).click();
+  await expect(dialog().locator(".screenshot-name")).toHaveCount(24);
+  await expect.poll(() => tile("Shot 1.png").locator("img").evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(280);
+  const layout = await dialog().evaluate((root) => {
+    const grid = root.querySelector<HTMLElement>(".screenshot-grid")!;
+    const box = (element: Element) => element.getBoundingClientRect();
+    return {
+      scrolls: grid.scrollHeight > grid.clientHeight + 1,
+      tiles: Array.from(root.querySelectorAll(".screenshot-tile")).map((tile) => {
+        const thumb = box(tile.querySelector(".screenshot-thumb")!);
+        const name = tile.querySelector<HTMLElement>(".screenshot-name")!;
+        const time = tile.querySelector<HTMLElement>(".screenshot-time")!;
+        return {
+          shape: Math.round((thumb.width / thumb.height) * 100) / 100,
+          // A line shows whole when nothing of it is cut off.
+          name: name.clientHeight > 0 && name.scrollHeight <= name.clientHeight,
+          time: time.clientHeight > 0 && time.scrollHeight <= time.clientHeight,
+        };
+      }),
+    };
+  });
+  // The grid scrolls rather than squeezing every tile into the dialog.
+  expect(layout.scrolls).toBe(true);
+  expect(new Set(layout.tiles.map((tile) => tile.shape))).toEqual(new Set([1.33]));
+  expect(layout.tiles.every((tile) => tile.name && tile.time)).toBe(true);
+  await dialog().screenshot({ path: info.outputPath("screenshots-full.png") });
+  // The last one is reached by scrolling and picked like any other.
+  await tile("Shot 24.png").click();
+  await expect(tile("Shot 24.png").locator(".screenshot-order")).toHaveText("1");
+  await dialog().getByRole("button", { name: "Add 1 screenshot", exact: true }).click();
+  await expect(dialog()).toHaveCount(0);
+  await expect(chips().last()).toHaveText("Shot 24.png");
+  await page.setViewportSize({ width: 1400, height: 950 });
   expect(errors).toEqual([]);
 });
