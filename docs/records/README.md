@@ -6,6 +6,7 @@ code at its date and is not updated afterwards: for current behaviour, read the
 
 Name new records `YYYY-MM-DD-topic.md` with the date the work was verified, and add a line here.
 
+- [2026-10-31 DeepSeek, live](2026-10-31-deepseek-live.md): both models against DeepSeek's API and behind Haarness Router, the problems found and fixed, and recovery runs.
 - [2026-10-31 OpenRouter, live](2026-10-31-openrouter-live.md): every layer against the real service, the twelve problems found and fixed, and recovery runs.
 - [2026-10-31 Amazon Bedrock, live](2026-10-31-bedrock-live.md): model list, key check and refusals against a new AWS account, streaming and recovery through a proxy, and the nine problems found and fixed; no model answered yet.
 - [2026-10-29 Release 0.1.11](2026-10-29-release-0.1.11.md): Haarness Router ships with every release, installed with `install-router.sh` or `install-router.ps1`, starts from provider keys alone and has a redesigned dashboard; one router page on the website; updates from 0.1.10 proven on macOS, Linux and the TUI.
