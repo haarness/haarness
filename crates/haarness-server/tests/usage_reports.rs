@@ -662,6 +662,92 @@ async fn a_stopped_request_is_not_timed() {
 }
 
 #[tokio::test]
+async fn a_stopped_answer_keeps_what_streamed() {
+    let (server, provider, root) = server("stopped-text").await;
+    let thread = server.thread().await;
+    provider.push_paced(vec![
+        (
+            0,
+            ProviderEvent::ReasoningDelta("Thinking it over. ".into()),
+        ),
+        (
+            0,
+            ProviderEvent::TextDelta("The printing press began ".into()),
+        ),
+        (0, ProviderEvent::TextDelta("in Mainz".into())),
+        (60_000, ProviderEvent::TextDelta(" and never this".into())),
+        (0, finished()),
+    ]);
+    let id = server.start(&thread, "go").await;
+    for _ in 0..200 {
+        if provider.answered.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Let the first three events land before stopping.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    server
+        .client
+        .post(format!("{}/v1/turns/{id}/interrupt", server.base))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    server.wait(&thread, &id).await;
+    let items: Value = server
+        .client
+        .get(format!("{}/v1/threads/{}/items", server.base, thread.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let kinds: Vec<(String, String)> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            let data = &item["data"];
+            let text = data["text"]
+                .as_str()
+                .or(data["message"].as_str())
+                .unwrap_or_default();
+            (
+                data["type"].as_str().unwrap_or_default().to_owned(),
+                text.to_owned(),
+            )
+        })
+        .collect();
+    let position = |kind: &str| kinds.iter().position(|(item, _)| item == kind);
+    assert!(
+        kinds.contains(&("reasoning".into(), "Thinking it over. ".into())),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.contains(&(
+            "assistant_message".into(),
+            "The printing press began in Mainz".into()
+        )),
+        "{kinds:?}"
+    );
+    // Clients read the stop from the closing item, after what streamed.
+    assert_eq!(
+        kinds.last().map(|(kind, _)| kind.as_str()),
+        Some("error"),
+        "{kinds:?}"
+    );
+    assert!(
+        position("reasoning") < position("assistant_message"),
+        "{kinds:?}"
+    );
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
 async fn side_questions_count_the_last_report_of_a_stream_once() {
     let (server, provider, root) = server("btw").await;
     let thread = server.thread().await;
