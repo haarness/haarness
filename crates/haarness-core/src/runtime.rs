@@ -3323,6 +3323,18 @@ impl AgentRuntime {
         if request.model.is_none() {
             request.model.clone_from(&components.config.default_model);
         }
+        // Nothing configured: a model from the providers' lists as they are
+        // now, never an id fixed in this build, which a provider may retire.
+        if (request.provider.is_none() || request.model.is_none())
+            && let Some((provider, model)) = catalog_default_model(
+                components.providers.as_ref(),
+                request.provider.as_deref(),
+                request.model.as_deref(),
+            )
+        {
+            request.provider = Some(provider);
+            request.model = Some(model);
+        }
         if request.ultracode.is_none() {
             request.ultracode = Some(components.config.default_ultracode);
         }
@@ -13831,6 +13843,56 @@ fn resolve_definition_model(
     Err(CoreError::Invalid(format!(
         "No configured provider has a {value} model. Choose an available model."
     )))
+}
+
+/// The provider and model a chat gets when neither it nor the configuration
+/// names both, from the providers' lists as they are now: for a provider
+/// alone, its first model that can use tools; for a model alone, the
+/// provider that lists it; for neither, the first connected provider's
+/// first model that can use tools (OpenAI, Anthropic and Gemini before the
+/// rest, as the clients choose), else the first listed provider's. `None`
+/// when no list has one.
+fn catalog_default_model(
+    registry: &dyn ProviderRegistry,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Option<(String, String)> {
+    let first_model = |models: &[haarness_protocol::ModelInfo]| {
+        models
+            .iter()
+            .find(|model| model.tools)
+            .or_else(|| models.first())
+            .map(|model| model.id.clone())
+    };
+    if let Some(provider) = provider {
+        let model = match model {
+            Some(model) => model.to_owned(),
+            None => first_model(&registry.models(provider))?,
+        };
+        return Some((provider.to_owned(), model));
+    }
+    let mut listed = registry.list();
+    // Stable: equal ranks keep the registry's order.
+    listed.sort_by_key(|info| {
+        (
+            !info.authenticated,
+            match info.id.as_str() {
+                "openai" => 0,
+                "anthropic" => 1,
+                "gemini" => 2,
+                _ => 3,
+            },
+        )
+    });
+    if let Some(model) = model {
+        return listed
+            .iter()
+            .find(|info| info.models.iter().any(|listed| listed.id == model))
+            .map(|info| (info.id.clone(), model.to_owned()));
+    }
+    listed
+        .iter()
+        .find_map(|info| first_model(&info.models).map(|model| (info.id.clone(), model)))
 }
 
 fn qualified_agent_model(agent: &str, model: &str) -> CoreResult<(String, String)> {
