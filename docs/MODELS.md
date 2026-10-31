@@ -37,9 +37,9 @@ in memory for the server lifetime.
 
 Live refresh is implemented for OpenAI API keys and the ChatGPT account catalog,
 Anthropic, Gemini, GitHub Copilot and compatible model-list endpoints, including
-detected local runtimes. Explicit model allowlists, configured cloud deployments,
-and presets with heterogeneous catalogs can deliberately disable discovery and
-keep their configured/curated fallback. OpenAI API-key and ChatGPT membership and
+detected local runtimes. Explicit model allowlists and configured cloud
+deployments keep their configured models; of the compatible presets only
+Perplexity, which has no list route, keeps a fixed list. OpenAI API-key and ChatGPT membership and
 reasoning options have separate caches: an API option is not automatically an
 option on a subscription. The
 server advertises `providers.refresh.v1`; older remote servers remain usable.

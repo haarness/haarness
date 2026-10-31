@@ -42,7 +42,10 @@ const fn entry(
 
 /// Longest-prefix table per provider. Order within a provider does not matter;
 /// the longest matching prefix wins, so a variant priced differently from its
-/// family (`-pro`, `-mini`, `-nano`, `-image`) needs its own entry.
+/// family (`-pro`, `-mini`, `-nano`, `-image`) needs its own entry. A prefix
+/// ending in a version number covers that release only: `gpt-5` matches
+/// `gpt-5-mini` and `gpt-5-2025-08-07`, never `gpt-5.7` (see
+/// `continues_release`), so each version needs its own entry.
 ///
 /// Prices here are fallbacks for models the reviewed table does not list: the
 /// providers' list prices in USD per million tokens as OpenRouter's live
@@ -196,30 +199,21 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
                 Some((15.0, 75.0, 1.5, 18.75)),
             ),
             entry(
-                "claude-opus-4-2025",
+                "claude-opus-4",
                 200_000,
                 32_000,
                 Some((15.0, 75.0, 1.5, 18.75)),
             ),
-            entry(
-                "claude-opus-4",
-                200_000,
-                64_000,
-                Some((5.0, 25.0, 0.5, 6.25)),
-            ),
+            entry("claude-opus-4-5", 200_000, 64_000, None),
             entry("claude-sonnet-4-6", 1_000_000, 64_000, None),
+            entry("claude-sonnet-4-5", 200_000, 64_000, None),
             entry(
                 "claude-sonnet-4",
                 200_000,
                 64_000,
                 Some((3.0, 15.0, 0.3, 3.75)),
             ),
-            entry(
-                "claude-haiku-4",
-                200_000,
-                64_000,
-                Some((1.0, 5.0, 0.1, 1.25)),
-            ),
+            entry("claude-haiku-4-5", 200_000, 64_000, None),
             entry("claude-opus-5", 1_000_000, 128_000, None),
             entry("claude-sonnet-5", 1_000_000, 128_000, None),
             entry("claude-fable-5", 1_000_000, 128_000, None),
@@ -420,7 +414,7 @@ fn price_key(id: &str) -> String {
 }
 
 /// A dated snapshot of a listed model: `-20251001` or `-2026-01-01`.
-fn is_snapshot(suffix: &str) -> bool {
+pub(crate) fn is_snapshot(suffix: &str) -> bool {
     let Some(date) = suffix.strip_prefix('-') else {
         return false;
     };
@@ -496,8 +490,38 @@ pub fn lookup(provider: &str, model_id: &str) -> Option<&'static CatalogEntry> {
     };
     entries
         .iter()
-        .filter(|entry| model_id.starts_with(entry.prefix))
+        .filter(|entry| {
+            model_id
+                .strip_prefix(entry.prefix)
+                .is_some_and(|rest| continues_release(entry.prefix, rest))
+        })
         .max_by_key(|entry| entry.prefix.len())
+}
+
+/// Whether `rest`, what follows a matched `prefix`, keeps to the release the
+/// prefix names: nothing, a dated snapshot or a variant word (`-mini`,
+/// `-preview`) does. After a prefix ending in a version number, another
+/// number is another release (`gpt-5` → `gpt-5.7`, `claude-opus-5` →
+/// `claude-opus-5-7`, `o1` → `o10`) and borrows neither its price nor its
+/// limits; it is unknown until listed. A zero minor (`claude-opus-4-0`) is the
+/// same release. Family entries without a number (`gemini`) still cover all.
+fn continues_release(prefix: &str, rest: &str) -> bool {
+    if rest.is_empty() || is_snapshot(rest) || !prefix.ends_with(|c: char| c.is_ascii_digit()) {
+        return true;
+    }
+    let Some(after) = rest.strip_prefix(['.', '-']) else {
+        // A digit straight after the prefix's number makes a longer number.
+        return !rest.starts_with(|c: char| c.is_ascii_digit());
+    };
+    let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return true;
+    }
+    // A date run (`-20250514-v1`, `-2025-08-07-preview`) starts a snapshot.
+    if rest.starts_with('-') && matches!(digits, 4 | 8) {
+        return true;
+    }
+    after[..digits].bytes().all(|byte| byte == b'0') && continues_release(prefix, &after[digits..])
 }
 
 /// Whether a catalog entry or the reviewed price table names `model_id`
@@ -599,7 +623,7 @@ mod tests {
         // A `-pro` build costs far more than its family: it never borrows the family's price.
         let pro = lookup("openai", "gpt-5.5-pro").unwrap().pricing.unwrap();
         assert!((pro.0 - 30.0).abs() < f64::EPSILON && (pro.1 - 180.0).abs() < f64::EPSILON);
-        // Opus 4.1 kept the old Opus price; the bare `claude-opus-4` prefix is Opus 4.5's.
+        // Opus 4 and 4.1 kept the old Opus price; 4.5 is priced by the reviewed table.
         assert!(
             (lookup("anthropic", "claude-opus-4-1-20250805")
                 .unwrap()
@@ -610,17 +634,60 @@ mod tests {
                 .abs()
                 < f64::EPSILON
         );
+        for id in ["claude-opus-4-20250514", "claude-opus-4-0"] {
+            let opus = lookup("anthropic", id).unwrap();
+            assert!(
+                (opus.pricing.unwrap().0 - 15.0).abs() < f64::EPSILON,
+                "{id}"
+            );
+        }
+        assert_eq!(
+            lookup("anthropic", "claude-opus-4-5-20251101")
+                .unwrap()
+                .prefix,
+            "claude-opus-4-5"
+        );
         assert!(
-            (lookup("anthropic", "claude-opus-4-5")
-                .unwrap()
-                .pricing
-                .unwrap()
-                .0
-                - 5.0)
-                .abs()
-                < f64::EPSILON
+            (pricing("anthropic", "claude-opus-4-5").unwrap().input - 5.0).abs() < f64::EPSILON
         );
         assert!(lookup("unknown-provider", "gpt-5.4").is_none());
+    }
+
+    #[test]
+    fn a_new_version_never_borrows_another_versions_price_or_limits() {
+        for (provider, id) in [
+            ("openai", "gpt-5.7"),
+            ("openai", "gpt-5.7-mini"),
+            ("openai", "gpt-5-1"),
+            ("openai", "o10"),
+            ("anthropic", "claude-opus-5-7"),
+            ("anthropic", "claude-sonnet-5.7"),
+            ("anthropic", "claude-opus-4-9-20270101"),
+        ] {
+            assert!(lookup(provider, id).is_none(), "{provider}/{id}");
+            assert!(pricing(provider, id).is_none(), "{provider}/{id}");
+        }
+        // Snapshots and variant words of a listed release still match it.
+        for (provider, id, prefix) in [
+            ("openai", "gpt-5-2025-08-07", "gpt-5"),
+            ("openai", "gpt-5-chat-latest", "gpt-5"),
+            ("openai", "gpt-5.4-mini-2026-01-01", "gpt-5.4-mini"),
+            ("openai", "o3-deep-research", "o3"),
+            ("anthropic", "claude-sonnet-4-20250514", "claude-sonnet-4"),
+            ("anthropic", "claude-3-5-sonnet-20241022", "claude-3-5"),
+            ("gemini", "gemini-3.1-pro-preview", "gemini-3.1-pro"),
+            (
+                "gemini",
+                "gemini-2.5-flash-preview-09-2025",
+                "gemini-2.5-flash",
+            ),
+        ] {
+            assert_eq!(
+                lookup(provider, id).map(|entry| entry.prefix),
+                Some(prefix),
+                "{id}"
+            );
+        }
     }
 
     #[test]

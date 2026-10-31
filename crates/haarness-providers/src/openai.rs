@@ -113,14 +113,9 @@ impl OpenAiProvider {
                     if !supports_responses(id) {
                         return None;
                     }
-                    let mut info = model(
-                        id,
-                        id.starts_with("gpt-5")
-                            || id.starts_with("gpt-6")
-                            || id.starts_with("o1")
-                            || id.starts_with("o3")
-                            || id.starts_with("o4"),
-                    );
+                    // The public resource carries no capability fields, so
+                    // the id's version decides until the entry says otherwise.
+                    let mut info = model(id, openai_reasons(id));
                     info.context_window = entry["context_window"]
                         .as_u64()
                         .filter(|value| *value > 0)
@@ -352,17 +347,37 @@ fn chatgpt_alias(model: &str) -> &str {
 }
 
 /// Static knowledge for the moments before the account catalog has loaded:
-/// the model families the ChatGPT transport is known to serve. The catalog
-/// replaces this as soon as it is read. Aliases are left out: `gpt-5.6` is
-/// Sol by another name, and listing both shows "GPT-5.6 Sol" twice. A thread
-/// already on the alias keeps working through `chatgpt_alias`.
+/// the current generation of the static list, read as the models reaching
+/// its strongest reasoning tier (older generations stop a tier short and are
+/// the ones the subscription retires first). No family is named, so a new
+/// static entry needs no change here, and the catalog replaces this as soon
+/// as it is read. Aliases are left out: `gpt-5.6` is Sol by another name, and
+/// listing both shows "GPT-5.6 Sol" twice. A thread already on the alias
+/// keeps working through `chatgpt_alias`.
 fn chatgpt_fallback_models(preferred: &[ModelInfo]) -> Vec<ModelInfo> {
+    let strongest = |model: &ModelInfo| {
+        model
+            .reasoning_efforts
+            .iter()
+            .map(|level| effort_rank(level))
+            .max()
+    };
+    let newest = preferred.iter().filter_map(strongest).max();
     preferred
         .iter()
-        .filter(|model| model.id.starts_with("gpt-6") || model.id.starts_with("gpt-5.6"))
+        .filter(|model| newest.is_some() && strongest(model) == newest)
         .filter(|model| chatgpt_alias(&model.id) == model.id)
         .cloned()
         .collect()
+}
+
+/// Where a level sits on the shared scale; a level outside it ranks above
+/// every known one, as the shared nearest-level rule reads it.
+fn effort_rank(level: &str) -> usize {
+    haarness_protocol::REASONING_EFFORTS
+        .iter()
+        .position(|known| *known == level)
+        .unwrap_or(haarness_protocol::REASONING_EFFORTS.len())
 }
 
 /// Parse the ChatGPT account catalog. Hidden entries and models carrying a
@@ -383,13 +398,15 @@ fn chatgpt_catalog(body: &Value) -> Option<ChatGptCatalog> {
         {
             continue;
         }
+        // Every level the account lists is kept, in its order, including
+        // ones newer than the shared scale.
         let efforts: Vec<String> = entry["supported_reasoning_levels"]
             .as_array()
             .map(|levels| {
                 levels
                     .iter()
                     .filter_map(|level| level["effort"].as_str())
-                    .filter(|effort| haarness_protocol::REASONING_EFFORTS.contains(effort))
+                    .filter(|effort| !effort.trim().is_empty())
                     .map(str::to_owned)
                     .collect()
             })
@@ -657,8 +674,7 @@ impl ModelProvider for OpenAiProvider {
         if structured_output.is_some() {
             body["tool_choice"] = json!("required");
         }
-        let sampling_allowed =
-            !model.starts_with("gpt-6") || request.reasoning_effort.as_deref() == Some("none");
+        let sampling_allowed = sampling_allowed(model, request.reasoning_effort.as_deref());
         if let Some(effort) = request.reasoning_effort {
             body["reasoning"] = json!({"effort": effort, "summary": "auto"});
         }
@@ -786,45 +802,85 @@ impl ModelProvider for OpenAiProvider {
     }
 }
 
-/// The minor version of a GPT-5 family id (`gpt-5.4-mini` → 4); `gpt-5`,
-/// `gpt-5-mini` and other unversioned ids have none.
-fn gpt5_minor(id: &str) -> Option<u32> {
-    let rest = id.strip_prefix("gpt-5")?;
-    let digits: String = rest
-        .strip_prefix(['.', '-'])?
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    // A four-digit hyphenated suffix starts a snapshot date, not a minor version.
-    if rest.starts_with('-') && digits.len() == 4 {
-        return None;
+/// The version an OpenAI id names, read from its shape rather than a list so
+/// a release Haarness has not seen still lands in the right place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenAiVersion {
+    /// `gpt-<major>[.<minor>]`: `gpt-6.1-sol` is 6.1, `gpt-5-1` is 5.1 and
+    /// `gpt-5-mini` or a dated `gpt-5-2025-08-07` has no minor.
+    Gpt { major: u32, minor: Option<u32> },
+    /// `o<n>`: `o4-mini` is 4.
+    O(u32),
+}
+
+fn openai_version(id: &str) -> Option<OpenAiVersion> {
+    let lower = id.to_ascii_lowercase();
+    // A fine-tune is `ft:<family>:<org>:<suffix>`; only the family matters.
+    let family = lower.strip_prefix("ft:").unwrap_or(&lower);
+    let family = family.split(':').next().unwrap_or(family);
+    let leading_number = |text: &str| -> Option<(u32, usize)> {
+        let digits = text.chars().take_while(char::is_ascii_digit).count();
+        Some((text[..digits].parse().ok()?, digits))
+    };
+    if let Some(rest) = family.strip_prefix("gpt-") {
+        let (major, digits) = leading_number(rest)?;
+        let rest = &rest[digits..];
+        let minor = rest
+            .strip_prefix(['.', '-'])
+            .and_then(leading_number)
+            // A four-digit hyphenated run starts a snapshot date, not a minor.
+            .filter(|(_, digits)| !(rest.starts_with('-') && *digits == 4))
+            .map(|(minor, _)| minor);
+        return Some(OpenAiVersion::Gpt { major, minor });
     }
-    digits.parse().ok()
+    let rest = family.strip_prefix('o')?;
+    let (number, digits) = leading_number(rest)?;
+    (rest.len() == digits || rest[digits..].starts_with('-')).then_some(OpenAiVersion::O(number))
+}
+
+/// Whether an id reasons: GPT-5 and every later GPT, and the o-series.
+pub(crate) fn openai_reasons(id: &str) -> bool {
+    match openai_version(id) {
+        Some(OpenAiVersion::Gpt { major, .. }) => major >= 5,
+        Some(OpenAiVersion::O(_)) => true,
+        None => false,
+    }
+}
+
+/// Whether the Responses API takes `temperature`/`top_p` with this model:
+/// GPT-6 and later only with reasoning off, the o-series never.
+fn sampling_allowed(model: &str, effort: Option<&str>) -> bool {
+    match openai_version(model) {
+        Some(OpenAiVersion::Gpt { major, .. }) if major >= 6 => effort == Some("none"),
+        Some(OpenAiVersion::O(_)) => false,
+        _ => true,
+    }
 }
 
 /// Reasoning tiers the public Responses API accepts per OpenAI model family,
 /// lightest first. GPT-5.1 replaced `minimal` with `none`, 5.2 added `xhigh`,
-/// 5.6 added `max`, GPT-6 Astra and GPT-6.1 Sol dropped `none`; GPT-6 Sol/Luna retain it. Codex, Pro and chat variants keep
-/// their own narrower sets. A request outside the set is a 400.
-fn openai_reasoning_efforts(id: &str) -> Vec<&'static str> {
+/// 5.6 added `max`, GPT-6 Astra and GPT-6.1 Sol dropped `none`; GPT-6 Sol/Luna
+/// retain it. Codex, Pro and chat variants keep their own narrower sets. A
+/// version newer than any here gets the newest set. A request outside the
+/// set is a 400; a catalog entry that lists its own levels wins over this.
+pub(crate) fn openai_reasoning_efforts(id: &str) -> Vec<&'static str> {
     let lower = id.to_ascii_lowercase();
-    // A fine-tune is `ft:<family>:<org>:<suffix>`; only the family matters.
     let family = lower.strip_prefix("ft:").unwrap_or(&lower);
     let family = family.split(':').next().unwrap_or(family);
     let segment = |name: &str| family.split(['-', '.']).any(|part| part == name);
     if family.contains("deep-research") {
         return vec!["medium"];
     }
-    if family.starts_with("gpt-6") {
-        if family.starts_with("gpt-6-sol") || family.starts_with("gpt-6-luna") {
-            return vec!["none", "low", "medium", "high", "xhigh", "max"];
+    let minor = match openai_version(family) {
+        Some(OpenAiVersion::Gpt { major, .. }) if major >= 6 => {
+            if family.starts_with("gpt-6-sol") || family.starts_with("gpt-6-luna") {
+                return vec!["none", "low", "medium", "high", "xhigh", "max"];
+            }
+            return vec!["low", "medium", "high", "xhigh", "max"];
         }
-        return vec!["low", "medium", "high", "xhigh", "max"];
-    }
-    if !family.starts_with("gpt-5") {
-        return vec!["low", "medium", "high"];
-    }
-    let minor = gpt5_minor(family);
+        Some(OpenAiVersion::Gpt { major: 5, minor }) => minor,
+        _ => return vec!["low", "medium", "high"],
+    };
     if segment("chat") {
         return Vec::new();
     }
@@ -1291,8 +1347,8 @@ mod tests {
         assert_eq!(super::tidy_catalog_name("Team model"), "Team model");
         assert_eq!(
             astra.reasoning_efforts,
-            ["low", "medium", "high", "xhigh", "max"],
-            "tiers the request API rejects never reach a request"
+            ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "every level the account lists is kept, a new one included"
         );
         assert_eq!(astra.context_window, Some(272_000));
         assert!(astra.images && !astra.video && astra.reasoning);
@@ -2008,5 +2064,111 @@ mod tests {
         );
         assert!(!info.models.iter().any(|model| model.id == "gpt-5.6"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unknown_new_openai_model_appears_with_usable_defaults() {
+        async fn list() -> Json<Value> {
+            Json(json!({"data":[
+                {"id":"gpt-7"},
+                {"id":"gpt-6.2-nova"},
+                {"id":"o5-mini"},
+                {"id":"gpt-7-preview","reasoning_efforts":["low","high","ultra"]},
+                {"id":"gpt-7-mini","supports_reasoning":false}
+            ]}))
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/models", axum::routing::get(list)),
+            )
+            .await
+            .unwrap()
+        });
+        let provider = OpenAiProvider::for_test(format!("http://{address}/responses"), "test");
+        provider.refresh_models(true).await;
+        let models = provider.info().models;
+        let find = |id: &str| models.iter().find(|model| model.id == id).unwrap();
+        // A listed model that is gone from the live list is gone here too.
+        assert_eq!(models.len(), 5, "{models:?}");
+        assert!(models.iter().all(|model| model.id != "gpt-6.1-sol"));
+        for id in ["gpt-7", "gpt-6.2-nova"] {
+            let model = find(id);
+            assert!(model.reasoning && model.tools, "{id}");
+            assert_eq!(
+                model.reasoning_efforts,
+                ["low", "medium", "high", "xhigh", "max"],
+                "{id} gets the newest known tiers"
+            );
+            // Another version's price or window is never borrowed.
+            assert!(
+                model.pricing.is_none() && model.context_window.is_none(),
+                "{id}"
+            );
+        }
+        assert_eq!(find("o5-mini").reasoning_efforts, ["low", "medium", "high"]);
+        assert_eq!(
+            find("gpt-7-preview").reasoning_efforts,
+            ["low", "high", "ultra"]
+        );
+        let plain = find("gpt-7-mini");
+        assert!(!plain.reasoning && plain.reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn versions_are_read_from_the_id_shape() {
+        use super::{
+            OpenAiVersion::{Gpt, O},
+            openai_version, sampling_allowed,
+        };
+        assert_eq!(
+            openai_version("gpt-6.1-sol"),
+            Some(Gpt {
+                major: 6,
+                minor: Some(1)
+            })
+        );
+        assert_eq!(
+            openai_version("gpt-5-1"),
+            Some(Gpt {
+                major: 5,
+                minor: Some(1)
+            })
+        );
+        assert_eq!(
+            openai_version("gpt-5-2025-08-07"),
+            Some(Gpt {
+                major: 5,
+                minor: None
+            })
+        );
+        assert_eq!(
+            openai_version("gpt-4o-mini"),
+            Some(Gpt {
+                major: 4,
+                minor: None
+            })
+        );
+        assert_eq!(
+            openai_version("ft:gpt-7:org:x"),
+            Some(Gpt {
+                major: 7,
+                minor: None
+            })
+        );
+        assert_eq!(openai_version("o5"), Some(O(5)));
+        assert_eq!(openai_version("o4-mini"), Some(O(4)));
+        assert_eq!(openai_version("omni-moderation-latest"), None);
+        assert_eq!(openai_version("gpt-oss-120b"), None);
+        assert!(!super::openai_reasons("gpt-4.1"));
+        assert!(super::openai_reasons("gpt-7") && super::openai_reasons("o5"));
+        assert!(!sampling_allowed("gpt-7", Some("high")));
+        assert!(sampling_allowed("gpt-7", Some("none")));
+        assert!(!sampling_allowed("gpt-6.1-sol", None));
+        assert!(!sampling_allowed("o5", None));
+        assert!(sampling_allowed("gpt-5.5", Some("high")));
+        assert!(sampling_allowed("gpt-4.1", None));
     }
 }

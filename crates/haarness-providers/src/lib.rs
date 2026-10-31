@@ -581,26 +581,6 @@ const fn preset_with_static_models(
     }
 }
 
-const fn preset_with_aliases_static(
-    id: &'static str,
-    aliases: &'static [&'static str],
-    name: &'static str,
-    base_url: &'static str,
-    api_key_envs: &'static [&'static str],
-    models: &'static [&'static str],
-) -> CompatiblePreset {
-    CompatiblePreset {
-        id,
-        name,
-        base_url,
-        api_key_envs,
-        aliases,
-        protocol: CompatibleProtocol::OpenAiChatCompletions,
-        discover_models: false,
-        models,
-    }
-}
-
 /// Built-in compatible presets. They are always advertised, then connected by
 /// a conventional environment variable or owner-only `auth.json` record.
 /// Endpoints and canonical variable names are verified against provider docs.
@@ -718,11 +698,11 @@ pub const COMPAT_PRESETS: &[CompatiblePreset] = &[
             "sonar-deep-research",
         ],
     ),
-    // Additional models.dev-compatible providers. Discovery is
-    // enabled only where the provider's `/models` route is homogeneous enough
-    // for the portable Chat Completions capability parser. Heterogeneous
-    // catalogs stay on a small text+tools allowlist instead of polluting the
-    // picker with image, embedding, guard, or non-tool models.
+    // Additional models.dev-compatible providers. Each serves a `/models`
+    // route, so its own list decides what the picker offers and the models
+    // here are only what shows before the first good read. Image, embedding,
+    // guard and other non-chat entries are left out by the chat filter
+    // (SiliconFlow is asked for chat models only).
     preset_with_models(
         "moonshotai",
         "Moonshot AI",
@@ -738,7 +718,7 @@ pub const COMPAT_PRESETS: &[CompatiblePreset] = &[
         &["SILICONFLOW_API_KEY"],
         &["openai/gpt-oss-120b", "Qwen/Qwen3-Coder-480B-A35B-Instruct"],
     ),
-    preset_with_static_models(
+    preset_with_models(
         "siliconflow-cn",
         "SiliconFlow (China)",
         "https://api.siliconflow.cn/v1",
@@ -748,21 +728,21 @@ pub const COMPAT_PRESETS: &[CompatiblePreset] = &[
             "Qwen/Qwen3-Coder-480B-A35B-Instruct",
         ],
     ),
-    preset_with_static_models(
+    preset_with_models(
         "nebius",
         "Nebius Token Factory",
         "https://api.tokenfactory.nebius.com/v1",
         &["NEBIUS_API_KEY"],
         &["openai/gpt-oss-120b", "meta-llama/Llama-3.3-70B-Instruct"],
     ),
-    preset_with_static_models(
+    preset_with_models(
         "requesty",
         "Requesty",
         "https://router.requesty.ai/v1",
         &["REQUESTY_API_KEY"],
         &["gpt-5.4", "claude-sonnet-4-6"],
     ),
-    preset_with_aliases_static(
+    preset_with_aliases(
         "novita-ai",
         &["novita"],
         "NovitaAI",
@@ -775,7 +755,7 @@ pub const COMPAT_PRESETS: &[CompatiblePreset] = &[
         "Ollama Cloud",
         "https://ollama.com/v1",
         &["OLLAMA_API_KEY"],
-        &["gpt-oss:120b", "kimi-k2.5"],
+        &["gpt-oss:120b"],
     ),
     preset_with_models(
         "llama",
@@ -787,15 +767,12 @@ pub const COMPAT_PRESETS: &[CompatiblePreset] = &[
             "llama-4-scout-17b-16e-instruct-fp8",
         ],
     ),
-    preset_with_static_models(
+    preset_with_models(
         "modelscope",
         "ModelScope",
         "https://api-inference.modelscope.cn/v1",
         &["MODELSCOPE_API_KEY"],
-        &[
-            "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-            "Qwen/Qwen3-235B-A22B-Instruct-2507",
-        ],
+        &["Qwen/Qwen3.5-397B-A17B", "ZhipuAI/GLM-5.2"],
     ),
     preset_with_models(
         "upstage",
@@ -804,7 +781,7 @@ pub const COMPAT_PRESETS: &[CompatiblePreset] = &[
         &["UPSTAGE_API_KEY"],
         &["solar-pro3", "solar-mini"],
     ),
-    preset_with_static_models(
+    preset_with_models(
         "digitalocean",
         "DigitalOcean Gradient AI",
         "https://inference.do-ai.run/v1",
@@ -821,12 +798,12 @@ pub const COMPAT_PRESETS: &[CompatiblePreset] = &[
             "Qwen/Qwen3-Coder-480B-A35B-Instruct",
         ],
     ),
-    preset_with_static_models(
+    preset_with_models(
         "chutes",
         "Chutes",
         "https://llm.chutes.ai/v1",
         &["CHUTES_API_KEY"],
-        &["deepseek-ai/DeepSeek-V3.2-TEE", "Qwen/Qwen3-32B-TEE"],
+        &["deepseek-ai/DeepSeek-V3.2-TEE", "moonshotai/Kimi-K3-TEE"],
     ),
 ];
 
@@ -1009,18 +986,15 @@ fn merge_discovered_models(
             if let Some(live) = discovered.remove(&model.id) {
                 return Some(live);
             }
-            // Some APIs list only dated snapshots (`claude-haiku-4-5-20251001`)
-            // while configs and chats name the alias (`claude-haiku-4-5`).
-            // Keep the alias, with the live details of its newest snapshot,
-            // so a configured or stored model is still found in the catalog.
+            // Some APIs list only dated snapshots (`claude-haiku-4-5-20251001`,
+            // `gpt-5.4-mini-2026-01-01`) while configs and chats name the
+            // alias. Keep the alias, with the live details of its newest
+            // snapshot, so a configured or stored model is still found.
             let mut snapshots: Vec<_> = discovered
                 .keys()
                 .filter(|id| {
                     id.strip_prefix(model.id.as_str())
-                        .and_then(|rest| rest.strip_prefix('-'))
-                        .is_some_and(|date| {
-                            date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())
-                        })
+                        .is_some_and(catalog::is_snapshot)
                 })
                 .cloned()
                 .collect();
@@ -1113,12 +1087,16 @@ mod tests {
             vec![
                 model("claude-haiku-4-5", "alias"),
                 model("claude-sonnet-4-6", "alias"),
+                model("gpt-5.4-mini", "alias"),
             ],
             vec![
                 model("claude-haiku-4-5-20250101", "older"),
                 model("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
                 model("claude-sonnet-4-6", "Claude Sonnet 4.6"),
                 model("claude-opus-4-5-20251101", "Claude Opus 4.5"),
+                model("gpt-5.4-mini-2025-12-01", "older"),
+                model("gpt-5.4-mini-2026-01-01", "GPT-5.4 mini"),
+                model("gpt-5.4-mini-tuned", "a different model"),
             ],
         );
         let ids: Vec<_> = merged.iter().map(|model| model.id.as_str()).collect();
@@ -1127,10 +1105,13 @@ mod tests {
             [
                 "claude-haiku-4-5",
                 "claude-sonnet-4-6",
+                "gpt-5.4-mini",
+                "gpt-5.4-mini-tuned",
                 "claude-opus-4-5-20251101"
             ]
         );
         assert_eq!(merged[0].display_name, "Claude Haiku 4.5");
+        assert_eq!(merged[2].display_name, "GPT-5.4 mini");
     }
 
     #[test]
@@ -1253,19 +1234,12 @@ mod tests {
                 .unwrap()
                 .discover_models
         );
-        for id in [
-            "siliconflow-cn",
-            "nebius",
-            "requesty",
-            "novita-ai",
-            "modelscope",
-            "digitalocean",
-            "chutes",
-        ] {
-            assert!(
-                !super::compatible_preset(id).unwrap().discover_models,
-                "{id} must retain its curated text-and-tools allowlist"
-            );
+        // Every other preset follows its provider's own list.
+        for preset in COMPAT_PRESETS
+            .iter()
+            .filter(|preset| preset.id != "perplexity")
+        {
+            assert!(preset.discover_models, "{} reads its model list", preset.id);
         }
 
         let together = super::compatible_preset("togetherai").unwrap();
