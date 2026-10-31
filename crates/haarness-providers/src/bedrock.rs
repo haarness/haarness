@@ -1386,12 +1386,28 @@ fn http_error(status: reqwest::StatusCode, kind: Option<&str>, body: &str) -> Co
         })
         .map(|message| message.trim().to_owned())
         .filter(|message| !message.is_empty())
-        .or_else(|| crate::sse::provider_error_detail(body));
+        .or_else(|| crate::sse::provider_error_detail(body))
+        .map(|detail| account_reason(&detail).unwrap_or(detail));
     CoreError::Provider(match (kind, detail) {
         (Some(kind), Some(detail)) => format!("HTTP {status}: [{kind}] {detail}"),
         (None, Some(detail)) => format!("HTTP {status}: {detail}"),
         (Some(kind), None) => format!("HTTP {status}: [{kind}]"),
         (None, None) => format!("HTTP {status}"),
+    })
+}
+
+/// AWS's words for an account that may not use a model yet say neither why
+/// nor where to look ("… is not available for this account … contact AWS
+/// Sales"; "Too many tokens per day, please wait", when the quota is 0).
+/// Both are what a new account gets.
+fn account_reason(detail: &str) -> Option<String> {
+    if let Some((model, _)) = detail.split_once(" is not available for this account") {
+        return Some(format!(
+            "AWS has not enabled {model} for this account yet. It refuses this way while the account is on AWS's Free plan or the model's Marketplace agreement is pending; the model's page in the Bedrock console says which."
+        ));
+    }
+    detail.starts_with("Too many tokens per day").then(|| {
+        "This model's daily token quota on this AWS account is used up, or is 0, as on a new account. Service Quotas in the AWS console shows it.".to_owned()
     })
 }
 
@@ -1903,6 +1919,25 @@ mod tests {
             )
             .to_string(),
             "provider error: HTTP 400 Bad Request: [ValidationException] The provided model identifier is invalid."
+        );
+        // What a new account is told, in words that say why and where to look.
+        assert_eq!(
+            http_error(
+                reqwest::StatusCode::FORBIDDEN,
+                Some("AccessDeniedException"),
+                r#"{"message":"anthropic.claude-haiku-5-5 is not available for this account. You can explore other available models on Amazon Bedrock. For additional access options, contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/"}"#
+            )
+            .to_string(),
+            "provider error: HTTP 403 Forbidden: [AccessDeniedException] AWS has not enabled anthropic.claude-haiku-5-5 for this account yet. It refuses this way while the account is on AWS's Free plan or the model's Marketplace agreement is pending; the model's page in the Bedrock console says which."
+        );
+        let daily = http_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            Some("ThrottlingException"),
+            r#"{"message":"Too many tokens per day, please wait before trying again."}"#,
+        );
+        assert_eq!(
+            daily.to_string(),
+            "provider error: HTTP 429 Too Many Requests: [ThrottlingException] This model's daily token quota on this AWS account is used up, or is 0, as on a new account. Service Quotas in the AWS console shows it."
         );
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(

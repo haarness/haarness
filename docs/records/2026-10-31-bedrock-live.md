@@ -20,6 +20,7 @@ Spend: $0.
 | No key check. | A mistyped key was saved and Bedrock read "connected". | Checked on the model list before it is saved; AWS's own words ("Authentication failed: Please make sure your API Key is valid") under the field. A key whose policy leaves out the list is still accepted. |
 | SigV4 signed the model id's `:` as is; AWS signs the path encoded once more. Discovery's GETs did not send the content type they signed. | Every id holding `:` (the old default, `amazon.nova-pro-v1:0`) failed to sign with AWS access keys. | Path and query canonicalized as AWS's SDKs do; signatures match botocore byte for byte for a `:` id and a sorted, encoded query. |
 | The connect screen asked for a "bearer token" and linked to the console's front page. | | "Use an API key", linking to the console's API keys page. |
+| A new account's refusals say neither why nor where to look: "… is not available for this account … contact AWS Sales" (Free plan, or the model's Marketplace agreement pending) and "Too many tokens per day, please wait" (a daily quota of 0 that no wait changes). | "Contact AWS Sales" and "please wait" for an account that cannot use the model at all. | "AWS has not enabled anthropic.claude-haiku-5-5 for this account yet. It refuses this way while the account is on AWS's Free plan or the model's Marketplace agreement is pending; the model's page in the Bedrock console says which." and "This model's daily token quota on this AWS account is used up, or is 0, as on a new account. Service Quotas in the AWS console shows it." The log keeps AWS's exception name. |
 
 ## Live verification
 
@@ -28,8 +29,8 @@ Spend: $0.
 | `ListFoundationModels`, `ListInferenceProfiles` with the API key | 200; `haarness models amazon-bedrock` lists 76 models. |
 | Picker (terminal UI, tmux) | "bedrock sonnet" finds Claude Sonnet 5.5, 5 and 4.6 with names, 1M context and prices. |
 | Connect (terminal UI) with a made-up, well-formed key | Refused under the field: "Amazon Bedrock rejected this API key (Authentication failed: Please make sure your API Key is valid)". |
-| `run` on Claude Haiku 5.5 | "Amazon Bedrock rejected the request: anthropic.claude-haiku-5-5 is not available for this account…" |
-| `run` on Nova Micro | "Amazon Bedrock rate limit or quota reached: Too many tokens per day, please wait before trying again." — at once, no retries. |
+| `run` on Claude Haiku 5.5 | "Amazon Bedrock rejected the request: AWS has not enabled anthropic.claude-haiku-5-5 for this account yet…" |
+| `run` on Nova Micro | "Amazon Bedrock rate limit or quota reached: This model's daily token quota on this AWS account is used up, or is 0…" — at once, no retries. |
 | `run` on an unknown model | "Amazon Bedrock rejected the request: The provided model identifier is invalid." |
 
 Through a local proxy that forwards the model list to Bedrock and answers ConverseStream itself, in
@@ -49,8 +50,10 @@ Bedrock's framing, with the real binary:
 
 - No model answered live: streaming, tool turns, reasoning levels, images, PDFs, structured output,
   cache points and their pricing are covered by fixtures built from Bedrock's documented and listed
-  shapes, not by Bedrock itself. The account needs its quotas raised (Service Quotas or a support case)
-  and Anthropic's access to go through.
+  shapes, not by Bedrock itself. The account was on AWS's Free plan, where every Bedrock daily token
+  quota reads 0 and "not adjustable"; it has been moved to a paid plan, the Claude 5.5 Marketplace
+  agreements were accepted (pending at the time of writing), and a support request asks for on-demand
+  quotas.
 - SigV4 with AWS access keys: matched against botocore, not sent to AWS (only an API key exists).
 - Claude's 1M context on Bedrock may need a beta flag; the picker shows the catalog's 1M.
 - Models that take no tools on Converse (Llama 3 8B, Mistral 7B, Mixtral) are listed; Bedrock should
