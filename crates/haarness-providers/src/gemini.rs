@@ -352,7 +352,7 @@ impl ModelProvider for GeminiProvider {
 /// grammar, and Gemini answers 400 "invalid argument" to an array bound over
 /// complex items (`browser_fill_form`'s 100 `anyOf` fields). The runtime still
 /// validates each call against the full schema.
-fn without_max_items(mut schema: Value) -> Value {
+pub(crate) fn without_max_items(mut schema: Value) -> Value {
     fn strip(value: &mut Value) {
         match value {
             Value::Object(object) => {

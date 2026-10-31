@@ -135,26 +135,29 @@ pub fn json_stream(
 /// envelopes (`error.message`, `message`, FastAPI's `detail`), and gateways
 /// sometimes answer in plain text; all of them beat a bare status line. HTML
 /// error pages carry nothing actionable and are left out.
-fn provider_error_detail(body: &str) -> Option<String> {
+pub(crate) fn provider_error_detail(body: &str) -> Option<String> {
     let body = body.trim();
     if body.is_empty() {
         return None;
     }
     let detail = match serde_json::from_str::<Value>(body) {
-        Ok(parsed) => [
-            "/error/message",
-            "/error",
-            "/message",
-            "/detail",
-            "/detail/message",
-            "/detail/0/msg",
-            "/errors/0/message",
-        ]
-        .iter()
-        .find_map(|pointer| parsed.pointer(pointer).and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|detail| !detail.is_empty())
-        .map(str::to_owned)?,
+        Ok(parsed) => match parsed.get("error").and_then(upstream_error) {
+            Some(upstream) => upstream,
+            None => [
+                "/error/message",
+                "/error",
+                "/message",
+                "/detail",
+                "/detail/message",
+                "/detail/0/msg",
+                "/errors/0/message",
+            ]
+            .iter()
+            .find_map(|pointer| parsed.pointer(pointer).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|detail| !detail.is_empty())
+            .map(str::to_owned)?,
+        },
         Err(_) => {
             let lower = body.to_ascii_lowercase();
             if lower.starts_with("<!doctype") || lower.starts_with("<html") {
@@ -181,6 +184,42 @@ fn provider_error_detail(body: &str) -> Option<String> {
         detail.push('…');
     }
     Some(detail)
+}
+
+/// The upstream provider's own words in a gateway's error, which itself says
+/// only "Provider returned error": OpenRouter carries them, and the provider's
+/// name, in `metadata.raw` and `metadata.provider_name`. An upstream message
+/// relayed as a raw server-sent event (`data: {"error":…}`) is unwrapped too.
+pub(crate) fn upstream_error(error: &Value) -> Option<String> {
+    let words = |text: &str| -> Option<String> {
+        let text = text.trim();
+        let json = text.strip_prefix("data:").unwrap_or(text).trim();
+        let inner = serde_json::from_str::<Value>(json).ok().and_then(|value| {
+            ["/error/message", "/message", "/error"]
+                .iter()
+                .find_map(|pointer| value.pointer(pointer)?.as_str().map(str::to_owned))
+        });
+        Some(inner.unwrap_or_else(|| text.to_owned()))
+            .filter(|text| !text.is_empty() && !text.starts_with('{'))
+    };
+    let metadata = error.get("metadata");
+    let detail = metadata
+        .and_then(|metadata| metadata.get("raw")?.as_str())
+        .and_then(words)
+        .or_else(|| {
+            let message = error.get("message")?.as_str()?;
+            message
+                .trim_start()
+                .starts_with("data:")
+                .then(|| words(message))
+                .flatten()
+        })?;
+    Some(
+        match metadata.and_then(|metadata| metadata.get("provider_name")?.as_str()) {
+            Some(provider) => format!("{provider}: {detail}"),
+            None => detail,
+        },
+    )
 }
 
 fn find_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
@@ -360,6 +399,28 @@ mod tests {
         assert_eq!(provider_error_detail(r#"{"error":{"code":400}}"#), None);
         assert_eq!(
             provider_error_detail("<!DOCTYPE html><html><body>Forbidden</body></html>"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_gateway_error_names_the_upstream_provider_and_its_words() {
+        // OpenRouter's answer when Google refused a request, as it arrived.
+        let body = json!({"error":{"message":"Provider returned error","code":400,"metadata":{
+            "raw":"{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Request contains an invalid argument.\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n",
+            "provider_name":"Google AI Studio","is_byok":false}},"user_id":"user_1"});
+        assert_eq!(
+            provider_error_detail(&body.to_string()).as_deref(),
+            Some("Google AI Studio: Request contains an invalid argument.")
+        );
+        // An upstream timeout relayed inside the stream as a raw event.
+        let relayed = json!({"code":502,"message":"data: {\"error\":{\"code\":\"TimeoutError\",\"message\":\"timed out during opening handshake\"}}\n\n","metadata":{"error_type":"provider_unavailable"}});
+        assert_eq!(
+            super::upstream_error(&relayed).as_deref(),
+            Some("timed out during opening handshake")
+        );
+        assert_eq!(
+            super::upstream_error(&json!({"message":"Rate limited","code":429})),
             None
         );
     }

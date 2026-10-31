@@ -958,7 +958,13 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
         return None;
     };
     let lower = message.to_ascii_lowercase();
-    let (_, rest) = lower.split_once("retry in ")?;
+    let Some((_, rest)) = lower.split_once("retry in ") else {
+        // A shared pool upstream that is briefly full ("temporarily
+        // rate-limited upstream. Please retry shortly") backs off as a busy
+        // provider does.
+        return (lower.contains("temporarily rate-limited") || lower.contains("retry shortly"))
+            .then(|| std::time::Duration::from_secs(1 << attempt.min(4)));
+    };
     let advised = advised_wait(rest)? + std::time::Duration::from_secs(1);
     (advised <= LONGEST_ADVISED_WAIT).then_some(advised)
 }
@@ -1544,8 +1550,18 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
         };
     }
     if is_provider_usage_limit(error) {
-        return "Provider rate limit or quota reached. Wait and retry, or check the account quota."
-            .into();
+        // The provider's own words say which limit and what helps; a bare
+        // code (`insufficient_quota`) says less than the general advice.
+        return match refusal_reason_text(raw).filter(|reason| reason.contains(' ')) {
+            Some(reason) => format!(
+                "{} rate limit or quota reached: {reason}",
+                provider.unwrap_or("Provider")
+            ),
+            None => {
+                "Provider rate limit or quota reached. Wait and retry, or check the account quota."
+                    .into()
+            }
+        };
     }
     if let Some(reason) = refusal_reason_text(raw) {
         return format!(
@@ -3743,7 +3759,9 @@ impl AgentRuntime {
                             progress(BtwEvent::Delta { text: delta });
                         }
                     }
-                    ProviderEvent::ReasoningDelta(_) | ProviderEvent::ContentStarted => {}
+                    ProviderEvent::ReasoningDelta(_)
+                    | ProviderEvent::ContentStarted
+                    | ProviderEvent::Cost { .. } => {}
                     ProviderEvent::Finished { reason } => {
                         finished = true;
                         if let Some(error) = ProviderEvent::finish_error(&reason) {
@@ -9870,6 +9888,7 @@ impl RunnerTask {
                 let mut text = String::new();
                 let mut reasoning = String::new();
                 let mut usage = None;
+                let mut charged = None;
                 // Everything the model streamed, for the local output estimate
                 // when the provider reports no usage.
                 let mut streamed = String::new();
@@ -9887,7 +9906,7 @@ impl RunnerTask {
                         biased;
                         () = self.cancel.cancelled() => {
                             // A stopped request has no finished stream to time.
-                            self.publish_round_usage(usage, prompt_usage.clone(), &streamed, None, provider_id, &model).await?;
+                            self.publish_round_usage(usage, charged, prompt_usage.clone(), &streamed, None, provider_id, &model).await?;
                             return Err(CoreError::Cancelled);
                         }
                         event = stream.next().instrument(provider_span.clone()) => event,
@@ -9974,7 +9993,9 @@ impl RunnerTask {
                         ProviderEvent::ToolCall { .. }
                         | ProviderEvent::StructuredOutput(_)
                         | ProviderEvent::ContentStarted => true,
-                        ProviderEvent::Usage { .. } | ProviderEvent::Finished { .. } => false,
+                        ProviderEvent::Usage { .. }
+                        | ProviderEvent::Cost { .. }
+                        | ProviderEvent::Finished { .. } => false,
                     };
                     if content {
                         clock.content(tokio::time::Instant::now().into_std());
@@ -10108,6 +10129,7 @@ impl RunnerTask {
                                 cache_write_tokens,
                             ));
                         }
+                        ProviderEvent::Cost { usd } => charged = Some(usd),
                         ProviderEvent::Usage { .. } | ProviderEvent::ContentStarted => {}
                         ProviderEvent::Finished { reason } => {
                             finished = true;
@@ -10175,6 +10197,7 @@ impl RunnerTask {
                             .await?;
                         self.publish_round_usage(
                             usage,
+                            charged,
                             prompt_usage.clone(),
                             &streamed,
                             timing,
@@ -10200,6 +10223,7 @@ impl RunnerTask {
                     if let Some(message) = invalid {
                         self.publish_round_usage(
                             usage,
+                            charged,
                             prompt_usage.clone(),
                             &streamed,
                             timing,
@@ -10225,6 +10249,7 @@ impl RunnerTask {
                 let usage = self
                     .publish_round_usage(
                         usage,
+                        charged,
                         prompt_usage,
                         &streamed,
                         timing,
@@ -10607,11 +10632,14 @@ impl RunnerTask {
     /// Records one provider request: its reported usage, or when the provider
     /// reported none for a request that sent and streamed something, the
     /// local estimate (prepared prompt plus streamed output), marked
-    /// `estimated`, with the request's timing when it finished cleanly.
+    /// `estimated`, with the request's timing when it finished cleanly. What
+    /// the provider `charged`, when it said, is the cost of reported usage.
     /// Returns what was recorded.
+    #[allow(clippy::too_many_arguments)]
     async fn publish_round_usage(
         &self,
         reported: Option<(u64, u64, u64, u64)>,
+        charged: Option<f64>,
         prompt: Option<haarness_protocol::PromptUsage>,
         streamed: &str,
         timing: Option<crate::stream_clock::StreamTiming>,
@@ -10640,13 +10668,15 @@ impl RunnerTask {
             output_tokens,
             cache_read_tokens,
             cache_write_tokens,
-            cost_usd: cost_usd(
-                model_pricing(&self.providers, provider_id, model),
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-            ),
+            cost_usd: charged.filter(|_| !estimated).or_else(|| {
+                cost_usd(
+                    model_pricing(&self.providers, provider_id, model),
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                )
+            }),
             estimated,
             first_token_ms: timing.map(|timing| timing.first_token_ms),
             stream_ms: timing.map(|timing| timing.stream_ms),
@@ -20257,6 +20287,20 @@ mod tests {
         let wait = super::retry_delay(&per_minute, 1).unwrap();
         assert!((18..=19).contains(&wait.as_secs()), "{wait:?}");
         assert!(super::retry_delay(&provider("HTTP 429: rate limit exceeded"), 1).is_none());
+        // OpenRouter's answer when a model's shared upstream pool is full.
+        let shared = provider(
+            "HTTP 429 Too Many Requests: Alibaba: qwen/qwen3.8-flash is temporarily \
+             rate-limited upstream. Please retry shortly, or add your own key to accumulate \
+             your rate limits: https://openrouter.ai/settings/integrations",
+        );
+        assert_eq!(
+            super::retry_delay(&shared, 1),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert_eq!(
+            super::retry_delay(&shared, 3),
+            Some(std::time::Duration::from_secs(8))
+        );
         assert!(
             super::retry_delay(
                 &provider("HTTP 429: quota exceeded. Please retry in 7200s."),
@@ -20371,6 +20415,17 @@ mod tests {
         assert_eq!(
             super::user_facing_error(&CoreError::Provider("HTTP 429: insufficient_quota".into())),
             "Provider rate limit or quota reached. Wait and retry, or check the account quota."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    "HTTP 429 Too Many Requests: Alibaba: qwen/qwen3.8-flash is temporarily \
+                     rate-limited upstream. Please retry shortly."
+                        .into()
+                ),
+                Some("OpenRouter")
+            ),
+            "OpenRouter rate limit or quota reached: Alibaba: qwen/qwen3.8-flash is temporarily rate-limited upstream. Please retry shortly."
         );
         assert_eq!(
             super::describe_error(

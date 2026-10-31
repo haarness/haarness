@@ -1228,10 +1228,12 @@ function Models() {
     if (app.state.providers.some((provider) => !provider.authenticated && id.startsWith(provider.id + ":")))
       setAll(true);
   });
-  const matches = (provider: T.ProviderInfo, model: T.ProviderInfo["models"][number]) =>
-    (modelName(provider.id, model.id, app.state.providers) + " " + model.id + " " + provider.name)
-      .toLowerCase()
-      .includes(filter().trim().toLowerCase());
+  const matches = (provider: T.ProviderInfo, model: T.ProviderInfo["models"][number]) => {
+    const text = (
+      modelName(provider.id, model.id, app.state.providers) + " " + model.id + " " + provider.name
+    ).toLowerCase();
+    return filter().toLowerCase().split(/\s+/).filter(Boolean).every((word) => text.includes(word));
+  };
   const rows = () =>
     app.state.providers
       .filter((provider) => all() || provider.authenticated)

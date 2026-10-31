@@ -64,13 +64,15 @@ export function Select(props: {
   const selected = () =>
     props.options.find((option) => String(option.value) === value());
   const searchable = () => props.searchable ?? props.options.length > 8;
-  const filtered = createMemo(() =>
-    props.options.filter((option) =>
-      `${option.label} ${option.group ?? ""} ${option.value}`
-        .toLocaleLowerCase()
-        .includes(query().trim().toLocaleLowerCase()),
-    ),
-  );
+  // Every word of the search, in any order: "openrouter haiku" among
+  // hundreds of routed models.
+  const filtered = createMemo(() => {
+    const words = query().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    return props.options.filter((option) => {
+      const text = `${option.label} ${option.group ?? ""} ${option.value}`.toLocaleLowerCase();
+      return words.every((word) => text.includes(word));
+    });
+  });
   const enabled = () => filtered().filter((option) => !option.disabled);
   const activeId = () => {
     const index = filtered().findIndex(
