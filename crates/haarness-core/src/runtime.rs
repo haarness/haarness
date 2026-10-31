@@ -1426,6 +1426,157 @@ fn describe_failure(error: &CoreError, provider: Option<&str>, advice: bool) -> 
     describe_error(error, provider)
 }
 
+/// A provider's refusal of the model itself, in plain words that name other
+/// models it lists now, so a chat whose model was retired (or that the
+/// account's plan leaves out) has a way on. Nothing stops a model missing
+/// from the list from being sent: the provider decides, and this only words
+/// its refusal. A refusal reads as a retired model only when the provider's
+/// list lacks the model too; `None` for any other failure.
+fn describe_model_refusal(
+    error: &CoreError,
+    info: &haarness_protocol::ProviderInfo,
+    model: &str,
+    advice: bool,
+) -> Option<String> {
+    let CoreError::Provider(raw) = error else {
+        return None;
+    };
+    let lower = raw.to_ascii_lowercase();
+    let name = haarness_protocol::model_display_name(
+        model,
+        model_metadata(&info.models, model).map(|listed| listed.display_name.as_str()),
+    );
+    let others = listed_alternatives(&info.models, model);
+    // Copilot answers `model_not_supported` for a model the plan or an
+    // organization policy leaves off; some can be turned on in its settings.
+    if info.name == "GitHub Copilot" && lower.contains("model_not_supported") {
+        let such_as = match others.as_slice() {
+            [] => String::new(),
+            names => format!(", such as {}", spoken_list(names, "or")),
+        };
+        return Some(format!(
+            "Your GitHub Copilot plan doesn't include {name}. Choose another model{such_as}, or turn it on at github.com/settings/copilot."
+        ));
+    }
+    if model_metadata(&info.models, model).is_some() || !refuses_unknown_model(&lower, model) {
+        return None;
+    }
+    let provider = &info.name;
+    Some(match (others.as_slice(), advice) {
+        ([], true) => {
+            format!("{provider} no longer offers {name}. Choose another model for this chat.")
+        }
+        ([], false) => format!("{provider} no longer offers {name}."),
+        (names, true) => format!(
+            "{provider} no longer offers {name}. Choose another model for this chat, such as {}.",
+            spoken_list(names, "or")
+        ),
+        (names, false) => format!(
+            "{provider} no longer offers {name}. It lists {} among others.",
+            spoken_list(names, "and")
+        ),
+    })
+}
+
+/// Whether a provider's refusal says it does not know the model: a 404 about
+/// it, or words such as "model_not_found", "does not exist" or "not
+/// supported" about the model itself rather than a setting of the request.
+fn refuses_unknown_model(lower: &str, model: &str) -> bool {
+    const ABOUT_THE_MODEL: [&str; 9] = [
+        "model_not_found",
+        "model not found",
+        "unknown model",
+        "no such model",
+        "model does not exist",
+        "model is not available",
+        "model is not supported",
+        "not a valid model",
+        "model identifier is invalid",
+    ];
+    const REFUSALS: [&str; 5] = [
+        "does not exist",
+        "not found",
+        "not supported",
+        "is not available",
+        "unknown",
+    ];
+    // A refusal of a setting names the model too ("reasoning_effort is not
+    // supported with gpt-…"): that model is still offered.
+    const SETTINGS: [&str; 8] = [
+        "reasoning",
+        "effort",
+        "parameter",
+        "temperature",
+        "image",
+        "tool",
+        "modalit",
+        "feature",
+    ];
+    // A server error is no answer about the model.
+    if ["http 5", "status 5"]
+        .iter()
+        .any(|status| lower.starts_with(status))
+    {
+        return false;
+    }
+    if ABOUT_THE_MODEL.iter().any(|words| lower.contains(words)) {
+        return true;
+    }
+    let model = model.to_ascii_lowercase();
+    let names_model = !model.is_empty() && lower.contains(&model);
+    if SETTINGS.iter().any(|word| lower.contains(word)) {
+        return false;
+    }
+    let not_found = lower.contains("http 404") || lower.contains("status 404");
+    (not_found && (names_model || lower.contains("model")))
+        || (names_model && REFUSALS.iter().any(|words| lower.contains(words)))
+}
+
+/// Up to three models a provider lists now other than `model`, by their
+/// names: those of the same family first (`claude-…` for a Claude model),
+/// those that can use tools before those that cannot, else in list order.
+fn listed_alternatives(models: &[haarness_protocol::ModelInfo], model: &str) -> Vec<String> {
+    let family = |id: &str| {
+        let id = id
+            .rsplit_once('/')
+            .map_or(id, |(_, id)| id)
+            .to_ascii_lowercase();
+        id.split(['-', '.', ':', '@'])
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(|c: char| c.is_ascii_digit())
+            .to_owned()
+    };
+    let wanted = family(model);
+    let mut candidates: Vec<_> = models
+        .iter()
+        .enumerate()
+        .filter(|(_, listed)| listed.id != model)
+        .collect();
+    candidates.sort_by_key(|(index, listed)| (family(&listed.id) != wanted, !listed.tools, *index));
+    let mut names: Vec<String> = Vec::new();
+    for (_, listed) in candidates {
+        let name =
+            haarness_protocol::model_display_name(&listed.id, Some(listed.display_name.as_str()));
+        if !names.contains(&name) {
+            names.push(name);
+        }
+        if names.len() == 3 {
+            break;
+        }
+    }
+    names
+}
+
+/// `A`, `A or B`, `A, B or C`.
+fn spoken_list(names: &[String], conjunction: &str) -> String {
+    match names {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} {conjunction} {last}", rest.join(", ")),
+    }
+}
+
 /// A connection that broke after the provider had answered, in plain words
 /// rather than the transport's ("error decoding response body: Connection
 /// reset by peer (os error 54)"), which the log keeps: one that kept breaking
@@ -3334,6 +3485,18 @@ impl AgentRuntime {
         }
         if request.model.is_none() {
             request.model.clone_from(&components.config.default_model);
+        }
+        // Nothing configured: a model from the providers' lists as they are
+        // now, never an id fixed in this build, which a provider may retire.
+        if (request.provider.is_none() || request.model.is_none())
+            && let Some((provider, model)) = catalog_default_model(
+                components.providers.as_ref(),
+                request.provider.as_deref(),
+                request.model.as_deref(),
+            )
+        {
+            request.provider = Some(provider);
+            request.model = Some(model);
         }
         if request.ultracode.is_none() {
             request.ultracode = Some(components.config.default_ultracode);
@@ -8626,12 +8789,18 @@ impl RunnerTask {
 
     /// The transcript's words for a failure of this turn, naming its provider.
     fn visible_error(&self, error: &CoreError) -> String {
-        let name = self
+        let info = self
             .providers
             .get(&self.turn.provider)
-            .map(|provider| provider.info().name);
+            .map(|provider| provider.info());
         // A child agent's failure is read by the model that started it.
-        describe_failure(error, name.as_deref(), self.depth == 0)
+        let advice = self.depth == 0;
+        if let Some(info) = &info
+            && let Some(words) = describe_model_refusal(error, info, &self.turn.model, advice)
+        {
+            return words;
+        }
+        describe_failure(error, info.as_ref().map(|info| info.name.as_str()), advice)
     }
 
     /// An agent's definition: this turn's own from its snapshot, any other
@@ -13794,7 +13963,13 @@ fn resolve_definition_model(
     if value.contains('/') {
         return qualified_agent_model("definition", value).map(Some);
     }
-    let release = if crate::definitions::MODEL_FAMILIES.contains(&value) {
+    let known_family = crate::definitions::MODEL_FAMILIES.contains(&value);
+    // A plain word that is no Claude id may be a family added after this
+    // release; it resolves among the Claude models listed now.
+    let new_family = !known_family
+        && crate::definitions::claude_release(value).is_none()
+        && crate::definitions::model_family_word(value);
+    let release = if known_family || new_family {
         None
     } else {
         Some(crate::definitions::claude_release(value).ok_or_else(|| {
@@ -13822,7 +13997,13 @@ fn resolve_definition_model(
             // A family is its newest release, by version, then by id.
             None => models
                 .iter()
-                .filter(|m| m.id.to_lowercase().contains(value))
+                .filter(|m| {
+                    if new_family {
+                        crate::definitions::claude_family_member(&m.id, value)
+                    } else {
+                        m.id.to_lowercase().contains(value)
+                    }
+                })
                 .max_by(|a, b| {
                     let version = crate::definitions::claude_version;
                     (version(&a.id), &a.id).cmp(&(version(&b.id), &b.id))
@@ -13844,6 +14025,56 @@ fn resolve_definition_model(
     Err(CoreError::Invalid(format!(
         "No configured provider has a {value} model. Choose an available model."
     )))
+}
+
+/// The provider and model a chat gets when neither it nor the configuration
+/// names both, from the providers' lists as they are now: for a provider
+/// alone, its first model that can use tools; for a model alone, the
+/// provider that lists it; for neither, the first connected provider's
+/// first model that can use tools (OpenAI, Anthropic and Gemini before the
+/// rest, as the clients choose), else the first listed provider's. `None`
+/// when no list has one.
+fn catalog_default_model(
+    registry: &dyn ProviderRegistry,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Option<(String, String)> {
+    let first_model = |models: &[haarness_protocol::ModelInfo]| {
+        models
+            .iter()
+            .find(|model| model.tools)
+            .or_else(|| models.first())
+            .map(|model| model.id.clone())
+    };
+    if let Some(provider) = provider {
+        let model = match model {
+            Some(model) => model.to_owned(),
+            None => first_model(&registry.models(provider))?,
+        };
+        return Some((provider.to_owned(), model));
+    }
+    let mut listed = registry.list();
+    // Stable: equal ranks keep the registry's order.
+    listed.sort_by_key(|info| {
+        (
+            !info.authenticated,
+            match info.id.as_str() {
+                "openai" => 0,
+                "anthropic" => 1,
+                "gemini" => 2,
+                _ => 3,
+            },
+        )
+    });
+    if let Some(model) = model {
+        return listed
+            .iter()
+            .find(|info| info.models.iter().any(|listed| listed.id == model))
+            .map(|info| (info.id.clone(), model.to_owned()));
+    }
+    listed
+        .iter()
+        .find_map(|info| first_model(&info.models).map(|model| (info.id.clone(), model)))
 }
 
 fn qualified_agent_model(agent: &str, model: &str) -> CoreResult<(String, String)> {
@@ -14541,11 +14772,13 @@ fn stated_window(info: Option<&haarness_protocol::ModelInfo>) -> Option<u64> {
         .filter(|window| *window > 0)
 }
 
-/// Match Haarness's ordinary OpenAI GPT-5 default: ask for balanced reasoning
-/// so the Responses API can return a visible reasoning summary even when the
-/// user did not choose an explicit `/reasoning` variant. Other providers and
-/// models keep their own defaults; an explicit turn or config value always
-/// wins before this fallback is consulted.
+/// Ask an OpenAI reasoning model for balanced reasoning when no level was
+/// chosen, so the Responses API returns a visible reasoning summary. Whether
+/// a model takes it is the catalog's say: any OpenAI model that lists
+/// `medium`, whatever its id, so a model released later needs no change here
+/// and one that lists no `medium` keeps its provider default. Other providers
+/// keep their own defaults; an explicit turn or config value always wins
+/// before this fallback is consulted.
 fn default_visible_reasoning_effort(
     models: &[haarness_protocol::ModelInfo],
     provider_id: &str,
@@ -14555,10 +14788,6 @@ fn default_visible_reasoning_effort(
         return None;
     }
     let metadata = model_metadata(models, requested).filter(|model| model.reasoning)?;
-    let id = metadata.id.to_ascii_lowercase();
-    if !id.starts_with("gpt-5") || id.contains("gpt-5-pro") {
-        return None;
-    }
     metadata
         .reasoning_efforts
         .iter()
@@ -14607,8 +14836,6 @@ fn supported_reasoning_effort(
 /// is authoritative: no advertised efforts means the request stays unset and
 /// the provider keeps its own default. Claude-compatible models intentionally
 /// cap at xhigh, even when a gateway also advertises max.
-const ULTRACODE_EFFORT_ORDER: [&str; 7] = haarness_protocol::REASONING_EFFORTS;
-
 fn ultracode_reasoning_effort(
     models: &[haarness_protocol::ModelInfo],
     provider_id: &str,
@@ -14625,13 +14852,10 @@ fn ultracode_reasoning_effort(
     {
         return Some("xhigh".into());
     }
-    ULTRACODE_EFFORT_ORDER.iter().rev().find_map(|candidate| {
-        metadata
-            .reasoning_efforts
-            .iter()
-            .any(|effort| effort == candidate)
-            .then(|| (*candidate).to_owned())
-    })
+    // The strongest level the model lists, `max` when it has it; a level
+    // this release does not know ranks strongest, as everywhere.
+    haarness_protocol::nearest_reasoning_effort(&metadata.reasoning_efforts, "max")
+        .map(str::to_owned)
 }
 
 /// Detect the one-turn keyword. It is case-insensitive and
@@ -17402,6 +17626,8 @@ mod tests {
                 &[
                     "anthropic/claude-opus-5.5",
                     "anthropic/claude-sonnet-5.5",
+                    "anthropic/claude-mythos-5",
+                    "anthropic/claude-mythos-6",
                     "openai/gpt-6.1-sol",
                 ],
             ),
@@ -17434,6 +17660,9 @@ mod tests {
             // Only an unauthenticated catalog lists Fable, so the caller
             // reports the sign-in it needs.
             (None, "fable", Some(("anthropic", "claude-fable-5-1"))),
+            // A family this release does not know is the newest listed
+            // Claude release with that word.
+            (None, "mythos", Some(("cloud", "anthropic/claude-mythos-6"))),
             (None, "inherit", None),
             (None, "acme/custom", Some(("acme", "custom"))),
         ] {
@@ -17450,6 +17679,8 @@ mod tests {
             ),
             ("gpt-6.1-sol", "Unknown model alias gpt-6.1-sol"),
             ("bad-alias", "Unknown model alias bad-alias"),
+            // A word no listed Claude release has.
+            ("sol", "No configured provider has a sol model"),
         ] {
             let message = super::resolve_definition_model(&registry, None, value)
                 .unwrap_err()
@@ -17457,6 +17688,7 @@ mod tests {
             assert!(message.contains(error), "{message}");
         }
         assert!(crate::definitions::unqualified_model("fable"));
+        assert!(crate::definitions::unqualified_model("mythos"));
         assert!(crate::definitions::unqualified_model("claude-opus-5-5"));
         assert!(!crate::definitions::unqualified_model("my-claude-model"));
         assert!(!crate::definitions::unqualified_model(
@@ -17780,6 +18012,21 @@ mod tests {
             super::ultracode_reasoning_effort(&[provider_default], "custom", "opaque-reasoner")
                 .is_none()
         );
+
+        // A level this release does not know is the strongest a model has
+        // only when it lists nothing at max.
+        let mut newer = model_info("reasoner-2", 128_000);
+        newer.reasoning = true;
+        newer.reasoning_efforts = ["low", "high", "ultra"].map(str::to_owned).to_vec();
+        assert_eq!(
+            super::ultracode_reasoning_effort(&[newer.clone()], "custom", "reasoner-2").as_deref(),
+            Some("ultra")
+        );
+        newer.reasoning_efforts = ["low", "max", "ultra"].map(str::to_owned).to_vec();
+        assert_eq!(
+            super::ultracode_reasoning_effort(&[newer], "custom", "reasoner-2").as_deref(),
+            Some("max")
+        );
     }
 
     #[test]
@@ -17806,11 +18053,26 @@ mod tests {
 
         let mut pro = model_info("gpt-5-pro", 400_000);
         pro.reasoning = true;
-        pro.reasoning_efforts = ["medium"].map(str::to_owned).to_vec();
+        pro.reasoning_efforts = ["high"].map(str::to_owned).to_vec();
         assert!(
             super::default_visible_reasoning_effort(&[pro], "openai", "gpt-5-pro").is_none(),
-            "Haarness leaves gpt-5-pro on its provider default"
+            "a model that lists no medium keeps its provider default"
         );
+
+        // A model released after this build follows its catalog entry, not
+        // its id.
+        for id in ["gpt-7", "o9-mini", "astra-2"] {
+            let mut later = model_info(id, 400_000);
+            later.reasoning = true;
+            later.reasoning_efforts = ["low", "medium", "high", "ultra"]
+                .map(str::to_owned)
+                .to_vec();
+            assert_eq!(
+                super::default_visible_reasoning_effort(&[later], "openai", id).as_deref(),
+                Some("medium"),
+                "{id}"
+            );
+        }
     }
 
     #[test]
@@ -20617,6 +20879,104 @@ mod tests {
                 Some("Anthropic")
             ),
             "Anthropic is not connected. Connect it with an API key or by signing in, then try again."
+        );
+    }
+
+    #[test]
+    fn a_retired_model_is_named_with_models_the_provider_lists_now() {
+        let mut opus = model_info("claude-opus-6", 1_000_000);
+        opus.display_name = "Claude Opus 6".into();
+        let catalog = haarness_protocol::ProviderInfo {
+            id: "anthropic".into(),
+            name: "Anthropic".into(),
+            authenticated: true,
+            models: vec![
+                model_info("embed-1", 8_000),
+                opus,
+                model_info("claude-sonnet-6", 1_000_000),
+                model_info("claude-haiku-6", 200_000),
+                model_info("claude-fable-6", 200_000),
+            ],
+        };
+        let not_found = CoreError::Provider(
+            r#"HTTP 404 Not Found: {"type":"error","error":{"type":"not_found_error","message":"model: claude-opus-4-1"}}"#.into(),
+        );
+        assert_eq!(
+            super::describe_model_refusal(&not_found, &catalog, "claude-opus-4-1", true).as_deref(),
+            Some(
+                "Anthropic no longer offers Claude Opus 4.1. Choose another model for this chat, such as Claude Opus 6, Claude Sonnet 6 or Claude Haiku 6."
+            )
+        );
+        assert_eq!(
+            super::describe_model_refusal(&not_found, &catalog, "claude-opus-4-1", false)
+                .as_deref(),
+            Some(
+                "Anthropic no longer offers Claude Opus 4.1. It lists Claude Opus 6, Claude Sonnet 6 and Claude Haiku 6 among others."
+            )
+        );
+        for raw in [
+            "HTTP 404 Not Found: The model `gpt-0` does not exist or you do not have access to it.",
+            r#"HTTP 400 Bad Request: {"error":{"message":"The model `gpt-0` does not exist","code":"model_not_found"}}"#,
+            "HTTP 400 Bad Request: models/gpt-0 is not found for API version v1beta, or is not supported for generateContent.",
+            "HTTP 400 Bad Request: The provided model identifier is invalid.",
+        ] {
+            let refused = super::describe_model_refusal(
+                &CoreError::Provider(raw.into()),
+                &catalog,
+                "gpt-0",
+                true,
+            );
+            assert!(
+                refused
+                    .as_deref()
+                    .is_some_and(|words| words.starts_with("Anthropic no longer offers GPT-0.")),
+                "{raw}: {refused:?}"
+            );
+        }
+        // A model the list still has, or a refusal of a setting, keeps the
+        // provider's own words.
+        assert!(
+            super::describe_model_refusal(&not_found, &catalog, "claude-opus-6", true).is_none()
+        );
+        for raw in [
+            "HTTP 400 Bad Request: reasoning_effort ultra is not supported with gpt-0.",
+            "HTTP 400 Bad Request: image input is not supported by gpt-0.",
+            "HTTP 404 Not Found",
+            "HTTP 500 Internal Server Error: upstream gpt-0 unknown failure",
+        ] {
+            let error = CoreError::Provider(raw.into());
+            assert!(
+                super::describe_model_refusal(&error, &catalog, "gpt-0", true).is_none(),
+                "{raw}"
+            );
+        }
+        // An empty list still names the model.
+        let empty = haarness_protocol::ProviderInfo {
+            models: Vec::new(),
+            ..catalog.clone()
+        };
+        assert_eq!(
+            super::describe_model_refusal(&not_found, &empty, "claude-opus-4-1", true).as_deref(),
+            Some("Anthropic no longer offers Claude Opus 4.1. Choose another model for this chat.")
+        );
+        // Copilot's own refusal stays one message and names models too.
+        let copilot = haarness_protocol::ProviderInfo {
+            id: "github-copilot".into(),
+            name: "GitHub Copilot".into(),
+            authenticated: true,
+            models: vec![
+                model_info("gpt-5.4", 400_000),
+                model_info("claude-sonnet-5-5", 200_000),
+            ],
+        };
+        let unsupported = CoreError::Provider(
+            r#"HTTP 400 Bad Request: {"error":{"message":"The requested model is not supported.","code":"model_not_supported","param":"model","type":"invalid_request_error"}}"#.into(),
+        );
+        assert_eq!(
+            super::describe_model_refusal(&unsupported, &copilot, "gpt-5.4", true).as_deref(),
+            Some(
+                "Your GitHub Copilot plan doesn't include GPT-5.4. Choose another model, such as Claude Sonnet 5.5, or turn it on at github.com/settings/copilot."
+            )
         );
     }
 

@@ -795,8 +795,11 @@ impl ThreadRepository for SqliteStore {
             fork_origin: None,
             archived: false,
             agent: request.agent.unwrap_or_else(|| "build".into()),
-            provider: request.provider.unwrap_or_else(|| "openai".into()),
-            model: request.model.unwrap_or_else(|| "gpt-5.6".into()),
+            // The runtime picks a model from the providers' current lists
+            // before it stores a chat; none is fixed here, since a provider
+            // may retire any model. Empty only when no list had one.
+            provider: request.provider.unwrap_or_default(),
+            model: request.model.unwrap_or_default(),
             ultracode: request.ultracode.unwrap_or(false),
             created_at: now,
             updated_at: now,
@@ -2168,6 +2171,32 @@ mod tests {
             .unwrap()
             .0
             .id
+    }
+
+    #[tokio::test]
+    async fn a_chat_with_no_model_named_is_not_pinned_to_one() {
+        let store = SqliteStore::in_memory().unwrap();
+        let unnamed = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            (unnamed.provider.as_str(), unnamed.model.as_str()),
+            ("", "")
+        );
+        let named = store
+            .create_thread(CreateThreadRequest {
+                provider: Some("acme".into()),
+                model: Some("acme-9".into()),
+                ..CreateThreadRequest::default()
+            })
+            .await
+            .unwrap();
+        let stored = store.get_thread(named.id).await.unwrap();
+        assert_eq!(
+            (stored.provider.as_str(), stored.model.as_str()),
+            ("acme", "acme-9")
+        );
     }
 
     #[tokio::test]

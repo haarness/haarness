@@ -157,7 +157,7 @@ impl GeminiProvider {
                 body["models"]
                     .as_array()?
                     .iter()
-                    .filter_map(|entry| discovered_model_for(entry, self.id == "gemini")),
+                    .filter_map(discovered_model),
             );
             let Some(cursor) = body["nextPageToken"]
                 .as_str()
@@ -371,11 +371,23 @@ pub(crate) fn without_max_items(mut schema: Value) -> Value {
 /// `gemini-3-pro-preview`, 4 for `gemini-4-argon`, nothing for an alias such
 /// as `gemini-flash-latest`. A `models/` or provider prefix is ignored.
 fn gemini_generation(id: &str) -> Option<u32> {
+    gemini_version(id).map(|(generation, _)| generation)
+}
+
+/// The version a Gemini model id names: (3, 8) for `gemini-3.8-flash`,
+/// (4, 0) for `gemini-4-argon`.
+fn gemini_version(id: &str) -> Option<(u32, u32)> {
     let name = id.rsplit('/').next()?.strip_prefix("gemini-")?;
-    let digits = name
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(name.len());
-    name[..digits].parse().ok()
+    let number = |text: &str| -> Option<(u32, usize)> {
+        let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+        Some((text[..digits].parse().ok()?, digits))
+    };
+    let (major, digits) = number(name)?;
+    let minor = name[digits..]
+        .strip_prefix('.')
+        .and_then(number)
+        .map_or(0, |(minor, _)| minor);
+    Some((major, minor))
 }
 
 /// The `thinkingConfig` for `effort`, or `None` to leave thinking to the
@@ -433,19 +445,19 @@ pub(crate) fn uses_thinking_level(id: &str) -> bool {
     gemini_generation(id).is_some_and(|generation| generation >= 3)
 }
 
-fn gemini_reasoning_efforts(id: &str) -> Vec<&'static str> {
-    // Gemini 4 Argon answers `minimal` with a 400, as 3.7/3.8 Flash and 3.1
-    // Pro do; later generations are assumed to follow them.
-    if id.starts_with("gemini-3.8-flash")
-        || id.starts_with("gemini-3.7-flash")
-        || id.starts_with("gemini-3.1-pro")
-        || gemini_generation(id).is_some_and(|generation| generation >= 4)
-    {
-        vec!["low", "medium", "high"]
-    } else if id.starts_with("gemini-3-pro") || id.starts_with("gemini-2.5-pro") {
-        vec!["low", "high"]
-    } else {
-        vec!["minimal", "low", "medium", "high"]
+/// The thinking levels a Gemini model takes. The Models API says only
+/// whether a model thinks, so the version decides: Gemini 4 Argon answers
+/// `minimal` with a 400, as Flash from 3.7 and Pro from 3.1 do, and every
+/// later version is assumed to follow them; Pro before 3.1 takes low or high.
+pub(crate) fn gemini_reasoning_efforts(id: &str) -> Vec<&'static str> {
+    let name = id.rsplit('/').next().unwrap_or(id);
+    let pro = name.split(['-', '.']).any(|part| part == "pro");
+    match gemini_version(name) {
+        Some(version) if version >= (3, 7) || (pro && version >= (3, 1)) => {
+            vec!["low", "medium", "high"]
+        }
+        Some(_) if pro => vec!["low", "high"],
+        _ => vec!["minimal", "low", "medium", "high"],
     }
 }
 
@@ -496,12 +508,10 @@ fn configured_model(id: &str, defaults: crate::CompatibleModelDefaults) -> Model
     info
 }
 
-#[cfg(test)]
+/// An entry of the Models API that Haarness can chat with: one that takes
+/// `generateContent`, whatever its name, unless its name marks it as a media,
+/// speech or specialty model.
 fn discovered_model(entry: &Value) -> Option<ModelInfo> {
-    discovered_model_for(entry, true)
-}
-
-fn discovered_model_for(entry: &Value, require_gemini_prefix: bool) -> Option<ModelInfo> {
     let methods = entry["supportedGenerationMethods"].as_array()?;
     if !methods.iter().any(|method| method == "generateContent") {
         return None;
@@ -510,7 +520,7 @@ fn discovered_model_for(entry: &Value, require_gemini_prefix: bool) -> Option<Mo
         .as_str()?
         .trim_start_matches("models/")
         .to_owned();
-    if !supports_harness_chat(&id, require_gemini_prefix) {
+    if !supports_harness_chat(&id) {
         return None;
     }
     let mut info = model(&id);
@@ -538,28 +548,34 @@ fn discovered_model_for(entry: &Value, require_gemini_prefix: bool) -> Option<Mo
     Some(info)
 }
 
-fn supports_harness_chat(id: &str, require_gemini_prefix: bool) -> bool {
+/// Words are matched as whole name segments, so `gemini-3.8-flash-delivery`
+/// is not a live model.
+fn supports_harness_chat(id: &str) -> bool {
     let unsupported = [
-        "-image",
-        // Image models named after the brand rather than `-image`.
+        "image",
+        // Image models named after the brand rather than `image`.
         "nano-banana",
-        "-tts",
-        "-live",
+        "tts",
+        "live",
         "native-audio",
-        "omni-flash",
-        "gemini-omni-",
-        "-transcribe",
+        "omni",
+        "transcribe",
         // Specialty models that need their own tools; the Cloud router skips them too.
         "robotics",
         "computer-use",
+        // Gemma through this API refuses system instructions and tools.
+        "gemma",
     ];
-    (!require_gemini_prefix || id.starts_with("gemini-"))
-        && !id.is_empty()
-        && !unsupported.iter().any(|kind| id.contains(kind))
+    let segments = format!("-{}-", id.to_ascii_lowercase().replace('.', "-"));
+    !id.is_empty()
+        && !unsupported
+            .iter()
+            .any(|word| segments.contains(&format!("-{word}-")))
 }
 
 pub(crate) fn preferred_models() -> Vec<ModelInfo> {
     vec![
+        model("gemini-4-argon"),
         model("gemini-3.8-flash"),
         model("gemini-3.7-flash"),
         model("gemini-3.6-flash"),
@@ -700,8 +716,8 @@ mod tests {
     use haarness_core::{ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest};
 
     use super::{
-        GeminiProvider, api_key_from, discovered_model, discovered_model_for, gemini_contents,
-        gemini_reasoning_efforts, thinking_config, uses_thinking_level,
+        GeminiProvider, api_key_from, discovered_model, gemini_contents, gemini_reasoning_efforts,
+        thinking_config, uses_thinking_level,
     };
 
     #[derive(Clone, Default)]
@@ -1203,16 +1219,63 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
     }
 
     #[test]
-    fn custom_gemini_discovery_accepts_non_vendor_model_ids() {
-        let entry = json!({
-            "name": "models/company-flash",
-            "supportedGenerationMethods": ["generateContent"]
+    fn discovery_trusts_generation_methods_over_the_model_name() {
+        let entry = |id: &str, method: &str| json!({"name": format!("models/{id}"), "supportedGenerationMethods": [method]});
+        // A chat model is offered whatever it is called.
+        for id in [
+            "company-flash",
+            "gemini-3.8-flash-delivery",
+            "gemini-imagination-5",
+        ] {
+            assert_eq!(
+                discovered_model(&entry(id, "generateContent")).map(|model| model.id),
+                Some(id.to_owned())
+            );
+        }
+        assert!(discovered_model(&entry("text-embedding-005", "embedContent")).is_none());
+        assert!(discovered_model(&entry("gemma-3-27b-it", "generateContent")).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_new_gemini_model_appears_and_a_dropped_one_goes() {
+        async fn list() -> Json<Value> {
+            Json(json!({"models": [
+                {"name": "models/gemini-5-pro", "supportedGenerationMethods": ["generateContent"], "thinking": true},
+                {"name": "models/gemini-3.9-flash", "supportedGenerationMethods": ["generateContent"], "thinking": true}
+            ]}))
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/models", axum::routing::get(list)),
+            )
+            .await
+            .unwrap()
         });
-        assert!(discovered_model(&entry).is_none());
-        assert_eq!(
-            discovered_model_for(&entry, false).unwrap().id,
-            "company-flash"
+        let provider = GeminiProvider::for_test(format!("http://{address}"));
+        assert!(
+            provider
+                .info()
+                .models
+                .iter()
+                .any(|model| model.id == "gemini-4-argon")
         );
+        provider.refresh_models(true).await;
+        let models = provider.info().models;
+        let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, ["gemini-5-pro", "gemini-3.9-flash"]);
+        for model in &models {
+            assert!(model.reasoning && model.tools, "{}", model.id);
+            assert_eq!(
+                model.reasoning_efforts,
+                ["low", "medium", "high"],
+                "{}",
+                model.id
+            );
+            assert!(model.pricing.is_none(), "{}", model.id);
+        }
     }
 
     #[test]

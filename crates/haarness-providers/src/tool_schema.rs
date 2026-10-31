@@ -20,17 +20,19 @@ static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
 /// Claude models that answer 400 to a forced tool choice (`any` or a named
 /// tool), under any vendor prefix: `claude-opus-5-5`, `anthropic/claude-sonnet-5.5`,
 /// `us.anthropic.claude-fable-5-1-v1:0`. Structured output then relies on the
-/// runtime's request to call the tool and its corrective retry.
+/// runtime's request to call the tool and its corrective retry, so a release
+/// newer than any Haarness knows is treated as refusing: unforced, it still
+/// answers in the schema's shape. Fable and Mythos refuse from 5.1, the
+/// other families from 5.5; Haiku 5.5 still takes a forced choice.
 pub(crate) fn refuses_forced_tool_choice(model: &str) -> bool {
-    let model = model.to_ascii_lowercase().replace('.', "-");
-    [
-        "claude-opus-5-5",
-        "claude-sonnet-5-5",
-        "claude-fable-5-1",
-        "claude-mythos-5-1",
-    ]
-    .iter()
-    .any(|family| model.contains(family))
+    let Some(release) = crate::anthropic::claude_release(model) else {
+        return false;
+    };
+    match release.family.as_str() {
+        "fable" | "mythos" => release.version >= (5, 1),
+        "haiku" => release.version > crate::anthropic::NEWEST_CLAUDE,
+        _ => release.version >= (5, 5),
+    }
 }
 
 pub(crate) fn claude_model(model: &str) -> bool {
@@ -135,8 +137,19 @@ mod tests {
             "claude-sonnet-5",
             "anthropic/claude-haiku-5.5",
             "gpt-6.1-sol",
+            "claude-3-5-sonnet-20241022",
+            "claude-opus-4-20250514",
         ] {
             assert!(!refuses_forced_tool_choice(model), "{model}");
+        }
+        // A release newer than any listed takes the newest behaviour.
+        for model in [
+            "claude-opus-6",
+            "anthropic/claude-sonnet-5.7",
+            "claude-haiku-6-20270101",
+            "global.anthropic.claude-nova-6-1-v1:0",
+        ] {
+            assert!(refuses_forced_tool_choice(model), "{model}");
         }
     }
 

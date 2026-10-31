@@ -5,6 +5,7 @@ import {
   parseModel,
   readModelRecents,
   selectModel,
+  unlistedModel,
 } from "../src/renderer/model-selection";
 
 const provider = (
@@ -168,5 +169,36 @@ test("disconnected, deleted and stale explicit choices resolve to available mode
       explicit: { provider: "offline", model: "preferred" },
     }),
     undefined,
+  );
+});
+
+test("a chat's model its provider no longer lists is kept and told apart", () => {
+  const providers = [provider("openai"), provider("custom", false)];
+  assert.deepEqual(unlistedModel(providers, "openai/retired"), {
+    provider: "openai",
+    model: "retired",
+  });
+  assert.equal(unlistedModel(providers, "openai/preferred"), undefined);
+  // A list not in yet, or a provider not signed in, decides nothing.
+  assert.equal(unlistedModel([{ ...provider("openai"), models: [] }], "openai/retired"), undefined);
+  assert.equal(unlistedModel(providers, "custom/retired"), undefined);
+  assert.equal(unlistedModel(providers, ""), undefined);
+});
+
+test("a configured default the provider retired falls back to a recent, then the first connected", () => {
+  const providers = [provider("openai"), provider("custom")];
+  assert.deepEqual(
+    selectModel({
+      ...base,
+      providers,
+      defaultProvider: "openai",
+      defaultModel: "retired",
+      recent: [{ provider: "custom", model: "other" }],
+    }),
+    { provider: "custom", model: "other" },
+  );
+  assert.deepEqual(
+    selectModel({ ...base, providers, defaultProvider: "openai", defaultModel: "retired" }),
+    { provider: "openai", model: "preferred" },
   );
 });

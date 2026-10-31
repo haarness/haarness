@@ -48,10 +48,17 @@ fn configured_models(
     ids.into_iter()
         .map(|id| {
             let defaults = instance.model_defaults;
+            // A deployment named after a model reasons as that model does;
+            // the version is read from the name, so a new one needs no change.
             let known_reasoning = match catalog_provider {
-                "openai" => id.starts_with('o') || id.starts_with("gpt-5"),
+                "openai" => crate::openai::openai_reasons(&id),
                 "gemini" => id.starts_with("gemini-2.5") || crate::gemini::uses_thinking_level(&id),
                 _ => false,
+            };
+            let known_efforts = match catalog_provider {
+                "openai" => crate::openai::openai_reasoning_efforts(&id),
+                "gemini" => crate::gemini::gemini_reasoning_efforts(&id),
+                _ => Vec::new(),
             };
             let mut model = ModelInfo {
                 display_name: id.clone(),
@@ -68,7 +75,14 @@ fn configured_models(
                 pricing: None,
             };
             if model.reasoning {
-                model.reasoning_efforts = ["low", "medium", "high"].map(str::to_owned).to_vec();
+                model.reasoning_efforts = if known_efforts.is_empty() {
+                    vec!["low", "medium", "high"]
+                } else {
+                    known_efforts
+                }
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
             }
             crate::catalog::annotate(catalog_provider, model)
         })
@@ -123,6 +137,12 @@ fn native_instance(
     }
 }
 
+/// The deployments assumed when none are configured. Azure's own model list
+/// names the models a resource could deploy, not the deployments a request
+/// can name, so it cannot replace these; deployments are usually named after
+/// their model.
+const AZURE_FALLBACK: &[&str] = &["gpt-5.5", "gpt-5.4-mini"];
+
 pub struct AzureProvider {
     instance: NativeInstance,
     auth_store: Option<Arc<CredentialStore>>,
@@ -143,14 +163,14 @@ impl AzureProvider {
                 "Azure OpenAI",
                 base_url,
                 env_first(&["AZURE_OPENAI_API_KEY", "AZURE_API_KEY"]),
-                &["gpt-4.1", "gpt-4.1-mini"],
+                AZURE_FALLBACK,
             ),
             auth_store,
         )
     }
 
     pub fn new(instance: NativeInstance, auth_store: Option<Arc<CredentialStore>>) -> Self {
-        let models = configured_models(&instance, &["gpt-4.1", "gpt-4.1-mini"], "openai");
+        let models = configured_models(&instance, AZURE_FALLBACK, "openai");
         Self {
             instance,
             auth_store,
@@ -516,8 +536,7 @@ fn copilot_model(entry: &serde_json::Value) -> Option<(ModelInfo, CopilotWire)> 
         })
         .unwrap_or_default();
     let reasoning = !listed.is_empty()
-        || id.starts_with('o')
-        || id.starts_with("gpt-5")
+        || crate::openai::openai_reasons(&id)
         || supports
             .and_then(|value| value.get("reasoning_effort"))
             .and_then(serde_json::Value::as_bool)
@@ -560,6 +579,10 @@ fn copilot_model(entry: &serde_json::Value) -> Option<(ModelInfo, CopilotWire)> 
     Some((model, wire))
 }
 
+/// The models assumed when none are configured: current Gemini models served
+/// through Vertex.
+const VERTEX_FALLBACK: &[&str] = &["gemini-4-argon", "gemini-3.8-flash"];
+
 pub struct VertexProvider {
     instance: NativeInstance,
     auth_store: Option<Arc<CredentialStore>>,
@@ -599,7 +622,7 @@ impl VertexProvider {
                 "Google Vertex AI",
                 base_url,
                 env_first(&["GOOGLE_OAUTH_ACCESS_TOKEN", "GOOGLE_ACCESS_TOKEN"]),
-                &["gemini-2.5-pro", "gemini-2.5-flash"],
+                VERTEX_FALLBACK,
             ),
             auth_store,
         )
@@ -607,8 +630,7 @@ impl VertexProvider {
 
     pub fn new(mut instance: NativeInstance, auth_store: Option<Arc<CredentialStore>>) -> Self {
         let token = instance.api_key.take().map(SecretString::from);
-        let models =
-            configured_models(&instance, &["gemini-2.5-pro", "gemini-2.5-flash"], "gemini");
+        let models = configured_models(&instance, VERTEX_FALLBACK, "gemini");
         Self {
             instance,
             auth_store,
@@ -797,6 +819,44 @@ mod tests {
     }
 
     #[test]
+    fn deployments_named_after_a_new_model_get_its_reasoning() {
+        let mut azure = instance("azure", "https://example.test".into(), "key");
+        azure.model_defaults = CompatibleModelDefaults::default();
+        azure.models = ["gpt-7", "o5-mini", "gpt-5.5", "team-deployment"]
+            .map(str::to_owned)
+            .to_vec();
+        let models = AzureProvider::new(azure, None).info().models;
+        let efforts = |id: &str| {
+            let model = models.iter().find(|model| model.id == id).unwrap();
+            (model.reasoning, model.reasoning_efforts.clone())
+        };
+        assert_eq!(
+            efforts("gpt-7"),
+            (
+                true,
+                ["low", "medium", "high", "xhigh", "max"]
+                    .map(str::to_owned)
+                    .to_vec()
+            )
+        );
+        assert_eq!(
+            efforts("o5-mini"),
+            (true, ["low", "medium", "high"].map(str::to_owned).to_vec())
+        );
+        assert_eq!(
+            efforts("gpt-5.5").1,
+            ["none", "low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(efforts("team-deployment"), (false, Vec::new()));
+        // Unconfigured, the fallbacks are current models.
+        let mut vertex = instance("google-vertex", "https://example.test".into(), "token");
+        vertex.models.clear();
+        let models = VertexProvider::new(vertex, None).info().models;
+        assert_eq!(models[0].id, VERTEX_FALLBACK[0]);
+        assert_eq!(models[0].reasoning_efforts, ["low", "medium", "high"]);
+    }
+
+    #[test]
     fn copilot_catalog_routes_each_model_and_maps_capabilities() {
         let model = |entry: Value| copilot_model(&entry);
         assert!(
@@ -850,6 +910,14 @@ mod tests {
             "an entry without endpoints is a chat model"
         );
         assert_eq!(unknown.context_window, None, "a listed 0 is no window");
+        // A newer version than any known reasons even when its entry is silent.
+        let (newer, _) = model(serde_json::json!({"id":"gpt-7"})).unwrap();
+        assert!(newer.reasoning);
+        let (named, _) = model(serde_json::json!({"id":"oswald-chat"})).unwrap();
+        assert!(
+            !named.reasoning,
+            "a name that merely starts with o is not the o-series"
+        );
 
         let provider = CopilotProvider::new(
             instance("github-copilot", "https://example.test".into(), "token"),

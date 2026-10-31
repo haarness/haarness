@@ -1721,15 +1721,15 @@ async fn start_turn(
         )
         .into());
     }
+    // Levels are an open set: a provider can list one this release has never
+    // seen, and the runtime fits any level to the levels the model lists.
     if let Some(effort) = request.reasoning_effort.as_deref()
-        && effort != "ultracode"
-        && effort != haarness_protocol::MODEL_DEFAULT_EFFORT
-        && !haarness_protocol::REASONING_EFFORTS.contains(&effort)
+        && !haarness_protocol::is_reasoning_level(effort)
     {
         return Err(CoreError::Invalid(format!(
-            "reasoning_effort must be {}|{}|ultracode, got {effort}",
+            "reasoning_effort must be a level the model lists (such as {}), {} or ultracode, got {effort}",
+            haarness_protocol::REASONING_EFFORTS.join(", "),
             haarness_protocol::MODEL_DEFAULT_EFFORT,
-            haarness_protocol::REASONING_EFFORTS.join("|")
         ))
         .into());
     }

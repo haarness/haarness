@@ -61,7 +61,14 @@ use crate::api::{ApiClient, EndpointResolver, ServerRestarter};
 use crate::input::{AppAction, handle_key_at};
 /// The model a new chat starts on when none is configured; `haarness run`
 /// picks the same way.
-pub use crate::state::default_connected_model;
+pub use crate::state::{default_connected_model, listed_default_model};
+
+/// The models this terminal UI picked most recently (`provider/model`),
+/// newest first, as it keeps them between runs.
+#[must_use]
+pub fn saved_model_recents() -> Vec<String> {
+    config::load_state().model_recents
+}
 use crate::state::{App, ToastVariant};
 use crate::terminal::TerminalGuard;
 
@@ -434,12 +441,16 @@ async fn run_with_client(
             {
                 request.model = Some(model.id.clone());
             }
-        } else if let Some((provider, model)) = initial_info
+        } else if let Some(configured) = initial_info
             .as_ref()
             .and_then(|info| Some((info.default_provider.clone()?, info.default_model.clone()?)))
         {
-            request.provider = Some(provider);
-            request.model = Some(model);
+            // A configured model its provider has since retired gives way,
+            // quietly, to one it lists.
+            let chosen = listed_default_model(&providers, configured.clone(), &saved.model_recents);
+            chose_model = chosen != configured;
+            request.provider = Some(chosen.0);
+            request.model = Some(chosen.1);
         } else if let Some((provider, model)) = default_connected_model(&providers) {
             request.provider = Some(provider);
             request.model = Some(model);

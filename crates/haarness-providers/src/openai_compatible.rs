@@ -288,9 +288,16 @@ impl OpenAiCompatibleProvider {
         } else {
             None
         };
+        // SiliconFlow's list mixes image, audio and embedding models with
+        // chat ones and filters on request.
+        let filter = if self.id.starts_with("siliconflow") {
+            "?sub_type=chat"
+        } else {
+            ""
+        };
         let request = self
             .client
-            .get(format!("{base}/models"))
+            .get(format!("{base}/models{filter}"))
             .headers(headers)
             .timeout(std::time::Duration::from_secs(3));
         let discovered = request
@@ -1541,6 +1548,8 @@ fn id_looks_non_chat(id: &str) -> bool {
         "/flux",
         "flux-",
         "/imagen",
+        "qwen-image",
+        "image-edit",
         "sdxl",
         "text-to-image",
         "image-generation",
@@ -5390,6 +5399,91 @@ mod tests {
             reasoning_round_trip("deepseek", "reasoning_content", false, Some(custom)).await;
         assert_eq!(assistant["reasoning_content"], "");
         assert!(assistant.get("reasoning").is_none(), "{assistant}");
+    }
+
+    async fn discovered_preset(
+        id: &str,
+        fallback: &[&str],
+        list: Value,
+    ) -> (OpenAiCompatibleProvider, Arc<Mutex<Vec<String>>>) {
+        let queries = Arc::new(Mutex::new(Vec::new()));
+        let seen = queries.clone();
+        let router = Router::new().route(
+            "/models",
+            get(move |uri: axum::http::Uri| {
+                seen.lock().push(uri.query().unwrap_or_default().to_owned());
+                let list = list.clone();
+                async move { Json(list) }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: id.into(),
+            name: id.into(),
+            base_url: format!("http://{address}"),
+            api_key: Some("fixture-secret".into()),
+            models: fallback.iter().map(|model| (*model).to_owned()).collect(),
+            discover_models: true,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: crate::ProviderHeaders::default(),
+        })
+        .discover_models()
+        .await;
+        (provider, queries)
+    }
+
+    #[tokio::test]
+    async fn an_unknown_new_compatible_model_appears_with_usable_defaults() {
+        let (provider, _) = discovered_preset(
+            "groq",
+            &["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+            json!({"data": [
+                // The listing's own levels win over the built-in table.
+                {"id": "openai/gpt-oss-120b", "supported_parameters": ["tools", "reasoning"], "reasoning_efforts": ["low", "ultra"]},
+                // Absent from the table, but it says it takes an effort.
+                {"id": "vendor/new-model", "supported_parameters": ["tools", "reasoning", "reasoning_effort"]},
+                {"id": "vendor/plain-model"}
+            ]}),
+        )
+        .await;
+        let models = provider.info().models;
+        let find = |id: &str| models.iter().find(|model| model.id == id);
+        // A listed model the provider dropped is gone.
+        assert!(find("openai/gpt-oss-20b").is_none());
+        assert_eq!(
+            find("openai/gpt-oss-120b").unwrap().reasoning_efforts,
+            ["low", "ultra"]
+        );
+        let new = find("vendor/new-model").unwrap();
+        assert!(new.reasoning && new.tools);
+        assert_eq!(new.reasoning_efforts, ["low", "medium", "high"]);
+        let plain = find("vendor/plain-model").unwrap();
+        assert!(plain.tools && !plain.images && plain.pricing.is_none());
+    }
+
+    #[tokio::test]
+    async fn siliconflow_asks_for_chat_models_and_image_editors_stay_out() {
+        let (provider, queries) = discovered_preset(
+            "siliconflow-cn",
+            &["deepseek-ai/DeepSeek-V3.2"],
+            json!({"data": [{"id": "zai-org/GLM-5.2"}, {"id": "Qwen/Qwen-Image-Edit"}]}),
+        )
+        .await;
+        assert_eq!(queries.lock().as_slice(), ["sub_type=chat"]);
+        let ids: Vec<_> = provider
+            .info()
+            .models
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(ids, ["zai-org/GLM-5.2"]);
+        let (_, queries) = discovered_preset("modelscope", &["a"], json!({"data": []})).await;
+        assert_eq!(queries.lock().as_slice(), [""]);
     }
 
     #[tokio::test]

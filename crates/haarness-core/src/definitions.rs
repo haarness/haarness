@@ -270,6 +270,20 @@ pub fn list(value: Option<&String>) -> Vec<String> {
 /// configured provider lists.
 pub const MODEL_FAMILIES: [&str; 4] = ["sonnet", "opus", "haiku", "fable"];
 
+/// Whether `value` could name a Claude family this release does not know:
+/// one plain lowercase word (`mythos`). It resolves, as the known families
+/// do, to the newest listed Claude release whose name has that word, so a
+/// family Anthropic adds later works without a change here.
+pub fn model_family_word(value: &str) -> bool {
+    (3..=20).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
+/// Whether a listed model id is a Claude release of `family`: `claude-mythos-5`
+/// and `us.anthropic.claude-mythos-5-v1:0` are of `mythos`.
+pub fn claude_family_member(id: &str, family: &str) -> bool {
+    claude_release(id).is_some_and(|release| release.split('-').any(|word| word == family))
+}
+
 /// The Claude release a model id names, without the routing a catalog adds:
 /// `claude-sonnet-5-5`, `anthropic/claude-sonnet-5.5` and
 /// `us.anthropic.claude-sonnet-5-5-v1:0` all name `claude-sonnet-5-5`.
@@ -311,7 +325,9 @@ pub fn claude_version(id: &str) -> Vec<u32> {
 /// Whether a definition's `model` may leave out the provider: a family, or a
 /// Claude release id such as `claude-sonnet-5-5`, as Claude Code writes them.
 pub fn unqualified_model(value: &str) -> bool {
-    MODEL_FAMILIES.contains(&value) || (!value.contains('/') && claude_release(value).is_some())
+    MODEL_FAMILIES.contains(&value)
+        || model_family_word(value)
+        || (!value.contains('/') && claude_release(value).is_some())
 }
 pub fn execution(
     front: &BTreeMap<String, String>,
