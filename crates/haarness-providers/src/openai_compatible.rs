@@ -609,8 +609,16 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
             info.context_window = Some(1_000_000);
             info.max_output_tokens = Some(384_000);
             info.images = info.id != "deepseek-v4-pro";
-            // Peak/off-peak billing cannot be represented by one static price.
-            info.pricing = None;
+            // Shown at peak rates, the most a request costs; each request
+            // reports what it was charged (`deepseek_charge`).
+            info.pricing =
+                deepseek_rates(&info.id, true).map(|(input, cache_read, output)| ModelPricing {
+                    input,
+                    output,
+                    cache_read,
+                    cache_write: 0.0,
+                    long_context: None,
+                });
         }
         ("together" | "togetherai", "zai-org/GLM-5.1") => {
             info.display_name = "GLM-5.1".into();
@@ -708,6 +716,12 @@ fn discovered_model_info(
                 model
             }
             _ => name,
+        };
+        // DeepSeek writes "DeepSeek-V4.1-Flash".
+        let name = if provider == "deepseek" {
+            name.replace('-', " ")
+        } else {
+            name.to_owned()
         };
         name.clone_into(&mut info.display_name);
     }
@@ -866,6 +880,42 @@ fn affordable_output(body: &str) -> Option<u64> {
         .next()?
         .parse()
         .ok()
+}
+
+/// DeepSeek's rates per million tokens (cache-miss input, cache-hit input,
+/// output) for a model, at peak or off-peak; off-peak is half.
+fn deepseek_rates(model: &str, peak: bool) -> Option<(f64, f64, f64)> {
+    let (input, cache_read, output) = match model {
+        "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => {
+            (0.30, 0.006, 1.20)
+        }
+        "deepseek-v4-pro" => (1.32, 0.044, 3.96),
+        _ => return None,
+    };
+    let share = if peak { 1.0 } else { 0.5 };
+    Some((input * share, cache_read * share, output * share))
+}
+
+/// Whether DeepSeek bills `at` at its peak rates: 01:00-04:00 and
+/// 06:00-10:00 UTC on weekdays. Its Chinese public holidays, off-peak all
+/// day, are not known here, so a request on one is reported at peak.
+fn deepseek_peak(at: chrono::DateTime<chrono::Utc>) -> bool {
+    use chrono::{Datelike as _, Timelike as _};
+    let weekday = at.weekday().num_days_from_monday() < 5;
+    weekday && matches!(at.hour(), 1..=3 | 6..=9)
+}
+
+/// What a DeepSeek request cost, from its usage at the rates of the hour it
+/// ran: cache hits (`prompt_cache_hit_tokens`) at their own rate.
+fn deepseek_charge(model: &str, at: chrono::DateTime<chrono::Utc>, usage: &Value) -> Option<f64> {
+    let (input, cache_read, output) = deepseek_rates(model, deepseek_peak(at))?;
+    #[allow(clippy::cast_precision_loss)] // a displayed cost, not accounting
+    let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0) as f64;
+    let prompt = count("prompt_tokens");
+    let hit = count("prompt_cache_hit_tokens").min(prompt);
+    let completion = count("completion_tokens");
+    (prompt > 0.0 || completion > 0.0)
+        .then(|| ((prompt - hit) * input + hit * cache_read + completion * output) / 1_000_000.0)
 }
 
 fn is_chat_completion_model(provider: &str, entry: &Value, id: &str) -> bool {
@@ -1514,17 +1564,19 @@ impl ModelProvider for OpenAiCompatibleProvider {
         if supports_tools && !tools.is_empty() {
             body["tools"] = json!(tools);
         }
+        // Alibaba refuses a forced call while Qwen thinks, which its reasoning
+        // models do unasked; DeepSeek does too, unless thinking is turned off.
+        let refuses_forced_while_thinking = (supports_reasoning
+            && model
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.to_ascii_lowercase().starts_with("qwen")))
+            || (self.id == "deepseek" && request.reasoning_effort.as_deref() != Some("none"));
         if native_json {
             body["response_format"] = json!({"type":"json_schema","json_schema":{"name":STRUCTURED_OUTPUT_TOOL_NAME,"schema":structured_output}});
         } else if structured_output.is_some()
             && !crate::tool_schema::refuses_forced_tool_choice(&model)
-            // Alibaba refuses a forced call while Qwen thinks, which its
-            // reasoning models do unasked.
-            && !(supports_reasoning
-                && model
-                    .rsplit('/')
-                    .next()
-                    .is_some_and(|name| name.to_ascii_lowercase().starts_with("qwen")))
+            && !refuses_forced_while_thinking
         {
             body["tool_choice"] = json!("required");
         }
@@ -1595,6 +1647,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         }
         let request_id = crate::request_id(response.headers());
         let provider_id = self.id.clone();
+        let charged_model = model.clone();
         let mut events = json_stream(response, cancel, limits);
         // A Cloud workspace's own router (the Haarness Cloud provider translates its errors itself).
         if self.server_output_limit && self.id != "haarness" {
@@ -1608,7 +1661,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
             let mut finish_reason: Option<String> = None;
             let mut response_id: Option<String> = None;
             let mut usage: Option<(u64, u64, u64, u64)> = None;
-            // What OpenRouter says the request cost, with its usage.
+            // What OpenRouter says the request cost, or DeepSeek's rates at
+            // the hour it ran, with its usage.
             let mut charged: Option<f64> = None;
             let mut reasoning_details: Vec<Value> = Vec::new();
             let mut reasoning_content = String::new();
@@ -1644,6 +1698,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     let count = |paths: &[&str]| paths.iter().find_map(|path| chunk_usage.pointer(path).and_then(Value::as_u64)).unwrap_or(0);
                     if provider_id == "openrouter" {
                         charged = chunk_usage.get("cost").and_then(Value::as_f64).filter(|cost| *cost >= 0.0).or(charged);
+                    }
+                    if provider_id == "deepseek" {
+                        charged = deepseek_charge(&charged_model, chrono::Utc::now(), chunk_usage).or(charged);
                     }
                     usage = Some((
                         count(&["/prompt_tokens"]),
@@ -1870,8 +1927,8 @@ mod tests {
 
     use super::{
         CompatibleInstance, CompatibleModelDefaults, OpenAiCompatibleProvider,
-        append_reasoning_details, discovered_model_info, model_info,
-        openai_compatible_media_message,
+        append_reasoning_details, deepseek_charge, deepseek_peak, discovered_model_info,
+        model_info, openai_compatible_media_message,
     };
 
     #[derive(Clone, Default)]
@@ -2632,6 +2689,115 @@ mod tests {
             headers: crate::ProviderHeaders::default(),
         });
         (provider, state)
+    }
+
+    async fn deepseek_fixture(
+        handler: axum::routing::MethodRouter<FixtureState>,
+    ) -> (OpenAiCompatibleProvider, FixtureState) {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/chat/completions", handler)
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "deepseek".into(),
+            name: "DeepSeek".into(),
+            base_url: format!("http://{address}"),
+            api_key: Some("test-key".into()),
+            models: vec!["deepseek-flash".into()],
+            discover_models: false,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: true,
+            headers: crate::ProviderHeaders::default(),
+        });
+        (provider, state)
+    }
+
+    #[test]
+    fn deepseek_bills_peak_hours_on_weekdays_only() {
+        use chrono::TimeZone as _;
+        let at = |day: u32, hour: u32, minute: u32| {
+            chrono::Utc
+                .with_ymd_and_hms(2026, 11, day, hour, minute, 0)
+                .unwrap()
+        };
+        // 2026-11-02 is a Monday, 2026-11-01 a Sunday.
+        assert!(deepseek_peak(at(2, 1, 0)));
+        assert!(deepseek_peak(at(2, 9, 59)));
+        assert!(!deepseek_peak(at(2, 4, 0)));
+        assert!(!deepseek_peak(at(2, 5, 30)));
+        assert!(!deepseek_peak(at(2, 10, 0)));
+        assert!(!deepseek_peak(at(1, 2, 0)));
+        let usage = json!({"prompt_tokens": 30_000, "prompt_cache_hit_tokens": 10_000, "completion_tokens": 100});
+        let off_peak = deepseek_charge("deepseek-flash", at(1, 2, 0), &usage).unwrap();
+        assert!(
+            (off_peak - (20_000.0 * 0.15 + 10_000.0 * 0.003 + 100.0 * 0.6) / 1e6).abs() < 1e-12,
+            "{off_peak}"
+        );
+        let peak = deepseek_charge("deepseek-v4-pro", at(2, 2, 0), &usage).unwrap();
+        assert!(
+            (peak - (20_000.0 * 1.32 + 10_000.0 * 0.044 + 100.0 * 3.96) / 1e6).abs() < 1e-12,
+            "{peak}"
+        );
+        assert!(deepseek_charge("deepseek-next", at(2, 2, 0), &usage).is_none());
+        let flash = model_info(
+            "deepseek",
+            "deepseek-flash",
+            CompatibleModelDefaults::default(),
+        );
+        assert_eq!(
+            flash.pricing.map(|price| (price.input, price.output)),
+            Some((0.30, 1.20))
+        );
+    }
+
+    #[tokio::test]
+    async fn deepseek_gets_structured_output_without_a_forced_call_while_it_thinks() {
+        async fn charged(
+            State(state): State<FixtureState>,
+            Json(request): Json<Value>,
+        ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+            state.0.lock().push(request);
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":30000,\"prompt_cache_hit_tokens\":10000,\"completion_tokens\":100}}\n\ndata: [DONE]\n\n".into(),
+            )
+        }
+        let (provider, state) = deepseek_fixture(post(charged)).await;
+        let mut costs = Vec::new();
+        for effort in ["high", "none"] {
+            let mut request = short_request();
+            request.model = "deepseek-flash".into();
+            request.reasoning_effort = Some(effort.into());
+            request.output_schema =
+                Some(json!({"type":"object","properties":{"answer":{"type":"string"}}}));
+            let events = provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            costs.extend(events.iter().filter_map(|event| match event {
+                Ok(ProviderEvent::Cost { usd }) => Some(*usd),
+                _ => None,
+            }));
+        }
+        let requests = state.0.lock();
+        assert_eq!(requests[0]["thinking"]["type"], "enabled");
+        assert!(
+            requests[0].get("tool_choice").is_none(),
+            "{:?}",
+            requests[0]
+        );
+        assert_eq!(requests[1]["thinking"]["type"], "disabled");
+        assert_eq!(requests[1]["tool_choice"], "required");
+        // Every request says what it cost, at the hour it ran.
+        assert_eq!(costs.len(), 2);
+        assert!(costs.iter().all(|cost| *cost > 0.0));
     }
 
     fn short_request() -> ProviderRequest {
