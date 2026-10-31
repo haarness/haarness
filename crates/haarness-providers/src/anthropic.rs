@@ -703,7 +703,7 @@ impl ModelProvider for AnthropicProvider {
     }
 }
 
-fn adaptive_thinking(id: &str) -> bool {
+pub(crate) fn adaptive_thinking(id: &str) -> bool {
     [
         "claude-fable-5",
         "claude-mythos-5",

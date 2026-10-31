@@ -39,7 +39,10 @@ pub(crate) fn is_loopback(url: &reqwest::Url) -> bool {
 }
 
 /// Wait for `future` at most `limit`, failing as a silent provider.
-async fn within<T>(limit: Option<Duration>, future: impl Future<Output = T>) -> CoreResult<T> {
+pub(crate) async fn within<T>(
+    limit: Option<Duration>,
+    future: impl Future<Output = T>,
+) -> CoreResult<T> {
     match limit {
         Some(limit) => tokio::time::timeout(limit, future)
             .await

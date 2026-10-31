@@ -39,6 +39,7 @@ fn official_api(url: &reqwest::Url) -> bool {
     };
     url.scheme() == "https"
         && (OFFICIAL_HOSTS.contains(&host)
+            || (host.starts_with("bedrock.") && host.ends_with(".amazonaws.com"))
             || crate::COMPAT_PRESETS.iter().any(|preset| {
                 reqwest::Url::parse(preset.base_url).is_ok_and(|base| base.host_str() == Some(host))
             }))
@@ -68,7 +69,12 @@ fn classify(name: &str, status: u16, reason: Option<String>, official: bool) -> 
     let lower = reason.as_deref().unwrap_or_default().to_ascii_lowercase();
     let refused = match status {
         // A restricted key that may not list models still authenticated.
-        401 | 403 if lower.contains("scope") || lower.contains("insufficient permission") => {
+        // AWS: a key whose policy leaves out the listing is still a key.
+        401 | 403
+            if lower.contains("scope")
+                || lower.contains("insufficient permission")
+                || lower.contains("not authorized to perform") =>
+        {
             return KeyCheck::Accepted;
         }
         401 | 403 => true,
@@ -96,10 +102,16 @@ fn classify(name: &str, status: u16, reason: Option<String>, official: bool) -> 
 fn reason(body: &str) -> Option<String> {
     let body = body.trim();
     let text = match serde_json::from_str::<Value>(body) {
-        Ok(value) => ["/error/message", "/message", "/error", "/detail"]
-            .iter()
-            .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))?
-            .to_owned(),
+        Ok(value) => [
+            "/error/message",
+            "/message",
+            "/Message",
+            "/error",
+            "/detail",
+        ]
+        .iter()
+        .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))?
+        .to_owned(),
         Err(_) if body.starts_with('<') => return None,
         Err(_) => body.to_owned(),
     };
@@ -121,6 +133,37 @@ mod tests {
 
     #[test]
     fn only_a_clear_refusal_from_a_providers_own_api_rejects_a_key() {
+        // Bedrock: an unknown API key, and a known one its policy keeps from listing.
+        assert!(official_api(
+            &reqwest::Url::parse("https://bedrock.us-east-1.amazonaws.com/foundation-models")
+                .unwrap()
+        ));
+        assert_eq!(
+            reason(
+                r#"{"Message":"Authentication failed: Please make sure your API Key is valid."}"#
+            ),
+            Some("Authentication failed: Please make sure your API Key is valid".into())
+        );
+        assert_eq!(
+            classify(
+                "Amazon Bedrock",
+                403,
+                Some("Authentication failed: Please make sure your API Key is valid".into()),
+                true
+            ),
+            KeyCheck::Rejected(Some(
+                "Authentication failed: Please make sure your API Key is valid".into()
+            ))
+        );
+        assert_eq!(
+            classify(
+                "Amazon Bedrock",
+                403,
+                Some("User: arn:aws:iam::123456789012:user/BedrockAPIKey-x is not authorized to perform: bedrock:ListFoundationModels".into()),
+                true
+            ),
+            KeyCheck::Accepted
+        );
         assert_eq!(
             classify("Anthropic", 401, Some("invalid x-api-key".into()), true),
             KeyCheck::Rejected(Some("invalid x-api-key".into()))
