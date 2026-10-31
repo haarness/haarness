@@ -48,7 +48,7 @@ import {
 import { btwQuestion, openSideChat } from "./SideChat";
 import { agentColor } from "./agent-colors";
 import { conversationAgents, selectConversationAgent } from "./agent-selection";
-import { providerModelOptions } from "./provider-model-options";
+import { providerModelOptions, withUnlistedModel } from "./provider-model-options";
 import {
   alreadySettled,
   approvalModeHint as modeHint,
@@ -516,7 +516,9 @@ export function Session() {
     const key = selectedModel();
     return key ? key.provider + "/" + key.model : "";
   };
-  const modelOptions = createMemo(() => providerModelOptions(state.providers));
+  const modelOptions = createMemo(() =>
+    withUnlistedModel(providerModelOptions(state.providers), state.providers, modelValue()),
+  );
   const [slashIndex, setSlashIndex] = createSignal(0);
   const [submissions, setSubmissions] = createSignal<string[]>([]);
   const owner = () => draftScope() + ":" + state.selected;

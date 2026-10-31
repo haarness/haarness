@@ -101,3 +101,21 @@ export function selectModel(input: {
     }
   }
 }
+
+/** The chat's model `value` (`provider/model`) when its signed-in provider's
+ * list has come in without it, as when the provider retired it: the chat
+ * keeps it, and the provider decides whether it still answers. */
+export function unlistedModel(
+  providers: ProviderInfo[],
+  value?: string | null,
+): ModelKey | undefined {
+  const key = parseModel(value);
+  if (!key) return;
+  const provider = providers.find((p) => p.id === key.provider);
+  if (
+    provider?.authenticated &&
+    provider.models.length &&
+    !provider.models.some((m) => m.id === key.model)
+  )
+    return key;
+}

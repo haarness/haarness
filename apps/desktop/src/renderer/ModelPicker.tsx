@@ -95,7 +95,10 @@ export function ModelPicker(props: {
                     </span>
                   </Show>
                 </strong>
-                <small>{selected()?.label ?? props.value}</small>
+                <small>
+                  {selected()?.label ?? props.value}
+                  <Show when={selected()?.hint}>{(hint) => <> · {hint()}</>}</Show>
+                </small>
               </div>
               {/* Reset clears the choice: back to the configured level when
                   there is one, else to the model's own default. */}

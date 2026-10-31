@@ -1370,6 +1370,11 @@ dialog .notifications {
   opacity: 0.45;
   cursor: default;
 }
+.select-hint {
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  white-space: nowrap;
+}
 .select-check {
   color: var(--primary);
   font-weight: 600;

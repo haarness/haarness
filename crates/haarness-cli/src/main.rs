@@ -5318,16 +5318,23 @@ const NO_MODEL_CONNECTED: &str = "No model is connected yet. Connect one with `h
 
 /// The model a new chat gets when the command line names none, chosen the way
 /// the terminal UI chooses: the configured default (left to the server, so
-/// an agent or command can still bring its own), else the first connected
-/// provider's.
+/// an agent or command can still bring its own) while its provider lists it,
+/// else a recent pick or the first connected provider's.
 async fn default_run_model_client(
     client: &haarness_tui::api::ApiClient,
 ) -> Result<Option<(String, String)>> {
     let info = client.info().await?;
-    if info.default_provider.is_some() && info.default_model.is_some() {
-        return Ok(None);
+    let providers = client.providers().await?;
+    if let (Some(provider), Some(model)) = (info.default_provider, info.default_model) {
+        let configured = (provider, model);
+        let chosen = haarness_tui::listed_default_model(
+            &providers,
+            configured.clone(),
+            &haarness_tui::saved_model_recents(),
+        );
+        return Ok((chosen != configured).then_some(chosen));
     }
-    haarness_tui::default_connected_model(&client.providers().await?)
+    haarness_tui::default_connected_model(&providers)
         .map(Some)
         .context(NO_MODEL_CONNECTED)
 }

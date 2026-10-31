@@ -22,7 +22,8 @@ export function validReasoning(
  * older server refuses the name, so it is sent only where a level is configured. */
 export const MODEL_DEFAULT_EFFORT = "default";
 /** Every provider effort Haarness knows, lightest first (the server's scale). */
-const scale = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+export const REASONING_SCALE = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const scale = REASONING_SCALE;
 /** The level of `levels` a model runs a turn asking for `effort` at, as the
  * server fits it: the level itself, else the nearest on the scale, the stronger
  * one on a tie (levels off the scale rank strongest). "" when it lists none. */

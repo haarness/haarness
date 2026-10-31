@@ -257,6 +257,12 @@ pub(crate) fn model_detail(app: &App, qualified: &str, status: &str) -> String {
     if !status.is_empty() {
         parts.push(status.to_owned());
     }
+    if info.is_none()
+        && app.chat_model_unlisted()
+        && qualified == format!("{}/{}", app.thread.provider, app.thread.model)
+    {
+        parts.push(app.language.text("no longer listed").to_owned());
+    }
     if let Some(info) = info {
         if let Some(context) = info.context_window {
             parts.push(format!("{} context", token_limit(context)));
