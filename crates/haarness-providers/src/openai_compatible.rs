@@ -1323,7 +1323,7 @@ fn apply_lmstudio_details(model: &mut ModelInfo, entry: &Value) {
         .as_str()
         .filter(|name| !name.is_empty())
     {
-        model.display_name = name.to_owned();
+        name.clone_into(&mut model.display_name);
     }
     let capabilities = &entry["capabilities"];
     if let Some(vision) = capabilities["vision"].as_bool() {

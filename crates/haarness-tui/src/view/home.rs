@@ -74,9 +74,10 @@ pub fn masthead(app: &App, width: usize, identity_in_panel: bool) -> Vec<Line> {
             // Nobody chose this model: say where replies come from, and how to
             // get a larger one, before the first prompt rather than after a
             // slow, small answer.
+            let model = app.model_label(&format!("{}/{}", app.thread.provider, app.thread.model));
             let sentence = app.language.format(
                 "Replies come from {model}, which {runtime} runs on this computer.",
-                &[("model", &app.thread.model), ("runtime", runtime)],
+                &[("model", &model), ("runtime", runtime)],
             );
             let mut spans = vec![
                 Span::new(" ".repeat(INSET), theme.muted),
