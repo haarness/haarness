@@ -233,6 +233,40 @@ impl OpenAiCompatibleProvider {
         self.refresh_models(true).await;
         self
     }
+    /// xAI's chat models and their input, from `/language-models`: `/models`
+    /// also lists its image and video generators and says nothing of input.
+    async fn xai_language_models(
+        &self,
+        base: &str,
+        headers: reqwest::header::HeaderMap,
+    ) -> Option<std::collections::HashMap<String, Value>> {
+        let body: Value = self
+            .client
+            .get(format!("{base}/language-models"))
+            .headers(headers)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        Some(
+            body["models"]
+                .as_array()?
+                .iter()
+                .filter_map(|entry| {
+                    Some((
+                        entry["id"].as_str()?.to_owned(),
+                        entry["input_modalities"].clone(),
+                    ))
+                })
+                .collect(),
+        )
+    }
+
     pub(crate) async fn fetch_models(&self) -> Option<Vec<ModelInfo>> {
         if !self.discover_models {
             return None;
@@ -245,17 +279,14 @@ impl OpenAiCompatibleProvider {
             };
             headers.insert(AUTHORIZATION, value);
         }
-        // xAI's `/language-models` lists only its chat models, with their
-        // input, levels and prices; `/models` mixes in image and video
-        // generators and says none of that.
-        let route = if self.id == "xai" {
-            "language-models"
+        let language_models = if self.id == "xai" {
+            self.xai_language_models(base, headers.clone()).await
         } else {
-            "models"
+            None
         };
         let request = self
             .client
-            .get(format!("{base}/{route}"))
+            .get(format!("{base}/models"))
             .headers(headers)
             .timeout(std::time::Duration::from_secs(3));
         let discovered = request
@@ -267,10 +298,20 @@ impl OpenAiCompatibleProvider {
             && let Ok(body) = response.json::<Value>().await
         {
             let models: Vec<_> = body["data"]
-                .as_array()
-                .or_else(|| body["models"].as_array())?
+                .as_array()?
                 .iter()
+                .filter_map(|entry| match &language_models {
+                    // xAI's chat models, with the input `/models` leaves out.
+                    Some(chat) => {
+                        let inputs = chat.get(entry["id"].as_str()?)?;
+                        let mut entry = entry.clone();
+                        entry["input_modalities"] = inputs.clone();
+                        Some(std::borrow::Cow::Owned(entry))
+                    }
+                    None => Some(std::borrow::Cow::Borrowed(entry)),
+                })
                 .filter_map(|entry| {
+                    let entry = &*entry;
                     let mut model = discovered_model_info(&self.id, entry, self.model_defaults)?;
                     if let Some(efforts) = entry["reasoning_efforts"].as_array() {
                         model.reasoning_efforts = efforts
