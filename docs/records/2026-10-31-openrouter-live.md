@@ -136,3 +136,11 @@ window) and the phones (no runnable simulator build; signing a phone in is the o
 that uses the account's own keys (BYOK) can be made and keyed without a web form, through the API the CLI's
 sign-in may call (`POST /api/v1/routers` with `credential_mode: "byok"`, then
 `PUT /api/v1/routers/{id}/credentials/{provider}` with the key); the CLI has no command for it yet.
+
+Changing model in a Cloud chat (Cloud 20261031-0df3925-4365f30, router 4365f30): a chat replays every
+earlier turn's reasoning details, whichever model wrote them. After DeepSeek V4 Flash through OpenRouter,
+Claude Haiku 5.5 failed every turn ("upstream returned HTTP 400"): the router made DeepSeek's unsigned
+thoughts into Claude thinking blocks. The OpenAI Responses path refused any detail not its own. Each provider
+now gets back only the reasoning it can take (Claude's signed or redacted thinking, OpenAI's reasoning items)
+and the rest is left out; the failing workspace chat answered on Claude with its DeepSeek history. Bedrock still
+refuses any replayed reasoning (no Cloud route goes there).
