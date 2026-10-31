@@ -1,4 +1,6 @@
-//! Friendly labels shared with Desktop. Provider names win; unknown IDs stay intact.
+//! Friendly labels shared with Desktop. Provider names win, then the table;
+//! an id the table does not know reads by its brand when it names one
+//! (`gpt-7-mini` is "GPT-7 Mini"), and any other stays intact.
 use std::{collections::HashMap, sync::LazyLock};
 static NAMES: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("model-names.json")).expect("valid embedded model names")
@@ -37,7 +39,127 @@ pub fn model_display_name(id: &str, supplied: Option<&str>) -> String {
         .or_else(|| id.rsplit_once('/').and_then(|(_, model)| NAMES.get(model)))
         .or_else(|| claude_base_id(id).and_then(|model| NAMES.get(model)))
         .cloned()
+        .or_else(|| {
+            let base = claude_base_id(id)
+                .unwrap_or_else(|| id.rsplit_once('/').map_or(id, |(_, model)| model));
+            tidy_name(base)
+        })
         .unwrap_or_else(|| id.to_owned())
+}
+
+/// Brands a model id starts with, as their names spell them. A brand marked
+/// `true` joins its version with a hyphen (`GPT-7`, `GLM-6`).
+const BRANDS: [(&str, &str, bool); 14] = [
+    ("gpt", "GPT", true),
+    ("glm", "GLM", true),
+    ("claude", "Claude", false),
+    ("gemini", "Gemini", false),
+    ("gemma", "Gemma", false),
+    ("grok", "Grok", false),
+    ("kimi", "Kimi", false),
+    ("mistral", "Mistral", false),
+    ("devstral", "Devstral", false),
+    ("codestral", "Codestral", false),
+    ("sonar", "Sonar", false),
+    ("deepseek", "DeepSeek", false),
+    ("qwen", "Qwen", false),
+    ("llama", "Llama", false),
+];
+
+/// A readable name for a model id the table does not know yet, so a model a
+/// provider adds reads like its siblings without a release: `gpt-7-mini`
+/// reads "GPT-7 Mini", `claude-opus-6-1` "Claude Opus 6.1",
+/// `claude-sonnet-6-20270101` "Claude Sonnet 6 (2027-01-01)", `deepseek-v5`
+/// "DeepSeek V5". `None` unless the id starts with a known brand (or is an
+/// `o`-series id) and holds only lowercase letters, digits, `.` and `-`.
+fn tidy_name(id: &str) -> Option<String> {
+    let mut tokens = id.split(['-', '@']);
+    let first = tokens.next()?;
+    let (mut name, joined) =
+        if let Some((_, brand, joined)) = BRANDS.iter().find(|(word, _, _)| *word == first) {
+            ((*brand).to_owned(), *joined)
+        } else if first.len() > 1
+            && first.starts_with('o')
+            && first[1..].bytes().all(|byte| byte.is_ascii_digit())
+        {
+            (first.to_owned(), false)
+        } else {
+            return None;
+        };
+    let mut words: Vec<String> = Vec::new();
+    let mut date = None;
+    // Claude writes a version as separate numbers (`4-5` is 4.5).
+    let mut in_version = false;
+    for token in tokens {
+        if token.is_empty()
+            || !token
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.')
+        {
+            return None;
+        }
+        let digits = token.bytes().all(|byte| byte.is_ascii_digit());
+        if digits && token.len() == 8 {
+            date = Some(format!(
+                "({}-{}-{})",
+                &token[..4],
+                &token[4..6],
+                &token[6..]
+            ));
+            continue;
+        }
+        if token == "latest" {
+            continue;
+        }
+        if digits && token.len() <= 2 {
+            match words.last_mut() {
+                Some(last) if in_version => {
+                    last.push('.');
+                    last.push_str(token);
+                }
+                _ => words.push(token.to_owned()),
+            }
+            in_version = true;
+            continue;
+        }
+        in_version = false;
+        words.push(tidy_word(token));
+    }
+    if joined
+        && let Some(version) = words
+            .first()
+            .filter(|word| word.starts_with(|c: char| c.is_ascii_digit()) || *word == "OSS")
+    {
+        name = format!("{name}-{version}");
+        words.remove(0);
+    }
+    let mut parts = vec![name];
+    parts.extend(words);
+    parts.extend(date);
+    Some(parts.join(" "))
+}
+
+/// One word of a model id as a name writes it: `mini` is "Mini", `v5` "V5",
+/// `120b` (a parameter count) "120B", `oss` "OSS"; a version stays as it is.
+fn tidy_word(token: &str) -> String {
+    if token == "oss" {
+        return "OSS".into();
+    }
+    if let Some(count) = token.strip_suffix(['b', 'k', 'm'])
+        && !count.is_empty()
+        && count
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return token.to_ascii_uppercase();
+    }
+    let mut chars = token.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() => {
+            first.to_ascii_uppercase().to_string() + chars.as_str()
+        }
+        _ => token.to_owned(),
+    }
 }
 
 /// Bedrock writes a Claude id with a region and vendor prefix and a version
@@ -125,13 +247,70 @@ mod tests {
         ] {
             assert_eq!(model_display_name(id, Some(id)), name, "{id}");
         }
-        // A Claude id the table does not know, and lookalikes, stay as written.
-        for id in [
-            "apac.anthropic.claude-sonnet-9-9-v1:0",
-            "mycorp.claude-sonnet-5-5",
-            "meta.llama3-70b-instruct-v1:0",
-        ] {
+        // A Claude id the table does not know reads by its words; lookalikes
+        // stay as written.
+        assert_eq!(
+            model_display_name("apac.anthropic.claude-sonnet-9-9-v1:0", None),
+            "Claude Sonnet 9.9"
+        );
+        for id in ["mycorp.claude-sonnet-5-5", "meta.llama3-70b-instruct-v1:0"] {
             assert_eq!(model_display_name(id, None), id);
+        }
+    }
+
+    #[test]
+    fn a_model_new_to_the_table_reads_by_its_brand() {
+        for (id, name) in [
+            ("gpt-7-mini", "GPT-7 Mini"),
+            ("gpt-6.2-sol", "GPT-6.2 Sol"),
+            ("openai/gpt-7", "GPT-7"),
+            ("o7-mini", "o7 Mini"),
+            ("claude-opus-6", "Claude Opus 6"),
+            ("claude-opus-6-1", "Claude Opus 6.1"),
+            ("claude-sonnet-6-20270101", "Claude Sonnet 6 (2027-01-01)"),
+            ("claude-sonnet-6@20270101", "Claude Sonnet 6 (2027-01-01)"),
+            ("deepseek-v5", "DeepSeek V5"),
+            ("gemini-5-pro-preview", "Gemini 5 Pro Preview"),
+            ("grok-5-fast", "Grok 5 Fast"),
+            ("glm-6", "GLM-6"),
+            ("gpt-oss-240b", "GPT-OSS 240B"),
+            ("kimi-k4", "Kimi K4"),
+            ("qwen-4-coder", "Qwen 4 Coder"),
+        ] {
+            assert_eq!(model_display_name(id, None), name, "{id}");
+            assert_eq!(model_display_name(id, Some(id)), name, "{id}");
+        }
+        // Ids that name no brand, or are not written as ids, stay intact.
+        for id in [
+            "future-7",
+            "my-company/future-7",
+            "GPT-7",
+            "gpt-7 mini",
+            "gpt-",
+            "o-mini",
+        ] {
+            assert_eq!(model_display_name(id, None), id, "{id}");
+        }
+    }
+
+    #[test]
+    fn the_brand_reading_agrees_with_the_table() {
+        // The table names a few ids its own way; every other bare id in it
+        // reads the same by the generic rule, so a sibling it lacks reads alike.
+        let own_way = [
+            "gpt-5.6",
+            "grok-4.20-0309-reasoning",
+            "grok-4.20-0309-non-reasoning",
+            "grok-4-1-fast-non-reasoning",
+            "mistral-large-4-0",
+        ];
+        for (id, name) in NAMES.iter() {
+            if own_way.contains(&id.as_str()) {
+                continue;
+            }
+            if let Some(tidy) = tidy_name(id) {
+                assert_eq!(&tidy, name, "{id}");
+            }
         }
     }
 }
