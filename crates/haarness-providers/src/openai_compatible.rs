@@ -35,6 +35,8 @@ pub struct OpenAiCompatibleProvider {
     renewal_limit: std::time::Duration,
     /// Held by the renewal task, not its caller (see [`Self::bearer_token`]).
     refresh_lock: Arc<Mutex<()>>,
+    /// One LM Studio load at a time, so parallel requests load a model once.
+    load_lock: Arc<Mutex<()>>,
     models: Vec<ModelInfo>,
     live_models: crate::live_models::LiveModels,
     /// Models whose endpoint explicitly accepts the OpenAI-style
@@ -150,6 +152,7 @@ impl OpenAiCompatibleProvider {
             auth_aliases: Vec::new(),
             xai_oauth: (provider_id == "xai").then(XaiOAuthClient::default),
             refresh_lock: Arc::default(),
+            load_lock: Arc::default(),
             renewal_limit: haarness_account::renewals::LIMIT,
             live_models: crate::live_models::LiveModels::default(),
             models: instance
@@ -332,10 +335,10 @@ impl OpenAiCompatibleProvider {
                     Some(model)
                 })
                 .collect();
-            let models = if self.id == "ollama" {
-                self.ollama_details(base, models).await
-            } else {
-                models
+            let models = match self.id.as_str() {
+                "ollama" => self.ollama_details(base, models).await,
+                "lmstudio" => self.lmstudio_details(base, models).await,
+                _ => models,
             };
             return Some(crate::merge_discovered_models(self.models.clone(), models));
         }
@@ -386,6 +389,119 @@ impl OpenAiCompatibleProvider {
             .collect()
     }
 
+    /// LM Studio's own list (`/api/v1/models`, from 0.4): each model's
+    /// name, the longest context it takes, whether it reads images, and what
+    /// is loaded with which context. `None` from an older LM Studio.
+    async fn lmstudio_models(&self, root: &str) -> Option<Vec<Value>> {
+        let body: Value = self
+            .client
+            .get(format!("{root}/api/v1/models"))
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        Some(body["models"].as_array()?.clone())
+    }
+
+    /// What LM Studio knows of each downloaded model, which its OpenAI-style
+    /// list leaves out. Every model calls tools there (LM Studio prompts
+    /// those not trained for them itself), and it runs on this computer, so
+    /// its price is nothing.
+    async fn lmstudio_details(&self, base: &str, models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+        let root = base.strip_suffix("/v1").unwrap_or(base);
+        let details = self.lmstudio_models(root).await.unwrap_or_default();
+        models
+            .into_iter()
+            .map(|mut model| {
+                if let Some(entry) = details
+                    .iter()
+                    .find(|entry| entry["key"] == model.id.as_str())
+                {
+                    apply_lmstudio_details(&mut model, entry);
+                }
+                model.pricing.get_or_insert(ModelPricing {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                    long_context: None,
+                });
+                model
+            })
+            .collect()
+    }
+
+    /// LM Studio loads a model on its first request with the context its
+    /// settings name, 4K or 8K out of the box: too small for an agent's
+    /// instructions and tools, so every request would be refused. A model
+    /// that isn't loaded, or is loaded with too little room, is loaded here
+    /// with [`LMSTUDIO_CONTEXT`] (or the model's longest, when shorter).
+    /// It stays loaded, as one loaded in LM Studio does. A model LM Studio
+    /// doesn't have is refused: it would answer with whichever model is
+    /// loaded. Anything else that goes wrong is left to the request.
+    async fn lmstudio_load(&self, model: &str) -> CoreResult<()> {
+        let _guard = self.load_lock.lock().await;
+        let Some(base) = self.endpoint.strip_suffix("/chat/completions") else {
+            return Ok(());
+        };
+        let root = base.strip_suffix("/v1").unwrap_or(base);
+        let Some(models) = self.lmstudio_models(root).await else {
+            return Ok(());
+        };
+        let Some(entry) = models.iter().find(|entry| entry["key"] == model) else {
+            return Err(CoreError::Provider(format!(
+                "LM Studio has no model {model}. Download it in LM Studio or with `lms get {model}`, or pick a model you have."
+            )));
+        };
+        let context = lmstudio_context(entry);
+        let instances = entry["loaded_instances"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let roomy = |instance: &Value| {
+            instance["config"]["context_length"]
+                .as_u64()
+                .is_some_and(|loaded| loaded >= LMSTUDIO_MIN_CONTEXT.min(context))
+        };
+        if instances.iter().any(roomy) {
+            return Ok(());
+        }
+        for instance in &instances {
+            if let Some(id) = instance["id"].as_str() {
+                tracing::info!(
+                    model,
+                    instance = id,
+                    "reloading an LM Studio model with room for the request"
+                );
+                let _ = self
+                    .client
+                    .post(format!("{root}/api/v1/models/unload"))
+                    .json(&json!({"instance_id": id}))
+                    .timeout(std::time::Duration::from_secs(30))
+                    .send()
+                    .await;
+            }
+        }
+        tracing::info!(model, context, "loading an LM Studio model");
+        let loaded = self
+            .client
+            .post(format!("{root}/api/v1/models/load"))
+            .json(&json!({"model": model, "context_length": context}))
+            .timeout(std::time::Duration::from_secs(300))
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status);
+        if let Err(error) = loaded {
+            tracing::warn!(model, %error, "LM Studio did not load the model");
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn for_test(endpoint: String) -> Self {
         let defaults = CompatibleModelDefaults {
@@ -404,6 +520,7 @@ impl OpenAiCompatibleProvider {
             auth_aliases: Vec::new(),
             xai_oauth: None,
             refresh_lock: Arc::default(),
+            load_lock: Arc::default(),
             renewal_limit: haarness_account::renewals::LIMIT,
             live_models: crate::live_models::LiveModels::default(),
             models: vec![model_info("openai-compatible", "compat-test", defaults)],
@@ -1174,6 +1291,46 @@ fn deepseek_charge(model: &str, at: chrono::DateTime<chrono::Utc>, usage: &Value
     let completion = count("completion_tokens");
     (prompt > 0.0 || completion > 0.0)
         .then(|| ((prompt - hit) * input + hit * cache_read + completion * output) / 1_000_000.0)
+}
+
+/// The context Haarness loads an LM Studio model with: room for the
+/// instructions, tools and a long chat, without the memory of a model's
+/// full window (often 256K).
+const LMSTUDIO_CONTEXT: u64 = 65_536;
+/// Less than this loaded, and a request is refused for its instructions and
+/// tools alone.
+const LMSTUDIO_MIN_CONTEXT: u64 = 32_768;
+
+/// The context an LM Studio model runs with in Haarness: what it is loaded
+/// with, else what Haarness loads it with.
+fn lmstudio_context(entry: &Value) -> u64 {
+    let longest = entry["max_context_length"]
+        .as_u64()
+        .unwrap_or(LMSTUDIO_CONTEXT);
+    entry["loaded_instances"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|instance| instance["config"]["context_length"].as_u64())
+        .filter(|loaded| *loaded >= LMSTUDIO_MIN_CONTEXT.min(longest))
+        .max()
+        .unwrap_or_else(|| LMSTUDIO_CONTEXT.min(longest))
+}
+
+/// One model's entry in LM Studio's own list, into what Haarness offers.
+fn apply_lmstudio_details(model: &mut ModelInfo, entry: &Value) {
+    if let Some(name) = entry["display_name"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+    {
+        model.display_name = name.to_owned();
+    }
+    let capabilities = &entry["capabilities"];
+    if let Some(vision) = capabilities["vision"].as_bool() {
+        model.images = vision;
+    }
+    model.tools = true;
+    model.context_window = Some(lmstudio_context(entry));
 }
 
 /// Ollama's 404 for a model it hasn't downloaded, with how to get it: the
@@ -1961,6 +2118,12 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     .map_err(|error| CoreError::Provider(error.to_string()))?,
             );
         }
+        if self.id == "lmstudio" {
+            tokio::select! {
+                () = cancel.cancelled() => return Err(CoreError::Cancelled),
+                loaded = self.lmstudio_load(&model) => loaded?,
+            }
+        }
         let builder = self
             .client
             .post(&self.endpoint)
@@ -2370,8 +2533,9 @@ mod tests {
 
     use super::{
         CompatibleInstance, CompatibleModelDefaults, ImageInput, OpenAiCompatibleProvider,
-        append_reasoning_details, apply_ollama_details, deepseek_charge, deepseek_peak,
-        discovered_model_info, local_model_missing, model_info, openai_compatible_media_message,
+        append_reasoning_details, apply_lmstudio_details, apply_ollama_details, deepseek_charge,
+        deepseek_peak, discovered_model_info, local_model_missing, model_info,
+        openai_compatible_media_message,
     };
 
     #[derive(Clone, Default)]
@@ -3338,6 +3502,138 @@ mod tests {
                 CompatibleModelDefaults::default()
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn lmstudio_details_name_a_model_and_its_room() {
+        let entry = |loaded: Option<u64>| {
+            json!({
+                "type": "llm",
+                "key": "qwen3-coder-30b-a3b-instruct",
+                "display_name": "Qwen3 Coder 30B A3B Instruct",
+                "max_context_length": 262_144,
+                "capabilities": {"vision": false, "trained_for_tool_use": false},
+                "loaded_instances": loaded.map_or_else(Vec::new, |context| {
+                    vec![json!({"id": "qwen3-coder-30b-a3b-instruct", "config": {"context_length": context}})]
+                }),
+            })
+        };
+        let mut model = model_info(
+            "lmstudio",
+            "qwen3-coder-30b-a3b-instruct",
+            CompatibleModelDefaults::default(),
+        );
+        apply_lmstudio_details(&mut model, &entry(None));
+        assert_eq!(model.display_name, "Qwen3 Coder 30B A3B Instruct");
+        assert!(!model.images);
+        assert!(model.tools, "LM Studio prompts any model for tools");
+        assert_eq!(
+            model.context_window,
+            Some(65_536),
+            "what Haarness loads it with"
+        );
+        // Loaded roomier by the person: that is what it has.
+        apply_lmstudio_details(&mut model, &entry(Some(131_072)));
+        assert_eq!(model.context_window, Some(131_072));
+        // Loaded too small: Haarness loads it again before a request.
+        apply_lmstudio_details(&mut model, &entry(Some(8_192)));
+        assert_eq!(model.context_window, Some(65_536));
+        // A model whose longest is short keeps it.
+        let mut small = entry(None);
+        small["max_context_length"] = json!(16_384);
+        apply_lmstudio_details(&mut model, &small);
+        assert_eq!(model.context_window, Some(16_384));
+    }
+
+    #[tokio::test]
+    async fn lmstudio_loads_a_model_with_room_before_the_request() {
+        #[derive(Clone, Default)]
+        struct Calls(Arc<Mutex<Vec<String>>>);
+        let calls = Calls::default();
+        let router = Router::new()
+            .route(
+                "/api/v1/models",
+                get(|State(calls): State<Calls>| async move {
+                    calls.0.lock().push("list".into());
+                    Json(json!({"models": [{
+                        "type": "llm",
+                        "key": "compat-test",
+                        "max_context_length": 262_144,
+                        "loaded_instances": [{"id": "compat-test", "config": {"context_length": 8_192}}],
+                    }]}))
+                }),
+            )
+            .route(
+                "/api/v1/models/unload",
+                post(|State(calls): State<Calls>, Json(body): Json<Value>| async move {
+                    calls.0.lock().push(format!("unload {}", body["instance_id"]));
+                    Json(json!({}))
+                }),
+            )
+            .route(
+                "/api/v1/models/load",
+                post(|State(calls): State<Calls>, Json(body): Json<Value>| async move {
+                    calls.0.lock().push(format!("load {} {}", body["model"], body["context_length"]));
+                    Json(json!({"status": "loaded"}))
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(|State(calls): State<Calls>| async move {
+                    calls.0.lock().push("chat".into());
+                    (
+                        [(CONTENT_TYPE, "text/event-stream")],
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ready\"},\"finish_reason\":\"stop\"}]}\n\n",
+                    )
+                }),
+            )
+            .with_state(calls.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut provider =
+            OpenAiCompatibleProvider::for_test(format!("http://{address}/v1/chat/completions"));
+        provider.id = "lmstudio".into();
+        let request = ProviderRequest {
+            model: "compat-test".into(),
+            system: "sys".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "go".into(),
+            }],
+            tools: vec![],
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        let events: Vec<_> = provider
+            .stream(request.clone(), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        assert_eq!(
+            *calls.0.lock(),
+            [
+                "list",
+                "unload \"compat-test\"",
+                "load \"compat-test\" 65536",
+                "chat"
+            ]
+        );
+        // LM Studio would answer a model it lacks with the loaded one.
+        let mut missing = request.clone();
+        missing.model = "qwen/qwen3-8b".into();
+        let Err(error) = provider.stream(missing, CancellationToken::new()).await else {
+            panic!("a model LM Studio lacks must be refused");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("LM Studio has no model qwen/qwen3-8b"),
+            "{error}"
         );
     }
 
