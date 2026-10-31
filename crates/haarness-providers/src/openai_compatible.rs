@@ -115,8 +115,11 @@ enum ReasoningReplay {
 }
 
 impl OpenAiCompatibleProvider {
-    fn reasoning_replay(&self) -> ReasoningReplay {
-        if matches!(self.id.as_str(), "deepseek" | "moonshotai" | "zai") {
+    fn reasoning_replay(&self, model: &str) -> ReasoningReplay {
+        // A Haarness Router passes `reasoning_content` through, and DeepSeek
+        // behind it refuses a tool call's next request without it.
+        let routed_deepseek = self.id.starts_with("router") && model.starts_with("deepseek/");
+        if matches!(self.id.as_str(), "deepseek" | "moonshotai" | "zai") || routed_deepseek {
             ReasoningReplay::Required
         } else if self.replay_observed_reasoning {
             ReasoningReplay::Observed
@@ -754,6 +757,8 @@ fn discovered_model_info(
     if let Some(modalities) = entry
         .pointer("/architecture/input_modalities")
         .or_else(|| entry.pointer("/modalities/input"))
+        // DeepSeek's own listing, also through a Haarness router.
+        .or_else(|| entry.get("input_modalities"))
         .and_then(Value::as_array)
     {
         info.images = modalities
@@ -777,11 +782,17 @@ fn discovered_model_info(
             )
         });
     }
-    if let Some(efforts) = entry["reasoning_efforts"].as_array() {
-        info.reasoning_efforts = efforts
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
+    // DeepSeek lists its levels as `effort.supported_levels`; its own
+    // provider can also turn thinking off (`none`).
+    if let Some(efforts) = entry["reasoning_efforts"].as_array().or_else(|| {
+        entry
+            .pointer("/effort/supported_levels")
+            .and_then(Value::as_array)
+    }) {
+        info.reasoning_efforts = (provider == "deepseek")
+            .then(|| "none".to_owned())
+            .into_iter()
+            .chain(efforts.iter().filter_map(Value::as_str).map(str::to_owned))
             .collect();
         info.reasoning = !info.reasoning_efforts.is_empty();
     }
@@ -839,6 +850,22 @@ fn discovered_model_info(
                 .unwrap_or(0.0)
                 * 1_000_000.0,
             long_context: long_context_override(entry),
+        });
+    }
+    // DeepSeek behind a self-hosted Haarness Router comes without prices: its
+    // own rates, at peak (see `deepseek_charge` for what a request cost).
+    if provider.starts_with("router")
+        && info.pricing.is_none()
+        && let Some((input, cache_read, output)) = id
+            .strip_prefix("deepseek/")
+            .and_then(|model| deepseek_rates(model, true))
+    {
+        info.pricing = Some(ModelPricing {
+            input,
+            output,
+            cache_read,
+            cache_write: 0.0,
+            long_context: None,
         });
     }
     // DeepInfra's compatible model list reports USD-per-million values under
@@ -907,12 +934,18 @@ fn deepseek_peak(at: chrono::DateTime<chrono::Utc>) -> bool {
 
 /// What a DeepSeek request cost, from its usage at the rates of the hour it
 /// ran: cache hits (`prompt_cache_hit_tokens`) at their own rate.
+#[allow(clippy::cast_precision_loss)] // a displayed cost, not accounting
 fn deepseek_charge(model: &str, at: chrono::DateTime<chrono::Utc>, usage: &Value) -> Option<f64> {
     let (input, cache_read, output) = deepseek_rates(model, deepseek_peak(at))?;
-    #[allow(clippy::cast_precision_loss)] // a displayed cost, not accounting
     let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0) as f64;
     let prompt = count("prompt_tokens");
-    let hit = count("prompt_cache_hit_tokens").min(prompt);
+    // A router may report DeepSeek's cache hits the OpenAI way.
+    let hit = usage
+        .get("prompt_cache_hit_tokens")
+        .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens"))
+        .and_then(Value::as_u64)
+        .map_or(0.0, |tokens| tokens as f64)
+        .min(prompt);
     let completion = count("completion_tokens");
     (prompt > 0.0 || completion > 0.0)
         .then(|| ((prompt - hit) * input + hit * cache_read + completion * output) / 1_000_000.0)
@@ -1407,7 +1440,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             )));
         }
         let model = request.model;
-        let replay = self.reasoning_replay();
+        let replay = self.reasoning_replay(&model);
         let mut messages = vec![json!({"role":"system","content":request.system})];
         let mut tool_media = Vec::new();
         for message in request.messages {
@@ -1565,13 +1598,15 @@ impl ModelProvider for OpenAiCompatibleProvider {
             body["tools"] = json!(tools);
         }
         // Alibaba refuses a forced call while Qwen thinks, which its reasoning
-        // models do unasked; DeepSeek does too, unless thinking is turned off.
+        // models do unasked; DeepSeek does too, unless thinking is turned off,
+        // directly or behind a router.
         let refuses_forced_while_thinking = (supports_reasoning
             && model
                 .rsplit('/')
                 .next()
                 .is_some_and(|name| name.to_ascii_lowercase().starts_with("qwen")))
-            || (self.id == "deepseek" && request.reasoning_effort.as_deref() != Some("none"));
+            || ((self.id == "deepseek" || model.starts_with("deepseek/"))
+                && request.reasoning_effort.as_deref() != Some("none"));
         if native_json {
             body["response_format"] = json!({"type":"json_schema","json_schema":{"name":STRUCTURED_OUTPUT_TOOL_NAME,"schema":structured_output}});
         } else if structured_output.is_some()
@@ -1647,7 +1682,16 @@ impl ModelProvider for OpenAiCompatibleProvider {
         }
         let request_id = crate::request_id(response.headers());
         let provider_id = self.id.clone();
-        let charged_model = model.clone();
+        // The DeepSeek model whose rates price this request: its own
+        // provider's, or one behind a self-hosted router, which reports no
+        // price (a Cloud router prices its own).
+        let deepseek_model = if self.id == "deepseek" {
+            Some(model.clone())
+        } else if self.id.starts_with("router") && !self.server_output_limit {
+            model.strip_prefix("deepseek/").map(str::to_owned)
+        } else {
+            None
+        };
         let mut events = json_stream(response, cancel, limits);
         // A Cloud workspace's own router (the Haarness Cloud provider translates its errors itself).
         if self.server_output_limit && self.id != "haarness" {
@@ -1699,8 +1743,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     if provider_id == "openrouter" {
                         charged = chunk_usage.get("cost").and_then(Value::as_f64).filter(|cost| *cost >= 0.0).or(charged);
                     }
-                    if provider_id == "deepseek" {
-                        charged = deepseek_charge(&charged_model, chrono::Utc::now(), chunk_usage).or(charged);
+                    if let Some(model) = deepseek_model.as_deref() {
+                        charged = deepseek_charge(model, chrono::Utc::now(), chunk_usage).or(charged);
                     }
                     usage = Some((
                         count(&["/prompt_tokens"]),
@@ -2718,6 +2762,25 @@ mod tests {
     }
 
     #[test]
+    fn deepseeks_own_listing_names_images_and_levels() {
+        let entry = json!({"id": "deepseek-flash", "name": "DeepSeek-V4.1-Flash",
+            "input_modalities": ["text", "image"], "effort": {"supported_levels": ["low", "high", "max"], "default_level": "high"}});
+        let direct =
+            discovered_model_info("deepseek", &entry, CompatibleModelDefaults::default()).unwrap();
+        assert!(direct.images && direct.reasoning);
+        assert_eq!(direct.reasoning_efforts, ["none", "low", "high", "max"]);
+        assert_eq!(direct.display_name, "DeepSeek V4.1 Flash");
+        let mut routed = entry.clone();
+        routed["id"] = json!("deepseek/deepseek-flash");
+        let routed =
+            discovered_model_info("router", &routed, CompatibleModelDefaults::default()).unwrap();
+        assert!(routed.images);
+        assert_eq!(routed.reasoning_efforts, ["low", "high", "max"]);
+        // A self-hosted router lists no price: DeepSeek's own, at peak.
+        assert_eq!(routed.pricing.map(|price| price.input), Some(0.30));
+    }
+
+    #[test]
     fn deepseek_bills_peak_hours_on_weekdays_only() {
         use chrono::TimeZone as _;
         let at = |day: u32, hour: u32, minute: u32| {
@@ -2786,18 +2849,34 @@ mod tests {
                 _ => None,
             }));
         }
-        let requests = state.0.lock();
-        assert_eq!(requests[0]["thinking"]["type"], "enabled");
-        assert!(
-            requests[0].get("tool_choice").is_none(),
-            "{:?}",
-            requests[0]
-        );
-        assert_eq!(requests[1]["thinking"]["type"], "disabled");
-        assert_eq!(requests[1]["tool_choice"], "required");
-        // Every request says what it cost, at the hour it ran.
-        assert_eq!(costs.len(), 2);
-        assert!(costs.iter().all(|cost| *cost > 0.0));
+        {
+            let requests = state.0.lock();
+            assert_eq!(requests[0]["thinking"]["type"], "enabled");
+            assert!(
+                requests[0].get("tool_choice").is_none(),
+                "{:?}",
+                requests[0]
+            );
+            assert_eq!(requests[1]["thinking"]["type"], "disabled");
+            assert_eq!(requests[1]["tool_choice"], "required");
+            // Every request says what it cost, at the hour it ran.
+            assert_eq!(costs.len(), 2);
+            assert!(costs.iter().all(|cost| *cost > 0.0));
+        }
+        // A DeepSeek model behind a router thinks too.
+        let (routed, routed_state) = openrouter_fixture(post(completions_recording_headers)).await;
+        let mut request = short_request();
+        request.model = "deepseek/deepseek-v4-pro".into();
+        request.reasoning_effort = Some("high".into());
+        request.output_schema =
+            Some(json!({"type":"object","properties":{"answer":{"type":"string"}}}));
+        let _ = routed
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(routed_state.0.lock()[0].get("tool_choice").is_none());
     }
 
     fn short_request() -> ProviderRequest {
