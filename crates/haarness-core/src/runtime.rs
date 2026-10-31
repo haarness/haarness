@@ -1561,6 +1561,22 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             ),
         };
     }
+    // A provider's own account out of money (DeepSeek's "Insufficient
+    // Balance", OpenRouter's credits): only a top-up there helps. Haarness
+    // Cloud's own refusals arrive already worded.
+    if raw.starts_with("HTTP 402") {
+        let reason = refusal_reason_text(raw)
+            .map(|reason| format!(" ({})", reason.trim_end_matches('.')))
+            .unwrap_or_default();
+        return match provider {
+            Some(name) => format!(
+                "Your {name} account is out of credit{reason}. Add credit with {name}, then try again."
+            ),
+            None => format!(
+                "The provider account is out of credit{reason}. Add credit with the provider, then try again."
+            ),
+        };
+    }
     if is_provider_usage_limit(error) {
         // The provider's own words say which limit and what helps; a bare
         // code (`insufficient_quota`) says less than the general advice.
@@ -20481,6 +20497,13 @@ mod tests {
         assert_eq!(
             super::user_facing_error(&CoreError::Provider("HTTP 429: insufficient_quota".into())),
             "Provider rate limit or quota reached. Wait and retry, or check the account quota."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider("HTTP 402 Payment Required: Insufficient Balance".into()),
+                Some("DeepSeek")
+            ),
+            "Your DeepSeek account is out of credit (Insufficient Balance). Add credit with DeepSeek, then try again."
         );
         assert_eq!(
             super::describe_error(
