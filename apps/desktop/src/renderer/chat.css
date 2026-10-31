@@ -1371,15 +1371,19 @@ html[dir="rtl"] .tool-target {
   display: none;
 }
 /* A new chat is one group: the mark, the question and the message box under
-   it, together a little above the middle of the window. The spacers share
-   the room left; a box that grows takes it from both. */
+   it, together a little above the middle of the window. The room above is
+   set from the window alone, so a box that grows (a second line, an
+   attachment) takes the room below and the question holds still. */
 .conversation.empty-start::before,
 .conversation.empty-start::after {
   content: "";
-  flex: 1 1 0;
+}
+.conversation.empty-start::before {
+  flex: 0 1 auto;
+  height: max(0px, calc(50% - 190px));
 }
 .conversation.empty-start::after {
-  flex-grow: 1.3;
+  flex: 1 1 0;
 }
 .empty-start .transcript-frame {
   flex: 0 1 auto;

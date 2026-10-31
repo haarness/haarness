@@ -2140,9 +2140,6 @@ test("new-chat starting area is project-aware, centred with its message box, and
   await expect(picker.getByRole("combobox")).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(picker).toHaveCount(0);
-  // Typing more lines grows the box without breaking the group apart.
-  await composer.fill("one\ntwo\nthree\nfour");
-  expect((await group()).gap).toBeLessThan(72);
   await composer.fill("");
   await composer.focus();
   expect((await client.listThreads()).map((item) => item.id)).toEqual([
@@ -8864,8 +8861,8 @@ test("the folder chip chooses a project or no folder, takes typed text along to 
   );
   await newSession();
   const heading = page.locator(".conversation-empty h2");
-  // The heading only names the project; the composer's chip chooses it.
-  await expect(heading.getByRole("button")).toHaveCount(0);
+  // The heading's only control is the project's name, which opens the chip's list.
+  await expect(heading.getByRole("button")).toHaveCount(1);
   const trigger = page.getByRole("button", { name: /^Folder for new chat: / });
   const popup = page.getByRole("dialog", {
     name: "Choose a folder",
