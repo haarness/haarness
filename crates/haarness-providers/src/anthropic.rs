@@ -491,15 +491,7 @@ impl ModelProvider for AnthropicProvider {
         }
         let parameters = &request.parameters;
         // The models whose thinking blocks are bound to the prompt before them.
-        let bound_thinking = adaptive
-            && [
-                "claude-fable-5-1",
-                "claude-opus-5-5",
-                "claude-sonnet-5-5",
-                "claude-haiku-5-5",
-            ]
-            .iter()
-            .any(|prefix| request.model.starts_with(prefix));
+        let bound_thinking = adaptive && binds_thinking(&request.model);
         if bound_thinking {
             // Like OpenCode, allow prompt/tool refresh and compaction to retire
             // invalidated reasoning instead of breaking the conversation.
@@ -515,7 +507,8 @@ impl ModelProvider for AnthropicProvider {
         let thinking = body.get("thinking").is_some();
         // New Claude families reject sampling parameters; older models only
         // permit temperature/top_k when thinking is off, and top_p >= .95 on.
-        let sampling = !adaptive_thinking(&request.model);
+        // The live catalog decides which family a model is, as above.
+        let sampling = !adaptive;
         if let Some(temperature) = parameters.temperature.filter(|_| sampling && !thinking) {
             body["temperature"] = json!(temperature);
         }
@@ -703,18 +696,72 @@ impl ModelProvider for AnthropicProvider {
     }
 }
 
+/// The newest Claude release Haarness has seen. A release past it takes the
+/// newest behaviour of every rule below until the live catalog says more.
+pub(crate) const NEWEST_CLAUDE: (u32, u32) = (5, 5);
+
+/// A Claude release read from its id under any vendor spelling:
+/// `claude-opus-5-5`, `anthropic/claude-sonnet-5.5`,
+/// `us.anthropic.claude-fable-5-1-v1:0` and the older `claude-3-5-sonnet`.
+/// A dated snapshot (`-20250514`) is not a minor version.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ClaudeRelease {
+    pub family: String,
+    pub version: (u32, u32),
+}
+
+pub(crate) fn claude_release(id: &str) -> Option<ClaudeRelease> {
+    let lower = id.to_ascii_lowercase().replace('.', "-");
+    let (_, rest) = lower.split_once("claude-")?;
+    let number = |part: &str| {
+        (!part.is_empty() && part.len() <= 2 && part.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| part.parse::<u32>().ok())
+            .flatten()
+    };
+    let parts: Vec<&str> = rest.split(['-', ':']).collect();
+    let (family, numbers) = match parts.first().copied().and_then(number) {
+        // The older spelling puts the version first: `claude-3-5-sonnet`.
+        Some(_) => {
+            let count = parts
+                .iter()
+                .take_while(|part| number(part).is_some())
+                .count();
+            (
+                parts.get(count).copied().unwrap_or_default(),
+                &parts[..count],
+            )
+        }
+        None => {
+            let count = parts[1..]
+                .iter()
+                .take_while(|part| number(part).is_some())
+                .count();
+            (parts[0], &parts[1..=count])
+        }
+    };
+    let major = numbers.first().copied().and_then(number)?;
+    let minor = numbers.get(1).copied().and_then(number).unwrap_or(0);
+    Some(ClaudeRelease {
+        family: family.to_owned(),
+        version: (major, minor),
+    })
+}
+
+/// Claude 5 onwards and Opus 4.7 onwards think adaptively, take effort
+/// levels up to `max` and reject sampling parameters. A model the live
+/// catalog lists says so itself; this decides only for the rest.
 pub(crate) fn adaptive_thinking(id: &str) -> bool {
-    [
-        "claude-fable-5",
-        "claude-mythos-5",
-        "claude-opus-5",
-        "claude-sonnet-5",
-        "claude-haiku-5",
-        "claude-opus-4-7",
-        "claude-opus-4-8",
-    ]
-    .iter()
-    .any(|prefix| id.starts_with(prefix))
+    claude_release(id).is_some_and(|release| {
+        release.version >= (5, 0) || (release.family == "opus" && release.version >= (4, 7))
+    })
+}
+
+/// Claude 5.5 onwards (Fable from 5.1) binds its thinking blocks to the
+/// prompt before them, so a refreshed prompt must retire them.
+fn binds_thinking(id: &str) -> bool {
+    claude_release(id).is_some_and(|release| {
+        release.version >= (5, 5) || (release.family == "fable" && release.version >= (5, 1))
+    })
 }
 
 fn model(id: &str) -> ModelInfo {
@@ -815,10 +862,15 @@ fn discovered_model_for(entry: &Value, require_claude_prefix: bool) -> Option<Mo
                 Vec::new()
             };
         } else if effort["supported"].as_bool() == Some(true) {
-            info.reasoning_efforts = ["low", "medium", "high", "xhigh", "max"]
+            // Every level the entry lists, in its order, a new one included.
+            info.reasoning_efforts = effort
+                .as_object()
                 .into_iter()
-                .filter(|name| effort[*name]["supported"].as_bool() == Some(true))
-                .map(str::to_owned)
+                .flatten()
+                .filter(|(name, level)| {
+                    name.as_str() != "supported" && level["supported"].as_bool() == Some(true)
+                })
+                .map(|(name, _)| name.clone())
                 .collect();
         }
     }
@@ -1259,6 +1311,199 @@ mod tests {
             .unwrap();
         assert_eq!(future.context_window, Some(2_000_000));
         assert_eq!(future.max_output_tokens, Some(192_000));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_new_claude_model_appears_with_its_listed_levels() {
+        async fn listing(State(state): State<FixtureState>) -> Json<Value> {
+            let mut data = vec![json!({
+                "id": "claude-nova-7",
+                "display_name": "Claude Nova 7",
+                "capabilities": {
+                    "thinking": {"supported": true, "types": {"adaptive": {"supported": true}}},
+                    "effort": {
+                        "supported": true,
+                        "low": {"supported": true},
+                        "high": {"supported": true},
+                        "max": {"supported": true},
+                        "ultra": {"supported": true},
+                        "xhigh": {"supported": false}
+                    }
+                }
+            })];
+            // The second read no longer lists Sonnet 5.5.
+            if state.0.lock().is_empty() {
+                data.push(json!({"id": "claude-sonnet-5-5", "display_name": "Claude Sonnet 5.5"}));
+            }
+            state.0.lock().push(json!({}));
+            Json(json!({"data": data, "has_more": false}))
+        }
+        let state = FixtureState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/models", get(listing))
+            .with_state(state.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"))
+            .discover_models()
+            .await;
+        let ids = |provider: &AnthropicProvider| {
+            provider
+                .info()
+                .models
+                .into_iter()
+                .map(|model| model.id)
+                .collect::<Vec<_>>()
+        };
+        // The live list replaces the static one.
+        assert_eq!(ids(&provider), ["claude-sonnet-5-5", "claude-nova-7"]);
+        let nova = provider
+            .info()
+            .models
+            .into_iter()
+            .find(|model| model.id == "claude-nova-7")
+            .unwrap();
+        assert_eq!(nova.reasoning_efforts, ["low", "high", "max", "ultra"]);
+        assert!(nova.reasoning && nova.tools);
+        assert!(
+            nova.pricing.is_none(),
+            "no price is borrowed from another release"
+        );
+        // A model the next read no longer lists is gone, though the static
+        // list still names it.
+        let later = AnthropicProvider::for_test(format!("http://{address}/messages"))
+            .discover_models()
+            .await;
+        assert!(
+            later
+                .models
+                .iter()
+                .any(|model| model.id == "claude-sonnet-5-5")
+        );
+        assert_eq!(ids(&later), ["claude-nova-7"]);
+    }
+
+    #[tokio::test]
+    async fn sampling_follows_the_live_catalog_before_the_release_rule() {
+        async fn reply(
+            State(state): State<FixtureState>,
+            Json(body): Json<Value>,
+        ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+            state.0.lock().push(body);
+            (
+                [(CONTENT_TYPE, "text/event-stream")],
+                "data: {\"type\":\"message_stop\"}\n\n".into(),
+            )
+        }
+        let state = FixtureState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/messages", post(reply))
+            .with_state(state.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"));
+        {
+            let mut live = provider.adaptive_models.write().unwrap();
+            live.insert("claude-opus-6".into(), false);
+            live.insert("future-deployment".into(), true);
+        }
+        for model in ["claude-opus-6", "future-deployment", "claude-opus-7"] {
+            let request = ProviderRequest {
+                model: model.into(),
+                system: "test".into(),
+                messages: vec![ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+                tools: vec![],
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters {
+                    temperature: Some(0.3),
+                    ..haarness_core::RequestParameters::default()
+                },
+                output_schema: None,
+            };
+            let stream = provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap();
+            let _ = stream.collect::<Vec<_>>().await;
+        }
+        let bodies = state.0.lock();
+        // The catalog says Opus 6 is not adaptive: sampling goes through.
+        assert_eq!(bodies[0]["temperature"], 0.3);
+        assert!(bodies[0].get("thinking").is_none());
+        // An adaptive deployment the rule cannot name takes none.
+        assert!(bodies[1].get("temperature").is_none());
+        // Unlisted, a newer release than any known takes the newest behaviour.
+        assert!(bodies[2].get("temperature").is_none());
+        assert_eq!(bodies[2]["thinking"]["type"], "adaptive");
+    }
+
+    #[test]
+    fn claude_releases_are_read_from_any_spelling() {
+        use super::{ClaudeRelease, adaptive_thinking, binds_thinking, claude_release};
+        let release = |family: &str, version| {
+            Some(ClaudeRelease {
+                family: family.into(),
+                version,
+            })
+        };
+        assert_eq!(claude_release("claude-opus-5-5"), release("opus", (5, 5)));
+        assert_eq!(
+            claude_release("anthropic/claude-sonnet-5.5"),
+            release("sonnet", (5, 5))
+        );
+        assert_eq!(
+            claude_release("us.anthropic.claude-fable-5-1-v1:0"),
+            release("fable", (5, 1))
+        );
+        assert_eq!(
+            claude_release("claude-opus-4-20250514"),
+            release("opus", (4, 0))
+        );
+        assert_eq!(
+            claude_release("claude-3-5-sonnet-20241022"),
+            release("sonnet", (3, 5))
+        );
+        assert_eq!(claude_release("claude-test"), None);
+        assert_eq!(claude_release("MiniMax-M3"), None);
+        // Listed releases keep their answers; a newer one takes the newest.
+        for id in [
+            "claude-fable-5",
+            "claude-mythos-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-5-5",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-6",
+            "claude-nova-7",
+        ] {
+            assert!(adaptive_thinking(id), "{id}");
+        }
+        for id in [
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+            "claude-test",
+        ] {
+            assert!(!adaptive_thinking(id), "{id}");
+        }
+        for id in [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-sonnet-6",
+        ] {
+            assert!(binds_thinking(id), "{id}");
+        }
+        for id in ["claude-fable-5", "claude-opus-5", "claude-mythos-5-1"] {
+            assert!(!binds_thinking(id), "{id}");
+        }
     }
 
     #[tokio::test]
