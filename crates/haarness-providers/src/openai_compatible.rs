@@ -1176,6 +1176,22 @@ fn deepseek_charge(model: &str, at: chrono::DateTime<chrono::Utc>, usage: &Value
         .then(|| ((prompt - hit) * input + hit * cache_read + completion * output) / 1_000_000.0)
 }
 
+/// Ollama's 404 for a model it hasn't downloaded, with how to get it: the
+/// picker lists only downloaded models, so this is a model typed by hand or
+/// removed since the chat began.
+fn local_model_missing(error: CoreError, model: &str) -> CoreError {
+    match error {
+        CoreError::Provider(text)
+            if text.starts_with("HTTP 404") && text.ends_with("not found") =>
+        {
+            CoreError::Provider(format!(
+                "{text}. Download it with `ollama pull {model}`, or pick a model you have."
+            ))
+        }
+        other => other,
+    }
+}
+
 /// One model's `/api/show` answer from Ollama, into what Haarness offers.
 fn apply_ollama_details(model: &mut ModelInfo, details: &Value) {
     let capabilities: Vec<&str> = details["capabilities"]
@@ -1703,10 +1719,30 @@ impl ModelProvider for OpenAiCompatibleProvider {
             )));
         }
         let model = request.model;
+        let model_name = selected.map_or(model.as_str(), |model| model.display_name.as_str());
         let replay = self.reasoning_replay(&model);
+        // The person's newest message: nothing has answered it yet.
+        let newest = request.messages.iter().rposition(|message| {
+            matches!(message, ProviderMessage::Text { role, .. } | ProviderMessage::Media { role, .. } if role == "user")
+        });
+        let answered = newest.is_some_and(|newest| {
+            request.messages[newest..].iter().any(|message| {
+                matches!(message, ProviderMessage::Text { role, .. } if role == "assistant")
+                    || matches!(message, ProviderMessage::ToolCall { .. })
+            })
+        });
+        let images = |index: usize| {
+            if supports_images {
+                ImageInput::Read
+            } else if Some(index) == newest && !answered {
+                ImageInput::Refuse(model_name)
+            } else {
+                ImageInput::Note
+            }
+        };
         let mut messages = vec![json!({"role":"system","content":request.system})];
         let mut tool_media = Vec::new();
-        for message in request.messages {
+        for (index, message) in request.messages.into_iter().enumerate() {
             if !matches!(&message, ProviderMessage::ToolResult { .. }) {
                 messages.append(&mut tool_media);
             }
@@ -1738,8 +1774,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     &role,
                     &content,
                     &attachments,
-                    supports_images,
-                    &model,
+                    images(index),
                 )?),
                 ProviderMessage::ToolCall {
                     call_id,
@@ -1819,8 +1854,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                             "user",
                             "The preceding tool result includes this binary document or media.",
                             &attachments,
-                            supports_images,
-                            &model,
+                            images(index).note_only(),
                         )?);
                     }
                 }
@@ -2017,6 +2051,12 @@ impl ModelProvider for OpenAiCompatibleProvider {
         if self.server_output_limit && self.id != "haarness" {
             events = Box::pin(futures::StreamExt::map(events, |event| {
                 event.map_err(crate::haarness_cloud::readable_router)
+            }));
+        }
+        if self.id == "ollama" {
+            let model = model.clone();
+            events = Box::pin(futures::StreamExt::map(events, move |event| {
+                event.map_err(|error| local_model_missing(error, &model))
             }));
         }
         Ok(Box::pin(try_stream! {
@@ -2219,12 +2259,33 @@ impl ModelProvider for OpenAiCompatibleProvider {
     }
 }
 
+/// What a request does with an image, by whether its model reads them.
+#[derive(Debug, Clone, Copy)]
+enum ImageInput<'a> {
+    Read,
+    /// In the person's newest message: they are told, by the model's name,
+    /// and can send it without the picture or switch models.
+    Refuse(&'a str),
+    /// Earlier in the chat (sent to another model) or from a tool: a note
+    /// stands in for it, so one picture does not fail every later turn.
+    Note,
+}
+
+impl ImageInput<'_> {
+    /// A tool's picture never refuses the turn: the model goes on without it.
+    fn note_only(self) -> Self {
+        match self {
+            Self::Refuse(_) => Self::Note,
+            other => other,
+        }
+    }
+}
+
 fn openai_compatible_media_message(
     role: &str,
     content: &str,
     attachments: &[String],
-    supports_images: bool,
-    model: &str,
+    images: ImageInput<'_>,
 ) -> CoreResult<Value> {
     // A photo sent on its own has no text. Claude refuses a blank text block,
     // including through a router that passes the request on to Anthropic, so
@@ -2235,12 +2296,20 @@ fn openai_compatible_media_message(
     }
     for item in crate::media::load_all(attachments)? {
         if item.is_image() {
-            if !supports_images {
-                return Err(CoreError::Provider(format!(
-                    "model {model} does not advertise image input; set the provider images override only when its API supports images"
-                )));
+            match images {
+                ImageInput::Read => {
+                    blocks.push(json!({"type":"image_url","image_url":{"url":item.data_url()}}));
+                }
+                ImageInput::Refuse(model) => {
+                    return Err(CoreError::Provider(format!(
+                        "{model} doesn't read images. Send the message without the picture, or switch to a model that reads them."
+                    )));
+                }
+                ImageInput::Note => blocks.push(json!({
+                    "type":"text",
+                    "text":format!("[Image {} left out: this model doesn't read images. Don't guess what it shows.]", item.filename)
+                })),
             }
-            blocks.push(json!({"type":"image_url","image_url":{"url":item.data_url()}}));
         } else if item.is_pdf() {
             blocks.push(json!({
                 "type":"file",
@@ -2294,15 +2363,15 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use haarness_core::{
-        ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest, ToolDefinition,
+        CoreError, ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest, ToolDefinition,
     };
 
     use crate::auth::{Credential, CredentialStore, XaiOAuthClient, XaiOAuthConfig};
 
     use super::{
-        CompatibleInstance, CompatibleModelDefaults, OpenAiCompatibleProvider,
+        CompatibleInstance, CompatibleModelDefaults, ImageInput, OpenAiCompatibleProvider,
         append_reasoning_details, apply_ollama_details, deepseek_charge, deepseek_peak,
-        discovered_model_info, model_info, openai_compatible_media_message,
+        discovered_model_info, local_model_missing, model_info, openai_compatible_media_message,
     };
 
     #[derive(Clone, Default)]
@@ -3059,8 +3128,7 @@ mod tests {
                 "user",
                 content,
                 &["data:image/png;name=photo-1.png;base64,iVBORw0KGgo=".into()],
-                true,
-                "anthropic/claude-sonnet-5.5",
+                ImageInput::Read,
             )
             .unwrap();
             let blocks = message["content"].as_array().unwrap();
@@ -3071,8 +3139,7 @@ mod tests {
             "user",
             "What is this?",
             &["data:image/png;base64,iVBORw0KGgo=".into()],
-            true,
-            "anthropic/claude-sonnet-5.5",
+            ImageInput::Read,
         )
         .unwrap();
         assert_eq!(message["content"][0]["text"], "What is this?");
@@ -3088,8 +3155,7 @@ mod tests {
                 "data:application/pdf;name=agenda.pdf;base64,JVBERi0xLjQK".into(),
                 "data:audio/mpeg;name=meeting.mp3;base64,SUQz".into(),
             ],
-            false,
-            "multimodal-test",
+            ImageInput::Note,
         )
         .unwrap();
         assert_eq!(message["content"][1]["type"], "file");
@@ -3101,8 +3167,7 @@ mod tests {
             "user",
             "Watch this",
             &["data:video/mp4;base64,AAAAIGZ0eXA=".into()],
-            true,
-            "multimodal-test",
+            ImageInput::Read,
         )
         .unwrap_err();
         assert!(error.to_string().contains("not portable"));
@@ -3273,6 +3338,23 @@ mod tests {
                 CompatibleModelDefaults::default()
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn a_model_ollama_lacks_says_how_to_get_it() {
+        let missing = local_model_missing(
+            CoreError::Provider("HTTP 404 Not Found: model 'llama3.2:1b' not found".into()),
+            "llama3.2:1b",
+        );
+        assert_eq!(
+            missing.to_string(),
+            CoreError::Provider("HTTP 404 Not Found: model 'llama3.2:1b' not found. Download it with `ollama pull llama3.2:1b`, or pick a model you have.".into()).to_string()
+        );
+        let other = local_model_missing(CoreError::Provider("HTTP 500".into()), "llama3.2:1b");
+        assert_eq!(
+            other.to_string(),
+            CoreError::Provider("HTTP 500".into()).to_string()
         );
     }
 
@@ -4144,6 +4226,86 @@ mod tests {
         assert_eq!(requests[0]["tools"][0]["function"]["name"], "plain");
         assert_eq!(count(&requests[1]), 2);
         assert_eq!(count(&requests[2]), 2, "only Haarness routers are filtered");
+    }
+
+    #[tokio::test]
+    async fn a_text_only_model_refuses_only_the_newest_picture() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/chat/completions", post(completions))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut provider =
+            OpenAiCompatibleProvider::for_test(format!("http://{address}/chat/completions"));
+        provider.models[0].images = false;
+        provider.models[0].display_name = "Coder 30B".into();
+        let picture = || vec!["data:image/png;name=shot.png;base64,iVBORw0KGgo=".to_owned()];
+        let text = |role: &str, content: &str| ProviderMessage::Text {
+            role: role.into(),
+            content: content.into(),
+        };
+        let request = |messages| ProviderRequest {
+            model: "compat-test".into(),
+            system: "sys".into(),
+            messages,
+            tools: vec![],
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        let picture_message = || ProviderMessage::Media {
+            role: "user".into(),
+            content: "what is this?".into(),
+            attachments: picture(),
+        };
+
+        // Sent now: the person hears it, by the model's name.
+        let Err(error) = provider
+            .stream(request(vec![picture_message()]), CancellationToken::new())
+            .await
+        else {
+            panic!("a picture for a text-only model must be refused");
+        };
+        assert!(
+            error.to_string().contains("Coder 30B doesn't read images"),
+            "{error}"
+        );
+        assert!(state.0.lock().is_empty());
+
+        // Sent earlier (to another model), or returned by a tool: a note.
+        let messages = vec![
+            picture_message(),
+            text("assistant", "A cat."),
+            text("user", "read the screenshot"),
+            ProviderMessage::ToolCall {
+                call_id: "call-1".into(),
+                name: "read".into(),
+                arguments: json!({"path": "shot.png"}),
+                provider_metadata: Value::Null,
+            },
+            ProviderMessage::ToolResult {
+                call_id: "call-1".into(),
+                name: "read".into(),
+                output: "shot.png".into(),
+                attachments: picture(),
+                is_error: false,
+            },
+        ];
+        provider
+            .stream(request(messages), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let sent = state.0.lock()[0]["messages"].to_string();
+        assert!(!sent.contains("image_url"), "{sent}");
+        assert_eq!(
+            sent.matches("[Image shot.png left out").count(),
+            2,
+            "{sent}"
+        );
     }
 
     #[tokio::test]
@@ -5144,7 +5306,7 @@ mod tests {
             Ok(_) => panic!("unsupported image request must fail before HTTP"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("does not advertise image input"));
+        assert!(error.to_string().contains("doesn't read images"));
         assert_eq!(
             state.0.lock().len(),
             1,

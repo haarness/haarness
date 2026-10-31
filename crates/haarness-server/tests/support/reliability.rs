@@ -880,7 +880,7 @@ async fn reliability_fallback_preserves_explicit_models_and_surfaces_configurati
             "missing-provider/model",
             None,
             true,
-            Err("unknown provider"),
+            Err("Provider missing-provider isn't connected"),
         ),
         ("echo/retired-model", None, false, Err("not authenticated")),
         ("bad-alias", None, true, Err("Unknown model alias")),

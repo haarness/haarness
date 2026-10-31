@@ -45,6 +45,10 @@ pub enum CoreError {
     ProviderBlocked(String),
     #[error("Provider response ended before completion ({0}).")]
     ProviderIncomplete(String),
+    /// The chat's provider isn't here now: a model runtime that stopped, or
+    /// a provider disconnected since the chat began. Said as it is.
+    #[error("{0}")]
+    ProviderUnavailable(String),
     #[error("storage error: {0}")]
     Storage(String),
     #[error("tool error: {0}")]
@@ -82,6 +86,7 @@ impl CoreError {
             Self::ProviderIncomplete(_) => "provider_incomplete",
             Self::Storage(_) => "storage_error",
             Self::Tool(_) => "tool_error",
+            Self::ProviderUnavailable(_) => "provider_unavailable",
             Self::Cancelled => "cancelled",
         }
     }

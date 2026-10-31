@@ -5436,6 +5436,28 @@ fn not_connected_provider(info: &haarness_protocol::ProviderInfo) -> String {
 }
 
 fn unavailable_provider(id: &str) -> String {
+    // A local runtime is listed only while it answers on its port.
+    let local = match id {
+        "ollama" => Some((
+            "Ollama",
+            11_434,
+            "open the Ollama app or run `ollama serve`",
+        )),
+        "lmstudio" => Some((
+            "LM Studio's server",
+            1_234,
+            "turn it on in LM Studio's Developer tab or run `lms server start`",
+        )),
+        _ => None,
+    };
+    if let Some((name, port, start)) = local {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err() {
+            return format!(
+                "{name} isn't running on this computer. To start it, {start}, then try again."
+            );
+        }
+    }
     format!("Provider {id} is not available. `haarness providers` lists the ones you can use.")
 }
 

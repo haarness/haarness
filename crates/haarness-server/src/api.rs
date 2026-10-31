@@ -3470,6 +3470,11 @@ fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
         CoreError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error", true),
         CoreError::ProviderBlocked(_) => (StatusCode::BAD_GATEWAY, "provider_blocked", false),
         CoreError::ProviderIncomplete(_) => (StatusCode::BAD_GATEWAY, "provider_incomplete", true),
+        CoreError::ProviderUnavailable(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "provider_unavailable",
+            true,
+        ),
         CoreError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error", true),
         CoreError::Tool(_) => (StatusCode::UNPROCESSABLE_ENTITY, "tool_error", false),
         CoreError::Cancelled => (StatusCode::CONFLICT, "cancelled", false),

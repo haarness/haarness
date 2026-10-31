@@ -562,8 +562,20 @@ fn failure_message(error: &mut CoreError) -> Option<&mut String> {
         | CoreError::Provider(_)
         | CoreError::ProviderBlocked(_)
         | CoreError::ProviderIncomplete(_)
+        | CoreError::ProviderUnavailable(_)
         | CoreError::Cancelled => None,
     }
+}
+
+/// A chat's provider this server doesn't have now. A model runtime on the
+/// computer is listed only while it answers, so its chats find it gone once
+/// it stops; another provider was disconnected since the chat began.
+fn missing_provider(id: &str) -> CoreError {
+    CoreError::ProviderUnavailable(match id {
+        "ollama" => "Ollama isn't running. Start it on the computer this chat runs on, then send your message again.".into(),
+        "lmstudio" => "LM Studio's server isn't running. Start it on the computer this chat runs on, then send your message again.".into(),
+        _ => format!("Provider {id} isn't connected. Connect it, or pick another model."),
+    })
 }
 
 /// A failed call's error without what hooks added after it, so goal
@@ -3631,9 +3643,10 @@ impl AgentRuntime {
         let (provider, mut prepared) = if let Some(prepared) = prepared {
             prepared
         } else {
-            let provider = components.providers.get(&thread.provider).ok_or_else(|| {
-                CoreError::Invalid(format!("unknown provider {}", thread.provider))
-            })?;
+            let provider = components
+                .providers
+                .get(&thread.provider)
+                .ok_or_else(|| missing_provider(&thread.provider))?;
             let custom = self.custom_agent(&thread.agent);
             let workspace = self.thread_workspace(&thread, FolderAccess::Read).await?;
             let context = SystemPromptContext {
@@ -4560,7 +4573,7 @@ impl AgentRuntime {
             .components()
             .providers
             .get(&thread.provider)
-            .ok_or_else(|| CoreError::Invalid(format!("unknown provider {}", thread.provider)))?;
+            .ok_or_else(|| missing_provider(&thread.provider))?;
         let input_limit = self.compaction_input_limit_for(&thread.provider, &thread.model);
         if items.is_empty() {
             return Err(CoreError::Invalid("nothing to compact".into()));
@@ -9229,7 +9242,7 @@ impl RunnerTask {
             let provider: Arc<dyn ModelProvider> = self
                 .providers
                 .get(provider_id)
-                .ok_or_else(|| CoreError::Invalid(format!("unknown provider {provider_id}")))?;
+                .ok_or_else(|| missing_provider(provider_id))?;
             let model = self
                 .request
                 .model
@@ -13750,7 +13763,7 @@ fn subagent_model(
     if let Some((provider, model)) = resolved {
         let available = registry
             .get(&provider)
-            .ok_or_else(|| CoreError::Invalid(format!("unknown provider {provider}")))?;
+            .ok_or_else(|| missing_provider(&provider))?;
         if !available.info().authenticated {
             return Err(CoreError::Provider(format!(
                 "configured provider {provider} is not authenticated"
@@ -13996,7 +14009,7 @@ async fn generate_title(
 ) -> CoreResult<String> {
     let provider = providers
         .get(provider_id)
-        .ok_or_else(|| CoreError::Invalid(format!("unknown provider {provider_id}")))?;
+        .ok_or_else(|| missing_provider(provider_id))?;
     let request = ProviderRequest {
         model,
         system: system.to_owned(),
