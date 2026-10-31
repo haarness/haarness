@@ -245,9 +245,17 @@ impl OpenAiCompatibleProvider {
             };
             headers.insert(AUTHORIZATION, value);
         }
+        // xAI's `/language-models` lists only its chat models, with their
+        // input, levels and prices; `/models` mixes in image and video
+        // generators and says none of that.
+        let route = if self.id == "xai" {
+            "language-models"
+        } else {
+            "models"
+        };
         let request = self
             .client
-            .get(format!("{base}/models"))
+            .get(format!("{base}/{route}"))
             .headers(headers)
             .timeout(std::time::Duration::from_secs(3));
         let discovered = request
@@ -259,7 +267,8 @@ impl OpenAiCompatibleProvider {
             && let Ok(body) = response.json::<Value>().await
         {
             let models: Vec<_> = body["data"]
-                .as_array()?
+                .as_array()
+                .or_else(|| body["models"].as_array())?
                 .iter()
                 .filter_map(|entry| {
                     let mut model = discovered_model_info(&self.id, entry, self.model_defaults)?;
@@ -580,24 +589,38 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
         ("xai", "grok-4.3") => {
             info.display_name = "Grok 4.3".into();
             info.reasoning = true;
+            info.images = true;
             info.context_window = Some(1_000_000);
             info.pricing = Some(ModelPricing {
                 input: 1.25,
                 output: 2.50,
-                cache_read: 0.0,
+                cache_read: 0.20,
                 cache_write: 0.0,
-                long_context: None,
+                long_context: Some(haarness_protocol::LongContextPricing {
+                    above_input_tokens: 199_999,
+                    input: 2.50,
+                    output: 5.0,
+                    cache_read: 0.40,
+                    cache_write: 0.0,
+                }),
             });
         }
         ("xai", "grok-build-0.1") => {
             info.display_name = "Grok Build 0.1".into();
+            info.images = true;
             info.context_window = Some(256_000);
             info.pricing = Some(ModelPricing {
                 input: 1.0,
                 output: 2.0,
-                cache_read: 0.0,
+                cache_read: 0.20,
                 cache_write: 0.0,
-                long_context: None,
+                long_context: Some(haarness_protocol::LongContextPricing {
+                    above_input_tokens: 199_999,
+                    input: 2.0,
+                    output: 4.0,
+                    cache_read: 0.40,
+                    cache_write: 0.0,
+                }),
             });
         }
         (
@@ -786,11 +809,13 @@ fn discovered_model_info(
             )
         });
     }
-    // DeepSeek lists its levels as `effort.supported_levels`; its own
-    // provider can also turn thinking off (`none`).
+    // DeepSeek lists its levels as `effort.supported_levels` (its own
+    // provider can also turn thinking off, `none`), xAI as
+    // `capabilities.reasoning_effort`.
     if let Some(efforts) = entry["reasoning_efforts"].as_array().or_else(|| {
         entry
             .pointer("/effort/supported_levels")
+            .or_else(|| entry.pointer("/capabilities/reasoning_effort"))
             .and_then(Value::as_array)
     }) {
         info.reasoning_efforts = (provider == "deepseek")
@@ -855,6 +880,48 @@ fn discovered_model_info(
                 * 1_000_000.0,
             long_context: long_context_override(entry),
         });
+    }
+    // xAI prices in hundredths of a cent per million tokens (12500 is $1.25),
+    // with a long-context tier from `long_context_threshold` prompt tokens.
+    if provider == "xai"
+        && let (Some(input), Some(output)) = (
+            entry.get("prompt_text_token_price").and_then(json_number),
+            entry
+                .get("completion_text_token_price")
+                .and_then(json_number),
+        )
+    {
+        let rate = |key: &str| {
+            entry
+                .get(key)
+                .and_then(json_number)
+                .map(|value| value / 10_000.0)
+        };
+        info.pricing = Some(ModelPricing {
+            input: input / 10_000.0,
+            output: output / 10_000.0,
+            cache_read: rate("cached_prompt_text_token_price").unwrap_or(0.0),
+            cache_write: 0.0,
+            long_context: entry
+                .get("long_context_threshold")
+                .and_then(Value::as_u64)
+                .zip(rate("prompt_text_token_price_long_context"))
+                .zip(rate("completion_text_token_price_long_context"))
+                .map(
+                    |((threshold, input), output)| haarness_protocol::LongContextPricing {
+                        above_input_tokens: threshold.saturating_sub(1),
+                        input,
+                        output,
+                        cache_read: rate("cached_prompt_text_token_price_long_context")
+                            .unwrap_or(0.0),
+                        cache_write: 0.0,
+                    },
+                ),
+        });
+    }
+    if provider == "xai" {
+        // A model that reasons at a fixed depth says so in its id only.
+        info.reasoning |= id.ends_with("-reasoning") && !id.ends_with("-non-reasoning");
     }
     // DeepSeek behind a self-hosted Haarness Router comes without prices: its
     // own rates, at peak (see `deepseek_charge` for what a request cost).
@@ -996,6 +1063,11 @@ fn deepseek_charge(model: &str, at: chrono::DateTime<chrono::Utc>, usage: &Value
 }
 
 fn is_chat_completion_model(provider: &str, entry: &Value, id: &str) -> bool {
+    // xAI serves its multi-agent model only on the Responses API: "Multi
+    // Agent requests are not allowed on chat completions".
+    if provider == "xai" && id.contains("multi-agent") {
+        return false;
+    }
     if entry.get("archived").and_then(Value::as_bool) == Some(true) {
         return false;
     }
@@ -2886,6 +2958,64 @@ mod tests {
             headers: crate::ProviderHeaders::default(),
         });
         (provider, state)
+    }
+
+    #[test]
+    fn xais_language_models_give_images_levels_and_prices() {
+        // Entries as xAI's `/language-models` listed them.
+        let entry = json!({"id": "grok-4.3", "object": "model", "owned_by": "xai",
+            "input_modalities": ["text", "image"], "output_modalities": ["text"],
+            "prompt_text_token_price": 12500, "cached_prompt_text_token_price": 2000,
+            "completion_text_token_price": 25000, "prompt_text_token_price_long_context": 25000,
+            "cached_prompt_text_token_price_long_context": 4000, "completion_text_token_price_long_context": 50000,
+            "long_context_threshold": 200_000,
+            "capabilities": {"reasoning_effort": ["none", "low", "medium", "high", "xhigh"], "default_reasoning_effort": "low"}});
+        let model =
+            discovered_model_info("xai", &entry, CompatibleModelDefaults::default()).unwrap();
+        assert!(model.images && model.reasoning);
+        assert_eq!(
+            model.reasoning_efforts,
+            ["none", "low", "medium", "high", "xhigh"]
+        );
+        let price = model.pricing.unwrap();
+        assert_eq!(
+            (price.input, price.cache_read, price.output),
+            (1.25, 0.2, 2.5)
+        );
+        let long = price.long_context.unwrap();
+        assert_eq!(
+            (
+                long.above_input_tokens,
+                long.input,
+                long.output,
+                long.cache_read
+            ),
+            (199_999, 2.5, 5.0, 0.4)
+        );
+        let fixed = discovered_model_info(
+            "xai",
+            &json!({"id": "grok-4.20-0309-reasoning", "input_modalities": ["text", "image"]}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert!(fixed.reasoning && fixed.reasoning_efforts.is_empty());
+        assert_eq!(fixed.display_name, "Grok 4.20 Reasoning");
+        let plain = discovered_model_info(
+            "xai",
+            &json!({"id": "grok-4.20-0309-non-reasoning"}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert!(!plain.reasoning);
+        // Served only on the Responses API.
+        assert!(
+            discovered_model_info(
+                "xai",
+                &json!({"id": "grok-4.20-multi-agent-0309"}),
+                CompatibleModelDefaults::default()
+            )
+            .is_none()
+        );
     }
 
     #[test]

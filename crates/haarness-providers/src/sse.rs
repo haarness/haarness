@@ -144,6 +144,8 @@ pub(crate) fn provider_error_detail(body: &str) -> Option<String> {
         return None;
     }
     let detail = match serde_json::from_str::<Value>(body) {
+        // xAI answers some refusals with a bare JSON string.
+        Ok(Value::String(text)) if !text.trim().is_empty() => text.trim().to_owned(),
         Ok(parsed) => match parsed.get("error").and_then(upstream_error) {
             Some(upstream) => upstream,
             None => [
@@ -404,6 +406,17 @@ mod tests {
             provider_error_detail("<!DOCTYPE html><html><body>Forbidden</body></html>"),
             None
         );
+    }
+
+    #[test]
+    fn a_bare_json_string_is_the_reason() {
+        // xAI's answer to its multi-agent model on chat completions.
+        assert_eq!(
+            provider_error_detail("\"Multi Agent requests are not allowed on chat completions\"")
+                .as_deref(),
+            Some("Multi Agent requests are not allowed on chat completions")
+        );
+        assert_eq!(provider_error_detail("\"\""), None);
     }
 
     #[test]
