@@ -40,7 +40,9 @@ follow-up in the same chat, Ollama stopped under a running chat and started agai
 without restarting Haarness), and LM Studio's server off.
 
 Surfaces: the terminal UI on Qwen 3.8 (Ollama) and Qwen3 Coder (LM Studio), each picking the model in the
-picker and answering with a read tool call; `haarness run` for each failure case.
+picker and answering with a read tool call; `haarness run` for each failure case; haarness.ai driving a chat
+on this computer, whose picker lists Ollama's models under their own heading: Qwen3 Coder answered with a
+read tool call.
 
 While idle, Haarness asks a runtime nothing: its models are read at start, on a reload and when a client
 lists models.
