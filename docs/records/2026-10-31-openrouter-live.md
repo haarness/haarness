@@ -56,9 +56,21 @@ batch or image models, Auto Router without a price; a tool turn shows tokens and
 --daemon`, `run --format json`, `sessions list` and `stats` (Auto Router with a known cost, no unpriced
 records).
 
+Haarness Cloud, live: this Mac connected as a whole-computer host (Desktop and the CLI built from main,
+signed in to production), driven from haarness.ai in Chrome. The web picker lists an OpenRouter group with
+the plain names; a turn on Claude Haiku 5.5 through OpenRouter read `Cargo.toml` with a tool call and was
+priced on the host ($0.0056); Stop ended a streaming answer; the same chat then switched to Gemini 3.8 Flash
+and read another file.
+
 ## Left for a decision
 
 - A 429 that names neither a wait nor "shortly" still fails at once, for every provider.
+- Stopping an answer mid-stream keeps none of the streamed text and records the stop as an error item
+  ("operation cancelled"), for every provider (native Anthropic too). The terminal hides that item; the web
+  app shows it as a red error card.
 - Haarness Cloud workspaces reach OpenRouter only through a Cloud router holding the person's key; that
   path was not run.
-- The web app's model search (Haarness Cloud) still matches a phrase, field by field.
+- The web app's model search (Haarness Cloud) still matches a phrase, field by field: "openrouter haiku"
+  finds nothing there.
+- `haarness remote enable` names a new host "My computer" where earlier hosts carried the Mac's name, and
+  `haarness remote hosts` prints raw JSON.
