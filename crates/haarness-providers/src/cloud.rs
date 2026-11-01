@@ -8,7 +8,8 @@ use std::{
 
 use async_trait::async_trait;
 use haarness_core::{
-    CoreError, CoreResult, ModelProvider, ProviderMessage, ProviderRequest, ProviderStream,
+    CoreError, CoreResult, KeyCheck, ModelProvider, ProviderMessage, ProviderRequest,
+    ProviderStream,
 };
 use haarness_protocol::{ModelInfo, ProviderInfo};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -593,6 +594,14 @@ fn is_google_api_key(credential: &str) -> bool {
     credential.starts_with("AIza") || credential.starts_with("AQ.")
 }
 
+/// Google's answer to an API key that the API does not take, which is also
+/// its answer to a mistyped or unknown `AIza…` key.
+fn google_refuses_keys(reason: &str) -> bool {
+    reason
+        .to_ascii_lowercase()
+        .contains("api keys are not supported by this api")
+}
+
 pub struct VertexProvider {
     instance: NativeInstance,
     auth_store: Option<Arc<CredentialStore>>,
@@ -679,6 +688,30 @@ impl VertexProvider {
             "Vertex AI is not authenticated; run `gcloud auth application-default login`, run `haarness auth login google-vertex`, or set GOOGLE_VERTEX_API_KEY or GOOGLE_OAUTH_ACCESS_TOKEN".into(),
         ))
     }
+
+    /// Where requests made with `credential` go, and the header carrying it:
+    /// an API key goes in `x-goog-api-key` and reaches the global endpoint
+    /// when no project is set; an access token is a bearer token and needs
+    /// the project's endpoint.
+    fn endpoint(&self, credential: String) -> CoreResult<(String, (&'static str, String))> {
+        let api_key = is_google_api_key(&credential);
+        let base_url = match (self.instance.base_url.as_str(), api_key) {
+            ("", true) => VERTEX_KEY_BASE_URL.to_owned(),
+            ("", false) => {
+                return Err(CoreError::Provider(
+                    "Vertex endpoint is not configured; set GOOGLE_VERTEX_PROJECT or GOOGLE_VERTEX_BASE_URL"
+                        .into(),
+                ));
+            }
+            (configured, _) => configured.to_owned(),
+        };
+        let auth = if api_key {
+            ("x-goog-api-key", credential)
+        } else {
+            ("Authorization", format!("Bearer {credential}"))
+        };
+        Ok((base_url, auth))
+    }
 }
 
 #[async_trait]
@@ -697,28 +730,42 @@ impl ModelProvider for VertexProvider {
         }
     }
 
+    /// Counting the tokens of a one-word prompt is free and needs the same
+    /// credential as a chat, so Vertex's answer says whether it takes the
+    /// key. Vertex lists no models for an API key, so a listing cannot tell.
+    async fn check_api_key(&self, key: &str) -> KeyCheck {
+        let (Ok((base_url, auth)), Some(model)) =
+            (self.endpoint(key.trim().to_owned()), self.models.first())
+        else {
+            return KeyCheck::Unsupported;
+        };
+        let Ok(headers) = headers_with(&self.instance.headers, [auth]) else {
+            return KeyCheck::Rejected(Some("The key holds characters a key cannot".into()));
+        };
+        let request = reqwest::Client::new()
+            .post(format!(
+                "{}/models/{}:countTokens",
+                base_url.trim_end_matches('/'),
+                model.id
+            ))
+            .headers(headers.map())
+            .json(&serde_json::json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}]}));
+        match crate::key_check::check(&self.instance.name, request).await {
+            // Google says this of any key Vertex does not take, a mistyped
+            // one included: it reads as if keys were not allowed at all.
+            KeyCheck::Rejected(Some(reason)) if google_refuses_keys(&reason) => {
+                KeyCheck::Rejected(None)
+            }
+            other => other,
+        }
+    }
+
     async fn stream(
         &self,
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> CoreResult<ProviderStream> {
-        let token = self.token().await?;
-        let api_key = is_google_api_key(&token);
-        let base_url = match (self.instance.base_url.as_str(), api_key) {
-            ("", true) => VERTEX_KEY_BASE_URL.to_owned(),
-            ("", false) => {
-                return Err(CoreError::Provider(
-                    "Vertex endpoint is not configured; set GOOGLE_VERTEX_PROJECT or GOOGLE_VERTEX_BASE_URL"
-                        .into(),
-                ));
-            }
-            (configured, _) => configured.to_owned(),
-        };
-        let auth = if api_key {
-            ("x-goog-api-key", token)
-        } else {
-            ("Authorization", format!("Bearer {token}"))
-        };
+        let (base_url, auth) = self.endpoint(self.token().await?)?;
         let headers = headers_with(&self.instance.headers, [auth])?;
         GeminiProvider::new(NativeInstance {
             id: self.instance.id.clone(),
@@ -748,7 +795,7 @@ mod tests {
     use futures::StreamExt as _;
     use haarness_core::{ProviderEvent, ProviderMessage};
     use parking_lot::Mutex;
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use tokio::net::TcpListener;
 
     #[derive(Clone, Default)]
@@ -1261,6 +1308,74 @@ mod tests {
                 .iter()
                 .all(|(headers, _)| !headers.contains_key("authorization"))
         );
+    }
+
+    #[tokio::test]
+    async fn vertex_checks_a_pasted_key_by_counting_tokens() {
+        async fn count_tokens(
+            State(capture): State<Capture>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> (axum::http::StatusCode, Json<Value>) {
+            let known = headers
+                .get("x-goog-api-key")
+                .is_some_and(|key| key == "AQ.known-key");
+            capture.0.lock().push((headers, body));
+            if known {
+                (axum::http::StatusCode::OK, Json(json!({"totalTokens": 1})))
+            } else {
+                (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    Json(
+                        json!({"error": {"code": 401, "message": "API key not valid. Please pass a valid API key.", "status": "UNAUTHENTICATED"}}),
+                    ),
+                )
+            }
+        }
+        let capture = Capture::default();
+        let router = Router::new()
+            .route("/models/test-model:countTokens", post(count_tokens))
+            .with_state(capture.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut instance = instance("google-vertex", format!("http://{address}"), "unused");
+        instance.api_key = None;
+        let provider = VertexProvider::new(instance, None);
+        assert_eq!(
+            provider.check_api_key(" AQ.known-key\n").await,
+            KeyCheck::Accepted
+        );
+        // A refusal from a host that is not Google's own leaves the key
+        // unchecked rather than rejected.
+        assert!(matches!(
+            provider.check_api_key("AIzaunknown").await,
+            KeyCheck::Unchecked(reason) if reason.contains("HTTP 401")
+        ));
+        let requests = capture.0.lock();
+        assert_eq!(requests[0].1["contents"][0]["parts"][0]["text"], "hi");
+        assert_eq!(requests[1].0["x-goog-api-key"], "AIzaunknown");
+        assert!(!requests[1].0.contains_key("authorization"));
+    }
+
+    #[tokio::test]
+    async fn vertex_cannot_check_an_access_token_without_a_project() {
+        let provider =
+            VertexProvider::new(instance("google-vertex", String::new(), "unused"), None);
+        assert_eq!(
+            provider.check_api_key("ya29.access-token").await,
+            KeyCheck::Unsupported
+        );
+    }
+
+    #[test]
+    fn google_words_for_an_unaccepted_key_are_recognised() {
+        assert!(google_refuses_keys(
+            "API keys are not supported by this API. Expected OAuth2 access token or other authentication credentials that assert a principal. See https://cloud.google.com/docs/authentication"
+        ));
+        assert!(!google_refuses_keys(
+            "API key not valid. Please pass a valid API key"
+        ));
     }
 
     #[test]

@@ -1704,6 +1704,17 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     if provider == Some("GitHub Copilot") && lower.contains("model_not_supported") {
         return "Your GitHub Copilot plan doesn't include this model. Choose another model, or turn it on at github.com/settings/copilot.".into();
     }
+    // Google answers a key that an API does not take, and a mistyped `AIza…`
+    // key, with "API keys are not supported by this API. Expected OAuth2
+    // access token…", which reads as if no key could work.
+    if lower.contains("api keys are not supported by this api") {
+        return match provider {
+            Some(name) => format!(
+                "{name} did not accept this API key: it is not valid, or not a key for {name}. Connect {name} again to replace it."
+            ),
+            None => "The provider did not accept this API key: it is not valid, or not a key for this provider. Connect it again to replace it.".into(),
+        };
+    }
     // Bedrock refuses a wrong API key with 403 "Authentication failed: Please
     // make sure your API Key is valid", or "Invalid API Key format".
     if lower.contains("http 401")
@@ -18474,6 +18485,27 @@ mod tests {
                 Some("Amazon Bedrock")
             ),
             "Amazon Bedrock rejected the request: anthropic.claude-haiku-5-5 is not available for this account."
+        );
+    }
+
+    #[test]
+    fn a_google_key_refusal_says_the_key_is_wrong_not_that_keys_are() {
+        let provider = |message: &str| CoreError::Provider(message.into());
+        assert_eq!(
+            super::describe_error(
+                &provider(
+                    r#"HTTP 401 Unauthorized: {"error":{"code":401,"message":"API keys are not supported by this API. Expected OAuth2 access token or other authentication credentials that assert a principal. See https://cloud.google.com/docs/authentication","status":"UNAUTHENTICATED"}}"#
+                ),
+                Some("Google Vertex AI")
+            ),
+            "Google Vertex AI did not accept this API key: it is not valid, or not a key for Google Vertex AI. Connect Google Vertex AI again to replace it."
+        );
+        assert_eq!(
+            super::describe_error(
+                &provider("HTTP 401 Unauthorized: API keys are not supported by this API."),
+                None
+            ),
+            "The provider did not accept this API key: it is not valid, or not a key for this provider. Connect it again to replace it."
         );
     }
 
