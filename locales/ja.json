@@ -1845,6 +1845,7 @@
   "Remove schedule": "スケジュールを削除",
   "Disconnect {name}?": "{name} を切断しますか？",
   "Haarness forgets the stored {name} credential. You can connect it again at any time.": "Haarness は保存済みの {name} の資格情報を削除します。いつでも再接続できます。",
+  "{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.": "{name} は環境変数から接続されています。切断するには {env} を削除して Haarness を再起動してください。",
   "Remove {name} from the sidebar?": "{name} をサイドバーから削除しますか？",
   "Save your files before changing working folders, or discard these edits.": "作業フォルダーを変更する前にファイルを保存するか、これらの編集を破棄してください。",
   "Only this agent, in this chat": "このチャットのこのエージェントのみ",

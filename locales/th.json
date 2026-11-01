@@ -1845,6 +1845,7 @@
   "Remove schedule": "ลบกำหนดการ",
   "Disconnect {name}?": "ยกเลิกการเชื่อมต่อ {name} หรือไม่",
   "Haarness forgets the stored {name} credential. You can connect it again at any time.": "Haarness จะลบข้อมูลรับรอง {name} ที่บันทึกไว้ คุณเชื่อมต่อใหม่ได้ทุกเมื่อ",
+  "{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.": "{name} เชื่อมต่อจากตัวแปรสภาพแวดล้อม หากต้องการยกเลิกการเชื่อมต่อ ให้ลบ {env} แล้วเริ่ม Haarness ใหม่",
   "Remove {name} from the sidebar?": "นำ {name} ออกจากแถบด้านข้างหรือไม่",
   "Save your files before changing working folders, or discard these edits.": "บันทึกไฟล์ของคุณก่อนเปลี่ยนโฟลเดอร์ทำงาน หรือทิ้งการแก้ไขเหล่านี้",
   "Only this agent, in this chat": "เฉพาะเอเจนต์นี้ ในแชทนี้",

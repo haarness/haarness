@@ -686,11 +686,42 @@ function EnvironmentHint(props: { env: string[] }) {
   );
 }
 
-/** Disconnect with a confirmation, shared by Settings and the picker. */
+/** The provider's connect row, which says where its connection comes from. */
+async function connectRow(app: ReturnType<typeof useApp>, id: string) {
+  try {
+    const view = await app.api<ManagementView>("manageResource", "providers", {
+      action: "connect",
+      name: id,
+    });
+    return parseCatalog(view).find((row) => row.id === id);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Says why a provider still connected from the environment stays so. */
+function stillFromEnvironment(app: ReturnType<typeof useApp>, provider: Provider) {
+  app.notify(
+    t("{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.", {
+      name: provider.name,
+      env: provider.env.join(" / "),
+    }),
+    "blocked",
+  );
+}
+
+/** Disconnect with a confirmation, shared by Settings and the picker. A key
+ * in the environment is not Haarness's to forget: rather than confirm a
+ * disconnect that changes nothing, it says where the connection comes from. */
 export async function disconnectProvider(
   app: ReturnType<typeof useApp>,
   provider: { id: string; name: string },
 ) {
+  const before = await connectRow(app, provider.id);
+  if (before?.source === "environment") {
+    stillFromEnvironment(app, before);
+    return false;
+  }
   if (
     !(await confirm(
       t("Disconnect {name}?", { name: provider.name }),
@@ -703,5 +734,8 @@ export async function disconnectProvider(
     return false;
   await app.api("manageResource", "providers", { action: "logout", name: provider.id });
   await app.catalogs();
+  // The stored key is gone, but one in the environment still connects it.
+  const after = await connectRow(app, provider.id);
+  if (after?.connected && after.source === "environment") stillFromEnvironment(app, after);
   return true;
 }

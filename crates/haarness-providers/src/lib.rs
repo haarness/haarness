@@ -668,7 +668,7 @@ pub const COMPAT_PRESETS: &[CompatiblePreset] = &[
         "Z.AI",
         "https://api.z.ai/api/paas/v4",
         &["ZAI_API_KEY", "ZHIPU_API_KEY"],
-        &["glm-5.1"],
+        &["glm-5.3", "glm-5.1"],
     ),
     preset_with_models(
         "deepinfra",

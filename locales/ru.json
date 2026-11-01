@@ -1845,6 +1845,7 @@
   "Remove schedule": "Удалить расписание",
   "Disconnect {name}?": "Отключить {name}?",
   "Haarness forgets the stored {name} credential. You can connect it again at any time.": "Haarness удалит сохранённые учётные данные {name}. Подключиться снова можно в любой момент.",
+  "{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.": "{name} подключён из окружения. Чтобы отключить его, удалите {env} и перезапустите Haarness.",
   "Remove {name} from the sidebar?": "Убрать {name} из боковой панели?",
   "Save your files before changing working folders, or discard these edits.": "Сохраните файлы, прежде чем менять рабочие папки, или отмените эти правки.",
   "Only this agent, in this chat": "Только этот агент, в этом чате",

@@ -40,6 +40,9 @@ fn official_api(url: &reqwest::Url) -> bool {
     url.scheme() == "https"
         && (OFFICIAL_HOSTS.contains(&host)
             || (host.starts_with("bedrock.") && host.ends_with(".amazonaws.com"))
+            // Vertex AI, global or regional (`us-central1-aiplatform…`).
+            || host == "aiplatform.googleapis.com"
+            || host.ends_with("-aiplatform.googleapis.com")
             || crate::COMPAT_PRESETS.iter().any(|preset| {
                 reqwest::Url::parse(preset.base_url).is_ok_and(|base| base.host_str() == Some(host))
             }))
@@ -221,6 +224,15 @@ mod tests {
         assert!(official("https://api.openai.com/v1/models"));
         assert!(official(
             "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"
+        ));
+        assert!(official(
+            "https://aiplatform.googleapis.com/v1/publishers/google/models/m:countTokens"
+        ));
+        assert!(official(
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/m:countTokens"
+        ));
+        assert!(!official(
+            "https://aiplatform.googleapis.com.example.com/v1"
         ));
         assert!(official("https://api.groq.com/openai/v1/models"));
         assert!(official("https://api.together.ai/v1/models"));

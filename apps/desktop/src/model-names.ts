@@ -65,10 +65,16 @@ export function tidyName(id: string): string | undefined {
   }
   if (joined && words.length && (/^\d/.test(words[0]) || words[0] === "OSS"))
     name = `${name}-${words.shift()}`;
+  // Z.ai writes every part of a GLM name with hyphens: `GLM-4.5-Air`,
+  // `GLM-5-Turbo`, `GLM-5.3-FlashX`.
+  if (first === "glm") name = [name, ...words.splice(0)].join("-");
   return [name, ...words, ...(date ? [date] : [])].join(" ");
 }
 function tidyWord(token: string) {
   if (token === "oss") return "OSS";
+  // Z.ai's faster tiers: `GLM-4.7-FlashX`, `GLM-4.5-AirX`.
+  if (token === "flashx") return "FlashX";
+  if (token === "airx") return "AirX";
   if (/^[\d.]+[bkm]$/.test(token)) return token.toUpperCase();
   return /^[a-z]/.test(token) ? token[0].toUpperCase() + token.slice(1) : token;
 }

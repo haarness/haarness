@@ -1845,6 +1845,7 @@
   "Remove schedule": "Zeitplan entfernen",
   "Disconnect {name}?": "{name} trennen?",
   "Haarness forgets the stored {name} credential. You can connect it again at any time.": "Haarness löscht die gespeicherten Anmeldedaten für {name}. Du kannst die Verbindung jederzeit wiederherstellen.",
+  "{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.": "{name} ist über die Umgebung verbunden. Entferne {env} und starte Haarness neu, um die Verbindung zu trennen.",
   "Remove {name} from the sidebar?": "{name} aus der Seitenleiste entfernen?",
   "Save your files before changing working folders, or discard these edits.": "Speichere deine Dateien, bevor du den Arbeitsordner wechselst, oder verwirf diese Änderungen.",
   "Only this agent, in this chat": "Nur dieser Agent, nur in diesem Chat",

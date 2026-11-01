@@ -4,6 +4,7 @@ import { For, Show, createSignal, onMount, type JSX } from "solid-js";
 import { Icon, type IconName, type IconSize } from "./icons";
 import { cancelled, errorText } from "./error-text";
 import { relativeTime } from "./relative-time";
+import { now } from "./clock";
 export { Icon, type IconName } from "./icons";
 /**
  * The one icon-only control. It owns the hit area (`--icon-button`), the
@@ -367,17 +368,6 @@ export const Empty = (props: {
 );
 export function stringify(value: unknown) {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
-}
-/** The time now, to the half minute: one clock for every relative time on
- * screen, started by the first one read. */
-const [clock, setClock] = createSignal(Date.now());
-let ticking = false;
-function now() {
-  if (!ticking) {
-    ticking = true;
-    setInterval(() => setClock(Date.now()), 30_000);
-  }
-  return clock();
 }
 /** "now", "5 minutes ago", "yesterday", "3 weeks ago": how long ago `value`
  * was, kept current as time passes. */

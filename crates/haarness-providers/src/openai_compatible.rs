@@ -922,16 +922,32 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 long_context: None,
             });
         }
-        // Mistral's pages spell the id both ways. A launch discount halves the
-        // list price until about 2026-10-20.
+        // Mistral's pages spell the id both ways. Prices as listed on
+        // docs.mistral.ai/models/mistral-large-4-0, checked 2026-11-01.
         ("mistral", "mistral-large-4-0" | "mistral-large-4") => {
             info.display_name = "Mistral Large 4".into();
             info.images = true;
             info.context_window = Some(1_048_576);
             info.pricing = Some(ModelPricing {
-                input: 1.36,
-                output: 4.18,
-                cache_read: 0.14,
+                input: 0.7,
+                output: 2.1,
+                cache_read: 0.07,
+                cache_write: 0.0,
+                long_context: None,
+            });
+        }
+        // Small 4 answers to its dated id and to `mistral-small-latest`. Prices
+        // as listed on docs.mistral.ai/models/mistral-small-4-0-26-03, checked
+        // 2026-11-01; the page names no cached-input price, so cached input
+        // costs what input does.
+        ("mistral", "mistral-small-2603" | "mistral-small-latest") => {
+            info.display_name = "Mistral Small 4".into();
+            info.images = true;
+            info.context_window = Some(256_000);
+            info.pricing = Some(ModelPricing {
+                input: 0.15,
+                output: 0.6,
+                cache_read: 0.15,
                 cache_write: 0.0,
                 long_context: None,
             });
@@ -946,9 +962,26 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
         ("nvidia", "nvidia/nemotron-3-super-120b-a12b") => {
             info.display_name = "Nemotron 3 Super 120B".into();
         }
-        ("zai", "glm-5.1") => {
-            info.display_name = "GLM-5.1".into();
-            info.reasoning = true;
+        ("zai", id) if id.starts_with("glm-") => {
+            if id == "glm-5.1" {
+                info.display_name = "GLM-5.1".into();
+            }
+            info.reasoning |= !info.reasoning_efforts.is_empty() || id == "glm-5.1";
+            // Z.ai's list says nothing of input; the 5.3 Flash models read
+            // pictures, the others refuse anything but text.
+            info.images |= matches!(id, "glm-5.3-flash" | "glm-5.3-flashx");
+            // Z.ai's list gives no context windows; without one a chat
+            // never compacts and fails once it outgrows the model.
+            info.context_window = info.context_window.or(zai_context_window(id));
+            if let Some((input, cache_read, output)) = zai_list_price(id) {
+                info.pricing = Some(ModelPricing {
+                    input,
+                    output,
+                    cache_read,
+                    cache_write: 0.0,
+                    long_context: None,
+                });
+            }
         }
         ("deepinfra", "deepseek-ai/DeepSeek-V3") => {
             info.display_name = "DeepSeek V3".into();
@@ -967,9 +1000,12 @@ fn discovered_model_info(
         return None;
     }
     let mut info = model_info(provider, id, CompatibleModelDefaults::default());
+    // Mistral's `name` is the id of the model an alias points to
+    // ("mistral-small-2603" for `magistral-small-latest`), not a label: shown
+    // as one, different ids read alike and known names were lost.
     if let Some(name) = entry
         .get("display_name")
-        .or_else(|| entry.get("name"))
+        .or_else(|| entry.get("name").filter(|_| provider != "mistral"))
         .and_then(Value::as_str)
     {
         // OpenRouter names a model "Vendor: Model"; its id already says the
@@ -983,6 +1019,11 @@ fn discovered_model_info(
             {
                 model
             }
+            _ => name,
+        };
+        // Groq names some models "Qwen/Qwen3.8-27B"; the vendor is its id's.
+        let name = match name.split_once('/') {
+            Some((_, model)) if provider == "groq" && !model.is_empty() => model,
             _ => name,
         };
         // DeepSeek writes "DeepSeek-V4.1-Flash".
@@ -1081,6 +1122,27 @@ fn discovered_model_info(
             .and_then(Value::as_bool)
         {
             info.tools = value;
+        }
+        // Mistral lists the other ids of the same model in `aliases`
+        // (`mistral-medium-latest` is Medium 3.5): an alias of a model whose
+        // reasoning levels and price are known takes them, rather than
+        // offering no levels and no cost.
+        if info.reasoning_efforts.is_empty()
+            && let Some(known) = entry["aliases"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .find(|alias| known_reasoning_effort_model(provider, alias))
+        {
+            let target = model_info(provider, known, CompatibleModelDefaults::default());
+            info.reasoning_efforts = target.reasoning_efforts;
+            info.pricing = info.pricing.take().or(target.pricing);
+        }
+        // A model with known reasoning levels reasons, whatever the
+        // catalog says of the id it is listed under.
+        if !info.reasoning_efforts.is_empty() {
+            info.reasoning = true;
         }
     }
     if provider == "deepinfra"
@@ -1439,6 +1501,9 @@ fn is_chat_completion_model(provider: &str, entry: &Value, id: &str) -> bool {
     if entry
         .pointer("/architecture/output_modalities")
         .or_else(|| entry.pointer("/modalities/output"))
+        // Groq's list says it at the top level; its Orpheus voices answer
+        // with speech only.
+        .or_else(|| entry.get("output_modalities"))
         .and_then(Value::as_array)
         .is_some_and(|modalities| {
             !modalities.is_empty()
@@ -1595,12 +1660,53 @@ fn known_reasoning_effort_model(provider: &str, model: &str) -> bool {
     !known_reasoning_efforts(provider, model).is_empty()
 }
 
+/// GLM models that turn thinking on and off with `thinking` and ignore
+/// `reasoning_effort`.
+fn zai_thinking_switch(model: &str) -> bool {
+    matches!(
+        model,
+        "glm-5.1" | "glm-5" | "glm-5-turbo" | "glm-4.7" | "glm-4.6" | "glm-4.5"
+    )
+}
+
+/// GLM context windows as each model's page on docs.z.ai lists them,
+/// checked 2026-11-01: 1M for GLM-5.3 (and its Flash models) and 5.2, 200K
+/// for 5.1, 5, 5-Turbo, 4.7 and 4.6, 128K for 4.5 and 4.5-Air.
+fn zai_context_window(model: &str) -> Option<u64> {
+    Some(match model {
+        "glm-5.3" | "glm-5.3-flash" | "glm-5.3-flashx" | "glm-5.2" => 1_000_000,
+        "glm-5.1" | "glm-5" | "glm-5-turbo" | "glm-4.7" | "glm-4.6" => 200_000,
+        "glm-4.5" | "glm-4.5-air" => 128_000,
+        _ => return None,
+    })
+}
+
+/// Z.ai's list prices per million tokens (input, cached input, output), as
+/// listed on docs.z.ai/guides/overview/pricing, checked 2026-11-01.
+fn zai_list_price(model: &str) -> Option<(f64, f64, f64)> {
+    Some(match model {
+        "glm-5.3" | "glm-5.2" | "glm-5.1" => (1.4, 0.26, 4.4),
+        "glm-5.3-flash" => (0.15, 0.03, 0.5),
+        "glm-5.3-flashx" => (0.37, 0.075, 1.25),
+        "glm-5" => (1.0, 0.2, 3.2),
+        "glm-4.7" | "glm-4.6" | "glm-4.5" => (0.6, 0.11, 2.2),
+        "glm-4.5-air" => (0.2, 0.03, 1.1),
+        _ => return None,
+    })
+}
+
 fn known_reasoning_efforts(provider: &str, model: &str) -> Vec<&'static str> {
     match (provider, model) {
         ("groq", "openai/gpt-oss-20b" | "openai/gpt-oss-120b") | ("xai", "grok-4.5") => {
             vec!["low", "medium", "high"]
         }
         ("xai", "grok-4.6" | "grok-4.7") => vec!["low", "medium", "high", "xhigh"],
+        // GLM 5.3 always thinks and takes these levels only; 5.2 takes every
+        // level; the older models ignore a level and switch thinking with
+        // `thinking` (see `zai_thinking_switch`).
+        ("zai", "glm-5.3" | "glm-5.3-flash" | "glm-5.3-flashx") => vec!["low", "high", "max"],
+        ("zai", "glm-5.2") => vec!["none", "low", "medium", "high", "max"],
+        ("zai", model) if zai_thinking_switch(model) => vec!["none", "high"],
         (
             "deepseek",
             "deepseek-flash"
@@ -1608,11 +1714,12 @@ fn known_reasoning_efforts(provider: &str, model: &str) -> Vec<&'static str> {
             | "deepseek-v4-pro"
             | "deepseek-v4-flash-vision-exp",
         ) => vec!["none", "low", "high", "max"],
+        // Large 4 refuses "none" and takes three levels; Medium 3.5 and
+        // Small refuse "low" and "medium".
+        ("mistral", "mistral-large-4-0" | "mistral-large-4") => vec!["low", "medium", "high"],
         (
             "mistral",
-            "mistral-large-4-0"
-            | "mistral-large-4"
-            | "mistral-medium-3-5"
+            "mistral-medium-3-5"
             | "mistral-medium-3.5"
             | "mistral-medium-2604"
             | "mistral-small-2603"
@@ -2114,7 +2221,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
             && supports_reasoning_effort
             && let Some(effort) = request.reasoning_effort.as_deref()
         {
-            if self.id == "deepseek" {
+            if self.id == "zai" && zai_thinking_switch(&model) {
+                body["thinking"] =
+                    json!({"type": if effort == "none" { "disabled" } else { "enabled" }});
+            } else if self.id == "deepseek" {
                 body["thinking"] =
                     json!({"type": if effort == "none" { "disabled" } else { "enabled" }});
                 if effort != "none" {
@@ -2490,9 +2600,11 @@ fn openai_compatible_media_message(
                         "{model} doesn't read images. Send the message without the picture, or switch to a model that reads them."
                     )));
                 }
+                // Earlier answers in the chat may come from a model that saw
+                // the picture; "this model" read as if none had.
                 ImageInput::Note => blocks.push(json!({
                     "type":"text",
-                    "text":format!("[Image {} left out: this model doesn't read images. Don't guess what it shows.]", item.filename)
+                    "text":format!("[Image {} is not shown to you, because you don't read images. Don't guess what it shows; earlier answers may come from a model that saw it.]", item.filename)
                 })),
             }
         } else if item.is_pdf() {
@@ -3011,6 +3123,92 @@ mod tests {
                 json!(["/api/v1/chat/completions", "/api/v1/responses"])
             )
             .is_some()
+        );
+    }
+
+    #[test]
+    fn groq_names_leave_out_the_vendor_prefix() {
+        let info = discovered_model_info(
+            "groq",
+            &json!({"id": "qwen/qwen3.8-27b", "name": "Qwen/Qwen3.8-27B"}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(info.display_name, "Qwen3.8-27B");
+    }
+
+    #[test]
+    fn groq_speech_models_stay_out_of_the_picker() {
+        let model = |id: &str, output: Value| {
+            discovered_model_info(
+                "groq",
+                &json!({"id": id, "output_modalities": output}),
+                CompatibleModelDefaults::default(),
+            )
+        };
+        assert!(model("canopylabs/orpheus-v1-english", json!(["speech"])).is_none());
+        assert!(model("openai/gpt-oss-120b", json!(["text"])).is_some());
+    }
+
+    #[test]
+    fn mistral_aliases_take_the_levels_and_price_of_the_model_they_name() {
+        let listed = |id: &str, aliases: &[&str]| {
+            discovered_model_info(
+                "mistral",
+                &json!({
+                    "id": id,
+                    "name": "mistral-medium-latest",
+                    "aliases": aliases,
+                    "capabilities": {"completion_chat": true, "function_calling": true, "reasoning": true, "vision": true}
+                }),
+                CompatibleModelDefaults::default(),
+            )
+            .unwrap()
+        };
+        // Mistral's list as of 2026-11-01: the latest alias is Medium 3.5.
+        let latest = listed(
+            "mistral-medium-latest",
+            &[
+                "mistral-medium",
+                "mistral-medium-3-5",
+                "mistral-medium-2604",
+            ],
+        );
+        assert!(latest.reasoning);
+        assert_eq!(latest.reasoning_efforts, ["none", "high"]);
+        assert_eq!(latest.pricing.map(|price| price.input), Some(1.5));
+        // The dotted spelling has its own levels and reads as reasoning.
+        let dotted = listed("mistral-medium-3.5", &["mistral-medium-3-5"]);
+        assert!(dotted.reasoning);
+        assert_eq!(dotted.reasoning_efforts, ["none", "high"]);
+        // An alias of a model with no known levels keeps none.
+        let large = listed("mistral-large-latest", &["mistral-large-2512"]);
+        assert!(large.reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn mistral_names_are_ids_not_labels() {
+        let named = |id: &str, name: &str| {
+            discovered_model_info(
+                "mistral",
+                &json!({"id": id, "name": name, "capabilities": {"completion_chat": true}}),
+                CompatibleModelDefaults::default(),
+            )
+            .unwrap()
+            .display_name
+        };
+        assert_eq!(
+            named("mistral-large-4-0", "mistral-large-4"),
+            "Mistral Large 4"
+        );
+        assert_eq!(
+            named("mistral-small-latest", "mistral-small-2603"),
+            "Mistral Small 4"
+        );
+        // An alias keeps its own id rather than its target's.
+        assert_eq!(
+            named("magistral-small-latest", "mistral-small-2603"),
+            "magistral-small-latest"
         );
     }
 
@@ -4631,7 +4829,7 @@ mod tests {
         let sent = state.0.lock()[0]["messages"].to_string();
         assert!(!sent.contains("image_url"), "{sent}");
         assert_eq!(
-            sent.matches("[Image shot.png left out").count(),
+            sent.matches("[Image shot.png is not shown to you").count(),
             2,
             "{sent}"
         );
@@ -5639,6 +5837,34 @@ mod tests {
 
         let requests = state.0.lock();
         assert!(requests[0].get("reasoning_effort").is_none());
+        // GLM-5.1 switches thinking rather than taking a level.
+        assert_eq!(requests[0]["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn glm_models_offer_the_levels_z_ai_accepts_and_have_prices() {
+        let info = |id: &str| model_info("zai", id, CompatibleModelDefaults::default());
+        assert_eq!(info("glm-5.3").reasoning_efforts, ["low", "high", "max"]);
+        assert_eq!(info("glm-5.1").reasoning_efforts, ["none", "high"]);
+        assert_eq!(
+            info("glm-5.2").reasoning_efforts,
+            ["none", "low", "medium", "high", "max"]
+        );
+        let flash = info("glm-5.3-flash");
+        assert!(flash.reasoning);
+        assert!(flash.images);
+        assert!(!info("glm-5.3").images);
+        assert_eq!(
+            flash.pricing.map(|price| (price.input, price.output)),
+            Some((0.15, 0.5))
+        );
+        assert!(info("glm-5-turbo").pricing.is_none());
+        assert_eq!(info("glm-5.3-flashx").context_window, Some(1_000_000));
+        assert_eq!(info("glm-5.1").context_window, Some(200_000));
+        assert_eq!(info("glm-4.5-air").context_window, Some(128_000));
+        assert_eq!(info("glm-5.3-flashx").display_name, "GLM-5.3-FlashX");
+        assert_eq!(info("glm-5-turbo").display_name, "GLM-5-Turbo");
+        assert_eq!(info("glm-4.5-air").display_name, "GLM-4.5-Air");
     }
 
     #[tokio::test]

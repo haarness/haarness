@@ -121,6 +121,19 @@ but never a provider's page: confirming a price is a person's job. Fix or add th
 entry in haarness-cloud from the provider's page with today's `checked` date,
 then `--sync` copies the table here.
 
+## Provider fixes: 2026-11-01
+
+Found by running real coding chats on each provider, on every client.
+
+| Provider | Change |
+| --- | --- |
+| Vertex AI | A Google API key (`AIza…`, or `AQ.…` for a key bound to a service account) is sent in `x-goog-api-key` and needs no project; without one, requests go to the global publisher endpoint. The location defaults to `global`, where current Gemini models are served. A pasted key is checked before it is saved, and a key Vertex does not take (most often a Gemini key from AI Studio) says so plainly. Vertex's 429 "Resource exhausted. Please try again later." is retried with backoff. |
+| Gemini and Vertex | A message sent after tool results, as after a stopped tool call, starts its own content: Vertex refused text after a function response in one content. A request with no tools (compacting a chat) sends no `tools` field, which Vertex refused when empty. |
+| All Chat Completions providers | A 429's `Retry-After` of whole seconds is passed on, so the turn waits and retries instead of failing on "Rate limit exceeded". A request larger than the plan's tokens a minute (Groq's free tier allows 8,000) says it can't be sent and where to upgrade. |
+| Mistral | Large 4 takes `low`/`medium`/`high` (Mistral now refuses `none`); Medium 3.5 and Small 4 take `none`/`high`. Small 4 has a price and Large 4 uses its current list price ($0.70/$2.10). Mistral's `name` field (the id an alias points to) is not used as a label, and alias ids take their model's levels and price. |
+| Groq | Speech-only models (top-level `output_modalities`) stay out of the chat picker, and names leave out the vendor prefix. |
+| Z.ai | GLM 5.3 and its Flash models always think and take `low`/`high`/`max`; GLM 5.2 takes every level; older GLM models switch thinking with `thinking`. Every listed GLM model has Z.ai's list price, and a new connection starts on GLM 5.3. |
+
 ## Provider requests: 2026-10-18 to 2026-10-22
 
 No catalog or price entries changed; these change what Haarness sends.

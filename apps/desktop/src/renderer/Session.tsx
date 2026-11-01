@@ -128,6 +128,7 @@ import { matchesShortcut, shortcutLabel, shortcutText } from "./search";
 import {
   awaitsApproval,
   describeTool,
+  errorParts,
   errorRecovery,
   permissionCommand,
   permissionScript,
@@ -3534,7 +3535,25 @@ function Message(props: {
               return (
                 <div class="inline-error" role="alert">
                   <Icon name="error" size="sm" />
-                  <span>{message()}</span>
+                  <span>
+                    <For each={errorParts(message())}>
+                      {(part) =>
+                        "url" in part ? (
+                          <a
+                            href={part.url}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              void window.haarness.openExternal(part.url);
+                            }}
+                          >
+                            {part.url}
+                          </a>
+                        ) : (
+                          part.text
+                        )
+                      }
+                    </For>
+                  </span>
                   <Show when={recovery()}>
                     <button
                       class="inline-error-action"

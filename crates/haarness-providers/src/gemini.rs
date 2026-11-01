@@ -263,7 +263,14 @@ impl ModelProvider for GeminiProvider {
                 json!({"name":t.name,"description":t.description,"parametersJsonSchema":schema})
             })
             .collect();
-        let mut body = json!({"systemInstruction":{"parts":[{"text":request.system}]},"contents":contents,"tools":[{"functionDeclarations":declarations}]});
+        let mut body =
+            json!({"systemInstruction":{"parts":[{"text":request.system}]},"contents":contents});
+        // A request without tools (compacting a chat) leaves the field out:
+        // Vertex refuses an empty declaration list ("tool_type must have one
+        // initialized field").
+        if !declarations.is_empty() {
+            body["tools"] = json!([{"functionDeclarations": declarations}]);
+        }
         if structured_output.is_some() {
             body["toolConfig"] = json!({"functionCallingConfig":{"mode":"ANY"}});
         }
@@ -662,29 +669,34 @@ fn gemini_contents(messages: Vec<ProviderMessage>) -> CoreResult<Vec<Value>> {
                 if let Some(id) = function_ids.get(&call_id) {
                     response["id"] = json!(id);
                 }
-                contents.push(json!({
-                    "role": "user",
-                    "parts": [{"functionResponse": response}]
-                }));
-                if !media.is_empty() {
-                    contents.push(json!({
-                        "role": "user",
-                        "parts": media.into_iter().map(|item| json!({
-                            "inlineData": {"mimeType": item.mime_type, "data": item.base64}
-                        })).collect::<Vec<_>>()
-                    }));
-                }
+                // A tool result's media rides with its response.
+                let parts: Vec<Value> = std::iter::once(json!({"functionResponse": response}))
+                    .chain(media.into_iter().map(|item| {
+                        json!({"inlineData": {"mimeType": item.mime_type, "data": item.base64}})
+                    }))
+                    .collect();
+                contents.push(json!({"role": "user", "parts": parts}));
             }
         }
     }
     // Parallel calls belong to a single model content, and their responses to
-    // one user content. Keep signatures on their original parts.
+    // one user content. Keep signatures on their original parts. A message
+    // after tool results starts a content of its own: Vertex refuses text
+    // that follows a function response in one content ("Requests ending with
+    // a model turn are not supported"), which is what a message sent after a
+    // stopped tool call produced.
+    let responds = |content: &Value| {
+        content["parts"].as_array().is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|part| part.get("functionResponse").is_some())
+        })
+    };
     let mut grouped: Vec<Value> = Vec::new();
     for content in contents {
-        if let Some(previous) = grouped
-            .last_mut()
-            .filter(|previous| previous["role"] == content["role"])
-        {
+        if let Some(previous) = grouped.last_mut().filter(|previous| {
+            previous["role"] == content["role"] && (!responds(previous) || responds(&content))
+        }) {
             previous["parts"]
                 .as_array_mut()
                 .unwrap()
@@ -1076,6 +1088,43 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
     }
 
     #[tokio::test]
+    async fn a_request_without_tools_sends_no_tools_field() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route(
+                "/models/gemini-3.8-flash:streamGenerateContent",
+                post(structured_content),
+            )
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = GeminiProvider::for_test(format!("http://{address}"));
+        // What compacting a chat asks: a summary, with no tools to call.
+        provider
+            .stream(
+                ProviderRequest {
+                    model: "gemini-3.8-flash".into(),
+                    system: "summarize".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "summarize the chat".into(),
+                    }],
+                    tools: vec![],
+                    reasoning_effort: None,
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(state.0.lock()[0].get("tools").is_none());
+    }
+
+    #[tokio::test]
     async fn a_short_verdict_under_a_small_limit_keeps_room_after_thinking() {
         let state = FixtureState::default();
         let router = Router::new()
@@ -1343,6 +1392,52 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
         assert_eq!(
             contents[0]["parts"][6]["inlineData"]["mimeType"],
             "application/pdf"
+        );
+    }
+
+    #[test]
+    fn a_message_after_tool_results_starts_its_own_content() {
+        let call = |id: &str| ProviderMessage::ToolCall {
+            call_id: id.into(),
+            name: "bash".into(),
+            arguments: json!({"command": "sleep 30"}),
+            provider_metadata: Value::Null,
+        };
+        let result = |id: &str| ProviderMessage::ToolResult {
+            call_id: id.into(),
+            name: "bash".into(),
+            output: "operation cancelled".into(),
+            is_error: true,
+            attachments: Vec::new(),
+        };
+        let contents = gemini_contents(vec![
+            ProviderMessage::Text {
+                role: "user".into(),
+                content: "run it twice".into(),
+            },
+            call("a"),
+            call("b"),
+            result("a"),
+            result("b"),
+            ProviderMessage::Text {
+                role: "user".into(),
+                content: "Reply with exactly: still here".into(),
+            },
+        ])
+        .unwrap();
+
+        let roles: Vec<_> = contents
+            .iter()
+            .map(|c| c["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "model", "user", "user"]);
+        // Parallel calls and their results stay together.
+        assert_eq!(contents[1]["parts"].as_array().unwrap().len(), 2);
+        assert_eq!(contents[2]["parts"].as_array().unwrap().len(), 2);
+        assert!(contents[2]["parts"][1]["functionResponse"].is_object());
+        assert_eq!(
+            contents[3]["parts"],
+            json!([{"text": "Reply with exactly: still here"}])
         );
     }
 

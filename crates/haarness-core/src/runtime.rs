@@ -975,13 +975,16 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
         // rate-limited upstream. Please retry shortly", or a Haarness router's
         // "Try again in a moment"), Bedrock's throttling
         // ("Too many requests, please wait before trying again") and a
-        // Bedrock model still loading back off as a busy provider does. A
+        // Bedrock model still loading back off as a busy provider does, and
+        // so does Vertex's shared capacity ("Resource exhausted. Please try
+        // again later."), which Google asks callers to retry with backoff. A
         // daily allowance ("Too many tokens per day") is not back in seconds.
         return ((lower.contains("temporarily rate-limited")
             || lower.contains("retry shortly")
             || lower.contains("try again in a moment")
             || lower.contains("please wait before trying again")
-            || lower.contains("[modelnotreadyexception]"))
+            || lower.contains("[modelnotreadyexception]")
+            || (lower.contains("resource exhausted") && lower.contains("try again later")))
             && !lower.contains("per day"))
         .then(|| std::time::Duration::from_secs(1 << attempt.min(4)));
     };
@@ -1022,11 +1025,13 @@ fn advised_wait(text: &str) -> Option<std::time::Duration> {
 
 /// How a rate limit or quota is worded. Such a refusal can also speak of too
 /// many tokens or a request too large; compacting cannot answer it.
-const RATE_LIMITED: [&str; 5] = [
+const RATE_LIMITED: [&str; 6] = [
     "rate limit",
     "too many requests",
     "throttl",
     "per minute",
+    // A Haarness router's 413 for a request over a plan's tokens a minute.
+    "tokens a minute",
     "quota",
 ];
 
@@ -1691,6 +1696,12 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             None => "This provider is not connected. Connect it with an API key or by signing in, then try again.".into(),
         };
     }
+    // Haarness refuses a picture for a model that reads none before anything
+    // is sent, in words that already say what to do: they are not the
+    // provider's error.
+    if lower.contains("doesn't read images. send the message without the picture") {
+        return clean_error_text(raw.trim(), 600);
+    }
     // GitHub accepts the sign-in but the account has no Copilot seat, so
     // signing in again would not help.
     if lower.contains("not licensed to use copilot") {
@@ -1700,6 +1711,22 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     // can be switched on in the account's Copilot settings.
     if provider == Some("GitHub Copilot") && lower.contains("model_not_supported") {
         return "Your GitHub Copilot plan doesn't include this model. Choose another model, or turn it on at github.com/settings/copilot.".into();
+    }
+    // Vertex refuses a mistyped key, and a key not bound to a service
+    // account (most often a Gemini key from Google AI Studio), with "API keys
+    // are not supported by this API. Expected OAuth2 access token…".
+    if provider == Some("Google Vertex AI") && lower.contains("api keys are not supported") {
+        return "Google Vertex AI did not accept this API key. It takes a key bound to a service account; a key from Google AI Studio connects as Gemini instead.".into();
+    }
+    // Other Google APIs answer a key they do not take the same way, which
+    // reads as if no key could work.
+    if lower.contains("api keys are not supported by this api") {
+        return match provider {
+            Some(name) => format!(
+                "{name} did not accept this API key: it is not valid, or not a key for {name}. Connect {name} again to replace it."
+            ),
+            None => "The provider did not accept this API key: it is not valid, or not a key for this provider. Connect it again to replace it.".into(),
+        };
     }
     // Bedrock refuses a wrong API key with 403 "Authentication failed: Please
     // make sure your API Key is valid", or "Invalid API Key format".
@@ -1751,6 +1778,44 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
                 "The provider account is out of credit{reason}. Add credit with the provider, then try again."
             ),
         };
+    }
+    // A request larger than the plan's per-minute token allowance (Groq's
+    // free tier allows 8,000, less than one coding turn with its tools) is
+    // not a limit that waiting clears.
+    if lower.contains("request too large") && lower.contains("tokens per minute") {
+        let number = |label: &str| {
+            lower
+                .split_once(label)
+                .and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|digits| digits.parse::<u64>().ok())
+        };
+        if let (Some(limit), Some(requested)) = (number("limit "), number("requested ")) {
+            let name = provider.unwrap_or("The provider");
+            let upgrade = raw
+                .split_whitespace()
+                .find(|word| word.starts_with("https://"))
+                .map_or_else(
+                    || format!("Upgrade the plan with {name}"),
+                    |url| format!("Upgrade the plan at {}", url.trim_end_matches(['.', ','])),
+                );
+            // "8,000" reads at a glance where "8000" does not.
+            let grouped = |value: u64| {
+                let digits = value.to_string();
+                let mut out = String::new();
+                for (index, digit) in digits.chars().enumerate() {
+                    if index > 0 && (digits.len() - index).is_multiple_of(3) {
+                        out.push(',');
+                    }
+                    out.push(digit);
+                }
+                out
+            };
+            return format!(
+                "{name} allows this account {} tokens a minute, and this request needs {}, so it can't be sent. {upgrade}, or choose another provider.",
+                grouped(limit),
+                grouped(requested)
+            );
+        }
     }
     if is_provider_usage_limit(error) {
         // The provider's own words say which limit and what helps; a bare
@@ -18475,6 +18540,38 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_refused_for_a_model_without_vision_reads_as_advice() {
+        let refused = CoreError::Provider(
+            "GLM-5.1 doesn't read images. Send the message without the picture, or switch to a model that reads them.".into(),
+        );
+        assert_eq!(
+            super::describe_failure(&refused, Some("Z.AI"), true),
+            "GLM-5.1 doesn't read images. Send the message without the picture, or switch to a model that reads them."
+        );
+    }
+
+    #[test]
+    fn a_google_key_refusal_says_the_key_is_wrong_not_that_keys_are() {
+        let provider = |message: &str| CoreError::Provider(message.into());
+        assert_eq!(
+            super::describe_error(
+                &provider(
+                    r#"HTTP 401 Unauthorized: {"error":{"code":401,"message":"API keys are not supported by this API. Expected OAuth2 access token or other authentication credentials that assert a principal. See https://cloud.google.com/docs/authentication","status":"UNAUTHENTICATED"}}"#
+                ),
+                Some("Gemini")
+            ),
+            "Gemini did not accept this API key: it is not valid, or not a key for Gemini. Connect Gemini again to replace it."
+        );
+        assert_eq!(
+            super::describe_error(
+                &provider("HTTP 401 Unauthorized: API keys are not supported by this API."),
+                None
+            ),
+            "The provider did not accept this API key: it is not valid, or not a key for this provider. Connect it again to replace it."
+        );
+    }
+
+    #[test]
     fn context_overflow_errors_are_told_apart_from_rate_limits() {
         let overflow = |message: &str| {
             super::is_provider_context_overflow(&CoreError::Provider(message.into()))
@@ -18498,6 +18595,8 @@ mod tests {
             "Image too large for model with 20 maximum images",
             "Rate limit reached for gpt-5.5: too many tokens per minute",
             "[upstream_429] RESOURCE_EXHAUSTED: quota exceeded",
+            // A plan's tokens a minute: a shorter chat would not get through.
+            "HTTP 413 Payload Too Large: [upstream_413] This request needs 12110 tokens, more than the 8000 tokens a minute the provider's plan allows",
             "Too many requests",
         ] {
             assert!(!overflow(message), "{message}");
@@ -20679,6 +20778,16 @@ mod tests {
             super::retry_delay(&shared, 3),
             Some(std::time::Duration::from_secs(8))
         );
+        // Vertex's answer when its shared capacity is busy.
+        let vertex_busy = provider(
+            "HTTP 429 Too Many Requests: Resource exhausted. Please try again later. \
+             Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 \
+             for more details.",
+        );
+        assert_eq!(
+            super::retry_delay(&vertex_busy, 2),
+            Some(std::time::Duration::from_secs(4))
+        );
         assert!(
             super::retry_delay(
                 &provider("HTTP 429: quota exceeded. Please retry in 7200s."),
@@ -20796,6 +20905,15 @@ mod tests {
         );
         assert_eq!(
             super::describe_error(
+                &CoreError::Provider(
+                    "HTTP 429 Too Many Requests: Request too large for model `openai/gpt-oss-120b` in organization `org_1` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 11419, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing".into()
+                ),
+                Some("Groq")
+            ),
+            "Groq allows this account 8,000 tokens a minute, and this request needs 11,419, so it can't be sent. Upgrade the plan at https://console.groq.com/settings/billing, or choose another provider."
+        );
+        assert_eq!(
+            super::describe_error(
                 &CoreError::Provider("HTTP 402 Payment Required: Insufficient Balance".into()),
                 Some("DeepSeek")
             ),
@@ -20848,6 +20966,15 @@ mod tests {
                 Some("Amazon Bedrock")
             ),
             "Amazon Bedrock rejected the API key or sign-in (Invalid bearer token). Connect Amazon Bedrock again to replace it."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    r#"HTTP 401 Unauthorized: {"error":{"code":401,"message":"API keys are not supported by this API. Expected OAuth2 access token or other authentication credentials that assert a principal.","status":"UNAUTHENTICATED"}}"#.into()
+                ),
+                Some("Google Vertex AI")
+            ),
+            "Google Vertex AI did not accept this API key. It takes a key bound to a service account; a key from Google AI Studio connects as Gemini instead."
         );
         assert_eq!(
             super::describe_error(
