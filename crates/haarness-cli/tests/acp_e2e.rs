@@ -703,7 +703,7 @@ async fn a_request_raised_between_prompts_is_asked_on_the_next_one() {
     let api = daemon_api(&data);
     let write = json!({"path":"late.txt", "content":"LATE_OK"});
     let task = json!({"description":"Late writer", "prompt":format!("!tool write {write}"), "background":true});
-    daemon(
+    let started = daemon(
         &api,
         reqwest::Method::POST,
         &format!("/threads/{session}/turns"),
@@ -725,6 +725,20 @@ async fn a_request_raised_between_prompts_is_asked_on_the_next_one() {
     })
     .await
     .expect("the background subagent asks");
+    // The turn that started it can still be finishing: a prompt sent before
+    // it ends is refused as one for a busy chat.
+    let turn = format!("/turns/{}", started["id"].as_str().unwrap());
+    timeout(Duration::from_secs(20), async {
+        while ["queued", "running"].contains(
+            &daemon(&api, reqwest::Method::GET, &turn, None).await["status"]
+                .as_str()
+                .unwrap_or_default(),
+        ) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the turn that started the subagent ends");
 
     send(
         &mut stdin,
@@ -734,7 +748,7 @@ async fn a_request_raised_between_prompts_is_asked_on_the_next_one() {
     .await;
     let mut messages = Vec::new();
     let response = receive_response(&mut lines, &mut stdin, 3, &mut messages).await;
-    assert_eq!(response["result"]["stopReason"], "end_turn");
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response:?}");
     let asked = messages
         .iter()
         .find(|message| message["method"].as_str() == Some("session/request_permission"))
