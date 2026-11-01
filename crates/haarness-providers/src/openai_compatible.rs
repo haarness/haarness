@@ -1458,6 +1458,9 @@ fn is_chat_completion_model(provider: &str, entry: &Value, id: &str) -> bool {
     if entry
         .pointer("/architecture/output_modalities")
         .or_else(|| entry.pointer("/modalities/output"))
+        // Groq's list says it at the top level; its Orpheus voices answer
+        // with speech only.
+        .or_else(|| entry.get("output_modalities"))
         .and_then(Value::as_array)
         .is_some_and(|modalities| {
             !modalities.is_empty()
@@ -3032,6 +3035,19 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    #[test]
+    fn groq_speech_models_stay_out_of_the_picker() {
+        let model = |id: &str, output: Value| {
+            discovered_model_info(
+                "groq",
+                &json!({"id": id, "output_modalities": output}),
+                CompatibleModelDefaults::default(),
+            )
+        };
+        assert!(model("canopylabs/orpheus-v1-english", json!(["speech"])).is_none());
+        assert!(model("openai/gpt-oss-120b", json!(["text"])).is_some());
     }
 
     #[test]
