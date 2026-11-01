@@ -409,6 +409,7 @@ async fn compatible_reasoning_is_provider_scoped_and_replayed() {
         ("xai", "grok-4.7", "xhigh"),
         ("mistral", "mistral-medium-3-5", "high"),
         ("mistral", "mistral-large-4-0", "medium"),
+        ("mistral", "mistral-small-latest", "high"),
         ("groq", "openai/gpt-oss-120b", "low"),
         ("custom", "legacy-model", "high"),
     ] {
@@ -431,6 +432,13 @@ async fn compatible_reasoning_is_provider_scoped_and_replayed() {
             assert_eq!(info.reasoning_efforts, ["low", "medium", "high"]);
             assert!(info.images);
             assert_eq!(info.context_window, Some(1_048_576));
+            assert_eq!(info.pricing.map(|price| price.input), Some(0.7));
+        }
+        if model == "mistral-small-latest" {
+            let info = provider.info().models.into_iter().next().unwrap();
+            assert_eq!(info.display_name, "Mistral Small 4");
+            assert_eq!(info.reasoning_efforts, ["none", "high"]);
+            assert!(info.pricing.is_some(), "a turn on Small 4 has a price");
         }
         let mut req = request(model, Some(effort));
         let first = events(&provider, req.clone()).await;

@@ -922,16 +922,32 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 long_context: None,
             });
         }
-        // Mistral's pages spell the id both ways. A launch discount halves the
-        // list price until about 2026-10-20.
+        // Mistral's pages spell the id both ways. Prices as listed on
+        // docs.mistral.ai/models/mistral-large-4-0, checked 2026-11-01.
         ("mistral", "mistral-large-4-0" | "mistral-large-4") => {
             info.display_name = "Mistral Large 4".into();
             info.images = true;
             info.context_window = Some(1_048_576);
             info.pricing = Some(ModelPricing {
-                input: 1.36,
-                output: 4.18,
-                cache_read: 0.14,
+                input: 0.7,
+                output: 2.1,
+                cache_read: 0.07,
+                cache_write: 0.0,
+                long_context: None,
+            });
+        }
+        // Small 4 answers to its dated id and to `mistral-small-latest`. Prices
+        // as listed on docs.mistral.ai/models/mistral-small-4-0-26-03, checked
+        // 2026-11-01; the page names no cached-input price, so cached input
+        // costs what input does.
+        ("mistral", "mistral-small-2603" | "mistral-small-latest") => {
+            info.display_name = "Mistral Small 4".into();
+            info.images = true;
+            info.context_window = Some(256_000);
+            info.pricing = Some(ModelPricing {
+                input: 0.15,
+                output: 0.6,
+                cache_read: 0.15,
                 cache_write: 0.0,
                 long_context: None,
             });
