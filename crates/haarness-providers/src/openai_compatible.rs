@@ -967,6 +967,9 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 info.display_name = "GLM-5.1".into();
             }
             info.reasoning |= !info.reasoning_efforts.is_empty() || id == "glm-5.1";
+            // Z.ai's list says nothing of input; the 5.3 Flash models read
+            // pictures, the others refuse anything but text.
+            info.images |= matches!(id, "glm-5.3-flash" | "glm-5.3-flashx");
             // Z.ai's list gives no context windows; without one a chat
             // never compacts and fails once it outgrows the model.
             info.context_window = info.context_window.or(zai_context_window(id));
@@ -5849,6 +5852,8 @@ mod tests {
         );
         let flash = info("glm-5.3-flash");
         assert!(flash.reasoning);
+        assert!(flash.images);
+        assert!(!info("glm-5.3").images);
         assert_eq!(
             flash.pricing.map(|price| (price.input, price.output)),
             Some((0.15, 0.5))
