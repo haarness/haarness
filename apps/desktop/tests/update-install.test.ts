@@ -4,7 +4,18 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HELPER, WINDOWS_HELPER, detectInstall, openInstaller, removeLeftovers, stageMacApp, windowsInstallCommand } from "../src/main/update-install";
+import {
+  HELPER,
+  WINDOWS_HELPER,
+  detectInstall,
+  openInstaller,
+  removeLeftovers,
+  signerName,
+  stageMacApp,
+  stageWindowsSetup,
+  windowsInstallCommand,
+  windowsPublisher,
+} from "../src/main/update-install";
 
 const temporary = () => mkdtemp(join(tmpdir(), "haarness-update-install-"));
 /** A process id that has already exited. */
@@ -229,4 +240,38 @@ test("Windows runs its install helper through Windows PowerShell, with every inp
   assert.match(WINDOWS_HELPER, /'--updated', '\/S', '--force-run'/);
   assert.match(WINDOWS_HELPER, /\/v1\/shutdown/);
   assert.match(WINDOWS_HELPER, /StartsWith\(\$bin \+ '\\'/);
+});
+
+test("a Windows publisher is the signer's name and organisation, as Windows judges the signature", async () => {
+  assert.equal(signerName("CN=Stack Forward LLC, O=Stack Forward LLC, L=Koto-ku, S=Tokyo-to, C=JP"), "Stack Forward LLC");
+  assert.equal(signerName('CN="Example, Inc.", O=Example Holdings, C=US'), "Example, Inc. (Example Holdings)");
+  assert.equal(signerName("O=No Name Ltd"), undefined);
+  const answer = (status: string, subject = "") => async () => ({ stdout: JSON.stringify({ status, subject }) + "\r\n", stderr: "" });
+  const subject = "CN=Stack Forward LLC, O=Stack Forward LLC, L=Koto-ku, S=Tokyo-to, C=JP";
+  assert.equal(await windowsPublisher("C:\\Haarness.exe", {}, answer("Valid", subject)), "Stack Forward LLC");
+  assert.equal(await windowsPublisher("C:\\Haarness.exe", {}, answer("NotSigned")), undefined);
+  assert.equal(await windowsPublisher("C:\\Haarness.exe", {}, answer("HashMismatch", subject)), null);
+  assert.equal(await windowsPublisher("C:\\Haarness.exe", {}, answer("NotTrusted", subject)), null);
+  assert.equal(await windowsPublisher("C:\\Haarness.exe", {}, async () => Promise.reject(new Error("no PowerShell"))), null);
+  // The path goes to PowerShell quoted, whatever it holds.
+  let seen: string[] = [];
+  await windowsPublisher("C:\\Users\\O'Neil\\setup.exe", { SystemRoot: "D:\\Windows" }, async (command, args) => {
+    seen = [command, ...args];
+    return { stdout: JSON.stringify({ status: "NotSigned", subject: "" }), stderr: "" };
+  });
+  assert.equal(seen[0], "D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  assert.match(seen.at(-1)!, /-LiteralPath 'C:\\Users\\O''Neil\\setup\.exe'/);
+});
+
+test("a Windows setup must come from the publisher that signed the running app", async () => {
+  const read = (signer: string | undefined | null) => async () => signer;
+  const signature = (error: { code?: string }) => error.code === "signature";
+  assert.equal(await stageWindowsSetup({ file: "setup.exe", publisher: "Stack Forward LLC", read: read("Stack Forward LLC") }), "setup.exe");
+  // Signed by someone else, unsigned, or with a broken signature.
+  await assert.rejects(stageWindowsSetup({ file: "setup.exe", publisher: "Stack Forward LLC", read: read("Someone Else") }), signature);
+  await assert.rejects(stageWindowsSetup({ file: "setup.exe", publisher: "Stack Forward LLC", read: read(undefined) }), signature);
+  await assert.rejects(stageWindowsSetup({ file: "setup.exe", publisher: "Stack Forward LLC", read: read(null) }), signature);
+  // A running app whose own signature cannot be read accepts nothing; an unsigned one (before 0.1.16) compares nothing.
+  await assert.rejects(stageWindowsSetup({ file: "setup.exe", publisher: null, read: read("Stack Forward LLC") }), signature);
+  assert.equal(await stageWindowsSetup({ file: "setup.exe", publisher: undefined, read: read(undefined) }), "setup.exe");
 });
