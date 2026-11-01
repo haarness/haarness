@@ -930,6 +930,27 @@ export function shortPath(value: string, keep = 2) {
     : "/" + parts.join("/");
 }
 
+/** A piece of an error's text: words, or a web address to open. */
+export type ErrorPart = { text: string } | { url: string };
+
+/**
+ * An error's text with its web addresses taken out to be shown as links
+ * ("Upgrade the plan at https://…/billing, or …"), so the page it points to
+ * opens with a click. Punctuation ending the sentence stays text.
+ */
+export function errorParts(message: string): ErrorPart[] {
+  const parts: ErrorPart[] = [];
+  let rest = 0;
+  for (const match of message.matchAll(/https?:\/\/[^\s<>"]+/g)) {
+    const url = match[0].replace(/[.,;:!?)\]'’”]+$/, "");
+    if (match.index > rest) parts.push({ text: message.slice(rest, match.index) });
+    parts.push({ url });
+    rest = match.index + url.length;
+  }
+  if (rest < message.length) parts.push({ text: message.slice(rest) });
+  return parts;
+}
+
 /**
  * Errors are shown where they happened, with the one action that actually
  * helps. A missing credential is by far the most common failure, and its fix

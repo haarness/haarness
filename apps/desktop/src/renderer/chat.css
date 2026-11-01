@@ -1159,6 +1159,12 @@ html[dir="rtl"] .tool-target {
   color: var(--danger);
   align-items: flex-start;
 }
+.inline-error a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
 .notice-inline.media-omitted {
   align-items: flex-start;
 }
