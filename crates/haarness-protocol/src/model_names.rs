@@ -303,6 +303,7 @@ mod tests {
             "grok-4.20-0309-non-reasoning",
             "grok-4-1-fast-non-reasoning",
             "mistral-large-4-0",
+            "glm-5.3-flashx",
         ];
         for (id, name) in NAMES.iter() {
             if own_way.contains(&id.as_str()) {

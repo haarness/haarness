@@ -74,6 +74,7 @@ test("the brand reading agrees with the table", () => {
     "grok-4.20-0309-non-reasoning",
     "grok-4-1-fast-non-reasoning",
     "mistral-large-4-0",
+    "glm-5.3-flashx",
   ]);
   for (const [id, name] of Object.entries(names as Record<string, string>)) {
     if (ownWay.has(id)) continue;
