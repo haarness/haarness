@@ -1704,6 +1704,11 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     if provider == Some("GitHub Copilot") && lower.contains("model_not_supported") {
         return "Your GitHub Copilot plan doesn't include this model. Choose another model, or turn it on at github.com/settings/copilot.".into();
     }
+    // Vertex refuses a key that is not bound to a service account, which is
+    // most often a Gemini API key from Google AI Studio.
+    if provider == Some("Google Vertex AI") && lower.contains("api keys are not supported") {
+        return "Google Vertex AI takes only an API key bound to a service account. A key from Google AI Studio connects as Gemini instead.".into();
+    }
     // Bedrock refuses a wrong API key with 403 "Authentication failed: Please
     // make sure your API Key is valid", or "Invalid API Key format".
     if lower.contains("http 401")
@@ -20861,6 +20866,15 @@ mod tests {
                 Some("Amazon Bedrock")
             ),
             "Amazon Bedrock rejected the API key or sign-in (Invalid bearer token). Connect Amazon Bedrock again to replace it."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    r#"HTTP 401 Unauthorized: {"error":{"code":401,"message":"API keys are not supported by this API. Expected OAuth2 access token or other authentication credentials that assert a principal.","status":"UNAUTHENTICATED"}}"#.into()
+                ),
+                Some("Google Vertex AI")
+            ),
+            "Google Vertex AI takes only an API key bound to a service account. A key from Google AI Studio connects as Gemini instead."
         );
         assert_eq!(
             super::describe_error(
