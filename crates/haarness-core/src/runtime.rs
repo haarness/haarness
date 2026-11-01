@@ -1790,8 +1790,22 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
                     || format!("Upgrade the plan with {name}"),
                     |url| format!("Upgrade the plan at {}", url.trim_end_matches(['.', ','])),
                 );
+            // "8,000" reads at a glance where "8000" does not.
+            let grouped = |value: u64| {
+                let digits = value.to_string();
+                let mut out = String::new();
+                for (index, digit) in digits.chars().enumerate() {
+                    if index > 0 && (digits.len() - index).is_multiple_of(3) {
+                        out.push(',');
+                    }
+                    out.push(digit);
+                }
+                out
+            };
             return format!(
-                "{name} allows this account {limit} tokens a minute, and this request needs {requested}, so it can't be sent. {upgrade}, or choose another provider."
+                "{name} allows this account {} tokens a minute, and this request needs {}, so it can't be sent. {upgrade}, or choose another provider.",
+                grouped(limit),
+                grouped(requested)
             );
         }
     }
@@ -20875,7 +20889,7 @@ mod tests {
                 ),
                 Some("Groq")
             ),
-            "Groq allows this account 8000 tokens a minute, and this request needs 11419, so it can't be sent. Upgrade the plan at https://console.groq.com/settings/billing, or choose another provider."
+            "Groq allows this account 8,000 tokens a minute, and this request needs 11,419, so it can't be sent. Upgrade the plan at https://console.groq.com/settings/billing, or choose another provider."
         );
         assert_eq!(
             super::describe_error(
