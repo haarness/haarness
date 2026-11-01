@@ -1696,6 +1696,12 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             None => "This provider is not connected. Connect it with an API key or by signing in, then try again.".into(),
         };
     }
+    // Haarness refuses a picture for a model that reads none before anything
+    // is sent, in words that already say what to do: they are not the
+    // provider's error.
+    if lower.contains("doesn't read images. send the message without the picture") {
+        return clean_error_text(raw.trim(), 600);
+    }
     // GitHub accepts the sign-in but the account has no Copilot seat, so
     // signing in again would not help.
     if lower.contains("not licensed to use copilot") {
@@ -18530,6 +18536,17 @@ mod tests {
                 Some("Amazon Bedrock")
             ),
             "Amazon Bedrock rejected the request: anthropic.claude-haiku-5-5 is not available for this account."
+        );
+    }
+
+    #[test]
+    fn a_picture_refused_for_a_model_without_vision_reads_as_advice() {
+        let refused = CoreError::Provider(
+            "GLM-5.1 doesn't read images. Send the message without the picture, or switch to a model that reads them.".into(),
+        );
+        assert_eq!(
+            super::describe_failure(&refused, Some("Z.AI"), true),
+            "GLM-5.1 doesn't read images. Send the message without the picture, or switch to a model that reads them."
         );
     }
 

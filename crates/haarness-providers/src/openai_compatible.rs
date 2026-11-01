@@ -967,6 +967,9 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 info.display_name = "GLM-5.1".into();
             }
             info.reasoning |= !info.reasoning_efforts.is_empty() || id == "glm-5.1";
+            // Z.ai's list gives no context windows; without one a chat
+            // never compacts and fails once it outgrows the model.
+            info.context_window = info.context_window.or(zai_context_window(id));
             if let Some((input, cache_read, output)) = zai_list_price(id) {
                 info.pricing = Some(ModelPricing {
                     input,
@@ -1661,6 +1664,18 @@ fn zai_thinking_switch(model: &str) -> bool {
         model,
         "glm-5.1" | "glm-5" | "glm-5-turbo" | "glm-4.7" | "glm-4.6" | "glm-4.5"
     )
+}
+
+/// GLM context windows as each model's page on docs.z.ai lists them,
+/// checked 2026-11-01: 1M for GLM-5.3 (and its Flash models) and 5.2, 200K
+/// for 5.1, 5, 5-Turbo, 4.7 and 4.6, 128K for 4.5 and 4.5-Air.
+fn zai_context_window(model: &str) -> Option<u64> {
+    Some(match model {
+        "glm-5.3" | "glm-5.3-flash" | "glm-5.3-flashx" | "glm-5.2" => 1_000_000,
+        "glm-5.1" | "glm-5" | "glm-5-turbo" | "glm-4.7" | "glm-4.6" => 200_000,
+        "glm-4.5" | "glm-4.5-air" => 128_000,
+        _ => return None,
+    })
 }
 
 /// Z.ai's list prices per million tokens (input, cached input, output), as
@@ -2582,9 +2597,11 @@ fn openai_compatible_media_message(
                         "{model} doesn't read images. Send the message without the picture, or switch to a model that reads them."
                     )));
                 }
+                // Earlier answers in the chat may come from a model that saw
+                // the picture; "this model" read as if none had.
                 ImageInput::Note => blocks.push(json!({
                     "type":"text",
-                    "text":format!("[Image {} left out: this model doesn't read images. Don't guess what it shows.]", item.filename)
+                    "text":format!("[Image {} is not shown to you, because you don't read images. Don't guess what it shows; earlier answers may come from a model that saw it.]", item.filename)
                 })),
             }
         } else if item.is_pdf() {
@@ -4809,7 +4826,7 @@ mod tests {
         let sent = state.0.lock()[0]["messages"].to_string();
         assert!(!sent.contains("image_url"), "{sent}");
         assert_eq!(
-            sent.matches("[Image shot.png left out").count(),
+            sent.matches("[Image shot.png is not shown to you").count(),
             2,
             "{sent}"
         );
@@ -5837,6 +5854,12 @@ mod tests {
             Some((0.15, 0.5))
         );
         assert!(info("glm-5-turbo").pricing.is_none());
+        assert_eq!(info("glm-5.3-flashx").context_window, Some(1_000_000));
+        assert_eq!(info("glm-5.1").context_window, Some(200_000));
+        assert_eq!(info("glm-4.5-air").context_window, Some(128_000));
+        assert_eq!(info("glm-5.3-flashx").display_name, "GLM-5.3-FlashX");
+        assert_eq!(info("glm-5-turbo").display_name, "GLM-5-Turbo");
+        assert_eq!(info("glm-4.5-air").display_name, "GLM-4.5-Air");
     }
 
     #[tokio::test]

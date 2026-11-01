@@ -57,6 +57,9 @@ test("a model new to the table reads by its brand, as the server names it", () =
     ["gemini-5-pro-preview", "Gemini 5 Pro Preview"],
     ["grok-5-fast", "Grok 5 Fast"],
     ["glm-6", "GLM-6"],
+    ["glm-6-flashx", "GLM-6-FlashX"],
+    ["glm-5.4-air", "GLM-5.4-Air"],
+    ["glm-6-turbo", "GLM-6-Turbo"],
     ["gpt-oss-240b", "GPT-OSS 240B"],
     ["kimi-k4", "Kimi K4"],
     ["qwen-4-coder", "Qwen 4 Coder"],
@@ -74,7 +77,6 @@ test("the brand reading agrees with the table", () => {
     "grok-4.20-0309-non-reasoning",
     "grok-4-1-fast-non-reasoning",
     "mistral-large-4-0",
-    "glm-5.3-flashx",
   ]);
   for (const [id, name] of Object.entries(names as Record<string, string>)) {
     if (ownWay.has(id)) continue;
