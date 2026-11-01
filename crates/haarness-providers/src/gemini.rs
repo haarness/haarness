@@ -263,7 +263,14 @@ impl ModelProvider for GeminiProvider {
                 json!({"name":t.name,"description":t.description,"parametersJsonSchema":schema})
             })
             .collect();
-        let mut body = json!({"systemInstruction":{"parts":[{"text":request.system}]},"contents":contents,"tools":[{"functionDeclarations":declarations}]});
+        let mut body =
+            json!({"systemInstruction":{"parts":[{"text":request.system}]},"contents":contents});
+        // A request without tools (compacting a chat) leaves the field out:
+        // Vertex refuses an empty declaration list ("tool_type must have one
+        // initialized field").
+        if !declarations.is_empty() {
+            body["tools"] = json!([{"functionDeclarations": declarations}]);
+        }
         if structured_output.is_some() {
             body["toolConfig"] = json!({"functionCallingConfig":{"mode":"ANY"}});
         }
@@ -1078,6 +1085,43 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
             thinking_config("gemini-3-flash-preview", "minimal", Some(2048)),
             Some(json!({"thinkingLevel": "minimal", "includeThoughts": true}))
         );
+    }
+
+    #[tokio::test]
+    async fn a_request_without_tools_sends_no_tools_field() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route(
+                "/models/gemini-3.8-flash:streamGenerateContent",
+                post(structured_content),
+            )
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = GeminiProvider::for_test(format!("http://{address}"));
+        // What compacting a chat asks: a summary, with no tools to call.
+        provider
+            .stream(
+                ProviderRequest {
+                    model: "gemini-3.8-flash".into(),
+                    system: "summarize".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "summarize the chat".into(),
+                    }],
+                    tools: vec![],
+                    reasoning_effort: None,
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(state.0.lock()[0].get("tools").is_none());
     }
 
     #[tokio::test]
