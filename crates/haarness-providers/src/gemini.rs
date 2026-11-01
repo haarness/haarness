@@ -662,29 +662,34 @@ fn gemini_contents(messages: Vec<ProviderMessage>) -> CoreResult<Vec<Value>> {
                 if let Some(id) = function_ids.get(&call_id) {
                     response["id"] = json!(id);
                 }
-                contents.push(json!({
-                    "role": "user",
-                    "parts": [{"functionResponse": response}]
-                }));
-                if !media.is_empty() {
-                    contents.push(json!({
-                        "role": "user",
-                        "parts": media.into_iter().map(|item| json!({
-                            "inlineData": {"mimeType": item.mime_type, "data": item.base64}
-                        })).collect::<Vec<_>>()
-                    }));
-                }
+                // A tool result's media rides with its response.
+                let parts: Vec<Value> = std::iter::once(json!({"functionResponse": response}))
+                    .chain(media.into_iter().map(|item| {
+                        json!({"inlineData": {"mimeType": item.mime_type, "data": item.base64}})
+                    }))
+                    .collect();
+                contents.push(json!({"role": "user", "parts": parts}));
             }
         }
     }
     // Parallel calls belong to a single model content, and their responses to
-    // one user content. Keep signatures on their original parts.
+    // one user content. Keep signatures on their original parts. A message
+    // after tool results starts a content of its own: Vertex refuses text
+    // that follows a function response in one content ("Requests ending with
+    // a model turn are not supported"), which is what a message sent after a
+    // stopped tool call produced.
+    let responds = |content: &Value| {
+        content["parts"].as_array().is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|part| part.get("functionResponse").is_some())
+        })
+    };
     let mut grouped: Vec<Value> = Vec::new();
     for content in contents {
-        if let Some(previous) = grouped
-            .last_mut()
-            .filter(|previous| previous["role"] == content["role"])
-        {
+        if let Some(previous) = grouped.last_mut().filter(|previous| {
+            previous["role"] == content["role"] && (!responds(previous) || responds(&content))
+        }) {
             previous["parts"]
                 .as_array_mut()
                 .unwrap()
@@ -1343,6 +1348,52 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
         assert_eq!(
             contents[0]["parts"][6]["inlineData"]["mimeType"],
             "application/pdf"
+        );
+    }
+
+    #[test]
+    fn a_message_after_tool_results_starts_its_own_content() {
+        let call = |id: &str| ProviderMessage::ToolCall {
+            call_id: id.into(),
+            name: "bash".into(),
+            arguments: json!({"command": "sleep 30"}),
+            provider_metadata: Value::Null,
+        };
+        let result = |id: &str| ProviderMessage::ToolResult {
+            call_id: id.into(),
+            name: "bash".into(),
+            output: "operation cancelled".into(),
+            is_error: true,
+            attachments: Vec::new(),
+        };
+        let contents = gemini_contents(vec![
+            ProviderMessage::Text {
+                role: "user".into(),
+                content: "run it twice".into(),
+            },
+            call("a"),
+            call("b"),
+            result("a"),
+            result("b"),
+            ProviderMessage::Text {
+                role: "user".into(),
+                content: "Reply with exactly: still here".into(),
+            },
+        ])
+        .unwrap();
+
+        let roles: Vec<_> = contents
+            .iter()
+            .map(|c| c["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "model", "user", "user"]);
+        // Parallel calls and their results stay together.
+        assert_eq!(contents[1]["parts"].as_array().unwrap().len(), 2);
+        assert_eq!(contents[2]["parts"].as_array().unwrap().len(), 2);
+        assert!(contents[2]["parts"][1]["functionResponse"].is_object());
+        assert_eq!(
+            contents[3]["parts"],
+            json!([{"text": "Reply with exactly: still here"}])
         );
     }
 
