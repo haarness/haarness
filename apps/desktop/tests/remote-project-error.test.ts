@@ -5,7 +5,7 @@ import { remoteProjectError } from "../src/renderer/remote-project-error";
 test("remote project failures give relevant next steps without exposing server diagnostics", () => {
   assert.match(
     remoteProjectError(
-      new Error("Haarness server did not become ready within 8 seconds"),
+      new Error("Haarness server did not become ready within 20 seconds"),
     ),
     /server took too long/i,
   );

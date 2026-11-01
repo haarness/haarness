@@ -12991,7 +12991,7 @@ async fn ensure_workspace_server_at(
     let mut child = command
         .spawn()
         .context("cannot start the Haarness server")?;
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + SERVER_START_WAIT;
     loop {
         if let Some(discovery) = discover_workspace_server(paths, workspace).await? {
             return Ok(discovery);
@@ -13010,11 +13010,22 @@ async fn ensure_workspace_server_at(
             anyhow::bail!("Haarness server exited during startup ({status}){reason}");
         }
         if Instant::now() >= deadline {
-            anyhow::bail!("Haarness server did not become ready within 8 seconds");
+            anyhow::bail!(
+                "Haarness server did not become ready within {} seconds",
+                SERVER_START_WAIT.as_secs()
+            );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// How long a launcher waits for the server it started, while that server
+/// runs: one that exits is reported at once. A first start in a folder
+/// creates the server's databases, and on a slow or busy disk (a Windows
+/// machine scanning new files, a shared CI runner) that alone has taken
+/// seconds. Desktop gives a whole connect 30 seconds, so this stays well
+/// inside that.
+const SERVER_START_WAIT: Duration = Duration::from_secs(20);
 
 /// Start `command` apart from whoever started this process: in a process
 /// group of its own (on Windows with no console, so closing the terminal or
