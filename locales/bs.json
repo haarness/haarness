@@ -1845,6 +1845,7 @@
   "Remove schedule": "Ukloni raspored",
   "Disconnect {name}?": "Prekinuti vezu s {name}?",
   "Haarness forgets the stored {name} credential. You can connect it again at any time.": "Haarness zaboravlja pohranjenu vjerodajnicu za {name}. Možete se ponovo povezati u bilo kojem trenutku.",
+  "{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.": "{name} je povezan iz okruženja. Da ga odspojite, uklonite {env} i ponovo pokrenite Haarness.",
   "Remove {name} from the sidebar?": "Ukloniti {name} s bočne trake?",
   "Save your files before changing working folders, or discard these edits.": "Spremite datoteke prije promjene radnih mapa ili odbacite ove izmjene.",
   "Only this agent, in this chat": "Samo ovaj agent, u ovom razgovoru",

@@ -1845,6 +1845,7 @@
   "Remove schedule": "إزالة الجدول",
   "Disconnect {name}?": "هل تريد قطع الاتصال بـ {name}؟",
   "Haarness forgets the stored {name} credential. You can connect it again at any time.": "سينسى Haarness بيانات اعتماد {name} المخزنة. يمكنك إعادة الاتصال في أي وقت.",
+  "{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.": "{name} متصل من متغيرات البيئة. لقطع الاتصال، أزل {env} ثم أعد تشغيل Haarness.",
   "Remove {name} from the sidebar?": "إزالة {name} من الشريط الجانبي؟",
   "Save your files before changing working folders, or discard these edits.": "احفظ ملفاتك قبل تغيير مجلدات العمل، أو تجاهل هذه التعديلات.",
   "Only this agent, in this chat": "هذا الوكيل فقط، في هذه المحادثة",

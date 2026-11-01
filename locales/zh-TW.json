@@ -1845,6 +1845,7 @@
   "Remove schedule": "移除排程",
   "Disconnect {name}?": "要中斷 {name} 的連線嗎？",
   "Haarness forgets the stored {name} credential. You can connect it again at any time.": "Haarness 會刪除已儲存的 {name} 憑證。你可以隨時重新連線。",
+  "{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.": "{name} 透過環境變數連線。若要中斷連線，請移除 {env} 並重新啟動 Haarness。",
   "Remove {name} from the sidebar?": "要從側邊欄移除 {name} 嗎？",
   "Save your files before changing working folders, or discard these edits.": "變更工作資料夾前請先儲存檔案，或捨棄這些修改。",
   "Only this agent, in this chat": "僅此代理程式，僅在此對話中",
