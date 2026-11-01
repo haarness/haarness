@@ -81,14 +81,20 @@ pub fn json_stream(
             response
         } else {
             let status = response.status();
+            let advised = advised_retry(status, response.headers());
             let detail = within(limit, response.text())
                 .await?
                 .ok()
                 .and_then(|body| provider_error_detail(&body));
-            let message = detail.map_or_else(
+            let mut message = detail.map_or_else(
                 || format!("HTTP {status}"),
                 |detail| format!("HTTP {status}: {detail}"),
             );
+            if let Some(advised) = advised
+                && !message.to_ascii_lowercase().contains("retry in")
+            {
+                message.push_str(&advised);
+            }
             Err(CoreError::Provider(message))?;
             unreachable!();
         };
@@ -132,6 +138,28 @@ pub fn json_stream(
             }
         }
     })
+}
+
+/// The wait a rate-limited response names in `Retry-After`, spelled the way
+/// the runtime reads a provider's own advice (" Please retry in 7s."). A
+/// limit's message alone ("Rate limit exceeded") says nothing about how long
+/// it lasts, so without this a per-minute limit failed the turn at once. Only
+/// a whole number of seconds is read; a date is left out.
+pub(crate) fn advised_retry(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> Option<String> {
+    if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return None;
+    }
+    let seconds: u64 = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(format!(" Please retry in {seconds}s."))
 }
 
 /// The human-readable reason in an error body. Providers use several JSON
@@ -242,6 +270,28 @@ fn find_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_rate_limit_passes_on_its_retry_after() {
+        use reqwest::{
+            StatusCode,
+            header::{HeaderMap, HeaderValue, RETRY_AFTER},
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
+        assert_eq!(
+            advised_retry(StatusCode::TOO_MANY_REQUESTS, &headers).as_deref(),
+            Some(" Please retry in 7s.")
+        );
+        // Only a rate limit, and only whole seconds.
+        assert!(advised_retry(StatusCode::SERVICE_UNAVAILABLE, &headers).is_none());
+        headers.insert(
+            RETRY_AFTER,
+            HeaderValue::from_static("Wed, 21 Oct 2026 07:28:00 GMT"),
+        );
+        assert!(advised_retry(StatusCode::TOO_MANY_REQUESTS, &headers).is_none());
+        assert!(advised_retry(StatusCode::TOO_MANY_REQUESTS, &HeaderMap::new()).is_none());
+    }
+
     use std::time::Duration;
 
     use futures::StreamExt as _;
@@ -254,7 +304,9 @@ mod tests {
     };
     use tokio_util::sync::CancellationToken;
 
-    use super::{find_boundary, is_loopback, json_stream, provider_error_detail, send};
+    use super::{
+        advised_retry, find_boundary, is_loopback, json_stream, provider_error_detail, send,
+    };
 
     /// A provider that answers with server-sent `parts`, `pause` apart, and
     /// then stays silent with the connection open, or with no `head` never
