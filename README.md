@@ -2,7 +2,7 @@
   <a href="https://haarness.ai">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.png">
-      <img alt="Haarness — Power your work with the best AI harness." src=".github/assets/banner-light.png" width="100%">
+      <img alt="Haarness — Open-source AI coding agent." src=".github/assets/banner-light.png" width="100%">
     </picture>
   </a>
 </p>
@@ -18,10 +18,11 @@
   <a href="locales/README.md"><img alt="17 interface languages" src="https://img.shields.io/badge/languages-17-eae5dd?style=flat-square&labelColor=232120"></a>
 </p>
 
-**Haarness is an AI assistant that does the work, not just the talking.** You see every step, and it
-asks before anything that matters. One open-source agent works in your project from a terminal UI, a desktop
-app, your editor, scripts and CI, and keeps going in [Haarness Cloud](https://haarness.ai) when you
-close the lid.
+**Haarness is an open-source AI coding agent that works with any model.** Bring your ChatGPT or
+GitHub Copilot plan, a key for Claude, GPT, Gemini and more, or a model on your own machine. It reads
+your code, makes the change, runs your tests and shows every step. One agent works in your project from a
+terminal UI, a desktop app, your editor, scripts and CI, and keeps going in
+[Haarness Cloud](https://haarness.ai) when you close the lid.
 
 A local server owns every chat, turn and tool call and keeps them durable: closing a window or losing a
 connection never stops the work, and every client sees the same chats. The CLI, server and terminal UI
