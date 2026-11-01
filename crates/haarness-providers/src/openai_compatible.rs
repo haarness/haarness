@@ -962,9 +962,20 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
         ("nvidia", "nvidia/nemotron-3-super-120b-a12b") => {
             info.display_name = "Nemotron 3 Super 120B".into();
         }
-        ("zai", "glm-5.1") => {
-            info.display_name = "GLM-5.1".into();
-            info.reasoning = true;
+        ("zai", id) if id.starts_with("glm-") => {
+            if id == "glm-5.1" {
+                info.display_name = "GLM-5.1".into();
+            }
+            info.reasoning |= !info.reasoning_efforts.is_empty() || id == "glm-5.1";
+            if let Some((input, cache_read, output)) = zai_list_price(id) {
+                info.pricing = Some(ModelPricing {
+                    input,
+                    output,
+                    cache_read,
+                    cache_write: 0.0,
+                    long_context: None,
+                });
+            }
         }
         ("deepinfra", "deepseek-ai/DeepSeek-V3") => {
             info.display_name = "DeepSeek V3".into();
@@ -1617,12 +1628,41 @@ fn known_reasoning_effort_model(provider: &str, model: &str) -> bool {
     !known_reasoning_efforts(provider, model).is_empty()
 }
 
+/// GLM models that turn thinking on and off with `thinking` and ignore
+/// `reasoning_effort`.
+fn zai_thinking_switch(model: &str) -> bool {
+    matches!(
+        model,
+        "glm-5.1" | "glm-5" | "glm-5-turbo" | "glm-4.7" | "glm-4.6" | "glm-4.5"
+    )
+}
+
+/// Z.ai's list prices per million tokens (input, cached input, output), as
+/// listed on docs.z.ai/guides/overview/pricing, checked 2026-11-01.
+fn zai_list_price(model: &str) -> Option<(f64, f64, f64)> {
+    Some(match model {
+        "glm-5.3" | "glm-5.2" | "glm-5.1" => (1.4, 0.26, 4.4),
+        "glm-5.3-flash" => (0.15, 0.03, 0.5),
+        "glm-5.3-flashx" => (0.37, 0.075, 1.25),
+        "glm-5" => (1.0, 0.2, 3.2),
+        "glm-4.7" | "glm-4.6" | "glm-4.5" => (0.6, 0.11, 2.2),
+        "glm-4.5-air" => (0.2, 0.03, 1.1),
+        _ => return None,
+    })
+}
+
 fn known_reasoning_efforts(provider: &str, model: &str) -> Vec<&'static str> {
     match (provider, model) {
         ("groq", "openai/gpt-oss-20b" | "openai/gpt-oss-120b") | ("xai", "grok-4.5") => {
             vec!["low", "medium", "high"]
         }
         ("xai", "grok-4.6" | "grok-4.7") => vec!["low", "medium", "high", "xhigh"],
+        // GLM 5.3 always thinks and takes these levels only; 5.2 takes every
+        // level; the older models ignore a level and switch thinking with
+        // `thinking` (see `zai_thinking_switch`).
+        ("zai", "glm-5.3" | "glm-5.3-flash" | "glm-5.3-flashx") => vec!["low", "high", "max"],
+        ("zai", "glm-5.2") => vec!["none", "low", "medium", "high", "max"],
+        ("zai", model) if zai_thinking_switch(model) => vec!["none", "high"],
         (
             "deepseek",
             "deepseek-flash"
@@ -2137,7 +2177,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
             && supports_reasoning_effort
             && let Some(effort) = request.reasoning_effort.as_deref()
         {
-            if self.id == "deepseek" {
+            if self.id == "zai" && zai_thinking_switch(&model) {
+                body["thinking"] =
+                    json!({"type": if effort == "none" { "disabled" } else { "enabled" }});
+            } else if self.id == "deepseek" {
                 body["thinking"] =
                     json!({"type": if effort == "none" { "disabled" } else { "enabled" }});
                 if effort != "none" {
@@ -5701,6 +5744,26 @@ mod tests {
 
         let requests = state.0.lock();
         assert!(requests[0].get("reasoning_effort").is_none());
+        // GLM-5.1 switches thinking rather than taking a level.
+        assert_eq!(requests[0]["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn glm_models_offer_the_levels_z_ai_accepts_and_have_prices() {
+        let info = |id: &str| model_info("zai", id, CompatibleModelDefaults::default());
+        assert_eq!(info("glm-5.3").reasoning_efforts, ["low", "high", "max"]);
+        assert_eq!(info("glm-5.1").reasoning_efforts, ["none", "high"]);
+        assert_eq!(
+            info("glm-5.2").reasoning_efforts,
+            ["none", "low", "medium", "high", "max"]
+        );
+        let flash = info("glm-5.3-flash");
+        assert!(flash.reasoning);
+        assert_eq!(
+            flash.pricing.map(|price| (price.input, price.output)),
+            Some((0.15, 0.5))
+        );
+        assert!(info("glm-5-turbo").pricing.is_none());
     }
 
     #[tokio::test]
