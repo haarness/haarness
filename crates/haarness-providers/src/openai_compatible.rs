@@ -983,9 +983,12 @@ fn discovered_model_info(
         return None;
     }
     let mut info = model_info(provider, id, CompatibleModelDefaults::default());
+    // Mistral's `name` is the id of the model an alias points to
+    // ("mistral-small-2603" for `magistral-small-latest`), not a label: shown
+    // as one, different ids read alike and known names were lost.
     if let Some(name) = entry
         .get("display_name")
-        .or_else(|| entry.get("name"))
+        .or_else(|| entry.get("name").filter(|_| provider != "mistral"))
         .and_then(Value::as_str)
     {
         // OpenRouter names a model "Vendor: Model"; its id already says the
@@ -3028,6 +3031,32 @@ mod tests {
                 json!(["/api/v1/chat/completions", "/api/v1/responses"])
             )
             .is_some()
+        );
+    }
+
+    #[test]
+    fn mistral_names_are_ids_not_labels() {
+        let named = |id: &str, name: &str| {
+            discovered_model_info(
+                "mistral",
+                &json!({"id": id, "name": name, "capabilities": {"completion_chat": true}}),
+                CompatibleModelDefaults::default(),
+            )
+            .unwrap()
+            .display_name
+        };
+        assert_eq!(
+            named("mistral-large-4-0", "mistral-large-4"),
+            "Mistral Large 4"
+        );
+        assert_eq!(
+            named("mistral-small-latest", "mistral-small-2603"),
+            "Mistral Small 4"
+        );
+        // An alias keeps its own id rather than its target's.
+        assert_eq!(
+            named("magistral-small-latest", "mistral-small-2603"),
+            "magistral-small-latest"
         );
     }
 
