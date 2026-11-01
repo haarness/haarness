@@ -7,6 +7,7 @@ import {
   reviewBlock,
   toolFailed,
   describeTool,
+  errorParts,
   errorRecovery,
   permissionCommand,
   permissionScript,
@@ -546,6 +547,25 @@ test("credential failures offer the setting that fixes them", () => {
     pane: "providers",
   });
   assert.equal(errorRecovery("the model returned a 500"), null);
+});
+
+test("web addresses in an error become links, without the sentence's punctuation", () => {
+  assert.deepEqual(
+    errorParts(
+      "Groq allows this account 8000 tokens a minute, and this request needs 12012, so it can't be sent. Upgrade the plan at https://console.groq.com/settings/billing, or choose another provider.",
+    ),
+    [
+      { text: "Groq allows this account 8000 tokens a minute, and this request needs 12012, so it can't be sent. Upgrade the plan at " },
+      { url: "https://console.groq.com/settings/billing" },
+      { text: ", or choose another provider." },
+    ],
+  );
+  assert.deepEqual(errorParts("See https://example.com/a."), [
+    { text: "See " },
+    { url: "https://example.com/a" },
+    { text: "." },
+  ]);
+  assert.deepEqual(errorParts("the model returned a 500"), [{ text: "the model returned a 500" }]);
 });
 
 test("a working location is identified by the tail of its path", () => {
