@@ -8870,7 +8870,13 @@ async fn a_workflow_result_its_chat_cannot_take_is_kept_for_the_next_message() {
     ));
     let host = WorkflowRuntimeAdapter::new();
     host.attach(&runtime);
-    let executor = WorkflowExecutor::new(ExecutorConfig::default());
+    // The run below counts for a moment on purpose. How long that takes is
+    // up to the machine, so the limits on a busy runtime are out of its way.
+    let executor = WorkflowExecutor::new(ExecutorConfig {
+        portable_watchdog_timeout: Duration::from_secs(60),
+        runner_heartbeat_timeout: Duration::from_secs(60),
+        ..ExecutorConfig::default()
+    });
     if !executor.capability().executable {
         eprintln!("skipping refused workflow result fixture: Bun is unavailable");
         let _ = std::fs::remove_dir_all(workspace);
