@@ -6,7 +6,18 @@ import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
 import { desktopLog, exportLogs, logLevel } from "./logs";
 import { createUpdater, type Updater } from "./updater";
-import { detectInstall, freeSpace, launchInstall, macTeam, openInstaller, removeLeftovers, stageAppImage, stageMacApp } from "./update-install";
+import {
+  detectInstall,
+  freeSpace,
+  launchInstall,
+  macTeam,
+  openInstaller,
+  removeLeftovers,
+  stageAppImage,
+  stageMacApp,
+  stageWindowsSetup,
+  windowsPublisher,
+} from "./update-install";
 import type { UpdateState } from "../updates";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
 import { createSideChatStorage } from "./side-chat-storage";
@@ -2281,6 +2292,8 @@ async function startUpdates() {
   const os = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
   // The new app must come from the team that signed this one.
   const team = install.method === "restart" && install.kind === "zip" ? await macTeam(install.target) : undefined;
+  // On Windows, the new setup must come from the publisher that signed this one.
+  const publisher = install.method === "restart" && install.kind === "exe" ? await windowsPublisher(process.execPath) : undefined;
   // What an install stopped halfway left beside the app.
   if (install.method === "restart" && install.kind !== "exe") void removeLeftovers(install.target);
   updater = createUpdater({
@@ -2299,7 +2312,9 @@ async function startUpdates() {
         ? stageMacApp({ file, version, folder, team })
         : install.method === "restart" && install.kind === "AppImage"
           ? stageAppImage({ file, target: install.target })
-          : Promise.resolve(file),
+          : install.method === "restart" && install.kind === "exe"
+            ? stageWindowsSetup({ file, publisher })
+            : Promise.resolve(file),
     launch: ({ staged, version, relaunch, result }) => {
       if (install.method !== "restart") return;
       launchInstall({

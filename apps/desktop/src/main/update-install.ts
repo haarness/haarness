@@ -124,6 +124,65 @@ export async function stageMacApp(input: { file: string; version: string; folder
   return staged;
 }
 
+/** The `CN` and `O` of a certificate subject (`CN=Stack Forward LLC, O=Stack
+ * Forward LLC, L=…`), the part a publisher keeps when it moves; undefined
+ * without a `CN`. */
+export function signerName(subject: string): string | undefined {
+  const parts = new Map<string, string>();
+  for (const match of subject.matchAll(/(?:^|,)\s*([A-Za-z.]+)=("(?:[^"]|"")*"|[^,]*)/g)) {
+    const value = match[2].startsWith('"') ? match[2].slice(1, -1).replace(/""/g, '"') : match[2];
+    if (!parts.has(match[1].toUpperCase())) parts.set(match[1].toUpperCase(), value.trim());
+  }
+  const name = parts.get("CN");
+  if (!name) return undefined;
+  const organization = parts.get("O");
+  return organization && organization !== name ? `${name} (${organization})` : name;
+}
+
+/**
+ * The publisher that signed a Windows program, as Windows itself judges it
+ * (`Get-AuthenticodeSignature`: the signature verifies and chains to a root
+ * this computer trusts): undefined for a program without a signature (a local
+ * build, or a release before 0.1.16), null when its signature is broken,
+ * untrusted or cannot be read.
+ */
+export async function windowsPublisher(file: string, env: NodeJS.ProcessEnv = process.env, runner = run): Promise<string | undefined | null> {
+  const powershell = win32.join(env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const script =
+    `$s = Get-AuthenticodeSignature -LiteralPath '${file.replace(/'/g, "''")}'; ` +
+    "[pscustomobject]@{ status = [string]$s.Status; subject = [string]$s.SignerCertificate.Subject } | ConvertTo-Json -Compress";
+  try {
+    const { stdout } = await runner(powershell, ["-NoProfile", "-NonInteractive", "-Command", script]);
+    const { status, subject } = JSON.parse(stdout.trim()) as { status?: string; subject?: string };
+    if (status === "NotSigned") return undefined;
+    return status === "Valid" ? (signerName(subject ?? "") ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Checks a verified Windows setup before it runs: when the running app is a
+ * publisher's, the setup must carry a valid signature by that same publisher
+ * (the one check that does not rest on the release service, as the team is on
+ * macOS). A running app whose signature cannot be read accepts nothing; an
+ * unsigned one compares nothing.
+ */
+export async function stageWindowsSetup(input: { file: string; publisher?: string | null; read?: (file: string) => Promise<string | undefined | null> }) {
+  if (input.publisher === null)
+    throw new UpdateError("signature", "This app's own signature could not be read, so no update can be checked against it.");
+  if (input.publisher === undefined) return input.file;
+  const signer = await (input.read ?? windowsPublisher)(input.file);
+  if (signer !== input.publisher)
+    throw new UpdateError(
+      "signature",
+      signer
+        ? `The update is signed by ${signer}, not ${input.publisher}.`
+        : `The update does not carry a valid signature by ${input.publisher}.`,
+    );
+  return input.file;
+}
+
 /** Puts a verified AppImage beside the one it replaces, hidden, so installing
  * is one rename on the same filesystem. */
 export async function stageAppImage(input: { file: string; target: string }) {
