@@ -1015,6 +1015,11 @@ fn discovered_model_info(
             }
             _ => name,
         };
+        // Groq names some models "Qwen/Qwen3.8-27B"; the vendor is its id's.
+        let name = match name.split_once('/') {
+            Some((_, model)) if provider == "groq" && !model.is_empty() => model,
+            _ => name,
+        };
         // DeepSeek writes "DeepSeek-V4.1-Flash".
         let name = if provider == "deepseek" {
             name.replace('-', " ")
@@ -3099,6 +3104,17 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    #[test]
+    fn groq_names_leave_out_the_vendor_prefix() {
+        let info = discovered_model_info(
+            "groq",
+            &json!({"id": "qwen/qwen3.8-27b", "name": "Qwen/Qwen3.8-27B"}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(info.display_name, "Qwen3.8-27B");
     }
 
     #[test]
