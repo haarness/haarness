@@ -339,7 +339,8 @@ packaging), then notarytool, stapler and the gate above. Add and prove it once A
 
 **Windows (`release-linux-windows-docker.sh`).** Unsigned, SmartScreen warns on every
 browser-downloaded file ("unknown publisher") and Smart App Control may refuse to run it; releases up
-to 0.1.4 shipped that way (the PowerShell installer unblocks verified bytes). Since June 2023 a code
+to 0.1.15 shipped that way (the PowerShell installer unblocks verified bytes). From 0.1.16 every
+Windows program is signed by **Stack Forward LLC**. Since June 2023 a code
 signing key must live in hardware, so no `.pfx` exists to hand electron-builder (the workflow's
 `WIN_CSC_LINK` cannot be filled). Signing goes through **Azure Artifact Signing** (formerly Trusted
 Signing): about $10 a month, open to organizations in Japan among others (Microsoft's quickstart,
@@ -393,14 +394,19 @@ The account (set up 2026-10-25): Azure subscription "Azure subscription 1" (pay-
 directory `orexhaarness.onmicrosoft.com`, owner orex@haarness.ai with two-step verification),
 resource group `haarness-signing`, Artifact Signing account `haarness` (Japan East, Basic). Identity
 validation (Public, organization "Stack Forward LLC", corporate number 9010603009734, website
-stackforward.dev) was submitted 2026-10-25; the representative completes the ID check from the email
-Microsoft sends, then Microsoft takes 1-20 business days. Build login: app registration
+stackforward.dev), request `71350ed3-5ea6-4e2c-98dc-462b12b953ad`, is **Completed** and expires
+**2029-01-27**: renew it from the account's Identity validation page before then (the representative
+repeats the ID check), or signing stops. Build login: app registration
 `haarness-release-signing` (client ID 8a9feb4b-89f4-4050-8128-4586cd4306c9, directory
 f0febf30-c13e-40a5-bfe0-df6044d513c6) with "Artifact Signing Certificate Profile Signer" on the
 account; its client secret expires **2028-10-24** (renew it before then and replace `client-secret`).
-Once validation completes, create the Public Trust certificate profile `haarness-public` on the
-account (Objects, Certificate profiles) with that validation, then run a release build without
-`WIN_SIGN=test`.
+The Public Trust certificate profile **`haarness-public`** (created 2026-11-01 on that validation,
+without street address or postal code) issues the three-day certificates, subject
+`CN=Stack Forward LLC, O=Stack Forward LLC, L=Koto-ku, S=Tokyo-to, C=JP`, through Microsoft ID Verified
+CS AOC CA 03 and Microsoft ID Verified Code Signing PCA 2021. The service principal can read the
+account and its profiles through Azure Resource Manager (api-version 2025-10-13) with the same
+client-credentials token for `https://management.azure.com/.default`: an empty `certificateProfiles`
+list means nothing can be signed. A plain release build signs (`WIN_SIGN=azure` is the default).
 
 Signed is not yet trusted: SmartScreen builds reputation per signing identity from downloads, so a
 new identity may still warn for days to weeks; submit a new release's installer at
@@ -414,7 +420,9 @@ the script uses `--mount …,readonly`.
 themselves ([Desktop updates](../../docs/DESKTOP.md#updates)): the macOS **ZIP** (unpacked, its
 `CFBundleShortVersionString` must be the release's version and its signature must verify and be
 the same team's as the running app's, so publish only Developer ID builds signed by
-`J63GND4Q8A`), the AppImage, and the Windows setup `.exe`; the .deb and a copy that may not write
+`J63GND4Q8A`), the AppImage, and the Windows setup `.exe` (a signed Desktop runs it only when Windows
+accepts its signature, `Get-AuthenticodeSignature` Valid, by the same publisher: certificate name and
+organisation; an unsigned copy, 0.1.15 and earlier, compares nothing); the .deb and a copy that may not write
 itself get the installer. The TUI's home screen reads `/api/v1/releases/<channel>/cli` and offers
 `haarness --update` when a binary for its platform is newer. So a release missing a platform's
 file is simply not offered there, a published file that does not match its index is refused, and
@@ -512,6 +520,17 @@ workflow's `HAARNESS_RELEASE_URL`: pointing it at `https://haarness.ai` fails th
 - Operator: POST `/internal/releases/artifacts`, POST `/internal/releases`, POST
   `/internal/releases/{id}/promote` (same-channel rollback), DELETE `/internal/releases/{id}`
   (withdraw; never silently selects an older release). Roll back by promoting a known-good receipt.
+
+**Fixing one platform's packages.** Nothing published can be replaced: an upload is keyed by version,
+product and file on every channel, `publish` answers "Published versions are immutable; choose a new
+version", the GitHub releases are immutable, and a channel serves one release, so a release carrying
+one platform alone would take the other platforms' downloads away. A fix to one platform's packages
+(0.1.16 signed Windows) is therefore a new version cut from the last release's tag: a `release-<v>`
+branch with the version bump and the fix only, in this repository and in haarness-router (its `v<v>`
+tag on its own `release-<v>` branch, so neither `main` moves and the Cloud's lock stays as it is), every
+platform rebuilt with the last release's `BUN_VERSION`. The Cloud that serves the last release serves
+it unchanged. `main` keeps the older version number, so the next release from `main` takes the number
+after; merge the fix itself into `main`.
 
 **GitHub release.** After haarness.ai, the same indexes go to the tags' GitHub releases: the CLI,
 Desktop and Haarness for Chrome on `haarness/haarness`, the router's files on
