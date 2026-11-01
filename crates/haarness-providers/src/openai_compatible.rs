@@ -1608,11 +1608,12 @@ fn known_reasoning_efforts(provider: &str, model: &str) -> Vec<&'static str> {
             | "deepseek-v4-pro"
             | "deepseek-v4-flash-vision-exp",
         ) => vec!["none", "low", "high", "max"],
+        // Large 4 refuses "none" and takes three levels; Medium 3.5 and
+        // Small refuse "low" and "medium".
+        ("mistral", "mistral-large-4-0" | "mistral-large-4") => vec!["low", "medium", "high"],
         (
             "mistral",
-            "mistral-large-4-0"
-            | "mistral-large-4"
-            | "mistral-medium-3-5"
+            "mistral-medium-3-5"
             | "mistral-medium-3.5"
             | "mistral-medium-2604"
             | "mistral-small-2603"

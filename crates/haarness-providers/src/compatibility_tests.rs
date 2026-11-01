@@ -408,7 +408,7 @@ async fn compatible_reasoning_is_provider_scoped_and_replayed() {
         ("deepseek", "deepseek-v4-pro", "none"),
         ("xai", "grok-4.7", "xhigh"),
         ("mistral", "mistral-medium-3-5", "high"),
-        ("mistral", "mistral-large-4-0", "none"),
+        ("mistral", "mistral-large-4-0", "medium"),
         ("groq", "openai/gpt-oss-120b", "low"),
         ("custom", "legacy-model", "high"),
     ] {
@@ -428,7 +428,7 @@ async fn compatible_reasoning_is_provider_scoped_and_replayed() {
         if model == "mistral-large-4-0" {
             let info = provider.info().models.into_iter().next().unwrap();
             assert_eq!(info.display_name, "Mistral Large 4");
-            assert_eq!(info.reasoning_efforts, ["none", "high"]);
+            assert_eq!(info.reasoning_efforts, ["low", "medium", "high"]);
             assert!(info.images);
             assert_eq!(info.context_window, Some(1_048_576));
         }
