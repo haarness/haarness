@@ -931,6 +931,10 @@ fn open_connection(database: impl AsRef<Path>) -> CoreResult<Connection> {
     connection
         .pragma_update(None, "journal_mode", "WAL")
         .map_err(storage)?;
+    // As the chat store on the same database: only checkpoints flush.
+    connection
+        .pragma_update(None, "synchronous", "NORMAL")
+        .map_err(storage)?;
     connection
         .busy_timeout(std::time::Duration::from_secs(5))
         .map_err(storage)?;
