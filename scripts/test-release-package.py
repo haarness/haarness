@@ -12,7 +12,7 @@ assert len(paths)==1,paths
 binary=paths[0]
 assert subprocess.check_output([str(binary),'--version'],text=True).strip()=='haarness '+versions['version']
 bun=binary.parent/('bun.exe' if platform.system()=='Windows' else 'bun')
-assert subprocess.check_output([str(bun),'--version'],text=True).strip()=='1.3.14'
+assert subprocess.check_output([str(bun),'--version'],text=True).strip()=='1.4.3'
 subprocess.run([str(binary),'--help'],check=True,stdout=subprocess.DEVNULL)
 if platform.system()=='Darwin':
     # Every program in bin/ starts wherever the app does: a Mac packages the other architecture's app too, and

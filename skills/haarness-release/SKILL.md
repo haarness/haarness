@@ -97,7 +97,7 @@ git commit -am "Cargo.lock follows Haarness Router $v" && git push   # before bu
 
 ## 2. Build per platform
 
-Rust from rust-toolchain.toml, Node 22+, **Bun 1.3.14** (never whatever Bun is first on PATH).
+Rust from rust-toolchain.toml, Node 22+, **Bun 1.4.3** (never whatever Bun is first on PATH).
 
 First, on every platform, the JavaScript the CLI embeds and Desktop bundles, in `release.yml`'s
 order: the extension's typecheck needs the built SDK (`@haarness/sdk` is a `file:` dependency)
@@ -158,7 +158,7 @@ error` before it listens, so the Docker checks run `--version` on stock Ubuntu 2
 ### Without GitHub Actions (local cross-builds)
 
 When the workflow cannot run (a blocked billing account), a Mac covers all six platforms (macOS
-natively, the rest in Docker), or a Mac and one Linux x64 machine. Same tag, same Bun 1.3.14 per
+natively, the rest in Docker), or a Mac and one Linux x64 machine. Same tag, same Bun 1.4.3 per
 target (checked against Bun's `SHASUMS256.txt`), same steps as above:
 
 - Both scripts also build the router, from a clean worktree of haarness-router's `v<v>` (`ROUTER_REPO`,

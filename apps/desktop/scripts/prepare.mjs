@@ -66,12 +66,12 @@ for (const candidate of bunCandidates) {
 }
 if (!bun)
   throw new Error(
-    "Bun 1.3.14 is required to package extensions and workflows.",
+    "Bun 1.4.3 is required to package extensions and workflows.",
   );
 const version = spawnSync(bun, ["--version"], { encoding: "utf8" });
-if (version.status !== 0 || version.stdout.trim() !== "1.3.14")
+if (version.status !== 0 || version.stdout.trim() !== "1.4.3")
   throw new Error(
-    "Package with Bun 1.3.14 to match the tested runtime and bundled license.",
+    "Package with Bun 1.4.3 to match the tested runtime and bundled license.",
   );
 await copyFile(bun, join(directory, "resources", bunName));
 await chmod(join(directory, "resources", bunName), 0o755);
