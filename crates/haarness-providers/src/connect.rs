@@ -209,7 +209,7 @@ pub fn guide(provider: &str) -> ConnectGuide {
                 "GOOGLE_ACCESS_TOKEN",
             ],
             note: Some(
-                "An API key already belongs to a project. With an access token, also set GOOGLE_VERTEX_PROJECT (and optionally GOOGLE_VERTEX_LOCATION) for the project to bill.",
+                "A key needs nothing else. With an access token, also set GOOGLE_VERTEX_PROJECT for the project to bill.",
             ),
             popular: None,
         },
