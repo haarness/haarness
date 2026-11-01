@@ -133,6 +133,14 @@ fn tidy_name(id: &str) -> Option<String> {
         name = format!("{name}-{version}");
         words.remove(0);
     }
+    // Z.ai writes every part of a GLM name with hyphens: `GLM-4.5-Air`,
+    // `GLM-5-Turbo`, `GLM-5.3-FlashX`.
+    if first == "glm" {
+        name = std::iter::once(name)
+            .chain(words.drain(..))
+            .collect::<Vec<_>>()
+            .join("-");
+    }
     let mut parts = vec![name];
     parts.extend(words);
     parts.extend(date);
@@ -142,8 +150,12 @@ fn tidy_name(id: &str) -> Option<String> {
 /// One word of a model id as a name writes it: `mini` is "Mini", `v5` "V5",
 /// `120b` (a parameter count) "120B", `oss` "OSS"; a version stays as it is.
 fn tidy_word(token: &str) -> String {
-    if token == "oss" {
-        return "OSS".into();
+    match token {
+        "oss" => return "OSS".into(),
+        // Z.ai's faster tiers: `GLM-4.7-FlashX`, `GLM-4.5-AirX`.
+        "flashx" => return "FlashX".into(),
+        "airx" => return "AirX".into(),
+        _ => {}
     }
     if let Some(count) = token.strip_suffix(['b', 'k', 'm'])
         && !count.is_empty()
@@ -273,6 +285,9 @@ mod tests {
             ("gemini-5-pro-preview", "Gemini 5 Pro Preview"),
             ("grok-5-fast", "Grok 5 Fast"),
             ("glm-6", "GLM-6"),
+            ("glm-6-flashx", "GLM-6-FlashX"),
+            ("glm-5.4-air", "GLM-5.4-Air"),
+            ("glm-6-turbo", "GLM-6-Turbo"),
             ("gpt-oss-240b", "GPT-OSS 240B"),
             ("kimi-k4", "Kimi K4"),
             ("qwen-4-coder", "Qwen 4 Coder"),
