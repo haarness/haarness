@@ -1771,6 +1771,30 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             ),
         };
     }
+    // A request larger than the plan's per-minute token allowance (Groq's
+    // free tier allows 8,000, less than one coding turn with its tools) is
+    // not a limit that waiting clears.
+    if lower.contains("request too large") && lower.contains("tokens per minute") {
+        let number = |label: &str| {
+            lower
+                .split_once(label)
+                .and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|digits| digits.parse::<u64>().ok())
+        };
+        if let (Some(limit), Some(requested)) = (number("limit "), number("requested ")) {
+            let name = provider.unwrap_or("The provider");
+            let upgrade = raw
+                .split_whitespace()
+                .find(|word| word.starts_with("https://"))
+                .map_or_else(
+                    || format!("Upgrade the plan with {name}"),
+                    |url| format!("Upgrade the plan at {}", url.trim_end_matches(['.', ','])),
+                );
+            return format!(
+                "{name} allows this account {limit} tokens a minute, and this request needs {requested}, so it can't be sent. {upgrade}, or choose another provider."
+            );
+        }
+    }
     if is_provider_usage_limit(error) {
         // The provider's own words say which limit and what helps; a bare
         // code (`insufficient_quota`) says less than the general advice.
@@ -20843,6 +20867,15 @@ mod tests {
         assert_eq!(
             super::user_facing_error(&CoreError::Provider("HTTP 429: insufficient_quota".into())),
             "Provider rate limit or quota reached. Wait and retry, or check the account quota."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    "HTTP 429 Too Many Requests: Request too large for model `openai/gpt-oss-120b` in organization `org_1` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 11419, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing".into()
+                ),
+                Some("Groq")
+            ),
+            "Groq allows this account 8000 tokens a minute, and this request needs 11419, so it can't be sent. Upgrade the plan at https://console.groq.com/settings/billing, or choose another provider."
         );
         assert_eq!(
             super::describe_error(
