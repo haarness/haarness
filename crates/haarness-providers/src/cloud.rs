@@ -583,6 +583,16 @@ fn copilot_model(entry: &serde_json::Value) -> Option<(ModelInfo, CopilotWire)> 
 /// through Vertex.
 const VERTEX_FALLBACK: &[&str] = &["gemini-4-argon", "gemini-3.8-flash"];
 
+/// Vertex's global endpoint for publisher models, which an API key reaches
+/// without naming a project: the key belongs to one.
+const VERTEX_KEY_BASE_URL: &str = "https://aiplatform.googleapis.com/v1/publishers/google";
+
+/// Google API keys (`AIza…`, and `AQ.…` for keys bound to a service account)
+/// travel in `x-goog-api-key`; anything else is an OAuth access token.
+fn is_google_api_key(credential: &str) -> bool {
+    credential.starts_with("AIza") || credential.starts_with("AQ.")
+}
+
 pub struct VertexProvider {
     instance: NativeInstance,
     auth_store: Option<Arc<CredentialStore>>,
@@ -621,7 +631,11 @@ impl VertexProvider {
                 "google-vertex",
                 "Google Vertex AI",
                 base_url,
-                env_first(&["GOOGLE_OAUTH_ACCESS_TOKEN", "GOOGLE_ACCESS_TOKEN"]),
+                env_first(&[
+                    "GOOGLE_OAUTH_ACCESS_TOKEN",
+                    "GOOGLE_ACCESS_TOKEN",
+                    "GOOGLE_VERTEX_API_KEY",
+                ]),
                 VERTEX_FALLBACK,
             ),
             auth_store,
@@ -662,7 +676,7 @@ impl VertexProvider {
             }
         }
         Err(CoreError::Provider(
-            "Vertex AI is not authenticated; run `gcloud auth application-default login`, run `haarness auth login google-vertex`, or set GOOGLE_OAUTH_ACCESS_TOKEN".into(),
+            "Vertex AI is not authenticated; run `gcloud auth application-default login`, run `haarness auth login google-vertex`, or set GOOGLE_VERTEX_API_KEY or GOOGLE_OAUTH_ACCESS_TOKEN".into(),
         ))
     }
 }
@@ -688,21 +702,28 @@ impl ModelProvider for VertexProvider {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> CoreResult<ProviderStream> {
-        if self.instance.base_url.is_empty() {
-            return Err(CoreError::Provider(
-                "Vertex endpoint is not configured; set GOOGLE_VERTEX_PROJECT or GOOGLE_VERTEX_BASE_URL"
-                    .into(),
-            ));
-        }
         let token = self.token().await?;
-        let headers = headers_with(
-            &self.instance.headers,
-            [("Authorization", format!("Bearer {token}"))],
-        )?;
+        let api_key = is_google_api_key(&token);
+        let base_url = match (self.instance.base_url.as_str(), api_key) {
+            ("", true) => VERTEX_KEY_BASE_URL.to_owned(),
+            ("", false) => {
+                return Err(CoreError::Provider(
+                    "Vertex endpoint is not configured; set GOOGLE_VERTEX_PROJECT or GOOGLE_VERTEX_BASE_URL"
+                        .into(),
+                ));
+            }
+            (configured, _) => configured.to_owned(),
+        };
+        let auth = if api_key {
+            ("x-goog-api-key", token)
+        } else {
+            ("Authorization", format!("Bearer {token}"))
+        };
+        let headers = headers_with(&self.instance.headers, [auth])?;
         GeminiProvider::new(NativeInstance {
             id: self.instance.id.clone(),
             name: self.instance.name.clone(),
-            base_url: self.instance.base_url.clone(),
+            base_url,
             api_key: None,
             models: self.models.iter().map(|model| model.id.clone()).collect(),
             discover_models: false,
@@ -1210,5 +1231,42 @@ mod tests {
         assert_eq!(requests[0].0["authorization"], "Bearer google-token");
         assert!(!requests[0].0.contains_key("x-goog-api-key"));
         assert_eq!(requests[0].1["contents"][0]["parts"][0]["text"], "hi");
+    }
+
+    #[tokio::test]
+    async fn vertex_sends_api_keys_in_the_google_key_header() {
+        let capture = Capture::default();
+        let router = Router::new()
+            .route(
+                "/models/test-model:streamGenerateContent",
+                post(vertex_fixture),
+            )
+            .with_state(capture.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        for key in ["AQ.bound-key", "AIzaclassic-key"] {
+            let provider = VertexProvider::new(
+                instance("google-vertex", format!("http://{address}"), key),
+                None,
+            );
+            let events = collect_text(&provider).await;
+            assert!(matches!(&events[0], ProviderEvent::TextDelta(text) if text == "hello"));
+        }
+        let requests = capture.0.lock();
+        assert_eq!(requests[0].0["x-goog-api-key"], "AQ.bound-key");
+        assert_eq!(requests[1].0["x-goog-api-key"], "AIzaclassic-key");
+        assert!(
+            requests
+                .iter()
+                .all(|(headers, _)| !headers.contains_key("authorization"))
+        );
+    }
+
+    #[test]
+    fn google_api_keys_are_told_from_access_tokens() {
+        assert!(is_google_api_key("AQ.bound-key"));
+        assert!(is_google_api_key("AIzaclassic-key"));
+        assert!(!is_google_api_key("ya29.access-token"));
     }
 }

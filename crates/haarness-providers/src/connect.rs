@@ -199,13 +199,17 @@ pub fn guide(provider: &str) -> ConnectGuide {
             methods: vec![method(
                 "api",
                 MethodKind::Api,
-                "Use an access token",
-                "A Google Cloud OAuth access token",
+                "Use an API key or access token",
+                "A Vertex AI API key, or a Google Cloud OAuth access token",
             )],
-            key_url: None,
-            env: vec!["GOOGLE_OAUTH_ACCESS_TOKEN", "GOOGLE_ACCESS_TOKEN"],
+            key_url: Some("https://console.cloud.google.com/apis/credentials"),
+            env: vec![
+                "GOOGLE_VERTEX_API_KEY",
+                "GOOGLE_OAUTH_ACCESS_TOKEN",
+                "GOOGLE_ACCESS_TOKEN",
+            ],
             note: Some(
-                "Also set GOOGLE_VERTEX_PROJECT (and optionally GOOGLE_VERTEX_LOCATION) for the project to bill.",
+                "An API key already belongs to a project. With an access token, also set GOOGLE_VERTEX_PROJECT (and optionally GOOGLE_VERTEX_LOCATION) for the project to bill.",
             ),
             popular: None,
         },
