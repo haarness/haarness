@@ -587,6 +587,21 @@ const VERTEX_FALLBACK: &[&str] = &["gemini-4-argon", "gemini-3.8-flash"];
 /// without naming a project: the key belongs to one.
 const VERTEX_KEY_BASE_URL: &str = "https://aiplatform.googleapis.com/v1/publishers/google";
 
+/// The location used when none is set. Current Gemini models, the fallback
+/// ones included, are served from the global endpoint and from few regions.
+const VERTEX_DEFAULT_LOCATION: &str = "global";
+
+/// A project's publisher-model endpoint in `location`; the global location
+/// has no regional host.
+fn vertex_project_url(project: &str, location: &str) -> String {
+    let host = if location == "global" {
+        "aiplatform.googleapis.com".into()
+    } else {
+        format!("{location}-aiplatform.googleapis.com")
+    };
+    format!("https://{host}/v1/projects/{project}/locations/{location}/publishers/google")
+}
+
 /// Google API keys (`AIza…`, and `AQ.…` for keys bound to a service account)
 /// travel in `x-goog-api-key`; anything else is an OAuth access token.
 fn is_google_api_key(credential: &str) -> bool {
@@ -613,17 +628,10 @@ impl VertexProvider {
             "GOOGLE_CLOUD_LOCATION",
             "VERTEX_LOCATION",
         ])
-        .unwrap_or_else(|| "us-central1".into());
+        .unwrap_or_else(|| VERTEX_DEFAULT_LOCATION.into());
         let base_url = std::env::var("GOOGLE_VERTEX_BASE_URL").unwrap_or_else(|_| {
             project.map_or_else(String::new, |project| {
-                let host = if location == "global" {
-                    "aiplatform.googleapis.com".into()
-                } else {
-                    format!("{location}-aiplatform.googleapis.com")
-                };
-                format!(
-                    "https://{host}/v1/projects/{project}/locations/{location}/publishers/google"
-                )
+                vertex_project_url(&project, &location)
             })
         });
         Self::new(
@@ -1260,6 +1268,18 @@ mod tests {
             requests
                 .iter()
                 .all(|(headers, _)| !headers.contains_key("authorization"))
+        );
+    }
+
+    #[test]
+    fn vertex_projects_default_to_the_global_endpoint() {
+        assert_eq!(
+            vertex_project_url("demo", VERTEX_DEFAULT_LOCATION),
+            "https://aiplatform.googleapis.com/v1/projects/demo/locations/global/publishers/google"
+        );
+        assert_eq!(
+            vertex_project_url("demo", "europe-west4"),
+            "https://europe-west4-aiplatform.googleapis.com/v1/projects/demo/locations/europe-west4/publishers/google"
         );
     }
 
