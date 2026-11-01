@@ -555,8 +555,9 @@ test("quitting with no window open ends the event streams before the app exits",
 });
 
 /** An Anthropic-format endpoint that lists its models in four pages of
- * 2.2 s each (inside the server's 3 s for a page and 10 s for the list), and
- * answers a message with "late hello". */
+ * 1.9 s each (well inside the server's 3 s for a page and 10 s for the list,
+ * which a slow runner otherwise outlasts), and answers a message with
+ * "late hello". */
 async function lateModels() {
   let listed = 0;
   const server = createHttpServer((request, response) => {
@@ -586,14 +587,19 @@ async function lateModels() {
         }),
       );
       if (page === 4) listed = Date.now();
-    }, 2200);
+    }, 1900);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return {
     url: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`,
     /** When the whole list was answered, or 0. */
     listed: () => listed,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    /** Ends the connections the server under test still keeps, as a list it
+     * gave up on a slow runner does until that server stops. */
+    close: () => {
+      server.closeAllConnections();
+      return new Promise<void>((resolve) => server.close(() => resolve()));
+    },
   };
 }
 
@@ -603,7 +609,7 @@ test("a project whose model list is slow opens at once, and a message sent meanw
   let client: Haarness | undefined;
   try {
     await launch();
-    // The server's list is in about 9 s after it starts.
+    // The server's list is in about 8 s after it starts.
     const remote = await endpoint(
       "slow-models",
       '[defaults]\nprovider="slowlist"\nmodel="late-model-1"\n' +
