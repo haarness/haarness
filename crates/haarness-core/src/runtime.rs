@@ -975,13 +975,16 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
         // rate-limited upstream. Please retry shortly", or a Haarness router's
         // "Try again in a moment"), Bedrock's throttling
         // ("Too many requests, please wait before trying again") and a
-        // Bedrock model still loading back off as a busy provider does. A
+        // Bedrock model still loading back off as a busy provider does, and
+        // so does Vertex's shared capacity ("Resource exhausted. Please try
+        // again later."), which Google asks callers to retry with backoff. A
         // daily allowance ("Too many tokens per day") is not back in seconds.
         return ((lower.contains("temporarily rate-limited")
             || lower.contains("retry shortly")
             || lower.contains("try again in a moment")
             || lower.contains("please wait before trying again")
-            || lower.contains("[modelnotreadyexception]"))
+            || lower.contains("[modelnotreadyexception]")
+            || (lower.contains("resource exhausted") && lower.contains("try again later")))
             && !lower.contains("per day"))
         .then(|| std::time::Duration::from_secs(1 << attempt.min(4)));
     };
@@ -20678,6 +20681,16 @@ mod tests {
         assert_eq!(
             super::retry_delay(&shared, 3),
             Some(std::time::Duration::from_secs(8))
+        );
+        // Vertex's answer when its shared capacity is busy.
+        let vertex_busy = provider(
+            "HTTP 429 Too Many Requests: Resource exhausted. Please try again later. \
+             Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 \
+             for more details.",
+        );
+        assert_eq!(
+            super::retry_delay(&vertex_busy, 2),
+            Some(std::time::Duration::from_secs(4))
         );
         assert!(
             super::retry_delay(
