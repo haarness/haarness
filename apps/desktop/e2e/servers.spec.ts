@@ -110,7 +110,7 @@ process.exit(result.status ?? 1);
       res.end(
         JSON.stringify({
           error: {
-            message: "Haarness server did not become ready within 8 seconds",
+            message: "Haarness server did not become ready within 20 seconds",
           },
         }),
       );

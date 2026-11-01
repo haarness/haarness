@@ -48,6 +48,14 @@ impl SqliteStore {
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(storage)?;
+        // In WAL mode a commit then waits for no disk flush; only checkpoints
+        // flush. The database stays whole through any crash, and what a
+        // power cut can take back is the last moment of writes. With a flush
+        // per commit, a new database's two dozen migration steps kept a
+        // server from starting for many seconds on a slow Windows disk.
+        connection
+            .pragma_update(None, "synchronous", "NORMAL")
+            .map_err(storage)?;
         connection
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(storage)?;
@@ -2568,6 +2576,25 @@ mod tests {
                 thread.is_subagent
             );
         }
+    }
+
+    #[test]
+    fn a_commit_waits_for_no_disk_flush() {
+        let directory =
+            std::env::temp_dir().join(format!("haarness-store-sync-{}", Uuid::now_v7()));
+        let store = SqliteStore::open(directory.join("sessions.db")).unwrap();
+        let connection = store.connection.lock();
+        let journal: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        // 1 is NORMAL: in WAL mode only checkpoints flush.
+        let synchronous: i64 = connection
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((journal.as_str(), synchronous), ("wal", 1));
+        drop(connection);
+        drop(store);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[tokio::test]

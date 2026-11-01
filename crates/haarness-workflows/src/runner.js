@@ -10,8 +10,8 @@ const VERSION = 1
 const pending = new Map()
 let nextRequestID = 1
 
-function send(frame) {
-  process.stdout.write(`${JSON.stringify({ version: VERSION, ...frame })}\n`)
+function send(frame, written) {
+  process.stdout.write(`${JSON.stringify({ version: VERSION, ...frame })}\n`, written)
 }
 
 function fail(message) {
@@ -781,13 +781,20 @@ async function main() {
         throw new Error("Workflow host input loop stopped")
       }),
     ])
-    send({ type: "result", value: encodeValue(result) })
+    const value = encodeValue(result)
+    await new Promise((resolve) => send({ type: "result", value }, resolve))
   } finally {
     clearInterval(heartbeat)
   }
 }
 
-main().catch((error) => {
+main().then(() => {
+  // The result is written: the run is over. Ending here, not once the host
+  // closes stdin and that is noticed, keeps the exit prompt on a busy
+  // system, and nothing the workflow left behind (a timer, a call it never
+  // awaited) holds the runtime up.
+  process.exit(0)
+}, (error) => {
   for (const waiter of pending.values()) waiter.reject(error)
   pending.clear()
   fail(error)

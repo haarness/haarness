@@ -370,7 +370,10 @@ async fn run_behind_proxy(
         .as_str()
         .unwrap()
         .to_owned();
-    let write = json!({"path":"elsewhere.txt", "content":"ELSEWHERE"});
+    // The other window's turn waits on an edit only a person answers: the
+    // run puts the chat in Auto, and Auto would answer any other request
+    // and let that turn end before the run's own turn is refused as busy.
+    let write = json!({"path":".mcp.json", "content":"{}"});
     api(
         &server,
         reqwest::Method::POST,
@@ -426,8 +429,6 @@ async fn run_behind_proxy(
         .unwrap();
     proxied.abort();
     let after = approval_mode(&server, &thread).await;
-    // While the chat was in Auto, its reviewer may have answered the other
-    // turn's request already: putting the mode back cannot undo that.
     let _ = reqwest::Client::new()
         .post(format!("{}/v1/permissions/{permission}", server.0))
         .bearer_auth(&server.1)
