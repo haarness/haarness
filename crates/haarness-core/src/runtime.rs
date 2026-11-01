@@ -1704,10 +1704,21 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     if provider == Some("GitHub Copilot") && lower.contains("model_not_supported") {
         return "Your GitHub Copilot plan doesn't include this model. Choose another model, or turn it on at github.com/settings/copilot.".into();
     }
-    // Vertex refuses a key that is not bound to a service account, which is
-    // most often a Gemini API key from Google AI Studio.
+    // Vertex refuses a mistyped key, and a key not bound to a service
+    // account (most often a Gemini key from Google AI Studio), with "API keys
+    // are not supported by this API. Expected OAuth2 access token…".
     if provider == Some("Google Vertex AI") && lower.contains("api keys are not supported") {
-        return "Google Vertex AI takes only an API key bound to a service account. A key from Google AI Studio connects as Gemini instead.".into();
+        return "Google Vertex AI did not accept this API key. It takes a key bound to a service account; a key from Google AI Studio connects as Gemini instead.".into();
+    }
+    // Other Google APIs answer a key they do not take the same way, which
+    // reads as if no key could work.
+    if lower.contains("api keys are not supported by this api") {
+        return match provider {
+            Some(name) => format!(
+                "{name} did not accept this API key: it is not valid, or not a key for {name}. Connect {name} again to replace it."
+            ),
+            None => "The provider did not accept this API key: it is not valid, or not a key for this provider. Connect it again to replace it.".into(),
+        };
     }
     // Bedrock refuses a wrong API key with 403 "Authentication failed: Please
     // make sure your API Key is valid", or "Invalid API Key format".
@@ -18483,6 +18494,27 @@ mod tests {
     }
 
     #[test]
+    fn a_google_key_refusal_says_the_key_is_wrong_not_that_keys_are() {
+        let provider = |message: &str| CoreError::Provider(message.into());
+        assert_eq!(
+            super::describe_error(
+                &provider(
+                    r#"HTTP 401 Unauthorized: {"error":{"code":401,"message":"API keys are not supported by this API. Expected OAuth2 access token or other authentication credentials that assert a principal. See https://cloud.google.com/docs/authentication","status":"UNAUTHENTICATED"}}"#
+                ),
+                Some("Gemini")
+            ),
+            "Gemini did not accept this API key: it is not valid, or not a key for Gemini. Connect Gemini again to replace it."
+        );
+        assert_eq!(
+            super::describe_error(
+                &provider("HTTP 401 Unauthorized: API keys are not supported by this API."),
+                None
+            ),
+            "The provider did not accept this API key: it is not valid, or not a key for this provider. Connect it again to replace it."
+        );
+    }
+
+    #[test]
     fn context_overflow_errors_are_told_apart_from_rate_limits() {
         let overflow = |message: &str| {
             super::is_provider_context_overflow(&CoreError::Provider(message.into()))
@@ -20874,7 +20906,7 @@ mod tests {
                 ),
                 Some("Google Vertex AI")
             ),
-            "Google Vertex AI takes only an API key bound to a service account. A key from Google AI Studio connects as Gemini instead."
+            "Google Vertex AI did not accept this API key. It takes a key bound to a service account; a key from Google AI Studio connects as Gemini instead."
         );
         assert_eq!(
             super::describe_error(

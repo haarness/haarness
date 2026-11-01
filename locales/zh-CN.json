@@ -1845,6 +1845,7 @@
   "Remove schedule": "移除计划",
   "Disconnect {name}?": "要断开 {name} 吗？",
   "Haarness forgets the stored {name} credential. You can connect it again at any time.": "Haarness 会删除已保存的 {name} 凭据。你可以随时重新连接。",
+  "{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.": "{name} 通过环境变量连接。要断开连接，请移除 {env} 并重启 Haarness。",
   "Remove {name} from the sidebar?": "要从侧边栏移除 {name} 吗？",
   "Save your files before changing working folders, or discard these edits.": "更改工作文件夹之前请先保存文件，或放弃这些修改。",
   "Only this agent, in this chat": "仅此智能体，仅在此对话中",

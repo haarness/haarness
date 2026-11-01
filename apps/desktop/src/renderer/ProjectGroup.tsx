@@ -22,6 +22,7 @@ import { SessionActions } from "./SessionActions";
 import { createFileDrop } from "./file-drop";
 import { chatTitle } from "./chat-title";
 import { relativeAge } from "./relative-age";
+import { now } from "./clock";
 import { revealInList } from "./reveal";
 import { searchArchived } from "./UniversalSearch";
 import { focusComposerWhenShown } from "./composer-focus";
@@ -36,18 +37,6 @@ import {
   setSelection,
   startsPick,
 } from "./sidebar-selection";
-
-/** One clock for every row's last-activity age, read by the rows that show
- * one and ticking twice a minute from the first read. */
-const [clock, setClock] = createSignal(Date.now());
-let ticking = false;
-function now() {
-  if (!ticking) {
-    ticking = true;
-    setInterval(() => setClock(Date.now()), 30_000);
-  }
-  return clock();
-}
 
 function ProjectGroup(props: {
   project: DesktopProject;

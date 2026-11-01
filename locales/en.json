@@ -1845,6 +1845,7 @@
   "Remove schedule": "Remove schedule",
   "Disconnect {name}?": "Disconnect {name}?",
   "Haarness forgets the stored {name} credential. You can connect it again at any time.": "Haarness forgets the stored {name} credential. You can connect it again at any time.",
+  "{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.": "{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.",
   "Remove {name} from the sidebar?": "Remove {name} from the sidebar?",
   "Save your files before changing working folders, or discard these edits.": "Save your files before changing working folders, or discard these edits.",
   "Only this agent, in this chat": "Only this agent, in this chat",

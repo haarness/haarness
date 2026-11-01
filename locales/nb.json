@@ -1845,6 +1845,7 @@
   "Remove schedule": "Fjern tidsplan",
   "Disconnect {name}?": "Koble fra {name}?",
   "Haarness forgets the stored {name} credential. You can connect it again at any time.": "Haarness glemmer den lagrede legitimasjonen for {name}. Du kan koble til igjen når som helst.",
+  "{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.": "{name} er koblet til fra miljøet. Fjern {env} og start Haarness på nytt for å koble fra.",
   "Remove {name} from the sidebar?": "Fjerne {name} fra sidepanelet?",
   "Save your files before changing working folders, or discard these edits.": "Lagre filene dine før du bytter arbeidsmappe, eller forkast disse endringene.",
   "Only this agent, in this chat": "Bare denne agenten, i denne chatten",

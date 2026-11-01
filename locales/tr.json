@@ -1845,6 +1845,7 @@
   "Remove schedule": "Zamanlamayı kaldır",
   "Disconnect {name}?": "{name} bağlantısı kesilsin mi?",
   "Haarness forgets the stored {name} credential. You can connect it again at any time.": "Haarness kayıtlı {name} kimlik bilgisini unutur. İstediğiniz zaman yeniden bağlanabilirsiniz.",
+  "{name} is connected from the environment. To disconnect it, remove {env} and restart Haarness.": "{name} ortamdan bağlı. Bağlantıyı kesmek için {env} değişkenini kaldırın ve Haarness'ı yeniden başlatın.",
   "Remove {name} from the sidebar?": "{name} kenar çubuğundan kaldırılsın mı?",
   "Save your files before changing working folders, or discard these edits.": "Çalışma klasörlerini değiştirmeden önce dosyalarınızı kaydedin veya bu düzenlemeleri atın.",
   "Only this agent, in this chat": "Yalnızca bu aracı, bu sohbette",
