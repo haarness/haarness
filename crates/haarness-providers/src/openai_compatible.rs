@@ -1101,6 +1101,27 @@ fn discovered_model_info(
         {
             info.tools = value;
         }
+        // Mistral lists the other ids of the same model in `aliases`
+        // (`mistral-medium-latest` is Medium 3.5): an alias of a model whose
+        // reasoning levels and price are known takes them, rather than
+        // offering no levels and no cost.
+        if info.reasoning_efforts.is_empty()
+            && let Some(known) = entry["aliases"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .find(|alias| known_reasoning_effort_model(provider, alias))
+        {
+            let target = model_info(provider, known, CompatibleModelDefaults::default());
+            info.reasoning_efforts = target.reasoning_efforts;
+            info.pricing = info.pricing.take().or(target.pricing);
+        }
+        // A model with known reasoning levels reasons, whatever the
+        // catalog says of the id it is listed under.
+        if !info.reasoning_efforts.is_empty() {
+            info.reasoning = true;
+        }
     }
     if provider == "deepinfra"
         && let Some(tags) = entry.pointer("/metadata/tags").and_then(Value::as_array)
@@ -3048,6 +3069,42 @@ mod tests {
         };
         assert!(model("canopylabs/orpheus-v1-english", json!(["speech"])).is_none());
         assert!(model("openai/gpt-oss-120b", json!(["text"])).is_some());
+    }
+
+    #[test]
+    fn mistral_aliases_take_the_levels_and_price_of_the_model_they_name() {
+        let listed = |id: &str, aliases: &[&str]| {
+            discovered_model_info(
+                "mistral",
+                &json!({
+                    "id": id,
+                    "name": "mistral-medium-latest",
+                    "aliases": aliases,
+                    "capabilities": {"completion_chat": true, "function_calling": true, "reasoning": true, "vision": true}
+                }),
+                CompatibleModelDefaults::default(),
+            )
+            .unwrap()
+        };
+        // Mistral's list as of 2026-11-01: the latest alias is Medium 3.5.
+        let latest = listed(
+            "mistral-medium-latest",
+            &[
+                "mistral-medium",
+                "mistral-medium-3-5",
+                "mistral-medium-2604",
+            ],
+        );
+        assert!(latest.reasoning);
+        assert_eq!(latest.reasoning_efforts, ["none", "high"]);
+        assert_eq!(latest.pricing.map(|price| price.input), Some(1.5));
+        // The dotted spelling has its own levels and reads as reasoning.
+        let dotted = listed("mistral-medium-3.5", &["mistral-medium-3-5"]);
+        assert!(dotted.reasoning);
+        assert_eq!(dotted.reasoning_efforts, ["none", "high"]);
+        // An alias of a model with no known levels keeps none.
+        let large = listed("mistral-large-latest", &["mistral-large-2512"]);
+        assert!(large.reasoning_efforts.is_empty());
     }
 
     #[test]
