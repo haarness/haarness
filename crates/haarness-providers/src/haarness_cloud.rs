@@ -191,8 +191,22 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
         // next catalogue refresh.
         "The provider no longer serves this model. Choose another model.".to_owned()
     } else if message.contains("[upstream_429]") {
-        "The provider is rate limiting this model right now. Try again in a moment, or choose another model."
-            .to_owned()
+        // The router names the wait when the provider did ("Try again in 12
+        // seconds."), and its Retry-After arrives as "Please retry in 12s.";
+        // either is kept in the words the runtime waits on.
+        match advised_seconds(&message) {
+            Some(seconds) => format!(
+                "The provider is rate limiting this model right now. Please retry in {seconds}s, or choose another model."
+            ),
+            None => "The provider is rate limiting this model right now. Try again in a moment, or choose another model."
+                .to_owned(),
+        }
+    } else if message.contains("[upstream_413]") {
+        // A request over the plan's tokens a minute: the router's sentence
+        // already says why and what helps, and waiting does not.
+        message
+            .split_once("[upstream_413]")
+            .map_or_else(|| message.clone(), |(_, rest)| rest.trim().to_owned())
     } else if [
         "[upstream_500]",
         "[upstream_502]",
@@ -239,6 +253,21 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
     };
     CoreError::Provider(advice)
 }
+/// The wait a rate-limited answer names, in whole seconds: the router's
+/// "Try again in 12 seconds." or a Retry-After passed on as "retry in 12s".
+fn advised_seconds(message: &str) -> Option<u64> {
+    let lower = message.to_ascii_lowercase();
+    ["retry in ", "try again in "].iter().find_map(|marker| {
+        lower.split(marker).skip(1).find_map(|rest| {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            let unit = rest[digits.len()..].trim_start();
+            (!digits.is_empty() && (unit.starts_with('s')))
+                .then(|| digits.parse().ok())
+                .flatten()
+        })
+    })
+}
+
 /// Whether a refused request's `available` names credits: with overage off
 /// the router reports the purchased balance there.
 fn purchased_available(message: &str) -> bool {
@@ -615,6 +644,11 @@ mod tests {
                 "HTTP 502: [upstream_503] upstream returned HTTP 503",
                 "The provider is overloaded or unavailable right now.",
             ),
+            (
+                "HTTP 413 Payload Too Large: [upstream_413] This request needs 12110 tokens, more \
+                 than the 8000 tokens a minute the provider's plan allows, so the provider refused it.",
+                "This request needs 12110 tokens, more than the 8000 tokens a minute",
+            ),
         ] {
             let CoreError::Provider(message) = readable_router(CoreError::Provider(raw.into()))
             else {
@@ -622,6 +656,19 @@ mod tests {
             };
             assert!(message.starts_with(start), "{raw} → {message}");
         }
+
+        // The router's own wait, or the Retry-After it passes on, is kept.
+        for raw in [
+            "HTTP 429: [upstream_429] The provider is rate limiting this key. Try again in 12 seconds.",
+            "HTTP 429: [upstream_429] upstream returned HTTP 429 Please retry in 12s.",
+        ] {
+            let CoreError::Provider(message) = readable_router(CoreError::Provider(raw.into()))
+            else {
+                panic!("still a provider error");
+            };
+            assert!(message.contains("Please retry in 12s"), "{raw} → {message}");
+        }
+        assert_eq!(advised_seconds("try again in a moment"), None);
 
         let byok = CoreError::Provider(
             "HTTP 402: [payment_required] routing your own provider keys needs a Haarness Cloud \

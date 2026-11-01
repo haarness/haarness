@@ -1025,11 +1025,13 @@ fn advised_wait(text: &str) -> Option<std::time::Duration> {
 
 /// How a rate limit or quota is worded. Such a refusal can also speak of too
 /// many tokens or a request too large; compacting cannot answer it.
-const RATE_LIMITED: [&str; 5] = [
+const RATE_LIMITED: [&str; 6] = [
     "rate limit",
     "too many requests",
     "throttl",
     "per minute",
+    // A Haarness router's 413 for a request over a plan's tokens a minute.
+    "tokens a minute",
     "quota",
 ];
 
@@ -18576,6 +18578,8 @@ mod tests {
             "Image too large for model with 20 maximum images",
             "Rate limit reached for gpt-5.5: too many tokens per minute",
             "[upstream_429] RESOURCE_EXHAUSTED: quota exceeded",
+            // A plan's tokens a minute: a shorter chat would not get through.
+            "HTTP 413 Payload Too Large: [upstream_413] This request needs 12110 tokens, more than the 8000 tokens a minute the provider's plan allows",
             "Too many requests",
         ] {
             assert!(!overflow(message), "{message}");
