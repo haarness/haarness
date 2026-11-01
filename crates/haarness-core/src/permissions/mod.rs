@@ -691,6 +691,26 @@ impl PermissionEngine {
         self.evaluate_passing_over(operation, &|_| false, PermissionDecision::Ask)
     }
 
+    /// Whether `matched`, the rule an evaluation names, is an allow someone
+    /// gave for something narrower than everything: an "always" answer, a
+    /// repository grant, or a configured rule rather than one of Haarness's
+    /// defaults. A blanket `bash:*` says nothing about any one command.
+    #[must_use]
+    pub fn allowed_by_choice(&self, matched: Option<&str>) -> bool {
+        let Some(matched) = matched else {
+            return false;
+        };
+        self.session_rules
+            .iter()
+            .chain(&self.repository_grants)
+            .chain(self.rules.iter().skip(self.builtin))
+            .any(|rule| {
+                rule.decision == PermissionDecision::Allow
+                    && rule.pattern == matched
+                    && !catch_all(rule)
+            })
+    }
+
     /// The verdict on a pattern read from inside a written shell command
     /// (another spelling of it, or a command it runs). In every layer
     /// (ceilings, configured rules, remembered answers) the rules `covers`

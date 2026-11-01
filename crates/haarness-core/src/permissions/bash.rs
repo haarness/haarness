@@ -64,8 +64,9 @@ pub struct BashAnalysis {
     pub links: Vec<Option<usize>>,
     /// The paths commands are given and redirects name that lead outside
     /// the project (the arguments of the commands in [`PATH_COMMANDS`]) or
-    /// may name where Haarness keeps sign-ins (any command's literal
-    /// arguments), each placed as [`Self::external_dirs`] places it.
+    /// may name where Haarness keeps sign-ins or a secret file such as
+    /// `.env` (any command's literal arguments), each placed as
+    /// [`Self::external_dirs`] places it.
     pub paths: Vec<NamedPath>,
 }
 
@@ -85,6 +86,9 @@ pub struct NamedPath {
     /// The folder of [`BashAnalysis::external_dirs`] it asks about, when
     /// it is outside the project.
     pub outside: Option<String>,
+    /// A command reads it, and it is a secret file a read asks about first
+    /// (`.env`: see [`crate::permissions::is_secret_path`]).
+    pub secret: bool,
 }
 
 /// A directory change in an `&&` chain: where it starts in the line, and
@@ -1104,11 +1108,16 @@ impl Reader<'_> {
                 &value,
                 complete,
             );
+            // `<` and `<>` read the file.
+            let reads = (0..redirect.child_count())
+                .filter_map(|i| redirect.child(i))
+                .any(|child| matches!(node_text(child, command).as_str(), "<" | "<>"));
             self.name_path(
                 &node_text(dest, command),
                 &value,
                 complete,
                 outside.as_deref(),
+                reads,
             );
             self.folder = None;
             if let Some(dir) = outside {
@@ -1703,7 +1712,10 @@ impl Reader<'_> {
     /// folder the same way.
     fn check_folder(&mut self, name: &str, raw: &str, value: &str, complete: bool) {
         let outside = external_dir(self.workspace, self.from(), raw, value, complete);
-        self.name_path(raw, value, complete, outside.as_deref());
+        // Of these, only `cat`, `cp` and `mv` read or carry off what a file
+        // holds.
+        let reads = matches!(name, "cat" | "cp" | "mv");
+        self.name_path(raw, value, complete, outside.as_deref(), reads);
         if let Some(dir) = outside {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
         }
@@ -1715,10 +1727,25 @@ impl Reader<'_> {
     }
 
     /// Record a path a command is given or a redirect names when it leads
-    /// outside the project (`outside`, the folder [`external_dir`] found) or
-    /// may name where Haarness keeps sign-ins: see [`BashAnalysis::paths`].
-    fn name_path(&mut self, raw: &str, value: &str, complete: bool, outside: Option<&Path>) {
-        if outside.is_none() && !(complete && crate::permissions::may_name_credential_store(value))
+    /// outside the project (`outside`, the folder [`external_dir`] found),
+    /// may name where Haarness keeps sign-ins, or is a secret file the
+    /// command `reads`: see [`BashAnalysis::paths`].
+    fn name_path(
+        &mut self,
+        raw: &str,
+        value: &str,
+        complete: bool,
+        outside: Option<&Path>,
+        reads: bool,
+    ) {
+        // Every secret name holds `.env`; the test is cheap for the rest.
+        let secret = complete
+            && reads
+            && value.contains(".env")
+            && crate::permissions::is_secret_path(Path::new(value));
+        if outside.is_none()
+            && !secret
+            && !(complete && crate::permissions::may_name_credential_store(value))
         {
             return;
         }
@@ -1737,6 +1764,7 @@ impl Reader<'_> {
         self.analysis.paths.push(NamedPath {
             file: complete && !path.is_dir(),
             literal: complete,
+            secret: secret && !path.is_dir(),
             path,
             outside: outside.map(glob),
         });
@@ -2229,7 +2257,7 @@ impl Reader<'_> {
                     Some((option, path)) if option.starts_with('-') => path.to_owned(),
                     _ => value,
                 };
-                self.name_path(&word.raw, &value, complete, None);
+                self.name_path(&word.raw, &value, complete, None, true);
             }
         }
         if !complete || !PATH_COMMANDS.contains(&name.as_str()) {

@@ -14991,6 +14991,8 @@ struct ShellReadings {
     /// The line names a file where Haarness keeps sign-ins (a literal path
     /// a command is given, or a redirect): see [`AskPlan::evaluate`].
     credentials: bool,
+    /// The secret files (`.env`) the line reads: see [`AskPlan::evaluate`].
+    secrets: Vec<std::path::PathBuf>,
 }
 
 impl ShellReadings {
@@ -15026,6 +15028,12 @@ impl ShellReadings {
             credentials: analysis.paths.iter().any(|named| {
                 named.file && crate::permissions::is_credential_store_path(&named.path)
             }),
+            secrets: analysis
+                .paths
+                .iter()
+                .filter(|named| named.secret)
+                .map(|named| named.path.clone())
+                .collect(),
         }
     }
 
@@ -15133,6 +15141,21 @@ impl AskPlan {
                 protected: true,
                 configured: false,
             };
+        }
+        // A command that reads a secret file (`cat .env`, `source .env`)
+        // gets what a read of it gets, unless someone chose to allow the
+        // command itself: a shell command could otherwise print what the
+        // read tool asks about first.
+        if evaluation.decision == PermissionDecision::Allow
+            && shell.index.contains_key(pattern)
+            && !engine.allowed_by_choice(evaluation.matched.as_deref())
+            && let Some(read) = shell
+                .secrets
+                .iter()
+                .map(|path| engine.evaluate_detailed(&format!("read:{}", path.display())))
+                .find(|read| read.decision != PermissionDecision::Allow)
+        {
+            return read;
         }
         evaluation
     }
@@ -15755,6 +15778,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 file: false,
                 literal: true,
                 outside: Some(pattern),
+                secret: false,
             });
             external_paths.push(path);
         }
@@ -16424,6 +16448,77 @@ mod shell_reading_tests {
         // reading too.
         let skill = PermissionEngine::new(vec![rule("bash:rm *", Deny)]);
         assert!(verdicts(&skill, "sudo rm x").contains(&("rm x".to_owned(), Deny)));
+    }
+
+    // POSIX shell text: Windows runs commands in cmd.exe.
+    #[cfg(unix)]
+    #[test]
+    fn a_line_that_reads_a_secret_file_gets_what_a_read_of_it_gets() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let project =
+            std::env::temp_dir().join(format!("haarness-shell-secrets-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+        std::fs::write(project.join(".env"), "TOKEN=x").unwrap();
+        // Haarness's defaults: shell commands run, `.env` reads ask.
+        let defaults = engine(&[]);
+        let verdict = |engine: &PermissionEngine, command: &str| {
+            ask_plans("bash", &json!({ "command": command }), &project)
+                .into_iter()
+                .filter(|plan| plan.permission == "bash")
+                .flat_map(|plan| {
+                    plan.patterns
+                        .iter()
+                        .map(|pattern| plan.evaluate(engine, pattern).decision)
+                        .collect::<Vec<_>>()
+                })
+                .max_by_key(|decision| match decision {
+                    Allow => 0,
+                    Ask => 1,
+                    Deny => 2,
+                })
+                .unwrap()
+        };
+        for command in [
+            "cat .env",
+            "cut -d= -f1 .env",
+            "grep TOKEN ./.env.local",
+            "source .env && npm test",
+            "wc -l < .env",
+            "cp .env /tmp/copy",
+            "git status && head -1 config/.env.production",
+        ] {
+            assert_eq!(verdict(&defaults, command), Ask, "{command}");
+        }
+        // Looking at it, an example file, a package's fixture, or writing
+        // it reads nothing secret.
+        for command in [
+            "ls -la .env",
+            "test -f .env && echo yes",
+            "cat .env.example",
+            "cat node_modules/pkg/.env",
+            "echo X=1 >> .env",
+            "cat README.md",
+        ] {
+            assert_eq!(verdict(&defaults, command), Allow, "{command}");
+        }
+        // A configured read rule decides, as it does for the read tool.
+        let readable = engine(&[("read:*.env", Allow)]);
+        assert_eq!(verdict(&readable, "cat .env"), Allow);
+        let secret = engine(&[("read:*.env", Deny)]);
+        assert_eq!(verdict(&secret, "cat .env"), Deny);
+        // So does an "always" answer for the command, or a rule naming it.
+        let mut answered = engine(&[]);
+        answered.add_grant(PermissionRule {
+            pattern: "bash:cat .env".into(),
+            decision: Allow,
+        });
+        assert_eq!(verdict(&answered, "cat .env"), Allow);
+        let configured = engine(&[("bash:source .env", Allow)]);
+        assert_eq!(verdict(&configured, "source .env"), Allow);
+        // A blanket allow for every command is not one for this one.
+        let blanket = engine(&[("bash:*", Allow)]);
+        assert_eq!(verdict(&blanket, "cat .env"), Ask);
+        std::fs::remove_dir_all(&project).unwrap();
     }
 
     // POSIX shell text with paths of this system: Windows runs commands in cmd.exe.
