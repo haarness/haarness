@@ -28,12 +28,12 @@ for mode, password in [('anonymous', ''), ('password', '日本:attach-password')
     workspace.mkdir(parents=True)
     local.mkdir()
     env = {**os.environ, 'HAARNESS_DATA_DIR': str(state / 'state'), 'HAARNESS_HOME': str(state / 'home'),
-           'HAARNESS_SERVER_TOKEN': '', 'HAARNESS_SERVER_PASSWORD': password, 'HAARNESS_SERVER_USERNAME': 'alex',
+           'HAARNESS_SERVER_TOKEN': '', 'HAARNESS_SERVER_PASSWORD': password, 'HAARNESS_SERVER_USERNAME': 'sam',
            'HAARNESS_TEST_PROVIDER': '1', 'HAARNESS_DEFAULT_PROVIDER': 'echo', 'HAARNESS_DEFAULT_MODEL': 'echo-1'}
     session = 'haarness-password-' + mode + '-' + str(os.getpid())
     url = None
     def api(path):
-        headers = {} if not password else {'Authorization': 'Basic ' + base64.b64encode(('alex:' + password).encode()).decode()}
+        headers = {} if not password else {'Authorization': 'Basic ' + base64.b64encode(('sam:' + password).encode()).decode()}
         with urllib.request.urlopen(urllib.request.Request(url + '/v1' + path, headers=headers), timeout=10) as response:
             return json.load(response)
     def tmux(*args): return run(['tmux', *args])

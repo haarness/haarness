@@ -921,7 +921,7 @@ fn user_credential(scheme: Option<&str>, name: &str) -> bool {
 /// starts with `@`, `/`, `<` or a space, so `npm:@scope/pkg`, `host:/path`,
 /// `MAIL FROM:<me@example.com>` and `name: me@example.com` stay, nor with
 /// the `-` of a shell default (`${USER:-root}@host`); and the host and path
-/// of an scp target (`alex@host:icon@2x.png`) are no user and password.
+/// of an scp target (`sam@host:icon@2x.png`) are no user and password.
 /// See [`hidden_userinfo`] for what else stays.
 fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
     // What may stand before a user name.
@@ -1028,9 +1028,9 @@ fn bare_userinfo<'a>(text: &'a str, mark: &str) -> Cow<'a, str> {
 }
 
 /// Whether the bare `host:path@after` starting at `user` is the target of an
-/// scp or ssh command (`scp alex@host:icon@2x.png .`): a plain account name
+/// scp or ssh command (`scp sam@host:icon@2x.png .`): a plain account name
 /// and `@` right before it, at the start of a word, and no port after the
-/// last `@`, which a proxy's `alex@corp:pw@proxy:8080` has.
+/// last `@`, which a proxy's `sam@corp:pw@proxy:8080` has.
 fn scp_target(bytes: &[u8], user: usize, after: &str) -> bool {
     if user < 2 || bytes[user - 1] != b'@' {
         return false;
@@ -1443,7 +1443,7 @@ mod tests {
             "pass=ok pw: x",
             "bypass=1 compass: north trespass=no",
             "bypass_code=ABC",
-            "passenger: Alex",
+            "passenger: Sam",
             "hasPassphrase=false passcode: True",
             "passcode_length=6 passcodeLength: 6",
             "--db-pass true",
@@ -1691,7 +1691,7 @@ mod tests {
             ("a|user:pass@host", "a|[redacted]@host"),
             ("a/user:pw@h:443", "a/[redacted]@h:443"),
             (
-                r"CORP\alex:PRIVATE@proxy:8080",
+                r"CORP\sam:PRIVATE@proxy:8080",
                 r"CORP\[redacted]@proxy:8080",
             ),
             // A spec or an address that says it holds a password.
@@ -1714,7 +1714,7 @@ mod tests {
             ("1000:PRIVATE@h.fixture.test", "[redacted]@h.fixture.test"),
             // When in doubt, hidden: an address-like password, a label that
             // names a user, a capital or a `-`, `::` in the password, a proxy
-            // reached as `alex@corp`, a host with no port.
+            // reached as `sam@corp`, a host with no port.
             ("db=root:PRIVATE@/app", "db=[redacted]@/app"),
             (
                 "root:PRIVATE@unix(/tmp/mysql.sock)/app",
@@ -1733,7 +1733,7 @@ mod tests {
                 "[redacted]@db.example.com",
             ),
             (
-                "export https_proxy=alex:PRIVATEHunter2@proxy.corp.example.com",
+                "export https_proxy=sam:PRIVATEHunter2@proxy.corp.example.com",
                 "export https_proxy=[redacted]@proxy.corp.example.com",
             ),
             (
@@ -1743,8 +1743,8 @@ mod tests {
             ("SA:PRIVATE@sqlhost", "[redacted]@sqlhost"),
             ("dsn root:PRIVATE@db.internal", "dsn [redacted]@db.internal"),
             (
-                "https_proxy=alex@corp.example.com:PRIVATE@proxy.corp.example.com:8080",
-                "https_proxy=alex@[redacted]@proxy.corp.example.com:8080",
+                "https_proxy=sam@corp.example.com:PRIVATE@proxy.corp.example.com:8080",
+                "https_proxy=sam@[redacted]@proxy.corp.example.com:8080",
             ),
             (
                 "user:PRIVATE-x@proxy.example.com:3128",
@@ -1773,9 +1773,9 @@ mod tests {
         }
         for kept in [
             "git@github.com:org/repo.git",
-            "scp build.tgz alex@h.fixture.test:/tmp/",
-            "ssh -J alex@jump.fixture.test:2222 alex@h.fixture.test",
-            "rsync -a alex@h.fixture.test::module/ out/",
+            "scp build.tgz sam@h.fixture.test:/tmp/",
+            "ssh -J sam@jump.fixture.test:2222 sam@h.fixture.test",
+            "rsync -a sam@h.fixture.test::module/ out/",
             "npm:some-ext@1.2.0",
             "npm:@scope/ext@1.2.0-beta.1",
             "spec=npm:some-ext@latest jsr:x@^2.0.0",
@@ -1783,8 +1783,8 @@ mod tests {
             "sip:alice@h.fixture.test xmpp:bob@h.fixture.test",
             "img:tag@sha256:abc",
             "node:20@v1.2.3 ruby:3.3@3.3.0",
-            "Signed-off-by: Alex <alex@h.fixture.test>",
-            "From: alex@h.fixture.test",
+            "Signed-off-by: Sam <sam@h.fixture.test>",
+            "From: sam@h.fixture.test",
             r"C:\proj\node_modules\@types\node\index.d.ts",
             r"C:\proj\node_modules\.pnpm\react@18.2.0\node_modules\react",
             "C:/proj/node_modules/@babel/core/lib/index.js",
@@ -1810,7 +1810,7 @@ mod tests {
             // Shell defaults, ssh targets and protocol specs.
             "ssh ${DEPLOY_USER:-deploy}@${HOST} uptime",
             "scp build.tgz ${USER:-root}@10.0.0.5:/tmp/",
-            "scp alex@build.fixture.test:icon@2x.png .",
+            "scp sam@build.fixture.test:icon@2x.png .",
             // Times.
             "backup finished 2026-10-24T08:00:00Z@db1 in 3s",
             "call me at 3:30pm@office, time 12:30:45.123@worker-3",
@@ -1830,7 +1830,7 @@ mod tests {
         let kept = [
             "--member=group:devs@example.com",
             "serviceAccount:ci@proj.iam.gserviceaccount.com",
-            "alex@build.fixture.test:icon@2x.png",
+            "sam@build.fixture.test:icon@2x.png",
             "${USER:-root}@10.0.0.5:/tmp/",
             "Email:sam@example.com",
             "2026-10-24T08:00:00Z@db1",
@@ -1882,8 +1882,8 @@ mod tests {
                 "jarsigner -keystore ks.jks -storepass [redacted] app.apk alias",
             ),
             (
-                "sshpass -p PRIVATE ssh alex@host",
-                "sshpass -p [redacted] ssh alex@host",
+                "sshpass -p PRIVATE ssh sam@host",
+                "sshpass -p [redacted] ssh sam@host",
             ),
             (
                 "sshpass -P assword: -p PRIVATE ssh h",
@@ -1899,8 +1899,8 @@ mod tests {
                 "openssl enc -pass [redacted] -in f",
             ),
             (
-                "sshpass -v -p 'PRIVATE PART' ssh alex@host",
-                "sshpass -v -p [redacted] ssh alex@host",
+                "sshpass -v -p 'PRIVATE PART' ssh sam@host",
+                "sshpass -v -p [redacted] ssh sam@host",
             ),
             (
                 "proxy user:p/PRIVATE@proxy.fixture.test:3128",
@@ -1924,7 +1924,7 @@ mod tests {
         }
         for kept in [
             "openssl rsa -in k.pem -passin env:KEY_PASS -passout file:pw.txt -pass fd:3 -pass stdin",
-            "ssh -p 2222 alex@host && scp -P 2222 f alex@host:/tmp",
+            "ssh -p 2222 sam@host && scp -P 2222 f sam@host:/tmp",
             "node:internal/process/task_queues:95:5",
             "image=registry.fixture.test:5000/app:1.0@sha256:abc123",
             r"C:\proj\x@y.fixture.test:80",

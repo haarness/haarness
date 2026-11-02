@@ -169,11 +169,11 @@ def test_optional_password_auth(endpoint, monkeypatch):
     )
 
     async def check():
-        async with AsyncHaarness(url, username="alex", password="secret") as client:
+        async with AsyncHaarness(url, username="sam", password="secret") as client:
             await client.load_skill("demo")
 
     asyncio.run(check())
-    assert calls[-1][1]["Authorization"] == "Basic YWxleDpzZWNyZXQ="
+    assert calls[-1][1]["Authorization"] == "Basic c2FtOnNlY3JldA=="
     with pytest.raises(ValueError):
         Haarness(url, username="bad:user", password="secret")
 

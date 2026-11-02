@@ -626,9 +626,9 @@ mod access_tests {
     /// on an open server, or with a saved password, it would be admitted.
     #[tokio::test]
     async fn requests_a_page_started_without_origin_are_refused_before_credentials() {
-        let basic = format!("Basic {}", STANDARD.encode("alex:secret"));
+        let basic = format!("Basic {}", STANDARD.encode("sam:secret"));
         let password = ServerAccess::Password {
-            username: "alex".into(),
+            username: "sam".into(),
             password: "secret".into(),
         };
         for (access, authorization) in
@@ -703,12 +703,12 @@ mod access_tests {
     #[tokio::test]
     async fn password_access_checks_both_fields_and_preserves_internal_bearer() {
         let access = ServerAccess::Password {
-            username: "alex".into(),
+            username: "sam".into(),
             password: "日本:secret".into(),
         };
-        let correct = format!("Basic {}", STANDARD.encode("alex:日本:secret"));
+        let correct = format!("Basic {}", STANDARD.encode("sam:日本:secret"));
         let wrong_user = format!("Basic {}", STANDARD.encode("other:日本:secret"));
-        let wrong_password = format!("Basic {}", STANDARD.encode("alex:wrong"));
+        let wrong_password = format!("Basic {}", STANDARD.encode("sam:wrong"));
         for invalid in [
             None,
             Some("Basic %%%"),
@@ -743,7 +743,7 @@ mod access_tests {
     async fn rejected_requests_log_reason_and_scheme_but_never_credentials() {
         let (capture, _guard) = crate::hooks::log_capture::Capture::install();
         let access = ServerAccess::Password {
-            username: "alex".into(),
+            username: "sam".into(),
             password: "PRIVATE_PASSWORD".into(),
         };
         let router = Router::new()
@@ -755,7 +755,7 @@ mod access_tests {
             ));
         // A C1 control is valid header obs-text once UTF-8 encoded.
         let agent = format!("fixture-client/1.0 \u{9b}[31m {}", "agent ".repeat(60));
-        let wrong_basic = format!("Basic {}", STANDARD.encode("alex:PRIVATE_WRONG"));
+        let wrong_basic = format!("Basic {}", STANDARD.encode("sam:PRIVATE_WRONG"));
         // The extra header is what a browser adds.
         for (authorization, extra, path, expected) in [
             (None, None, "/v1/threads/a?token=PRIVATE_QUERY", 401),

@@ -28,14 +28,14 @@ test("explicit anonymous and password connections override ambient bearer creden
   try {
     for(const options of [
       {auth:{type:"none"}},
-      {username:"alex",password:"secret"},
-      {auth:{type:"basic",username:"alex",password:"secret"}},
+      {username:"sam",password:"secret"},
+      {auth:{type:"basic",username:"sam",password:"secret"}},
       {token:"legacy"},
     ]) {
       const client=new Haarness({baseUrl,...options});
       try {await client.info();} finally {client.close();}
     }
-    assert.deepEqual(requests,[undefined,"Basic YWxleDpzZWNyZXQ=","Basic YWxleDpzZWNyZXQ=","Bearer legacy"]);
+    assert.deepEqual(requests,[undefined,"Basic c2FtOnNlY3JldA==","Basic c2FtOnNlY3JldA==","Bearer legacy"]);
   } finally {
     if(original===undefined)delete process.env.HAARNESS_SERVER_TOKEN;else process.env.HAARNESS_SERVER_TOKEN=original;
     server.closeAllConnections();

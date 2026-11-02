@@ -3672,7 +3672,7 @@ mod tests {
         let existing: Vec<String> = args(&[
             "--member=group:devs@example.com",
             "scp",
-            "alex@build.fixture.test:icon@2x.png",
+            "sam@build.fixture.test:icon@2x.png",
             "${USER:-root}@10.0.0.5:/tmp/",
             "--proxy",
             "user:PRIVATE@proxy.fixture.test:3128",

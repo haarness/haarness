@@ -15257,7 +15257,7 @@ request_timeout = 0
                 "haarness",
                 "serve",
                 "--username",
-                "alex",
+                "sam",
                 "--password",
                 "secret",
             ],
@@ -15266,7 +15266,7 @@ request_timeout = 0
                 "attach",
                 "http://localhost:4096",
                 "--username",
-                "alex",
+                "sam",
                 "--password",
                 "secret",
             ],
@@ -15276,7 +15276,7 @@ request_timeout = 0
                 "--attach",
                 "http://localhost:4096",
                 "--username",
-                "alex",
+                "sam",
                 "--password",
                 "secret",
             ],
@@ -15286,7 +15286,7 @@ request_timeout = 0
                 "--attach",
                 "http://localhost:4096",
                 "--username",
-                "alex",
+                "sam",
                 "--password",
                 "secret",
                 "hello",
@@ -15300,7 +15300,7 @@ request_timeout = 0
                 Command::Run(args) => args.authentication,
                 _ => panic!("unexpected command"),
             };
-            assert_eq!(authentication.username.as_deref(), Some("alex"));
+            assert_eq!(authentication.username.as_deref(), Some("sam"));
             assert_eq!(authentication.password.as_deref(), Some("secret"));
         }
     }

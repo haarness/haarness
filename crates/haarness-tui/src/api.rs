@@ -2645,7 +2645,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let id = haarness_protocol::PtyId(uuid::Uuid::now_v7());
-        let auth = ServerAuth::basic("alex", "日本:password").unwrap();
+        let auth = ServerAuth::basic("sam", "日本:password").unwrap();
         let expected = auth.header().unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
