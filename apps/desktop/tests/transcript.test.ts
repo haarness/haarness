@@ -569,7 +569,7 @@ test("web addresses in an error become links, without the sentence's punctuation
 });
 
 test("a working location is identified by the tail of its path", () => {
-  assert.equal(shortPath("/Users/alex/work/acme/api"), "…/acme/api");
+  assert.equal(shortPath("/Users/sam/work/acme/api"), "…/acme/api");
   assert.equal(shortPath("/srv/app"), "/srv/app");
   assert.equal(shortPath("/"), "/");
 });

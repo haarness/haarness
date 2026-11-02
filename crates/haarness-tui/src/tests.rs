@@ -3922,7 +3922,7 @@ fn home_is_a_launch_masthead_settled_onto_the_composer() {
         server_instance_id: uuid::Uuid::now_v7(),
         event_cursor: 0,
         capabilities: vec![],
-        workspace: Some("/Users/alex/work/haarness".into()),
+        workspace: Some("/Users/sam/work/haarness".into()),
         git_branch: Some("main".into()),
         default_provider: None,
         default_model: None,
@@ -4210,7 +4210,7 @@ fn masthead_names_the_session_without_repeating_its_id() {
         server_instance_id: uuid::Uuid::now_v7(),
         event_cursor: 0,
         capabilities: vec![],
-        workspace: Some("/Users/alex/work/haarness".into()),
+        workspace: Some("/Users/sam/work/haarness".into()),
         git_branch: Some("main".into()),
         default_provider: None,
         default_model: None,
@@ -9512,7 +9512,7 @@ fn approval_panel_docks_the_full_request_above_the_composer() {
 #[test]
 fn an_always_rule_identical_to_the_subject_is_not_repeated() {
     let thread = fixture_thread();
-    let path = "/Users/alex/.cargo/registry/src/index.crates.io-1949cf8/reqwest-0.13.4/src/*";
+    let path = "/Users/sam/.cargo/registry/src/index.crates.io-1949cf8/reqwest-0.13.4/src/*";
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
     app.pending_permissions
         .push(haarness_protocol::PendingPermissionInfo {
@@ -18704,7 +18704,7 @@ fn panels_read_as_an_aligned_table_and_keep_their_own_separators() {
         title: "Status".into(),
         lines: vec![
             "Server  running  \u{00b7}  http://127.0.0.1:8080".into(),
-            "Workspace  /Users/alex/work/haarness".into(),
+            "Workspace  /Users/sam/work/haarness".into(),
             "Branch  main  \u{00b7}  3 files changed".into(),
         ],
     });
@@ -21602,7 +21602,7 @@ fn home_names_the_missing_provider_and_the_agent_mention() {
         server_instance_id: uuid::Uuid::now_v7(),
         event_cursor: 0,
         capabilities: vec![],
-        workspace: Some("/Users/alex/work/haarness".into()),
+        workspace: Some("/Users/sam/work/haarness".into()),
         git_branch: Some("main".into()),
         default_provider: None,
         default_model: None,

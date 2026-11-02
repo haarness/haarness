@@ -31,18 +31,18 @@ const tool = (
 });
 
 test("a path shows this computer's own home folder as ~ and keeps its last folder whole", () => {
-  const home = "/Users/alex";
-  assert.equal(homePath("/Users/alex/work/haarness", home), "~/work/haarness");
-  assert.equal(homePath("/Users/alex", home), "~");
-  assert.equal(homePath("/Users/alex/work", home + "/"), "~/work");
+  const home = "/Users/sam";
+  assert.equal(homePath("/Users/sam/work/haarness", home), "~/work/haarness");
+  assert.equal(homePath("/Users/sam", home), "~");
+  assert.equal(homePath("/Users/sam/work", home + "/"), "~/work");
   assert.equal(homePath("C:\\Users\\Ana\\code\\app", "C:\\Users\\Ana"), "~\\code\\app");
   // Another user's home, a folder only named like it, or a path when the home
   // is not known (a remote server's) keeps its whole path.
-  assert.equal(homePath("/Users/sam/notes", home), "/Users/sam/notes");
-  assert.equal(homePath("/Users/alexandra/x", home), "/Users/alexandra/x");
-  assert.equal(homePath("/Users/alex/work"), "/Users/alex/work");
-  assert.equal(homePath("/home/alex/work", "/"), "/home/alex/work");
-  assert.deepEqual(splitPath("/Users/alex/work/haarness", home), { head: "~/work", tail: "/haarness" });
+  assert.equal(homePath("/Users/robin/notes", home), "/Users/robin/notes");
+  assert.equal(homePath("/Users/samantha/x", home), "/Users/samantha/x");
+  assert.equal(homePath("/Users/sam/work"), "/Users/sam/work");
+  assert.equal(homePath("/home/sam/work", "/"), "/home/sam/work");
+  assert.deepEqual(splitPath("/Users/sam/work/haarness", home), { head: "~/work", tail: "/haarness" });
   assert.deepEqual(splitPath("/tmp"), { head: "", tail: "/tmp" });
   assert.deepEqual(splitPath("relative"), { head: "", tail: "relative" });
   assert.deepEqual(splitPath("C:\\Users\\Ana\\code\\app", "C:\\Users\\Ana"), { head: "~\\code", tail: "\\app" });

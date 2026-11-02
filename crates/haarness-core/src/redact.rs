@@ -1128,7 +1128,7 @@ impl BareWord {
 /// `sip:`, `xmpp:`, `acct:`, a cloud member kind (`serviceAccount:`,
 /// `group:`, `domain:`, `principal:`), a mail or search field (`from:`,
 /// `to:`, `cc:`, `bcc:`, `email:`, Go's `Email:`), unless a second `:` says
-/// it holds a password. `user:alex@example.com` is hidden: it reads as a
+/// it holds a password. `user:sam@example.com` is hidden: it reads as a
 /// user and password too.
 fn hidden_userinfo(info: &str, after: &str) -> Option<usize> {
     // An image digest (`sha256:` with a letter, which no port has, or a
@@ -1799,14 +1799,14 @@ mod tests {
             // Addresses after a label that names one: cloud members, mail
             // headers and search fields, and Go's struct printing.
             r#""members": ["group:devs@example.com", "domain:example.com"]"#,
-            "principal:alex@example.com",
-            "> MAIL FROM:<alex@example.com> SIZE=1024",
+            "principal:sam@example.com",
+            "> MAIL FROM:<sam@example.com> SIZE=1024",
             "> RCPT TO:<bob@example.com>",
             "search from:alice@example.com to:bob@example.com cc:c@example.com bcc:d@example.com",
-            "email:alex@example.com,name:Alex",
-            "To:alex@example.com",
-            r#"level=info msg="created user" user={ID:42 Email:alex@example.com Role:admin}"#,
-            "&{Name:alex Email:alex@example.com Admin:false}",
+            "email:sam@example.com,name:Sam",
+            "To:sam@example.com",
+            r#"level=info msg="created user" user={ID:42 Email:sam@example.com Role:admin}"#,
+            "&{Name:sam Email:sam@example.com Admin:false}",
             // Shell defaults, ssh targets and protocol specs.
             "ssh ${DEPLOY_USER:-deploy}@${HOST} uptime",
             "scp build.tgz ${USER:-root}@10.0.0.5:/tmp/",
@@ -1832,7 +1832,7 @@ mod tests {
             "serviceAccount:ci@proj.iam.gserviceaccount.com",
             "alex@build.fixture.test:icon@2x.png",
             "${USER:-root}@10.0.0.5:/tmp/",
-            "Email:alex@example.com",
+            "Email:sam@example.com",
             "2026-10-24T08:00:00Z@db1",
         ]
         .map(str::to_owned);

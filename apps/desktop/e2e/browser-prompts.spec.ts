@@ -143,12 +143,12 @@ const cases: Case[] = [
     id: "03_book_a_table",
     tui: true,
     prompts: (b) => [
-      `Book a table using ${b}/booking for Alex Rivera, alex@example.test, four people on October 12, 2026. Outdoor seating, please, and add 'One vegetarian guest' to the notes. Submit it and tell me if it was confirmed.`,
+      `Book a table using ${b}/booking for Sam Rivera, sam@example.test, four people on October 12, 2026. Outdoor seating, please, and add 'One vegetarian guest' to the notes. Submit it and tell me if it was confirmed.`,
     ],
     check: async (p) => {
       expect(await value(p, "/booking", "window.saved")).toEqual({
-        guest: "Alex Rivera",
-        email: "alex@example.test",
+        guest: "Sam Rivera",
+        email: "sam@example.test",
         party: "4",
         date: "2026-10-12",
         notes: "One vegetarian guest",

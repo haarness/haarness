@@ -2213,14 +2213,14 @@ mod tests {
     #[test]
     fn computers_and_chats_list_one_readable_line_each() {
         let hosts = json!({"items": [
-            {"id": "h1", "name": "Alex's MacBook Pro", "mode": "host", "connected": true,
+            {"id": "h1", "name": "Sam's MacBook Pro", "mode": "host", "connected": true,
              "metadata": {"version": "0.1.14", "platform": "macos"}, "lastSeenAt": "2026-10-31T03:34:05.867837Z"},
             {"id": "h2", "name": "Test Mac", "mode": "sessions", "connected": false,
              "metadata": {}, "lastSeenAt": "2026-10-29T12:46:02.484730Z"}
         ]});
         assert_eq!(
             listing(&hosts, host_line, "none"),
-            "h1  Alex's MacBook Pro  connected  whole computer  0.1.14 macos\n\
+            "h1  Sam's MacBook Pro  connected  whole computer  0.1.14 macos\n\
              h2  Test Mac  offline  shared chats  last seen 2026-10-29 12:46\n"
         );
         let chats = json!({"items": [{"id": "s1", "title": "Fix the build", "connected": true,
