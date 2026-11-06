@@ -260,14 +260,15 @@ pub fn is_config_path(path: &Path) -> bool {
 }
 
 /// Whether `path` is one of the global configuration folder's own files:
-/// `config.toml`, `extensions.json`, `haarness.json{,c}`, `opencode.json{,c}`,
+/// `config.toml`, `computer-use.json`, `extensions.json`, `haarness.json{,c}`, `opencode.json{,c}`,
 /// extension code under `extensions/` or a prompt file under `prompts/`. The
 /// folder and each of those may be a link (dotfiles kept elsewhere and linked
 /// in, as `stow` does), so the files they really lead to count too.
 #[must_use]
 pub fn is_global_config_path(path: &Path, global: &Path) -> bool {
-    const FILES: [&str; 6] = [
+    const FILES: [&str; 7] = [
         "config.toml",
+        "computer-use.json",
         "extensions.json",
         "haarness.json",
         "haarness.jsonc",
@@ -566,6 +567,9 @@ impl PermissionEngine {
             rule("doom_loop:*", PermissionDecision::Ask),
             rule("external_directory:*", PermissionDecision::Ask),
             rule("browser_site:*", PermissionDecision::Ask),
+            // Acting on this Mac's screen asks a person (the computer tools'
+            // approvals are explicit, so no allow rule answers them anyway).
+            rule("computer:*", PermissionDecision::Ask),
         ];
         rules.extend(
             SECRET_READ_RULES
@@ -1184,6 +1188,7 @@ fn ruleset_disables_tool<'a>(
 fn canonical_tool_permission(tool: &str) -> &str {
     match tool {
         name if name.starts_with("browser_") => "browser",
+        name if name.starts_with("mac_") => "computer",
         "todo" => "todowrite",
         "write" | "apply_patch" | "patch" | "multiedit" => "edit",
         "image_generate" | "video_generate" => "media_generate",
@@ -1249,6 +1254,10 @@ fn normalize_rule_aliases(mut rule: PermissionRule) -> PermissionRule {
 /// "Allow in this chat" answer never reaches another chat.
 pub const EXPLICIT_GRANT_PREFIX: &str = "browser_site:chrome-";
 
+/// Computer use approvals are explicit too, and their patterns name the chat
+/// (`computer:act:<thread>:<bundle id>`), so "Allow in this chat" stays in it.
+pub const COMPUTER_GRANT_PREFIX: &str = "computer:";
+
 /// Whether a person already answered this explicit operation with an
 /// "always" in this server's session. Configured rules never count: a `*` or
 /// `browser_site:*` allow, project rules and custom agents can only deny it.
@@ -1257,7 +1266,11 @@ pub fn explicit_granted(grants: &[PermissionRule], operation: &str) -> bool {
     grants
         .iter()
         .rev()
-        .find(|rule| rule.pattern.starts_with(EXPLICIT_GRANT_PREFIX) && rule.pattern == operation)
+        .find(|rule| {
+            (rule.pattern.starts_with(EXPLICIT_GRANT_PREFIX)
+                || rule.pattern.starts_with(COMPUTER_GRANT_PREFIX))
+                && rule.pattern == operation
+        })
         .is_some_and(|rule| rule.decision == PermissionDecision::Allow)
 }
 
@@ -1472,6 +1485,12 @@ pub fn plan_ceiling() -> Vec<PermissionRule> {
         rule("browser:snapshot:*", PermissionDecision::Allow),
         rule("browser:find:*", PermissionDecision::Allow),
         rule("browser:screenshot:*", PermissionDecision::Allow),
+        // Looking at one app asks nothing and stays open to the plan agent;
+        // acting, launching and the whole-screen look do not.
+        rule("computer:act:*", PermissionDecision::Deny),
+        rule("computer:each:*", PermissionDecision::Deny),
+        rule("computer:launch:*", PermissionDecision::Deny),
+        rule("computer:screen:*", PermissionDecision::Deny),
         rule("write:*", PermissionDecision::Deny),
         rule("edit:*", PermissionDecision::Deny),
         rule("apply_patch:*", PermissionDecision::Deny),

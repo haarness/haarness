@@ -3,6 +3,7 @@ import { AccountMenu } from "./AccountMenu";
 import { UpdateRow } from "./Updates";
 import { Notifications } from "./Notifications";
 import { formatNumber, t } from "./i18n";
+import { COMPUTER_USE_CAPABILITY, barWords } from "./computer-use";
 import { ServerConnect, openServerConnection } from "./ServerConnect";
 import { RemoteProjectPicker } from "./RemoteProjectPicker";
 import { ConnectProvider } from "./ConnectProvider";
@@ -294,6 +295,18 @@ export function App() {
   const [layoutReady, setLayoutReady] = createSignal(false);
   // The flat list needs every project's index, which the store decides.
   createEffect(() => set("sidebarLayout", sidebarLayout()));
+  // The bar this Mac shows while an agent uses it speaks the interface
+  // language: the server has no dictionaries, so each local connection hands
+  // it the words, and again when the language changes. Starts nothing there.
+  createEffect(() => {
+    const connection = state.connection;
+    if (!connection || connection.remote || state.platform !== "darwin") return;
+    if (!connection.info.capabilities.includes(COMPUTER_USE_CAPABILITY)) return;
+    const bar = barWords((key) => t(key));
+    void window.haarness
+      .api(connection.id, "manageResource", ["computer-use", { action: "words", bar }])
+      .catch(() => undefined);
+  });
   let workbench!: HTMLDivElement;
   const clamp = (value: number, min: number, max: number) =>
     Math.max(min, Math.min(max, value));

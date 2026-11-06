@@ -279,6 +279,7 @@ export function readToolImage(
   result: { is_error: boolean; metadata?: unknown } | undefined,
   root: string | readonly string[],
 ): { data: string } | { path: string; size?: number } | undefined {
+  if (name.startsWith("mac_")) return screenToolImage(result, root);
   if (name !== "read" || !result || result.is_error) return undefined;
   const metadata = result.metadata as { attachments?: unknown; mime?: unknown; size?: unknown } | undefined;
   const source = Array.isArray(metadata?.attachments) ? metadata.attachments[0] : undefined;
@@ -294,6 +295,23 @@ export function readToolImage(
   const found = projectImagePath(source, root);
   if (!found || !("path" in found)) return undefined;
   return typeof metadata.size === "number" ? { path: found.path, size: metadata.size } : found;
+}
+
+/**
+ * The screenshot a computer use step returned (`mac_snapshot`, or an action
+ * that looked again), to preview in its row: the file the server saved with
+ * the chat's attachments, inside the project. A failed step shows none.
+ */
+export function screenToolImage(
+  result: { is_error: boolean; metadata?: unknown } | undefined,
+  root: string | readonly string[],
+): { path: string } | undefined {
+  if (!result || result.is_error) return undefined;
+  const metadata = result.metadata as { attachments?: unknown } | undefined;
+  const source = Array.isArray(metadata?.attachments) ? metadata.attachments[0] : undefined;
+  if (typeof source !== "string" || /^data:/i.test(source)) return undefined;
+  const found = projectImagePath(source, root);
+  return found && "path" in found ? { path: found.path } : undefined;
 }
 
 /** Reads one project file through the server's file API. */

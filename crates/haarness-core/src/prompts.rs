@@ -27,6 +27,7 @@ pub enum PromptName {
     MaxSteps,
     Goal,
     AutoReview,
+    ComputerUse,
 }
 
 /// How Haarness sends a prompt: the whole system prompt of a request (a
@@ -40,7 +41,7 @@ pub enum PromptKind {
 }
 
 impl PromptName {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::System,
         Self::Plan,
         Self::Review,
@@ -52,6 +53,7 @@ impl PromptName {
         Self::MaxSteps,
         Self::Goal,
         Self::AutoReview,
+        Self::ComputerUse,
     ];
 
     /// The name of its prompt file, without `.md`.
@@ -69,6 +71,7 @@ impl PromptName {
             Self::MaxSteps => "max-steps",
             Self::Goal => "goal",
             Self::AutoReview => "auto-review",
+            Self::ComputerUse => "computer-use",
         }
     }
 
@@ -94,6 +97,7 @@ impl PromptName {
             Self::MaxSteps => "Message sent when an agent reaches its step limit",
             Self::Goal => "Guidance added to every goal turn",
             Self::AutoReview => "Instructions for Auto's reviewer model",
+            Self::ComputerUse => "Guidance sent with the computer use tools",
         }
     }
 
@@ -107,7 +111,7 @@ impl PromptName {
             | Self::Compaction
             | Self::Title
             | Self::AutoReview => PromptKind::System,
-            Self::Preview | Self::Ultracode => PromptKind::Section,
+            Self::Preview | Self::Ultracode | Self::ComputerUse => PromptKind::Section,
             Self::MaxSteps | Self::Goal => PromptKind::Message,
         }
     }
@@ -141,6 +145,7 @@ impl PromptName {
             Self::MaxSteps => MAX_STEPS.to_owned(),
             Self::Goal => crate::goal::GOAL_DOCTRINE.to_owned(),
             Self::AutoReview => crate::auto_review::POLICY.trim().to_owned(),
+            Self::ComputerUse => COMPUTER_USE.trim().to_owned(),
         }
     }
 }
@@ -148,6 +153,9 @@ impl PromptName {
 /// The preview section as the system prompt carries it, a line break before
 /// and after the text.
 pub(crate) const PREVIEW: &str = include_str!("preview.txt");
+
+/// The computer use section, sent while the `mac_*` tools are offered.
+pub(crate) const COMPUTER_USE: &str = include_str!("computer_use.txt");
 
 /// The notice on an agent's last allowed step, sent as a user message.
 pub(crate) const MAX_STEPS: &str = "The configured maximum number of tool steps has been reached. Tools are disabled for this response. Summarize the work completed, explain anything unfinished, and respond to the user without calling tools.";

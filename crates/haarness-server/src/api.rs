@@ -872,6 +872,9 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
                 "input-settings.v1".into(),
                 "browser-settings.v1".into(),
                 "usage-statistics.v1".into(),
+                // The `computer-use` resource; whether this Mac can use it is
+                // in its status (`supported`).
+                "computer-use.v1".into(),
             ]
         }))
         .collect(),

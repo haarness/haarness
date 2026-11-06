@@ -240,6 +240,16 @@ impl NativeToolRegistry {
         self
     }
 
+    /// Add tools the composition root builds itself (computer use). A tool
+    /// whose `offered()` is false stays registered but out of the list.
+    #[must_use]
+    pub fn with_tools(mut self, tools: Vec<Arc<dyn Tool>>) -> Self {
+        for tool in tools {
+            self.tools.insert(tool.definition().name.clone(), tool);
+        }
+        self
+    }
+
     #[must_use]
     pub fn with_browser(mut self, broker: Arc<crate::browser::BrowserBroker>) -> Self {
         for tool in crate::browser::tools(broker) {
@@ -2032,7 +2042,12 @@ impl ToolRegistry for NativeToolRegistry {
         self.mcp.as_ref()?.starting()
     }
     fn list(&self) -> Vec<ToolDefinition> {
-        let mut values: Vec<_> = self.tools.values().map(|tool| tool.definition()).collect();
+        let mut values: Vec<_> = self
+            .tools
+            .values()
+            .filter(|tool| tool.offered())
+            .map(|tool| tool.definition())
+            .collect();
         if let Some(mcp) = &self.mcp {
             values.extend(mcp.tool_snapshot());
             // Only while a connected server declares resources: most expose

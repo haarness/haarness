@@ -221,6 +221,11 @@ Desktop, or `haarness browser setup`. Each new site asks in each chat (**Allow i
 in this chat), and Auto, `--yolo`, hooks and permission rules never answer for you. See
 [Use your Chrome](https://haarness.ai/docs/desktop/use-your-chrome).
 
+**Use this Mac.** On macOS, agents can see the screen and work in native apps with computer use: turn it
+on with **Settings → Computer use** in Desktop, `/mac` in the TUI, or `haarness mac on`, after agreeing to
+its terms. Each app asks once per chat (**Allow in this chat**) unless you allow it, a strip along the top edge of the
+screen offers Pause and Stop, and Escape stops the turn. See [Computer use](docs/COMPUTER-USE.md).
+
 ## Usage statistics
 
 Usage statistics are on by default. About every six hours, a running Haarness server sends Haarness

@@ -98,6 +98,8 @@ import { useApp } from "./state";
 import { Button, Icon, ago, stringify } from "./ui";
 import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
 import { watchOpenImages } from "./ImageViewer";
+import { computerApproval, isComputerPermission } from "./computer-use";
+import "./computer-use.css";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import type { FileContent } from "../shared";
 import { isTextEntry } from "./text-entry";
@@ -3658,6 +3660,7 @@ const permissionTitles: Record<string, string> = {
   browser_site: "Allow site access",
   multiple: "Allow browser and file access",
   doom_loop: "Repeat this action",
+  computer: "Use this Mac",
 };
 
 /**
@@ -3745,6 +3748,10 @@ function Permission(props: {
   // A site in the user's own Chrome is answered by a person, for this chat
   // at most: no folder or repository rule, and no switch to Auto.
   const explicit = () => isExplicitPermission(props.permission);
+  // Acting on this Mac's screen is explicit too, but about an app, not a
+  // site: its card names the app and shows the spot the agent aims at.
+  const computer = () => isComputerPermission(props.permission);
+  const computerCard = createMemo(() => (computer() ? computerApproval(props.permission, t) : undefined));
   const otherPatterns = () =>
     (props.permission.patterns ?? []).filter((pattern) => !chromeApproval(pattern));
   const explicitDetail = () => {
@@ -3846,9 +3853,9 @@ function Permission(props: {
       aria-label={t("Permission request")}
     >
       <header class="prompt-head">
-        <Icon name={shape().icon} size="sm" />
+        <Icon name={computer() ? "host" : shape().icon} size="sm" />
         <strong class="prompt-title">
-          {explicit() ? t("Allow in Chrome") : t(title())}
+          {computer() ? t(title()) : explicit() ? t("Allow in Chrome") : t(title())}
         </strong>
         <Show when={props.queued > 1}>
           <span class="prompt-count">
@@ -3864,10 +3871,50 @@ function Permission(props: {
           </button>
         </Show>
       </header>
+      <Show when={computerCard()}>
+        {(card) => (
+          <div class="computer-approval">
+            <p class="computer-approval-summary">
+              <bdi>
+                <SpelledOut text={card().summary} />
+              </bdi>
+            </p>
+            <Show when={card().preview}>
+              {(preview) => (
+                <div
+                  class="computer-approval-preview"
+                  ref={(element) => {
+                    // Shown smaller than it is, the picture opens full size.
+                    const opening = watchOpenImages(element, () => t("The spot the agent aims at"));
+                    onCleanup(opening.dispose);
+                  }}
+                >
+                  <img src={preview()} alt={t("The spot the agent aims at")} />
+                </div>
+              )}
+            </Show>
+            <Show when={card().text}>
+              {(text) => (
+                <pre class="computer-approval-text" aria-label={t("Text to type")}>
+                  <SpelledOut text={text()} />
+                </pre>
+              )}
+            </Show>
+            <Show when={card().keys}>
+              {(keys) => (
+                <p class="computer-approval-note">
+                  {splitAround(t("Keys: {keys}"), () => <kbd dir="ltr">{keys()}</kbd>, "{keys}")}
+                </p>
+              )}
+            </Show>
+            <For each={card().notes}>{(note) => <p class="computer-approval-note">{note}</p>}</For>
+          </div>
+        )}
+      </Show>
       <Show
         when={!explicit()}
         fallback={
-          <>
+          <Show when={!computer()}>
             <ul class="prompt-subject chrome-approval">
               <For each={chromeApprovalLines(props.permission.patterns ?? [])}>
                 {(line) => (
@@ -3891,7 +3938,7 @@ function Permission(props: {
             <Show when={explicitDetail()}>
               <pre class="prompt-subject prompt-detail"><SpelledOut text={explicitDetail()} /></pre>
             </Show>
-          </>
+          </Show>
         }
       >
         <Show
@@ -4050,17 +4097,26 @@ function Permission(props: {
           >
             {t("Deny")}
           </button>
-          <button ref={allowOnce} disabled={answered()} onClick={() => decide("once")}>
+          <button
+            ref={allowOnce}
+            classList={{ primary: computer() && !computerCard()?.inChat }}
+            disabled={answered()}
+            onClick={() => decide("once")}
+          >
             {t("Allow once")}
           </button>
-          <button
-            class="primary"
-            disabled={answered()}
-            onClick={() => decide("always")}
-            title={t("Lasts for this chat until its Haarness server stops.")}
-          >
-            {t("Allow in this chat")}
-          </button>
+          {/* A computer use request that asks every time offers nothing
+              lasting; any other allows its app (or site) for this chat. */}
+          <Show when={!computer() || computerCard()?.inChat}>
+            <button
+              class="primary"
+              disabled={answered()}
+              onClick={() => decide("always")}
+              title={t("Lasts for this chat until its Haarness server stops.")}
+            >
+              {computer() ? computerCard()!.inChat : t("Allow in this chat")}
+            </button>
+          </Show>
         </footer>
       </Show>
       <Show when={!explicit() && !settled()}>

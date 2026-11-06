@@ -62,6 +62,10 @@ fn category(pending: &PendingPermissionInfo) -> &str {
 /// naming the category here is what stops the card from saying the same
 /// string twice.
 fn headline(pending: &PendingPermissionInfo) -> &str {
+    // Computer use approvals are explicit as Chrome's are, but about this Mac.
+    if category(pending) == "computer" {
+        return "Use this Mac";
+    }
     if pending.explicit {
         return "Allow in Chrome";
     }
@@ -211,6 +215,9 @@ fn as_sent(text: &str) -> String {
 /// The one thing being approved: the command, path, or url the server sent as
 /// detail, else the raw patterns, else the operation string's subject half.
 fn subject(pending: &PendingPermissionInfo, language: Language, show: Show) -> Option<String> {
+    if category(pending) == "computer" {
+        return computer_subject(pending, language, show);
+    }
     if pending.explicit
         && let Some(subject) = chrome_subject(pending, language, show)
     {
@@ -294,6 +301,60 @@ fn subject(pending: &PendingPermissionInfo, language: Language, show: Show) -> O
             .map_or(operation, |(_, rest)| rest.trim()),
     ))
     .filter(|subject| !subject.is_empty())
+}
+
+/// The computer use card's text: the planned action and its app, any text to
+/// be typed, and why a terminal keeps asking. Desktop's cropped picture of the
+/// target cannot be drawn here, so the card names the element by role and label instead.
+fn computer_subject(
+    pending: &PendingPermissionInfo,
+    language: Language,
+    show: Show,
+) -> Option<String> {
+    let mac = &pending.detail["__mac"];
+    let mut lines = Vec::new();
+    if mac["kind"] == "screen" {
+        lines.push(language.text("Look at every app's windows").to_owned());
+        lines.push(
+            language
+                .text("Everything open on screen, apart from password managers and Haarness, goes to the model.")
+                .to_owned(),
+        );
+        return Some(lines.join("\n"));
+    }
+    if let Some(summary) = mac["summary"]
+        .as_str()
+        .filter(|summary| !summary.is_empty())
+    {
+        lines.push(show(summary));
+    }
+    if let Some(text) = mac["text"].as_str().filter(|text| !text.is_empty()) {
+        let cut: String = text.chars().take(200).collect();
+        let more = if text.chars().count() > 200 {
+            "…"
+        } else {
+            ""
+        };
+        lines.push(
+            language
+                .text("Text: {text}")
+                .replace("{text}", &format!("{}{more}", show(&cut))),
+        );
+    }
+    if mac["everyTime"] == true && mac["console"] == true {
+        lines.push(
+            language
+                .text("Terminal and editor text can hold someone's prompt, so every click on it needs your approval.")
+                .to_owned(),
+        );
+    } else if mac["everyTime"] == true {
+        lines.push(
+            language
+                .text("You set this app to ask every time.")
+                .to_owned(),
+        );
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// Files a read or edit is asked about besides the path the tool names: where

@@ -34,6 +34,9 @@ jobs:
       # Every test binary runs, so one run shows every failure.
       - run: cargo test --workspace --no-fail-fast
       - run: cargo build --release -p haarness-cli
+      - name: Computer use helper (Swift) unit tests
+        if: runner.os == 'macOS'
+        run: swift test --package-path crates/haarness-computer/macos
       - name: Bundled ripgrep integrity and offline CLI/server searches
         env:
           HAARNESS_BIN: ./target/release/haarness${{ runner.os == 'Windows' && '.exe' || '' }}

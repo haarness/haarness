@@ -9,6 +9,7 @@ import { languages, dictionaries, displayLanguage, parseLanguage, translate } fr
 import { contextKinds } from "../src/renderer/context-usage";
 import { themes } from "../src/themes";
 import { settingsControls, settingsSections, settingsTitles, shortcutTitles } from "../src/renderer/settings-catalog";
+import { computerUseKeys } from "../src/renderer/computer-use";
 
 test("English is the explicit default and invalid preferences recover to English", () => {
   assert.equal(defaults.language, "en");
@@ -316,6 +317,16 @@ test("keys translated through a variable are in the catalog", () => {
     // three descriptions are listed here).
     "Undo the last turn and restore its prompt", "Restore the next undone turn",
     "Summarize this chat with its model",
+    // Computer use: the bar's words, rule choices and card lines, from `computer-use.ts`.
+    ...computerUseKeys,
+    // Settings rows of Computer use, handed to SettingRow.
+    "Agents may use this Mac",
+    "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it.",
+    "Accessibility", "Needed to read app contents and to click, type and press keys.",
+    "Screen Recording", "Required for screenshots. Agents can still read apps without it, just not see them.",
+    "Apps without a rule", "Terminals and code editors still ask before a click on their text.",
+    "Mark each click on screen", "A ring marks the spot for a moment before each click.",
+    "Terms for computer use", "You agree to these before agents use this Mac.",
     // Settings navigation and search titles.
     ...Object.values(settingsTitles),
     ...settingsSections.map(([section]) => section),
@@ -324,6 +335,25 @@ test("keys translated through a variable are in the catalog", () => {
   ];
   assert.deepEqual(
     dynamic.filter((key) => !Object.hasOwn(dictionaries.en, key)),
+    [],
+  );
+});
+
+// The computer use terms come from the server in English, and Desktop shows
+// each sentence through t(): every one of them, and each heading, needs a
+// translation. They are read from the Rust source, so a reworded term fails
+// here until its translations follow.
+test("every sentence of the computer use terms is in the catalog", async () => {
+  const source = await readFile(new URL("../../../crates/haarness-computer/src/terms.rs", import.meta.url), "utf8");
+  const literals = (text: string) => [...text.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(([, value]) => value.replace(/\\(.)/g, "$1"));
+  const sentences = [
+    ...[...source.matchAll(/pub const (?:TITLE|INTRO): &str = ([\s\S]*?);/g)].flatMap(([, body]) => literals(body)),
+    ...[...source.matchAll(/pub const (?:FOR|NOT_FOR|UNDERSTAND): &\[&str\] = &\[([\s\S]*?)\];/g)].flatMap(([, body]) => literals(body)),
+    ...[...source.matchAll(/"heading": "([^"]+)"/g)].map(([, heading]) => heading),
+  ];
+  assert.ok(sentences.length >= 17, String(sentences.length));
+  assert.deepEqual(
+    sentences.filter((key) => !Object.hasOwn(dictionaries.en, key)),
     [],
   );
 });

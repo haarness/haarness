@@ -23,6 +23,11 @@ publishing, platform validation and rollback.
   the Haarness button in Chrome pauses, stops or answers. Set up with `haarness browser setup`,
   `/chrome` or Settings → Browser → Chrome; see [Browser alongside chat](BROWSER.md).
 
+- [Computer use](COMPUTER-USE.md): on macOS, agents see the screen and work in native apps
+  with the `mac_*` tools. It stays off until you accept its terms (Settings → Computer use, `/mac` or
+  `haarness mac on`); each app asks once per chat unless you allow it, a bar on the screen offers
+  Pause and Stop, and Escape stops the turn.
+
 - [Haarness Router integration](ROUTER.md): connect a self-hosted router by
   address in Desktop, TUI, or CLI. Access keys are optional, models refresh
   automatically, and multiple named connections are supported.
@@ -132,6 +137,7 @@ haarness run --approvals yolo "Regenerate the fixtures"  # the chat stays in Yol
 haarness login                          # Haarness account (--device on a headless machine)
 haarness desktop                        # open Desktop, installing it first if needed
 haarness browser setup                  # let agents use your own Chrome
+haarness mac on                         # let agents see and use this Mac (macOS; agree to the terms first)
 haarness remote enable --name "Studio Mac"
 haarness models openai --verbose
 haarness doctor                         # install check and where files live
@@ -312,7 +318,7 @@ directory is refused; branch deletion uses Git's safe merged-branch check.
 
 ## Terminal UI
 
-Inside the TUI, type `/` to browse commands; `/help` lists them with their descriptions whole where the terminal is wide enough, and `/keybinds` lists the shortcuts you can rebind and, above them, the main fixed ones (Esc Esc stops work, Ctrl+C clears the draft, which ↑ or Ctrl+- brings back, and then stops, Alt+Enter queues, Ctrl+G moves the keyboard between the prompt and a waiting approval card, Tab switches agent, Ctrl+Y steps the chat through Review, Auto and Yolo, Ctrl+B shows or hides the sidebar, Ctrl+T cycles the thinking display). The rebindable ones live in `[tui.keybinds]` of `config.toml` and, once `/keybinds` saves them, in `tui-state.toml`, which wins per action. Press **F2** to switch models without submitting your draft (Ctrl+M is Enter in conventional terminals). The catalog includes `/new`, `/sessions` (`/resume`, `/continue`, and `/threads` are aliases), `/worktree`, `/connect`, `/chrome`, `/models`, `/providers`, `/agents`, `/marketplace`, `/plugin`, `/workflow`, `/btw`, `/goal`, `/loop`, `/plan`, `/review`, `/build`, `/explore`, `/compact`, `/diff`, `/terminal`, `/undo`, `/redo`, `/timeline`, `/messages`, `/fork`, `/rename`, `/archive`, `/reasoning`, `/ultracode`, `/approvals`, `/queue`, `/input-mode`, `/stash`, `/usage`, `/mcp`, `/skills`, `/tools`, `/schedules`, `/hooks`, `/memory`, `/servers`, `/router`, `/billing`, `/share`, `/remote-control`, `/status`, `/tasks`, `/background`, `/copy`, `/export`, `/editor`, `/logs` (export this computer's logs or turn on detailed logging; see [logs](OBSERVABILITY.md#from-desktop-and-the-tui)), `/cancel`, `/help`, and `/exit`. Use the arrow keys and Enter to select, or Tab to complete a command. Connected providers and their discovered models sort first; selecting a disconnected provider explains how to connect it.
+Inside the TUI, type `/` to browse commands; `/help` lists them with their descriptions whole where the terminal is wide enough, and `/keybinds` lists the shortcuts you can rebind and, above them, the main fixed ones (Esc Esc stops work, Ctrl+C clears the draft, which ↑ or Ctrl+- brings back, and then stops, Alt+Enter queues, Ctrl+G moves the keyboard between the prompt and a waiting approval card, Tab switches agent, Ctrl+Y steps the chat through Review, Auto and Yolo, Ctrl+B shows or hides the sidebar, Ctrl+T cycles the thinking display). The rebindable ones live in `[tui.keybinds]` of `config.toml` and, once `/keybinds` saves them, in `tui-state.toml`, which wins per action. Press **F2** to switch models without submitting your draft (Ctrl+M is Enter in conventional terminals). The catalog includes `/new`, `/sessions` (`/resume`, `/continue`, and `/threads` are aliases), `/worktree`, `/connect`, `/chrome`, `/mac`, `/models`, `/providers`, `/agents`, `/marketplace`, `/plugin`, `/workflow`, `/btw`, `/goal`, `/loop`, `/plan`, `/review`, `/build`, `/explore`, `/compact`, `/diff`, `/terminal`, `/undo`, `/redo`, `/timeline`, `/messages`, `/fork`, `/rename`, `/archive`, `/reasoning`, `/ultracode`, `/approvals`, `/queue`, `/input-mode`, `/stash`, `/usage`, `/mcp`, `/skills`, `/tools`, `/schedules`, `/hooks`, `/memory`, `/servers`, `/router`, `/billing`, `/share`, `/remote-control`, `/status`, `/tasks`, `/background`, `/copy`, `/export`, `/editor`, `/logs` (export this computer's logs or turn on detailed logging; see [logs](OBSERVABILITY.md#from-desktop-and-the-tui)), `/cancel`, `/help`, and `/exit`. Use the arrow keys and Enter to select, or Tab to complete a command. Connected providers and their discovered models sort first; selecting a disconnected provider explains how to connect it.
 
 `/sessions` (**Ctrl+L**) lists the chats newest first, with the ones that wait for you on top: `⚠` and *waiting for approval* for a permission request, `?` and *waiting for your answer* for a question (in place of *working*), whether the chat or one of its child agents asked; an approval outranks a question. It follows requests in every chat as they come and go, as Desktop's sidebar does, and the cursor stays on its chat when the order changes under it. → (or Tab) opens a chat's actions (resume, fork, rename, archive, copy its ID); ← or Esc goes back to the list as it was. `/sessions --all` includes archived chats.
 

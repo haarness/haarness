@@ -844,6 +844,7 @@ treats a missing one as an older server.
 | `browser-extension.v1` | Haarness for Chrome: the extension host route and its settings |
 | `background-commands.v1` | Shell commands in the background: `run_in_background`, `bash_output`, `bash_stop`, the `/commands` routes and events, `followsBackground` and `backgroundCommands` |
 | `input-settings.v1`, `browser-settings.v1`, `usage-statistics.v1` | The management resources of those names |
+| `computer-use.v1` | The `computer-use` management resource: computer use settings and status on macOS (see [Computer use](COMPUTER-USE.md#settings-and-api)) |
 
 `rest`, `sse`, `network.attach`, `attachments.inline-upload`, `files.base64-write.v1`,
 `files.preview.v1`, `mcp`, `skills`, `subagents`, `workflows`, `workflows.read`,
@@ -858,9 +859,10 @@ and `data`). The form resources are `providers`, `mcp`, `schedules`, `hooks`,
 `memory`, `profiles`, `sharing`, `remote-control` (see
 [remote access](REMOTE-ACCESS.md)), `marketplace-ui` and `capabilities-ui`.
 Begin with `{"action":"view"}`; `sharing` and `remote-control` also require
-`threadId`. `input-settings`, `browser-settings` and `usage-statistics` answer
-a view whose `data` holds their settings (advertised as `input-settings.v1`,
-`browser-settings.v1` and `usage-statistics.v1`), and `capabilities` and
+`threadId`. `input-settings`, `browser-settings`, `usage-statistics` and
+`computer-use` answer a view whose `data` holds their settings (advertised as
+`input-settings.v1`, `browser-settings.v1`, `usage-statistics.v1` and
+`computer-use.v1`), and `capabilities` and
 `marketplace` answer plain JSON (the SDKs' `capabilities()` and
 `marketplace()`). Render fields, preserve the returned submit/revision metadata, merge
 edited values into that submit object, and send it to the same resource. An

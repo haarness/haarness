@@ -75,6 +75,11 @@ impl App {
         if resource == "sharing" {
             input["threadId"] = json!(self.thread.id);
         }
+        if resource == "computer-use" {
+            // The bar the Mac shows while an agent works speaks the
+            // person's language: the server has no dictionaries of its own.
+            input["bar"] = computer_bar_words(self.language);
+        }
         let input = &input;
         let view: ManagementView = if resource == "servers" {
             self.servers_view(input, client).await?
@@ -392,4 +397,18 @@ impl App {
         }
         Ok(())
     }
+}
+
+/// The words of the bar computer use shows at the top of the screen, in
+/// `language`, with `%@` where the app's name goes.
+pub(crate) fn computer_bar_words(language: crate::locale::Language) -> Value {
+    json!({
+        "usingApp": language.text("Haarness is working in {app}").replace("{app}", "%@"),
+        "usingMac": language.text("Haarness is working on this Mac"),
+        "paused": language.text("Haarness is waiting for you"),
+        "pause": language.text("Pause"),
+        "resume": language.text("Resume"),
+        "stop": language.text("Stop"),
+        "stopHint": language.text("Esc stops it too"),
+    })
 }

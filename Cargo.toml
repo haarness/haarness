@@ -5,6 +5,7 @@ members = [
     "crates/haarness-extensions",
     "crates/haarness-protocol",
     "crates/haarness-core",
+    "crates/haarness-computer",
     "crates/haarness-store",
     "crates/haarness-insights",
     "crates/haarness-profiles",

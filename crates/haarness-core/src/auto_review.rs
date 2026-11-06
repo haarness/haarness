@@ -687,6 +687,7 @@ fn action(request: &ReviewRequest, workspace: &Path) -> Option<String> {
     let mut arguments = request.detail.as_object().cloned().unwrap_or_default();
     // Internal fields: a browser lease, the card's read-limit note.
     arguments.remove("__browser");
+    arguments.remove("__mac");
     arguments.remove("__readLimit");
     let claims = arguments
         .remove("description")

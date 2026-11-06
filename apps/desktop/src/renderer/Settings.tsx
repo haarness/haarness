@@ -6,6 +6,7 @@ import { DiagnosticsSetting } from "./Diagnostics";
 import { UsageStatisticsSetting } from "./UsageStatistics";
 import { UpdateSettings } from "./Updates";
 import { BrowserSettings } from "./BrowserSettings";
+import { ComputerUseSettings } from "./ComputerUseSettings";
 import { Notifications } from "./Notifications";
 import { formatNumber, splitAround, t, languages } from "./i18n";
 import { InputSettings } from "./InputSettings";
@@ -47,6 +48,7 @@ import { Wordmark } from "./brand";
 import { Button, Icon, ago, ask, confirm, Empty } from "./ui";
 import { restoreArgs, restoredMessage, restorePlan, restoreSummary } from "./profile-restore";
 import {
+  macOnlySections,
   settingsSections as sections,
   settingsTitles as titles,
   shortcutDescriptions,
@@ -188,8 +190,10 @@ export function Settings() {
           <For each={sections}>
             {([group, items]) => {
               const visible = () =>
-                items.filter((name) =>
-                  `${titles[name]} ${t(titles[name])}`.toLowerCase().includes(filter().toLowerCase()),
+                items.filter(
+                  (name) =>
+                    (app.state.platform === "darwin" || !macOnlySections.has(name)) &&
+                    `${titles[name]} ${t(titles[name])}`.toLowerCase().includes(filter().toLowerCase()),
                 );
               return (
                 <Show when={visible().length}>
@@ -249,6 +253,7 @@ export function Settings() {
               <General />
             </Show>
             <Show when={app.state.settings === "browser"}><BrowserSettings /></Show>
+            <Show when={app.state.settings === "computer"}><ComputerUseSettings /></Show>
             <Show when={app.state.settings === "shortcuts"}>
               <Shortcuts />
             </Show>
@@ -266,6 +271,7 @@ export function Settings() {
                 ![
                   "general",
                   "browser",
+                  "computer",
                   "shortcuts",
                   "servers",
                   "projects",

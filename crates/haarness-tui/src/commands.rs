@@ -356,6 +356,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Continue this chat from your phone or any browser · /remote-control stop",
     ),
     command("chrome", &["browser"], "Use your Chrome with Haarness"),
+    command("mac", &["computer-use"], "Let agents see and use this Mac"),
     command("mcp", &["mcps"], "Manage MCP connections"),
     command("schedules", &["schedule"], "Manage scheduled runs"),
     command("hooks", &[], "Manage runtime hooks"),
@@ -2483,6 +2484,14 @@ impl App {
             "share" => {
                 self.open_management("sharing", &serde_json::json!({"action":"view"}), client)
                     .await?;
+            }
+            "mac" => {
+                self.open_management(
+                    "computer-use",
+                    &serde_json::json!({"action":"view"}),
+                    client,
+                )
+                .await?;
             }
             "marketplace" => {
                 // The same server-authored pages as Desktop's Settings ›

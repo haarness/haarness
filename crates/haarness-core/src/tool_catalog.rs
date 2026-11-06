@@ -98,6 +98,9 @@ fn classify(name: &str) -> Classification {
         ("automation", "Automation", false)
     } else if name == "webfetch" || name.starts_with("web_") {
         ("web", "Web", true)
+    } else if name.starts_with("mac_") {
+        // Offered only while computer use is on; then they are the point.
+        ("computer", "Computer use", true)
     } else if matches!(name, "image_generate" | "video_generate") {
         ("media", "Media", false)
     } else if name.starts_with("ext__")
