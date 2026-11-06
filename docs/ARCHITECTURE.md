@@ -23,6 +23,7 @@ How the Haarness code is put together: the crates and apps in this repository, t
 | `crates/haarness-insights` | Read-only cross-project analytics |
 | `crates/haarness-profiles` | Portable configuration archives |
 | `crates/haarness-language` | Formatter and LSP processes |
+| `crates/haarness-computer` | Computer use on macOS: the embedded native helper, its settings, the screen lease and the `mac_*` tools |
 | `crates/haarness-pty` | Server-owned terminal sessions |
 | `crates/haarness-ripgrep` | The embedded, checksummed ripgrep |
 | `apps/desktop` | Haarness Desktop (Electron and SolidJS), see [DESKTOP.md](DESKTOP.md) |
@@ -70,6 +71,10 @@ and writes reports locally; it never opens the server's databases directly.
   their child process PATH; login-shell tools restore that entry after profiles
   run. Extraction is offline, locked, atomic, and verifies cached bytes before
   use. Core and protocol remain independent of executable distribution.
+- `haarness-computer` builds its Swift helper for macOS targets and embeds it the same way: unpacked into the
+  cache, checked against its hash before every start, one process per server. Its `mac_*` tools are offered only
+  while computer use is on (`Tool::offered`), and they resolve their target before the permission check so the
+  `computer` approval can name the app; core knows only the plan they leave in `__mac`.
 - MCP and built-in tools share the same provider tool schema and permission path.
 - Formatter and LSP processes are workspace-scoped, lazy, cancellable, and shut down with the server. Formatting completes inside the original mutating tool call before its final diff and diagnostics are returned, so the runtime's existing before/after snapshot pair includes the formatted bytes without introducing a second mutation epoch. Missing optional executables fail open.
 - Interactive PTYs are workspace-scoped, process-local server resources. Their raw output lives in a bounded two-megabyte replay buffer with a monotonic byte cursor and is streamed through authenticated WebSockets; it is not transcript or SQLite state. Client detach and session switches leave PTYs running, while explicit tab deletion and server shutdown terminate them. The TUI parses child escape sequences into an in-memory VT screen before drawing OpenTUI cells, so a nested application cannot write control sequences into the outer terminal.

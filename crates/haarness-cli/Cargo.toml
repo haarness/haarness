@@ -26,6 +26,7 @@ clap.workspace = true
 directories.workspace = true
 fs2.workspace = true
 glob.workspace = true
+haarness-computer = { path = "../haarness-computer" }
 haarness-core = { path = "../haarness-core" }
 haarness-extensions = { path = "../haarness-extensions" }
 haarness-insights = { path = "../haarness-insights" }

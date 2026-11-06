@@ -10000,6 +10000,15 @@ impl RunnerTask {
                     system.push_str(&self.config.prompts.text(crate::PromptName::Preview));
                     system.push('\n');
                 }
+                if !tool_round_limit_reached
+                    && eligible_tools
+                        .iter()
+                        .any(|tool| tool.name == "mac_snapshot")
+                {
+                    system.push('\n');
+                    system.push_str(&self.config.prompts.text(crate::PromptName::ComputerUse));
+                    system.push('\n');
+                }
                 let mut lazy_settings = self.config.lazy_tools.clone();
                 if let Some(mode) = *self.lazy_tool_mode.read() {
                     lazy_settings.mode = mode;
@@ -15593,6 +15602,29 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             permission: name.into(),
             patterns: vec![format!("{action}:{target}")],
             always: vec![format!("{action}:*")],
+            external_paths: Vec::new(),
+            resolved: Vec::new(),
+            shell: None,
+        }];
+    }
+    if name.starts_with("mac_") {
+        // The computer use tools resolved their target before this (see
+        // `prepare_arguments`): which app, and the approvals that needs, each
+        // naming the chat. An app the person allowed needs none.
+        let asks: Vec<String> = arguments["__mac"]["asks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str())
+            .map(str::to_owned)
+            .collect();
+        if asks.is_empty() {
+            return Vec::new();
+        }
+        return vec![AskPlan {
+            permission: "computer".into(),
+            always: asks.clone(),
+            patterns: asks,
             external_paths: Vec::new(),
             resolved: Vec::new(),
             shell: None,

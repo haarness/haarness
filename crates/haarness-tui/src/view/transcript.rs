@@ -69,6 +69,12 @@ fn primary_argument(
     if same_tool(name, "mcp_resource_list") {
         return text("server");
     }
+    // A computer use row names the app, the key, the text or the element.
+    if bare_tool(name).starts_with("mac_") {
+        return ["app", "key", "text", "ref", "direction"]
+            .iter()
+            .find_map(|key| text(key));
+    }
     if (same_tool(name, "grep") || same_tool(name, "glob"))
         && let Some(pattern) = text("pattern")
     {

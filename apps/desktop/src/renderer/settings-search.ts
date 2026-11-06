@@ -5,6 +5,7 @@ import { t } from "./i18n";
 import { modelName } from "../model-names";
 import {
   macOnlyControls,
+  macOnlySections,
   selfUpdateControls,
   settingsControls,
   settingsTitles,
@@ -177,9 +178,9 @@ export function createSettingsSearch(
     });
   });
   return createMemo(() => [
-    ...Object.entries(settingsTitles).map(([section, title]) =>
-      entry(section, title, undefined, settingsKeywords[section]),
-    ),
+    ...Object.entries(settingsTitles)
+      .filter(([section]) => app.state.platform === "darwin" || !macOnlySections.has(section))
+      .map(([section, title]) => entry(section, title, undefined, settingsKeywords[section])),
     ...settingsControls
       .filter(([, title]) => app.state.platform === "darwin" || !macOnlyControls.has(title))
       .filter(([, title]) => app.state.update.method === "restart" || !selfUpdateControls.has(title))

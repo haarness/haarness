@@ -125,7 +125,8 @@ export function newChatMode(
   return serverDefault == null ? "auto" : readMode(serverDefault);
 }
 /** Whether this client may answer a request for the user. An explicit
- * request (a site in the user's own Chrome) always waits for a person. */
+ * request (a site in the user's own Chrome, an app on this Mac) always
+ * waits for a person. */
 export function canAutoApprove(
   request: Pick<PendingPermissionInfo, "permission" | "operation"> & {
     patterns?: string[];
@@ -139,6 +140,8 @@ export function canAutoApprove(
     request.allowOnce !== false &&
     request.allowAlways !== false &&
     category !== "instruction_import" &&
+    // Acting on this Mac's screen is a person's to approve, whatever the server marks.
+    category !== "computer" &&
     !isExplicitPermission(request)
   );
 }

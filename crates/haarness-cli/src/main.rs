@@ -4,6 +4,7 @@ mod auto_update;
 mod browser;
 mod browser_settings;
 mod capability_state;
+mod computer_cli;
 mod config_specs;
 mod desktop;
 mod desktop_hooks;
@@ -218,6 +219,8 @@ enum Command {
     Desktop,
     /// Use your own Chrome with Haarness: set up, check or remove Haarness for Chrome.
     Browser(browser::BrowserArgs),
+    /// Computer use: hand agents this Mac's screen, mouse and keyboard (macOS).
+    Mac(computer_cli::MacArgs),
     /// Manage trusted TypeScript/JavaScript runtime extensions.
     #[command(visible_alias = "extensions")]
     Extension(extensions::ExtensionArgs),
@@ -1577,6 +1580,9 @@ async fn cli_main() -> Result<()> {
             )
             .await;
         }
+        Some(Command::Mac(args)) => {
+            return computer_cli::run(&computer_use(&base_paths), args).await;
+        }
         _ => {}
     }
     // Logs always land in <data>/logs (rotated daily) so problems seen in
@@ -1677,7 +1683,7 @@ async fn cli_main() -> Result<()> {
         Some(Command::Remote(args)) => remote_cloud::run(&paths, &workspace, project_config, args).await,
         Some(Command::Desktop) => desktop::run(&paths, &workspace, project_config).await,
         Some(Command::Login(_) | Command::Logout | Command::Account(_) | Command::Cloud(_)) => unreachable!("account command handled before project setup"),
-        Some(Command::Stats(_) | Command::Insights(_) | Command::Profile(_) | Command::Telemetry(_) | Command::Browser(_)) => unreachable!("standalone commands dispatched before runtime setup"),
+        Some(Command::Stats(_) | Command::Insights(_) | Command::Profile(_) | Command::Telemetry(_) | Command::Browser(_) | Command::Mac(_)) => unreachable!("standalone commands dispatched before runtime setup"),
         None => {
             interactive(
                 &paths,
@@ -1881,6 +1887,7 @@ impl Command {
         match self {
             Self::Desktop => "desktop",
             Self::Browser(_) => "browser",
+            Self::Mac(_) => "mac",
             Self::Login(_) => "login",
             Self::Logout => "logout",
             Self::Account(_) => "account",
@@ -6346,7 +6353,8 @@ fn permission_arguments(pending: &haarness_protocol::PendingPermissionInfo) -> V
         return Vec::new();
     };
     let mut lines = Vec::new();
-    for (key, value) in arguments.iter().filter(|(key, _)| *key != "__browser") {
+    // The server's own preparation (`__browser`, `__mac`) is plumbing.
+    for (key, value) in arguments.iter().filter(|(key, _)| !key.starts_with("__")) {
         let text = match value {
             serde_json::Value::String(text) => shown(text),
             other => shown(&other.to_string()),
@@ -6371,6 +6379,22 @@ fn answer_terminal() -> io::Result<fs::File> {
 
 /// A permission prompt in a few words: the kind of access, then on what.
 fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> String {
+    // A computer use request says what the agent would do on this Mac, in
+    // the server's words ("Click button "Save" in TextEdit").
+    if pending.permission == "computer" {
+        return pending.detail["__mac"]["summary"]
+            .as_str()
+            .filter(|summary| !summary.is_empty())
+            .map_or_else(
+                || "use this Mac".to_owned(),
+                |summary| {
+                    let mut chars = summary.chars();
+                    chars.next().map_or_else(String::new, |first| {
+                        first.to_lowercase().chain(chars).collect()
+                    })
+                },
+            );
+    }
     if pending.explicit {
         let phrases: Vec<String> = chrome_requests(pending)
             .into_iter()
@@ -7608,6 +7632,7 @@ impl HotReloadController {
             .with_browser(self.browser.clone())
             .with_management(self.management.clone())
             .with_language(self.language.clone())
+            .with_tools(computer_use(&self.paths).tools())
             .with_claude_instructions(claude_compat(&sources.file_config).project.instructions()),
         );
         let hooks = (!sources.json_layers.hooks.is_empty()).then(|| {
@@ -8430,6 +8455,10 @@ async fn application_at(
         })
     }));
     browser.set_chrome_wrapper(browser_settings::chrome_wrapper(&paths.data));
+    // One computer use service per process; its screen lease ends when the
+    // turn holding it does, whichever runtime that turn ran in.
+    let computer = computer_use(paths);
+    computer.watch(&events);
     let tools: Arc<dyn ToolRegistry> = Arc::new(
         NativeToolRegistry::with_workflows_and_scheduler(
             workspace.to_path_buf(),
@@ -8443,6 +8472,7 @@ async fn application_at(
         .with_browser(browser.clone())
         .with_management(management.clone())
         .with_language(language.clone())
+        .with_tools(computer.tools())
         .with_claude_instructions(claude_compat(&file_config).project.instructions()),
     );
     let extensions = extensions::load(paths, workspace, trust).await?;
@@ -12017,6 +12047,21 @@ fn logs_command(paths: &Paths, tail: Option<usize>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// This process's computer use service: one helper and one screen per
+/// process, whatever number of projects it serves. `HAARNESS_MAC_HELPER`
+/// (an absolute path) runs another helper, such as a development build.
+fn computer_use(paths: &Paths) -> Arc<haarness_computer::Computer> {
+    haarness_computer::Computer::shared(haarness_computer::Config {
+        config_dir: paths.config_dir().to_path_buf(),
+        data_dir: paths.data.clone(),
+        cache_dir: paths.cache.clone(),
+        helper: std::env::var_os("HAARNESS_MAC_HELPER")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute()),
+        console: None,
+    })
 }
 
 #[derive(Clone)]
@@ -17168,6 +17213,30 @@ request_timeout = 0
             serde_json::to_value(haarness_protocol::PermissionReplyDecision::Reject).unwrap()
         );
         server.abort();
+    }
+
+    #[test]
+    fn computer_use_approvals_say_what_the_agent_would_do_without_the_plumbing() {
+        let thread = haarness_protocol::ThreadId::new();
+        let mut pending: haarness_protocol::PendingPermissionInfo =
+            serde_json::from_value(serde_json::json!({
+                "permissionId": "p1",
+                "operation": format!("computer:act:{thread}:com.apple.TextEdit"),
+                "permission": "computer",
+                "explicit": true,
+                "detail": {"ref": "e1", "__mac": {"summary": "Click button \"Save\" in TextEdit", "asks": ["x"]}},
+                "patterns": [format!("act:{thread}:com.apple.TextEdit")],
+                "threadId": thread,
+                "createdAt": "2026-11-07T00:00:00Z",
+            }))
+            .unwrap();
+        assert_eq!(
+            describe_permission(&pending),
+            "click button \"Save\" in TextEdit"
+        );
+        assert_eq!(super::permission_arguments(&pending), vec!["  ref: e1"]);
+        pending.detail = serde_json::json!({});
+        assert_eq!(describe_permission(&pending), "use this Mac");
     }
 
     #[test]

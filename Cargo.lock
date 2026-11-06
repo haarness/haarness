@@ -1501,6 +1501,7 @@ dependencies = [
  "futures",
  "glob",
  "haarness-account",
+ "haarness-computer",
  "haarness-core",
  "haarness-extensions",
  "haarness-insights",
@@ -1550,6 +1551,32 @@ dependencies = [
  "url",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "haarness-computer"
+version = "0.1.15"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "fs2",
+ "futures",
+ "haarness-core",
+ "haarness-protocol",
+ "haarness-server",
+ "haarness-store",
+ "hex",
+ "nix 0.31.3",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

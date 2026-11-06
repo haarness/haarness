@@ -828,6 +828,13 @@ pub trait Tool: Send + Sync {
         crate::tool_validation::validate_arguments(&definition, arguments)
     }
     fn side_effectful(&self) -> bool;
+    /// Whether the registry lists this tool now. A tool that depends on a
+    /// setting the person can switch (computer use) leaves the list while it
+    /// is off; the runtime then neither offers nor runs it. Must be cheap: it
+    /// is asked every time the list is built.
+    fn offered(&self) -> bool {
+        true
+    }
     /// Whether this concrete call can mutate the local workspace. Most tools
     /// use their static classification; tools such as a shell may recognize a
     /// deliberately tiny set of provably inert invocations so unrelated

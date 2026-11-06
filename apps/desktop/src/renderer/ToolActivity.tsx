@@ -123,7 +123,7 @@ export function ToolActivity(props: {
           attempt: batchLabel(batch()),
           target: batchTarget(batch()),
         }
-      : describeTool(props.name, props.args),
+      : describeTool(props.name, props.args, props.result?.metadata),
   );
   const store = useApp();
   /** What the row names: a step reading or stopping a command by its id
@@ -617,7 +617,12 @@ export function ToolActivity(props: {
                         )}
                       </Show>
                       <Show when={image()} keyed>
-                        {(found) => <ReadImage image={found} alt={imageName(props.args)} />}
+                        {(found) => (
+                          <ReadImage
+                            image={found}
+                            alt={toolName(props.name).startsWith("mac_") ? t("Screenshot") : imageName(props.args)}
+                          />
+                        )}
                       </Show>
                     </div>
                   }

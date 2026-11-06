@@ -253,6 +253,10 @@ Desktop's dock and the TUI card read `explicit` and show **Allow in Chrome** wit
 
 **API.** `PendingPermissionInfo.explicit` (`#[serde(default)]`) and the `permission.requested` event payload's `explicit: true` let clients tell these requests apart; both are in the OpenAPI document and the generated SDKs. Haarness browser `browser_site:` gates without the `chrome-` prefix behave as before.
 
+## Computer use approvals
+
+Acting on this Mac's screen asks with the `computer` permission, and those requests are explicit like Chrome's: only a person answers them, never Auto's reviewer, Yolo, `--yolo`, hooks or a configured allow rule, while a configured deny still refuses. Their patterns name the chat (`act:<chat>:<bundle id>`, `launch:<chat>:<bundle id>`, `screen:<chat>`), so **Allow in this chat** covers one app in one chat until the server stops. Clicks that land on terminal or editor text, and anything in an app set to ask, carries a fresh id (`each:…`) and asks every time with nothing lasting on offer. `explicit_granted` counts answered grants starting `computer:` as it does `browser_site:chrome-`. The app rules in Settings → Computer use (`haarness mac allow|ask|deny`) decide which apps ask at all; the plan agent may look at one app but never act. See [Computer use](COMPUTER-USE.md#approvals-and-app-rules).
+
 ## Extension budgets
 
 In global or project `extensions.json`, keep `timeout_ms` as the fallback and override the stages that need more time:

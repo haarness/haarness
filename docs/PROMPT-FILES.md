@@ -67,6 +67,7 @@ Instructions that only concern one project go in that project's `AGENTS.md`, not
 | `max-steps` | Message sent when an agent reaches its step limit |
 | `goal` | Guidance added to every goal turn, between the objective and budget and the criteria |
 | `auto-review` | Instructions for [Auto's reviewer](AUTO-APPROVALS.md#autos-reviewer), placed before your `auto_review` settings |
+| `computer-use` | Guidance sent while the [computer use](COMPUTER-USE.md) tools are offered |
 
 A file changes only the prompt it is named after. A `system` file leaves the plan and review agents alone, and a custom agent (a markdown file in `agents/` or an `agent` entry) keeps its own prompt. Everything Haarness sends after the instructions is outside prompt files and always goes out: the environment block with its tool rules, the output style, `AGENTS.md`, and the reminders a turn carries (date, memory, hook context). Tool descriptions, slash command templates and output styles cannot be changed with prompt files.
 

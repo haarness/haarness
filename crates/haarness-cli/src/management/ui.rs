@@ -416,6 +416,13 @@ impl ManagementService {
                 ..View::default()
             });
         }
+        if resource == "computer-use" {
+            let status = crate::computer_use(&self.paths)
+                .manage(input)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            return output(crate::computer_cli::view(status));
+        }
         if resource == "usage-statistics" {
             let result =
                 crate::usage_stats::request(&self.paths.data, self.paths.config_dir(), input)?;

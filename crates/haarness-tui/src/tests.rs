@@ -25065,3 +25065,77 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+fn computer_event(
+    thread: &Thread,
+    id: &str,
+    mac: serde_json::Value,
+    allow_always: bool,
+) -> haarness_protocol::EventEnvelope {
+    fixture_event(
+        "permission.requested",
+        thread.id,
+        thread.id,
+        serde_json::json!({
+            "permissionId": id,
+            "permission": "computer",
+            "operation": format!("computer:act:{}:com.apple.TextEdit", thread.id),
+            "patterns": [format!("act:{}:com.apple.TextEdit", thread.id)],
+            "alwaysPatterns": [format!("computer:act:{}:com.apple.TextEdit", thread.id)],
+            "explicit": true,
+            "allowAlways": allow_always,
+            "detail": {"ref": "e1", "text": "hello", "__mac": mac},
+        }),
+    )
+}
+
+/// A computer use approval is explicit like Chrome's but about this Mac: it
+/// names the action and the app, never the wire's rule or `__mac`, and
+/// offers Allow in this chat.
+#[tokio::test]
+async fn a_computer_use_card_names_the_action_and_stays_in_this_chat() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mac = serde_json::json!({"kind": "act", "action": "type", "app": "TextEdit", "bundle": "com.apple.TextEdit",
+        "summary": "Type into text field \"Name\" in TextEdit", "text": "hello", "everyTime": false, "console": false});
+    app.reduce(
+        computer_event(&thread, "perm-mac", mac, true),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    let text = frame_text(&app, (130, 40));
+    assert!(text.contains("Use this Mac"), "{text}");
+    assert!(!text.contains("Allow in Chrome"), "{text}");
+    assert!(
+        text.contains("Type into text field \"Name\" in TextEdit"),
+        "{text}"
+    );
+    assert!(text.contains("Text: hello"), "{text}");
+    assert!(text.contains("Allow in this chat"), "{text}");
+    assert!(!text.contains("__mac") && !text.contains("act:"), "{text}");
+    assert_eq!(
+        app.notice,
+        "Use this Mac: Type into text field \"Name\" in TextEdit"
+    );
+}
+
+/// A click on a terminal's text asks every time: the card says why and
+/// offers no answer that lasts.
+#[tokio::test]
+async fn a_terminal_text_click_card_says_it_asks_every_time() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mac = serde_json::json!({"kind": "act", "action": "click", "app": "Terminal", "bundle": "com.apple.Terminal",
+        "summary": "Click text area in Terminal", "everyTime": true, "console": true});
+    app.reduce(
+        computer_event(&thread, "perm-term", mac, false),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    let text = frame_text(&app, (130, 40));
+    assert!(text.contains("Click text area in Terminal"), "{text}");
+    assert!(text.contains("needs your approval"), "{text}");
+    assert!(!text.contains("Allow in this chat"), "{text}");
+}

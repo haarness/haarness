@@ -1,5 +1,5 @@
 export const settingsSections = [
-  ["Application", ["general", "browser", "shortcuts", "servers", "projects", "profiles"]],
+  ["Application", ["general", "browser", "computer", "shortcuts", "servers", "projects", "profiles"]],
   ["Intelligence", ["providers", "models", "agents", "commands", "skills"]],
   [
     "Capabilities",
@@ -10,6 +10,7 @@ export const settingsSections = [
 export const settingsTitles: Record<string, string> = {
   general: "General",
   browser: "Browser",
+  computer: "Computer use",
   shortcuts: "Keyboard shortcuts",
   servers: "Servers",
   projects: "Projects",
@@ -32,6 +33,7 @@ export const settingsKeywords: Record<string, string> = {
   general:
     "language locale translation english appearance theme font notifications reasoning editor enter preferences steer queue input delivery project global inherited usage statistics telemetry privacy logs diagnostics",
   browser: "web browser Chromium agent control enabled disabled localhost URL history downloads uploads cookies cache site permissions approval chrome google edge brave extension real profile signed in accounts",
+  computer: "computer use mac screen apps accessibility screen recording click type keys agent control desktop automation native apps terms",
   shortcuts: "keyboard hotkey keybind key binding accelerators",
   servers: "connections remote host url token switch computer",
   projects: "folders workspace directory configuration forget open",
@@ -70,6 +72,13 @@ export const settingsControls = [
   ["browser", "Let agents use Chrome", "chrome enable disable turn off agents real browser extension"],
   ["browser", "Browser for new agent tabs", "default browser chrome haarness automatic choose where tabs open"],
   ["browser", "Chrome site permissions", "chrome allow deny block ask approval scripts browsing uploads downloads sites origins signed in"],
+  ["computer", "Agents may use this Mac", "computer use enable disable turn on off screen apps agent control"],
+  ["computer", "Accessibility", "macos permission privacy system settings allow click type"],
+  ["computer", "Screen Recording", "macos permission privacy system settings screenshots capture"],
+  ["computer", "Apps without a rule", "ask allow default approval apps"],
+  ["computer", "Mark each click on screen", "ring marker pointer click highlight"],
+  ["computer", "App rules", "allow ask never deny bundle identifier apps"],
+  ["computer", "Terms for computer use", "agree agreement withdraw terms"],
   ["general", "Turn completion notifications", "task finished failed alerts always never unfocused background"],
   ["general", "Permission notifications", "approval needed alerts notify"],
   ["general", "Question notifications", "input answer needed alerts notify"],
@@ -106,7 +115,18 @@ export const settingsControls = [
   ["about", "Reopen project", "refresh conversations files reconnect"],
 ] as const;
 /** Rows Settings shows on macOS only, so search offers them only there. */
-export const macOnlyControls: ReadonlySet<string> = new Set(["Option as Meta key"]);
+export const macOnlyControls: ReadonlySet<string> = new Set([
+  "Option as Meta key",
+  "Agents may use this Mac",
+  "Accessibility",
+  "Screen Recording",
+  "Apps without a rule",
+  "Mark each click on screen",
+  "App rules",
+  "Terms for computer use",
+]);
+/** Sections Settings lists on macOS only. */
+export const macOnlySections: ReadonlySet<string> = new Set(["computer"]);
 /** Rows Settings shows only for a copy that updates itself and restarts. */
 export const selfUpdateControls: ReadonlySet<string> = new Set(["Download updates automatically"]);
 export const shortcutTitles: Record<string, string> = {

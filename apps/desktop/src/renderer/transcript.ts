@@ -204,9 +204,10 @@ const kindShape: Record<ToolKind, { icon: IconName } & Verbs> = {
   agent: { icon: "agents", ...verbs("Delegated", "Delegating", "Tried to delegate") },
   other: { icon: "tools", ...verbs("Used", "Using", "Tried to use") },
 };
-export function describeTool(name: string, args: unknown): ToolShape {
+export function describeTool(name: string, args: unknown, metadata?: unknown): ToolShape {
   name = toolName(name);
   if (name.startsWith("browser_")) return describeBrowser(name.slice(8), object(args));
+  if (name.startsWith("mac_")) return describeMac(name.slice(4), object(args), object(metadata));
   const known = namedTools[name];
   const record = object(args);
   if (
@@ -284,6 +285,79 @@ const browserVerbs: Record<string, Verbs> = {
   network_list: verbs("Listed network requests", "Listing network requests", "Tried to list network requests"),
   network_get: verbs("Read a network request", "Reading a network request", "Tried to read a network request"),
 };
+/**
+ * Computer use steps read like the browser's: what was done to which app.
+ * A ref (@e12) means nothing to a reader, so the element comes from the
+ * result, which names it ("button “Save”"), with its app.
+ */
+const macVerbs: Record<string, Verbs> = {
+  look: verbs("Viewed", "Viewing", "Tried to view"),
+  screen: verbs("Viewed the screen", "Viewing the screen", "Tried to view the screen"),
+  list: verbs("Listed apps", "Listing apps", "Tried to list apps"),
+  launch: verbs("Opened", "Opening", "Tried to open"),
+  activate: verbs("Brought forward", "Bringing forward", "Tried to bring forward"),
+  quit: verbs("Quit", "Quitting", "Tried to quit"),
+  click: verbs("Clicked", "Clicking", "Tried to click"),
+  "double-click": verbs("Double-clicked", "Double-clicking", "Tried to double-click"),
+  "right-click": verbs("Right-clicked", "Right-clicking", "Tried to right-click"),
+  type: verbs("Typed", "Typing", "Tried to type"),
+  press: verbs("Pressed", "Pressing", "Tried to press"),
+  scroll: verbs("Scrolled", "Scrolling", "Tried to scroll"),
+  drag: verbs("Dragged", "Dragging", "Tried to drag"),
+  hover: verbs("Pointed at", "Pointing at", "Tried to point at"),
+};
+function describeMac(
+  action: string,
+  record?: Record<string, unknown>,
+  metadata?: Record<string, unknown>,
+): ToolShape {
+  const text = (value: unknown) =>
+    typeof value === "string" && value.trim() ? spelledOutText(value).replace(/\s+/g, " ").trim() : "";
+  const mac = object(metadata?.mac);
+  const app = text(mac?.app) || text(metadata?.app) || text(record?.app);
+  // "button “Save” in TextEdit": the element the result names, in its app.
+  const element = () => {
+    const target = text(mac?.target);
+    if (target && app) return t("{target} in {app}", { target, app });
+    return target || app;
+  };
+  const shape = (forms: Verbs, target: string): ToolShape => ({ icon: "host", ...forms, target });
+  switch (action) {
+    case "snapshot":
+      return app ? shape(macVerbs.look, app) : shape(macVerbs.screen, "");
+    case "apps": {
+      const kind = typeof record?.action === "string" ? record.action : "list";
+      return kind === "list" ? shape(macVerbs.list, "") : shape(macVerbs[kind] ?? macVerbs.launch, app);
+    }
+    case "click": {
+      const forms =
+        record?.button === "right"
+          ? macVerbs["right-click"]
+          : record?.count === 2
+            ? macVerbs["double-click"]
+            : macVerbs.click;
+      return shape(forms, element());
+    }
+    case "type":
+      return shape(macVerbs.type, text(record?.text) ? `“${text(record?.text)}”` : element());
+    case "press":
+      return shape(macVerbs.press, text(record?.key));
+    case "scroll": {
+      const direction = record?.direction;
+      const word =
+        direction === "up" ? t("up") : direction === "left" ? t("left") : direction === "right" ? t("right") : t("down");
+      return shape(macVerbs.scroll, app ? t("{direction} in {app}", { direction: word, app }) : word);
+    }
+    case "drag":
+      return shape(macVerbs.drag, element());
+    case "hover":
+      return shape(macVerbs.hover, element());
+    default: {
+      const fallback = "Computer use · " + action.replaceAll("_", " ");
+      return shape({ verb: fallback, doing: fallback, attempt: fallback }, app);
+    }
+  }
+}
 const checkVerbs = verbs("Checked", "Checking", "Tried to check");
 /** `bash_output` waiting for its command to end, go quiet or print a line. */
 const waitVerbs = verbs("Waited for a command", "Waiting for a command", "Tried to wait for a command");
@@ -295,6 +369,7 @@ export const toolVerbKeys = [
       ...Object.values(namedTools),
       ...Object.values(kindShape),
       ...Object.values(browserVerbs),
+      ...Object.values(macVerbs),
       checkVerbs,
       uncheckVerbs,
       waitVerbs,
@@ -401,6 +476,12 @@ export function toolInput(name: string, args: unknown) {
       context: typeof directory === "string" ? directory : "",
     };
   }
+  // What Haarness added to a call to resolve it (`__mac`, `__browser`) is
+  // plumbing, not what the agent asked for.
+  const shown =
+    record && Object.keys(record).some((key) => key.startsWith("__"))
+      ? Object.fromEntries(Object.entries(record).filter(([key]) => !key.startsWith("__")))
+      : args;
   return {
     label:
       (
@@ -413,7 +494,7 @@ export function toolInput(name: string, args: unknown) {
           execute: "Code",
         } as Record<string, string>
       )[name] ?? "Tool",
-    text: readable(args),
+    text: readable(shown),
     context: "",
   };
 }
@@ -581,6 +662,8 @@ const ownActivity: Record<string, string> = {
   skill: "Using a skill",
   question: "Asking a question",
 };
+/** Any computer use step, as the activity line says it alone. */
+const macActivity = "Using this Mac";
 /** The activity keys reached through the tables above, for the catalog guard. */
 export const activityKeys = [
   ...new Set([
@@ -588,6 +671,7 @@ export const activityKeys = [
     ...Object.values(batchDoing),
     ...Object.values(toolDoing),
     ...Object.values(ownActivity),
+    macActivity,
   ]),
 ];
 const batchGroup = (tool: string) => {
@@ -988,6 +1072,7 @@ export function toolActivity(name: string, args?: unknown): string {
     return phraseList(phrases.map((phrase) => t(phrase)));
   }
   if (toolName(name) === "batch") return t("Working through several steps");
+  if (toolName(name).startsWith("mac_")) return t(macActivity);
   const known = namedTools[toolName(name)];
   if (Object.hasOwn(ownActivity, toolName(name))) return t(ownActivity[toolName(name)]);
   if (known && !familyTools.has(toolName(name))) return t(known.doing);
