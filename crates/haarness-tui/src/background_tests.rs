@@ -1985,6 +1985,126 @@ fn a_call_shows_only_its_first_result() {
     );
 }
 
+/// A delegation a restart or a shutdown cut off reads as a call that did not
+/// finish, not as a failure, whether the TUI reads it from the chat's history
+/// or sees it happen. Its own result, coming after the one Haarness stored,
+/// does not change that; a call made again under its id starts over.
+#[tokio::test]
+async fn a_delegation_cut_off_reads_that_it_did_not_finish() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let child_thread = ThreadId::new();
+    let item = |sequence, data| message_item_for_turn(sequence, &thread, turn, data);
+    let call = || ItemData::ToolCall {
+        call_id: "call-1".into(),
+        name: "task".into(),
+        arguments: serde_json::json!({ "prompt": "inspect the logs" }),
+        provider_metadata: serde_json::Value::Null,
+    };
+    let link = || ItemData::TaskLink {
+        call_id: "call-1".into(),
+        child_thread_id: child_thread,
+    };
+    let result = |output: &str, is_error, metadata| ItemData::ToolResult {
+        call_id: "call-1".into(),
+        name: "task".into(),
+        output: output.into(),
+        is_error,
+        metadata,
+    };
+    let stored = || {
+        result(
+            "This call did not finish, so there is no result.",
+            true,
+            serde_json::json!({ "unfinished": true }),
+        )
+    };
+    let late = || {
+        result(
+            "<task state=\"completed\">LATE_ANSWER</task>",
+            false,
+            serde_json::Value::Null,
+        )
+    };
+    let reads_unfinished = |app: &App| {
+        assert_eq!(app.children["call-1"].state, "interrupted");
+        let rows = frame_text(app, (100, 30));
+        let row = row_with(&rows, "task inspect the logs");
+        assert!(row.contains('⊘') && row.contains("didn't finish"), "{row}");
+        assert!(!row.contains("failed") && !row.contains('✓'), "{row}");
+        // The line under it says the same, not that it was cancelled.
+        assert!(row_with(&rows, "└").contains("didn't finish"), "{rows:#?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("LATE_ANSWER")),
+            "{rows:#?}"
+        );
+    };
+
+    let durable = app_on(
+        &thread,
+        vec![
+            item(1, call()),
+            item(2, link()),
+            item(3, stored()),
+            item(4, late()),
+        ],
+    );
+    reads_unfinished(&durable);
+
+    let mut live = app_on(&thread, vec![item(1, call()), item(2, link())]);
+    let client = offline_client();
+    for (sequence, data) in [(3, stored()), (4, late())] {
+        live.reduce(
+            fixture_event(
+                "item.created",
+                thread.id,
+                thread.id,
+                serde_json::json!(item(sequence, data)),
+            ),
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    reads_unfinished(&live);
+
+    // A TUI left open across the restart reloads the history, which settles
+    // the row it last saw running.
+    let mut open = app_on(&thread, vec![item(1, call()), item(2, link())]);
+    assert_eq!(open.children["call-1"].state, "running");
+    open.items.extend([item(3, stored()), item(4, late())]);
+    open.hydrate_child_links();
+    reads_unfinished(&open);
+
+    // A goal's next round makes the call again: its result counts.
+    for (sequence, data) in [(5, call()), (6, late())] {
+        live.reduce(
+            fixture_event(
+                "item.created",
+                thread.id,
+                thread.id,
+                serde_json::json!(item(sequence, data)),
+            ),
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(live.children["call-1"].state, "done");
+    let again = app_on(
+        &thread,
+        vec![
+            item(1, call()),
+            item(2, link()),
+            item(3, stored()),
+            item(4, late()),
+            item(5, call()),
+            item(6, late()),
+        ],
+    );
+    assert_eq!(again.children["call-1"].state, "done");
+}
+
 #[test]
 fn a_progress_line_read_part_way_shows_as_a_terminal_leaves_it() {
     let thread = fixture_thread();

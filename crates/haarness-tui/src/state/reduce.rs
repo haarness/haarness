@@ -868,7 +868,7 @@ impl App {
                                 }
                             }
                         }
-                        let item_turn_id = item.turn_id;
+                        let (item_turn_id, item_sequence) = (item.turn_id, item.sequence);
                         match item.data {
                             ItemData::Reasoning { .. } => {
                                 // The durable item supersedes the live preview.
@@ -900,8 +900,15 @@ impl App {
                                 name,
                                 output,
                                 is_error,
-                                ..
-                            } if name == "task" => {
+                                metadata,
+                            } if name == "task"
+                                && crate::state::first_task_result(
+                                    &self.items,
+                                    item_sequence,
+                                    item_turn_id,
+                                    &call_id,
+                                ) =>
+                            {
                                 let row = self
                                     .children
                                     .contains_key(&call_id)
@@ -913,17 +920,10 @@ impl App {
                                 if let Some(task) =
                                     row.as_ref().and_then(|row| self.children.get_mut(row))
                                 {
-                                    task.state =
-                                        if !is_error && output.contains("state=\"running\"") {
-                                            "background"
-                                        } else if !is_error {
-                                            "done"
-                                        } else if output.trim() == "operation cancelled" {
-                                            "cancelled"
-                                        } else {
-                                            "failed"
-                                        }
-                                        .into();
+                                    task.state = crate::state::task_result_state(
+                                        &output, is_error, &metadata,
+                                    )
+                                    .into();
                                 }
                             }
                             ItemData::TaskState {

@@ -265,6 +265,66 @@ pub(super) fn task_runs_in_background(
     })
 }
 
+/// A call Haarness stopped before it finished, a restart or a shutdown
+/// cutting it off: its result is written for the model, and its row says so
+/// in a few words.
+pub(crate) fn unfinished(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("unfinished")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+/// The state a `task` call's result gives its delegation. One Haarness
+/// stopped before it finished was interrupted, as a child turn a restart
+/// stops is, rather than failed.
+pub(crate) fn task_result_state(
+    output: &str,
+    is_error: bool,
+    metadata: &serde_json::Value,
+) -> &'static str {
+    if !is_error && output.contains("state=\"running\"") {
+        "background"
+    } else if !is_error {
+        "done"
+    } else if output.trim() == "operation cancelled" {
+        "cancelled"
+    } else if unfinished(metadata) {
+        "interrupted"
+    } else {
+        "failed"
+    }
+}
+
+/// Whether the `task` result at `sequence` is the first for its call since
+/// the call was made. A later one, such as the delegation's own after the
+/// "did not finish" a shutdown stored, is not what the model was told; a
+/// call made again under its id (a goal's next round) starts over.
+pub(crate) fn first_task_result(
+    items: &[Item],
+    sequence: u64,
+    turn_id: Option<TurnId>,
+    call_id: &str,
+) -> bool {
+    let made = items
+        .iter()
+        .rev()
+        .find(|item| {
+            item.sequence < sequence
+                && item.turn_id == turn_id
+                && matches!(&item.data, ItemData::ToolCall { call_id: candidate, name, .. }
+                    if candidate == call_id && name == "task")
+        })
+        .map(|item| item.sequence);
+    !items.iter().any(|item| {
+        item.sequence < sequence
+            && made.is_none_or(|made| item.sequence > made)
+            && item.turn_id == turn_id
+            && matches!(&item.data, ItemData::ToolResult { call_id: candidate, name, .. }
+                if candidate == call_id && name == "task")
+    })
+}
+
 fn durable_children(items: &[Item]) -> std::collections::HashMap<String, ChildTask> {
     let mut children = std::collections::HashMap::<String, ChildTask>::new();
     let mut child_rows = std::collections::HashMap::<ThreadId, String>::new();
@@ -318,24 +378,18 @@ fn durable_children(items: &[Item]) -> std::collections::HashMap<String, ChildTa
                 name,
                 output,
                 is_error,
-                ..
+                metadata,
             } if name == "task" => {
+                if !first_task_result(items, item.sequence, item.turn_id, call_id) {
+                    continue;
+                }
                 let Some(row) = call_rows.get(call_id) else {
                     continue;
                 };
                 let Some(task) = children.get_mut(row) else {
                     continue;
                 };
-                task.state = if !is_error && output.contains("state=\"running\"") {
-                    "background"
-                } else if !is_error {
-                    "done"
-                } else if output.trim() == "operation cancelled" {
-                    "cancelled"
-                } else {
-                    "failed"
-                }
-                .into();
+                task.state = task_result_state(output, *is_error, metadata).into();
             }
             ItemData::TaskState {
                 child_thread_id,
@@ -1338,7 +1392,7 @@ impl App {
                 std::collections::hash_map::Entry::Occupied(mut entry)
                     if matches!(
                         task.state.as_str(),
-                        "background" | "done" | "failed" | "cancelled"
+                        "background" | "done" | "failed" | "cancelled" | "interrupted"
                     ) =>
                 {
                     // A paired durable task result is authoritative after an

@@ -16,9 +16,14 @@ real, isolated workspace daemon runs against it:
    version recovered (no result), and a call an older fork copied without its
    result. Each chat's next message is answered: the request gives the call
    a result saying it did not finish.
+4. a delegation a crash cut off: an echo chat's subagent runs a `sleep` when
+   the daemon is killed. Its `task` call gets the same result, and the TUI,
+   opened on the chat in a private tmux server, shows the row as one that
+   did not finish, in the dark and light palettes, not as a failure.
 
 Usage: python3 scripts/test-unfinished-calls.py   (HAARNESS_BIN picks the binary;
-HAARNESS_E2E_KEEP=1 keeps the fixture folder). No model is paid for.
+HAARNESS_E2E_KEEP=1 keeps the fixture folder; UNFINISHED_CALLS_EVIDENCE names a
+folder for the TUI's screens). No model is paid for.
 """
 import http.server
 import json
@@ -27,6 +32,7 @@ from pathlib import Path
 import signal
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -36,6 +42,7 @@ import uuid
 
 import e2e_scratch
 from e2e_env import ISOLATED
+from e2e_tmux import pane_command
 
 REPO = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("HAARNESS_BIN", REPO / "target/debug/haarness")).resolve()
@@ -155,9 +162,12 @@ home, workspace = root / "home", root / "workspace"
     '[permissions]\nread="allow"\nedit="ask"\nbash = { "*" = "ask", "sleep 30*" = "allow" }\n[lsp]\nenabled=false\n')
 env = {**ISOLATED, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "HAARNESS_HOME": str(home),
        "HAARNESS_DATA_DIR": str(root / "data"), "USER": os.environ.get("USER", "fixture"), "LANG": "en_US.UTF-8",
+       "HAARNESS_TEST_PROVIDER": "1",
        "ANTHROPIC_API_KEY": "fixture-key", "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{service.server_port}/v1"}
 args = [str(BINARY), "--workspace", str(workspace), "--trust-project"]
 connection = {}
+TMUX = ["tmux", "-L", f"haarness-unfinished-{os.getpid()}", "-f", "/dev/null"]
+EVIDENCE = Path(os.environ.get("UNFINISHED_CALLS_EVIDENCE", root / "tui")).resolve()
 
 
 def connect():
@@ -238,6 +248,21 @@ def chat():
     return api("/threads", {"provider": "anthropic", "model": MODEL})["id"]
 
 
+def tmux(*values):
+    return subprocess.run(TMUX + [str(value) for value in values], check=True, capture_output=True,
+                          text=True, env={**env, "PATH": os.environ["PATH"]}).stdout
+
+
+def pane():
+    return tmux("capture-pane", "-p", "-t", "tui")
+
+
+def screen(name):
+    EVIDENCE.mkdir(parents=True, exist_ok=True)
+    (EVIDENCE / f"{name}.txt").write_text(pane())
+    (EVIDENCE / f"{name}.ansi").write_text(tmux("capture-pane", "-p", "-e", "-t", "tui"))
+
+
 try:
     connect()
 
@@ -309,9 +334,51 @@ try:
         assert "did not finish" in sent, sent
     print("PASS chats stored with a call and no result are answered again", flush=True)
 
+    # 4. A crash while a subagent runs, seen in the TUI.
+    delegating = api("/threads", {"provider": "echo", "model": "echo-1"})["id"]
+    task = {"agent": "general", "prompt": '!tool bash {"command":"sleep 30"}'}
+    running = start(delegating, "!tool task " + json.dumps(task))
+    link = until(lambda: next((item["data"] for item in items(delegating)
+                               if item["data"]["type"] == "task_link"), None), "the subagent did not start")
+    until(lambda: "bash" in calls_without_results(link["child_thread_id"]).values(), "the subagent's sleep did not start")
+    time.sleep(0.5)
+    kill_daemon()
+    connect()
+    assert api(f"/turns/{running}")["status"] == "interrupted"
+    results = [item["data"] for item in items(delegating) if item["data"]["type"] == "tool_result"]
+    assert len(results) == 1 and results[0]["name"] == "task", results
+    assert results[0]["is_error"] and results[0].get("metadata", {}).get("unfinished") is True, results
+    config = root / "data" / "config" / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    tui = pane_command({**env, "HAARNESS_NO_CONNECT_PROMPT": "1"}, args + ["-s", delegating])
+    for variant in ("dark", "light"):
+        config.write_text(f'[tui]\ntheme = "haarness"\nvariant = "{variant}"\nbackground_mode = "theme"\n')
+        if variant == "dark":
+            tmux("new-session", "-d", "-x", "120", "-y", "40", "-s", "tui", tui)
+        else:
+            tmux("respawn-pane", "-k", "-t", "tui", tui)
+        # The conversation's columns, left of the docked sidebar.
+        until(lambda: any("task !tool bash" in line[:78] and "didn't finish" in line[:78]
+                          for line in pane().splitlines()),
+              f"the TUI did not show the delegation as one that did not finish ({variant})", timeout=40)
+        time.sleep(1)
+        screen(f"delegation-cut-off-{variant}")
+        lines = [line[:78] for line in pane().splitlines()]
+        at = next(index for index, line in enumerate(lines) if "task !tool bash" in line)
+        assert "⊘" in lines[at] and "failed" not in lines[at] and "✗" not in lines[at], lines[at]
+        assert "└ didn't finish" in lines[at + 1], lines[at + 1]
+    config.unlink()
+    print("PASS a delegation a crash cut off reads in the TUI that it did not finish", flush=True)
+
     assert not REFUSED, REFUSED
     print("PASS no request left a tool call without its result", flush=True)
 finally:
+    if sys.exc_info()[1] is not None:
+        try:
+            screen("last")  # what the TUI showed when the run failed
+        except subprocess.CalledProcessError:
+            pass
+    subprocess.run(TMUX + ["kill-server"], capture_output=True)
     if connection:
         stop_daemon()
     service.shutdown()

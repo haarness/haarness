@@ -13,7 +13,7 @@ use haarness_protocol::{FileDiff, FileDiffStatus, Item, ItemData, ItemId};
 
 use crate::diff::{render_added, render_diff};
 use crate::markdown::render_markdown;
-use crate::state::{App, ChildTask};
+use crate::state::{App, ChildTask, unfinished};
 use crate::theme::Theme;
 use crate::view::frame::{HitTarget, TaggedLines};
 use crate::view::span::{line, single_line, spinner, task_state_style, wrap_spans};
@@ -344,10 +344,12 @@ fn batch_failures(name: &str, result: Option<&Item>, steps: &[BatchStep]) -> usi
 }
 
 /// The line under a delegation row: `↳` what the child is doing while it
-/// runs, `└` what it did once it stopped. The status line already says how
-/// to open child views, so the row does not repeat it.
+/// runs, `└` what it did once it stopped (`cut_off`: Haarness stopped its
+/// call before it finished). The status line already says how to open child
+/// views, so the row does not repeat it.
 fn delegation_detail_line(
     task: &ChildTask,
+    cut_off: bool,
     theme: &Theme,
     language: crate::locale::Language,
 ) -> Line {
@@ -385,6 +387,7 @@ fn delegation_detail_line(
         let (ended, tone) = match task.state.as_str() {
             "done" => (None, theme.muted),
             "failed" => (Some(language.text("failed")), theme.danger),
+            _ if cut_off => (Some(language.text("didn't finish")), theme.muted),
             _ => (Some(language.text("cancelled")), theme.muted),
         };
         let parts = ended
@@ -573,16 +576,6 @@ fn review_block(metadata: &serde_json::Value) -> Option<haarness_protocol::Permi
 /// agent chose to run.
 fn is_user_shell(call_id: &str) -> bool {
     call_id.starts_with("shell-")
-}
-
-/// A call Haarness stopped before it finished, a restart or a shutdown
-/// cutting it off: its result is written for the model, and its row says so
-/// in a few words.
-fn unfinished(metadata: &serde_json::Value) -> bool {
-    metadata
-        .get("unfinished")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
 }
 
 /// The exit code of a command that ran and failed. The bash tool reports a
@@ -2090,6 +2083,11 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     match state {
                         "done" => Some("done"),
                         "failed" => Some("failed"),
+                        // Haarness stopped the call before it finished: the
+                        // row says so as any call's does.
+                        "cancelled" | "interrupted" if result_status == Some("unfinished") => {
+                            Some("unfinished")
+                        }
                         "cancelled" | "interrupted" => Some("cancelled"),
                         _ => None,
                     }
@@ -2378,7 +2376,12 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 {
                     block.push_tagged(row, HitTarget::TaskOpen(call_id.clone()));
                     block.push_tagged(
-                        delegation_detail_line(task, theme, app.language),
+                        delegation_detail_line(
+                            task,
+                            status == Some("unfinished"),
+                            theme,
+                            app.language,
+                        ),
                         HitTarget::TaskOpen(call_id.clone()),
                     );
                 } else if name == "workflow"
@@ -2600,7 +2603,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     ]);
                     block.push_tagged(child_row, HitTarget::TaskOpen(child_call_id.clone()));
                     block.push_tagged(
-                        delegation_detail_line(task, theme, app.language),
+                        delegation_detail_line(task, false, theme, app.language),
                         HitTarget::TaskOpen(child_call_id.clone()),
                     );
                 }
