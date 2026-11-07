@@ -9964,7 +9964,10 @@ impl RunnerTask {
                 if !consumed_now.is_empty() {
                     self.skill_rules.lock().clear();
                     tool_rounds = 0;
+                    // The person's new words come last, without a request to
+                    // explain a failure they may have answered themselves.
                     unexplained_failure = false;
+                    explain_failure = false;
                 }
                 let current_attachments =
                     crate::image_budget::turn_attachments(&items, Some(self.turn.id));

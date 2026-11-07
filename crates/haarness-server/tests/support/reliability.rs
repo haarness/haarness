@@ -1322,6 +1322,70 @@ async fn reliability_a_cut_before_any_reply_still_asks_the_model_to_explain_the_
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+#[tokio::test]
+async fn reliability_words_sent_during_a_retry_wait_go_without_the_request_to_explain() {
+    // The request to explain meets an overloaded provider, and the person
+    // writes while the turn waits to try again: the request sent next ends
+    // with their words, not with the request to explain.
+    let (directory, runtime, provider, _) = setup_streams(
+        vec![
+            vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+            vec![Ok(usage()), Ok(finish("stop"))],
+            vec![cut("HTTP 529: overloaded")],
+            vec![Ok(text("Using pnpm.")), Ok(usage()), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while provider.calls.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the request to explain was never sent");
+    let words = "Never mind the notes, use pnpm";
+    let queued = runtime
+        .queue_input(
+            thread.id,
+            haarness_protocol::QueueInputRequest {
+                preview: None,
+                reasoning_effort: None,
+                delivery: haarness_protocol::InputDelivery::Steer,
+                request_id: haarness_protocol::RequestId::new(),
+                text: words.into(),
+                attachments: Vec::new(),
+                resources: Vec::new(),
+                synthetic: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(queued.queued, "the words join the waiting turn");
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert!(explain_note(&requests[2]));
+        assert!(!explain_note(&requests[3]), "{:?}", requests[3].messages);
+        assert!(matches!(requests[3].messages.last(),
+            Some(ProviderMessage::Text {role,content}) if role == "user" && content.contains(words)));
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 fn explain_note(request: &ProviderRequest) -> bool {
     request.messages.iter().any(|message| matches!(message, ProviderMessage::Text {role,content} if role == "user" && content.starts_with("Your last reply was empty")))
 }
