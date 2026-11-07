@@ -1877,11 +1877,15 @@ fn input_modalities(entry: &Value) -> Option<&Vec<Value>> {
 
 /// Whether `model` takes `input_audio`. Its catalog entry decides when it
 /// lists input modalities. Otherwise only a family known to listen does:
-/// Gemini (which Haarness Cloud's router passes audio to), OpenAI's audio
-/// models, Voxtral and the omni models. A model that takes no audio refuses
-/// the whole request, and again on every later turn, so any other model gets
-/// a note instead.
-fn takes_audio(listed: &HashMap<String, bool>, model: &str) -> bool {
+/// Gemini, OpenAI's audio models, Voxtral and the omni models. On Haarness
+/// Cloud only `google/` and `openai/` models can: its router sends every
+/// other vendor through a route that takes no audio, whatever the model
+/// does. A model that takes no audio refuses the whole request, and again on
+/// every later turn, so any other model gets a note instead.
+fn takes_audio(provider: &str, listed: &HashMap<String, bool>, model: &str) -> bool {
+    if provider == "haarness" && !model.starts_with("google/") && !model.starts_with("openai/") {
+        return false;
+    }
     listed.get(model).copied().unwrap_or_else(|| {
         let name = model
             .rsplit('/')
@@ -2083,6 +2087,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let replay = self.reasoning_replay(&model);
         let newest = crate::media::newest_unanswered(&request.messages);
         let audio = takes_audio(
+            &self.id,
             &self
                 .listed_audio
                 .read()
@@ -4961,7 +4966,8 @@ mod tests {
     /// modalities, and its router refuses `input_audio` for them ("… doesn't
     /// take audio"), a refusal every later turn would meet again. A tool's
     /// recording goes as audio only to a model whose listing says it takes
-    /// audio, or to a family known to (Gemini); the rest get a note.
+    /// audio, or to a family known to (Gemini); the rest get a note. Other
+    /// vendors than Google and OpenAI go through a route that takes no audio.
     #[tokio::test]
     async fn a_tools_recording_goes_only_to_a_model_that_takes_audio() {
         let state = FixtureState::default();
@@ -4974,6 +4980,7 @@ mod tests {
                         {"id": "google/gemini-3.5-flash"},
                         {"id": "openai/gpt-audio", "architecture": {"input_modalities": ["text", "audio"]}},
                         {"id": "google/gemini-listed", "architecture": {"input_modalities": ["text", "image"]}},
+                        {"id": "mistralai/voxtral-listed", "architecture": {"input_modalities": ["text", "audio"]}},
                     ]}))
                 }),
             )
@@ -5009,6 +5016,11 @@ mod tests {
             ("openai/gpt-audio", true),
             ("google/gemini-listed", false),
             ("deepseek/deepseek-v4-flash", false),
+            ("openai/gpt-audio-mini", true),
+            // Cloud sends these through a route that takes no audio.
+            ("mistralai/voxtral-small-24b-2507", false),
+            ("qwen/qwen3.8-omni-flash", false),
+            ("mistralai/voxtral-listed", false),
         ] {
             let request = ProviderRequest {
                 model: model.into(),
