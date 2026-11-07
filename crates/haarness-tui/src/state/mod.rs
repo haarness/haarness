@@ -58,9 +58,35 @@ pub fn lasting_app(pending: &haarness_protocol::PendingPermissionInfo) -> Option
         && mac["kind"] == "act"
         && mac["everyTime"] != true
         && mac["console"] != true)
-        .then(|| mac["bundle"].as_str())
+        .then(|| allowed_app(pending))
         .flatten()
-        .filter(|bundle| !bundle.is_empty())
+        .map(|(bundle, _)| bundle)
+}
+
+/// The one app an answer to a computer use request allows, by bundle identifier and name: the app it acts in or, for a
+/// drag into another app, whichever of the two it asks about. None for a drag that asks about both, where naming one
+/// app would leave the other unsaid.
+#[must_use]
+pub fn allowed_app(pending: &haarness_protocol::PendingPermissionInfo) -> Option<(&str, &str)> {
+    let mac = &pending.detail["__mac"];
+    let text = |key: &str| mac[key].as_str().filter(|value| !value.is_empty());
+    let bundle = text("bundle")?;
+    let start = (bundle, text("app").unwrap_or(bundle));
+    let Some(end) = text("endBundle").filter(|end| *end != bundle) else {
+        return Some(start);
+    };
+    // Each pattern names one app the request asks about: `act:<chat>:<bundle id>`.
+    let mut asked = pending.patterns.iter().filter_map(|pattern| {
+        pattern
+            .strip_prefix("act:")?
+            .split_once(':')
+            .map(|(_, bundle)| bundle)
+    });
+    match (asked.next(), asked.next()) {
+        (Some(only), None) if only == end => Some((end, text("endApp").unwrap_or(end))),
+        (Some(only), None) if only == bundle => Some(start),
+        _ => None,
+    }
 }
 
 impl PermissionChoice {
@@ -291,6 +317,66 @@ pub(super) fn task_runs_in_background(
     })
 }
 
+/// A call Haarness stopped before it finished, a restart or a shutdown
+/// cutting it off: its result is written for the model, and its row says so
+/// in a few words.
+pub(crate) fn unfinished(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("unfinished")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+/// The state a `task` call's result gives its delegation. One Haarness
+/// stopped before it finished was interrupted, as a child turn a restart
+/// stops is, rather than failed.
+pub(crate) fn task_result_state(
+    output: &str,
+    is_error: bool,
+    metadata: &serde_json::Value,
+) -> &'static str {
+    if !is_error && output.contains("state=\"running\"") {
+        "background"
+    } else if !is_error {
+        "done"
+    } else if output.trim() == "operation cancelled" {
+        "cancelled"
+    } else if unfinished(metadata) {
+        "interrupted"
+    } else {
+        "failed"
+    }
+}
+
+/// Whether the `task` result at `sequence` is the first for its call since
+/// the call was made. A later one, such as the delegation's own after the
+/// "did not finish" a shutdown stored, is not what the model was told; a
+/// call made again under its id (a goal's next round) starts over.
+pub(crate) fn first_task_result(
+    items: &[Item],
+    sequence: u64,
+    turn_id: Option<TurnId>,
+    call_id: &str,
+) -> bool {
+    let made = items
+        .iter()
+        .rev()
+        .find(|item| {
+            item.sequence < sequence
+                && item.turn_id == turn_id
+                && matches!(&item.data, ItemData::ToolCall { call_id: candidate, name, .. }
+                    if candidate == call_id && name == "task")
+        })
+        .map(|item| item.sequence);
+    !items.iter().any(|item| {
+        item.sequence < sequence
+            && made.is_none_or(|made| item.sequence > made)
+            && item.turn_id == turn_id
+            && matches!(&item.data, ItemData::ToolResult { call_id: candidate, name, .. }
+                if candidate == call_id && name == "task")
+    })
+}
+
 fn durable_children(items: &[Item]) -> std::collections::HashMap<String, ChildTask> {
     let mut children = std::collections::HashMap::<String, ChildTask>::new();
     let mut child_rows = std::collections::HashMap::<ThreadId, String>::new();
@@ -344,24 +430,18 @@ fn durable_children(items: &[Item]) -> std::collections::HashMap<String, ChildTa
                 name,
                 output,
                 is_error,
-                ..
+                metadata,
             } if name == "task" => {
+                if !first_task_result(items, item.sequence, item.turn_id, call_id) {
+                    continue;
+                }
                 let Some(row) = call_rows.get(call_id) else {
                     continue;
                 };
                 let Some(task) = children.get_mut(row) else {
                     continue;
                 };
-                task.state = if !is_error && output.contains("state=\"running\"") {
-                    "background"
-                } else if !is_error {
-                    "done"
-                } else if output.trim() == "operation cancelled" {
-                    "cancelled"
-                } else {
-                    "failed"
-                }
-                .into();
+                task.state = task_result_state(output, *is_error, metadata).into();
             }
             ItemData::TaskState {
                 child_thread_id,
@@ -785,6 +865,11 @@ pub struct App {
     pub providers: Vec<ProviderInfo>,
     pub agents: Vec<AgentProfile>,
     pub agent_index: usize,
+    /// The agent picked here whose file was gone at the last reload (an
+    /// editor that saves by writing a new file, say): another stands in, and
+    /// this one is picked again when it is back, unless one is picked or
+    /// something is sent as the stand-in meanwhile.
+    pub(crate) agent_set_aside: Option<String>,
     pub composer: Composer,
     /// Unsent prompt/media state follows its thread instead of disappearing
     /// or being sent into whichever session the user opens next.
@@ -796,6 +881,9 @@ pub struct App {
     pub preview: String,
     pub reasoning_preview: String,
     pub live_threads: std::collections::HashMap<ThreadId, LiveThreadState>,
+    /// The chat the person paused on computer use's strip, while the pause
+    /// lasts: the conversation's root chat (`computer_use.updated`).
+    pub(crate) computer_paused: Option<ThreadId>,
     /// Every request waiting for a person on the server, by request id. The
     /// session list leads with the chats they wait in.
     pub waiting: std::collections::HashMap<String, WaitingRequest>,
@@ -1198,6 +1286,7 @@ impl App {
             providers,
             agents,
             agent_index,
+            agent_set_aside: None,
             composer: Composer::default(),
             drafts: std::collections::HashMap::new(),
             draft_baseline: std::cell::RefCell::default(),
@@ -1205,6 +1294,7 @@ impl App {
             preview: String::new(),
             reasoning_preview: String::new(),
             live_threads: std::collections::HashMap::new(),
+            computer_paused: None,
             waiting: std::collections::HashMap::new(),
             notice,
             notice_shown: None,
@@ -1364,7 +1454,7 @@ impl App {
                 std::collections::hash_map::Entry::Occupied(mut entry)
                     if matches!(
                         task.state.as_str(),
-                        "background" | "done" | "failed" | "cancelled"
+                        "background" | "done" | "failed" | "cancelled" | "interrupted"
                     ) =>
                 {
                     // A paired durable task result is authoritative after an
@@ -1464,6 +1554,44 @@ impl App {
                     && compute_root(&self.threads, **thread_id) == self.root_thread_id
             })
             .count()
+    }
+
+    /// Whether the person paused computer use on the strip while this chat's turn uses the screen: the paused chat is
+    /// the conversation's root, so a child agent's view counts too.
+    #[must_use]
+    pub fn screen_paused(&self) -> bool {
+        self.active_turn.is_some()
+            && self
+                .computer_paused
+                .is_some_and(|chat| chat == self.thread.id || chat == self.root_thread_id)
+    }
+
+    /// Whether this chat's turn waits on the screen while the person paused computer use on the strip: one of its
+    /// `mac_*` steps has no result yet. A turn busy with anything else (a command, an edit, its reply) shows that work.
+    #[must_use]
+    pub fn screen_waiting(&self) -> bool {
+        let Some(turn) = self.active_turn.filter(|_| self.screen_paused()) else {
+            return false;
+        };
+        let mut open = std::collections::HashSet::new();
+        for item in self.items.iter().filter(|item| item.turn_id == Some(turn)) {
+            match &item.data {
+                ItemData::ToolCall { call_id, name, .. }
+                    if name
+                        .get(..10)
+                        .filter(|prefix| prefix.eq_ignore_ascii_case("functions."))
+                        .map_or(name.as_str(), |_| &name[10..])
+                        .starts_with("mac_") =>
+                {
+                    open.insert(call_id.as_str());
+                }
+                ItemData::ToolResult { call_id, .. } => {
+                    open.remove(call_id.as_str());
+                }
+                _ => {}
+            }
+        }
+        !open.is_empty()
     }
 
     /// Delegated threads are inspection surfaces. Forks also have a parent
@@ -2561,7 +2689,7 @@ impl App {
             .map(|offset| (self.agent_index + offset) % self.agents.len())
             .find(|&index| self.agents[index].selectable())
         {
-            self.agent_index = index;
+            self.pick_agent(index);
             self.notice = format!("Agent: {}", self.agent());
         }
     }
@@ -2571,9 +2699,52 @@ impl App {
             .map(|offset| (self.agent_index + self.agents.len() - offset) % self.agents.len())
             .find(|&index| self.agents[index].selectable())
         {
-            self.agent_index = index;
+            self.pick_agent(index);
             self.notice = format!("Agent: {}", self.agent());
         }
+    }
+
+    /// The agent at `index` is picked, here or for this chat elsewhere: one
+    /// a reload set aside is not taken up again.
+    pub(crate) fn pick_agent(&mut self, index: usize) {
+        self.agent_index = index;
+        self.agent_set_aside = None;
+    }
+
+    /// The agent a message, a command's workflow or a workflow is sent as.
+    /// Sending as the agent that stands in for one set aside makes it the
+    /// choice: the one set aside is not taken up again later.
+    pub(crate) fn sending_agent(&mut self) -> String {
+        self.agent_set_aside = None;
+        self.agent().to_owned()
+    }
+
+    /// A reloaded agent list: a new or removed agent file can move every
+    /// agent after it, so the one picked is found again by its ID, among
+    /// those that can still be picked (the chat's own agent always can). One
+    /// that is gone is set aside while the chat's own agent, or the first
+    /// that can be picked, stands in, quietly; it is picked again once it is
+    /// back.
+    pub(crate) fn agents_reloaded(&mut self, agents: Vec<AgentProfile>) {
+        let chosen = self
+            .agent_set_aside
+            .take()
+            .unwrap_or_else(|| self.agent().to_owned());
+        self.agents = agents;
+        let own = self.thread.agent.clone();
+        let find = |id: &str| {
+            self.agents
+                .iter()
+                .position(|agent| agent.id == id && (agent.selectable() || id == own))
+        };
+        if let Some(index) = find(&chosen) {
+            self.agent_index = index;
+            return;
+        }
+        self.agent_index = find(&own)
+            .or_else(|| self.agents.iter().position(AgentProfile::selectable))
+            .unwrap_or(0);
+        self.agent_set_aside = Some(chosen);
     }
 
     pub fn open_overlay(&mut self, overlay: Overlay) {
@@ -2792,6 +2963,7 @@ impl App {
         let query = query.trim().to_ascii_lowercase();
         let mut entries: Vec<SlashEntry> = COMMANDS
             .iter()
+            .filter(|entry| crate::commands::listed(entry))
             .filter(|entry| {
                 query.is_empty()
                     || entry.name.starts_with(&query)

@@ -7,7 +7,7 @@ use haarness_opentui::{Line, Span, attr};
 use crate::state::App;
 use crate::view::frame::{HitTarget, TaggedLines};
 use crate::view::home::{INSET, wordmark};
-use crate::view::span::{compact_count, line, single_line, task_state_style};
+use crate::view::span::{compact_count, line, single_line, task_state_style, title_line};
 
 pub const SECTION_TASKS: usize = 0;
 pub const SECTION_TODOS: usize = 1;
@@ -157,9 +157,10 @@ pub fn sidebar_lines(app: &App, width: usize, height: usize) -> TaggedLines {
                     }
                     "done" => activity.push(app.language.text("completed").into()),
                     "failed" => activity.push(app.language.text("failed").into()),
-                    "cancelled" | "interrupted" => {
-                        activity.push(app.language.text("cancelled").into())
-                    }
+                    "cancelled" => activity.push(app.language.text("cancelled").into()),
+                    // Never a person's Stop: Haarness stopped it before it
+                    // finished, and it reads as its delegation's row does.
+                    "interrupted" => activity.push(app.language.text("didn't finish").into()),
                     _ => {
                         if let Some(seconds) = task.elapsed_seconds() {
                             activity.push(format!("{seconds}s"));
@@ -169,7 +170,7 @@ pub fn sidebar_lines(app: &App, width: usize, height: usize) -> TaggedLines {
                 out.push_tagged(
                     Line::new(vec![
                         Span::new(format!("  {marker} "), color),
-                        Span::new(single_line(&title, width.saturating_sub(5)), theme.text),
+                        Span::new(title_line(&title, width.saturating_sub(5)), theme.text),
                     ]),
                     HitTarget::TaskOpen(call_id.clone()),
                 );
@@ -272,10 +273,7 @@ pub fn sidebar_lines(app: &App, width: usize, height: usize) -> TaggedLines {
             for thread in &recent {
                 out.push_tagged(
                     line(
-                        format!(
-                            "  ▸ {}",
-                            single_line(&thread.title, width.saturating_sub(5))
-                        ),
+                        format!("  ▸ {}", title_line(&thread.title, width.saturating_sub(5))),
                         theme.text,
                     ),
                     HitTarget::ThreadOpen(thread.id),
@@ -308,7 +306,7 @@ fn push_identity(app: &App, out: &mut TaggedLines, width: usize) {
     let title = if app.is_child_view() {
         String::new()
     } else {
-        single_line(app.thread.title.trim(), width.saturating_sub(INSET))
+        title_line(app.thread.title.trim(), width.saturating_sub(INSET))
     };
     if !title.is_empty() {
         out.push(Line::new(vec![

@@ -3,7 +3,7 @@ import { AccountMenu } from "./AccountMenu";
 import { UpdateRow } from "./Updates";
 import { Notifications } from "./Notifications";
 import { formatNumber, t } from "./i18n";
-import { COMPUTER_USE_CAPABILITY, barWords } from "./computer-use";
+import { COMPUTER_USE_CAPABILITY, barWords, pausedChatIn } from "./computer-use";
 import { ServerConnect, openServerConnection } from "./ServerConnect";
 import { RemoteProjectPicker } from "./RemoteProjectPicker";
 import { ConnectProvider } from "./ConnectProvider";
@@ -121,6 +121,7 @@ import { chatTitle } from "./chat-title";
 import { tabOrderScope } from "./chat-tabs";
 import { revealInStrip } from "./reveal";
 import { chatRowSelector, rovingRows, rowAfter } from "./roving-rows";
+import { terminalKeyboard } from "./terminal-focus";
 const TerminalPanel = lazy(() =>
   import("./Terminal").then((module) => ({ default: module.TerminalPanel })),
 );
@@ -305,6 +306,11 @@ export function App() {
     const bar = barWords((key) => t(key));
     void window.haarness
       .api(connection.id, "manageResource", ["computer-use", { action: "words", bar }])
+      // The answer names a chat paused before this window connected.
+      .then((answer) => {
+        const paused = pausedChatIn(answer);
+        if (paused && state.connection?.id === connection.id) set("computerPaused", paused);
+      })
       .catch(() => undefined);
   });
   let workbench!: HTMLDivElement;
@@ -765,6 +771,16 @@ export function App() {
     set("terminal", true);
     setDockExpanded(false);
   }
+  // However the terminal is opened (its button, its key, Search, the menu),
+  // the person brought it up: its shell takes the keyboard once it connects.
+  createEffect(
+    on(
+      () => state.terminal,
+      (open, was) => {
+        if (open && !was) terminalKeyboard.claim();
+      },
+    ),
+  );
   const remote = openServerConnection;
   app.registerSearch("application", () => {
     const connected = !!state.connection && !state.openingProject;

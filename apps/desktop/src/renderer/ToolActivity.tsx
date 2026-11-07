@@ -71,6 +71,7 @@ import {
   toolFailed,
   toolVerb,
   ranInChrome,
+  unfinishedCall,
   reviewBlock,
   routineEditOutput,
   changeRows,
@@ -249,8 +250,11 @@ export function ToolActivity(props: {
   // An edit's size is the first thing a reader wants after its file name.
   const stats = createMemo(() => changeStats(changes()));
   const input = createMemo(() => toolInput(props.name, props.args));
-  const output = createMemo(
-    () => props.result && (blocked() || resultText(props.name, props.result)),
+  const unfinished = () => unfinishedCall(props.result);
+  const output = createMemo(() =>
+    props.result && !unfinished()
+      ? blocked() || resultText(props.name, props.result)
+      : undefined,
   );
   const exit = () =>
     background()
@@ -538,6 +542,9 @@ export function ToolActivity(props: {
         <Show when={status() === "pending" && props.settled}>
           <span class="tool-status">{t("No result")}</span>
         </Show>
+        <Show when={unfinished()}>
+          <span class="tool-status">{t("Didn't finish")}</span>
+        </Show>
         <Show when={room()}>
           <span class="tool-controls-room" style={{ width: room() + "px" }} aria-hidden="true" />
         </Show>
@@ -570,13 +577,15 @@ export function ToolActivity(props: {
                         when={liveOutput()}
                         fallback={
                           <Show
-                            when={props.result}
+                            when={props.result && !unfinished()}
                             fallback={
-                              <p class="tool-empty">
-                                {props.settled
-                                  ? t("No result was recorded.")
-                                  : t("Waiting for output…")}
-                              </p>
+                              <Show when={!props.result}>
+                                <p class="tool-empty">
+                                  {props.settled
+                                    ? t("No result was recorded.")
+                                    : t("Waiting for output…")}
+                                </p>
+                              </Show>
                             }
                           >
                             <Show

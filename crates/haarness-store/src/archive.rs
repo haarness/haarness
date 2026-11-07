@@ -19,7 +19,7 @@ impl SqliteStore {
         let connection = self.connection.lock();
         let mut statement = connection
             .prepare(
-                "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory
+                "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json
                  FROM threads ORDER BY created_at,id",
             )
             .map_err(super::storage)?;
@@ -142,8 +142,18 @@ impl SqliteStore {
 
     pub(super) fn restore_session_archive(
         &self,
-        archive: SessionArchive,
+        mut archive: SessionArchive,
     ) -> CoreResult<SessionArchiveImportResult> {
+        // Whoever made the archive wrote its titles: they are stored without
+        // control characters, as a rename's are, and one with nothing
+        // printable left is untitled.
+        for entry in &mut archive.threads {
+            let thread = &mut entry.thread;
+            thread.title = haarness_protocol::readable_chat_title(&thread.title).into_owned();
+            if let Some(origin) = thread.fork_origin.as_mut() {
+                origin.title = haarness_protocol::readable_chat_title(&origin.title).into_owned();
+            }
+        }
         let order = archive.ordered_thread_ids().map_err(CoreError::Invalid)?;
         let entries = archive
             .threads
@@ -188,7 +198,7 @@ impl SqliteStore {
                 .ok_or_else(|| CoreError::Invalid(format!("archive thread {id} is missing")))?;
             let current = tx
                 .query_row(
-                    "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory
+                    "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json
                      FROM threads WHERE id=?1",
                     [id.to_string()],
                     raw_thread,
@@ -412,7 +422,7 @@ impl SqliteStore {
         for id in order {
             let raw = connection
                 .query_row(
-                    "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory
+                    "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json
                      FROM threads WHERE id=?1",
                     [id.to_string()],
                     raw_thread,
@@ -652,6 +662,42 @@ mod tests {
         assert!(second.created.is_empty());
         assert_eq!(second.merged.len(), 2);
         assert_eq!(target.list_threads(true).await.unwrap().len(), 2);
+    }
+
+    /// An archive's title is whatever its maker wrote: it is stored without
+    /// escape sequences, and one with nothing printable left is untitled.
+    #[tokio::test]
+    async fn imported_titles_are_stored_without_escape_sequences() {
+        let source = SqliteStore::in_memory().unwrap();
+        let root = source
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let mut archive = source.export_session_archive(root.id, false).await.unwrap();
+        let stored = |store: &SqliteStore| -> String {
+            store
+                .connection
+                .lock()
+                .query_row(
+                    "SELECT title FROM threads WHERE id=?1",
+                    [root.id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        for (title, kept) in [
+            ("\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}Escaped", "Escaped"),
+            ("\u{1b}]0;owned\u{7}\u{1b}[2J", "New chat"),
+        ] {
+            archive.threads[0].thread.title = title.into();
+            let target = SqliteStore::in_memory().unwrap();
+            let result = target
+                .import_session_archive(archive.clone())
+                .await
+                .unwrap();
+            assert_eq!(result.root.title, kept);
+            assert_eq!(stored(&target), kept);
+        }
     }
 
     #[tokio::test]

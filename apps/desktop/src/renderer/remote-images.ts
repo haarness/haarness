@@ -129,18 +129,50 @@ export function markMade(node: Node) {
 }
 
 /**
- * What the sanitizer keeps of an attribute a reply wrote: never the
- * `data-remote-*` and `data-project-*` attributes or the `remote-image*` and
- * `project-image*` classes placeholders use, nor the mark of an image that
- * opens larger, so markup cannot dress as one. Undefined drops the attribute.
+ * What the sanitizer keeps of an attribute a reply wrote on `element` (its
+ * tag name): never the `data-remote-*` and `data-project-*` attributes
+ * placeholders use, nor the mark of an image that opens larger, so markup
+ * cannot dress as one. Classes are the app's own: one a reply borrowed would
+ * be styled as the app styles it, so `<div class="modal-backdrop">` would lay
+ * the app's overlay over the chat and `remote-image` would pass for a
+ * placeholder. So a reply keeps no class but the `language-…` that Markdown
+ * writes on a code block's `code`, which names its language. Undefined drops
+ * the attribute.
  */
-export function replyAttribute(name: string, value: string): string | undefined {
+export function replyAttribute(name: string, value: string, element: string): string | undefined {
   if (/^data-(?:remote|project)-|^data-image-open$/i.test(name)) return undefined;
   if (name.toLowerCase() !== "class") return value;
-  const tokens = value.split(/\s+/).filter(Boolean);
-  const kept = tokens.filter((token) => !/^(?:remote|project)-image/i.test(token));
-  if (kept.length === tokens.length) return value;
+  if (element.toLowerCase() !== "code") return undefined;
+  const kept = value.split(/\s+/).filter((token) => /^language-./i.test(token));
   return kept.length ? kept.join(" ") : undefined;
+}
+
+/** What every id a reply's markup writes starts with (`replyIds`). */
+export const REPLY_ID = "reply-";
+/** Attributes that name ids of the same page, one or several. */
+const ID_REFERENCES = new Set([
+  "aria-activedescendant", "aria-controls", "aria-describedby", "aria-details", "aria-errormessage",
+  "aria-flowto", "aria-labelledby", "aria-owns", "for", "headers", "itemref",
+]);
+
+/**
+ * A reply's ids are its own: the app finds parts of its own by id (the
+ * message box's command menu scrolls to `slash-command-1`, and names it to
+ * assistive technology), and a reply drawn before them in the page would be
+ * found instead. So each id a reply writes gets `REPLY_ID` in front, and so
+ * does each reference to one inside the reply (an SVG's `url(#shade)` or
+ * `href="#shape"`, a label's `for`, an `aria-labelledby`), so a drawing
+ * still finds its gradient. `svg` says the attribute is on an SVG element,
+ * where `href="#…"` names one of the reply's elements.
+ */
+export function replyIds(name: string, value: string, svg: boolean): string {
+  const lower = name.toLowerCase();
+  if (lower === "id") return value ? REPLY_ID + value : value;
+  if (ID_REFERENCES.has(lower))
+    return value.split(/\s+/).filter(Boolean).map((id) => REPLY_ID + id).join(" ");
+  if (svg && (lower === "href" || lower === "xlink:href") && value.trim().startsWith("#"))
+    return "#" + REPLY_ID + value.trim().slice(1);
+  return value.replace(/url\((\s*['"]?\s*)#/gi, (_match, before: string) => `url(${before}#${REPLY_ID}`);
 }
 
 /**

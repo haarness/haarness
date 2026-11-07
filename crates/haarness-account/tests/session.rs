@@ -492,3 +492,96 @@ async fn a_renewal_the_caller_gave_up_on_is_still_saved_so_cloud_never_sees_a_sp
     server.abort();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn an_early_renewal_cloud_cannot_answer_keeps_the_token_that_still_works() {
+    use axum::response::IntoResponse as _;
+    use haarness_account::Error;
+    // Cloud answers 503 until `revoked` is set, then refuses the sign-in.
+    let revoked = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/oauth/token",
+            post(|State(revoked): State<Arc<AtomicUsize>>| async move {
+                if revoked.load(Ordering::SeqCst) == 0 {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error": "unavailable"})),
+                    )
+                        .into_response()
+                } else {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "invalid_grant"})),
+                    )
+                        .into_response()
+                }
+            }),
+        )
+        .with_state(revoked.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dir = std::env::temp_dir().join(format!("haarness-account-test-{}", uuid::Uuid::now_v7()));
+    let config = Config::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        dir.clone(),
+        "haarness-cli",
+    )
+    .unwrap();
+    let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+    let save = |token: &str, expires: chrono::DateTime<Utc>| {
+        credentials::save(
+            &config.path(),
+            &Credentials {
+                api_url: config.api_url.to_string(),
+                access_token: token.into(),
+                refresh_token: "refresh".into(),
+                access_expires_at: expires,
+            },
+        )
+        .unwrap();
+    };
+    let client = Client::new(config.clone()).unwrap();
+
+    // Asked for five minutes of headroom with four left: the renewal fails,
+    // and the token that still works comes back with its own expiry.
+    let expires = Utc::now() + Duration::minutes(4);
+    save("working", expires);
+    let (token, until) = client
+        .bearer_until(None, Duration::minutes(5))
+        .await
+        .unwrap();
+    assert_eq!(token, "working");
+    assert_eq!(until, Some(expires));
+    assert_eq!(client.bearer(None).await.unwrap(), "working");
+    assert!(credentials::load(&config.path()).unwrap().is_some());
+
+    // A token Cloud refused is never handed back, even with time left.
+    let error = client.bearer(Some("working")).await.unwrap_err();
+    assert!(
+        matches!(&error, Error::Api { status: 503, .. }),
+        "{error:?}"
+    );
+
+    // An expired token is no use: the outage is the answer.
+    save("expired", Utc::now() - Duration::seconds(1));
+    let error = client
+        .bearer_until(None, Duration::minutes(5))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Api { status: 503, .. }) && error.is_transient(),
+        "{error:?}"
+    );
+
+    // A revoked sign-in still signs out, time left or not.
+    save("working", Utc::now() + Duration::minutes(4));
+    revoked.store(1, Ordering::SeqCst);
+    let error = client
+        .bearer_until(None, Duration::minutes(5))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::NotLoggedIn), "{error:?}");
+    assert!(credentials::load(&config.path()).unwrap().is_none());
+    server.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}

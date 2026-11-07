@@ -11604,6 +11604,86 @@ fn a_rejected_tool_and_a_stopped_turn_read_as_choices_not_failures() {
     }
 }
 
+/// A hook's refusal reads as its decision, quietly, with the hook's own
+/// reason when it gave one, whatever words the agent read; a refusal that
+/// gave none says only who refused.
+#[test]
+fn a_hooks_refusal_reads_as_the_hooks_decision_not_a_failure() {
+    let thread = fixture_thread();
+    let refusal = |sequence, call_id: &str, command: &str, reason: serde_json::Value| {
+        [
+            message_item(
+                sequence,
+                &thread,
+                ItemData::ToolCall {
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"command": command}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            message_item(
+                sequence + 1,
+                &thread,
+                ItemData::ToolResult {
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    output: "A permission hook refused this action without asking the user. Take a different approach, or ask the user if you need it.".into(),
+                    is_error: true,
+                    metadata: serde_json::json!({"refusedBy": "hook", "reason": reason}),
+                },
+            ),
+        ]
+    };
+    let mut items = refusal(
+        1,
+        "call-1",
+        "cargo build",
+        serde_json::json!("builds run only in CI"),
+    )
+    .to_vec();
+    items.extend(refusal(3, "call-2", "cargo test", serde_json::Value::Null));
+    // A hook that threw refused nothing: it could not answer.
+    let mut failed = refusal(
+        5,
+        "call-3",
+        "npm publish",
+        serde_json::json!("TypeError: x is undefined"),
+    );
+    if let ItemData::ToolResult { metadata, .. } = &mut failed[1].data {
+        metadata["failed"] = serde_json::json!(true);
+    }
+    items.extend(failed);
+    let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let transcript = crate::view::transcript::transcript_lines(&app, 100);
+    let text: String = transcript
+        .lines
+        .iter()
+        .map(|line| line_text(line) + "\n")
+        .collect();
+    assert!(
+        text.contains("⊘ bash cargo build  Refused by a hook: builds run only in CI"),
+        "{text}"
+    );
+    assert!(
+        text.contains("⊘ bash cargo test  Refused by a hook\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("⊘ bash npm publish  A hook could not answer: TypeError: x is undefined"),
+        "{text}"
+    );
+    assert!(!text.contains("Refused by a hook: TypeError"), "{text}");
+    assert!(!text.contains("failed"), "{text}");
+    assert!(!text.contains("A permission hook refused"), "{text}");
+    for line in &transcript.lines {
+        assert!(
+            line.spans.iter().all(|span| span.fg != app.theme.danger),
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn a_batch_step_auto_review_blocked_reads_as_its_decision() {
     let thread = fixture_thread();
@@ -13571,6 +13651,7 @@ fn todo_transcript_fallback_respects_a_pending_revert_boundary() {
         sequence: 1,
         snapshot_id: "backup".into(),
         base_snapshot_id: None,
+        ..Default::default()
     });
     let items = vec![
         message_item(
@@ -15340,6 +15421,8 @@ async fn suspend_and_composer_history_shortcuts_do_not_overlap() {
     assert!(matches!(shifted_control, crate::input::AppAction::Continue));
     assert_eq!(app.composer.text(), "x");
 
+    // Over a dialog Ctrl+Z still suspends, and the dialog is there after
+    // `fg`; Ctrl+Shift+Z there does nothing.
     app.open_overlay(crate::state::Overlay::Models);
     let dialog_key = crate::input::handle_key(
         &mut app,
@@ -15348,7 +15431,131 @@ async fn suspend_and_composer_history_shortcuts_do_not_overlap() {
     )
     .await
     .unwrap();
-    assert!(matches!(dialog_key, crate::input::AppAction::Continue));
+    assert!(matches!(dialog_key, crate::input::AppAction::Suspend));
+    assert!(matches!(app.overlay, crate::state::Overlay::Models));
+    let shifted = crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(
+            KeyCode::Char('Z'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(shifted, crate::input::AppAction::Continue));
+    assert_eq!(app.composer.text(), "x");
+}
+
+/// A `y` still settling on an approval card when Ctrl+Z comes is sent
+/// first, as any other key sends it, and then the TUI suspends.
+#[tokio::test]
+async fn ctrl_z_sends_a_settling_answer_then_suspends() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        outside_write_event(&thread, "perm-suspend"),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    press_key(&mut app, KeyCode::Char('y')).await;
+    assert!(crate::input::settle_deadline(&app).is_some());
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+    assert!(suspends(&mut app, &client).await);
+    assert!(app.pending_permissions.is_empty());
+    let requests = server.await.unwrap();
+    assert!(
+        requests[0].contains("/permissions/perm-suspend")
+            && requests[0].contains("\"decision\":\"once\""),
+        "{}",
+        requests[0]
+    );
+}
+
+/// An embedded terminal keeps Ctrl+Z for the program in it: the key goes to
+/// the shell (here, a terminal with no connection says so) and the TUI is
+/// not suspended.
+#[tokio::test]
+async fn ctrl_z_goes_to_an_embedded_terminal() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.terminal = Some(crate::pty_view::TerminalWorkspace::new(vec![
+        haarness_protocol::PtyInfo {
+            id: haarness_protocol::PtyId::new(),
+            title: "zsh".into(),
+            command: "zsh".into(),
+            args: Vec::new(),
+            cwd: "/tmp".into(),
+            status: haarness_protocol::PtyStatus::Running,
+            pid: None,
+            cols: 80,
+            rows: 24,
+            created: false,
+            directory: None,
+        },
+    ]));
+    let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(crate::pty_view::key_bytes(key), Some(vec![0x1a]));
+    let sent = crate::input::handle_key(&mut app, key, &offline_client()).await;
+    let error = sent
+        .err()
+        .expect("the key went to the terminal, not to suspend");
+    assert!(
+        error.to_string().contains("terminal is not connected"),
+        "{error}"
+    );
+    assert!(app.terminal.is_some());
+}
+
+/// Whether Ctrl+Z, pressed now, suspends the TUI.
+async fn suspends(app: &mut App, client: &crate::api::ApiClient) -> bool {
+    let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+    matches!(
+        crate::input::handle_key(app, key, client).await.unwrap(),
+        crate::input::AppAction::Suspend
+    )
+}
+
+#[tokio::test]
+async fn ctrl_z_suspends_over_the_session_list_an_approval_and_a_question() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let client = offline_client();
+
+    app.open_overlay(crate::state::Overlay::Threads);
+    app.overlay_filter = "rel".into();
+    assert!(suspends(&mut app, &client).await);
+    assert!(matches!(app.overlay, crate::state::Overlay::Threads));
+    assert_eq!(app.overlay_filter, "rel", "the dialog is left as it was");
+    app.close_overlay();
+
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "suspend-approval"));
+    app.permission_focus = true;
+    assert!(suspends(&mut app, &client).await);
+    assert_eq!(app.pending_permissions.len(), 1, "nothing is answered");
+    assert!(app.permission_focus);
+    app.pending_permissions.clear();
+    app.permission_focus = false;
+
+    app.pending_questions
+        .push(haarness_protocol::PendingQuestionInfo {
+            question_id: "suspend-question".into(),
+            prompt: "Which color?".into(),
+            choices: vec!["red".into(), "blue".into()],
+            multiple: false,
+            custom: true,
+            thread_id: thread.id,
+            root_thread_id: Some(thread.id),
+            turn_id: None,
+            call_id: None,
+            created_at: chrono::Utc::now(),
+        });
+    app.composer.set_text("my own".into());
+    assert!(suspends(&mut app, &client).await);
+    assert_eq!(app.pending_questions.len(), 1);
+    assert_eq!(app.composer.text(), "my own", "the typed answer stays");
 }
 
 #[tokio::test]
@@ -16955,6 +17162,207 @@ async fn resume_alias_targets_a_unique_short_session_id_without_an_extra_menu_st
     assert!(
         requests[1].contains(&format!("/{}/items", target.id)),
         "direct resume loaded the wrong session: {requests:?}"
+    );
+}
+
+/// A title an older server kept as written, escape sequences included,
+/// shows as its words in the sidebar and the session list, with no `]0;`
+/// fragment.
+#[test]
+fn a_title_with_escape_sequences_draws_as_its_words() {
+    let thread = Thread {
+        title: "\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}Escaped title".into(),
+        ..fixture_thread()
+    };
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::AssistantMessage {
+            text: "conversation".into(),
+        },
+    )];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = true;
+    let header = frame_text(&app, (140, 30));
+    assert!(header.contains("Escaped title"), "{header}");
+    app.open_overlay(crate::state::Overlay::Threads);
+    let list = frame_text(&app, (140, 30));
+    assert!(list.contains("Escaped title"), "{list}");
+    for shown in [&header, &list] {
+        assert!(!shown.contains("]0;") && !shown.contains("52;c"), "{shown}");
+    }
+}
+
+/// A server that answers each `PATCH /v1/threads/{id}` with that chat
+/// renamed as asked, and records which chat each rename went to.
+async fn renaming_server(
+    threads: Vec<Thread>,
+) -> (
+    crate::api::ApiClient,
+    std::sync::Arc<std::sync::Mutex<Vec<(ThreadId, String)>>>,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let renames = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = renames.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let mut expected = None;
+            while expected.is_none_or(|length| request.len() < length) {
+                let read = socket.read(&mut chunk).await.unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if expected.is_none()
+                    && let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    expected = Some(end + 4 + length);
+                }
+            }
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let line = text.lines().next().unwrap_or_default();
+            let body = text.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+            let reply = line
+                .strip_prefix("PATCH /v1/threads/")
+                .and_then(|rest| rest.split(' ').next())
+                .and_then(|id| threads.iter().find(|thread| thread.id.to_string() == id))
+                .map_or_else(
+                    || "[]".to_owned(),
+                    |thread| {
+                        let title =
+                            serde_json::from_str::<serde_json::Value>(body).unwrap()["title"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned();
+                        log.lock().unwrap().push((thread.id, title.clone()));
+                        serde_json::to_string(&Thread {
+                            title,
+                            ..thread.clone()
+                        })
+                        .unwrap()
+                    },
+                );
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            let _ = socket.write_all(reply.as_bytes()).await;
+        }
+    });
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    (client, renames)
+}
+
+#[tokio::test]
+async fn rename_takes_a_first_word_as_a_chat_only_when_it_is_that_chats_id() {
+    let current = Thread {
+        id: ThreadId("018f0000-1111-7222-8333-444455556666".parse().unwrap()),
+        ..fixture_thread()
+    };
+    // Only the other chat has "db", "add" and "e2e" inside its ID.
+    let other = Thread {
+        id: ThreadId("018f0add-0000-7000-8000-0000db00e2e1".parse().unwrap()),
+        title: "Other".into(),
+        ..fixture_thread()
+    };
+    let (client, renames) = renaming_server(vec![current.clone(), other.clone()]).await;
+    let mut app = App::new(
+        current.clone(),
+        vec![current.clone(), other.clone()],
+        vec![],
+        vec![],
+        vec![],
+    );
+    let other_id = other.id.to_string();
+    let short = crate::view::span::short_id(&other_id).to_owned();
+    for (command, target, title) in [
+        (
+            "/rename db migration".to_owned(),
+            current.id,
+            "db migration",
+        ),
+        (
+            "/rename add e2e tests".to_owned(),
+            current.id,
+            "add e2e tests",
+        ),
+        ("/rename db".to_owned(), current.id, "db"),
+        (
+            format!("/rename {short} Schema work"),
+            other.id,
+            "Schema work",
+        ),
+        (
+            format!("/rename #{short} Schema plan"),
+            other.id,
+            "Schema plan",
+        ),
+        (
+            format!("/rename {} Full ID", other_id.to_uppercase()),
+            other.id,
+            "Full ID",
+        ),
+    ] {
+        renames.lock().unwrap().clear();
+        app.execute_command(&command, &client).await.unwrap();
+        assert_eq!(
+            renames.lock().unwrap().as_slice(),
+            [(target, title.to_owned())],
+            "{command}"
+        );
+        assert_eq!(app.notice, "Session renamed", "{command}");
+    }
+    assert_eq!(app.thread.title, "db");
+
+    // A chat's ID alone still asks for the title.
+    renames.lock().unwrap().clear();
+    app.execute_command(&format!("/rename {short}"), &client)
+        .await
+        .unwrap();
+    assert!(renames.lock().unwrap().is_empty());
+    assert_eq!(app.notice, "Type a title after the session ID");
+}
+
+/// Two chats whose IDs end alike: their short ID names neither, so the
+/// rename is refused instead of naming the open chat after the ID.
+#[tokio::test]
+async fn rename_refuses_a_short_id_two_chats_share() {
+    let chat = |id: &str, title: &str| Thread {
+        id: ThreadId(id.parse().unwrap()),
+        title: title.into(),
+        ..fixture_thread()
+    };
+    let current = chat("018f0000-1111-7222-8333-444455556666", "Current");
+    let first = chat("018f0aaa-0000-7000-8000-0000db00e2e1", "First");
+    let second = chat("018f0bbb-0000-7000-8000-0000db00e2e1", "Second");
+    let threads = vec![current.clone(), first.clone(), second.clone()];
+    let (client, renames) = renaming_server(threads.clone()).await;
+    let mut app = App::new(current.clone(), threads, vec![], vec![], vec![]);
+    app.execute_command("/rename db00e2e1 Schema work", &client)
+        .await
+        .unwrap();
+    assert!(renames.lock().unwrap().is_empty());
+    assert_eq!(
+        app.notice,
+        "More than one chat ends in db00e2e1 · type the full session ID"
+    );
+    assert_eq!(app.thread.title, "Current");
+    app.execute_command(&format!("/rename {} Schema work", second.id), &client)
+        .await
+        .unwrap();
+    assert_eq!(
+        renames.lock().unwrap().as_slice(),
+        [(second.id, "Schema work".to_owned())]
     );
 }
 
@@ -18873,6 +19281,7 @@ fn undo_and_redo_report_how_far_the_history_reaches() {
         sequence: 3,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     assert_eq!(app.undo_depth(), (1, 2));
     // At the earliest checkpoint there is nowhere further back to go.
@@ -18880,8 +19289,131 @@ fn undo_and_redo_report_how_far_the_history_reaches() {
         sequence: 1,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     assert_eq!(app.undo_depth(), (0, 3));
+}
+
+#[test]
+fn an_undo_that_left_files_says_so_under_its_marker() {
+    let thread = fixture_thread();
+    let items = vec![
+        message_item(
+            1,
+            &thread,
+            ItemData::UserMessage {
+                text: "first".into(),
+                attachments: vec![],
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        ),
+        message_item(
+            2,
+            &thread,
+            ItemData::UserMessage {
+                text: "edit the env".into(),
+                attachments: vec![],
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text = |app: &App| {
+        app.lines((100, 40))
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let undone = |unrestored: &[(&str, haarness_protocol::UnrestoredReason)], count| {
+        haarness_protocol::RevertState {
+            sequence: 1,
+            snapshot_id: "backup".into(),
+            base_snapshot_id: Some("base".into()),
+            unrestored: unrestored
+                .iter()
+                .map(|(path, reason)| haarness_protocol::UnrestoredFile {
+                    path: (*path).to_owned(),
+                    reason: *reason,
+                })
+                .collect(),
+            unrestored_count: count,
+        }
+    };
+    // An undo that put everything back: the marker alone.
+    app.thread.revert = Some(undone(&[], None));
+    let quiet = text(&app);
+    assert!(quiet.contains("↶ "), "{quiet}");
+    assert!(!quiet.contains("restored ·"), "{quiet}");
+    assert!(!quiet.contains("wasn't restored"), "{quiet}");
+
+    app.thread.revert = Some(undone(
+        &[(".env", haarness_protocol::UnrestoredReason::Ignored)],
+        None,
+    ));
+    let one = text(&app);
+    let marker = one
+        .lines()
+        .position(|line| line.contains("↶ "))
+        .expect("the undone marker");
+    assert_eq!(
+        one.lines().nth(marker + 1).map(str::trim_end),
+        Some("    1 file wasn't restored · .env"),
+        "{one}"
+    );
+
+    // A file left for its size comes first, in the text colour, with why;
+    // the ignored ones stay quiet, named up to what the server sent and the
+    // rest counted.
+    app.thread.revert = Some(undone(
+        &[
+            ("big.bin", haarness_protocol::UnrestoredReason::Large),
+            (
+                "src/\u{1b}[31mlog",
+                haarness_protocol::UnrestoredReason::Ignored,
+            ),
+        ],
+        Some(5),
+    ));
+    let lines = app.lines((100, 40));
+    let row = |needle: &str| {
+        lines
+            .iter()
+            .find(|line| line.text().contains(needle))
+            .unwrap_or_else(|| panic!("no row with {needle}"))
+    };
+    let large = row("left as it was");
+    assert_eq!(
+        large.text().trim_end(),
+        "    1 file left as it was · too large for Undo · big.bin"
+    );
+    assert!(large.spans.iter().any(|span| span.fg == app.theme.text));
+    let quiet = row("weren't restored");
+    assert_eq!(
+        quiet.text().trim_end(),
+        "    4 files weren't restored · src/[31mlog, +3 more"
+    );
+    assert!(quiet.spans.iter().all(|span| span.fg == app.theme.muted));
+    assert!(
+        !lines.iter().any(|line| line.text().contains('\u{1b}')),
+        "a name is never a terminal control"
+    );
+
+    // Read in the interface language, one counter word to a line.
+    app.language = crate::locale::Language::Japanese;
+    let japanese = text(&app);
+    assert!(
+        japanese.contains("1 件のファイルはそのままです · 大きすぎて元に戻せません · big.bin"),
+        "{japanese}"
+    );
+    assert!(
+        japanese.contains("4 件のファイルは復元されていません · src/[31mlog, あと 3 件"),
+        "{japanese}"
+    );
 }
 
 #[tokio::test]
@@ -20323,6 +20855,7 @@ fn a_slash_command_reads_as_the_line_typed_with_its_prompt_folded_below() {
         sequence: 0,
         snapshot_id: "backup".into(),
         base_snapshot_id: None,
+        ..Default::default()
     });
     assert_eq!(
         app.undone_prompt().map(|(text, _)| text),
@@ -22746,6 +23279,8 @@ fn undo_redo_and_diff_failures_read_as_what_to_do() {
             status: reqwest::StatusCode::from_u16(status).unwrap(),
             code: Some(code.into()),
             message: message.into(),
+            reason: None,
+            path: None,
         }
         .into()
     };
@@ -23445,6 +23980,7 @@ async fn an_undo_whose_history_cannot_be_read_keeps_the_undone_prompt() {
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     let error = serde_json::json!({
         "code": "storage",
@@ -23474,6 +24010,7 @@ async fn undo_restores_the_prompt_and_slash_starts_a_command_over_it() {
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     let items = serde_json::to_string(&app.items).unwrap();
     let (client, server) = workspace_http_status_client(
@@ -23543,6 +24080,7 @@ async fn an_undone_prompt_with_a_reference_keeps_its_chip_under_a_slash_command(
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     // As /undo puts it back: the reference reads as its chip.
     app.composer.set_text(sent.clone());
@@ -23569,6 +24107,7 @@ async fn redo_typed_over_an_undone_prompt_runs_and_leaves_the_composer_empty() {
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     // A draft that is still the undone prompt, as the composer holds it
     // after /undo or after coming back to the chat later.
@@ -23607,12 +24146,103 @@ async fn redo_typed_over_an_undone_prompt_runs_and_leaves_the_composer_empty() {
 }
 
 #[tokio::test]
+async fn a_redo_undo_has_no_copy_for_says_why_whole_in_the_persons_language() {
+    let english = "assets/big.bin is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.";
+    for language in [
+        crate::locale::Language::English,
+        crate::locale::Language::Japanese,
+        crate::locale::Language::Arabic,
+    ] {
+        let (mut app, _) = undo_fixture();
+        app.language = language;
+        app.thread.revert = Some(haarness_protocol::RevertState {
+            sequence: 2,
+            snapshot_id: "backup".into(),
+            base_snapshot_id: Some("base".into()),
+            ..Default::default()
+        });
+        let refusal = serde_json::json!({
+            "code": "refused",
+            "message": english,
+            "retryable": false,
+            "details": {"reason": "no_undo_copy", "path": "assets/big.bin"},
+        });
+        let (client, server) =
+            workspace_http_status_client(vec![(409, refusal.to_string())], false).await;
+        app.execute_command("/redo", &client).await.unwrap();
+        assert!(server.await.unwrap()[0].contains("/unrevert"));
+        let said = language.format(
+            "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",
+            &[("path", "assets/big.bin")],
+        );
+        if language == crate::locale::Language::English {
+            assert_eq!(said, english);
+        } else {
+            assert_ne!(said, english, "{language:?} has its own words");
+        }
+        assert!(said.contains("assets/big.bin"), "{said}");
+        assert_eq!(app.notice, said);
+        let toast = app.notification_toast.as_ref().expect("a toast");
+        assert_eq!(toast.message, said);
+        assert!(toast.variant == crate::state::ToastVariant::Error);
+        // The band cuts it at these widths; the toast has it whole, every
+        // row it wraps to on screen.
+        for width in [80_u16, 100] {
+            let lines = app.lines((u32::from(width), 30));
+            let inner = 60.min(usize::from(width) - 6) - 6;
+            for row in textwrap::wrap(&said, inner) {
+                assert!(
+                    lines.iter().any(|line| line.text().contains(row.trim())),
+                    "{language:?} {width}: {row:?} in {:#?}",
+                    lines.iter().map(Line::text).collect::<Vec<_>>()
+                );
+            }
+            assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
+        }
+    }
+
+    // Relayed inside `error`, as a gateway writes it, it reads the same.
+    let (mut app, _) = undo_fixture();
+    app.thread.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+        ..Default::default()
+    });
+    let relayed = serde_json::json!({"error": {
+        "code": "refused",
+        "message": english,
+        "details": {"reason": "no_undo_copy", "path": "assets/big.bin"},
+    }});
+    let (client, _server) =
+        workspace_http_status_client(vec![(409, relayed.to_string())], false).await;
+    app.execute_command("/redo", &client).await.unwrap();
+    assert_eq!(app.notice, english);
+
+    // A server that names no reason is said as before.
+    let (mut app, _) = undo_fixture();
+    app.thread.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+        ..Default::default()
+    });
+    let refusal = serde_json::json!({"code": "refused", "message": english, "retryable": false});
+    let (client, _server) =
+        workspace_http_status_client(vec![(409, refusal.to_string())], false).await;
+    app.execute_command("/redo", &client).await.unwrap();
+    assert_eq!(app.notice, format!("Redo failed: {english}"));
+    assert!(app.notification_toast.is_none());
+}
+
+#[tokio::test]
 async fn redo_from_elsewhere_drops_the_undone_prompt_copy_from_the_composer() {
     let (mut app, thread) = undo_fixture();
     app.thread.revert = Some(haarness_protocol::RevertState {
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     app.composer.set_text("write the file".into());
     // Moving the cursor is not an edit of the text: the copy still goes.
@@ -24472,6 +25102,198 @@ async fn a_catalog_read_after_assets_updated_does_not_hold_the_event_loop() {
     server.abort();
 }
 
+/// Agents reloaded after an agent file is added or removed come back in a
+/// new order: the agent picked with Tab stays picked, and one that is gone
+/// gives way to the chat's own agent until its file is back.
+#[tokio::test]
+async fn the_chosen_agent_stays_chosen_when_agents_reload() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let profile = |id: &str| haarness_protocol::AgentProfile {
+        id: id.into(),
+        name: id.into(),
+        description: format!("{id} agent"),
+        hidden: false,
+        max_subagents: 4,
+        mode: Some("primary".into()),
+        model: None,
+    };
+    let lists = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+        vec![
+            profile("build"),
+            profile("plan"),
+            profile("b"),
+            profile("c"),
+        ],
+        vec![profile("build"), profile("plan"), profile("b")],
+        vec![
+            profile("build"),
+            profile("plan"),
+            profile("b"),
+            profile("c"),
+        ],
+    ])));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let answers = lists.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 4096];
+            let read = socket.read(&mut request).await.unwrap_or(0);
+            let body = if String::from_utf8_lossy(&request[..read]).starts_with("GET /v1/agents ") {
+                serde_json::to_string(&answers.lock().unwrap().pop_front().unwrap()).unwrap()
+            } else {
+                "[]".to_owned()
+            };
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        }
+    });
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let thread = fixture_thread();
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        vec![],
+        vec![],
+        vec![profile("build"), profile("plan"), profile("c")],
+    );
+    while app.agent() != "c" {
+        app.cycle_agent();
+    }
+    let reload = |app: &App| {
+        fixture_event(
+            "assets.updated",
+            app.thread.id,
+            app.thread.id,
+            serde_json::json!({"resource": "agent", "action": "created"}),
+        )
+    };
+
+    // `b.md` added: it sorts before `c`, at the index `c` had.
+    let event = reload(&app);
+    app.reduce(event, &client).await.unwrap();
+    assert_eq!(app.agents.len(), 4);
+    assert_eq!(app.agent(), "c");
+    // `c.md` removed: the chat's own agent, quietly.
+    let notice = app.notice.clone();
+    let event = reload(&app);
+    app.reduce(event, &client).await.unwrap();
+    assert_eq!(app.agents.len(), 3);
+    assert_eq!(app.agent(), "build");
+    assert_eq!(app.notice, notice);
+    // Back again (an editor that saves by writing a new file): picked again.
+    let event = reload(&app);
+    app.reduce(event, &client).await.unwrap();
+    assert_eq!(app.agent(), "c");
+    server.abort();
+}
+
+/// An agent whose file is briefly gone (an editor saving it) is picked again
+/// when it is back; one that can no longer be picked (hidden, or only for
+/// child agents) is not taken up; and once another agent is picked, the one
+/// set aside stays out.
+#[test]
+fn an_agent_set_aside_on_reload_comes_back_unless_another_is_picked() {
+    let profile = |id: &str, mode: &str, hidden: bool| haarness_protocol::AgentProfile {
+        id: id.into(),
+        name: id.into(),
+        description: format!("{id} agent"),
+        hidden,
+        max_subagents: 4,
+        mode: Some(mode.into()),
+        model: None,
+    };
+    let with = |custom: Option<haarness_protocol::AgentProfile>| {
+        let mut agents = vec![
+            profile("build", "primary", false),
+            profile("plan", "primary", false),
+        ];
+        agents.extend(custom);
+        agents
+    };
+    let thread = fixture_thread();
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread],
+        vec![],
+        vec![],
+        with(Some(profile("charlie", "primary", false))),
+    );
+    while app.agent() != "charlie" {
+        app.cycle_agent();
+    }
+    let notice = app.notice.clone();
+
+    app.agents_reloaded(with(None));
+    assert_eq!(app.agent(), "build", "the chat's own agent stands in");
+    app.agents_reloaded(with(Some(profile("charlie", "primary", false))));
+    assert_eq!(app.agent(), "charlie", "picked again once its file is back");
+    assert_eq!(app.notice, notice, "quietly");
+
+    for unpickable in [
+        profile("charlie", "subagent", false),
+        profile("charlie", "primary", true),
+    ] {
+        app.agents_reloaded(with(Some(unpickable)));
+        assert_eq!(app.agent(), "build");
+    }
+    app.agents_reloaded(with(Some(profile("charlie", "primary", false))));
+    assert_eq!(app.agent(), "charlie");
+
+    app.agents_reloaded(with(None));
+    app.cycle_agent();
+    assert_eq!(app.agent(), "plan");
+    app.agents_reloaded(with(Some(profile("charlie", "primary", false))));
+    assert_eq!(app.agent(), "plan", "the agent picked meanwhile stays");
+}
+
+/// A message sent as the agent standing in for one set aside makes the
+/// stand-in the choice: the set-aside agent does not come back later.
+#[tokio::test]
+async fn sending_as_the_stand_in_forgets_the_agent_set_aside() {
+    let profile = |id: &str| haarness_protocol::AgentProfile {
+        id: id.into(),
+        name: id.into(),
+        description: format!("{id} agent"),
+        hidden: false,
+        max_subagents: 4,
+        mode: Some("primary".into()),
+        model: None,
+    };
+    let thread = fixture_thread();
+    let provider = ProviderInfo {
+        id: thread.provider.clone(),
+        name: "OpenAI".into(),
+        authenticated: true,
+        models: vec![],
+    };
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread],
+        vec![],
+        vec![provider],
+        vec![profile("build"), profile("plan"), profile("charlie")],
+    );
+    while app.agent() != "charlie" {
+        app.cycle_agent();
+    }
+    app.agents_reloaded(vec![profile("build"), profile("plan")]);
+    assert_eq!(app.agent(), "build");
+    // The server is out of reach; the message was still sent as `build`.
+    let _ = app.submit_prompt("hello".into(), &offline_client()).await;
+    app.agents_reloaded(vec![profile("build"), profile("plan"), profile("charlie")]);
+    assert_eq!(app.agent(), "build");
+}
+
 /// Ctrl+Y goes Review → Auto → Yolo → Review on a server that keeps Yolo,
 /// each notice naming where it goes next, and the band names Yolo in the
 /// danger colour.
@@ -25153,6 +25975,351 @@ async fn a_computer_use_card_offers_the_app_in_every_chat_and_speaks_the_languag
     assert!(text.contains("このアプリを常に許可"), "{text}");
 }
 
+/// The person paused computer use on the strip at the top of the screen: the
+/// step it holds stops spinning, says so with the command that lets it go on,
+/// and a click on that command resumes the agent, as the strip's Resume does.
+#[tokio::test]
+async fn a_step_paused_on_the_strip_says_so_and_its_row_resumes_it() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let items = vec![message_item_for_turn(
+        1,
+        &thread,
+        turn,
+        ItemData::ToolCall {
+            call_id: "c1".into(),
+            name: "mac_type".into(),
+            arguments: serde_json::json!({"ref": "e2", "text": "milk"}),
+            provider_metadata: serde_json::Value::Null,
+        },
+    )];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.active_turn = Some(turn);
+    let spins = |text: &str| {
+        ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+            .iter()
+            .any(|frame| text.contains(*frame))
+    };
+    let paused = |on: bool| {
+        fixture_event(
+            crate::management::COMPUTER_USE_UPDATED,
+            thread.id,
+            thread.id,
+            serde_json::json!({"paused": on}),
+        )
+    };
+    assert!(spins(&frame_text(&app, (100, 30))));
+    app.reduce(paused(true), &offline_client()).await.unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("‖ mac_type"), "{text}");
+    assert!(text.contains("paused  ·  /mac resume"), "{text}");
+    assert!(!spins(&text), "nothing moves while paused: {text}");
+    // The band says it too, without a clock running.
+    let band = text
+        .lines()
+        .rev()
+        .find(|line| line.contains("paused"))
+        .unwrap();
+    assert!(!band.contains("mac_type"), "{band}");
+    // The command on the row is what a click runs.
+    let row = text
+        .lines()
+        .position(|line| line.contains("/mac resume"))
+        .unwrap();
+    let column = text.lines().nth(row).unwrap().find("/mac resume").unwrap();
+    let column = text.lines().nth(row).unwrap()[..column].width();
+    assert_eq!(
+        app.hit_at(row, column + 2),
+        Some(crate::view::frame::HitTarget::ComputerResume)
+    );
+    assert_ne!(
+        app.hit_at(row, 4),
+        Some(crate::view::frame::HitTarget::ComputerResume),
+        "only the command takes the click"
+    );
+    let (client, seen) = sign_in_server(vec![SignInReply::Json(
+        r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null}}"#,
+    )])
+    .await;
+    mouse_drag(
+        &mut app,
+        &client,
+        u16::try_from(row).unwrap(),
+        u16::try_from(column + 2).unwrap(),
+        u16::try_from(column + 2).unwrap(),
+    )
+    .await;
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(
+        requests[0].starts_with("POST /v1/manage/computer-use ")
+            && requests[0].contains(r#""action":"resume""#),
+        "{requests:?}"
+    );
+    let text = frame_text(&app, (100, 30));
+    assert!(!text.contains("/mac resume") && spins(&text), "{text}");
+    // A pause heard later ends with the server's word, or with the turn.
+    app.reduce(paused(true), &offline_client()).await.unwrap();
+    app.reduce(paused(false), &offline_client()).await.unwrap();
+    assert!(!frame_text(&app, (100, 30)).contains("/mac resume"));
+    app.reduce(paused(true), &offline_client()).await.unwrap();
+    let mut finished = fixture_event("turn.finished", thread.id, thread.id, serde_json::json!({}));
+    finished.turn_id = Some(turn);
+    app.reduce(finished, &offline_client()).await.unwrap();
+    assert_eq!(app.computer_paused, None);
+}
+
+/// A pause on the strip holds only a turn that waits on the screen: one that
+/// looked earlier and now runs a command keeps its own band and rows.
+#[tokio::test]
+async fn a_pause_says_paused_only_while_a_step_waits_on_the_screen() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let call = |sequence: u64, id: &str, name: &str| {
+        message_item_for_turn(
+            sequence,
+            &thread,
+            turn,
+            ItemData::ToolCall {
+                call_id: id.into(),
+                name: name.into(),
+                arguments: serde_json::json!({}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    let done = message_item_for_turn(
+        2,
+        &thread,
+        turn,
+        ItemData::ToolResult {
+            call_id: "c1".into(),
+            name: "mac_snapshot".into(),
+            output: "TextEdit".into(),
+            is_error: false,
+            metadata: serde_json::Value::Null,
+        },
+    );
+    let items = vec![call(1, "c1", "mac_snapshot"), done, call(3, "c2", "bash")];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.active_turn = Some(turn);
+    app.reduce(
+        fixture_event(
+            crate::management::COMPUTER_USE_UPDATED,
+            thread.id,
+            thread.id,
+            serde_json::json!({"paused": true}),
+        ),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.screen_paused());
+    assert!(
+        !app.screen_waiting(),
+        "the command is not waiting on the screen"
+    );
+    let text = frame_text(&app, (100, 30));
+    assert!(
+        !text.contains("paused") && !text.contains("/mac resume"),
+        "{text}"
+    );
+    // The next screen step is the one the pause holds.
+    app.items.push(call(4, "c3", "functions.mac_click"));
+    assert!(app.screen_waiting());
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("paused  ·  /mac resume"), "{text}");
+}
+
+/// `/mac resume` words its notice from the server's answer: an agent this
+/// client never heard was paused (another chat's, or a missed event) was
+/// still resumed, and one it thought paused may have gone on already.
+#[tokio::test]
+async fn mac_resume_says_what_the_server_did() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (client, _) = sign_in_server(vec![
+        SignInReply::Json(
+            r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null,"resumed":true}}"#,
+        ),
+        SignInReply::Json(
+            r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null,"resumed":false}}"#,
+        ),
+    ])
+    .await;
+    app.notice.clear();
+    app.execute_command("/mac resume", &client).await.unwrap();
+    assert_ne!(app.notice, "No agent is paused", "it did resume one");
+    app.computer_paused = Some(thread.id);
+    app.execute_command("/mac resume", &client).await.unwrap();
+    assert_eq!(app.notice, "No agent is paused");
+    assert_eq!(app.computer_paused, None);
+}
+
+/// A pause is followed in every chat, so a chat opened while it lasts shows
+/// it; a child agent's view counts as its conversation's; `/mac resume` does
+/// what the row's click does, and says so when nothing is paused.
+#[tokio::test]
+async fn a_pause_reaches_the_paused_conversation_and_mac_resume_ends_it() {
+    let thread = fixture_thread();
+    let other = fixture_thread();
+    let turn = TurnId::new();
+    let mut app = App::new(
+        other.clone(),
+        vec![thread.clone(), other.clone()],
+        vec![],
+        vec![],
+        vec![],
+    );
+    app.reduce(
+        fixture_event(
+            crate::management::COMPUTER_USE_UPDATED,
+            thread.id,
+            thread.id,
+            serde_json::json!({"paused": true}),
+        ),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.computer_paused, Some(thread.id));
+    app.active_turn = Some(turn);
+    assert!(!app.screen_paused(), "another chat is not paused");
+    app.root_thread_id = thread.id;
+    assert!(app.screen_paused(), "a child agent of the paused chat is");
+    let (client, seen) = sign_in_server(vec![
+        SignInReply::Json(r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null}}"#),
+        SignInReply::Json(r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null}}"#),
+    ])
+    .await;
+    app.execute_command("/mac resume", &client).await.unwrap();
+    assert_eq!(app.computer_paused, None);
+    assert!(!app.screen_paused());
+    assert_ne!(app.notice, "No agent is paused");
+    app.execute_command("/mac resume", &client).await.unwrap();
+    assert_eq!(app.notice, "No agent is paused");
+    let requests = seen.lock().unwrap().clone();
+    assert!(
+        requests.len() == 2
+            && requests
+                .iter()
+                .all(|request| request.contains(r#""action":"resume""#)),
+        "{requests:?}"
+    );
+}
+
+/// `/mac` is listed only where computer use exists: on macOS.
+#[test]
+fn mac_is_listed_on_macos_only() {
+    let mac = COMMANDS.iter().find(|spec| spec.name == "mac").unwrap();
+    assert!(crate::commands::listed_on(mac, "macos"));
+    assert!(!crate::commands::listed_on(mac, "linux"));
+    assert!(!crate::commands::listed_on(mac, "windows"));
+    let help = COMMANDS.iter().find(|spec| spec.name == "help").unwrap();
+    assert!(crate::commands::listed_on(help, "linux"));
+    let thread = fixture_thread();
+    let app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    assert_eq!(
+        app.filtered_slash_entries("mac")
+            .iter()
+            .any(|entry| entry.name == "mac"),
+        cfg!(target_os = "macos")
+    );
+}
+
+/// The server's own request for a drag from TextEdit, set to act without
+/// asking, into Notes (as `a_drag_into_another_app_asks_only_about_the_app_not_yet_allowed`
+/// in haarness-computer pins it): only Notes is asked about, so only Notes
+/// may be allowed in every chat, and the chip says which app that is.
+fn drag_into_notes(thread: &Thread, also_textedit: bool) -> haarness_protocol::EventEnvelope {
+    let chat = thread.id;
+    let mut patterns = vec![format!("act:{chat}:com.apple.Notes")];
+    if also_textedit {
+        patterns.insert(0, format!("act:{chat}:com.apple.TextEdit"));
+    }
+    let always: Vec<String> = patterns
+        .iter()
+        .map(|pattern| format!("computer:{pattern}"))
+        .collect();
+    fixture_event(
+        "permission.requested",
+        chat,
+        chat,
+        serde_json::json!({
+            "explicit": true,
+            "permissionId": "perm-drag",
+            "operation": format!("computer:{}", patterns[0]),
+            "detail": {"from": {"ref": "e1"}, "to": {"ref": "e4"}, "__mac": {
+                "kind": "act", "action": "drag", "bundle": "com.apple.TextEdit", "app": "TextEdit",
+                "target": "button \"Save\"", "label": "Save", "direction": null, "endBundle": "com.apple.Notes",
+                "endApp": "Notes", "point": {"x": 20, "y": 15}, "preview": "data:image/jpeg;base64,/9j/4AAQ",
+                "text": null, "keys": null, "console": false, "everyTime": false, "running": null,
+                "asks": patterns, "summary": "Drag button \"Save\" from TextEdit to Notes"}},
+            "permission": "computer",
+            "patterns": patterns,
+            "alwaysPatterns": always,
+            "threadId": chat,
+            "rootThreadId": chat,
+            "callId": "drag",
+            "agent": "build",
+            "createdAt": "2026-11-07T06:11:53.971429Z",
+        }),
+    )
+}
+
+#[tokio::test]
+async fn a_computer_use_drag_into_another_app_allows_in_every_chat_only_the_app_it_asks_about() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(drag_into_notes(&thread, false), &offline_client())
+        .await
+        .unwrap();
+    let pending = app.first_pending_permission().unwrap();
+    assert_eq!(crate::state::lasting_app(pending), Some("com.apple.Notes"));
+    let text = frame_text(&app, (130, 40));
+    assert!(
+        text.contains("Drag “Save” from TextEdit to Notes"),
+        "{text}"
+    );
+    assert!(text.contains("Always allow Notes"), "{text}");
+    assert!(
+        !text.contains("Always allow TextEdit") && !text.contains("this app"),
+        "{text}"
+    );
+    // `e` saves a rule for Notes, the app the card asked about, then allows this request once.
+    let (client, seen) = sign_in_server(vec![
+        SignInReply::Json(r#"{"title":"Computer use","data":{}}"#),
+        SignInReply::Json("null"),
+    ])
+    .await;
+    app.permission_focus = true;
+    crate::input::answer_permission(&mut app, &client, 'e')
+        .await
+        .unwrap();
+    let requests = seen.lock().unwrap().clone();
+    assert!(
+        requests[0].contains(r#""bundle":"com.apple.Notes""#)
+            && !requests[0].contains("com.apple.TextEdit"),
+        "{requests:?}"
+    );
+    // Asked about both apps, one rule would leave the other out: nothing lasting is offered.
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(drag_into_notes(&thread, true), &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::state::lasting_app(app.first_pending_permission().unwrap()),
+        None
+    );
+    assert!(
+        !crate::state::PermissionChoice::available(&app)
+            .contains(&crate::state::PermissionChoice::App)
+    );
+    let text = frame_text(&app, (130, 40));
+    assert!(!text.contains("Always allow"), "{text}");
+    assert!(text.contains("Allow in this chat"), "{text}");
+}
+
 /// A click on a terminal's text asks every time: the card says why and
 /// offers no answer that lasts.
 #[tokio::test]
@@ -25173,4 +26340,68 @@ async fn a_terminal_text_click_card_says_it_asks_every_time() {
     assert!(!text.contains("Allow in this chat"), "{text}");
     assert!(!text.contains("Always allow this app"), "{text}");
     assert!(crate::state::lasting_app(app.first_pending_permission().unwrap()).is_none());
+}
+
+/// A worktree whose link to its repository broke is only forgotten by the
+/// server, which leaves its folder; the notice says so instead of "Removed".
+#[tokio::test]
+async fn a_forgotten_worktree_says_its_folder_was_left_on_disk() {
+    let catalog = fixture_workspace_catalog();
+    let workspace = catalog.workspaces[1].clone();
+    let forgotten = haarness_protocol::WorkspaceOperationResponse {
+        workspace: workspace.clone(),
+        message: "forgot worktree".into(),
+    };
+    let mut after = catalog.clone();
+    after
+        .workspaces
+        .retain(|candidate| candidate.id != workspace.id);
+    let (client, server) = workspace_http_client(
+        vec![
+            serde_json::to_string(&forgotten).unwrap(),
+            serde_json::to_string(&after).unwrap(),
+        ],
+        false,
+    )
+    .await;
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.open_workspace_dashboard(catalog);
+    app.execute_choice(
+        crate::state::OverlayChoice::Option(
+            crate::state::OptionsKind::Workspaces,
+            format!("workspace:{}", workspace.id),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    app.execute_choice(
+        crate::state::OverlayChoice::Option(
+            crate::state::OptionsKind::WorkspaceActions,
+            "remove".into(),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    let action = app
+        .execute_choice(
+            crate::state::OverlayChoice::Option(
+                crate::state::OptionsKind::WorkspaceRemoveConfirmation,
+                "remove".into(),
+            ),
+            &client,
+        )
+        .await
+        .unwrap();
+    let operation = started_workspace_mutation(action);
+    let completion = crate::commands::run_workspace_mutation(client.clone(), operation).await;
+    assert!(app.finish_workspace_mutation(completion, false).is_none());
+    assert_eq!(
+        app.notice,
+        "Worktree “review” forgotten · it no longer links to its repository, so its folder was left on disk"
+    );
+    let requests = server.await.unwrap();
+    assert!(requests[0].starts_with("DELETE /v1/workspaces/workspace-review "));
 }

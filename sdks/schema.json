@@ -64,6 +64,17 @@
           "code": {
             "type": "string"
           },
+          "details": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ApiErrorDetails",
+                "description": "What a client needs to say the failure in the person's own\nlanguage, where `message` says it in English: set on some refusals\n(`code` `refused`), absent from other failures and from older\nservers. Cloud's errors carry their reasons in the same object."
+              }
+            ]
+          },
           "message": {
             "type": "string"
           },
@@ -76,6 +87,30 @@
           "message",
           "retryable"
         ],
+        "type": "object"
+      },
+      "ApiErrorDetails": {
+        "description": "The parts of a failure a client says in its own words (see\n[`ApiError::details`]).",
+        "properties": {
+          "path": {
+            "description": "The file `reason` is about, relative to the folder.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RefusalReason",
+                "description": "Why the request was refused."
+              }
+            ]
+          }
+        },
         "type": "object"
       },
       "ApprovalMode": {
@@ -4656,6 +4691,14 @@
         ],
         "type": "object"
       },
+      "RefusalReason": {
+        "description": "Why a request was refused for good (see [`ApiErrorDetails::reason`]).",
+        "enum": [
+          "no_undo_copy",
+          "other"
+        ],
+        "type": "string"
+      },
       "Report": {
         "properties": {
           "databasesRead": {
@@ -4812,6 +4855,22 @@
           "snapshotId": {
             "description": "Pre-revert backup snapshot consumed by unrevert.",
             "type": "string"
+          },
+          "unrestored": {
+            "description": "Files the undone turns changed that undo left as they are, each with\nwhy: files the checkpoints never hold (ignored, or outside the\nfolder) that the agent's file tools wrote, and files over the\ncheckpoints' size limit whose content undo had no copy of. The ones\nleft for their size come first; at most [`MAX_UNRESTORED`]. Absent\nfrom older servers, and empty when undo put everything back.",
+            "items": {
+              "$ref": "#/components/schemas/UnrestoredFile"
+            },
+            "type": "array"
+          },
+          "unrestoredCount": {
+            "description": "How many such files there are in all, when `unrestored` names only\nthe first of them.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -5695,6 +5754,80 @@
         ],
         "type": "object"
       },
+      "StopTurnWorkRequest": {
+        "description": "`POST /v1/threads/{id}/work/stop`: stop what some turns of a chat left\nrunning, telling the chat nothing, and leave every other turn's work\nalone. A scheduled run ends its own work this way.",
+        "properties": {
+          "commands": {
+            "description": "Commands of the chat itself (not of a chat under it) that stop too,\nby id, whatever turn ran them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "keepCalls": {
+            "description": "Calls of those turns, by the id of their `tool_call` item, whose\nsubagents and commands go on: what a turn started for a person who\nwrote into it. Servers before this field stop them too.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "turns": {
+            "description": "The turns whose work stops: any of them still running, the subagents\nthey started (and everything under those) and the commands they ran.",
+            "items": {
+              "$ref": "#/components/schemas/TurnId"
+            },
+            "type": "array"
+          },
+          "workflows": {
+            "description": "Workflow runs launched from the chat that stop too, running or\npaused, with no result delivered to it.",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowId"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "turns"
+        ],
+        "type": "object"
+      },
+      "StopTurnWorkResult": {
+        "description": "What a `StopTurnWorkRequest` began to stop.",
+        "properties": {
+          "commands": {
+            "items": {
+              "$ref": "#/components/schemas/ShellCommandInfo"
+            },
+            "type": "array"
+          },
+          "subagents": {
+            "items": {
+              "$ref": "#/components/schemas/BackgroundTaskInfo"
+            },
+            "type": "array"
+          },
+          "turns": {
+            "description": "The named turns that were still running.",
+            "items": {
+              "$ref": "#/components/schemas/TurnId"
+            },
+            "type": "array"
+          },
+          "workflows": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowId"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "turns",
+          "subagents",
+          "commands",
+          "workflows"
+        ],
+        "type": "object"
+      },
       "Thread": {
         "properties": {
           "agent": {
@@ -6066,6 +6199,33 @@
           "completed",
           "failed",
           "interrupted"
+        ],
+        "type": "string"
+      },
+      "UnrestoredFile": {
+        "description": "A file an undo left as it is (see [`RevertState::unrestored`]).",
+        "properties": {
+          "path": {
+            "description": "Relative to the folder, as checkpoints name it, or absolute when\noutside it.",
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/UnrestoredReason"
+          }
+        },
+        "required": [
+          "path",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "UnrestoredReason": {
+        "description": "Why undo left a file as it is, the one a person most needs to know\nabout first.",
+        "enum": [
+          "large",
+          "ignored",
+          "outside",
+          "other"
         ],
         "type": "string"
       },

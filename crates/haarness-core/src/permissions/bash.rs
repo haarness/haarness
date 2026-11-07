@@ -39,9 +39,16 @@ pub struct BashAnalysis {
     /// [`Self::patterns`] too; their "always" patterns are not in
     /// [`Self::always`].
     pub derived: Vec<Derived>,
-    /// The line is too large to read as the shell would (its patterns passed
-    /// [`MAX_PATTERN_BYTES`], or it is longer than [`MAX_COMMAND_BYTES`]):
-    /// its written patterns may be clipped, and no rule allows it.
+    /// The line cannot be read as the shell would: its patterns passed
+    /// [`MAX_PATTERN_BYTES`], it is longer than [`MAX_COMMAND_BYTES`], or a
+    /// here-document delimiter in it could not be set apart from the operator
+    /// written against it (see [`separated_delimiters`]), or what follows a
+    /// here-document's operator on its line has no command of the line to
+    /// be read for (`X=1 <<EOF ; make`, `cd sub <<EOF ; make`, `export X=1
+    /// <<EOF ; make`) or is cut short by a limit on what is read, in it or
+    /// in what it runs (more wrappers or shells than [`MAX_HOPS`] or
+    /// [`MAX_NESTING`] allow, counting that text as one). Its written
+    /// patterns may be clipped, and no rule allows it.
     pub unreadable: bool,
     /// What the line deletes or overwrites, wherever it runs the program
     /// (behind a wrapper, in text run again): `rm`, `rmdir`, `unlink`,
@@ -152,12 +159,46 @@ pub struct Derived {
     pub written: usize,
     /// Its generalized "don't ask again" pattern.
     pub always: String,
+    /// It is a command of the line itself that the parser put inside the
+    /// written command: one after a here-document's operator on its line
+    /// (`cat <<EOF ; make`). It is judged as a written command is, and its
+    /// "always" pattern is in [`BashAnalysis::always`].
+    pub own: bool,
 }
 
 /// Commands whose non-flag arguments are filesystem paths worth resolving.
 /// `pushd` enters its folder like `cd`.
 const PATH_COMMANDS: &[&str] = &[
-    "cd", "pushd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
+    "cd", "pushd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "chgrp", "cat",
+];
+
+/// Wrappers that run the command they are given in the folder they run in
+/// themselves, unless an option of theirs names another (`env -C`, `sudo
+/// -D`): after a plain `cd` that opens the line's `&&` chain, what they run
+/// is read from where the `cd` went (see [`Reader::carried`]). `pkexec`
+/// starts its command in the user's home folder and `find -execdir` in
+/// each file's, so they are not among them.
+const KEEPS_FOLDER: &[&str] = &[
+    "builtin",
+    "busybox",
+    "caffeinate",
+    "chrt",
+    "command",
+    "doas",
+    "env",
+    "exec",
+    "flock",
+    "ionice",
+    "nice",
+    "nohup",
+    "setsid",
+    "stdbuf",
+    "sudo",
+    "taskset",
+    "time",
+    "timeout",
+    "gtimeout",
+    "xargs",
 ];
 
 /// Programs that only look at the files they are given (their names, sizes,
@@ -274,7 +315,7 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         source: None,
         readings: HashSet::new(),
         counts: HashMap::new(),
-        texts: HashSet::new(),
+        texts: HashMap::new(),
         read_bytes: 0,
         nested_commands: 0,
         pattern_bytes: 0,
@@ -286,9 +327,17 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         folder: None,
         here: None,
         lost: false,
+        carried: None,
+        names_work_tree: false,
+        cdpaths: Vec::new(),
+        work_trees: Vec::new(),
+        loops: Vec::new(),
+        unseparated: false,
     };
     if !reader.read(command, Depth::default()) {
-        return fallback(command);
+        let mut fallback = fallback(command);
+        fallback.unreadable = reader.unseparated;
+        return fallback;
     }
     let Reader {
         mut analysis,
@@ -296,11 +345,15 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         overflow,
         nested_cd,
         unplaced,
+        unseparated,
         ..
     } = reader;
     if nested_cd {
         analysis.directories = None;
     }
+    // The parser read a here-document's text, and what follows its operator
+    // on its line, otherwise than the shell does.
+    analysis.unreadable |= unseparated;
     if overflow {
         // Patterns past the limit are clipped and the line's readings stop,
         // but its paths outside the project and its commands as written
@@ -318,6 +371,9 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         for written in &mut fallback.written {
             written.incomplete |= unplaced;
         }
+        // `X=1 <<EOF; rm -rf x`: no command is read before the delimiter
+        // that could not be set apart.
+        fallback.unreadable = unseparated;
         return fallback;
     }
     if unplaced && analysis.written.is_empty() {
@@ -337,9 +393,327 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
     analysis
 }
 
-/// What the parser is given for a shell line: the line itself, except for
-/// the backslash shapes tree-sitter-bash reads otherwise than the shell does,
-/// where one backslash is written as a space. The parser takes a line feed
+/// What the parser is given for a shell line: the line itself, with the
+/// shapes tree-sitter-bash reads otherwise than the shell does rewritten in
+/// place (see [`shell_reading`] and [`separated_delimiters`]), so the text
+/// keeps its length. False with it when a here-document delimiter could not
+/// be set apart from the operator written against it: the line is then not
+/// read whole. With them, the text's tree when finding that took a parse.
+fn parser_input(command: &str) -> (std::borrow::Cow<'_, str>, bool, Option<tree_sitter::Tree>) {
+    match shell_reading(command) {
+        std::borrow::Cow::Borrowed(text) => separated_delimiters(text),
+        std::borrow::Cow::Owned(text) => {
+            let (separated, whole, tree) = separated_delimiters(&text);
+            (std::borrow::Cow::Owned(separated.into_owned()), whole, tree)
+        }
+    }
+}
+
+/// How many bytes [`separated_delimiters`] parses for a line, in all, when
+/// it parses more than [`MIN_DELIMITER_PASSES`] times: each parse shows the
+/// delimiters up to the first one the parser misreads inside another, so a
+/// line of many documents needs a parse for each, and a line one parse
+/// leaves misread costs that parse each time (`cat <<EOF;` many times over).
+/// A line that needs more is not read whole.
+const MAX_DELIMITER_BYTES: usize = 64 * 1024;
+/// How many times [`separated_delimiters`] may parse any line, the last
+/// parse only checking the moves before it.
+const MIN_DELIMITER_PASSES: usize = 4;
+/// How many delimiters [`separated_delimiters`] sets apart in one text, over
+/// all its parses: a text that needs more is not read whole after the parse
+/// that shows it. Lines people and agents write need a few.
+const MAX_DELIMITERS_APART: usize = 64;
+
+/// How a delimiter written against an operator is set apart from it: see
+/// [`separated_delimiters`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Apart {
+    /// The bytes from the first to the delimiter's end (the second) move one
+    /// byte left.
+    Left(usize, usize),
+    /// The operator at the first, as long as the second, moves one byte
+    /// right, into the blank after it.
+    Right(usize, usize),
+    /// The `;` here ends its line, and becomes a blank.
+    Blank(usize),
+}
+
+/// `text` with each here-document delimiter that is written against an
+/// operator (`cat <<EOF; rm -rf x`, `cat <<EOF>out.txt`, `cat <<EOF|sh`) set
+/// apart from it, whether every one could be, and the tree of the text
+/// returned when it was parsed. The shell ends an unquoted delimiter at a
+/// blank or an operator, the parser only at a blank: it would look for a
+/// line `EOF;` to close the document, and take the rest of the operator's
+/// line and every line after it for the document's text. The delimiter moves
+/// one byte left, into a blank between it and `<<` (unless it starts with
+/// `-`, which would make `<<` a `<<-`), or else with `<<` into the blank
+/// before them (`cat<<EOF ; rm -rf x`), and that blank goes after it. The
+/// text keeps its length and every node's range is a range of the line as
+/// written, but for those of `<<` and the delimiter, one byte early; the
+/// delimiter's text is only read for its quotes, which stay in that range.
+/// When neither of those blanks can be taken, because there is none or `<<`
+/// would join the word before it (`2 <<EOF;` would read as a redirect of
+/// descriptor 2, `a= <<EOF;` as a value) or take it in (the parser reads
+/// `-s<<` and `-<<` as the operator), an operator `;`, `&`, `&&`, `|` or `||`
+/// with a blank after it moves one byte right instead, into that blank
+/// (`python3 - <<EOF ;ls`): the word after it keeps its place, and the
+/// ranges of the operator and of an error that starts with it are one byte
+/// late. A `;` that ends its line becomes a blank. Any other delimiter
+/// cannot move (`cat<<EOF>out.txt`). A text that needs more than
+/// [`MAX_DELIMITERS_APART`] set apart is returned, not whole, as it stood
+/// at the parse that showed it, with that parse's tree.
+fn separated_delimiters(
+    text: &str,
+) -> (std::borrow::Cow<'_, str>, bool, Option<tree_sitter::Tree>) {
+    if !may_glue_delimiter(text) {
+        return (std::borrow::Cow::Borrowed(text), true, None);
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        return (std::borrow::Cow::Borrowed(text), true, None);
+    }
+    let mut bytes = text.as_bytes().to_vec();
+    let mut changed = false;
+    let mut apart = 0;
+    let passes = (MAX_DELIMITER_BYTES / text.len().max(1)).max(MIN_DELIMITER_PASSES);
+    for pass in 1..=passes {
+        // Only whole characters move, and a blank takes an ASCII byte's
+        // place: the text is still UTF-8.
+        let Ok(current) = std::str::from_utf8(&bytes) else {
+            break;
+        };
+        let Some(tree) = parser.parse(current, None) else {
+            break;
+        };
+        let moves = misread_delimiters(&tree, current);
+        apart += moves.as_ref().map_or(0, Vec::len);
+        if moves.as_ref().is_none_or(Vec::is_empty) || apart > MAX_DELIMITERS_APART {
+            let text = if changed {
+                std::borrow::Cow::Owned(current.to_owned())
+            } else {
+                std::borrow::Cow::Borrowed(text)
+            };
+            let whole = moves.is_some_and(|moves| moves.is_empty());
+            return (text, whole, Some(tree));
+        }
+        // No parse is left to check these moves.
+        if pass == passes {
+            break;
+        }
+        for apart in moves.unwrap_or_default() {
+            match apart {
+                Apart::Left(from, end) => {
+                    bytes.copy_within(from..end, from - 1);
+                    bytes[end - 1] = b' ';
+                }
+                Apart::Right(at, length) => {
+                    bytes.copy_within(at..at + length, at + 1);
+                    bytes[at] = b' ';
+                }
+                Apart::Blank(at) => bytes[at] = b' ',
+            }
+        }
+        changed = true;
+    }
+    // More misread delimiters than passes.
+    (
+        std::borrow::Cow::Owned(String::from_utf8(bytes).unwrap_or_else(|_| text.to_owned())),
+        false,
+        None,
+    )
+}
+
+/// The delimiters a parse of `text` misreads, each as how it is set apart,
+/// or `None` when one of them cannot be (see [`separated_delimiters`]).
+/// After a misread one the parser takes each later `<<EOF;` on the line for
+/// that document's end (`cat <<EOF; cat <<EOF;`): those are delimiters too.
+fn misread_delimiters(tree: &tree_sitter::Tree, text: &str) -> Option<Vec<Apart>> {
+    let mut moves = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let parts: Vec<_> = node.children(&mut node.walk()).collect();
+        for (index, part) in parts.iter().enumerate() {
+            let operator = index
+                .checked_sub(1)
+                .map(|before| parts[before])
+                .filter(|before| matches!(before.kind(), "<<" | "<<-"));
+            match part.kind() {
+                "heredoc_start" => {}
+                "heredoc_end" if operator.is_some() => {}
+                _ => continue,
+            }
+            let start = part.start_byte();
+            let end = start + delimiter_length(&text[start..]);
+            if end == start || end >= part.end_byte() {
+                continue;
+            }
+            // The shell joins the line after a backslash to it before it
+            // reads the delimiter (`<<EOF\⏎; …`): the operator is on another
+            // line of the text.
+            if text[start..end].contains("\\\n") {
+                return None;
+            }
+            let operator = operator?;
+            let apart = delimiter_room(
+                text.as_bytes(),
+                operator.start_byte(),
+                operator.end_byte(),
+                start,
+                end,
+            )
+            .map(|from| Apart::Left(from, end))
+            .or_else(|| operator_room(text.as_bytes(), end))?;
+            moves.push(apart);
+        }
+        stack.extend(parts);
+    }
+    Some(moves)
+}
+
+/// Whether `text` may hold a here-document delimiter written against an
+/// operator: a `<<` (not `<<<`) whose word, to the next blank, is longer
+/// than the shell's delimiter or ends in a line continuation. Quotes and
+/// comments are not looked at, so some lines it names hold none;
+/// [`separated_delimiters`] parses those.
+fn may_glue_delimiter(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(found) = text[from..].find("<<") {
+        let operator = from + found;
+        from = operator + 1;
+        if bytes.get(operator + 2) == Some(&b'<')
+            || operator.checked_sub(1).map(|before| bytes[before]) == Some(b'<')
+        {
+            continue;
+        }
+        let mut start = operator + 2;
+        if bytes.get(start) == Some(&b'-') {
+            start += 1;
+        }
+        while matches!(bytes.get(start), Some(b' ' | b'\t')) {
+            start += 1;
+        }
+        let word = bytes[start..]
+            .iter()
+            .position(u8::is_ascii_whitespace)
+            .map_or(bytes.len(), |end| start + end);
+        let length = delimiter_length(&text[start..word]);
+        if length > 0 && start + length < word {
+            return true;
+        }
+        // A line continuation right after it, which the shell drops.
+        let backslashes = bytes[start..word]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        if backslashes % 2 == 1 && bytes.get(word) == Some(&b'\n') {
+            return true;
+        }
+    }
+    false
+}
+
+/// How long the here-document delimiter that `text` starts with is, as the
+/// shell reads it: to a blank or an operator outside quotes.
+fn delimiter_length(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let (mut quote, mut escaped) = (None, false);
+    for (at, &byte) in bytes.iter().enumerate() {
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+        } else if let Some(open) = quote {
+            if byte == open {
+                quote = None;
+            }
+        } else if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+        } else if byte.is_ascii_whitespace() || b";&|<>()".contains(&byte) {
+            return at;
+        }
+    }
+    bytes.len()
+}
+
+/// Where the bytes start that move one byte left to set the delimiter
+/// (from `start` to `end`) of the `<<` at `operator..operator_end` apart
+/// from what follows it: the delimiter alone when a blank stands between
+/// `<<` and it and it does not start with `-`, else `<<` with it when a
+/// blank stands before `<<` and the word before that blank stays a word,
+/// whole, once `<<` touches it. `None` when neither holds, or the shell's
+/// delimiter stops at a `$(` the parser would read otherwise.
+fn delimiter_room(
+    bytes: &[u8],
+    operator: usize,
+    operator_end: usize,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    if bytes.get(end) == Some(&b'(') && bytes.get(end.checked_sub(1)?) == Some(&b'$') {
+        return None;
+    }
+    if start > operator_end && matches!(bytes[start - 1], b' ' | b'\t') && bytes[start] != b'-' {
+        return Some(start);
+    }
+    let blank = operator.checked_sub(1)?;
+    if !matches!(bytes[blank], b' ' | b'\t') {
+        return None;
+    }
+    let before = blank.checked_sub(1)?;
+    // A word that starts with `-` (`-s`, `-`) the parser would read as
+    // part of `<<`.
+    let first = bytes[..before]
+        .iter()
+        .rposition(|byte| byte.is_ascii_whitespace() || b";&|(".contains(byte))
+        .map_or(0, |at| at + 1);
+    if bytes[first] == b'-' {
+        return None;
+    }
+    let joins = match bytes[before] {
+        // A word that ends in digits, not one of digits only: `2<<EOF`
+        // redirects descriptor 2.
+        b'0'..=b'9' => bytes[..before]
+            .iter()
+            .rev()
+            .find(|byte| !byte.is_ascii_digit())
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_'),
+        // A group's `}` alone, not a descriptor's name (`{fd}<<EOF`).
+        b'}' => before
+            .checked_sub(1)
+            .is_some_and(|index| matches!(bytes[index], b' ' | b'\t' | b'\n' | b';')),
+        byte => byte.is_ascii_alphabetic() || byte >= 0x80 || b"_./-+,:@%'\"])".contains(&byte),
+    };
+    joins.then_some(operator)
+}
+
+/// How the operator right after a delimiter that ends at `end` makes room
+/// for a blank before it, when the delimiter cannot move: a `;`, `&`, `&&`,
+/// `|` or `||` with a blank after it moves into that blank, and a `;` that
+/// ends its line becomes a blank. `None` for any other operator, or none.
+fn operator_room(bytes: &[u8], end: usize) -> Option<Apart> {
+    let rest = bytes.get(end..)?;
+    let length = if rest.starts_with(b"&&") || rest.starts_with(b"||") {
+        2
+    } else if matches!(rest.first(), Some(b';' | b'&' | b'|')) {
+        1
+    } else {
+        return None;
+    };
+    match rest.get(length) {
+        Some(b' ' | b'\t') => Some(Apart::Right(end, length)),
+        Some(b'\n') if rest[0] == b';' => Some(Apart::Blank(end)),
+        _ => None,
+    }
+}
+
+/// A shell line with the backslash shapes tree-sitter-bash reads otherwise
+/// than the shell does, where one backslash is written as a space (the first
+/// step of [`parser_input`]). The parser takes a line feed
 /// directly followed by a backslash as part of the next word, so the line
 /// after it becomes more words of the command before (`true` then a line
 /// `\rm -rf x` reads as one `true` command, and the first line of a
@@ -631,8 +1005,9 @@ struct Reader<'w> {
     readings: HashSet<(String, usize)>,
     /// How many readings each written command has.
     counts: HashMap<usize, usize>,
-    /// The text each written command has read again.
-    texts: HashSet<(usize, String)>,
+    /// The text each written command has read again, and whether it was
+    /// read as the line's own (see [`Depth::own`]).
+    texts: HashMap<(usize, String), bool>,
     /// Bytes of text read again, in all.
     read_bytes: usize,
     /// Commands read in text run again, in all.
@@ -668,6 +1043,34 @@ struct Reader<'w> {
     /// what runs behind a wrapper whose folder nobody can place (`env -C
     /// "$d"`, `sudo -i`, `find -execdir`).
     lost: bool,
+    /// [`Self::here`] carried into what a written command runs: while every
+    /// wrapper on the way is one of [`KEEPS_FOLDER`] and names no folder of
+    /// its own, the command it runs starts where the `cd`s left the shell.
+    /// `None` behind any other wrapper and in text run again, where it
+    /// starts where the shell started, as before.
+    carried: Option<Rc<Path>>,
+    /// The line sets or exports `GIT_WORK_TREE` (see [`sets_work_tree`]):
+    /// in the text being read, one it is read from, or text run again read
+    /// before. A `git clean` may then clean a work tree set where it is not
+    /// read.
+    names_work_tree: bool,
+    /// The values the line gives `CDPATH` (see [`note_cdpath`]), `None` for
+    /// one only known when it runs: in the text being read, one it is read
+    /// from, or text run again read before. A `cd` to a relative folder may
+    /// then go to one under any of them.
+    cdpaths: Vec<Option<String>>,
+    /// The `GIT_WORK_TREE` settings of the command being read, by where
+    /// each starts: see [`work_tree_settings`].
+    work_trees: Vec<(usize, Path_)>,
+    /// Where the loops and function definitions of the text being read are:
+    /// see [`Self::repeats`].
+    loops: Vec<std::ops::Range<usize>>,
+    /// A here-document delimiter in the text read could not be set apart
+    /// from the operator written against it (see [`separated_delimiters`]),
+    /// or what follows such an operator in the line as written has no
+    /// command of the line to be read for, or a limit stopped reading it or
+    /// what it runs (see [`Self::cut`]).
+    unseparated: bool,
 }
 
 /// The written command whose standard input a program reads.
@@ -705,6 +1108,16 @@ struct Depth {
     text: u8,
     /// Wrappers and strings around it, together.
     hops: u8,
+    /// The text is the line's own: what follows a here-document's operator
+    /// on a line of the command as written, which the shell runs as more
+    /// commands of that line. Its commands are the line's (see
+    /// [`Derived::own`]); what they run again is not.
+    own: bool,
+    /// The reading is in the line's own text or in what its commands run,
+    /// however deep (a wrapper's command, text a shell runs again), where a
+    /// limit that stops it leaves the line not read whole (see
+    /// [`Reader::cut`]).
+    in_own: bool,
 }
 
 /// Where a wrapper runs the command it is given: see
@@ -761,8 +1174,16 @@ impl Reader<'_> {
             return false;
         }
         // The tree comes from the shell's reading of the line; every text is
-        // read from the line itself, which has the same length.
-        let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
+        // read from the line itself, which has the same length. Text read
+        // again once the line is not read whole is not worth the parses
+        // that set its delimiters apart.
+        let (reading, whole, tree) = if depth.text > 0 && self.unseparated {
+            (shell_reading(command), true, None)
+        } else {
+            parser_input(command)
+        };
+        self.unseparated |= !whole;
+        let Some(tree) = tree.or_else(|| parser.parse(reading.as_ref(), None)) else {
             return false;
         };
         // Each node with its parent: asking the tree for a node's parent
@@ -781,10 +1202,30 @@ impl Reader<'_> {
         // Parse errors: what the parser could not place is read best-effort.
         let mut errors = Vec::new();
         let mut loose_starts = Vec::new();
+        // The parent of each list, which asking the tree would find by
+        // walking down from the root.
+        let mut list_parents = HashMap::new();
+        let mut loops = Vec::new();
+        let mut sets_tree = false;
+        let mut cdpaths = Vec::new();
         let mut cursor = tree.walk();
         while let Some((node, parent)) = stack.pop() {
+            sets_tree = sets_tree || sets_work_tree(node, parent, command);
+            note_cdpath(node, parent, command, &mut cdpaths);
             if node.kind() == "command" {
                 command_nodes.push((node, parent));
+            }
+            if node.kind() == "list" {
+                list_parents.insert(node.id(), parent);
+            }
+            if matches!(
+                node.kind(),
+                "for_statement"
+                    | "c_style_for_statement"
+                    | "while_statement"
+                    | "function_definition"
+            ) {
+                loops.push(node.start_byte()..node.end_byte());
             }
             if node.kind() == "redirected_statement"
                 && let Some(parent) = parent
@@ -832,7 +1273,7 @@ impl Reader<'_> {
         // on the whole list, but it belongs to the list's last command, and
         // that command reads it as if written alone with it.
         for (node, parent) in &mut command_nodes {
-            if let Some(statement) = heredoc_holder(*node, *parent) {
+            if let Some(statement) = heredoc_holder(*node, *parent, &list_parents) {
                 *parent = Some(statement);
             }
         }
@@ -841,16 +1282,16 @@ impl Reader<'_> {
         // operator, to the end of its line, is read as a command line of its
         // own, as the shell runs it.
         let mut hidden: HashMap<usize, Vec<String>> = HashMap::new();
+        // Each statement of `hidden`, by where the first of its lines
+        // starts, and those a command of theirs read.
+        let mut hidden_at = Vec::new();
+        let mut consumed = HashSet::new();
         for error in &errors {
-            let text = node_text(*error, command);
-            if !["|", "&&", "||", ";", "&"]
-                .iter()
-                .any(|operator| text.trim_start().starts_with(operator))
-            {
+            if !starts_with_operator(*error) {
                 continue;
             }
             let rest = command.get(error.end_byte()..).unwrap_or_default();
-            let line = rest.split('\n').next().unwrap_or_default().trim();
+            let line = rest[..line_end(rest)].trim();
             let mut holder = error.parent();
             while let Some(node) = holder.filter(|node| node.kind() != "redirected_statement") {
                 holder = node.parent();
@@ -858,10 +1299,11 @@ impl Reader<'_> {
             if let Some(statement) = holder
                 && !line.is_empty()
             {
-                hidden
-                    .entry(statement.id())
-                    .or_default()
-                    .push(line.to_owned());
+                let lines = hidden.entry(statement.id()).or_default();
+                if lines.is_empty() {
+                    hidden_at.push((error.start_byte(), statement.id()));
+                }
+                lines.push(line.to_owned());
             }
         }
         // A here-document the parser could not attach (`true && bash <<'A'
@@ -913,7 +1355,14 @@ impl Reader<'_> {
         // of the reading around it are its own again afterwards.
         let outer_folder = self.folder.take();
         let outer_here = self.here.take();
+        let outer_carried = self.carried.take();
         let outer_lost = self.lost;
+        // Kept for the rest of the line once set: `eval 'export
+        // GIT_WORK_TREE=…'` sets it for what follows.
+        self.names_work_tree |= sets_tree;
+        self.cdpaths.extend(cdpaths);
+        let outer_work_trees = std::mem::take(&mut self.work_trees);
+        let outer_loops = std::mem::replace(&mut self.loops, loops);
         let continued = command.contains("\\\n");
         // The written command each command node is read for, by where the
         // node starts.
@@ -935,7 +1384,7 @@ impl Reader<'_> {
             if depth.text > 0 {
                 self.nested_commands += 1;
                 if self.nested_commands > MAX_NESTED_COMMANDS {
-                    self.stopped();
+                    self.cut(depth);
                     break;
                 }
             }
@@ -961,6 +1410,9 @@ impl Reader<'_> {
             // here-document operator are the command's too.
             let (words, carried) = command_words(node, parent, command);
             let here = folders.get(&node.id()).cloned();
+            if self.names_work_tree {
+                self.work_trees = work_tree_settings(node, command);
+            }
             self.folder.clone_from(&here);
             self.check_paths(&words, command);
             self.folder = None;
@@ -974,7 +1426,7 @@ impl Reader<'_> {
                     if depth.text == 0 {
                         self.write(command_text, always);
                     } else {
-                        self.derive(command_text, always);
+                        self.derive_as(command_text, always, depth.own);
                     }
                 }
             }
@@ -1008,13 +1460,26 @@ impl Reader<'_> {
                 wrappers: &wrappers,
                 documents: &documents,
             };
+            self.carried.clone_from(&here);
             self.here = here;
             self.lost = !open.contains(&node.id());
             self.unwrap(&words, Some(stdin), command, depth);
             self.here = None;
-            if let Some(lines) = parent.and_then(|statement| hidden.get(&statement.id())) {
+            self.carried = None;
+            self.work_trees.clear();
+            // A `cd` is no command of the line to read them for (`cd sub
+            // <<EOF ; rm -rf x`): they are read below, as those of a loop.
+            if let Some((statement, lines)) = parent
+                .and_then(|statement| {
+                    hidden
+                        .get(&statement.id())
+                        .map(|lines| (statement.id(), lines))
+                })
+                .filter(|_| self.source.is_some())
+            {
+                consumed.insert(statement);
                 for line in lines {
-                    self.nested(line, depth);
+                    self.nested_as(line, depth, depth.text == 0 || depth.own);
                 }
             }
             // `r\<newline>m -rf x`: the shell drops a line continuation
@@ -1045,6 +1510,30 @@ impl Reader<'_> {
             let mut first = vec![None; sources.len() + 1];
             for index in (0..sources.len()).rev() {
                 first[index] = sources[index].1.or(first[index + 1]);
+            }
+            // A statement no command of which is its own (a loop, a group,
+            // a pipeline: `for f in a; do cat; done <<EOF; rm -rf x`) or
+            // whose command is a `cd` has none that reads what follows its
+            // here-document's operator: it is read for the command written
+            // last before it.
+            for (at, statement) in hidden_at {
+                if consumed.contains(&statement) {
+                    continue;
+                }
+                let before = sources.partition_point(|(start, _)| *start < at);
+                if let Some(source) = last[before].or(first[before]) {
+                    self.source = Some(source);
+                } else if depth.text == 0 || self.source.is_none() {
+                    // `X=1 <<EOF ; make`: no command of the line is there
+                    // to read the line's own commands for, so the line is
+                    // not read whole.
+                    self.unseparated |= depth.text == 0;
+                    self.unplaced = true;
+                    continue;
+                }
+                for line in &hidden[&statement] {
+                    self.nested_as(line, depth, depth.text == 0 || depth.own);
+                }
             }
             for heredoc in heredocs {
                 let Some(text) = backquoted(heredoc, command) else {
@@ -1126,7 +1615,10 @@ impl Reader<'_> {
         }
         self.folder = outer_folder;
         self.here = outer_here;
+        self.carried = outer_carried;
         self.lost = outer_lost;
+        self.work_trees = outer_work_trees;
+        self.loops = outer_loops;
         true
     }
 
@@ -1198,6 +1690,12 @@ impl Reader<'_> {
 
     /// A pattern read from inside the written command being read.
     fn derive(&mut self, pattern: String, always: String) {
+        self.derive_as(pattern, always, false);
+    }
+
+    /// [`Self::derive`], `own` when it is a command of the line itself (see
+    /// [`Derived::own`]).
+    fn derive_as(&mut self, pattern: String, always: String, own: bool) {
         if self.overflow {
             return;
         }
@@ -1208,6 +1706,19 @@ impl Reader<'_> {
             return;
         }
         if self.readings.contains(&(pattern.clone(), source)) {
+            // Read before as something the command runs, and written in the
+            // line too.
+            if own
+                && let Some(derived) = self
+                    .analysis
+                    .derived
+                    .iter_mut()
+                    .find(|derived| derived.pattern == pattern && derived.written == source)
+                && !derived.own
+            {
+                derived.own = true;
+                push_unique(&mut self.analysis.always, derived.always.clone());
+            }
             return;
         }
         let count = self.counts.entry(source).or_default();
@@ -1216,6 +1727,9 @@ impl Reader<'_> {
             || self.pattern_bytes + pattern.len() > MAX_PATTERN_BYTES
         {
             self.stopped();
+            // A command of the line's own left out, as a written one past
+            // the limit is.
+            self.unseparated |= own;
             return;
         }
         if self.text_depth == 0 {
@@ -1226,10 +1740,14 @@ impl Reader<'_> {
         if self.patterns.insert(pattern.clone()) {
             self.analysis.patterns.push(pattern.clone());
         }
+        if own {
+            push_unique(&mut self.analysis.always, always.clone());
+        }
         self.analysis.derived.push(Derived {
             pattern,
             written: source,
             always,
+            own,
         });
     }
 
@@ -1240,11 +1758,21 @@ impl Reader<'_> {
         }
     }
 
-    /// One more wrapper or string around a reading, or `None` (and the
-    /// written command marked incomplete) past [`MAX_HOPS`].
+    /// A limit stopped reading what the written command being read runs. In
+    /// the line's own text, or in what its commands run, the line is not
+    /// read whole either: a command written after a here-document's
+    /// operator is judged as written, so no rule about the command before
+    /// it answers for what the limit left out.
+    fn cut(&mut self, depth: Depth) {
+        self.stopped();
+        self.unseparated |= depth.in_own;
+    }
+
+    /// One more wrapper or string around a reading, or `None` past
+    /// [`MAX_HOPS`], where the reading is [`Self::cut`].
     fn hop(&mut self, depth: Depth) -> Option<Depth> {
         if depth.hops >= MAX_HOPS {
-            self.stopped();
+            self.cut(depth);
             return None;
         }
         Some(Depth {
@@ -1354,9 +1882,13 @@ impl Reader<'_> {
         };
         let outer = std::mem::replace(&mut self.folder, folder);
         let outer_lost = std::mem::replace(&mut self.lost, lost);
+        // A folder nobody can place leaves the command read from where the
+        // shell started.
+        let outer_carried = self.carried.take();
         self.moved += 1;
         self.invocation(words, stdin, source, depth);
         self.moved -= 1;
+        self.carried = outer_carried;
         self.lost = outer_lost;
         self.folder = outer;
     }
@@ -1383,37 +1915,77 @@ impl Reader<'_> {
     /// Text a shell runs again, read as a command of its own: once for
     /// each written command, within the limits on nesting and size.
     fn nested(&mut self, text: &str, depth: Depth) {
+        self.nested_as(text, depth, false);
+    }
+
+    /// [`Self::nested`] for text that is the line's own when `own` (see
+    /// [`Depth::own`]). The line's own text that is not read, for want of a
+    /// written command to read it for or because a limit stops it or what
+    /// it runs (see [`Self::cut`]), leaves the line not read whole: no rule
+    /// about another command covers what it runs.
+    fn nested_as(&mut self, text: &str, depth: Depth, own: bool) {
         if text.trim().is_empty() {
             return;
         }
         let Some(source) = self.source else {
+            self.unseparated |= own;
             return;
         };
+        // Read again as the line's own when it was read before as text a
+        // command runs (`bash -c 'rm x' <<EOF ; rm x`).
         let key = (source, text.to_owned());
-        if self.texts.contains(&key) {
+        if self.texts.get(&key).is_some_and(|&read| read || !own) {
             return;
         }
         let Some(mut depth) = self.hop(depth) else {
+            self.unseparated |= own;
             return;
         };
         depth.text += 1;
+        depth.own = own;
+        depth.in_own |= own;
         if depth.text > MAX_NESTING
             || text.len() > MAX_NESTED_BYTES
             || self.read_bytes + text.len() > MAX_READ_BYTES
             || self.nested_commands >= MAX_NESTED_COMMANDS
         {
-            self.stopped();
+            self.cut(depth);
             return;
         }
         self.read_bytes += text.len();
-        self.texts.insert(key);
+        self.texts.insert(key, own);
         self.read(text, depth);
     }
 
     /// Read what a command runs: the rest of a wrapper's words, or the text
-    /// a shell, `eval`, `env -S` or `source` runs again. `stdin` is the
-    /// written command whose standard input the program reads.
+    /// a shell, `eval`, `env -S`, `source` or `trap` runs again. `stdin` is
+    /// the written command whose standard input the program reads.
     fn unwrap(
+        &mut self,
+        words: &[Word<'_>],
+        stdin: Option<Stdin<'_, '_>>,
+        source: &str,
+        depth: Depth,
+    ) {
+        let Some(program) = words.first() else {
+            return;
+        };
+        // Behind any wrapper but those that keep their folder, what it runs
+        // is read from where the shell started.
+        let keeps =
+            program.literal && KEEPS_FOLDER.contains(&program_name(&program.value).as_str());
+        let outer = if keeps {
+            self.carried.clone()
+        } else {
+            self.carried.take()
+        };
+        self.unwrap_program(words, stdin, source, depth);
+        self.carried = outer;
+    }
+
+    /// [`Self::unwrap`], by the program.
+    #[allow(clippy::too_many_lines)]
+    fn unwrap_program(
         &mut self,
         words: &[Word<'_>],
         stdin: Option<Stdin<'_, '_>>,
@@ -1537,6 +2109,11 @@ impl Reader<'_> {
                     self.nested(&text, depth);
                 }
             }
+            "trap" => {
+                if let Some(text) = trap_action(arguments) {
+                    self.nested(&text, depth);
+                }
+            }
             "command" => {
                 let options = Options::read(arguments, "", "", &[]);
                 // `command -v` and `-V` only say what a name is.
@@ -1657,7 +2234,7 @@ impl Reader<'_> {
     fn script(&mut self, input: Input, depth: Depth) {
         match input {
             Input::Text(text) => self.nested(&text, depth),
-            Input::Unread => self.stopped(),
+            Input::Unread => self.cut(depth),
             Input::Unknown => {}
         }
     }
@@ -1677,6 +2254,7 @@ impl Reader<'_> {
         }
         // A `cd` given no folder goes to the home folder.
         let mut bare = name == "cd";
+        let mut ended = false;
         for word in node.named_children(&mut node.walk()) {
             if word.id() == program.id() || !WORD_KINDS.contains(&word.kind()) {
                 continue;
@@ -1687,7 +2265,11 @@ impl Reader<'_> {
             }
             let (argument, complete) = path_literal(word, source);
             bare &= complete && argument.starts_with('-') && argument != "-";
-            if names_no_path(&name, &argument) {
+            if !ended && complete && argument == "--" {
+                ended = true;
+                continue;
+            }
+            if !ended && names_no_path(&name, &argument) {
                 continue;
             }
             let raw = node_text(word, source);
@@ -1698,9 +2280,21 @@ impl Reader<'_> {
         }
     }
 
-    /// Where a relative path being checked starts: see [`Self::folder`].
+    /// Whether `node` runs again and again, or later than written: inside a
+    /// loop or a function of the text being read.
+    fn repeats(&self, node: tree_sitter::Node<'_>) -> bool {
+        self.loops
+            .iter()
+            .any(|range| range.start <= node.start_byte() && node.end_byte() <= range.end)
+    }
+
+    /// Where a relative path being checked starts: see [`Self::folder`] and
+    /// [`Self::carried`].
     fn from(&self) -> &Path {
-        self.folder.as_deref().unwrap_or(self.start)
+        self.folder
+            .as_deref()
+            .or(self.carried.as_deref())
+            .unwrap_or(self.start)
     }
 
     /// An argument of a command in [`PATH_COMMANDS`] that leads outside the
@@ -1723,6 +2317,21 @@ impl Reader<'_> {
             && let Some(dir) = cd_dir(self.workspace, self.from(), raw, value, complete)
         {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
+        }
+        // `/bin/sh` on macOS (bash 3.2) and dash expand `.*` to `..` too, so
+        // `chmod -R a-w .*` changes the folder above. `rm`, `rmdir` and `mv`
+        // refuse `..`, and `cp` copies nothing of it (`dest/..` is there).
+        if complete
+            && matches!(name, "chmod" | "chown" | "chgrp")
+            && let Some(up) = dot_patterns_up(raw, value)
+        {
+            // A quoted `~` stays a name.
+            let raw = if raw.starts_with('~') || !up.starts_with('~') {
+                up.clone()
+            } else {
+                format!("'{up}'")
+            };
+            self.check_folder(name, &raw, &up, true);
         }
     }
 
@@ -1779,6 +2388,8 @@ impl Reader<'_> {
         let top = self.text_depth == 0;
         let moved = self.moved > 0;
         let workspace = self.workspace;
+        let names_work_tree = self.names_work_tree;
+        let work_trees = &self.work_trees;
         let deletions = std::cell::RefCell::new(&mut self.analysis.deletions);
         // A path deleted (`existing`: emptied or replaced) as written.
         let record = |word: &Word<'_>, path: &Path_, existing: bool| {
@@ -1816,16 +2427,21 @@ impl Reader<'_> {
             }
         };
         // The words that are not options, the value of an option that takes
-        // one (`-s 0`) left out too.
+        // one (`-s 0`) left out too. After a literal `--` every word is one.
         let operands = |takes_value: &[&str]| {
             let mut skip = false;
+            let mut ended = false;
             arguments
                 .iter()
                 .filter(|word| {
                     if std::mem::take(&mut skip) {
                         return false;
                     }
-                    if word.value.starts_with('-') {
+                    if !ended && ends_options(word) {
+                        ended = true;
+                        return false;
+                    }
+                    if !ended && word.value.starts_with('-') {
                         skip = takes_value.contains(&word.value.as_str());
                         return false;
                     }
@@ -2119,6 +2735,9 @@ impl Reader<'_> {
                 // `git -c alias.c=clean c -fdx`: what an alias runs is not
                 // read, so where it deletes cannot be told.
                 let mut alias = None;
+                // `--work-tree` (or `GIT_WORK_TREE`) names the folder it
+                // cleans instead, from the folder it runs in.
+                let mut tree = None;
                 let clean = loop {
                     let Some(word) = rest.next() else {
                         break false;
@@ -2133,10 +2752,24 @@ impl Reader<'_> {
                                 alias = setting;
                             }
                         }
-                        "--git-dir" | "--work-tree" | "--namespace" => {
+                        "--work-tree" => {
+                            tree = rest
+                                .next()
+                                .and_then(|word| expanded(word, source).into_iter().next());
+                        }
+                        "--git-dir" | "--namespace" => {
                             rest.next();
                         }
                         "clean" => break true,
+                        other if other.starts_with("--work-tree=") => {
+                            let given = Given {
+                                name: "work-tree".into(),
+                                value: other["--work-tree=".len()..].to_owned(),
+                                word: Some(word),
+                                attached: true,
+                            };
+                            tree = given_paths(&given, source).into_iter().next();
+                        }
                         other if other.starts_with('-') => {}
                         _ => break false,
                     }
@@ -2152,16 +2785,46 @@ impl Reader<'_> {
                             && word.value.contains('f'))
                 });
                 if clean && forced {
+                    let mut ended = false;
                     let paths: Vec<&&Word<'_>> = rest
                         .iter()
-                        .filter(|word| !word.value.starts_with('-'))
+                        .filter(|word| {
+                            if !ended && ends_options(word) {
+                                ended = true;
+                                return false;
+                            }
+                            ended || !word.value.starts_with('-')
+                        })
                         .collect();
-                    if paths.is_empty() {
-                        match (folder, arguments.first()) {
+                    // One set before `git`, in the command or for a wrapper.
+                    let tree = tree.or_else(|| {
+                        let first = arguments.first()?.node.start_byte();
+                        work_trees
+                            .iter()
+                            .rev()
+                            .find(|(start, _)| *start < first)
+                            .map(|(_, tree)| tree.clone())
+                    });
+                    match (tree, arguments.first()) {
+                        // Its paths are in the work tree too: the whole of it
+                        // is what it may clean.
+                        (Some(tree), Some(anchor)) => {
+                            let tree = match folder {
+                                Some(word) => under_folder(word, tree, source),
+                                None => tree,
+                            };
+                            record(anchor, &tree, false);
+                        }
+                        // Set earlier in the line (`export GIT_WORK_TREE=…`).
+                        (None, Some(anchor)) if names_work_tree => {
+                            unplaced(anchor, "$GIT_WORK_TREE".to_owned(), false);
+                        }
+                        (None, anchor) if paths.is_empty() => match (folder, anchor) {
                             (Some(word), _) => push(word),
                             (None, Some(anchor)) => record(anchor, &Path_::here(), false),
                             (None, None) => {}
-                        }
+                        },
+                        _ => {}
                     }
                     for word in paths {
                         push(word);
@@ -2205,7 +2868,7 @@ impl Reader<'_> {
             let end = words
                 .last()
                 .map_or(program.node.end_byte(), |word| word.node.end_byte());
-            let repeated = repeats(program.node);
+            let repeated = self.repeats(program.node);
             self.analysis.links.push((top && !repeated).then_some(end));
         }
         if complete && matches!(name.as_str(), "cd" | "pushd" | "popd") {
@@ -2273,16 +2936,66 @@ impl Reader<'_> {
         {
             self.check_folder(&name, "~", "~", true);
         }
+        // After a literal `--`, a word that starts with `-` is a path too.
+        let mut ended = false;
         for word in arguments {
+            let ends = !ended && ends_options(word);
             // Each path of a brace list (`cat {,~/.ssh/id_rsa}`) on its own.
             for path in expanded(word, source) {
-                if names_no_path(&name, &path.value) {
+                if ends || (!ended && names_no_path(&name, &path.value)) {
                     continue;
                 }
                 self.check_folder(&name, &path.raw, &path.value, path.complete);
+                if matches!(name.as_str(), "cd" | "pushd") {
+                    self.check_cdpath(&name, &path);
+                }
             }
+            ended |= ends;
         }
     }
+
+    /// A `cd` or `pushd` to a relative folder that does not start with `.`
+    /// goes to the first folder `CDPATH` names that holds it, so where the
+    /// line sets `CDPATH` (the launcher clears it, but an assignment wins)
+    /// it is also checked under each folder named there, and under `/` for a
+    /// value only known when it runs.
+    fn check_cdpath(&mut self, name: &str, path: &Path_) {
+        let searched = path.complete
+            && !path.value.is_empty()
+            && !path.raw.starts_with('~')
+            && !path.value.starts_with('/')
+            && !matches!(path.value.as_str(), "." | "..")
+            && !path.value.starts_with("./")
+            && !path.value.starts_with("../");
+        if !searched || self.cdpaths.is_empty() {
+            return;
+        }
+        let mut candidates = Vec::new();
+        for value in &self.cdpaths {
+            match value {
+                // Only known when it runs: anywhere.
+                None => push_unique(&mut candidates, "/".to_owned()),
+                Some(value) => {
+                    // An empty entry is the folder the shell is in, which is
+                    // checked already.
+                    for entry in value.split(':').filter(|entry| !entry.is_empty()) {
+                        push_unique(
+                            &mut candidates,
+                            format!("{}/{}", entry.trim_end_matches('/'), path.value),
+                        );
+                    }
+                }
+            }
+        }
+        for candidate in candidates {
+            self.check_folder(name, &candidate, &candidate, true);
+        }
+    }
+}
+
+/// Whether `word` is a literal `--`, which ends a program's options.
+fn ends_options(word: &Word<'_>) -> bool {
+    word.literal && word.value == "--"
 }
 
 /// Whether an argument of a command in [`PATH_COMMANDS`] names no path: an
@@ -2405,6 +3118,171 @@ fn given_paths(given: &Given<'_, '_>, source: &str) -> Vec<Path_> {
     }]
 }
 
+/// The `GIT_WORK_TREE` values `command` (a command node) sets, by where each
+/// starts: an assignment before its program (`GIT_WORK_TREE=x git …`, also
+/// before a wrapper), and a word `env` or `sudo` sets (`env GIT_WORK_TREE=x
+/// git …`). An empty one sets none.
+fn work_tree_settings(command: tree_sitter::Node<'_>, source: &str) -> Vec<(usize, Path_)> {
+    const NAME: &str = "GIT_WORK_TREE";
+    let mut found = Vec::new();
+    for child in command.named_children(&mut command.walk()) {
+        let tree = if child.kind() == "variable_assignment" {
+            if child
+                .child_by_field_name("name")
+                .is_none_or(|name| node_text(name, source) != NAME)
+            {
+                continue;
+            }
+            child.child_by_field_name("value").map(|value| {
+                let (text, complete) = path_literal(value, source);
+                Path_ {
+                    raw: node_text(value, source),
+                    value: text,
+                    complete,
+                }
+            })
+        } else if WORD_KINDS.contains(&child.kind()) {
+            let (value, literal) = unquote(child, source);
+            // Read as an option's value: `~` there is a name.
+            value
+                .strip_prefix(NAME)
+                .and_then(|rest| rest.strip_prefix('='))
+                .map(|tree| Path_ {
+                    raw: node_text(child, source),
+                    value: tree.to_owned(),
+                    complete: literal,
+                })
+        } else {
+            continue;
+        };
+        if let Some(tree) = tree.filter(|tree| !tree.value.is_empty() || !tree.complete) {
+            found.push((child.start_byte(), tree));
+        }
+    }
+    found
+}
+
+/// Whether `node` (with its `parent`) sets `GIT_WORK_TREE` to a value: an
+/// assignment (before a command, on its own, or made by `export`, `declare`,
+/// `local` or `readonly`), `export GIT_WORK_TREE` of a value set elsewhere, a
+/// word a command such as `env` or `sudo` is given (`GIT_WORK_TREE=x`) or
+/// `export` is, quoted or not (`export "GIT_WORK_TREE=x"`), or
+/// `${GIT_WORK_TREE:=x}`. An empty value sets none (git refuses it), and
+/// reading it (`"$GIT_WORK_TREE"`) or `unset` sets nothing.
+fn sets_work_tree(
+    node: tree_sitter::Node<'_>,
+    parent: Option<tree_sitter::Node<'_>>,
+    source: &str,
+) -> bool {
+    const NAME: &str = "GIT_WORK_TREE";
+    // Read without copying: every node of the line comes here.
+    let text = |node: tree_sitter::Node<'_>| source.get(node.byte_range()).unwrap_or_default();
+    match node.kind() {
+        "variable_assignment" => {
+            node.child_by_field_name("name")
+                .is_some_and(|name| text(name) == NAME)
+                && node.child_by_field_name("value").is_some_and(|value| {
+                    let (text, literal) = unquote(value, source);
+                    !(literal && text.is_empty())
+                })
+        }
+        "variable_name" => {
+            parent.is_some_and(|parent| parent.kind() == "declaration_command")
+                && text(node) == NAME
+        }
+        "expansion" => text(node)
+            .strip_prefix("${")
+            .and_then(|rest| rest.strip_prefix(NAME))
+            .is_some_and(|rest| rest.starts_with('=') || rest.starts_with(":=")),
+        kind if WORD_KINDS.contains(&kind)
+            && parent.is_some_and(|parent| {
+                matches!(parent.kind(), "command" | "declaration_command")
+            })
+            && text(node).trim_start_matches(['"', '\'']).starts_with(NAME) =>
+        {
+            let (value, literal) = unquote(node, source);
+            value
+                .strip_prefix(NAME)
+                .and_then(|rest| rest.strip_prefix('='))
+                .is_some_and(|rest| !(literal && rest.is_empty()))
+        }
+        _ => false,
+    }
+}
+
+/// The value an assignment to `CDPATH` in `node` (with its `parent`) gives
+/// it (`CDPATH=/x:.`, also one `export` makes, or a word `export`, `env` or
+/// `sudo` is given, quoted or not: `export "CDPATH=/x"`, `env CDPATH=/x sh
+/// -c …`), added to `values`: `None` for one only known when it runs, and for
+/// `${CDPATH:=…}`.
+fn note_cdpath(
+    node: tree_sitter::Node<'_>,
+    parent: Option<tree_sitter::Node<'_>>,
+    source: &str,
+    values: &mut Vec<Option<String>>,
+) {
+    const NAME: &str = "CDPATH";
+    let text = |node: tree_sitter::Node<'_>| source.get(node.byte_range()).unwrap_or_default();
+    match node.kind() {
+        kind if WORD_KINDS.contains(&kind)
+            && text(node).trim_start_matches(['"', '\'']).starts_with(NAME)
+            && parent.is_some_and(|parent| match parent.kind() {
+                "declaration_command" => true,
+                "command" => parent.child_by_field_name("name").is_some_and(|name| {
+                    matches!(program_name(text(name)).as_str(), "env" | "sudo")
+                }),
+                _ => false,
+            }) =>
+        {
+            let (value, literal) = unquote(node, source);
+            if let Some(path) = value
+                .strip_prefix(NAME)
+                .and_then(|rest| rest.strip_prefix('='))
+            {
+                values.push(literal.then(|| path.to_owned()));
+            }
+        }
+        "variable_assignment"
+            if node
+                .child_by_field_name("name")
+                .is_some_and(|name| text(name) == NAME) =>
+        {
+            values.push(match node.child_by_field_name("value") {
+                Some(value) => {
+                    let (text, complete) = path_literal(value, source);
+                    complete.then_some(text)
+                }
+                None => Some(String::new()),
+            });
+        }
+        "expansion"
+            if text(node)
+                .strip_prefix("${")
+                .and_then(|rest| rest.strip_prefix(NAME))
+                .is_some_and(|rest| rest.starts_with('=') || rest.starts_with(":=")) =>
+        {
+            values.push(None);
+        }
+        _ => {}
+    }
+}
+
+/// `path` from the folder `-C` names (`folder`), when it is relative.
+fn under_folder(folder: &Word<'_>, path: Path_, source: &str) -> Path_ {
+    if path.value.starts_with('/') || home_expansion(&path.raw, &path.value).is_some() {
+        return path;
+    }
+    let Some(folder) = expanded(folder, source).into_iter().next() else {
+        return path;
+    };
+    let join = |base: &str| format!("{}/{}", base.trim_end_matches('/'), path.value);
+    Path_ {
+        raw: join(&folder.raw),
+        value: join(&folder.value),
+        complete: folder.complete && path.complete,
+    }
+}
+
 /// The value written after the option's own `skip` bytes of literal text in
 /// `word`, read as [`path_literal`] reads a path: its parts as the shell
 /// joins them, a double-quoted string's own parts in its place, so
@@ -2469,6 +3347,13 @@ const BRACE_WORDS: usize = 64;
 /// before anything else: `None` past `limit` words, or for a list it cannot
 /// read.
 fn expand_braces(raw: &str, limit: usize) -> Option<Vec<String>> {
+    // Each call reads the first list and calls itself for what follows it,
+    // one brace fewer each time, so a word with more braces that may open a
+    // list than it may expand to words is not read: that keeps the calls
+    // few however the word is written.
+    if opening_braces(raw) > limit {
+        return None;
+    }
     let chars: Vec<char> = raw.chars().collect();
     // The first unquoted `{` that opens a list, and its matching `}`.
     let (mut single, mut double, mut escaped) = (false, false, false);
@@ -2548,6 +3433,29 @@ fn expand_braces(raw: &str, limit: usize) -> Option<Vec<String>> {
     Some(vec![raw.to_owned()])
 }
 
+/// How many braces in `raw` may open a list for [`expand_braces`]: those
+/// outside quotes, not escaped and not after a `$`.
+fn opening_braces(raw: &str) -> usize {
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    let mut previous = '\0';
+    let mut count = 0;
+    for c in raw.chars() {
+        if escaped {
+            escaped = false;
+        } else {
+            match c {
+                '\\' if !single => escaped = true,
+                '\'' if !double => single = !single,
+                '"' if !single => double = !double,
+                '{' if !single && !double && previous != '$' => count += 1,
+                _ => {}
+            }
+        }
+        previous = c;
+    }
+    count
+}
+
 /// A brace sequence (`1..3`, `a..c`, `1..10..2`) as its words; `None` for
 /// one the shell would leave as it is (`{a}`) or that is too long.
 fn sequence(text: &str) -> Option<Vec<String>> {
@@ -2620,22 +3528,6 @@ fn makes_links(name: &str, arguments: &[Word<'_>]) -> bool {
         "rsync" => short(&['l', 'a']) || long(&["--links", "--archive"]),
         _ => false,
     }
-}
-
-/// Whether a command runs again and again, or later than written: inside
-/// a loop or a function.
-fn repeats(node: tree_sitter::Node<'_>) -> bool {
-    let mut current = node.parent();
-    while let Some(node) = current {
-        if matches!(
-            node.kind(),
-            "for_statement" | "c_style_for_statement" | "while_statement" | "function_definition"
-        ) {
-            return true;
-        }
-        current = node.parent();
-    }
-    false
 }
 
 /// Interpreters that take code inline.
@@ -3283,6 +4175,34 @@ fn su_command(arguments: &[Word<'_>]) -> Option<String> {
     None
 }
 
+/// The text `trap` sets the shell to run later, on a signal or as it exits:
+/// its first operand, when one or more conditions follow it. Nothing for
+/// `trap -p` and `trap -l` (they print), another option (refused), a single
+/// operand (that condition is reset), or a first operand of `-` (reset),
+/// empty text (ignore) or an unsigned number (every operand a condition).
+fn trap_action(arguments: &[Word<'_>]) -> Option<String> {
+    let mut operands = arguments;
+    if let [option, rest @ ..] = operands
+        && option.literal
+        && option.value.starts_with('-')
+        && option.value != "-"
+    {
+        if option.value != "--" {
+            return None;
+        }
+        operands = rest;
+    }
+    let [action, _, ..] = operands else {
+        return None;
+    };
+    if action.literal
+        && (action.value == "-" || action.value.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some(action.value.clone())
+}
+
 /// The script a command reads on standard input, when the command line
 /// spells it out: a here-string or here-document of its own, or what an
 /// `echo`, `printf` or `cat` of one writes into a pipe to it, through any
@@ -3316,10 +4236,12 @@ fn stdin_script(stdin: Stdin<'_, '_>, source: &str) -> Input {
 
 /// The statement whose here-document `node` reads when the parser hung it
 /// on a list `node` ends (`false && bash <<'EOF' … EOF`): its last command,
-/// in lists nested any depth. `None` for any other command.
+/// in lists nested any depth. `None` for any other command. `parents` holds
+/// each list's parent.
 fn heredoc_holder<'t>(
     node: tree_sitter::Node<'t>,
     parent: Option<tree_sitter::Node<'t>>,
+    parents: &HashMap<usize, Option<tree_sitter::Node<'t>>>,
 ) -> Option<tree_sitter::Node<'t>> {
     let mut list = parent.filter(|parent| parent.kind() == "list")?;
     let mut child = node;
@@ -3332,7 +4254,7 @@ fn heredoc_holder<'t>(
         if final_part.id() != child.id() {
             return None;
         }
-        let holder = list.parent()?;
+        let holder = (*parents.get(&list.id())?)?;
         match holder.kind() {
             "list" => {
                 child = list;
@@ -3399,39 +4321,43 @@ fn document_readers(body: tree_sitter::Node<'_>) -> Vec<tree_sitter::Node<'_>> {
             .filter(|child| child.kind() != "comment")
             .collect()
     }
-    match body.kind() {
-        "command" => vec![body],
-        "list" | "pipeline" => named(body)
-            .last()
-            .map(|last| document_readers(*last))
-            .unwrap_or_default(),
-        "negated_command" => named(body)
-            .first()
-            .map(|inner| document_readers(*inner))
-            .unwrap_or_default(),
-        "subshell" | "compound_statement" => {
-            named(body).into_iter().flat_map(document_readers).collect()
+    // Walked without recursion: subshells and groups nest any depth.
+    let mut readers = Vec::new();
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "command" => readers.push(node),
+            "list" | "pipeline" => stack.extend(named(node).last()),
+            "negated_command" => stack.extend(named(node).first()),
+            // In order: the first is taken next.
+            "subshell" | "compound_statement" => stack.extend(named(node).into_iter().rev()),
+            "redirected_statement" => stack.extend(node.child_by_field_name("body")),
+            _ => {}
         }
-        "redirected_statement" => body
-            .child_by_field_name("body")
-            .map(document_readers)
-            .unwrap_or_default(),
-        _ => Vec::new(),
     }
+    readers
 }
 
 /// The command that writes last in a statement: the last command of a list,
 /// the command under `!`, the body of a redirected statement.
 fn last_command(node: tree_sitter::Node<'_>) -> tree_sitter::Node<'_> {
-    let named: Vec<_> = (0..node.named_child_count())
-        .filter_map(|index| node.named_child(index))
-        .filter(|child| child.kind() != "comment")
-        .collect();
-    match node.kind() {
-        "list" => named.last().map_or(node, |last| last_command(*last)),
-        "negated_command" => named.first().map_or(node, |inner| last_command(*inner)),
-        "redirected_statement" => node.child_by_field_name("body").map_or(node, last_command),
-        _ => node,
+    let mut node = node;
+    loop {
+        let named = || {
+            (0..node.named_child_count())
+                .filter_map(|index| node.named_child(index))
+                .filter(|child| child.kind() != "comment")
+        };
+        let next = match node.kind() {
+            "list" => named().next_back(),
+            "negated_command" => named().next(),
+            "redirected_statement" => node.child_by_field_name("body"),
+            _ => None,
+        };
+        match next {
+            Some(next) => node = next,
+            None => return node,
+        }
     }
 }
 
@@ -3450,6 +4376,16 @@ fn command_words<'t>(
     };
     let before = list.len();
     for redirect in children(statement) {
+        // Words after an operator the parser could not place inside the
+        // redirect (`cat <<EOF ; rm -rf x`), to the end of its line, are the
+        // next command's, which is read as a line of its own (see
+        // [`Reader::read`]).
+        let unplaced = children(redirect)
+            .into_iter()
+            .find(|part| part.kind() == "ERROR" && starts_with_operator(*part))
+            .map_or(0..0, |error| {
+                error.start_byte()..error.end_byte() + line_end(&source[error.end_byte()..])
+            });
         let carried: Vec<tree_sitter::Node<'t>> = match redirect.kind() {
             "file_redirect" => {
                 let mut cursor = redirect.walk();
@@ -3466,10 +4402,9 @@ fn command_words<'t>(
             }
             _ => Vec::new(),
         };
-        for child in carried
-            .into_iter()
-            .filter(|child| WORD_KINDS.contains(&child.kind()))
-        {
+        for child in carried.into_iter().filter(|child| {
+            WORD_KINDS.contains(&child.kind()) && !unplaced.contains(&child.start_byte())
+        }) {
             let (value, literal) = unquote(child, source);
             list.push(Word {
                 node: child,
@@ -3692,7 +4627,28 @@ fn unquote(node: tree_sitter::Node<'_>, source: &str) -> (String, bool) {
                 .unwrap_or_default();
             (ansi_c(inner), true)
         }
-        "command_name" | "concatenation" | "string" | "translated_string" => {
+        // The parser leaves a string's line breaks out of its parts: they are
+        // its text too, so `bash -c "true<line feed>rm -rf x"` runs two
+        // commands.
+        "string" => {
+            let mut value = String::new();
+            let mut whole = true;
+            let mut at = node.start_byte();
+            for index in 0..node.child_count() {
+                let Some(child) = node.child(index) else {
+                    continue;
+                };
+                value.push_str(source.get(at..child.start_byte()).unwrap_or_default());
+                at = child.end_byte();
+                if child.is_named() {
+                    let (part, complete) = unquote(child, source);
+                    value.push_str(&part);
+                    whole &= complete;
+                }
+            }
+            (value, whole)
+        }
+        "command_name" | "concatenation" | "translated_string" => {
             let mut value = String::new();
             let mut whole = true;
             for index in 0..node.named_child_count() {
@@ -3784,7 +4740,11 @@ pub fn is_obviously_read_only(command: &str) -> bool {
     if joined_continuations(command, true).is_some() {
         return false;
     }
-    let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
+    let (reading, whole, tree) = parser_input(command);
+    if !whole {
+        return false;
+    }
+    let Some(tree) = tree.or_else(|| parser.parse(reading.as_ref(), None)) else {
         return false;
     };
     if tree.root_node().has_error() {
@@ -4126,28 +5086,134 @@ fn remote(value: &str) -> bool {
             .is_some_and(|(host, _)| !host.is_empty() && !host.contains('/'))
 }
 
+/// `value` with each of its parts that is a pattern the shell matches
+/// against `..` written as `..`: a part that starts with a dot and holds a
+/// `*`, `?` or `[` that `raw` (the word as written) leaves unquoted, such as
+/// `.*`, `.?` or `'.'*`, but not `.??*`, `.[!.]*` or `".*"`. `None` when no
+/// part is one.
+fn dot_patterns_up(raw: &str, value: &str) -> Option<String> {
+    // The value's characters as written, each marked when the shell reads it
+    // as a pattern character.
+    let mut characters: Vec<(char, bool)> = Vec::with_capacity(value.len());
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    for c in raw.chars() {
+        if escaped {
+            escaped = false;
+            characters.push((c, false));
+            continue;
+        }
+        match c {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            _ => characters.push((c, !single && !double && matches!(c, '*' | '?' | '['))),
+        }
+    }
+    // A word written in a way this does not read (`$'…'`) is left alone.
+    if !characters.iter().map(|(c, _)| *c).eq(value.chars()) {
+        return None;
+    }
+    let mut up = String::with_capacity(value.len());
+    let mut changed = false;
+    for (index, part) in characters.split(|(c, _)| *c == '/').enumerate() {
+        if index > 0 {
+            up.push('/');
+        }
+        if part.first().is_some_and(|(c, _)| *c == '.')
+            && part.iter().any(|(_, pattern)| *pattern)
+            && matches_two_dots(part)
+        {
+            up.push_str("..");
+            changed = true;
+        } else {
+            up.extend(part.iter().map(|(c, _)| *c));
+        }
+    }
+    changed.then_some(up)
+}
+
+/// Whether a part of a shell pattern (each character marked when it is a
+/// pattern character) matches the name `..`.
+fn matches_two_dots(pattern: &[(char, bool)]) -> bool {
+    // Whether the pattern read so far matches none, one or both of the dots.
+    let mut reach = [true, false, false];
+    let mut index = 0;
+    while index < pattern.len() {
+        let (c, special) = pattern[index];
+        index += 1;
+        let dot = match (c, special) {
+            ('*', true) => {
+                for count in 1..reach.len() {
+                    reach[count] |= reach[count - 1];
+                }
+                continue;
+            }
+            ('?', true) => true,
+            ('[', true) => match bracket_matches_dot(&pattern[index..]) {
+                Some((dot, length)) => {
+                    index += length;
+                    dot
+                }
+                // With no `]` to close it, `[` is itself.
+                None => false,
+            },
+            (c, _) => c == '.',
+        };
+        reach = [false, dot && reach[0], dot && reach[1]];
+    }
+    reach[2]
+}
+
+/// For a bracket expression after its `[`: whether it matches `.`, and how
+/// many characters it takes, its `]` included. `None` when no `]` closes it.
+fn bracket_matches_dot(rest: &[(char, bool)]) -> Option<(bool, usize)> {
+    let negated = matches!(rest.first(), Some(('!' | '^', _)));
+    let start = usize::from(negated);
+    let mut index = start;
+    let mut dot = false;
+    while let Some(&(c, _)) = rest.get(index) {
+        // A `]` right after the `[` (or its `!`) is a member.
+        if c == ']' && index > start {
+            return Some((dot != negated, index + 1));
+        }
+        if let (Some(('-', _)), Some(&(high, _))) = (rest.get(index + 1), rest.get(index + 2))
+            && high != ']'
+        {
+            dot |= (c..=high).contains(&'.');
+            index += 3;
+            continue;
+        }
+        dot |= c == '.';
+        index += 1;
+    }
+    None
+}
+
 /// Whether `node` (a line's statement) is one `&&` chain of commands, each
 /// running only once those before it succeeded, all in the same shell.
 fn and_chain(node: tree_sitter::Node<'_>) -> bool {
-    match node.kind() {
-        "command" => true,
-        "redirected_statement" => node
-            .child_by_field_name("body")
-            .is_some_and(|body| body.kind() == "command"),
-        "list" => {
-            let mut cursor = node.walk();
-            let children: Vec<_> = node.children(&mut cursor).collect();
-            children
-                .iter()
-                .filter(|child| !child.is_named())
-                .all(|operator| operator.kind() == "&&")
-                && children
-                    .iter()
-                    .filter(|child| child.is_named())
-                    .all(|child| and_chain(*child))
+    // Walked without recursion: a chain of n steps is n lists deep.
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "command" => {}
+            "redirected_statement"
+                if node
+                    .child_by_field_name("body")
+                    .is_some_and(|body| body.kind() == "command") => {}
+            "list" => {
+                for child in node.children(&mut node.walk()) {
+                    if child.is_named() {
+                        stack.push(child);
+                    } else if child.kind() != "&&" {
+                        return false;
+                    }
+                }
+            }
+            _ => return false,
         }
-        _ => false,
     }
+    true
 }
 
 /// Builtins that run text or another command in the line's own shell, which
@@ -4169,13 +5235,16 @@ const RUNS_IN_SHELL: &[&str] = &["time", "trap", "mapfile", "readarray", "enable
 /// redirect's included) or word after a redirect. After them, every step is read from the folder they
 /// reached while each step before it is a command that cannot move the
 /// shell: a program written as a literal name that is not a builtin
-/// [`moves_shell`] or [`RUNS_IN_SHELL`] names. Any other step (a pipeline, a
-/// subshell, a group, an `||` list, `popd`, a `cd` that is not plain, a
-/// program nobody can name …), and a `cd` after a step that ran (it may have
-/// set `CDPATH` or `HOME`, or made a link where the `cd` goes), leaves the
-/// rest of the line read from where the shell started, as for any line.
-/// Past [`MAX_MOVES`] or a folder of [`MAX_PLACED_BYTES`] nothing more is
-/// followed.
+/// [`moves_shell`] or [`RUNS_IN_SHELL`] names, or a pipeline of such
+/// commands. The commands in a step's substitutions and the stages of a
+/// pipeline start there too, with their redirects, when nothing in the step
+/// can move the shell (see [`stays`]). Any other step (a subshell, a group,
+/// an `||` list, `popd`, a `cd` that is not plain, a program nobody can name,
+/// a pipeline with any other stage …), and a `cd` after a step that ran (it
+/// may have set `CDPATH` or `HOME`, or made a link where the `cd` goes),
+/// leaves the rest of the line read from where the shell started, as for
+/// any line. Past [`MAX_MOVES`] or a folder of [`MAX_PLACED_BYTES`] nothing
+/// more is followed.
 ///
 /// Also the steps where a `cd` would be followed, by the node id of their
 /// command: each plain step before any other step ran. A wrapper's folder is
@@ -4190,6 +5259,27 @@ fn chain_folders(
     let mut folder: Rc<Path> = Rc::from(workspace);
     let (mut moves, mut ran) = (0, false);
     for (node, outer) in steps(chain) {
+        // A pipeline's stages each run in a subshell started where the shell
+        // is, and leave it there. A redirect the tree hangs on the list
+        // around it (`cd sub && a | b > f`) is its last stage's.
+        if node.kind() == "pipeline" {
+            let stages: Vec<_> = node.named_children(&mut node.walk()).collect();
+            if !stages.iter().all(|stage| {
+                statement(*stage, &[]).0.is_some()
+                    && !heredoc_holds_more(*stage)
+                    && stays(*stage, source)
+            }) || !outer.iter().all(|redirect| stays(*redirect, source))
+            {
+                break;
+            }
+            if moves > 0 {
+                for node in std::iter::once(node).chain(outer) {
+                    place(&mut folders, node, &folder);
+                }
+            }
+            ran = true;
+            continue;
+        }
         let (Some(command), redirects) = statement(node, &outer) else {
             break;
         };
@@ -4208,6 +5298,10 @@ fn chain_folders(
                 .chain(inner)
             {
                 folders.insert(node.id(), Rc::clone(&folder));
+            }
+            // What its substitutions run starts there too.
+            if stays(node, source) {
+                place(&mut folders, node, &folder);
             }
         }
         let words = words(command, source);
@@ -4279,6 +5373,45 @@ fn node_text(node: tree_sitter::Node, source: &str) -> String {
         .get(node.start_byte()..node.end_byte())
         .unwrap_or_default()
         .to_owned()
+}
+
+/// Whether the parser's error `node` starts with an operator it could not
+/// place (`;`, `&`, `|`, `&&`, `||`): what follows it is another command.
+/// Its first part tells, not the line's text there: an operator written
+/// against a delimiter is parsed one byte later than it is written (see
+/// [`separated_delimiters`]).
+fn starts_with_operator(node: tree_sitter::Node<'_>) -> bool {
+    let mut first = node.child(0);
+    while let Some(part) = first.filter(|part| part.kind() == "ERROR") {
+        first = part.child(0);
+    }
+    first.is_some_and(|first| {
+        !first.is_named()
+            && ["|", "&&", "||", ";", "&"]
+                .iter()
+                .any(|operator| first.kind().starts_with(operator))
+    })
+}
+
+/// How long the line `text` starts with is, as the shell reads it: to the
+/// first line feed that a backslash before it does not join to the next
+/// line.
+fn line_end(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(found) = text[from..].find('\n') {
+        let at = from + found;
+        let backslashes = bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        if backslashes % 2 == 0 {
+            return at;
+        }
+        from = at + 1;
+    }
+    text.len()
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
@@ -4668,12 +5801,13 @@ pub fn script_files(command: &str, cwd: &Path) -> Vec<ScriptFile> {
     if joined_continuations(command, true).is_some() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
+    let (reading, whole, tree) = parser_input(command);
+    let Some(tree) = tree.or_else(|| parser.parse(reading.as_ref(), None)) else {
         return Vec::new();
     };
     // A line the tree cannot read whole may hold an `&` or a `cd` where the
     // tree puts none (`a && cd sub <<EOF &`): no folder can be told.
-    if tree.root_node().has_error() {
+    if !whole || tree.root_node().has_error() {
         return Vec::new();
     }
     let mut line = Line {
@@ -5277,6 +6411,12 @@ fn heredoc_holds_more(node: tree_sitter::Node<'_>) -> bool {
         })
 }
 
+/// The builtins that may move the shell, or redefine a command that does:
+/// see [`moves_shell`].
+const MOVES_SHELL: &[&str] = &[
+    "cd", "pushd", "popd", "eval", "source", ".", "builtin", "command", "alias",
+];
+
 /// Whether a command under `node` may move the shell, or redefine one that
 /// does: `cd`, `pushd`, `popd`, `eval`, `source`, `.`, `builtin`, `command`,
 /// `alias`, or a function definition.
@@ -5286,17 +6426,7 @@ fn moves_shell(node: tree_sitter::Node<'_>, source: &str) -> bool {
         if node.kind() == "function_definition"
             || node.kind() == "command"
                 && node.child_by_field_name("name").is_some_and(|name| {
-                    matches!(
-                        program_name(&literal(name, source).0).as_str(),
-                        "cd" | "pushd"
-                            | "popd"
-                            | "eval"
-                            | "source"
-                            | "."
-                            | "builtin"
-                            | "command"
-                            | "alias"
-                    )
+                    MOVES_SHELL.contains(&program_name(&literal(name, source).0).as_str())
                 })
         {
             return true;
@@ -5304,6 +6434,47 @@ fn moves_shell(node: tree_sitter::Node<'_>, source: &str) -> bool {
         stack.extend(node.children(&mut node.walk()));
     }
     false
+}
+
+/// Whether every command under `node` runs where it starts and leaves the
+/// shell there: each has a program written out (not `$run`) that is not one
+/// of [`MOVES_SHELL`] or [`RUNS_IN_SHELL`], and there is no function
+/// definition.
+fn stays(node: tree_sitter::Node<'_>, source: &str) -> bool {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "function_definition" => return false,
+            "command" => {
+                let Some(name) = node.child_by_field_name("name") else {
+                    return false;
+                };
+                let (name, complete) = literal(name, source);
+                let name = program_name(&name);
+                if !complete
+                    || MOVES_SHELL.contains(&name.as_str())
+                    || RUNS_IN_SHELL.contains(&name.as_str())
+                {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        stack.extend(node.children(&mut node.walk()));
+    }
+    true
+}
+
+/// `folder` as where every command and file redirect under `node` starts,
+/// its own included: see [`chain_folders`].
+fn place(folders: &mut HashMap<usize, Rc<Path>>, node: tree_sitter::Node<'_>, folder: &Rc<Path>) {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "command" | "file_redirect") {
+            folders.insert(node.id(), Rc::clone(folder));
+        }
+        stack.extend(node.children(&mut node.walk()));
+    }
 }
 
 /// A redirect's operator.
@@ -5499,6 +6670,7 @@ mod tests {
                 pattern: "git commit -m x".into(),
                 written: 1,
                 always: "git commit *".into(),
+                own: false,
             }]
         );
     }
@@ -5922,6 +7094,21 @@ mod regression {
             "cd sub && cd deeper && cat ../../README.md",
             "cd sub &&\ncat ../README.md",
             "cd a/l && cat ../../../README.md",
+            // The stages of a pipeline, what a step's substitutions run and
+            // what a wrapper that keeps its folder runs start there too.
+            "cd sub && cat ../README.md | head",
+            "cd sub && cat ../README.md | grep x | wc -l",
+            "cd sub && cat x | head > ../top.txt",
+            "cd sub && cat x | head 2> ../err.log",
+            "cd sub && cat ../README.md | head && cat ../README.md",
+            "cd sub && echo \"$(cat ../README.md)\"",
+            "cd sub && diff <(cat ../README.md) x",
+            "cd sub && sudo cat ../README.md",
+            "cd sub && time cat ../README.md",
+            "cd sub && timeout 5 nice cat ../README.md | head",
+            "cd sub && env A=1 cat ../README.md",
+            "cd sub && ls | xargs cat ../README.md",
+            "cd a/l && cat ../../../README.md | head",
         ] {
             assert!(
                 analyze(command, &workspace).external_dirs.is_empty(),
@@ -5936,6 +7123,12 @@ mod regression {
             "cd sub && cat <<'EOF' > ../../notes.md\n# x\nEOF",
             "cd sub > ../log.txt && cat ../README.md",
             "cd a/l && cat ../../../../x",
+            "cd sub && cat ../../x | head",
+            "cd sub && cat x | head > ../../out.txt",
+            "cd sub && echo \"$(cat ../../x)\"",
+            "cd sub && sudo cat ../../x",
+            "cd sub && cat ../README.md | head && cat ../../x",
+            "cd a/l && cat ../../../../x | head",
         ] {
             assert_eq!(
                 analyze(command, &workspace).external_dirs,
@@ -5971,11 +7164,27 @@ mod regression {
             "cd sub && popd && cat ../x",
             "cd sub > >(cat) && cat ../x",
             "cd sub 2> \"$(mktemp)\" && cat ../x",
-            "cd sub && cat ../x | head",
             "cd sub || cat ../x",
             "env cd sub && cat ../x",
             "/usr/bin/cd sub && cat ../x",
             &format!("cd sub && c\\\nd {} && cat ../x", workspace.display()),
+            // A pipeline or a substitution where something may move the
+            // shell, a stage that is not a command, and what a wrapper runs
+            // elsewhere or as text of its own.
+            "cd sub && cd .. | cat ../x",
+            "cd sub && eval true | cat ../x",
+            "cd sub && $run | cat ../x",
+            "cd sub && cat ../x | while read -r l; do echo \"$l\"; done",
+            "cd sub && cat ../x | (cat)",
+            "cd sub && echo \"$(f() { true; }; cat ../x)\"",
+            "cd sub && echo \"$($run; cat ../x)\"",
+            "cd sub && pkexec cat ../x",
+            "cd sub && find . -exec cat ../x \\;",
+            "cd sub && sudo -i cat ../x",
+            "cd sub && env -C \"$D\" cat ../x",
+            "cd sub && bash -c 'cat ../x'",
+            "cd sub && sudo pkexec cat ../x",
+            "cd sub; cat ../x | head",
         ] {
             assert_eq!(
                 analyze(command, &workspace).external_dirs,
@@ -5983,6 +7192,222 @@ mod regression {
                 "{command}"
             );
         }
+        // Where Auto's reviewer places a deletion is as before: only a line
+        // that is one `&&` chain of commands is followed.
+        assert_eq!(
+            outside_deletions("cd sub && rm -rf ../x | cat", &workspace, None),
+            vec![OutsideDeletion {
+                path: "../x".into(),
+                placed: false,
+                effect: Effect::Deletes,
+            }]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cd_under_a_cdpath_the_line_sets_is_checked_where_it_may_go() {
+        let root = std::env::temp_dir().join(format!("haarness-cdpath-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        // The launcher clears `CDPATH`, but an assignment in the line wins:
+        // `cd etc` then goes to `/etc`.
+        let etc = analyze("cd /etc", &workspace).external_dirs;
+        assert!(!etc.is_empty());
+        for command in [
+            "CDPATH=/ cd etc && cat passwd",
+            "export CDPATH=/ && cd etc && cat passwd",
+            "CDPATH=/; cd etc; cat passwd",
+            "CDPATH=/tmp:/ pushd etc",
+            "CDPATH=.:/ cd etc",
+            "eval 'CDPATH=/'; cd etc",
+            "CDPATH=/ bash -c 'cd etc && cat passwd'",
+            "export \"CDPATH=/\" && cd etc && cat passwd",
+            "export 'CDPATH=/'; cd etc",
+            "env CDPATH=/ bash -c \"cd etc && cat passwd\"",
+            "sudo CDPATH=/ sh -c 'cd etc'",
+        ] {
+            let found = analyze(command, &workspace).external_dirs;
+            assert!(
+                etc.iter().all(|dir| found.contains(dir)),
+                "{command}: {found:?}"
+            );
+        }
+        // A value only known when it runs may lead anywhere.
+        assert!(
+            analyze("CDPATH=\"$X\" cd etc", &workspace)
+                .external_dirs
+                .contains(&"/*".to_owned())
+        );
+        // A folder `CDPATH` does not search, a value of the folder the shell
+        // is in, and a line that only reads or clears it ask nothing.
+        for command in [
+            "cd etc && cat passwd",
+            "CDPATH=/ cd ./src",
+            "CDPATH=/ cd .",
+            "CDPATH=.: cd src && ls",
+            "CDPATH= cd src",
+            "unset CDPATH; cd src",
+            "echo \"$CDPATH\"; cd src",
+            "export \"CDPATH=\"; cd src",
+            "echo CDPATH=/ && cd src",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        // Not followed: what the line deletes after it cannot be placed.
+        assert_eq!(
+            outside_deletions("CDPATH=/ cd etc && rm -rf x", &workspace, None),
+            vec![OutsideDeletion {
+                path: "x".into(),
+                placed: false,
+                effect: Effect::Deletes,
+            }]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn chgrp_s_paths_are_checked_like_chown_s() {
+        let workspace = std::env::current_dir().expect("cwd");
+        let shared = analyze("chown -R :staff ~/shared", &workspace).external_dirs;
+        assert!(!shared.is_empty());
+        assert_eq!(
+            analyze("chgrp -R staff ~/shared", &workspace).external_dirs,
+            shared
+        );
+        assert_eq!(
+            analyze("/usr/bin/chgrp staff ~/shared", &workspace).external_dirs,
+            shared
+        );
+        assert!(
+            analyze("chgrp staff notes.txt", &workspace)
+                .external_dirs
+                .is_empty()
+        );
+        // It changes no file's contents: naming a secret file is no read.
+        assert!(
+            analyze("chgrp staff .env", &workspace)
+                .paths
+                .iter()
+                .all(|path| !path.secret)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dot_led_pattern_that_matches_dot_dot_reaches_the_folder_above() {
+        let root = std::env::temp_dir().join(format!("haarness-dot-glob-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(workspace.join("build")).unwrap();
+        let parent = vec![glob(&dunce::canonicalize(&root).unwrap())];
+        // `/bin/sh` expands these to `..` among the rest.
+        for command in [
+            "chmod -R a-w .*",
+            "chown -R sam .*",
+            "chgrp -R staff .*",
+            "chmod -R a-w ./.*",
+            "chmod a-w .?",
+            "chmod a-w '.'*",
+            "chmod a-w \\.*",
+            "chmod a-w .[.]*",
+            "chmod -R a-w .*/*",
+            "chmod -R a-w src/../.*",
+            "sudo chmod -R a-w .*",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                parent,
+                "{command}"
+            );
+        }
+        // Patterns that cannot match `..`, a part below a folder of the
+        // project, quoted characters, other programs, and those that refuse
+        // `..`.
+        for command in [
+            "chmod 600 .env*",
+            "chmod 600 .??*",
+            "chmod -R go-w .[!.]*",
+            "chmod -R go-w .[^.]*",
+            "chmod -R a-w src/.*",
+            "chmod a-w \".*\"",
+            "chmod a-w '.*'",
+            "chmod a-w .\\*",
+            "chmod a-w .*rc",
+            "cd src && chmod -R a-w .*",
+            "ls -la .*",
+            "du -sh .*",
+            "rm -rf .*",
+            "mv .* build/",
+            "cp -R .* build/",
+            "cp -r .* build",
+            "cp .* build 2>/dev/null",
+            "cat .*",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_word_after_a_literal_double_dash_is_a_path_even_with_a_leading_dash() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-dash-dash-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        let parent = vec![glob(&dunce::canonicalize(&root).unwrap())];
+        for command in [
+            "mkdir -- - && rm -rf -- -/../../x",
+            "cat -- -/../../x",
+            "chmod -R a-w -- -/../..",
+            "cp -- -/../../x .",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                parent,
+                "{command}"
+            );
+        }
+        // Before it, a dash word is an option, as before; inside the
+        // project nothing asks.
+        for command in [
+            "rm -rf -/../../x",
+            "touch -- -notes.txt",
+            "rm -f -- -notes.txt",
+            "cat -- --",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        // What it deletes is placed.
+        let deleted: Vec<String> = analyze("rm -rf -- -x --", &workspace)
+            .deletions
+            .into_iter()
+            .map(|deletion| deletion.value)
+            .collect();
+        assert_eq!(deleted, ["-x", "--"]);
+        assert_eq!(
+            outside_deletions("mkdir -- - && rm -rf -- -/../../x", &workspace, None),
+            vec![OutsideDeletion {
+                path: dunce::canonicalize(&root)
+                    .unwrap()
+                    .join("x")
+                    .display()
+                    .to_string(),
+                placed: true,
+                effect: Effect::Deletes,
+            }]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -6250,6 +7675,11 @@ mod readings {
             "busybox sh -c 'rm x'",
             "git status && sudo rm x",
             "for f in a; do timeout 1 rm \"$f\"; done",
+            "trap 'rm -rf x' EXIT",
+            "trap -- 'rm x' EXIT INT TERM",
+            "trap \"rm x\" 0",
+            "trap 'rm x' ERR; make",
+            "bash -c \"trap 'rm x' EXIT\"",
         ] {
             let readings = derived(command);
             assert!(
@@ -6274,6 +7704,11 @@ mod readings {
             "grep -r 'eval rm' .",
             "echo 'rm x' > script.sh",
             "find . -name rm",
+            "trap 'rm x'",
+            "trap -p 'rm x' EXIT",
+            "trap -l 'rm x' EXIT",
+            "trap - 'rm x' EXIT",
+            "trap 2 'rm x'",
         ] {
             let readings = derived(command);
             assert!(
@@ -6283,6 +7718,446 @@ mod readings {
                 "{command}: {readings:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_trap_s_text_is_read_as_a_command_of_its_own() {
+        let workspace = workspace();
+        // Its paths outside the project ask, and what it deletes is placed.
+        let home = analyze("rm -rf ~/x", &workspace).external_dirs;
+        assert!(!home.is_empty());
+        for command in [
+            "trap 'rm -rf ~/x' EXIT; true",
+            "trap -- 'rm -rf ~/x' EXIT",
+            "f() { trap 'rm -rf ~/x' RETURN; }",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                home,
+                "{command}"
+            );
+        }
+        let at_home = resolve(&haarness_protocol::home_dir().unwrap(), Path::new("x"))
+            .display()
+            .to_string();
+        assert_eq!(
+            outside_deletions("trap 'rm -rf ~/x' EXIT; true", &workspace, None),
+            vec![OutsideDeletion {
+                path: at_home,
+                placed: true,
+                effect: Effect::Deletes,
+            }]
+        );
+        // A variable in it cannot be placed, as when written directly.
+        assert_eq!(
+            outside_deletions("trap 'rm -rf \"$tmp\"' EXIT", &workspace, None),
+            outside_deletions("rm -rf \"$tmp\"", &workspace, None)
+        );
+        // Resetting, ignoring, listing and printing run nothing.
+        for command in [
+            "trap - EXIT",
+            "trap -- - EXIT INT",
+            "trap '' INT",
+            "trap 2 INT",
+            "trap -p",
+            "trap -p EXIT",
+            "trap -l",
+            "trap EXIT",
+            "trap",
+        ] {
+            // Only `trap` itself, spelled as it runs (`trap  INT`).
+            assert!(
+                derived(command)
+                    .iter()
+                    .all(|pattern| pattern.starts_with("trap")),
+                "{command}"
+            );
+            assert!(
+                analyze(command, &workspace).deletions.is_empty(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_follows_a_here_document_operator_on_its_line_is_read() {
+        let workspace = workspace();
+        let home = analyze("rm -rf ~/x", &workspace).external_dirs;
+        assert!(!home.is_empty());
+        // The shell ends the delimiter at the operator and runs the rest of
+        // the line before the document's text; the parser reads none of it
+        // when the delimiter touches the operator, and not what follows a
+        // loop's, a group's or a pipeline's document.
+        for command in [
+            "cat <<EOF; rm -rf ~/x\nbody\nEOF",
+            "cat > notes.txt <<EOF; rm -rf ~/x\nbody\nEOF",
+            "cat <<-EOF; rm -rf ~/x\n\tbody\n\tEOF",
+            "cat << EOF; rm -rf ~/x\nbody\nEOF",
+            "cat<< EOF; rm -rf ~/x\nbody\nEOF",
+            "true; cat <<EOF;rm -rf ~/x\nbody\nEOF",
+            "cat <<EOF&&rm -rf ~/x\nbody\nEOF",
+            "(cat <<EOF); rm -rf ~/x\nbody\nEOF",
+            "cat <<EOF; cat <<B; rm -rf ~/x\na\nEOF\nb\nB",
+            "cat <<EOF; cat <<EOF; rm -rf ~/x\na\nEOF\nb\nEOF",
+            "for f in a; do cat; done <<EOF; rm -rf ~/x\nbody\nEOF",
+            "for f in a; do cat; done <<EOF ; rm -rf ~/x\nbody\nEOF",
+            "while read l; do echo \"$l\"; done <<EOF; rm -rf ~/x\nbody\nEOF",
+            "for f in a; do cat <<EOF; done && rm -rf ~/x\nbody\nEOF",
+            "true | cat <<EOF ; rm -rf ~/x\nbody\nEOF",
+            "{ cat; } <<EOF; rm -rf ~/x\nbody\nEOF",
+            // And what follows the document, and a document a shell runs.
+            "cat <<EOF;\nbody\nEOF\nrm -rf ~/x",
+            "(cat <<EOF)\nbody\nEOF\nrm -rf ~/x",
+            "cat <<EOF; ls\nbody\nEOF\ncat <<B; rm -rf ~/x\nb\nB",
+            "cat <<EOF|sh\nrm -rf ~/x\nEOF",
+            "bash <<EOF; true\nrm -rf ~/x\nEOF",
+            "bash <<EOF ; true\nrm -rf ~/x\nEOF",
+            "python3 <<EOF; rm -rf ~/x\nprint(1)\nEOF",
+            // A delimiter that starts with `-` ends at its own line.
+            "cat << -EOF; true\nbody\n-EOF\nrm -rf ~/x",
+            // The operator's line goes on past a backslash at its end.
+            "cat <<EOF;\\\nrm -rf ~/x\nb\nEOF",
+            "cat <<EOF ;\\\n rm -rf ~/x\nb\nEOF",
+            "cat <<EOF \\\n; rm -rf ~/x\nb\nEOF",
+            // The operator moves right, into the blank after it.
+            "cat<<EOF; rm -rf ~/x\nbody\nEOF",
+            "python3 - <<EOF; rm -rf ~/x\nprint(1)\nEOF",
+        ] {
+            let analysis = analyze(command, &workspace);
+            assert!(
+                analysis
+                    .patterns
+                    .iter()
+                    .any(|pattern| pattern == "rm -rf ~/x"),
+                "{command}: {:?}",
+                analysis.patterns
+            );
+            assert!(
+                home.iter().all(|dir| analysis.external_dirs.contains(dir)),
+                "{command}: {:?}",
+                analysis.external_dirs
+            );
+            assert!(!analysis.unreadable, "{command}");
+            assert!(
+                outside_deletions(command, &workspace, None)
+                    .iter()
+                    .any(|deletion| deletion.path.ends_with("/x")),
+                "{command}"
+            );
+        }
+        // A delimiter that starts with `-` keeps its document's text a text.
+        let dashed = analyze("cat << -EOF; true\nbody\n-EOF\nrm -rf ~/x", &workspace);
+        assert!(
+            !dashed.patterns.iter().any(|pattern| pattern == "body"),
+            "{:?}",
+            dashed.patterns
+        );
+        // Many that share a line and a delimiter are set apart together.
+        let chain = format!(
+            "{}rm -rf ~/x\nbody\nEOF",
+            "cat <<EOF; ".repeat(4 * MIN_DELIMITER_PASSES)
+        );
+        let analysis = analyze(&chain, &workspace);
+        assert!(!analysis.unreadable);
+        assert!(analysis.patterns.contains(&"rm -rf ~/x".to_owned()));
+        // Up to a bound on how many one text may need.
+        let chain =
+            |count: usize| format!("{}rm -rf ~/x\nbody\nEOF", "cat - <<EOF; ".repeat(count));
+        assert!(!analyze(&chain(MAX_DELIMITERS_APART), &workspace).unreadable);
+        assert!(analyze(&chain(MAX_DELIMITERS_APART + 1), &workspace).unreadable);
+        // A redirect written against the delimiter writes where it says.
+        let written = analyze("cat <<EOF>../outside/f\nbody\nEOF", &workspace);
+        assert!(!written.external_dirs.is_empty(), "{written:?}");
+        // A delimiter that cannot move left, against an operator with a
+        // blank after it, is read as the line with the blank before the
+        // operator: the operator moves right.
+        for (command, twin) in [
+            (
+                "cat<<EOF; rm -rf ~/x\nbody\nEOF",
+                "cat<<EOF ; rm -rf ~/x\nbody\nEOF",
+            ),
+            (
+                "cat 2 <<EOF; rm -rf ~/x\nbody\nEOF",
+                "cat 2 <<EOF ; rm -rf ~/x\nbody\nEOF",
+            ),
+            (
+                "cat {fd} <<EOF; rm -rf ~/x\nbody\nEOF",
+                "cat {fd} <<EOF ; rm -rf ~/x\nbody\nEOF",
+            ),
+            (
+                "git commit -F - <<EOF; git push --force\nmsg\nEOF",
+                "git commit -F - <<EOF ; git push --force\nmsg\nEOF",
+            ),
+            (
+                "python3 - <<EOF; ls\nprint(1)\nEOF",
+                "python3 - <<EOF ; ls\nprint(1)\nEOF",
+            ),
+            (
+                "kubectl apply -f - <<EOF; kubectl get pods\nkind: x\nEOF",
+                "kubectl apply -f - <<EOF ; kubectl get pods\nkind: x\nEOF",
+            ),
+            (
+                "psql -v ON_ERROR_STOP=1 <<SQL; echo ok\nselect 1;\nSQL",
+                "psql -v ON_ERROR_STOP=1 <<SQL ; echo ok\nselect 1;\nSQL",
+            ),
+            (
+                "mysql -uroot <<EOF& ls\nselect 1;\nEOF",
+                "mysql -uroot <<EOF & ls\nselect 1;\nEOF",
+            ),
+            (
+                "git clean -fdx <<EOF&& ls\nbody\nEOF",
+                "git clean -fdx <<EOF && ls\nbody\nEOF",
+            ),
+            ("cat<<EOF|| ls\nbody\nEOF", "cat<<EOF || ls\nbody\nEOF"),
+            (
+                "cat<<EOF| sh\nrm -rf ~/x\nEOF",
+                "cat<<EOF | sh\nrm -rf ~/x\nEOF",
+            ),
+            ("cat<<EOF;\nbody\nEOF", "cat<<EOF\nbody\nEOF"),
+        ] {
+            let (analysis, other) = (analyze(command, &workspace), analyze(twin, &workspace));
+            assert!(!analysis.unreadable, "{command}");
+            let spelled = |analysis: &BashAnalysis| -> Vec<String> {
+                analysis
+                    .patterns
+                    .iter()
+                    .map(|pattern| pattern.replace([' ', ';'], ""))
+                    .collect()
+            };
+            assert_eq!(spelled(&analysis), spelled(&other), "{command}");
+            assert_eq!(analysis.external_dirs, other.external_dirs, "{command}");
+            assert_eq!(analysis.always, other.always, "{command}");
+        }
+        // One with no blank to take on either side, one the shell joins to
+        // the next line before it reads it, and what follows an operator
+        // that no command of the line opens is not read whole.
+        for command in [
+            "cat<<EOF;rm -rf ~/x\nbody\nEOF",
+            "cat<<EOF>out.txt\nbody\nEOF",
+            "cat <<EOF\\\n; rm -rf ~/x\nb\nEOF",
+            "cat <<EO\\\nF; rm -rf ~/x\nb\nEOF",
+            "X=1 <<EOF; rm -rf ~/x\nbody\nEOF",
+            "X=1 <<EOF ; rm -rf ~/x\nbody\nEOF",
+            // A `cd` reads no document and is no command to read them for.
+            "cd sub <<EOF ; rm -rf ~/x\nbody\nEOF",
+            "cd sub <<EOF; rm -rf ~/x\nbody\nEOF",
+            "cd sub <<EOF & rm -rf ~/x\nbody\nEOF",
+            "cd sub <<EOF 2>&1 | rm -rf ~/x\nbody\nEOF",
+            "cd -- sub <<EOF ; rm -rf ~/x\nbody\nEOF",
+            "cd sub 2>/dev/null <<EOF ; rm -rf ~/x\nbody\nEOF",
+            "cd sub; cd sub <<EOF ; rm -rf ~/x\nbody\nEOF",
+        ] {
+            assert!(analyze(command, &workspace).unreadable, "{command}");
+            assert!(!is_obviously_read_only(command), "{command}");
+        }
+        // Next to another command they are read for it.
+        for command in [
+            "ls && cd sub <<EOF ; rm -rf ~/x\nbody\nEOF",
+            "true; cd sub <<EOF; rm -rf ~/x\nbody\nEOF",
+        ] {
+            let analysis = analyze(command, &workspace);
+            assert!(!analysis.unreadable, "{command}");
+            assert!(
+                analysis.patterns.contains(&"rm -rf ~/x".to_owned()),
+                "{command}: {:?}",
+                analysis.patterns
+            );
+            assert!(
+                home.iter().all(|dir| analysis.external_dirs.contains(dir)),
+                "{command}"
+            );
+        }
+        // What follows the operator and is too long to read leaves the line
+        // not read whole, as a written command that long does.
+        let long = "a".repeat(MAX_NESTED_BYTES + 1);
+        for command in [
+            format!("cat <<EOF ; rm -rf ~/x {long}\nbody\nEOF"),
+            format!("cat <<EOF; git push --force {long}\nbody\nEOF"),
+            format!("cat <<EOF 2>&1 | rm -rf ~/x {long}\nbody\nEOF"),
+        ] {
+            assert!(
+                analyze(&command, &workspace).unreadable,
+                "{}",
+                &command[..30]
+            );
+        }
+        // So does one past the bytes a line may read again in all: each
+        // script here is read twice, as `bash -c`'s and as `eval`'s.
+        let script = |byte: &str| format!("echo {}", byte.repeat(MAX_READ_BYTES / 5));
+        let line = format!(
+            "bash -c 'eval \"{}\"'; bash -c 'eval \"{}\"'; cat <<EOF ; rm -rf ~/x {}\nbody\nEOF",
+            script("b"),
+            script("c"),
+            "d".repeat(MAX_READ_BYTES - 4 * script("b").len())
+        );
+        assert!(line.len() < MAX_COMMAND_BYTES);
+        assert!(analyze(&line, &workspace).unreadable);
+        assert!(!analyze(&line.replace(" <<EOF ;", ";"), &workspace).unreadable);
+        // And one whose wrappers or shells run deeper than a reading goes,
+        // there or in text it runs: the text after the operator takes one of
+        // the levels, so a chain one level shorter is read, its paths too.
+        let after = |text: &str| format!("cat <<EOF ; {text}\nbody\nEOF");
+        let wrapped = |wrapper: &str, count: u8| {
+            format!(
+                "{}rm -rf ~/x",
+                format!("{wrapper} ").repeat(usize::from(count))
+            )
+        };
+        let shells = |count: u8| {
+            let mut text = "rm -rf ~/x".to_owned();
+            for _ in 0..count {
+                text = format!("bash -c {}", quoted(&text));
+            }
+            text
+        };
+        for wrapper in ["env", "sudo", "nice", "command"] {
+            let analysis = analyze(&after(&wrapped(wrapper, MAX_HOPS)), &workspace);
+            assert!(analysis.unreadable, "{wrapper}");
+            let shorter = analyze(&after(&wrapped(wrapper, MAX_HOPS - 1)), &workspace);
+            assert!(!shorter.unreadable, "{wrapper}");
+            assert_eq!(shorter.external_dirs, home, "{wrapper}");
+        }
+        for command in [
+            after(&shells(MAX_NESTING)),
+            after(&format!(
+                "bash -c {}",
+                quoted(&wrapped("env", MAX_HOPS - 1))
+            )),
+            format!("cat <<EOF 2>&1 | {}\nbody\nEOF", wrapped("env", MAX_HOPS)),
+        ] {
+            assert!(
+                analyze(&command, &workspace).unreadable,
+                "{}",
+                &command[..40]
+            );
+        }
+        let shorter = analyze(&after(&shells(MAX_NESTING - 1)), &workspace);
+        assert!(!shorter.unreadable);
+        assert_eq!(shorter.external_dirs, home);
+        // Written alone, the same chains are read as before.
+        assert_eq!(
+            analyze(&wrapped("env", MAX_HOPS), &workspace).external_dirs,
+            home
+        );
+        assert!(!analyze(&shells(MAX_NESTING), &workspace).unreadable);
+        // Each document on a line of its own needs a parse of its own, up to
+        // the bytes the parses of one line may take in all.
+        let documents = |count: usize, body: &str| -> String {
+            use std::fmt::Write as _;
+            let mut line = String::new();
+            for n in 0..count {
+                let _ = write!(line, "cat > f{n}.txt <<EOF&& echo ok{n}\n{body}\nEOF\n");
+            }
+            line
+        };
+        let many = analyze(&documents(8, "body"), &workspace);
+        assert!(!many.unreadable);
+        for n in 0..8 {
+            assert!(many.patterns.contains(&format!("echo ok{n}")), "{n}");
+        }
+        let body = "x".repeat(MAX_DELIMITER_BYTES / MIN_DELIMITER_PASSES);
+        assert!(!analyze(&documents(MIN_DELIMITER_PASSES - 1, &body), &workspace).unreadable);
+        assert!(analyze(&documents(MIN_DELIMITER_PASSES, &body), &workspace).unreadable);
+        // Lines whose delimiters the parser reads as the shell does are
+        // given to it as written.
+        for command in [
+            "cat <<'EOF' > notes.txt; ls\nbody\nEOF",
+            "cat <<\"EOF\"; ls\nbody\nEOF",
+            "cat <<EOF ; ls\nbody\nEOF",
+            "cat <<EOF > out.txt\nbody\nEOF",
+            "git commit -F - <<'EOF'\nfix: thing\nEOF",
+            "cat <<< \"a;b\"",
+            "echo $((1<<2)); ls",
+            "echo '<<EOF;'",
+        ] {
+            let (reading, whole, _) = parser_input(command);
+            assert_eq!((reading, whole), (command.into(), true), "{command}");
+        }
+    }
+
+    #[test]
+    fn commands_after_a_here_document_operator_are_the_lines_own() {
+        let workspace = workspace();
+        let own = |command: &str| -> Vec<(String, bool)> {
+            analyze(command, &workspace)
+                .derived
+                .into_iter()
+                .map(|derived| (derived.pattern, derived.own))
+                .collect()
+        };
+        for command in [
+            "cat <<EOF ; git push --force\nbody\nEOF",
+            "cat <<EOF; git push --force\nbody\nEOF",
+            "cat <<'EOF' 2>&1 | git push --force\nbody\nEOF",
+            "for f in a; do cat; done <<EOF & git push --force\nbody\nEOF",
+            "cat <<EOF;\\\ngit push --force\nb\nEOF",
+        ] {
+            assert!(
+                own(command).contains(&("git push --force".to_owned(), true)),
+                "{command}: {:?}",
+                own(command)
+            );
+            // An Always answer remembers it.
+            let always = analyze(command, &workspace).always;
+            assert!(
+                always.contains(&"git push *".to_owned()),
+                "{command}: {always:?}"
+            );
+        }
+        // What such a command runs is read from it, as for one written on a
+        // line of its own.
+        assert_eq!(
+            own("cat <<EOF ; sudo git push --force\nbody\nEOF"),
+            vec![
+                ("sudo git push --force".to_owned(), true),
+                ("git push --force".to_owned(), false)
+            ]
+        );
+        // Text a shell runs again keeps its commands, after a here-document
+        // or not, the shell's.
+        let nested = analyze("bash -c 'cat <<EOF ; git push --force\nb\nEOF'", &workspace);
+        assert!(
+            nested.derived.iter().all(|derived| !derived.own),
+            "{nested:?}"
+        );
+        assert!(!nested.always.contains(&"git push *".to_owned()));
+    }
+
+    #[test]
+    fn a_double_quoted_script_keeps_its_line_breaks() {
+        let workspace = workspace();
+        let home = analyze("rm -rf ~/x", &workspace).external_dirs;
+        for command in [
+            "bash -c \"true\nrm -rf ~/x\"",
+            "bash -c \"true\r\nrm -rf ~/x\"",
+            "sh -c \"\nrm -rf ~/x\n\"",
+            "bash -c \"set -e\n  rm -rf ~/x\"",
+            "eval \"true\nrm -rf ~/x\"",
+        ] {
+            let analysis = analyze(command, &workspace);
+            assert!(
+                analysis
+                    .patterns
+                    .iter()
+                    .any(|pattern| pattern.trim() == "rm -rf ~/x"),
+                "{command:?}: {:?}",
+                analysis.patterns
+            );
+            assert!(
+                home.iter().all(|dir| analysis.external_dirs.contains(dir)),
+                "{command:?}"
+            );
+        }
+        // A message's lines are its own text, and nothing in it runs.
+        let message = analyze("git commit -m \"fix: a\n\nrm -rf ~/x\"", &workspace);
+        assert!(message.external_dirs.is_empty(), "{message:?}");
+        assert!(
+            message
+                .patterns
+                .contains(&"git commit -m fix: a\n\nrm -rf ~/x".to_owned()),
+            "{:?}",
+            message.patterns
+        );
     }
 
     #[test]
@@ -6483,6 +8358,58 @@ mod readings {
                 .iter()
                 .all(|pattern| pattern.len() <= MAX_PATTERN_BYTES)
         );
+    }
+
+    #[test]
+    fn a_long_chain_and_deep_groups_are_read_on_a_small_stack() {
+        // A model may write a line of thousands of steps: reading it in every
+        // way a call is read must not overflow a small stack, or take long.
+        let workspace = workspace();
+        let chain = format!("{}rm -rf ~/x", "true && ".repeat(16_000));
+        let followed = format!("cd src && {}cat ../README.md", "true && ".repeat(16_000));
+        for line in [
+            chain.clone(),
+            followed.clone(),
+            format!("{}true", "true || ".repeat(16_000)),
+            format!("{}bash <<'EOF'\nrm x\nEOF", "true && ".repeat(16_000)),
+            format!("{}rm -rf x", "ln -s a b && ".repeat(8_000)),
+            format!(
+                "{}true{} <<EOF\nx\nEOF",
+                "( ".repeat(3_000),
+                " )".repeat(3_000)
+            ),
+            format!(
+                "{}true{} <<EOF\nx\nEOF",
+                "{ ".repeat(3_000),
+                "; }".repeat(3_000)
+            ),
+            format!("rm x{}", "{1..1}".repeat(2_000)),
+        ] {
+            let workspace = workspace.clone();
+            let took = std::thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn(move || {
+                    let started = std::time::Instant::now();
+                    let _ = analyze(&line, &workspace);
+                    let _ = outside_deletions(&line, &workspace, None);
+                    let _ = script_files(&line, &workspace);
+                    let _ = is_obviously_read_only(&line);
+                    started.elapsed()
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+        }
+        // Read whole: the chain is one, its last step's path asks, and a
+        // path after its `cd` is read from where it went.
+        let analysis = analyze(&chain, &workspace);
+        assert!(analysis.directories.is_some());
+        assert_eq!(
+            analysis.external_dirs,
+            analyze("rm -rf ~/x", &workspace).external_dirs
+        );
+        assert!(analyze(&followed, &workspace).external_dirs.is_empty());
     }
 
     #[test]
@@ -6764,6 +8691,61 @@ mod readings {
             found("git -c alias.c=clean c -fdx"),
             vec![unplaced("alias.c=clean")]
         );
+        // A work tree named by an option or by `GIT_WORK_TREE` is what git
+        // cleans, from the folder it runs in; set earlier in the line, it
+        // cannot be placed.
+        for command in [
+            "git --work-tree=../outside/cache clean -fdx",
+            "git --work-tree ../outside/cache clean -fd",
+            "git --git-dir=.git --work-tree=../outside/cache clean -fdx",
+            "git --work-tree=../outside/cache clean -fdx sub",
+            "git -C ../outside --work-tree=cache clean -fdx",
+            "GIT_WORK_TREE=../outside/cache git clean -fdx",
+            "env GIT_WORK_TREE=../outside/cache git clean -fdx",
+            "sudo GIT_WORK_TREE=../outside/cache git clean -fdx",
+            "cd sub && git --work-tree=../../outside/cache clean -fdx",
+            "bash -c 'GIT_WORK_TREE=../outside/cache git clean -fdx'",
+        ] {
+            assert_eq!(found(command), vec![placed(&cache)], "{command}");
+        }
+        assert_eq!(
+            found(&format!(
+                "git --work-tree={} clean -fdx",
+                outside.join("cache").display()
+            )),
+            vec![placed(&cache)]
+        );
+        for command in [
+            "export GIT_WORK_TREE=../outside/cache && git clean -fdx",
+            "declare -x GIT_WORK_TREE=../outside/cache; git clean -fdx",
+            "export GIT_WORK_TREE; git clean -fdx",
+            ": \"${GIT_WORK_TREE:=../outside/cache}\"; git clean -fdx",
+            "eval 'export GIT_WORK_TREE=../outside/cache'; git clean -fdx",
+            "export \"GIT_WORK_TREE=../outside/cache\" && git clean -fdx",
+            "export 'GIT_WORK_TREE=../outside/cache' && git clean -fdx",
+            "declare -x \"GIT_WORK_TREE=../outside/cache\"; git clean -fdx",
+        ] {
+            assert_eq!(
+                found(command),
+                vec![unplaced("$GIT_WORK_TREE")],
+                "{command}"
+            );
+        }
+        // Reading it, unsetting it or setting it empty (git refuses that)
+        // moves nothing.
+        for command in [
+            "unset GIT_WORK_TREE && git clean -fd",
+            "echo \"$GIT_WORK_TREE\" && git clean -fdn",
+            "GIT_WORK_TREE= git clean -fd",
+            "env GIT_WORK_TREE= git clean -fd",
+            "grep -r GIT_WORK_TREE . && git clean -fd",
+        ] {
+            assert!(found(command).is_empty(), "{command}");
+        }
+        assert_eq!(
+            found("git --work-tree=\"$W\" clean -fdx"),
+            vec![unplaced("--work-tree=\"$W\"")]
+        );
         // A new file, an append, a find that deletes nothing and a clean
         // without -f delete nothing outside.
         for command in [
@@ -6776,6 +8758,12 @@ mod readings {
             "find . -name '*.o' -delete".to_owned(),
             "find -L . -delete".to_owned(),
             "git clean -fdx".to_owned(),
+            "git --work-tree=. clean -fdx".to_owned(),
+            "git --work-tree=build clean -fdx".to_owned(),
+            "git --git-dir=.git clean -fdx".to_owned(),
+            "GIT_WORK_TREE=build git clean -fdx".to_owned(),
+            "git --work-tree=../outside/cache clean -n".to_owned(),
+            "git --work-tree=../outside/cache status".to_owned(),
             "ls | xargs echo".to_owned(),
             "git -c color.ui=never status".to_owned(),
         ] {
@@ -7372,7 +9360,7 @@ mod backslash_lines {
         // text is read from the line as written.
         assert_eq!(written("echo 'a\n\\rm x'"), vec!["echo 'a\n\\rm x'"]);
         assert_eq!(readings("echo 'a\n\\rm x'"), vec!["echo a\n\\rm x"]);
-        assert_eq!(readings("echo \"a\n\\rm x\""), vec!["echo a\\rm x"]);
+        assert_eq!(readings("echo \"a\n\\rm x\""), vec!["echo a\n\\rm x"]);
         for command in [
             "echo 'a\n\\rm x'",
             "echo \"a\n\\rm x\"",

@@ -18,6 +18,7 @@ import { Schedules } from "./Schedules";
 import { Hooks } from "./Hooks";
 import { McpForm } from "./McpForm";
 import { appsOff, loadReadOnlyServers, noteMcpServers, offersApps, readOnlyServer, setApps } from "./mcp-servers";
+import { mcpServerNote } from "./mcp-server-note";
 import { AssetForm, type AssetRow } from "./AssetForm";
 import { definitionSource, OPEN_GROUP_LIMIT, toolGroupKeys, toolGroups, toolSummary, toolTitle, type DefinitionRow, type ToolGroup } from "./settings-lists";
 import { SourceForm } from "./SourceForm";
@@ -1793,9 +1794,14 @@ function Mcp(props: { cli: Cli }) {
               </Show>
               <span class="badge">{server.status}</span>
             </header>
-            {/* Why a server failed is what decides the next step (reconnect, fix a setting). */}
-            <Show when={server.status === "failed" && server.detail}>
-              <p class="mcp-server-detail">{server.detail}</p>
+            {/* Why a server failed is what decides the next step (reconnect, fix a setting); a working
+                one says only what it left out, quietly. */}
+            <Show when={mcpServerNote(server)}>
+              {(note) => (
+                <p class="mcp-server-detail" classList={{ quiet: note().quiet }}>
+                  {note().text}
+                </p>
+              )}
             </Show>
             <div class="toolbar">
               <button

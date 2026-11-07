@@ -1298,18 +1298,19 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
 }
 
 /// The lines a file-changing request would add and remove, as `(marker,
-/// text)` pairs clipped to `width`: an `edit`'s old/new text, an
-/// `apply_patch` envelope's hunks, or the opening of a `write`.
+/// text)` pairs clipped to `width`: an `edit`'s old/new text, a
+/// `multiedit`'s edits one after another, an `apply_patch` envelope's
+/// hunks, or the opening of a `write`.
 fn change_preview(pending: &PendingPermissionInfo, width: usize) -> Vec<(char, String)> {
     let detail = &pending.detail;
     let text = |key: &str| detail.get(key).and_then(serde_json::Value::as_str);
-    // A direction override or isolate in a changed line is a code, so the
-    // line cannot read as something it is not; the rest is the file's text.
+    // A direction override or isolate, or a control character, in a changed
+    // line is a code, so the line cannot read as something it is not or
+    // hide what an escape string holds; the rest is the file's text.
     let clip =
         |line: &str| single_line(&marked_directions(line.trim_end()), width.saturating_sub(2));
-    if let (Some(old), Some(new)) = (text("old"), text("new")) {
-        let diff = similar::TextDiff::from_lines(old, new);
-        return diff
+    let changed = |old: &str, new: &str| {
+        similar::TextDiff::from_lines(old, new)
             .iter_all_changes()
             .map(|change| {
                 let marker = match change.tag() {
@@ -1319,7 +1320,17 @@ fn change_preview(pending: &PendingPermissionInfo, width: usize) -> Vec<(char, S
                 };
                 (marker, clip(change.value()))
             })
-            .collect();
+            .collect::<Vec<_>>()
+    };
+    if let (Some(old), Some(new)) = (text("old"), text("new")) {
+        return changed(old, new);
+    }
+    if let Some(edits) = detail.get("edits").and_then(serde_json::Value::as_array) {
+        let edit = |edit: &serde_json::Value| {
+            let side = |key: &str| edit.get(key).and_then(serde_json::Value::as_str);
+            Some(changed(side("old")?, side("new")?))
+        };
+        return edits.iter().filter_map(edit).flatten().collect();
     }
     if let Some(patch) = text("input")
         .or_else(|| text("patch"))
@@ -1459,13 +1470,26 @@ fn chips(app: &App, staged: bool) -> Vec<(String, String)> {
         .is_some_and(|pending| pending.explicit);
     PermissionChoice::available(app)
         .iter()
-        .map(|choice| {
-            (
-                app.language.text(choice.label_for(explicit)).to_owned(),
-                choice.key().to_string(),
-            )
-        })
+        .map(|choice| (chip_label(app, *choice, explicit), choice.key().to_string()))
         .collect()
+}
+
+/// A chip's words in the person's language. Allowing an app in every chat names the app when the card's line names
+/// two, a drag from one app into another, so it is plain which one is meant.
+fn chip_label(app: &App, choice: PermissionChoice, explicit: bool) -> String {
+    if choice == PermissionChoice::App
+        && let Some(pending) = app.first_pending_permission()
+        && pending.detail["__mac"]["endBundle"]
+            .as_str()
+            .is_some_and(|end| Some(end) != pending.detail["__mac"]["bundle"].as_str())
+        && let Some((_, name)) = crate::state::allowed_app(pending)
+    {
+        return app
+            .language
+            .text("Always allow {app}")
+            .replace("{app}", &spelled_out(name));
+    }
+    app.language.text(choice.label_for(explicit)).to_owned()
 }
 
 fn chip_width(label: &str, key: &str) -> usize {
@@ -1676,11 +1700,11 @@ fn footer(app: &App, width: usize, staged: bool) -> Vec<Span> {
         let answer = PermissionChoice::available(app)
             .into_iter()
             .find(|choice| choice.key() == settling.letter)
-            .map(|choice| app.language.text(choice.label_for(explicit)))
+            .map(|choice| chip_label(app, choice, explicit))
             .unwrap_or_default();
         let text = app.language.format(
             "{answer} in a moment · enter now · esc cancels",
-            &[("answer", answer)],
+            &[("answer", &answer)],
         );
         return vec![Span::new(single_line(&text, width), theme.muted).on(surface)];
     }

@@ -8,7 +8,12 @@ short echo turn after another, each writing its items to the same database. Then
 both writes.
 
 Checks that no turn of chat B fails or waits on chat A's captures (the slowest one is reported),
-and that undo puts the tree back byte for byte. Before captures were written in short batches,
+and that undo puts the tree back byte for byte. A third turn of chat A changes an ignored file and
+shrinks a file over the checkpoints' 2 MiB limit along with a tracked one: its undo restores the
+tracked file, leaves those two as the turn left them and names them in `revert.unrestored` with
+why, which the later steps keep until redo or new work. Then chat C edits a file and grows it past
+2 MiB in two turns: undo steps back through both, the large content kept in the data folder first,
+and redo brings it back; the copies go with the undo. Before captures were written in short batches,
 one capture held the database's write lock for as long as it took to read and compress every
 file: B's writes waited the five-second busy timeout and failed with "database is locked".
 
@@ -41,7 +46,7 @@ home.mkdir()
 (project / '.haarness').mkdir(parents=True)
 (project / '.haarness/config.toml').write_text(
     '[defaults]\nprovider="echo"\nmodel="echo-1"\n'
-    '[permissions]\nread="allow"\nwrite="allow"\nedit="allow"\n[lsp]\nenabled=false\n')
+    '[permissions]\nread="allow"\nwrite="allow"\nedit="allow"\nbash="allow"\n[lsp]\nenabled=false\n')
 env = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home), 'HAARNESS_HOME': str(home),
        'HAARNESS_DATA_DIR': str(root / 'data'), 'USER': os.environ.get('USER', 'fixture'),
        'LANG': 'en_US.UTF-8', 'HAARNESS_TEST_PROVIDER': '1'}
@@ -109,6 +114,11 @@ def write_project():
             folder.mkdir(parents=True)
         lines = (' '.join(rng.choices(words, k=rng.randint(3, 14))) for _ in range(rng.randint(20, 160)))
         (folder / f'f{index:05d}.txt').write_text(f'// file {index}\n' + ';\n'.join(lines) + '\n')
+    # An ignored file, and one over the checkpoints' size limit that is tracked.
+    (project / '.gitignore').write_text('local.env\n')
+    (project / 'local.env').write_text('TOKEN=fixture\n')
+    (project / 'assets').mkdir()
+    (project / 'assets/model.bin').write_bytes(bytes(rng.randrange(256) for _ in range(256)) * (12 * 1024))
     git = ['git', '-C', str(project), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid']
     for command in (['init', '-q', '-b', 'main'], ['add', '-A'], ['commit', '-q', '-m', 'fixture']):
         subprocess.run(git + command, check=True, capture_output=True, env=env)
@@ -171,10 +181,32 @@ try:
     assert (project / 'notes/new.txt').read_text() == 'added by chat A\n'
     passed('chat A writes into a large project while chat B keeps running turns')
 
+    model, env_file = project / 'assets/model.bin', project / 'local.env'
+    large_before, env_before = model.read_bytes(), env_file.read_text()
+    calls = [{'name': 'write', 'arguments': {'path': path, 'content': content}} for path, content in (
+        ('local.env', 'TOKEN=changed\n'), ('assets/model.bin', 'small now\n'),
+        ('src/d000/f00001.txt', 'third turn\n'))]
+    done, _ = turn(first, '!multi ' + json.dumps(calls))
+    assert done['status'] == 'completed', done
+    start = time.monotonic()
+    reverted = api('POST', f'/threads/{first["id"]}/revert', {}, timeout=300)
+    timings['undo_left_s'] = round(time.monotonic() - start, 2)
+    left = reverted['revert'].get('unrestored')
+    assert left == [{'path': 'assets/model.bin', 'reason': 'large'},
+                    {'path': 'local.env', 'reason': 'ignored'}], reverted['revert']
+    assert 'unrestoredCount' not in reverted['revert'], reverted['revert']
+    assert (project / 'src/d000/f00001.txt').read_text() != 'third turn\n', 'undo left the tracked file'
+    assert env_file.read_text() == 'TOKEN=changed\n' and model.read_bytes() == b'small now\n'
+    passed('undo restores the tracked file and names the ignored and the large file it left')
+    # As a person would, put the two back by hand before undoing further.
+    env_file.write_text(env_before)
+    model.write_bytes(large_before)
+
     for step in ('undo_add', 'undo_edit'):
         start = time.monotonic()
         reverted = api('POST', f'/threads/{first["id"]}/revert', {}, timeout=300)
         assert reverted.get('revert'), reverted
+        assert reverted['revert'].get('unrestored') == left, (step, reverted['revert'])
         timings[f'{step}_s'] = round(time.monotonic() - start, 2)
     chatter.stopping.set()
     chatter.join(timeout=120)
@@ -184,7 +216,38 @@ try:
 
     assert not (project / 'notes/new.txt').exists(), 'undo left the added file'
     assert tree() == (original, count), 'undo did not restore the project byte for byte'
-    passed('undo restores the whole project byte for byte')
+    passed('undo restores the whole project byte for byte, and keeps naming what it left')
+
+    # Redo walks forward again; at the end no undo is pending and nothing is named.
+    for _ in range(3):
+        redone = api('POST', f'/threads/{first["id"]}/unrevert', {}, timeout=300)
+    assert redone.get('revert') is None, redone
+    assert (project / 'src/d000/f00001.txt').read_text() == 'third turn\n'
+    passed('redo brings all three turns back')
+
+    # Chat C: a file edited, then grown past 2 MiB by a command; undo steps back through both.
+    grown = project / 'src/d001/f00100.txt'
+    original_grown = grown.read_text()
+    third = api('POST', '/threads', {'title': 'Grow'})
+    done, _ = turn(third, '!tool write ' + json.dumps({'path': 'src/d001/f00100.txt', 'content': 'edited\n'}))
+    assert done['status'] == 'completed', done
+    grow = "head -c 2500000 /dev/zero | tr '\\0' a > src/d001/f00100.txt"
+    done, _ = turn(third, '!tool bash ' + json.dumps({'command': grow}))
+    assert done['status'] == 'completed', done
+    assert grown.stat().st_size == 2_500_000
+    for expected in ('edited\n', original_grown):
+        reverted = api('POST', f'/threads/{third["id"]}/revert', {}, timeout=300)
+        assert grown.read_text() == expected, grown.stat().st_size
+        assert not reverted['revert'].get('unrestored'), reverted['revert']
+    copies = list((root / 'data').rglob('*.undo-copies'))
+    assert len(copies) == 1 and len(list(copies[0].iterdir())) == 1, copies
+    passed('undo steps back through a file grown past 2 MiB, its content kept first')
+    for _ in range(2):
+        redone = api('POST', f'/threads/{third["id"]}/unrevert', {}, timeout=300)
+    assert redone.get('revert') is None, redone
+    assert grown.stat().st_size == 2_500_000 and grown.read_bytes()[:4] == b'aaaa'
+    assert not list(copies[0].iterdir()), 'the copies stayed after the last redo'
+    passed('redo brings the grown file back from its copy, and the copy goes')
 
     assert chatter.turns >= 5, chatter.turns
     assert not chatter.errors, chatter.errors[:5]

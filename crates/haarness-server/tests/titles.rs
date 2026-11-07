@@ -26,6 +26,8 @@ struct Provider {
     title: CancellationToken,
     main: CancellationToken,
     failures: AtomicUsize,
+    /// The output limit the catalog states for `main`, 0 for none.
+    output_limit: std::sync::atomic::AtomicU64,
 }
 
 impl Provider {
@@ -37,6 +39,7 @@ impl Provider {
             title: CancellationToken::new(),
             main: CancellationToken::new(),
             failures: AtomicUsize::new(0),
+            output_limit: std::sync::atomic::AtomicU64::new(0),
         });
         if title_ready {
             provider.title.cancel();
@@ -63,11 +66,27 @@ impl ModelProvider for Provider {
         "fixture"
     }
     fn info(&self) -> ProviderInfo {
+        let limit = self.output_limit.load(Ordering::SeqCst);
         ProviderInfo {
             id: "fixture".into(),
             name: "Titles".into(),
             authenticated: true,
-            models: vec![],
+            models: if limit == 0 {
+                vec![]
+            } else {
+                vec![haarness_protocol::ModelInfo {
+                    id: "main".into(),
+                    display_name: "Main".into(),
+                    reasoning: false,
+                    reasoning_efforts: Vec::new(),
+                    images: false,
+                    video: false,
+                    tools: false,
+                    context_window: None,
+                    max_output_tokens: Some(limit),
+                    pricing: None,
+                }]
+            },
         }
     }
     async fn stream(
@@ -77,6 +96,22 @@ impl ModelProvider for Provider {
     ) -> CoreResult<ProviderStream> {
         let title = request.system == haarness_core::system_prompt_for("title");
         let broken = request.model == "broken-small";
+        // A model cut off at its output limit while it thought aloud.
+        if title && request.model == "unclosed-small" {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((request, cancel.clone()));
+            self.title_started.add_permits(1);
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderEvent::TextDelta(
+                    "<think>Choosing a short name for this chat".into(),
+                )),
+                Ok(ProviderEvent::Finished {
+                    reason: "length".into(),
+                }),
+            ])));
+        }
         self.requests
             .lock()
             .unwrap()
@@ -304,7 +339,16 @@ async fn renames_are_trimmed_and_a_blank_title_is_refused() {
         .await
         .unwrap();
     assert_eq!(renamed.title, "Release notes");
-    for blank in ["", "   ", "\t\n"] {
+    // A title loses what a terminal listing the chats would act on.
+    let renamed = runtime
+        .update_thread(
+            thread.id,
+            rename("\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}Release\nnotes"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed.title, "Release notes");
+    for blank in ["", "   ", "\t\n", "\u{1b}]0;owned\u{7}\u{1b}[2J"] {
         let error = runtime
             .update_thread(thread.id, rename(blank))
             .await
@@ -316,6 +360,91 @@ async fn renames_are_trimmed_and_a_blank_title_is_refused() {
         runtime.get_thread(thread.id).await.unwrap().title,
         "Release notes"
     );
+}
+
+/// Answers a title request with escape sequences around the title, on a
+/// line of their own and inside it.
+struct EscapedTitles;
+
+#[async_trait]
+impl ModelProvider for EscapedTitles {
+    fn id(&self) -> &str {
+        "fixture"
+    }
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            id: "fixture".into(),
+            name: "Titles".into(),
+            authenticated: true,
+            models: vec![],
+        }
+    }
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        let text = if request.system == haarness_core::system_prompt_for("title") {
+            "\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}\n\u{1b}[1mSecurity\u{1b}[0m\treview"
+        } else {
+            "Main answer"
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderEvent::TextDelta(text.into())),
+            Ok(ProviderEvent::Finished {
+                reason: "completed".into(),
+            }),
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn generated_created_and_forked_titles_lose_control_characters() {
+    let events = EventBus::new(128);
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(EscapedTitles) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        events.clone(),
+        std::env::temp_dir(),
+        String::new(),
+        RuntimeConfig::default(),
+    );
+    let untitled = thread(&runtime).await;
+    let mut receiver = events.subscribe(None).receiver;
+    let turn = runtime.start_turn(untitled.id, request()).await.unwrap();
+    assert_eq!(
+        updated(&mut receiver, untitled.id).await.title,
+        "Security review"
+    );
+    finished(&runtime, &turn).await;
+
+    let create = |title: &str| CreateThreadRequest {
+        title: Some(title.into()),
+        provider: Some("fixture".into()),
+        model: Some("main".into()),
+        ..Default::default()
+    };
+    let named = runtime
+        .create_thread(create("\u{1b}]0;owned\u{7}Release\u{9b}\u{7f} notes"))
+        .await
+        .unwrap();
+    assert_eq!(named.title, "Release notes");
+    let blank = runtime.create_thread(create("\u{1b}[2J")).await.unwrap();
+    assert!(haarness_protocol::is_untitled_chat_title(&blank.title));
+
+    let fork = runtime
+        .fork_thread(named.id, Some("\u{1b}]2;tab\u{7}Try again".into()), None)
+        .await
+        .unwrap();
+    assert_eq!(fork.title, "Try again");
+    let fork = runtime
+        .fork_thread(named.id, Some("\u{1b}[2J".into()), None)
+        .await
+        .unwrap();
+    assert_eq!(fork.title, "Fork of Release notes");
 }
 
 #[tokio::test]
@@ -343,6 +472,82 @@ async fn broken_small_model_falls_back_to_session_model_without_waiting_for_main
     );
     provider.main.cancel();
     finished(&runtime, &turn).await;
+}
+
+#[tokio::test]
+async fn a_long_first_message_is_quoted_in_part_and_the_title_output_is_capped() {
+    // A pasted log of 400 KB, then text in a script whose characters take
+    // several bytes each, so a cut by bytes would split one.
+    for (text, stated, asked) in [
+        (
+            format!(
+                "Why does this fail?\n{}",
+                "error: connection refused\n".repeat(16_000)
+            ),
+            64_000,
+            Some(4_096),
+        ),
+        // A model with a lower limit is held to it; one whose limit the
+        // catalog does not state is asked for none.
+        ("日本語のテキスト".repeat(1_000), 1_024, Some(1_024)),
+        ("日本語のテキスト".repeat(1_000), 0, None),
+    ] {
+        let provider = Provider::new(true, true);
+        provider.output_limit.store(stated, Ordering::SeqCst);
+        let (runtime, events) = runtime(provider.clone(), None);
+        let thread = thread(&runtime).await;
+        let mut receiver = events.subscribe(None).receiver;
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                StartTurnRequest {
+                    text: text.clone(),
+                    ..request()
+                },
+            )
+            .await
+            .unwrap();
+        finished(&runtime, &turn).await;
+        assert_eq!(
+            updated(&mut receiver, thread.id).await.title,
+            "Security review"
+        );
+        let titles = provider.titles();
+        assert_eq!(titles.len(), 1);
+        let [ProviderMessage::Text { content, .. }] = &titles[0].0.messages[..] else {
+            panic!("one quoted message");
+        };
+        let quoted = content
+            .split_once("<message>\n")
+            .and_then(|(_, rest)| rest.strip_suffix("\n</message>"))
+            .expect("the message is quoted");
+        assert_eq!(quoted.chars().count(), 2_000);
+        assert!(text.starts_with(quoted));
+        assert_eq!(titles[0].0.parameters.max_output_tokens, asked, "{stated}");
+    }
+}
+
+#[tokio::test]
+async fn thinking_cut_off_before_its_end_is_not_a_title() {
+    let provider = Provider::new(true, true);
+    let (runtime, events) = runtime(provider.clone(), Some("fixture/unclosed-small"));
+    let thread = thread(&runtime).await;
+    let mut receiver = events.subscribe(None).receiver;
+    let turn = runtime.start_turn(thread.id, request()).await.unwrap();
+    finished(&runtime, &turn).await;
+    // The small model's reply holds no title: the chat's model names it.
+    assert_eq!(
+        updated(&mut receiver, thread.id).await.title,
+        "Security review"
+    );
+    assert_eq!(
+        provider
+            .titles()
+            .iter()
+            .map(|(request, _)| request.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["unclosed-small", "main"]
+    );
 }
 
 #[tokio::test]

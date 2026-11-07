@@ -616,7 +616,7 @@
 .html-preview { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: white; color: #171717; }
 .html-preview-viewport { flex: 1; min-height: 100px; overflow: hidden; position: relative; }
 .html-preview iframe { display: block; border: 0; width: 100%; height: 100%; }
-.preview-notice { flex: none; padding: 8px 12px; font: 12px/1.4 var(--font); background: var(--surface); color: var(--muted); }
+.preview-notice { flex: none; padding: var(--s2) var(--s3); font: var(--ui) / var(--lh-ui) var(--sans); background: var(--surface); color: var(--muted); }
 .document-preview { overflow: auto; padding: 24px; flex: 1; }
 /* A comment on lines of a Markdown file's Preview, docked under it (Explorer). */
 .preview-comment {
@@ -625,17 +625,23 @@
   border-block-start: 1px solid var(--hairline);
   background: var(--page);
 }
-.preview-banner { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin: 12px 0; }
-.preview-banner-heading { display: flex; align-items: center; gap: 10px; padding: 12px; }
-.preview-title { text-align: left; flex: 1; min-width: 0; display: grid; gap: 4px; }
-.preview-title span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.preview-status { color: var(--muted); font-size: 11px; flex: none; }
-.preview-banner-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 12px 12px; }
-.preview-banner-actions button, .preview-version-strip button { padding: 4px 9px; background: var(--surface); border: 1px solid var(--border); border-radius: 5px; }
+.preview-banner { border: 1px solid var(--hairline); border-radius: var(--r-md); overflow: hidden; margin: var(--s3) 0; }
+.preview-banner-heading { display: flex; align-items: center; gap: var(--s2); padding: var(--s3); }
+/* The title opens the preview as "Open preview" does; it is the card's
+   heading, not a box of its own. */
+.preview-title { text-align: start; flex: 1; min-width: 0; display: grid; justify-content: stretch; gap: var(--s0); min-height: 0; padding: 0; border: 0; background: none; white-space: normal; }
+.preview-title:hover:not(:disabled) { background: none; }
+.preview-title span { color: var(--muted); font-size: var(--ui-sm); overflow-wrap: anywhere; }
+.preview-status { color: var(--muted); font-size: var(--ui-sm); flex: none; }
+.preview-banner-actions { display: flex; flex-wrap: wrap; gap: var(--s2); padding: 0 var(--s3) var(--s3); }
+.preview-banner-actions button, .preview-version-strip button { padding: var(--s0) var(--s2); background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--r-sm); }
 .preview-banner-actions button[aria-pressed="true"] { background: var(--selected); }
-.preview-code { max-height: 400px; overflow: auto; padding: 12px; font: 12px/1.5 var(--mono); font-variant-ligatures: none; white-space: pre-wrap; overflow-wrap: anywhere; }
-.preview-added { background: #22c55e25; }.preview-removed { background: #ef444425; text-decoration: line-through; }
-.preview-version-strip { padding: 8px 12px; background: var(--surface); display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.preview-code { max-height: 400px; overflow: auto; padding: var(--s3); font: var(--ui-sm) / 1.5 var(--mono); font-variant-ligatures: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+.preview-added { background: var(--diff-add); }
+.preview-removed { background: var(--diff-remove); text-decoration: line-through; }
+.preview-version-strip { padding: var(--s2) var(--s3); background: var(--surface); display: flex; align-items: center; gap: var(--s2); font-size: var(--ui); }
+/* Its buttons sit together at the end, after what the strip says. */
+.preview-version-strip button:first-of-type { margin-inline-start: auto; }
 /* The open file moved on under unsaved edits: say so where the edits are. */
 .file-changed { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); padding: var(--s2) var(--s3); background: var(--surface); border-bottom: 1px solid var(--hairline); font-size: var(--ui); }
 .file-changed > .icon { color: var(--accent); flex: none; }
@@ -648,5 +654,5 @@
 @keyframes file-changed-flash {
   50% { background: color-mix(in srgb, var(--accent) 24%, var(--surface)); }
 }
-.preview-inline { border-top: 1px solid var(--border); }
+.preview-inline { border-top: 1px solid var(--hairline); }
 .file-actions { flex-wrap: wrap; }

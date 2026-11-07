@@ -166,9 +166,11 @@ impl ModelProvider for LongToolLoop {
                     && content.starts_with("The configured maximum number of tool steps"))
         });
         let mut events = if guard {
-            if !request.tools.is_empty() {
+            // The tools stay as every earlier round sent them, so the
+            // request reads the prompt prefix those rounds cached.
+            if request.tools.is_empty() {
                 return Err(CoreError::Invalid(
-                    "tool-step guard request still exposed ordinary tools".into(),
+                    "tool-step guard request dropped the tools".into(),
                 ));
             }
             self.guarded.store(true, Ordering::SeqCst);
@@ -549,12 +551,14 @@ impl CompactionQueueRace {
     }
 }
 
+/// A summary request ends on its request to summarize, in the chat's last
+/// message when that is the person's too.
 fn is_compaction_request(request: &ProviderRequest) -> bool {
     matches!(
         request.messages.last(),
         Some(ProviderMessage::Text { role, content })
             if role == "user"
-                && content.starts_with("Summarize this conversation for continuation:")
+                && content.contains("Summarize this conversation for continuation:")
     )
 }
 
@@ -4823,7 +4827,7 @@ async fn a_compaction_summary_asks_providers_to_write_no_cache_entry() {
     let requests = requests.lock().unwrap();
     let (summaries, turns): (Vec<_>, Vec<_>) = requests.iter().partition(|request| {
         matches!(request.messages.last(), Some(ProviderMessage::Text { content, .. })
-            if content.starts_with("Summarize this conversation for continuation"))
+            if content.contains("Summarize this conversation for continuation"))
     });
     assert_eq!(summaries.len(), 1, "{requests:#?}");
     assert!(summaries[0].parameters.uncached);
@@ -6771,6 +6775,936 @@ async fn undo_restores_the_files_a_persons_shell_command_wrote() {
             .await
             .unwrap(),
         "new"
+    );
+    remove_test_folder(root).await;
+}
+
+#[tokio::test]
+async fn undo_names_the_files_it_left_as_they_are() {
+    let root = std::env::temp_dir().join(format!("haarness-unrestored-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(workspace.join(".git"))
+        .await
+        .unwrap();
+    for (path, content) in [
+        (".gitignore", "local.env\n"),
+        ("local.env", "TOKEN=old\n"),
+        ("tracked.txt", "before\n"),
+    ] {
+        tokio::fs::write(workspace.join(path), content)
+            .await
+            .unwrap();
+    }
+    // Over the checkpoints' size limit: they keep its hash, not its content.
+    let large = vec![b'x'; 3 * 1024 * 1024];
+    tokio::fs::write(workspace.join("large.bin"), &large)
+        .await
+        .unwrap();
+    let runtime = undo_fixture(&root, &workspace);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Unrestored fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let calls = serde_json::json!([
+        {"name": "write", "arguments": {"path": "local.env", "content": "TOKEN=new\n"}},
+        {"name": "write", "arguments": {"path": "tracked.txt", "content": "after\n"}},
+        {"name": "write", "arguments": {"path": "large.bin", "content": "small now\n"}},
+        {"name": "write", "arguments": {"path": "added.txt", "content": "new\n"}},
+    ]);
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&format!("!multi {calls}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let read = |path: &str| std::fs::read(workspace.join(path)).ok();
+
+    let reverted = runtime.revert(thread.id, None).await.unwrap();
+    assert_eq!(read("tracked.txt").as_deref(), Some(&b"before\n"[..]));
+    assert_eq!(read("added.txt"), None);
+    // The ignored file and the large one stay as the turn left them, and
+    // the undo says so.
+    assert_eq!(read("local.env").as_deref(), Some(&b"TOKEN=new\n"[..]));
+    assert_eq!(read("large.bin").as_deref(), Some(&b"small now\n"[..]));
+    let unrestored = |thread: &haarness_protocol::Thread| {
+        thread
+            .revert
+            .as_ref()
+            .map(|revert| (revert.unrestored.clone(), revert.unrestored_count))
+    };
+    // Nothing holds what the large file held before the turn shrank it.
+    let left = |path: &str, reason| haarness_protocol::UnrestoredFile {
+        path: path.to_owned(),
+        reason,
+    };
+    let expected = Some((
+        vec![
+            left("large.bin", haarness_protocol::UnrestoredReason::Large),
+            left("local.env", haarness_protocol::UnrestoredReason::Ignored),
+        ],
+        None,
+    ));
+    assert_eq!(unrestored(&reverted), expected);
+    assert_eq!(
+        unrestored(&runtime.get_thread(thread.id).await.unwrap()),
+        expected,
+        "kept with the undo"
+    );
+
+    // Redo brings back what undo put back, and the notice goes with it.
+    let redone = runtime.unrevert(thread.id).await.unwrap();
+    assert!(redone.revert.is_none());
+    assert_eq!(read("tracked.txt").as_deref(), Some(&b"after\n"[..]));
+    assert_eq!(read("added.txt").as_deref(), Some(&b"new\n"[..]));
+    remove_test_folder(root).await;
+}
+
+#[tokio::test]
+async fn undo_and_redo_step_through_a_file_a_turn_grew_past_the_size_limit() {
+    let root = std::env::temp_dir().join(format!("haarness-grown-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::write(workspace.join("data.txt"), "v0\n")
+        .await
+        .unwrap();
+    tokio::fs::write(workspace.join("other.txt"), "o0\n")
+        .await
+        .unwrap();
+    let database = root.join("db.sqlite");
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::open(&database).unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+        EventBus::new(64),
+        workspace.clone(),
+        String::new(),
+        {
+            let mut config = haarness_core::RuntimeConfig::default();
+            for pattern in ["write:*", "bash:*"] {
+                config.base_rules.push(haarness_core::PermissionRule {
+                    pattern: pattern.into(),
+                    decision: haarness_core::PermissionDecision::Allow,
+                });
+            }
+            config
+        },
+    )
+    .with_snapshots(Arc::new(
+        haarness_store::SqliteSnapshotStore::open(&database, workspace.clone()).unwrap(),
+    ));
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Grown file fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // Turn 1 edits it; turn 2's command grows it past 2 MiB.
+    let grow = "head -c 2500000 /dev/zero | tr '\\0' a > data.txt";
+    for (data, other) in [
+        (
+            serde_json::json!({"name": "write", "arguments": {"path": "data.txt", "content": "v1\n"}}),
+            "o1\n",
+        ),
+        (
+            serde_json::json!({"name": "bash", "arguments": {"command": grow}}),
+            "o2\n",
+        ),
+    ] {
+        let calls = serde_json::json!([
+            data,
+            {"name": "write", "arguments": {"path": "other.txt", "content": other}},
+        ]);
+        let turn = runtime
+            .start_turn(thread.id, turn_request(&format!("!multi {calls}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_done(&runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+    }
+    let read = |path: &str| std::fs::read_to_string(workspace.join(path)).unwrap();
+    let large = read("data.txt");
+    assert_eq!(large.len(), 2_500_000);
+    // Both steps back: the large content is kept first, so nothing is left
+    // and the second step meets no false conflict.
+    for (data, other) in [("v1\n", "o1\n"), ("v0\n", "o0\n")] {
+        let reverted = runtime.revert(thread.id, None).await.unwrap();
+        assert_eq!(read("data.txt"), data);
+        assert_eq!(read("other.txt"), other);
+        assert!(reverted.revert.unwrap().unrestored.is_empty());
+    }
+    let copies = root.join("db.sqlite.undo-copies");
+    assert_eq!(std::fs::read_dir(&copies).unwrap().count(), 1);
+    // And forward again, the large file from its copy.
+    runtime.unrevert(thread.id).await.unwrap();
+    assert_eq!(read("data.txt"), "v1\n");
+    let redone = runtime.unrevert(thread.id).await.unwrap();
+    assert!(redone.revert.is_none());
+    assert_eq!(read("data.txt"), large);
+    assert_eq!(read("other.txt"), "o2\n");
+    assert_eq!(
+        std::fs::read_dir(&copies).unwrap().count(),
+        0,
+        "the copies go with the undo"
+    );
+    remove_test_folder(root).await;
+}
+
+/// A runtime over `root`'s database that may write files and run commands
+/// in `workspace` without asking, with checkpoints.
+fn large_file_fixture(root: &std::path::Path, workspace: &std::path::Path) -> AgentRuntime {
+    let database = root.join("db.sqlite");
+    AgentRuntime::with_config(
+        Arc::new(SqliteStore::open(&database).unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(haarness_server::NativeToolRegistry::new(
+            workspace.to_path_buf(),
+        )),
+        EventBus::new(64),
+        workspace.to_path_buf(),
+        String::new(),
+        {
+            let mut config = haarness_core::RuntimeConfig::default();
+            for pattern in ["write:*", "bash:*"] {
+                config.base_rules.push(haarness_core::PermissionRule {
+                    pattern: pattern.into(),
+                    decision: haarness_core::PermissionDecision::Allow,
+                });
+            }
+            config
+        },
+    )
+    .with_snapshots(Arc::new(
+        haarness_store::SqliteSnapshotStore::open(&database, workspace.to_path_buf()).unwrap(),
+    ))
+}
+
+/// Two turns that each edit `other.txt` and take `big.bin` through the
+/// size limit: turn 1 writes 2.5 MB of `a` over `start` (a new file when
+/// none), and turn 2 makes `second` of it, which `rm` deletes.
+async fn two_large_turns(
+    runtime: &AgentRuntime,
+    workspace: &std::path::Path,
+    start: Option<&str>,
+    second: serde_json::Value,
+) -> haarness_protocol::ThreadId {
+    if let Some(start) = start {
+        std::fs::write(workspace.join("big.bin"), start).unwrap();
+    }
+    std::fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Two large turns".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let grow = serde_json::json!({"name": "bash", "arguments": {
+        "command": "head -c 2500000 /dev/zero | tr '\\0' a > big.bin"}});
+    for (change, other) in [(grow, "o1\n"), (second, "o2\n")] {
+        let calls = serde_json::json!([
+            change,
+            {"name": "write", "arguments": {"path": "other.txt", "content": other}},
+        ]);
+        let turn = runtime
+            .start_turn(thread.id, turn_request(&format!("!multi {calls}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_done(runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+    }
+    thread.id
+}
+
+#[tokio::test]
+async fn two_turns_through_a_large_file_are_undone_and_redone_all_the_way() {
+    let rewrite = serde_json::json!({"name": "bash", "arguments": {
+        "command": "head -c 2500000 /dev/zero | tr '\\0' b > big.bin"}});
+    let scenarios = [
+        ("made, rewritten", None, rewrite.clone()),
+        ("grown, rewritten", Some("v0\n"), rewrite),
+        (
+            "made, deleted",
+            None,
+            serde_json::json!({"name": "bash", "arguments": {"command": "rm big.bin"}}),
+        ),
+        (
+            "grown, shrunk",
+            Some("v0\n"),
+            serde_json::json!({"name": "write", "arguments": {"path": "big.bin", "content": "v2\n"}}),
+        ),
+        (
+            "grown, deleted",
+            Some("v0\n"),
+            serde_json::json!({"name": "bash", "arguments": {"command": "rm big.bin"}}),
+        ),
+    ];
+    for (scenario, start, second) in scenarios {
+        let root =
+            std::env::temp_dir().join(format!("haarness-two-large-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("ws");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let runtime = large_file_fixture(&root, &workspace);
+        let thread = two_large_turns(&runtime, &workspace, start, second).await;
+        let read = |path: &str| std::fs::read(workspace.join(path)).ok();
+        let turn_two = read("big.bin");
+        let left = |thread: &haarness_protocol::Thread| {
+            thread
+                .revert
+                .as_ref()
+                .map(|revert| {
+                    revert
+                        .unrestored
+                        .iter()
+                        .map(|file| (file.path.clone(), file.reason))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let big = vec![(
+            "big.bin".to_owned(),
+            haarness_protocol::UnrestoredReason::Large,
+        )];
+
+        // Nothing holds what turn 1 left: the first step back leaves the
+        // file and names it, and the second takes it all the way back.
+        let undone = runtime.revert(thread, None).await.unwrap();
+        assert_eq!(left(&undone), big, "{scenario}");
+        assert_eq!(read("big.bin"), turn_two, "{scenario}");
+        assert_eq!(
+            read("other.txt").as_deref(),
+            Some(&b"o1\n"[..]),
+            "{scenario}"
+        );
+        let undone = runtime
+            .revert(thread, None)
+            .await
+            .unwrap_or_else(|error| panic!("{scenario}: {error}"));
+        assert_eq!(left(&undone), Vec::new(), "{scenario}: as before turn 1");
+        assert_eq!(
+            read("big.bin"),
+            start.map(|start| start.as_bytes().to_vec()),
+            "{scenario}"
+        );
+        assert_eq!(
+            read("other.txt").as_deref(),
+            Some(&b"o0\n"[..]),
+            "{scenario}"
+        );
+
+        // Forward, the first redo takes the file to where the last one
+        // does, and names it until then.
+        let redone = runtime
+            .unrevert(thread)
+            .await
+            .unwrap_or_else(|error| panic!("{scenario}: {error}"));
+        assert_eq!(left(&redone), big, "{scenario}");
+        assert_eq!(read("big.bin"), turn_two, "{scenario}");
+        assert_eq!(
+            read("other.txt").as_deref(),
+            Some(&b"o1\n"[..]),
+            "{scenario}"
+        );
+        let redone = runtime
+            .unrevert(thread)
+            .await
+            .unwrap_or_else(|error| panic!("{scenario}: {error}"));
+        assert!(redone.revert.is_none(), "{scenario}");
+        assert_eq!(read("big.bin"), turn_two, "{scenario}");
+        assert_eq!(
+            read("other.txt").as_deref(),
+            Some(&b"o2\n"[..]),
+            "{scenario}"
+        );
+        let copies = root.join("db.sqlite.undo-copies");
+        assert_eq!(
+            std::fs::read_dir(&copies).map_or(0, Iterator::count),
+            0,
+            "{scenario}: the copies go with the undo"
+        );
+        remove_test_folder(root).await;
+    }
+}
+
+#[tokio::test]
+async fn an_undo_or_redo_step_that_cannot_be_saved_puts_its_large_file_back() {
+    let root = std::env::temp_dir().join(format!("haarness-unsaved-step-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    let runtime = large_file_fixture(&root, &workspace);
+    let rewrite = serde_json::json!({"name": "bash", "arguments": {
+        "command": "head -c 2500000 /dev/zero | tr '\\0' b > big.bin"}});
+    let thread = two_large_turns(&runtime, &workspace, None, rewrite).await;
+    let read = |path: &str| std::fs::read(workspace.join(path)).ok();
+    let turn_two = read("big.bin");
+    // The chat's undo state cannot be saved while this trigger stands.
+    let database = rusqlite::Connection::open(root.join("db.sqlite")).unwrap();
+    let refuse = |on: bool| {
+        database
+            .execute_batch(if on {
+                "CREATE TRIGGER refuse_undo_state BEFORE UPDATE OF revert_sequence ON threads \
+                 WHEN NEW.revert_sequence IS NOT OLD.revert_sequence \
+                 BEGIN SELECT RAISE(ABORT, 'database is full'); END;"
+            } else {
+                "DROP TRIGGER refuse_undo_state;"
+            })
+            .unwrap();
+    };
+    runtime.revert(thread, None).await.unwrap();
+
+    // The second step back removes the file and cannot be saved: the file
+    // comes back from its copy, though nothing holds what turn 1 left.
+    refuse(true);
+    assert!(runtime.revert(thread, None).await.is_err());
+    assert_eq!(read("big.bin"), turn_two);
+    assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
+    refuse(false);
+    runtime.revert(thread, None).await.unwrap();
+    assert_eq!(read("big.bin"), None);
+
+    // A redo step that cannot be saved goes back as an undo step does: the
+    // file it brought back goes again.
+    refuse(true);
+    assert!(runtime.unrevert(thread).await.is_err());
+    assert_eq!(read("big.bin"), None);
+    assert_eq!(read("other.txt").as_deref(), Some(&b"o0\n"[..]));
+    refuse(false);
+    runtime.unrevert(thread).await.unwrap();
+    assert!(runtime.unrevert(thread).await.unwrap().revert.is_none());
+    assert_eq!(read("big.bin"), turn_two);
+    assert_eq!(read("other.txt").as_deref(), Some(&b"o2\n"[..]));
+    drop(database);
+    remove_test_folder(root).await;
+}
+
+/// A server over `runtime`, its address and the token its client sends.
+async fn undo_server(
+    runtime: AgentRuntime,
+    workspace: &std::path::Path,
+) -> (haarness_server::ServerHandle, String, reqwest::Client) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let handle = serve(
+        listener,
+        "undo-token",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime: Arc::new(runtime),
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace: workspace.to_path_buf(),
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    let base = format!("http://{}/v1", handle.address);
+    let client = reqwest::Client::builder()
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                "Bearer undo-token".parse().unwrap(),
+            );
+            headers
+        })
+        .build()
+        .unwrap();
+    (handle, base, client)
+}
+
+/// A new chat on `base`, by its id.
+async fn undo_chat(client: &reqwest::Client, base: &str) -> String {
+    let thread: Thread = client
+        .post(format!("{base}/threads"))
+        .json(&serde_json::json!({"title": "Undo chat", "provider": "echo", "model": "echo-1"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    thread.id.to_string()
+}
+
+/// A turn of `chat` that makes the tool `calls`, run to the end.
+async fn undo_turn(client: &reqwest::Client, base: &str, chat: &str, calls: serde_json::Value) {
+    let begun: Turn = client
+        .post(format!("{base}/threads/{chat}/turns"))
+        .json(&serde_json::json!({
+            "requestId": uuid::Uuid::now_v7().to_string(),
+            "text": format!("!multi {calls}"),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for _ in 0..1_000 {
+        let turn: Turn = client
+            .get(format!("{base}/turns/{}", begun.id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if !matches!(turn.status, TurnStatus::Queued | TurnStatus::Running) {
+            assert_eq!(turn.status, TurnStatus::Completed, "{calls}");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("turn did not finish");
+}
+
+/// An edit to the folder after a turn: the person's, or another chat's turn
+/// when `None`.
+type LaterEdit = Option<Box<dyn Fn(&std::path::Path)>>;
+
+#[tokio::test]
+async fn undo_answers_conflict_and_changes_nothing_at_a_later_edit_whatever_the_size() {
+    let make = |byte: char| {
+        serde_json::json!({"name": "bash", "arguments": {
+            "command": format!("head -c 2500000 /dev/zero | tr '\\0' {byte} > big.bin")}})
+    };
+    let other = |content: &str| {
+        serde_json::json!({"name": "write", "arguments": {
+            "path": "other.txt", "content": content}})
+    };
+    let append = |path: &str| {
+        let path = path.to_owned();
+        move |workspace: &std::path::Path| {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(workspace.join(&path))
+                .unwrap();
+            std::io::Write::write_all(&mut file, b"edit\n").unwrap();
+        }
+    };
+    let large = "z".repeat(2_500_000);
+    // The file, what it starts as, the turn's change to it, and the later
+    // edit.
+    let scenarios: Vec<(&str, &str, Option<&str>, serde_json::Value, LaterEdit)> = vec![
+        (
+            "made, appended",
+            "big.bin",
+            None,
+            make('a'),
+            Some(Box::new(append("big.bin"))),
+        ),
+        (
+            "grown, trimmed",
+            "big.bin",
+            Some("v0\n"),
+            make('a'),
+            Some(Box::new(|workspace: &std::path::Path| {
+                std::fs::write(workspace.join("big.bin"), "trimmed\n").unwrap();
+            })),
+        ),
+        (
+            "small, pasted into",
+            "s.txt",
+            Some("s0\n"),
+            serde_json::json!({"name": "write", "arguments": {"path": "s.txt", "content": "s1\n"}}),
+            Some(Box::new(|workspace: &std::path::Path| {
+                std::fs::write(workspace.join("s.txt"), vec![b'H'; 3_000_000]).unwrap();
+            })),
+        ),
+        (
+            "large both sides, appended",
+            "big.bin",
+            Some(large.as_str()),
+            make('a'),
+            Some(Box::new(append("big.bin"))),
+        ),
+        (
+            "made, rewritten by another chat",
+            "big.bin",
+            None,
+            make('a'),
+            None,
+        ),
+    ];
+    for (scenario, path, start, change, edit) in scenarios {
+        for second_step in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("haarness-later-edit-{}", uuid::Uuid::now_v7()));
+            let workspace = root.join("ws");
+            tokio::fs::create_dir_all(&workspace).await.unwrap();
+            if let Some(start) = start {
+                std::fs::write(workspace.join(path), start).unwrap();
+            }
+            std::fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+            let (handle, base, client) =
+                undo_server(large_file_fixture(&root, &workspace), &workspace).await;
+            let chat = undo_chat(&client, &base).await;
+            let turn = |calls| undo_turn(&client, &base, &chat, calls);
+            turn(serde_json::json!([change, other("o1\n")])).await;
+            // On the second step, a later turn changed only `other.txt`.
+            if second_step {
+                turn(serde_json::json!([other("o2\n")])).await;
+            }
+            match &edit {
+                Some(edit) => edit(&workspace),
+                None => {
+                    let another = undo_chat(&client, &base).await;
+                    undo_turn(&client, &base, &another, serde_json::json!([make('c')])).await;
+                }
+            }
+            let undo = || {
+                client
+                    .post(format!("{base}/threads/{chat}/revert"))
+                    .json(&serde_json::json!({}))
+                    .send()
+            };
+            if second_step {
+                assert!(undo().await.unwrap().status().is_success(), "{scenario}");
+                assert_eq!(
+                    std::fs::read_to_string(workspace.join("other.txt")).unwrap(),
+                    "o1\n"
+                );
+            }
+            let read = |path: &str| std::fs::read(workspace.join(path)).ok();
+            let (edited, other_before) = (read(path), read("other.txt"));
+            let state = async || {
+                client
+                    .get(format!("{base}/threads/{chat}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<Thread>()
+                    .await
+                    .unwrap()
+                    .revert
+                    .map(|revert| revert.sequence)
+            };
+            let undone_before = state().await;
+
+            let refused = undo().await.unwrap();
+            assert_eq!(
+                refused.status(),
+                reqwest::StatusCode::CONFLICT,
+                "{scenario}"
+            );
+            let body: haarness_protocol::ApiError = refused.json().await.unwrap();
+            assert_eq!(body.code, "conflict", "{scenario}: {}", body.message);
+            assert!(body.message.ends_with(path), "{scenario}: {}", body.message);
+            assert_eq!(read(path), edited, "{scenario}, second step {second_step}");
+            assert_eq!(read("other.txt"), other_before, "{scenario}");
+            assert_eq!(
+                state().await,
+                undone_before,
+                "{scenario}: the undo state stays"
+            );
+            // Nor does the next message lose the edit.
+            turn(serde_json::json!([other("o3\n")])).await;
+            assert_eq!(read(path), edited, "{scenario}, second step {second_step}");
+            handle.shutdown().await.unwrap();
+            remove_test_folder(root).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn undo_answers_conflict_at_a_later_step_when_a_left_file_was_deleted_or_put_back() {
+    let make = |byte: char| {
+        serde_json::json!({"name": "bash", "arguments": {
+            "command": format!("head -c 2500000 /dev/zero | tr '\\0' {byte} > big.bin")}})
+    };
+    let other = |content: String| {
+        serde_json::json!({"name": "write", "arguments": {
+            "path": "other.txt", "content": content}})
+    };
+    for deleted in [true, false] {
+        for steps_before in [1, 2] {
+            let case = format!("deleted {deleted}, step {}", steps_before + 1);
+            let root =
+                std::env::temp_dir().join(format!("haarness-left-edit-{}", uuid::Uuid::now_v7()));
+            let workspace = root.join("ws");
+            tokio::fs::create_dir_all(&workspace).await.unwrap();
+            // Made (or grown from `v0`) and rewritten by every turn, so no
+            // step back has a copy of what the turn before left.
+            if !deleted {
+                std::fs::write(workspace.join("big.bin"), "v0\n").unwrap();
+            }
+            std::fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+            let (handle, base, client) =
+                undo_server(large_file_fixture(&root, &workspace), &workspace).await;
+            let chat = undo_chat(&client, &base).await;
+            for (turn, byte) in ['a', 'b', 'c']
+                .into_iter()
+                .take(steps_before + 1)
+                .enumerate()
+            {
+                let calls = serde_json::json!([make(byte), other(format!("o{}\n", turn + 1))]);
+                undo_turn(&client, &base, &chat, calls).await;
+            }
+            let undo = || {
+                client
+                    .post(format!("{base}/threads/{chat}/revert"))
+                    .json(&serde_json::json!({}))
+                    .send()
+            };
+            for _ in 0..steps_before {
+                let undone = undo().await.unwrap().error_for_status().unwrap();
+                let undone: Thread = undone.json().await.unwrap();
+                let left = undone.revert.unwrap().unrestored;
+                assert_eq!(left.len(), 1, "{case}: {left:?}");
+                assert_eq!(left[0].path, "big.bin", "{case}");
+            }
+            let read = |path: &str| std::fs::read(workspace.join(path)).ok();
+            assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]), "{case}");
+            // What the steps left, the person deletes or puts back by hand as
+            // it was before turn 1: where the next step would take it.
+            if deleted {
+                std::fs::remove_file(workspace.join("big.bin")).unwrap();
+            } else {
+                std::fs::write(workspace.join("big.bin"), "v0\n").unwrap();
+            }
+            let edited = read("big.bin");
+            let state = async || {
+                client
+                    .get(format!("{base}/threads/{chat}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<Thread>()
+                    .await
+                    .unwrap()
+                    .revert
+                    .map(|revert| (revert.sequence, revert.unrestored))
+            };
+            let undone_before = state().await;
+
+            let refused = undo().await.unwrap();
+            assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT, "{case}");
+            let body: haarness_protocol::ApiError = refused.json().await.unwrap();
+            assert_eq!(body.code, "conflict", "{case}: {}", body.message);
+            assert!(
+                body.message.ends_with("big.bin"),
+                "{case}: {}",
+                body.message
+            );
+            assert_eq!(read("big.bin"), edited, "{case}");
+            assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]), "{case}");
+            assert_eq!(state().await, undone_before, "{case}: the undo state stays");
+            // Nor does the next message lose the edit.
+            let calls = serde_json::json!([other("o9\n".into())]);
+            undo_turn(&client, &base, &chat, calls).await;
+            assert_eq!(read("big.bin"), edited, "{case}");
+            handle.shutdown().await.unwrap();
+            remove_test_folder(root).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_file_a_turn_shrank_between_two_that_grew_it_is_undone_and_redone_without_a_conflict() {
+    let root = std::env::temp_dir().join(format!("haarness-grow-shrink-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    std::fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+    let runtime = large_file_fixture(&root, &workspace);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Grow, shrink, grow".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let make = |byte: char| {
+        serde_json::json!({"name": "bash", "arguments": {
+            "command": format!("head -c 2500000 /dev/zero | tr '\\0' {byte} > big.bin")}})
+    };
+    let shrink = serde_json::json!({"name": "write", "arguments": {
+        "path": "big.bin", "content": "small\n"}});
+    for (turn, change) in [make('a'), shrink, make('c')].into_iter().enumerate() {
+        let calls = serde_json::json!([
+            change,
+            {"name": "write", "arguments": {"path": "other.txt", "content": format!("o{}\n", turn + 1)}},
+        ]);
+        let begun = runtime
+            .start_turn(thread.id, turn_request(&format!("!multi {calls}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_done(&runtime, &begun).await.status,
+            TurnStatus::Completed
+        );
+    }
+    let read = |path: &str| std::fs::read(workspace.join(path)).ok();
+    let turn_three = read("big.bin");
+    let left = |thread: &Thread| {
+        thread
+            .revert
+            .as_ref()
+            .map(|revert| {
+                revert
+                    .unrestored
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    // Back over turn 3 the file is small again; back over turn 2 nothing
+    // holds what turn 1 left, so it stays small, named; back over turn 1,
+    // with nobody having touched it, it goes.
+    for (other, small, named) in [
+        ("o2\n", true, false),
+        ("o1\n", true, true),
+        ("o0\n", false, false),
+    ] {
+        let undone = runtime
+            .revert(thread.id, None)
+            .await
+            .unwrap_or_else(|error| panic!("back to {other:?}: {error}"));
+        assert_eq!(read("other.txt").as_deref(), Some(other.as_bytes()));
+        assert_eq!(
+            read("big.bin"),
+            small.then(|| b"small\n".to_vec()),
+            "back to {other:?}"
+        );
+        assert_eq!(
+            left(&undone),
+            if named {
+                vec!["big.bin".to_owned()]
+            } else {
+                Vec::new()
+            }
+        );
+    }
+    // Forward all the way, to the bytes turn 3 left.
+    for _ in 0..2 {
+        runtime.unrevert(thread.id).await.unwrap();
+    }
+    let redone = runtime.unrevert(thread.id).await.unwrap();
+    assert!(redone.revert.is_none());
+    assert_eq!(read("big.bin"), turn_three);
+    assert_eq!(read("other.txt").as_deref(), Some(&b"o3\n"[..]));
+    let copies = root.join("db.sqlite.undo-copies");
+    assert_eq!(std::fs::read_dir(&copies).map_or(0, Iterator::count), 0);
+    remove_test_folder(root).await;
+}
+
+#[tokio::test]
+async fn undo_names_only_what_a_resumed_child_agent_changed_in_the_undone_turn() {
+    let root = std::env::temp_dir().join(format!("haarness-child-undo-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(workspace.join(".git"))
+        .await
+        .unwrap();
+    tokio::fs::write(workspace.join(".gitignore"), "*.env\n")
+        .await
+        .unwrap();
+    let runtime = undo_fixture(&root, &workspace);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Child undo fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let delegate = |path: &str, child: Option<haarness_protocol::ThreadId>| {
+        let write = serde_json::json!({"path": path, "content": "set\n"});
+        let mut task = serde_json::json!({
+            "description": "settings",
+            "prompt": format!("!tool write {write}"),
+            "agent": "general",
+        });
+        if let Some(child) = child {
+            task["task_id"] = serde_json::json!(child.to_string());
+        }
+        format!("!tool task {task}")
+    };
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&delegate("first.env", None)))
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    let child = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|item| match item.data {
+            haarness_protocol::ItemData::TaskLink {
+                child_thread_id, ..
+            } => Some(child_thread_id),
+            _ => None,
+        })
+        .expect("a child agent");
+    // The same child, resumed by the next turn.
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&delegate("second.env", Some(child))),
+        )
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    assert!(workspace.join("first.env").exists() && workspace.join("second.env").exists());
+    let children = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            haarness_protocol::ItemData::TaskLink {
+                child_thread_id, ..
+            } => Some(child_thread_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(children, vec![child, child], "the child was resumed");
+
+    let reverted = runtime.revert(thread.id, None).await.unwrap();
+    let named = reverted
+        .revert
+        .unwrap()
+        .unrestored
+        .into_iter()
+        .map(|file| file.path)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        named,
+        vec!["second.env"],
+        "the earlier turn's file is not this step's"
     );
     remove_test_folder(root).await;
 }

@@ -5,7 +5,6 @@
 //! mention of a resource is read here too, into the message it was sent with.
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use haarness_core::{
     CoreError, CoreResult, McpRegistry, Tool, ToolContext, ToolDefinition, ToolOutput,
 };
@@ -21,17 +20,6 @@ pub(crate) const READ: &str = "mcp_resource_read";
 
 const LIST_DESCRIPTION: &str = "List the documents, records and other data that connected MCP servers expose as resources. Use this when the user refers to something that is not a local file, such as a URI with a custom scheme, then read a match with mcp_resource_read. Each entry names the server to read it from. Templates are resources addressed by a parameter such as a record id: fill in their uriTemplate placeholders before reading.";
 const READ_DESCRIPTION: &str = "Read one MCP resource by server and URI. Not for local files; use read for those. Returns the whole resource rather than a slice: text as text, images and PDFs as attachments for models that take them, and other binary content by its type and size. Long text is cut with a note that says where the full text was saved.";
-
-/// Images and documents a resource may hand the model, as `read` does.
-const ATTACHABLE: [&str; 5] = [
-    "image/png",
-    "image/jpeg",
-    "image/gif",
-    "image/webp",
-    "application/pdf",
-];
-/// The decoded size of everything one read attaches, as for MCP tool media.
-const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Both tools, for a registry whose servers declare resources.
 pub(crate) fn tools(registry: &Arc<dyn McpRegistry>) -> [Arc<dyn Tool>; 2] {
@@ -250,11 +238,13 @@ impl Tool for ReadTool {
     }
 }
 
-/// What a `resources/read` result holds, as the model may take it: its text
-/// parts (labelled by URI when there are several); images and PDFs as data
+/// What a `resources/read` result holds, as the model may take it (see
+/// [`haarness_core::mcp_content`]): its text parts and blobs of text as
+/// text (labelled by URI when there are several); images and PDFs as data
 /// URLs, while `attached` (the bytes attached so far) stays within 10 MiB;
 /// other binary content by its type and size, never as base64 text.
 fn resource_contents(result: &Value, attached: &mut usize) -> (String, Vec<String>) {
+    use haarness_core::mcp_content::{self, Blob};
     let contents = result
         .get("contents")
         .and_then(Value::as_array)
@@ -268,28 +258,17 @@ fn resource_contents(result: &Value, attached: &mut usize) -> (String, Vec<Strin
             .get("uri")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let mime = content
-            .get("mimeType")
-            .and_then(Value::as_str)
-            .unwrap_or("application/octet-stream");
+        let mime = content.get("mimeType").and_then(Value::as_str);
         let text = if let Some(text) = content.get("text").and_then(Value::as_str) {
             text.to_owned()
         } else if let Some(blob) = content.get("blob").and_then(Value::as_str) {
-            match STANDARD.decode(blob) {
-                Err(_) => format!("[{uri}: {mime} content that is not valid base64]"),
-                Ok(bytes) if ATTACHABLE.contains(&mime) => {
-                    *attached = attached.saturating_add(bytes.len());
-                    if *attached > MAX_ATTACHMENT_BYTES {
-                        format!(
-                            "[{uri}: {mime}, {} bytes, left out: a read attaches at most 10 MiB]",
-                            bytes.len()
-                        )
-                    } else {
-                        attachments.push(format!("data:{mime};base64,{blob}"));
-                        format!("[{mime} attachment: {uri}]")
-                    }
+            match mcp_content::blob(uri, mime, blob, attached) {
+                Blob::Text(text) => text,
+                Blob::Attached { data_url, note } => {
+                    attachments.push(data_url);
+                    note
                 }
-                Ok(bytes) => format!("[{uri}: {mime}, {} bytes]", bytes.len()),
+                Blob::Note(note) => note,
             }
         } else {
             continue;
@@ -307,14 +286,16 @@ fn resource_contents(result: &Value, attached: &mut usize) -> (String, Vec<Strin
 }
 
 /// What the model gets for a `resources/read` result: its contents, the text
-/// cut with a note when long (the whole text saved in `directory`).
+/// cut with a note when long (the whole text saved in `directory`), as an
+/// MCP tool's is, so a resource of one long JSON line is laid out a value a
+/// line.
 async fn resource_output(
     result: &Value,
     directory: &std::path::Path,
     attached: &mut usize,
 ) -> CoreResult<ToolOutput> {
     let (text, attachments) = resource_contents(result, attached);
-    let mut output = crate::tools::truncate_output_at(text, directory).await?;
+    let (mut output, _) = crate::tools::cut_mcp_text(text, directory, false).await?;
     if !attachments.is_empty() {
         if !output.metadata.is_object() {
             output.metadata = json!({});
@@ -463,25 +444,40 @@ pub(crate) async fn read_mentions(
 }
 
 /// A mentioned resource's text within `room` bytes (and 2,000 lines): the
-/// first whole lines that fit, then a note that says how much is left out
-/// and where the whole text was saved for the model to read.
+/// first whole lines that fit, and the start of a long line that does not,
+/// then a note that says how much is left out and where the whole text was
+/// saved for the model to read. JSON on one line is laid out a value a line
+/// first (see [`crate::tools::indented_json`]), and comes whole when it
+/// then fits.
 async fn cut(text: String, room: usize, directory: &Path) -> CoreResult<String> {
-    if text.len() <= room && text.lines().count() <= MENTION_LINES {
+    let fits = |text: &str| text.len() <= room && text.lines().count() <= MENTION_LINES;
+    if fits(&text) {
         return Ok(text);
     }
+    // Saved, and shown, as an MCP tool's text is, so the file reads by line.
+    let text = match crate::tools::indented_json(&text) {
+        Some(laid_out) if fits(&laid_out) => return Ok(laid_out),
+        Some(laid_out) => laid_out,
+        None => text,
+    };
     let mut kept = 0;
     for (index, line) in text.split_inclusive('\n').enumerate() {
-        if index == MENTION_LINES || kept + line.len() > room {
+        if index == MENTION_LINES {
+            break;
+        }
+        if kept + line.len() > room {
+            // A line too long to read whole (data on one line, or the first)
+            // is cut inside it, so a heading before it does not come alone;
+            // a shorter one is left out whole.
+            if kept == 0 || line.len() > crate::tools::LONG_LINE_BYTES {
+                kept = room.min(text.len());
+                while !text.is_char_boundary(kept) {
+                    kept -= 1;
+                }
+            }
             break;
         }
         kept += line.len();
-    }
-    // A first line longer than the room is cut inside it.
-    if kept == 0 {
-        kept = room.min(text.len());
-        while !text.is_char_boundary(kept) {
-            kept -= 1;
-        }
     }
     let error = |error: std::io::Error| CoreError::Tool(error.to_string());
     let (path, mut file) = crate::data_folder::new_private_file(directory, "resource")
@@ -544,6 +540,7 @@ fn mention_block(mention: &ResourceMention, body: &str, failed: bool) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use haarness_protocol::{McpConfigureRequest, McpServerInfo, ThreadId, TurnId};
     use std::sync::Mutex;
     use tokio_util::sync::CancellationToken;
@@ -623,12 +620,25 @@ mod tests {
                 "docs://fenced" => Ok(
                     json!({"contents": [{"uri": uri, "mimeType": "text/markdown", "text": "```sh\nrun\n```"}]}),
                 ),
+                "docs://notes" => Ok(
+                    json!({"contents": [{"uri": uri, "mimeType": "text/plain; charset=utf-8", "blob": STANDARD.encode("Ship on Friday.\n")}]}),
+                ),
+                "docs://record" => Ok(
+                    json!({"contents": [{"uri": uri, "mimeType": "Application/JSON", "blob": STANDARD.encode(r#"{"id":7}"#)}]}),
+                ),
+                "docs://shout" => Ok(
+                    json!({"contents": [{"uri": uri, "mimeType": "IMAGE/PNG; charset=binary", "blob": png}]}),
+                ),
                 "docs://archive" => Ok(
                     json!({"contents": [{"uri": uri, "mimeType": "application/zip", "blob": STANDARD.encode([0u8; 300])}]}),
                 ),
                 "docs://big" => {
                     Ok(json!({"contents": [{"uri": uri, "text": "line\n".repeat(30_000)}]}))
                 }
+                "docs://found" => Ok(json!({"contents": [{"uri": uri, "mimeType": "text/plain",
+                    "text": format!("Found 3000 issues:\n[{}]", vec![r#"{"id":1234567890123456789012345}"#; 3000].join(","))}]})),
+                "docs://dump" => Ok(json!({"contents": [{"uri": uri,
+                    "text": format!("Found 3000 issues:\n{}", "issue; ".repeat(15_000))}]})),
                 "docs://wide" => Ok(
                     json!({"contents": [{"uri": uri, "text": format!("{}\n", "w".repeat(99)).repeat(1_500)}]}),
                 ),
@@ -772,6 +782,43 @@ mod tests {
             ),
             "{missing}"
         );
+    }
+
+    /// A blob of text came back as `[uri: type, N bytes]` and an image type
+    /// written in capitals or with a parameter was never attached.
+    #[tokio::test]
+    async fn a_blob_of_text_reads_as_its_text_and_an_image_of_any_spelling_attaches() {
+        let registry: Arc<dyn McpRegistry> = Arc::new(Resources::default());
+        let [_, read] = tools(&registry);
+        let read =
+            |uri: &'static str| read.execute(json!({"server": "docs", "uri": uri}), context());
+        assert_eq!(
+            read("docs://notes").await.unwrap().text,
+            "Ship on Friday.\n"
+        );
+        assert_eq!(read("docs://record").await.unwrap().text, r#"{"id":7}"#);
+        let image = read("docs://shout").await.unwrap();
+        assert_eq!(image.text, "[image/png attachment: docs://shout]");
+        assert_eq!(
+            image.metadata["attachments"][0],
+            format!(
+                "data:image/png;base64,{}",
+                STANDARD.encode(b"\x89PNG\r\n\x1a\nfixture")
+            )
+        );
+        // Several contents, each labelled by its URI, text blob included.
+        let (text, media) = resource_contents(
+            &json!({"contents": [
+                {"uri": "docs://a", "mimeType": "text/csv", "blob": STANDARD.encode("a,b\n1,2")},
+                {"uri": "docs://b", "mimeType": "application/zip", "blob": STANDARD.encode([0u8; 4])}
+            ]}),
+            &mut 0,
+        );
+        assert_eq!(
+            text,
+            "docs://a\na,b\n1,2\n\ndocs://b\n[docs://b: application/zip, 4 bytes]"
+        );
+        assert!(media.is_empty());
     }
 
     /// The whole of a long mentioned resource is saved for this user alone.
@@ -1036,6 +1083,90 @@ mod tests {
             *registry.reads.lock().unwrap(),
             ["docs:slow://", "docs:docs://setup"]
         );
+    }
+
+    /// A heading before one long line came alone: the line did not fit,
+    /// and the cut kept only whole lines before it.
+    #[tokio::test]
+    async fn a_mention_with_a_heading_before_a_long_line_keeps_the_line_too() {
+        let registry = Resources::default();
+        let read = |uri: &'static str| {
+            let registry = &registry;
+            async move {
+                let (mut text, mut attachments) = (String::new(), Vec::new());
+                read_mentions(
+                    registry,
+                    &std::env::temp_dir(),
+                    vec![mention("docs", uri, None)],
+                    &|_: &str, _: &str| false,
+                    MENTION_BUDGET,
+                    &mut text,
+                    &mut attachments,
+                )
+                .await
+                .unwrap();
+                let kept: usize = text
+                    .split("[Only the first ")
+                    .nth(1)
+                    .and_then(|rest| rest.split(' ').next())
+                    .and_then(|bytes| bytes.parse().ok())
+                    .unwrap();
+                let saved = text
+                    .split("saved at ")
+                    .nth(1)
+                    .and_then(|rest| rest.split("; read it there").next())
+                    .unwrap();
+                let file = std::fs::read_to_string(saved).unwrap();
+                std::fs::remove_file(saved).unwrap();
+                (text, kept, file)
+            }
+        };
+        // JSON is laid out a value a line, every value as written, and as
+        // many of its lines as a mention keeps (2,000) come.
+        let (text, kept, file) = read("docs://found").await;
+        assert!(
+            text.contains(
+                "Found 3000 issues:\n[\n  {\n    \"id\": 1234567890123456789012345\n  },"
+            ),
+            "{text:.300}"
+        );
+        assert!(kept > 20 * 1024, "{kept}");
+        assert!(file.lines().all(|line| line.len() < 100));
+        // Other text on one line comes as its first 50 KiB.
+        let (text, kept, _) = read("docs://dump").await;
+        assert!(
+            text.contains("Found 3000 issues:\nissue; issue; "),
+            "{text:.300}"
+        );
+        assert_eq!(kept, MENTION_BYTES);
+    }
+
+    /// JSON past 50 KiB only for its wide indents was laid out to fit and
+    /// still said to be cut, with a file saved for nothing.
+    #[tokio::test]
+    async fn a_mention_that_fits_once_laid_out_comes_whole() {
+        let rows: Vec<Value> = (0..300)
+            .map(|id| json!({"id": id, "title": "t".repeat(50), "body": "b".repeat(50)}))
+            .collect();
+        let mut spaced = Vec::new();
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(b"        ");
+        serde::Serialize::serialize(
+            &rows,
+            &mut serde_json::Serializer::with_formatter(&mut spaced, formatter),
+        )
+        .unwrap();
+        let spaced = String::from_utf8(spaced).unwrap();
+        assert!(spaced.len() > MENTION_BYTES, "{}", spaced.len());
+        let directory =
+            std::env::temp_dir().join(format!("haarness-mention-{}", uuid::Uuid::now_v7()));
+        let body = cut(spaced, MENTION_BYTES, &directory).await.unwrap();
+        assert!(
+            !body.contains("[Only the first "),
+            "{}",
+            &body[body.len() - 200..]
+        );
+        assert_eq!(body, serde_json::to_string_pretty(&rows).unwrap());
+        assert!(!directory.exists());
     }
 
     #[tokio::test]

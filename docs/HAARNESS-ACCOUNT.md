@@ -32,6 +32,15 @@ An exhausted pending-request allowance is reported separately from upstream
 provider quota. Provider outages, retired models and API-account restrictions
 can still prevent a listed model from serving a request.
 
+Cloud runs a sign-in's requests eight at a time and 300 a minute, and each
+router has a limit of its own. A request over one of them is not an error the
+turn ends on: it is sent again after 2, 4, 8 and 16 seconds (each a random part
+of a second later, so agents refused together spread out), or as long as Cloud
+says (`Retry-After`) for a full minute or router. A fan-out of more
+than eight agents waits this way for a free slot. If Cloud is still busy after
+that, the reply says so and suggests trying again once another chat or agent
+finishes.
+
 Each sign-in is named after the app and the computer in Cloud's **Settings → Devices**: `Haarness CLI on Studio`, or `Haarness Desktop on Studio` when Desktop signs in (it runs `haarness login` with `HAARNESS_LOGIN_APP=desktop`). The computer name is the one Remote control shows: macOS's computer name, else the host name.
 
 `haarness account` shows the signed-in user and selected account (`--json` for the full status); `haarness account --select <account-id>` switches it. `haarness logout` removes local credentials and revokes the login. Sign-out does not stop running Cloud workspaces; stop them separately to stop compute usage. If Cloud is unreachable during sign-out, credentials are removed locally and the command explains how to revoke the session online.
@@ -134,7 +143,16 @@ its defaults. Inline configuration overrides those defaults. Follow-ups use the 
 `wait=false` submits the message after startup and returns without waiting for the reply.
 Waits default to 120 seconds (maximum 600). A startup timeout reports `messageSubmitted:false`;
 retry `ask` with that workspace ID once it is running. A running turn at timeout continues remotely:
-use `wait` with its IDs instead of submitting another message. History supports `after`/`nextAfter`
+use `wait` with its IDs instead of submitting another message. While an ask or a wait waits, each
+read of the workspace (and Cloud's reads of a workspace that is starting) gives up at the timeout, or
+five seconds after it began when that is later, so a workspace that stops answering holds the call
+at most five seconds past it while a slow one still answers the reads that close it. A read left
+unanswered ends the call with what is known and a `message` that says so: `status:"unanswered"`
+before the turn could be read (an ask then reports `messageSubmitted:false`), the turn as last read
+during the wait, `status:"starting"` with the last snapshot when Cloud stopped answering during
+startup, and no `messages` when the history could not be read. Looking the workspace up and
+attaching to it keep their own 30-second limit. Submitting a message, creating a chat or workspace
+and starting one are never cut short, so the answer always says whether they happened. History supports `after`/`nextAfter`
 cursors and `limit` (1–100); without `after`, it returns the latest page.
 
 Waits use the account WebSocket for startup and the runtime SSE stream for turn/approval
@@ -155,7 +173,7 @@ Create/start/stop return once the operation is accepted. Use `list` to check its
 
 ## Session storage and development
 
-CLI and Desktop use the same account client: PKCE with a loopback callback, or device authorization, rotating refresh tokens, a single retry after a rejected access token, and an OS file lock across processes. Cloud spends a refresh token when it answers and ends the whole sign-in when a spent one comes back, so a renewal runs on its own task: a Stop or timeout returns at once, and the renewal still saves the new pair for the next request. A renewal gives up after 30 seconds without an answer, freeing the next request, and a Haarness process that exits (a stopped server, a finished command) first waits up to 5 seconds for a renewal still running. A process killed outright cannot wait, and MCP servers' own OAuth renewals (made inside the MCP client while it connects) are not covered by this. Credentials are written atomically with owner-only permissions. Account refresh tokens are never passed to a workspace, renderer, project configuration or model provider upstream.
+CLI and Desktop use the same account client: PKCE with a loopback callback, or device authorization, rotating refresh tokens, a single retry after a rejected access token, and an OS file lock across processes. Cloud spends a refresh token when it answers and ends the whole sign-in when a spent one comes back, so a renewal runs on its own task: a Stop or timeout returns at once, and the renewal still saves the new pair for the next request. A token renewed ahead of its expiry (Desktop asks for five minutes of headroom) stays in use when the renewal fails in a way that may pass, such as Cloud or the network out of reach or a 408, 429 or 5xx answer: callers keep getting it until it expires, while a revoked sign-in still signs out and a token Cloud refused is never handed back. A renewal gives up after 30 seconds without an answer, freeing the next request, and a Haarness process that exits (a stopped server, a finished command) first waits up to 5 seconds for a renewal still running. A process killed outright cannot wait, and MCP servers' own OAuth renewals (made inside the MCP client while it connects) are not covered by this. Credentials are written atomically with owner-only permissions. Account refresh tokens are never passed to a workspace, renderer, project configuration or model provider upstream.
 
 Release builds sign in to `https://haarness.ai`. **Development builds** (`cargo build`, the `target/debug/haarness` that Desktop's `npm run dev` and the TUI use) sign in to the local Cloud stack at `http://127.0.0.1:18080`, the address `haarness-cloud/scripts/dev-up.sh` starts, so trying a change never touches production accounts or billing. Desktop needs nothing extra: its account dialog, billing and Cloud workspaces all go through that binary.
 

@@ -60,6 +60,8 @@ pub enum HitTarget {
     QueueItem(RequestId),
     /// The strip's editing line: cancel the edit and restore the draft.
     QueueEditCancel,
+    /// `/mac resume` on a step paused on computer use's strip: the agent goes on.
+    ComputerResume,
 }
 
 /// One clickable horizontal region in the final terminal frame. `start` is

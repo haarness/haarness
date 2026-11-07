@@ -463,6 +463,23 @@ impl Helper {
         });
     }
 
+    /// Tells a running helper the person resumed in a client, so its bar shows the agent at work again and lets the next
+    /// request through. Like [`Self::release`] it jumps the queue and never launches a helper, but it waits for the
+    /// answer: the agent may act only after the bar knows.
+    pub async fn resume(&self) -> Result<(), HelperError> {
+        let Some(running) = self
+            .running
+            .lock()
+            .clone()
+            .filter(|running| !running.closed.is_cancelled())
+        else {
+            return Ok(());
+        };
+        Self::send(&running, "resume", json!({}), Duration::from_secs(5), None)
+            .await
+            .map(|_| ())
+    }
+
     /// Shuts the helper down if there is one: `now` kills it immediately, ending any action in progress; otherwise it
     /// is asked to finish the current request and exit.
     pub fn shutdown(&self, now: bool) {

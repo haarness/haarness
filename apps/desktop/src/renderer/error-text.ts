@@ -10,6 +10,8 @@
 export interface ErrorText {
   title?: string;
   message: string;
+  /** What the `{placeholder}`s of a known `message` stand for. */
+  values?: Record<string, string>;
   /** The text as received, for a tooltip, when the copy above replaced it. */
   detail?: string;
   known: boolean;
@@ -47,6 +49,27 @@ const sentences = {
   signInRefused: "The server refused the token or password. Check it, then try again.",
   refused: "That didn't go through. Try again.",
 } as const;
+/** Refusals a server names by their `reason`, said with the file they are
+ * about: no retry can do them, and the words say what to do instead. */
+const refusals: Record<string, string> = {
+  no_undo_copy:
+    "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",
+};
+/** Each refusal as main hands it to the window (or a server says it), its
+ * file found again. */
+const refusalPatterns = Object.values(refusals).map((key) => {
+  const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const [before, after] = key.split("{path}");
+  return { key, pattern: new RegExp(`^${escape(before)}(.+)${escape(after)}$`, "s") };
+});
+/** An `ErrorText`'s values for a translated sentence, each set apart from
+ * the words around it (FSI … PDI), so a right-to-left sentence keeps a path
+ * in one piece and its own punctuation in place. */
+export const isolatedValues = (values: Record<string, string> = {}) =>
+  Object.fromEntries(Object.entries(values).map(([name, value]) => [name, "\u2068" + value + "\u2069"]));
+/** `key` with its `{placeholder}`s filled in, in English. */
+const filled = (key: string, values: Record<string, string> = {}) =>
+  key.replace(/\{(\w+)\}/g, (match, name: string) => (Object.hasOwn(values, name) ? values[name] : match));
 /** A titled failure on one line, as the window gets it from main and a
  * surface with room for one line shows it. */
 const line = ([title, message]: readonly [string, string]) => `${title}. ${message}`;
@@ -59,6 +82,7 @@ export const errorTextKeys = [
   ...Object.values(copy).flat(),
   ...lines.keys(),
   ...Object.values(sentences),
+  ...Object.values(refusals),
 ];
 
 const layers = /^(?:error|tool error|invalid request|storage error|internal error):\s*/i;
@@ -190,7 +214,18 @@ export function errorText(error: unknown, options: { relay?: boolean } = {}): Er
   // Copy chosen before, as main hands it to the window.
   const chosen = lines.get(text);
   if (chosen) return known(chosen);
-  const { name, status: raw, code } = failure(error);
+  const { name, status: raw, code, body } = failure(error);
+  // A refusal the server named under `details`, as Cloud's errors carry
+  // their reasons too, said with its file in the reader's words.
+  const details = body && typeof body === "object" ? (body as { details?: unknown }).details : undefined;
+  const named = details && typeof details === "object" ? (details as Record<string, unknown>) : {};
+  const reason = code === "refused" && typeof named.reason === "string" ? named.reason : "";
+  if (Object.hasOwn(refusals, reason) && typeof named.path === "string")
+    return { message: refusals[reason], values: { path: named.path }, known: true };
+  for (const { key, pattern } of refusalPatterns) {
+    const path = pattern.exec(text)?.[1];
+    if (path) return { message: key, values: { path }, known: true };
+  }
   const status = typeof raw === "number" ? raw : statusLine(text)?.status;
   if (code === "bad_gateway" || code === "project_server_unavailable" || computerFailed.test(text))
     return known(copy.computer);
@@ -265,7 +300,7 @@ export function failureMessage(error: unknown, options: { relay?: boolean } = {}
   if (cancelled(error)) return "This operation was aborted";
   const full = errorText(error, options);
   return full.known && errorTextLine(full) !== errorTextLine(errorText(message))
-    ? errorTextLine(full)
+    ? filled(errorTextLine(full), full.values)
     : message;
 }
 

@@ -77,7 +77,8 @@ Primary resources:
 - `GET /v1/projects`; `GET|POST /v1/workspaces`; `GET /v1/workspaces/refs`; `POST /v1/workspaces/resolve-ref`; `GET|DELETE /v1/workspaces/{reference}`; `POST /v1/workspaces/{reference}/open`, `/reset`, and `/cleanup`
 - `GET|POST /v1/threads` (`?archived=true` lists archived chats), `GET|PATCH /v1/threads/{id}`
   Thread responses include `isSubagent` (default `false` for older payloads). Delegated child creation sets it; forks preserve `parentId` lineage with `isSubagent: false`. List APIs continue returning all threads; clients can filter sidebar presentations without losing child access.
-  Untitled root conversations generate a title asynchronously from the first real user message after prompt hooks accept it. A `thread.updated` event publishes the persisted title while the main turn may still be running or waiting for permission. Titling is independent of turn completion and never overwrites a manual rename.
+  Untitled root conversations generate a title asynchronously from the first real user message after prompt hooks accept it. The title request quotes at most the message's first 2,000 characters, so a pasted log or file stays quick and cheap to name, and asks for at most 4,096 tokens of output, or the model's own output limit when that is lower; a model whose limit its catalog does not state (a local server, an endpoint configured without one) is asked for no limit, and so is a model reached through a ChatGPT sign-in, whose transport takes none. A `thread.updated` event publishes the persisted title while the main turn may still be running or waiting for permission. Titling is independent of turn completion and never overwrites a manual rename.
+  A title, typed or generated, is stored without terminal escape sequences or other control characters, and a line break or tab in it reads as a space; a rename left with nothing printable is refused as a blank one is. An archive's titles are cleaned the same way when it is imported. A title an older server stored as written is returned cleaned (the row keeps its bytes until the chat is written again), a fork is named from the cleaned title, and one with nothing printable left reads as `New chat`. The CLI prints every title without such characters.
   Until then a chat is titled `New chat`. Servers before 2026-10 stored `New thread`; such rows are returned as `New chat` and still get a generated title, and a create request whose title is either placeholder or only spaces gets `New chat`. A fork without a `title` is named `Fork of <source title>`, or `Fork of New chat` when the source has none.
 - `GET /v1/threads/{id}/archive[?sanitize=true]`; `POST /v1/session-archives/import`
 - `GET|POST /v1/ptys`; `GET|PATCH|DELETE /v1/ptys/{id}`; WebSocket `GET /v1/ptys/{id}/connect?cursor=N`
@@ -149,7 +150,11 @@ The API retains `{title?, beforeItemId?}` for older integrations that use an
 exclusive user-message boundary; clients may send both boundary fields only
 when the sequence is immediately before the named message. Forking is one
 SQLite transaction: copied items receive new IDs and internal
-`QueueConsumed.itemId` references are remapped to those IDs.
+`QueueConsumed.itemId` references are remapped to those IDs. A tool call whose
+result is not among the copied items (it was waiting for approval or still
+running, or a steer sent while it ran is the boundary) is left out, with its
+`task_link`, `task_state` and `command_state` items: nothing would ever give the
+fork's copy a result, and providers refuse a call without one.
 New forks also persist optional `forkOrigin: {title, sequence, itemId}` on the
 thread in that transaction. `parentId` identifies the immediate source;
 `title` is its title at fork time, `sequence` is the last item actually copied,
@@ -177,9 +182,32 @@ confirms any pending revert, captures a versioned exact todo checkpoint, and
 records the configured recent-turn tail. Subsequent provider requests receive
 the summary, exact todo JSON as data, then the retained turns. Media from the
 pre-compaction tail is represented by a textual attachment note rather than
-re-uploaded. Automatic compaction uses the selected model's context and output
-limits and retries pre-output context-overflow/HTTP-413 failures after safe
-compaction, under a bounded per-turn recovery ceiling. A refusal of the request
+re-uploaded. The summary request offers no tools, so it reads the chat's tool
+calls and their results written out as text, each between an opening and a
+closing marker that carry the call's number. A result names the earliest call
+of its response with its id that has no result yet, so two calls a server gave
+one id are still answered in order. Once the user's side of the chat holds
+text the person did not write (a tool result, a background command's or a
+task's notice, a reminder, an earlier summary), the person's own words sit
+between markers of their own, and the request to summarize says that only
+those words are theirs and that the rest is data. Every marker's name ends in
+a key of 16 random hex digits that Haarness makes for that one request, so no
+text it quotes was written knowing it, and the request says that only markers
+with that key open or close anything: a lookalike without it, whatever its
+characters, is part of the text around it. Everything the request quotes is
+sent as it was written, angle brackets and all, but for two things: a copy of
+the key, should one turn up, is left out, and a tool name, which sits inside a
+marker, has its `&`, `"`, `<` and `>` written as character entities and its
+control characters and Unicode line and paragraph separators as numeric ones.
+A chat with nothing to mark is sent without markers or key.
+Automatic compaction uses the
+selected model's context and output limits and retries pre-output context-overflow/HTTP-413 failures after safe
+compaction, under a bounded per-turn recovery ceiling. A context too long is
+read in each provider's own words, among them Z.ai's code 1261 ("Prompt exceeds
+max length"), Amazon Nova's "Input Tokens Exceeded", DeepInfra's "Requested
+input length … exceeds maximum input length" and Text Generation Inference's
+(Together, Hugging Face) "`inputs` tokens + `max_new_tokens` must be <= …"; an
+HTTP 429 is a rate limit whatever its words, and never compacts. A refusal of the request
 for its size in bytes (an HTTP 413, Bedrock's "413 Payload Too Large" or
 Gemini's "Request payload size exceeds the limit", rather than a context too
 long in tokens or a rate limit) compacts once until the provider takes a
@@ -423,10 +451,29 @@ command that completed. Enums may gain values; an unknown one reads as
   output past `cursor` is there already; `settled` says the command has ended
   and `size` is final. Terminal escapes are left in for the client to strip.
 - `POST …/commands/{command}/stop` stops it for a person, with every process
-  it started (interrupt, terminate, then kill, `execution.shell_stop_grace_ms`
-  apart). The answer reads `stopping` until the process has exited, then a
+  in its process group, its process tree on Windows (interrupt, terminate,
+  then kill, `execution.shell_stop_grace_ms` apart). The answer reads
+  `stopping` until the process has exited, then a
   `command.updated` event reports `stopped`. Stopping an ended command answers
   it unchanged.
+- `POST /v1/threads/{id}/work/stop` with `{"turns": [...], "workflows": [...],
+  "commands": [...], "keepCalls": [...]}` stops what those turns of the chat
+  left running, and tells the chat nothing: any of them still running, the
+  subagents they started (with everything under them), the commands they ran
+  (`endedBy: turn_ended`), the named workflows launched from the chat or a
+  chat under it, running or paused, cancelled with no result delivered, and
+  the named commands of the chat itself, whichever turn ran them. As
+  `/interrupt` does for a whole tree, every workflow launched from the chat of
+  a stopped subagent or workflow, or a chat under it, is cancelled too, with
+  no result delivered. What the calls named in `keepCalls` (by `tool_call` id)
+  started goes on, as does every other turn's work. A person's message steered
+  into a stopped turn that its agent had not answered is answered in a turn of
+  its own, as after the person's own Stop. Unlike that Stop, this one leaves
+  the chat's queue going: a message queued behind a stopped turn is sent once
+  it has stopped. It answers what began to stop (`StopTurnWorkResult`). A
+  scheduled run ends its own work this way, leaving a person's turns in its
+  chat alone, and what its turns started for a person who wrote into them;
+  servers that have the route list `turn-work-stop.v1`.
 - `POST /v1/threads/{id}/commands/background` sends every running foreground
   command of the chat tree to the background, the one named with
   `?commandId=` alone; it answers the commands moved. A named command that
@@ -495,13 +542,37 @@ workflow's). Both are written in one database step while no turn can start;
 if a turn started meanwhile, the result steers into it instead. A chat that
 no longer exists, or is archived, is not told.
 
+A call the model makes in the request that sums up at an agent's `steps` or
+`tools.max_rounds` limit is not run: its error `tool_result` says so and
+carries `metadata: {"notRun": true}`, which the rebuild of a chat's loaded
+tools after a restart reads to leave it out. Clients show it as a failed call
+with that text.
+
 The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.
 Startup recovery marks orphaned queued/running turns interrupted and appends a
 retryable transcript notice while preserving prior items; provider streams and
-side-effecting tools are never replayed speculatively. Active goals recover as
-paused with `awaitingUserInput=true`, so elapsed indicators cannot claim a
-stale execution is still pursuing after process death.
+side-effecting tools are never replayed speculatively. Each call such a turn
+left without a result gets an error `tool_result` first, saying it did not
+finish, with `metadata: {"unfinished": true}`; a turn that outlives a graceful
+shutdown's wait gets the same results before the shutdown marks it interrupted.
+Desktop and the TUI show such a call as one that did not finish, in a few words
+of their own, rather than its result's text, which is written for the model;
+the phone apps and Cloud web still show that text as a failed call. A request
+leaves out a second result for one call. A chat stored before then, or a fork
+made before forks left such calls out, can still hold one: once a later turn
+has begun after it (or, in a fork, a message the person wrote there), requests
+give it the same kind of result after the calls and results it was made with,
+so the provider takes the history. A running turn's calls, a steer queued
+meanwhile included, are left as they are. `"notRun": true` in a result's
+metadata says its call never began: a call of a round that broke off before its
+calls ran, one Stop reached first, or one still waiting its turn when a
+shutdown or crash cut the turn off. After a crash only the turn's first open
+call counts as begun, since recovery cannot tell which of several reads running
+together had. Rebuilding a chat's loaded tools after a restart or in a fork
+skips these calls. Active goals recover as paused with
+`awaitingUserInput=true`, so elapsed indicators cannot claim a stale execution
+is still pursuing after process death.
 
 Todo state is available through `GET /v1/threads/{id}/todos` and
 `todo.updated` (`{threadId,todos}`). The canonical tools are `todowrite`
@@ -519,7 +590,42 @@ changes all of its files or none: when a path cannot be written part way (a
 read-only directory, a locked file, a full disk), every path already changed
 is put back, the chat keeps its previous undo state, and the same request
 succeeds once the cause is fixed. Undo and redo run one at a time across the
-chats of a workspace. The last-turn diff comes from the newest pair before any
+chats of a workspace. Checkpoints follow the folder's ignore files and keep
+only the hash of a file over 2 MiB. Before undo or redo changes such a file,
+it keeps a copy of it in the data folder, beside the database, so undo still
+takes the folder back to the checkpoint (a file a turn made over 2 MiB goes,
+one it grew past 2 MiB gets its earlier content back) and redo brings the
+file back from the copy. A copy is on disk before the file changes. Copies
+are kept up to 256 MiB per file and 1 GiB per database in all, and only while
+the disk would still have 512 MiB free; room is made by dropping the copies of
+undos that are no longer pending, the oldest first, and then those of
+archived chats' pending undos. An undo's copies go when it is confirmed (the
+next message, a compaction or a direct tool) or fully redone; copies that no
+chat's undo names, as after a process stopped part way through a step, stay
+as long as checkpoints do (`retention_days`). A file over 2 MiB that undo
+cannot handle so (past those bounds, or one whose earlier content no copy
+holds, as when a turn shrank it or two turns rewrote it) stays as it is while
+the rest is restored; the next step takes it as that step left it (the copy
+folder records which files those are and what each held). An edit a person or
+another chat made to any file after the turn, whatever its size, stops the
+step with `409 conflict` before anything changes; so does any change to a file
+a step left, deleting it or putting it back by hand included. Redo takes a file left so to where the last redo does, as it was
+before the undo, and names it until then. Redo refuses, before writing
+anything, only when a copy it needs is gone; its code is
+`refused` (409, not retryable), with `details.reason` `no_undo_copy` and the
+file in `details.path` beside the English `message` (the `details` object
+Cloud's errors carry their reasons in), so a client can say it in the
+person's language (Desktop and the terminal UI do), and a new message keeps
+the chat as it is now. The ignored and outside files that the
+undone turns' `write`, `edit`, `multiedit` and `apply_patch` calls (direct,
+in a `batch`, or a child agent's during those turns) changed stay as they
+are too. The thread's `revert` lists them in `unrestored` as `{path, reason}`,
+the reason `large`, `ignored` or `outside` (those left for their size first),
+the path relative to the folder or absolute when outside it, at most 50, with
+`unrestoredCount` when there are more; it follows the steps still undone (a
+file a later step puts back drops out) and is absent when undo put everything
+back, as it is from older servers. A file
+made and removed within those turns is not listed. The last-turn diff comes from the newest pair before any
 pending undo boundary that changed files: an undone turn drops out of it, and a
 later turn that only ran commands does not hide the edits before it. The VCS
 endpoint reports staged, unstaged, untracked, unborn-branch, and
@@ -810,7 +916,9 @@ ordered logs, warnings, child-agent records, result/error, and timestamps.
 `GET /v1/workflows/runs/{id}?afterSequence=N` returns only logs newer than the
 given sequence. `GET /v1/workflows/runs?threadId=...` scopes recent runs to the
 conversation that launched them (with execution-thread matching retained only
-for legacy rows that predate launch-session persistence); the wait endpoint
+for legacy rows that predate launch-session persistence), and `?tree=...` to
+those launched from a conversation or any under it (its subagents' and
+theirs; servers with `turn-work-stop.v1`); the wait endpoint
 accepts a bounded timeout. Pause/cancel stop
 the active execution, and resume restarts paused/interrupted source from the
 beginning. `workflow.updated`, `workflow.log`, and `workflow.deleted` are live
@@ -839,12 +947,13 @@ treats a missing one as an older server.
 | `remote-chat-scope.v1` | The server confines a published chat's requests to its chat tree; the Cloud connector does not serve through a server without it |
 | `session-archive.v1` | Portable session archives |
 | `thread-create-id.v1` | A client-chosen `id` on `POST /v1/threads` |
+| `turn-work-stop.v1` | `POST /v1/threads/{id}/work/stop`; a scheduled run on a server without it fails when it has work to stop, and leaves that work running |
 | `workspace-history.v1` | Git review and undo/redo; the CLI and TUI use a running folder server only when it has this and `pty.v1` |
 | `browser.v1`, `browser-drafts.v1` | The browser host routes (servers with a browser broker) |
 | `browser-extension.v1` | Haarness for Chrome: the extension host route and its settings |
 | `background-commands.v1` | Shell commands in the background: `run_in_background`, `bash_output`, `bash_stop`, the `/commands` routes and events, `followsBackground` and `backgroundCommands` |
 | `input-settings.v1`, `browser-settings.v1`, `usage-statistics.v1` | The management resources of those names |
-| `computer-use.v1` | The `computer-use` management resource: computer use settings and status on macOS (see [Computer use](COMPUTER-USE.md#settings-and-api)) |
+| `computer-use.v1` | The `computer-use` management resource: computer use settings, status and `resume` on macOS, and the `computer_use.updated` event when the person pauses an agent (see [Computer use](COMPUTER-USE.md#settings-and-api)) |
 
 `rest`, `sse`, `network.attach`, `attachments.inline-upload`, `files.base64-write.v1`,
 `files.preview.v1`, `mcp`, `skills`, `subagents`, `workflows`, `workflows.read`,

@@ -11,6 +11,16 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
+/// The least time a read of an ask or a wait gets, even when its deadline is
+/// nearer or has passed: a slow workspace still answers the reads that close
+/// the answer.
+const CLOSING: Duration = Duration::from_secs(5);
+/// Why an ask or a wait answered with what it knew: a read was not answered
+/// in time.
+const UNANSWERED: &str = "The workspace did not answer within timeoutSeconds. Its work goes on: use wait with these IDs, and do not submit the message again.";
+const UNSENT: &str = "The workspace did not answer within timeoutSeconds, so no message was submitted. Ask again with this workspaceId; do not create a duplicate workspace.";
+const UNREAD: &str = "The workspace did not answer within timeoutSeconds, so its messages are not here: read them with messages.";
+const STARTING: &str = "Haarness Cloud did not answer within timeoutSeconds while the workspace started, so this is how it was last seen and no chat message was submitted. Get it to see its state, and ask using this workspaceId once it is running; do not create a duplicate workspace.";
 mod events;
 
 use haarness_protocol::{
@@ -71,6 +81,50 @@ fn validate_configuration(configuration: Option<&Value>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// When a read of an ask or a wait gives up: at the deadline, or
+/// [`CLOSING`] after it starts when that is later.
+fn answer_by(deadline: Instant) -> Instant {
+    deadline.max(Instant::now() + CLOSING)
+}
+
+/// The answer of an ask or a wait whose workspace did not answer a read in
+/// time before the turn was known: an ask's message was not submitted, and a
+/// wait has nothing to report but that, for the next wait to read.
+fn unanswered(
+    id: Uuid,
+    url: &str,
+    thread: Option<Uuid>,
+    turn: Option<Uuid>,
+    asking: bool,
+) -> Value {
+    let url = thread.map_or_else(|| url.to_owned(), |thread| format!("{url}?thread={thread}"));
+    let mut answer = json!({"workspaceId":id,"threadId":thread,"url":url,"status":"unanswered","messageSubmitted":false});
+    if asking {
+        answer["message"] = json!(UNSENT);
+    } else {
+        answer["turnId"] = json!(turn);
+        answer["message"] = json!(UNANSWERED);
+    }
+    answer
+}
+
+/// Whether a turn in this state is still going.
+fn going(status: &Value) -> bool {
+    matches!(
+        status.as_str(),
+        Some("pending" | "queued" | "running" | "in_progress")
+    )
+}
+
+/// `timeoutSeconds` of an ask or a wait, 120 unless given.
+fn wait_seconds(value: Option<u64>) -> Result<u64> {
+    let seconds = value.unwrap_or(120);
+    if !(1..=600).contains(&seconds) {
+        return Err(invalid("timeoutSeconds must be between 1 and 600"));
+    }
+    Ok(seconds)
 }
 
 fn model_search_text(value: &str) -> String {
@@ -348,6 +402,12 @@ impl Cloud {
                 "message",
             )?;
         }
+        // An ask or a wait answers by its deadline, counted from here (see
+        // `workspace_until`).
+        let deadline = matches!(input.action, ChatAction::Ask | ChatAction::Wait)
+            .then(|| wait_seconds(input.timeout_seconds))
+            .transpose()?
+            .map(|seconds| Instant::now() + Duration::from_secs(seconds));
         let workspace = self.owned("workspaces", id).await?;
         if workspace["observedState"] != "running" {
             return Err(invalid(
@@ -398,7 +458,17 @@ impl Cloud {
         }
         let chat_id = required(input.chat_id, "chatId")?;
         let path = format!("v1/threads/{chat_id}");
-        let mut chat = remote.request(Method::GET, &path, None).await?;
+        let Some(mut chat) = remote.read_by(&path, deadline.map(answer_by)).await? else {
+            let mut result = unanswered(
+                id,
+                &url,
+                Some(chat_id),
+                input.turn_id,
+                matches!(input.action, ChatAction::Ask),
+            );
+            result["chatId"] = json!(chat_id);
+            return Ok(result);
+        };
         if !chat["parentId"].is_null() {
             return Err(invalid(
                 "chatId must identify a root chat, not a subagent thread",
@@ -425,7 +495,7 @@ impl Cloud {
                 // Archiving belongs to chats; workspaces have no archived state.
                 fields.remove("archived");
                 args["threadId"] = json!(chat_id);
-                let mut result = self.workspace(args).await?;
+                let mut result = self.workspace_until(args, deadline).await?;
                 result["chatId"] = json!(chat_id);
                 Ok(result)
             }
@@ -433,6 +503,15 @@ impl Cloud {
     }
 
     pub async fn workspace(&self, arguments: Value) -> Result<Value> {
+        self.workspace_until(arguments, None).await
+    }
+
+    /// [`Self::workspace`], waiting until `deadline` when given instead of
+    /// timeoutSeconds from now. An ask or a wait answers by its deadline: a
+    /// read the workspace has not answered by then ends it with what is known
+    /// (writes are never cut short, so the answer says whether the message
+    /// went in).
+    async fn workspace_until(&self, arguments: Value, deadline: Option<Instant>) -> Result<Value> {
         let input: WorkspaceInput = serde_json::from_value(arguments)?;
         validate_configuration(input.configuration.as_ref())?;
         if matches!(input.action, WorkspaceAction::Ask) && input.start == Some(false) {
@@ -441,11 +520,8 @@ impl Cloud {
             ));
         }
         let count = limit(input.limit)?;
-        let seconds = input.timeout_seconds.unwrap_or(120);
-        if !(1..=600).contains(&seconds) {
-            return Err(invalid("timeoutSeconds must be between 1 and 600"));
-        }
-        let deadline = Instant::now() + Duration::from_secs(seconds);
+        let seconds = wait_seconds(input.timeout_seconds)?;
+        let deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(seconds));
         if matches!(input.action, WorkspaceAction::List) {
             // Workspaces have no archived state: every one is listed until it is deleted.
             let extra = input
@@ -542,7 +618,13 @@ impl Cloud {
             if input.start != Some(false)
                 && (matches!(input.action, WorkspaceAction::Ask) || input.wait.unwrap_or(true))
             {
-                workspace = self.ready(id, deadline).await?;
+                let answered;
+                (workspace, answered) = self.ready(id, workspace, deadline).await?;
+                if !answered {
+                    return Ok(
+                        json!({"workspace":workspace,"workspaceId":id,"url":url,"status":"starting","messageSubmitted":false,"message":STARTING}),
+                    );
+                }
             } else {
                 workspace = self.owned("workspaces", id).await?;
             }
@@ -560,13 +642,25 @@ impl Cloud {
             );
         }
         let mut remote = Remote::new(self, id).await?;
+        let asking = matches!(input.action, WorkspaceAction::Ask);
+        let by = || {
+            matches!(input.action, WorkspaceAction::Ask | WorkspaceAction::Wait)
+                .then(|| answer_by(deadline))
+        };
+        let cut = |thread| Ok(unanswered(id, &url, thread, input.turn_id, asking));
         let thread = if let Some(thread) = input.thread_id {
-            remote
-                .request(Method::GET, &format!("v1/threads/{thread}"), None)
-                .await?;
+            if remote
+                .read_by(&format!("v1/threads/{thread}"), by())
+                .await?
+                .is_none()
+            {
+                return cut(Some(thread));
+            }
             thread
         } else {
-            let threads = remote.request(Method::GET, "v1/threads", None).await?;
+            let Some(threads) = remote.read_by("v1/threads", by()).await? else {
+                return cut(None);
+            };
             let roots: Vec<&Value> = threads
                 .as_array()
                 .into_iter()
@@ -581,8 +675,10 @@ impl Cloud {
             let candidate = roots.first();
             if let Some(thread) = candidate {
                 serde_json::from_value(thread["id"].clone())?
-            } else if matches!(input.action, WorkspaceAction::Ask) {
-                let info = remote.request(Method::GET, "v1/info", None).await?;
+            } else if asking {
+                let Some(info) = remote.read_by("v1/info", by()).await? else {
+                    return cut(None);
+                };
                 let agent = info["defaultAgent"]
                     .as_str()
                     .or_else(|| (!workspace["agentSnapshot"].is_null()).then_some("cloud-agent"));
@@ -595,13 +691,13 @@ impl Cloud {
         let thread_path = format!("v1/threads/{thread}");
         match input.action {
             WorkspaceAction::Messages => {
-                let items = remote.items(thread, input.after, count).await?;
+                let items = remote.items(thread, input.after, count, None).await?;
                 Ok(json!({"workspaceId":id,"threadId":thread,"url":url,"messages":items}))
             }
             WorkspaceAction::Abort => {
                 // Never allow a turn ID from a different conversation to be interrupted.
                 let result = if let Some(turn) = input.turn_id {
-                    remote.turn(thread, turn).await?;
+                    remote.turn(thread, turn, None).await?;
                     remote
                         .request(
                             Method::POST,
@@ -623,7 +719,6 @@ impl Cloud {
                 )
             }
             WorkspaceAction::Ask | WorkspaceAction::Wait => {
-                let asking = matches!(input.action, WorkspaceAction::Ask);
                 let turn = if asking {
                     // No nested control-plane access or interactive questions in remote delegated work.
                     // `cloud_agent_session` is the tool's name in runtimes started before the rename.
@@ -637,37 +732,69 @@ impl Cloud {
                         format!("{}{message}", haarness_protocol::AGENT_MESSAGE_PREFIX)
                     });
                     remote.request(Method::POST,&format!("{thread_path}/turns"),Some(json!({"requestId":Uuid::now_v7(),"text":text,"reasoningEffort":effort,"tools":{"question":false,"cloud_agent_manage":false,"cloud_workspace":false,"cloud_agent_session":false,"cloud_chat":false,"cloud_schedule":false}}))).await?
-                } else if let Some(turn) = input.turn_id {
-                    remote.turn(thread, turn).await?
                 } else {
-                    remote
-                        .request(Method::GET, &format!("{thread_path}/active"), None)
-                        .await?
-                };
-                if turn.is_null() {
-                    return Ok(
-                        json!({"workspaceId":id,"threadId":thread,"url":url,"status":"idle","messages":remote.items(thread,input.after,count).await?}),
-                    );
-                }
-                let turn_id: Uuid = serde_json::from_value(turn["id"].clone())?;
-                let result = if !asking || input.wait.unwrap_or(true) {
-                    remote.wait(thread, turn_id, deadline, asking).await?
-                } else {
+                    let read = if let Some(turn) = input.turn_id {
+                        remote.turn(thread, turn, by()).await?
+                    } else {
+                        remote
+                            .read_by(&format!("{thread_path}/active"), by())
+                            .await?
+                    };
+                    let Some(turn) = read else {
+                        return cut(Some(thread));
+                    };
                     turn
                 };
+                if turn.is_null() {
+                    let mut answer =
+                        json!({"workspaceId":id,"threadId":thread,"url":url,"status":"idle"});
+                    match remote.items(thread, input.after, count, by()).await? {
+                        Some(messages) => answer["messages"] = messages,
+                        None => answer["message"] = json!(UNREAD),
+                    }
+                    return Ok(answer);
+                }
+                let turn_id: Uuid = serde_json::from_value(turn["id"].clone())?;
+                let (result, answered) = if !asking || input.wait.unwrap_or(true) {
+                    remote.wait(thread, turn_id, turn, deadline, asking).await?
+                } else {
+                    (turn, true)
+                };
                 // These cursors are sufficient to continue a timed-out or asynchronous call without resubmission.
-                Ok(
-                    json!({"workspaceId":id,"threadId":thread,"turnId":turn_id,"url":format!("{url}?thread={thread}"),"status":result["status"],"messageSubmitted":asking,"turn":result,"messages":remote.items(thread,input.after,count).await?}),
-                )
+                let mut answer = json!({"workspaceId":id,"threadId":thread,"turnId":turn_id,"url":format!("{url}?thread={thread}"),"status":result["status"],"messageSubmitted":asking,"turn":result});
+                // A workspace that left a read unanswered is not asked for the
+                // history too.
+                let history = if answered {
+                    remote
+                        .items(thread, input.after, count, Some(answer_by(deadline)))
+                        .await?
+                } else {
+                    None
+                };
+                let still = going(&answer["status"]) || answer["status"] == "needs_attention";
+                match history {
+                    Some(messages) => answer["messages"] = messages,
+                    None if still => answer["message"] = json!(UNANSWERED),
+                    // It ended: nothing goes on, only the history is missing.
+                    None => answer["message"] = json!(UNREAD),
+                }
+                Ok(answer)
             }
             _ => Err(invalid("Unsupported workspace action")),
         }
     }
 
-    async fn ready(&self, id: Uuid, deadline: Instant) -> Result<Value> {
+    /// The workspace once it is running or settled, or when `deadline`
+    /// passes, with `true`; as it was last seen (`last` at first), with
+    /// `false`, when Cloud has not answered a read in time.
+    async fn ready(&self, id: Uuid, mut last: Value, deadline: Instant) -> Result<(Value, bool)> {
         let mut updates = events::Updates::control(self.clone(), id, deadline).await;
         loop {
-            let workspace = match self.owned("workspaces", id).await {
+            let read = tokio::time::timeout_at(answer_by(deadline), self.owned("workspaces", id));
+            let Ok(read) = read.await else {
+                return Ok((last, false));
+            };
+            let workspace = match read {
                 Err(_) if self.cancel.is_cancelled() => {
                     return Err(invalid(format!(
                         "Cloud wait cancelled. Workspace {id} is retained; inspect or stop it explicitly."
@@ -682,8 +809,9 @@ impl Cloud {
                 && workspace["desiredState"] != "running")
                 || Instant::now() >= deadline
             {
-                return Ok(workspace);
+                return Ok((workspace, true));
             }
+            last = workspace;
             updates.wait(deadline, &self.cancel).await;
         }
     }
@@ -765,26 +893,45 @@ impl<'a> Remote<'a> {
         }
         Err(Error::NotLoggedIn)
     }
-    async fn turn(&mut self, thread: Uuid, turn: Uuid) -> Result<Value> {
-        let value = self
-            .request(Method::GET, &format!("v1/turns/{turn}"), None)
-            .await?;
+    /// A read that gives up at `by`, when given: `None` when the workspace
+    /// has not answered by then. Its retry and re-attach count too.
+    async fn read_by(&mut self, path: &str, by: Option<Instant>) -> Result<Option<Value>> {
+        let read = self.request(Method::GET, path, None);
+        match by {
+            None => read.await.map(Some),
+            Some(by) => tokio::time::timeout_at(by, read)
+                .await
+                .map_or(Ok(None), |read| read.map(Some)),
+        }
+    }
+    async fn turn(
+        &mut self,
+        thread: Uuid,
+        turn: Uuid,
+        by: Option<Instant>,
+    ) -> Result<Option<Value>> {
+        let Some(value) = self.read_by(&format!("v1/turns/{turn}"), by).await? else {
+            return Ok(None);
+        };
         if value["threadId"].as_str() != Some(thread.to_string().as_str()) {
             return Err(invalid("turnId does not belong to threadId"));
         }
-        Ok(value)
+        Ok(Some(value))
     }
-    async fn items(&mut self, thread: Uuid, after: Option<u64>, count: u64) -> Result<Value> {
-        let items = self
-            .request(
-                Method::GET,
-                &format!(
-                    "v1/threads/{thread}/items{}",
-                    after.map(|v| format!("?after={v}")).unwrap_or_default()
-                ),
-                None,
-            )
-            .await?;
+    async fn items(
+        &mut self,
+        thread: Uuid,
+        after: Option<u64>,
+        count: u64,
+        by: Option<Instant>,
+    ) -> Result<Option<Value>> {
+        let path = format!(
+            "v1/threads/{thread}/items{}",
+            after.map(|v| format!("?after={v}")).unwrap_or_default()
+        );
+        let Some(items) = self.read_by(&path, by).await? else {
+            return Ok(None);
+        };
         let all = items
             .as_array()
             .ok_or_else(|| invalid("Invalid conversation response"))?;
@@ -801,17 +948,21 @@ impl<'a> Remote<'a> {
             .cloned()
             .collect::<Vec<_>>();
         let next = page.last().and_then(|v| v.get("sequence")).cloned();
-        Ok(
+        Ok(Some(
             json!({"items":page,"nextAfter":next,"hasMore":start+take<all.len(),"truncatedBefore":start>0}),
-        )
+        ))
     }
+    /// Waits for `turn` to end, ask for attention or reach `deadline`, and
+    /// returns its state. `last` is the state already known; it is returned,
+    /// with `false`, when the workspace has not answered a read in time.
     async fn wait(
         &mut self,
         thread: Uuid,
         turn: Uuid,
+        mut last: Value,
         deadline: Instant,
         abort_on_cancel: bool,
-    ) -> Result<Value> {
+    ) -> Result<(Value, bool)> {
         let mut updates = events::Updates::runtime(
             self.cloud.clone(),
             self.id,
@@ -845,20 +996,21 @@ impl<'a> Remote<'a> {
                     self.id
                 )));
             }
-            let result = match self.turn(thread, turn).await {
-                Ok(value) => value,
+            let result = match self.turn(thread, turn, Some(answer_by(deadline))).await {
+                Ok(Some(value)) => value,
+                Ok(None) => return Ok((last, false)),
                 Err(_) if self.cloud.cancel.is_cancelled() => continue,
                 Err(e) => return Err(e),
             };
-            if !matches!(
-                result["status"].as_str(),
-                Some("pending" | "queued" | "running" | "in_progress")
-            ) || Instant::now() >= deadline
-            {
-                return Ok(result);
+            if !going(&result["status"]) || Instant::now() >= deadline {
+                return Ok((result, true));
             }
-            let pending = match self.request(Method::GET, "v1/permissions", None).await {
-                Ok(value) => value,
+            let pending = match self
+                .read_by("v1/permissions", Some(answer_by(deadline)))
+                .await
+            {
+                Ok(Some(value)) => value,
+                Ok(None) => return Ok((result, false)),
                 Err(_) if self.cloud.cancel.is_cancelled() => continue,
                 Err(error) => return Err(error),
             };
@@ -877,8 +1029,14 @@ impl<'a> Remote<'a> {
                 let mut result = result;
                 result["status"] = json!("needs_attention");
                 result["permissions"] = json!(permissions);
-                return Ok(result);
+                return Ok((result, true));
             }
+            // The deadline passed during these reads: the turn as just read
+            // is the answer, not another round of reads after it.
+            if Instant::now() >= deadline {
+                return Ok((result, true));
+            }
+            last = result;
             updates.wait(deadline, &self.cloud.cancel).await;
         }
     }

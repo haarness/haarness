@@ -537,6 +537,12 @@ export function resultText(name: string, result: ToolResult) {
     text = text.replace(/^exit: -?\d+\n/, "");
   return withoutEscapes(toolOutput(name, text));
 }
+/** Haarness stopped before the call finished (a restart or a shutdown cut it
+ * off): its result is written for the model, and the row says so in a few
+ * words instead. */
+export function unfinishedCall(result?: ToolResult) {
+  return object(result?.metadata)?.unfinished === true;
+}
 /** A command's exit status, when it is not 0. */
 export function exitStatus(name: string, result?: ToolResult) {
   const exit = object(result?.metadata)?.exit;

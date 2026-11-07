@@ -13,7 +13,7 @@ use haarness_protocol::{FileDiff, FileDiffStatus, Item, ItemData, ItemId};
 
 use crate::diff::{render_added, render_diff};
 use crate::markdown::render_markdown;
-use crate::state::{App, ChildTask};
+use crate::state::{App, ChildTask, unfinished};
 use crate::theme::Theme;
 use crate::view::frame::{HitTarget, TaggedLines};
 use crate::view::span::{line, single_line, spinner, task_state_style, wrap_spans};
@@ -33,6 +33,8 @@ const SHELL_OUTPUT_ROWS: usize = 10;
 const USER_BLOCK_ROWS: usize = 12;
 const USER_PREVIEW_ROWS: usize = 8;
 const TOOL_BLOCK_ROWS: usize = 12;
+/// What a step paused on computer use's strip offers: the command that lets the agent go on, which a click on it runs.
+pub(crate) const RESUME_COMMAND: &str = "/mac resume";
 /// A tool name as the server matches it: without a `functions.` namespace,
 /// and compared ignoring ASCII case, so a model writing `Read` gets `read`.
 fn bare_tool(name: &str) -> &str {
@@ -344,10 +346,12 @@ fn batch_failures(name: &str, result: Option<&Item>, steps: &[BatchStep]) -> usi
 }
 
 /// The line under a delegation row: `↳` what the child is doing while it
-/// runs, `└` what it did once it stopped. The status line already says how
-/// to open child views, so the row does not repeat it.
+/// runs, `└` what it did once it stopped (`cut_off`: Haarness stopped its
+/// call before it finished). The status line already says how to open child
+/// views, so the row does not repeat it.
 fn delegation_detail_line(
     task: &ChildTask,
+    cut_off: bool,
     theme: &Theme,
     language: crate::locale::Language,
 ) -> Line {
@@ -385,6 +389,7 @@ fn delegation_detail_line(
         let (ended, tone) = match task.state.as_str() {
             "done" => (None, theme.muted),
             "failed" => (Some(language.text("failed")), theme.danger),
+            _ if cut_off => (Some(language.text("didn't finish")), theme.muted),
             _ => (Some(language.text("cancelled")), theme.muted),
         };
         let parts = ended
@@ -547,6 +552,15 @@ fn rejected_by_user(output: &str) -> bool {
     output
         .trim_start()
         .starts_with("The user rejected this action")
+}
+
+/// Whether a hook refused the call (`metadata.refusedBy` of `hook`); its
+/// own reason, when it gave one, is `metadata.reason`.
+fn refused_by_hook(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("refusedBy")
+        .and_then(serde_json::Value::as_str)
+        == Some("hook")
 }
 
 /// Auto's reviewer's note on a call it blocked (`metadata.review` of status
@@ -1184,7 +1198,9 @@ fn render_tool_result(
             || (*is_error
                 && (rejected_by_user(output)
                     || output.trim() == "operation cancelled"
-                    || review_block(metadata).is_some())))
+                    || unfinished(metadata)
+                    || review_block(metadata).is_some()
+                    || refused_by_hook(metadata))))
         && paired_call(app, item, call_id).is_some()
     {
         return;
@@ -1712,6 +1728,88 @@ fn plan_row(app: &App, width: usize) -> Line {
     ])
 }
 
+/// The files a pending undo left as they are, one line for each kind: the
+/// ones left for their size, which the folder no longer matches a
+/// checkpoint at, in the text colour with why (`1 file left as it was ·
+/// too large for Undo · data/model.bin`), then the ignored and outside ones,
+/// quiet (`2 files weren't restored · .env, ~/notes.txt`). Each `true` when
+/// it is the first kind.
+fn unrestored_lines(app: &App) -> Vec<(String, bool)> {
+    let Some(revert) = app.thread.revert.as_ref() else {
+        return Vec::new();
+    };
+    let shown = revert.unrestored.len();
+    let count = revert
+        .unrestored_count
+        .map_or(shown, |count| usize::try_from(count).unwrap_or(usize::MAX))
+        .max(shown);
+    // The home folder reads as `~`, and a path is text, never a control.
+    let home = haarness_protocol::home_dir().map(|home| home.display().to_string());
+    let name = |path: &str| {
+        let path = match home.as_deref().and_then(|home| path.strip_prefix(home)) {
+            Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+            _ => path.to_owned(),
+        };
+        path.chars().filter(|c| !c.is_control()).collect::<String>()
+    };
+    let (large, quiet): (Vec<_>, Vec<_>) = revert
+        .unrestored
+        .iter()
+        .partition(|file| file.reason == haarness_protocol::UnrestoredReason::Large);
+    let language = app.language;
+    let counted = |count: usize, one: &str, many: &str| {
+        if count == 1 {
+            language.text(one).to_owned()
+        } else {
+            language.format(many, &[("count", &count.to_string())])
+        }
+    };
+    let mut lines = Vec::new();
+    if !large.is_empty() {
+        let names = large
+            .iter()
+            .map(|file| name(&file.path))
+            .collect::<Vec<_>>();
+        lines.push((
+            format!(
+                "{} · {} · {}",
+                counted(
+                    large.len(),
+                    "1 file left as it was",
+                    "{count} files left as they were"
+                ),
+                language.text("too large for Undo"),
+                names.join(", ")
+            ),
+            true,
+        ));
+    }
+    // Those the list leaves out are counted with the quiet ones.
+    let unnamed = count - shown;
+    if !quiet.is_empty() || unnamed > 0 {
+        let mut names = quiet
+            .iter()
+            .map(|file| name(&file.path))
+            .collect::<Vec<_>>();
+        if unnamed > 0 {
+            names.push(language.format("+{count} more", &[("count", &unnamed.to_string())]));
+        }
+        lines.push((
+            format!(
+                "{} · {}",
+                counted(
+                    quiet.len() + unnamed,
+                    "1 file wasn't restored",
+                    "{count} files weren't restored"
+                ),
+                names.join(", ")
+            ),
+            false,
+        ));
+    }
+    lines
+}
+
 pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
     let theme = &app.theme;
     let mut transcript = TaggedLines::default();
@@ -2038,10 +2136,24 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     {
                         Some("stopped")
                     }
+                    // Haarness stopped before the call finished: quiet, as
+                    // the turn's own notice below says why.
                     ItemData::ToolResult {
-                        output, is_error, ..
+                        is_error: true,
+                        metadata,
+                        ..
+                    } if unfinished(metadata) => Some("unfinished"),
+                    ItemData::ToolResult {
+                        output,
+                        is_error,
+                        metadata,
+                        ..
                     } => Some(if *is_error && output.trim() == "operation cancelled" {
                         "cancelled"
+                    } else if *is_error && refused_by_hook(metadata) {
+                        // A hook decided, before anyone saw it: as quiet as
+                        // a person's reject, with the hook's reason.
+                        "refused"
                     } else if *is_error && rejected_by_user(output) {
                         "rejected"
                     } else if blocked.is_some() {
@@ -2072,7 +2184,13 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     match state {
                         "done" => Some("done"),
                         "failed" => Some("failed"),
-                        "cancelled" | "interrupted" => Some("cancelled"),
+                        // Haarness stopped the call before it finished: the
+                        // row says so as any call's does. Only Haarness
+                        // leaves a child interrupted (a restart, say), one in
+                        // the background too.
+                        "cancelled" if result_status == Some("unfinished") => Some("unfinished"),
+                        "interrupted" => Some("unfinished"),
+                        "cancelled" => Some("cancelled"),
                         _ => None,
                     }
                 } else {
@@ -2131,7 +2249,10 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         None if queued => "  ○ ".into(),
                         None => format!("  {} ", spinner(app.tick)),
                         Some("failed") => "  ✗ ".into(),
-                        Some("cancelled" | "rejected" | "blocked" | "stopped") => "  ⊘ ".into(),
+                        Some(
+                            "cancelled" | "rejected" | "refused" | "blocked" | "stopped"
+                            | "unfinished",
+                        ) => "  ⊘ ".into(),
                         Some(_) => "  ● ".into(),
                     },
                     |state| format!("  {} ", task_state_style(state, app.tick, theme).0),
@@ -2150,6 +2271,29 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     ),
                     Some(state @ ("cancelled" | "rejected" | "stopped")) => {
                         format!("  {}", app.language.text(state))
+                    }
+                    Some("unfinished") => format!("  {}", app.language.text("didn't finish")),
+                    Some("refused") => {
+                        let metadata = result.and_then(|item| match &item.data {
+                            ItemData::ToolResult { metadata, .. } => Some(metadata),
+                            _ => None,
+                        });
+                        // A hook that failed refused nothing of its own.
+                        let lead = app.language.text(
+                            if metadata.is_some_and(|metadata| metadata["failed"] == true) {
+                                "A hook could not answer"
+                            } else {
+                                "Refused by a hook"
+                            },
+                        );
+                        let reason = metadata
+                            .and_then(|metadata| metadata["reason"].as_str())
+                            .map(str::trim)
+                            .filter(|reason| !reason.is_empty());
+                        match reason {
+                            Some(reason) => format!("  {lead}: {}", single_line(reason, 160)),
+                            None => format!("  {lead}"),
+                        }
                     }
                     Some("blocked") => {
                         let lead = app.language.text("Stopped by Auto's reviewer");
@@ -2170,6 +2314,24 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     }
                     None if queued => "  queued".to_owned(),
                     _ => String::new(),
+                };
+                // The person paused computer use on the strip: the step holds
+                // still, and says how to let it go on from here.
+                let paused = unfinished
+                    && !awaiting
+                    && !queued
+                    && bare_tool(name).starts_with("mac_")
+                    && item.turn_id.is_some()
+                    && item.turn_id == app.active_turn
+                    && app.screen_paused();
+                let (marker, color, suffix) = if paused {
+                    (
+                        "  ‖ ".to_owned(),
+                        theme.muted,
+                        format!("  {}", app.language.text("paused")),
+                    )
+                } else {
+                    (marker, color, suffix)
                 };
                 // A command in the background takes a task's marker and
                 // says where it is (`in background · 1m 12s`), then how it
@@ -2201,6 +2363,11 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         lead + 16 + hint.chars().count() <= width
                     })
                     .unwrap_or_default();
+                let resume = if paused {
+                    format!("  ·  {RESUME_COMMAND}")
+                } else {
+                    String::new()
+                };
                 // Child-agent tasks are alive: show what the child is doing
                 // right now, not just that it was spawned.
                 // A delegation's live detail goes on its own line below the
@@ -2320,7 +2487,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                             + suffix.chars().count()
                             + browser.chars().count()
                             + disclosure.chars().count()
-                            + hint.chars().count(),
+                            + hint.chars().count()
+                            + resume.chars().count(),
                     )
                     .max(16);
                 let argument = if name == "workflow" {
@@ -2331,7 +2499,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         .map(|value| format!(" {}", single_line(&value, argument_budget)))
                         .unwrap_or_default()
                 };
-                let row = Line::new(vec![
+                let mut row = Line::new(vec![
                     Span::new(marker, color),
                     Span::new(name.clone(), theme.text),
                     Span::new(format!("{argument}{suffix}"), color),
@@ -2340,6 +2508,14 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     Span::new(disclosure, theme.muted),
                     Span::new(hint, theme.muted),
                 ]);
+                // Where `/mac resume` sits on the row, for a click on it.
+                let resume_at = paused.then(|| {
+                    use crate::width::DisplayWidth as _;
+                    let start = row.width() + "  ·  ".width();
+                    row.spans.push(Span::new("  ·  ", theme.muted));
+                    row.spans.push(Span::new(RESUME_COMMAND, theme.text));
+                    (start, row.width())
+                });
                 // A command this client follows opens its output on a click:
                 // one in the background, and one still running.
                 let opens_output = command
@@ -2357,7 +2533,12 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 {
                     block.push_tagged(row, HitTarget::TaskOpen(call_id.clone()));
                     block.push_tagged(
-                        delegation_detail_line(task, theme, app.language),
+                        delegation_detail_line(
+                            task,
+                            status == Some("unfinished"),
+                            theme,
+                            app.language,
+                        ),
                         HitTarget::TaskOpen(call_id.clone()),
                     );
                 } else if name == "workflow"
@@ -2367,9 +2548,12 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 } else if let Some(id) = opens_output {
                     block.push_tagged(row, HitTarget::CommandOpen(id));
                 } else if let Some(result) = compact_result
-                    .or(result.filter(|_| matches!(status, Some("rejected" | "blocked"))))
+                    .or(result
+                        .filter(|_| matches!(status, Some("rejected" | "refused" | "blocked"))))
                 {
                     block.push_tagged(row, HitTarget::ToolToggle(result.id));
+                } else if let Some((start, end)) = resume_at {
+                    block.push_ranged(row, [(start, end, HitTarget::ComputerResume)]);
                 } else {
                     block.push(row);
                 }
@@ -2579,7 +2763,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     ]);
                     block.push_tagged(child_row, HitTarget::TaskOpen(child_call_id.clone()));
                     block.push_tagged(
-                        delegation_detail_line(task, theme, app.language),
+                        delegation_detail_line(task, false, theme, app.language),
                         HitTarget::TaskOpen(child_call_id.clone()),
                     );
                 }
@@ -2757,6 +2941,14 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
             Span::new("  ↶ ", theme.muted),
             Span::new(single_line(&text, width.saturating_sub(4)), theme.muted),
         ]));
+        // What the undo left as it is, under it, a line for each kind.
+        for (text, pressing) in unrestored_lines(app) {
+            let tone = if pressing { theme.text } else { theme.muted };
+            block.push(Line::new(vec![
+                Span::new("    ", theme.muted),
+                Span::new(single_line(&text, width.saturating_sub(4)), tone),
+            ]));
+        }
         append_block(
             &mut transcript,
             block,

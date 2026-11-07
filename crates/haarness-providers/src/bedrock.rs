@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     CompatibleModelDefaults, CredentialStore, NativeInstance, ProviderHeaders, aws_event_stream,
+    media::Unreadable,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -371,7 +372,9 @@ impl ModelProvider for BedrockProvider {
             self.instance.base_url.trim_end_matches('/'),
             encode_path_segment(&request.model)
         );
-        let body = bedrock_request(request, &controls)?;
+        let models = self.live_models.get(&self.models);
+        let model = models.iter().find(|info| info.id == request.model);
+        let body = bedrock_request(request, &controls, model)?;
         let payload = serde_json::to_vec(&body).map_err(|error| {
             CoreError::Provider(format!("cannot encode Bedrock request: {error}"))
         })?;
@@ -907,9 +910,40 @@ const NO_OUTPUT: &str = "(no output)";
 /// A Converse cache checkpoint: what comes before it is cached.
 const CACHE_POINT: &str = r#"{"cachePoint":{"type":"default"}}"#;
 
-fn bedrock_request(request: ProviderRequest, controls: &ModelControls) -> CoreResult<Value> {
+/// The Converse request for `request`. `model` is Bedrock's entry for the
+/// model, when its list was read: it names the model and says whether it
+/// reads images.
+fn bedrock_request(
+    request: ProviderRequest,
+    controls: &ModelControls,
+    model: Option<&ModelInfo>,
+) -> CoreResult<Value> {
+    let model_name = model.map_or_else(
+        || haarness_protocol::model_display_name(&request.model, None),
+        |info| info.display_name.clone(),
+    );
+    // A model Bedrock lists without image input (gpt-oss, a text-only Llama)
+    // refuses a request with an image in it; one not listed is sent them.
+    let reads_images = model.is_none_or(|info| info.images);
+    let newest = crate::media::newest_unanswered(&request.messages);
+    // Converse takes images and PDFs. Anything else is refused in the
+    // person's newest message and is a note everywhere else.
+    let block = |item: crate::media::LoadedMedia, place: Unreadable<'_>| -> CoreResult<Value> {
+        Ok(if item.is_image() && reads_images {
+            let format = item.mime_type.strip_prefix("image/").unwrap_or("png");
+            json!({"image":{"format":format,"source":{"bytes":item.base64}}})
+        } else if item.is_pdf() {
+            json!({"document":{
+                "format":"pdf",
+                "name":bedrock_document_name(&item.filename),
+                "source":{"bytes":item.base64}
+            }})
+        } else {
+            json!({"text":place.stand_in(&item)?})
+        })
+    };
     let mut messages = Vec::new();
-    for message in request.messages {
+    for (index, message) in request.messages.into_iter().enumerate() {
         match message {
             // Converse refuses a blank text block, so blank text is left out
             // wherever it would stand alone.
@@ -935,24 +969,9 @@ fn bedrock_request(request: ProviderRequest, controls: &ModelControls) -> CoreRe
                     .into_iter()
                     .map(|text| json!({"text":text}))
                     .collect();
+                let place = Unreadable::at(index, newest, &model_name);
                 for item in media {
-                    if item.is_image() {
-                        let format = item.mime_type.strip_prefix("image/").unwrap_or("png");
-                        blocks.push(
-                            json!({"image":{"format":format,"source":{"bytes":item.base64}}}),
-                        );
-                    } else if item.is_pdf() {
-                        blocks.push(json!({"document":{
-                            "format":"pdf",
-                            "name":bedrock_document_name(&item.filename),
-                            "source":{"bytes":item.base64}
-                        }}));
-                    } else {
-                        return Err(CoreError::Provider(
-                            "Bedrock Converse accepts Haarness image and PDF attachments, not audio or video"
-                                .into(),
-                        ));
-                    }
+                    blocks.push(block(item, place)?);
                 }
                 messages.push(json!({"role":role,"content":blocks}));
             }
@@ -987,24 +1006,10 @@ fn bedrock_request(request: ProviderRequest, controls: &ModelControls) -> CoreRe
                 } else {
                     Vec::new()
                 };
+                // A tool's file never refuses the turn: the model goes on
+                // without it.
                 for item in media {
-                    if item.is_image() {
-                        let format = item.mime_type.strip_prefix("image/").unwrap_or("png");
-                        content.push(
-                            json!({"image":{"format":format,"source":{"bytes":item.base64}}}),
-                        );
-                    } else if item.is_pdf() {
-                        content.push(json!({"document":{
-                            "format":"pdf",
-                            "name":bedrock_document_name(&item.filename),
-                            "source":{"bytes":item.base64}
-                        }}));
-                    } else {
-                        return Err(CoreError::Provider(
-                            "Bedrock Converse tool results support Haarness images and PDFs, not audio or video"
-                                .into(),
-                        ));
-                    }
+                    content.push(block(item, Unreadable::FromTool)?);
                 }
                 messages.push(json!({"role":"user","content":[{"toolResult":{"toolUseId":call_id,"content":content,"status":if is_error {"error"} else {"success"}}}]}));
             }
@@ -1423,7 +1428,7 @@ mod tests {
 
     /// The request body with no model metadata read yet.
     fn bedrock_request(request: ProviderRequest) -> CoreResult<Value> {
-        super::bedrock_request(request, &ModelControls::default())
+        super::bedrock_request(request, &ModelControls::default(), None)
     }
 
     /// ConverseStream events as Bedrock frames them.
@@ -1564,6 +1569,7 @@ mod tests {
                     output_schema: None,
                 },
                 &controls[model],
+                None,
             )
             .unwrap()
         };
@@ -2396,6 +2402,105 @@ mod tests {
         assert_eq!(
             events[1].as_ref().unwrap_err().to_string(),
             "provider error: the provider sent nothing for 300 milliseconds"
+        );
+    }
+
+    #[test]
+    fn media_converse_cannot_take_is_a_note_except_in_the_newest_message() {
+        let audio = || "data:audio/mpeg;name=meeting.mp3;base64,SUQz".to_owned();
+        let shot = || "data:image/png;name=shot.png;base64,iVBORw0KGgo=".to_owned();
+        let text = |role: &str, content: &str| ProviderMessage::Text {
+            role: role.into(),
+            content: content.into(),
+        };
+        let chat = |newest: Option<ProviderMessage>| {
+            let mut messages = vec![
+                ProviderMessage::Media {
+                    role: "user".into(),
+                    content: "What does it say?".into(),
+                    attachments: vec![audio()],
+                },
+                text("assistant", "I can't hear recordings."),
+                text("user", "Record the demo"),
+                ProviderMessage::ToolCall {
+                    call_id: "record".into(),
+                    name: "record".into(),
+                    arguments: json!({}),
+                    provider_metadata: Value::Null,
+                },
+                ProviderMessage::ToolResult {
+                    call_id: "record".into(),
+                    name: "record".into(),
+                    output: String::new(),
+                    is_error: false,
+                    attachments: vec![audio(), shot()],
+                },
+            ];
+            messages.extend(newest);
+            ProviderRequest {
+                model: "openai.gpt-oss-120b-1:0".into(),
+                system: "test".into(),
+                messages,
+                tools: Vec::new(),
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: None,
+            }
+        };
+        let newest = |attachment: String| {
+            Some(ProviderMessage::Media {
+                role: "user".into(),
+                content: "And this?".into(),
+                attachments: vec![attachment],
+            })
+        };
+
+        // A model not listed yet reads the screenshot; the recordings are
+        // notes, and the tool result is not empty.
+        let body = bedrock_request(chat(None)).unwrap();
+        let sent = body["messages"].to_string();
+        assert_eq!(
+            sent.matches("[Audio meeting.mp3 is left out").count(),
+            2,
+            "{sent}"
+        );
+        assert!(!sent.contains("SUQz"), "{sent}");
+        assert!(
+            body["messages"][4]["content"][0]["toolResult"]["content"][1]
+                .get("image")
+                .is_some(),
+            "{sent}"
+        );
+
+        // Bedrock lists gpt-oss without image input: its screenshot is a
+        // note too, and the newest message is refused by the model's name.
+        let gpt_oss = model_info(
+            "openai.gpt-oss-120b-1:0",
+            Some("gpt-oss-120b"),
+            &ModelControls::default(),
+            &CompatibleModelDefaults::default(),
+            false,
+        );
+        let listed =
+            |request| super::bedrock_request(request, &ModelControls::default(), Some(&gpt_oss));
+        let sent = listed(chat(None)).unwrap()["messages"].to_string();
+        assert!(
+            sent.contains("[Image shot.png is not shown to you"),
+            "{sent}"
+        );
+        assert!(!sent.contains("iVBORw0KGgo="), "{sent}");
+        let name = &gpt_oss.display_name;
+        assert_eq!(
+            listed(chat(newest(audio()))).unwrap_err().to_string(),
+            format!(
+                "provider error: Haarness can't send audio to {name}. Send the message without the recording, or switch to a model that takes audio."
+            )
+        );
+        assert_eq!(
+            listed(chat(newest(shot()))).unwrap_err().to_string(),
+            format!(
+                "provider error: {name} doesn't read images. Send the message without the picture, or switch to a model that reads them."
+            )
         );
     }
 }

@@ -2,7 +2,7 @@ import { language, t } from "./i18n";
 import { useApp } from "./state";
 import { createEffect, on, onCleanup, onMount } from "solid-js";
 import { createMarkdownClient } from "./markdown-client";
-import { createMarkdownDOM } from "./markdown-dom";
+import { copiedCode, createMarkdownDOM, shownCode } from "./markdown-dom";
 import { linkTarget } from "./link-target";
 import {
   imageLoading,
@@ -317,7 +317,9 @@ export function Markdown(props: {
       if (language && !/^(text|plain|plaintext|txt|none|output|console)$/i.test(language))
         block.dataset.language = language;
       else delete block.dataset.language;
-      if (live) { block.querySelector(":scope > .code-copy")?.remove(); continue; }
+      // Copy comes once the block is written, and only for a block that
+      // shows its one code alone (`copiedCode`).
+      if (live || !copiedCode(block)) { block.querySelector(":scope > .code-copy")?.remove(); continue; }
       if (block.querySelector(":scope > .code-copy")) continue;
       const button = document.createElement("button");
       button.type = "button";
@@ -376,8 +378,9 @@ export function Markdown(props: {
         }
         const button = target.closest<HTMLButtonElement>(".code-copy");
         if (button && host.contains(button)) {
-          const code = button.parentElement?.querySelector("code");
-          void navigator.clipboard.writeText(code?.textContent ?? "").then(() => {
+          const code = button.parentElement ? copiedCode(button.parentElement) : undefined;
+          if (!code?.checkVisibility()) return;
+          void navigator.clipboard.writeText(shownCode(code)).then(() => {
             if (disposed || !button.isConnected) return;
             button.textContent = t("Copied");
             button.classList.add("done");

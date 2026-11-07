@@ -1891,6 +1891,405 @@ fn a_person_stopping_a_foreground_command_reads_stopped_and_leftovers_running_sa
 }
 
 #[test]
+fn a_call_a_restart_cut_off_reads_quietly_that_it_did_not_finish() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let items = vec![
+        message_item_for_turn(
+            1,
+            &thread,
+            turn,
+            ItemData::ToolCall {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({ "command": "sleep 30" }),
+                provider_metadata: serde_json::Value::Null,
+            },
+        ),
+        message_item_for_turn(
+            2,
+            &thread,
+            turn,
+            ItemData::ToolResult {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                output: "This call did not finish, so there is no result. It may have done part of its work before it stopped.".into(),
+                is_error: true,
+                metadata: serde_json::json!({ "unfinished": true }),
+            },
+        ),
+    ];
+    let mut app = app_on(&thread, items);
+    let rows = frame_text(&app, (100, 30));
+    let row = row_with(&rows, "bash sleep 30");
+    assert!(row.contains('⊘') && row.contains("didn't finish"), "{row}");
+    assert!(!row.contains("failed"), "{row}");
+    assert!(
+        !rows.iter().any(|row| row.contains("so there is no result")),
+        "the words for the model stay folded: {rows:#?}"
+    );
+    app.language = crate::locale::Language::Japanese;
+    let rows = frame_text(&app, (100, 30));
+    assert!(
+        row_with(&rows, "bash sleep 30").contains("未完了"),
+        "{rows:#?}"
+    );
+}
+
+/// A row shows its call's first result: a later one for the same call (a
+/// stopped turn's own, after the one its shutdown stored) is not what the
+/// model was told.
+#[test]
+fn a_call_shows_only_its_first_result() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let item = |sequence, data| message_item_for_turn(sequence, &thread, turn, data);
+    let result = |output: &str, is_error, metadata| ItemData::ToolResult {
+        call_id: "call-1".into(),
+        name: "bash".into(),
+        output: output.into(),
+        is_error,
+        metadata,
+    };
+    let items = vec![
+        item(
+            1,
+            ItemData::ToolCall {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({ "command": "cat notes" }),
+                provider_metadata: serde_json::Value::Null,
+            },
+        ),
+        // What the shutdown stored, then the tool's own late result.
+        item(
+            2,
+            result(
+                "This call did not finish.",
+                true,
+                serde_json::json!({ "unfinished": true }),
+            ),
+        ),
+        // An error, which a row always shows when it is the call's result.
+        item(3, result("LATE_OUTPUT_LINE", true, serde_json::Value::Null)),
+    ];
+    let app = app_on(&thread, items);
+    let rows = frame_text(&app, (100, 30));
+    assert!(
+        row_with(&rows, "bash cat notes").contains("didn't finish"),
+        "{rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("LATE_OUTPUT_LINE")),
+        "{rows:#?}"
+    );
+}
+
+/// A delegation a restart or a shutdown cut off reads as a call that did not
+/// finish, not as a failure, whether the TUI reads it from the chat's history
+/// or sees it happen. Its own result, coming after the one Haarness stored,
+/// does not change that; a call made again under its id starts over.
+#[tokio::test]
+async fn a_delegation_cut_off_reads_that_it_did_not_finish() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let child_thread = ThreadId::new();
+    let item = |sequence, data| message_item_for_turn(sequence, &thread, turn, data);
+    let call = || ItemData::ToolCall {
+        call_id: "call-1".into(),
+        name: "task".into(),
+        arguments: serde_json::json!({ "prompt": "inspect the logs" }),
+        provider_metadata: serde_json::Value::Null,
+    };
+    let link = || ItemData::TaskLink {
+        call_id: "call-1".into(),
+        child_thread_id: child_thread,
+    };
+    let result = |output: &str, is_error, metadata| ItemData::ToolResult {
+        call_id: "call-1".into(),
+        name: "task".into(),
+        output: output.into(),
+        is_error,
+        metadata,
+    };
+    let stored = || {
+        result(
+            "This call did not finish, so there is no result.",
+            true,
+            serde_json::json!({ "unfinished": true }),
+        )
+    };
+    let late = || {
+        result(
+            "<task state=\"completed\">LATE_ANSWER</task>",
+            false,
+            serde_json::Value::Null,
+        )
+    };
+    let reads_unfinished = |app: &App| {
+        assert_eq!(app.children["call-1"].state, "interrupted");
+        let rows = frame_text(app, (100, 30));
+        let row = row_with(&rows, "task inspect the logs");
+        assert!(row.contains('⊘') && row.contains("didn't finish"), "{row}");
+        assert!(!row.contains("failed") && !row.contains('✓'), "{row}");
+        // The line under it says the same, not that it was cancelled.
+        assert!(row_with(&rows, "└").contains("didn't finish"), "{rows:#?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("LATE_ANSWER")),
+            "{rows:#?}"
+        );
+    };
+
+    let durable = app_on(
+        &thread,
+        vec![
+            item(1, call()),
+            item(2, link()),
+            item(3, stored()),
+            item(4, late()),
+        ],
+    );
+    reads_unfinished(&durable);
+
+    let mut live = app_on(&thread, vec![item(1, call()), item(2, link())]);
+    let client = offline_client();
+    for (sequence, data) in [(3, stored()), (4, late())] {
+        live.reduce(
+            fixture_event(
+                "item.created",
+                thread.id,
+                thread.id,
+                serde_json::json!(item(sequence, data)),
+            ),
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    reads_unfinished(&live);
+
+    // A TUI left open across the restart reloads the history, which settles
+    // the row it last saw running.
+    let mut open = app_on(&thread, vec![item(1, call()), item(2, link())]);
+    assert_eq!(open.children["call-1"].state, "running");
+    open.items.extend([item(3, stored()), item(4, late())]);
+    open.hydrate_child_links();
+    reads_unfinished(&open);
+
+    // A goal's next round makes the call again: its result counts.
+    for (sequence, data) in [(5, call()), (6, late())] {
+        live.reduce(
+            fixture_event(
+                "item.created",
+                thread.id,
+                thread.id,
+                serde_json::json!(item(sequence, data)),
+            ),
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(live.children["call-1"].state, "done");
+    let again = app_on(
+        &thread,
+        vec![
+            item(1, call()),
+            item(2, link()),
+            item(3, stored()),
+            item(4, late()),
+            item(5, call()),
+            item(6, late()),
+        ],
+    );
+    assert_eq!(again.children["call-1"].state, "done");
+}
+
+/// A chat whose delegation `call-1` (the general agent's) Haarness cut off,
+/// as the TUI reads it after a restart: the result Haarness stored makes
+/// the child interrupted.
+fn cut_off_delegation() -> App {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let item = |sequence, data| message_item_for_turn(sequence, &thread, turn, data);
+    let app = app_on(
+        &thread,
+        vec![
+            item(
+                1,
+                ItemData::ToolCall {
+                    call_id: "call-1".into(),
+                    name: "task".into(),
+                    arguments: serde_json::json!({
+                        "agent": "general",
+                        "prompt": "inspect the logs",
+                    }),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                2,
+                ItemData::TaskLink {
+                    call_id: "call-1".into(),
+                    child_thread_id: ThreadId::new(),
+                },
+            ),
+            item(
+                3,
+                ItemData::ToolResult {
+                    call_id: "call-1".into(),
+                    name: "task".into(),
+                    output: "This call did not finish, so there is no result.".into(),
+                    is_error: true,
+                    metadata: serde_json::json!({ "unfinished": true }),
+                },
+            ),
+        ],
+    );
+    assert_eq!(app.children["call-1"].state, "interrupted");
+    app
+}
+
+/// The agents panel says a delegation a restart or a shutdown cut off did
+/// not finish, as its row does, in every language; one that Stop cancelled
+/// still reads as cancelled.
+#[test]
+fn the_agents_panel_says_a_cut_off_delegation_did_not_finish() {
+    let mut app = cut_off_delegation();
+    let panel = |app: &App| {
+        crate::view::sidebar::sidebar_lines(app, 38, 40)
+            .lines
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+    };
+    let rows = panel(&app);
+    let activity = row_with(&rows, "general ·");
+    assert!(activity.contains("didn't finish"), "{rows:#?}");
+    assert!(!activity.contains("cancelled"), "{rows:#?}");
+    app.language = crate::locale::Language::Japanese;
+    let rows = panel(&app);
+    assert!(rows.iter().any(|row| row.contains("未完了")), "{rows:#?}");
+    app.language = crate::locale::Language::English;
+    app.children.get_mut("call-1").unwrap().state = "cancelled".into();
+    let rows = panel(&app);
+    let activity = row_with(&rows, "general ·");
+    assert!(
+        activity.contains("cancelled") && !activity.contains("didn't finish"),
+        "{rows:#?}"
+    );
+}
+
+/// `/tasks` leads a cut-off delegation's entry with "didn't finish", as its
+/// row says; a cancelled one keeps "cancelled".
+#[test]
+fn tasks_says_a_cut_off_delegation_did_not_finish() {
+    let mut app = cut_off_delegation();
+    let description = |app: &mut App| {
+        app.open_tasks_overlay();
+        let crate::state::Overlay::Options { entries, .. } = &app.overlay else {
+            panic!("child picker did not open");
+        };
+        let description = entries[0].description.clone();
+        app.close_overlay();
+        description
+    };
+    let entry = description(&mut app);
+    assert!(entry.starts_with("didn't finish · "), "{entry}");
+    app.language = crate::locale::Language::Japanese;
+    let entry = description(&mut app);
+    assert!(entry.starts_with("未完了 · "), "{entry}");
+    app.language = crate::locale::Language::English;
+    app.children.get_mut("call-1").unwrap().state = "cancelled".into();
+    let entry = description(&mut app);
+    assert!(entry.starts_with("cancelled · "), "{entry}");
+}
+
+/// Opened on its own, a child a restart or a shutdown cut off says in the
+/// band that it did not finish, as its delegation's row does.
+#[test]
+fn a_cut_off_child_says_in_its_band_that_it_did_not_finish() {
+    let (mut app, _, first, _) = child_navigation_fixture();
+    let state = |app: &mut App, state: &str| {
+        app.children
+            .values_mut()
+            .find(|task| task.child_thread_id == first.id)
+            .expect("current child task")
+            .state = state.into();
+    };
+    let band = |app: &App| line_text(app.lines((100, 24)).last().unwrap());
+    state(&mut app, "interrupted");
+    assert!(band(&app).contains("didn't finish"), "{}", band(&app));
+    assert!(!band(&app).contains("cancelled"), "{}", band(&app));
+    app.language = crate::locale::Language::Japanese;
+    assert!(band(&app).contains("未完了"), "{}", band(&app));
+    app.language = crate::locale::Language::English;
+    state(&mut app, "cancelled");
+    assert!(band(&app).contains("cancelled"), "{}", band(&app));
+}
+
+/// A delegation in the background that a restart cut off (the restart
+/// records it as interrupted) reads as one that did not finish, on its row
+/// and the line under it, not as cancelled.
+#[test]
+fn a_background_delegation_a_restart_cut_off_reads_that_it_did_not_finish() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let child_thread = ThreadId::new();
+    let child_turn = TurnId::new();
+    let item = |sequence, data| message_item_for_turn(sequence, &thread, turn, data);
+    let checkpoint = |state: &str| ItemData::TaskState {
+        call_id: "call-1".into(),
+        child_thread_id: child_thread,
+        child_turn_id: child_turn,
+        state: state.into(),
+    };
+    let app = app_on(
+        &thread,
+        vec![
+            item(
+                1,
+                ItemData::ToolCall {
+                    call_id: "call-1".into(),
+                    name: "task".into(),
+                    arguments: serde_json::json!({ "prompt": "inspect in background" }),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                2,
+                ItemData::TaskLink {
+                    call_id: "call-1".into(),
+                    child_thread_id: child_thread,
+                },
+            ),
+            item(3, checkpoint("background")),
+            item(
+                4,
+                ItemData::ToolResult {
+                    call_id: "call-1".into(),
+                    name: "task".into(),
+                    output: "<task state=\"running\">detached</task>".into(),
+                    is_error: false,
+                    metadata: serde_json::Value::Null,
+                },
+            ),
+            item(5, checkpoint("interrupted")),
+        ],
+    );
+    assert_eq!(app.children["call-1"].state, "interrupted");
+    let rows = frame_text(&app, (100, 30));
+    let row = row_with(&rows, "task inspect in background");
+    assert!(row.contains('⊘') && row.contains("didn't finish"), "{row}");
+    assert!(!row.contains("cancelled"), "{row}");
+    let detail = row_with(&rows, "└");
+    assert!(
+        detail.contains("didn't finish") && !detail.contains("cancelled"),
+        "{rows:#?}"
+    );
+}
+
+#[test]
 fn a_progress_line_read_part_way_shows_as_a_terminal_leaves_it() {
     let thread = fixture_thread();
     let mut app = app_on(&thread, vec![]);

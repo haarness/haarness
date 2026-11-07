@@ -112,6 +112,7 @@ import { createUiSession } from "./ui-session";
 import { createNotifications } from "./notifications";
 import { chatHomeFolder, chatHomePath, isChatHome } from "./chat-home";
 import { quietClosedSocketReads } from "./closed-socket-read";
+import { removalSurvivesFailedStart } from "./unlinked-worktree";
 import { cliCacheFolder, daemonRunning } from "./daemon-record";
 
 // A connection that went away never interrupts with Electron's error dialog
@@ -633,7 +634,11 @@ async function manageWorktree(owner: string, method: string, args: unknown[]) {
     try {
       if (workspace.exists) {
         const saved = data().recent.find((item) => item.id === id);
-        await connectLocal(workspace.path, saved?.trust ?? root.view.trust);
+        await connectLocal(workspace.path, saved?.trust ?? root.view.trust).catch(
+          (error) => {
+            if (!removalSurvivesFailedStart(method, error)) throw error;
+          },
+        );
       }
       const cached = connections.get(id);
       const target =

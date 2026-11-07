@@ -330,6 +330,17 @@ impl App {
     }
 
     async fn reduce_event(&mut self, event: EventEnvelope, client: &ApiClient) -> Result<()> {
+        // Followed in every chat, so a chat opened during a pause shows it.
+        if event.event_type == crate::management::COMPUTER_USE_UPDATED {
+            if let Some(chat) = event.thread_id {
+                if event.payload["paused"] == true {
+                    self.computer_paused = Some(chat);
+                } else if self.computer_paused == Some(chat) {
+                    self.computer_paused = None;
+                }
+            }
+            return Ok(());
+        }
         if event.event_type == "approval_mode.changed" {
             if let Ok(info) = serde_json::from_value(event.payload.clone()) {
                 self.show_approval_mode(info);
@@ -420,7 +431,7 @@ impl App {
                     self.catalog_arrived(providers, client).await;
                 }
                 if let Ok(agents) = client.agents().await {
-                    self.agents = agents;
+                    self.agents_reloaded(agents);
                 }
                 if let Ok(catalog) = client.workflows().await {
                     self.workflow_definitions = catalog.workflows;
@@ -868,7 +879,7 @@ impl App {
                                 }
                             }
                         }
-                        let item_turn_id = item.turn_id;
+                        let (item_turn_id, item_sequence) = (item.turn_id, item.sequence);
                         match item.data {
                             ItemData::Reasoning { .. } => {
                                 // The durable item supersedes the live preview.
@@ -900,8 +911,15 @@ impl App {
                                 name,
                                 output,
                                 is_error,
-                                ..
-                            } if name == "task" => {
+                                metadata,
+                            } if name == "task"
+                                && crate::state::first_task_result(
+                                    &self.items,
+                                    item_sequence,
+                                    item_turn_id,
+                                    &call_id,
+                                ) =>
+                            {
                                 let row = self
                                     .children
                                     .contains_key(&call_id)
@@ -913,17 +931,10 @@ impl App {
                                 if let Some(task) =
                                     row.as_ref().and_then(|row| self.children.get_mut(row))
                                 {
-                                    task.state =
-                                        if !is_error && output.contains("state=\"running\"") {
-                                            "background"
-                                        } else if !is_error {
-                                            "done"
-                                        } else if output.trim() == "operation cancelled" {
-                                            "cancelled"
-                                        } else {
-                                            "failed"
-                                        }
-                                        .into();
+                                    task.state = crate::state::task_result_state(
+                                        &output, is_error, &metadata,
+                                    )
+                                    .into();
                                 }
                             }
                             ItemData::TaskState {
@@ -1159,6 +1170,10 @@ impl App {
                 });
                 if let Some(thread_id) = event.thread_id {
                     self.live_threads.remove(&thread_id);
+                    // A pause ends with its turn.
+                    if self.computer_paused == Some(thread_id) {
+                        self.computer_paused = None;
+                    }
                 }
                 if event.thread_id == Some(self.root_thread_id) {
                     self.root_active_turn = None;
@@ -1229,7 +1244,7 @@ impl App {
                                 .iter()
                                 .position(|agent| agent.id == thread.agent)
                         {
-                            self.agent_index = index;
+                            self.pick_agent(index);
                         }
                         // Undo/redo elsewhere, or the next turn confirming an
                         // undo, changes which items are live: reload them.

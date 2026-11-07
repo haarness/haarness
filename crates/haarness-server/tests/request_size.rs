@@ -122,7 +122,7 @@ fn is_summary(request: &ProviderRequest) -> bool {
     matches!(
         request.messages.last(),
         Some(ProviderMessage::Text { role, content })
-            if role == "user" && content.starts_with("Summarize this conversation")
+            if role == "user" && content.contains("Summarize this conversation")
     )
 }
 

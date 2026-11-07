@@ -36,6 +36,13 @@ pub fn single_line(value: &str, width: usize) -> String {
     truncated
 }
 
+/// A chat title as one display line: [`single_line`] without the escape
+/// sequences an older server kept in a title, so no `]0;…` fragment shows.
+/// Only for titles: a file's or a command's text keeps what it holds.
+pub fn title_line(title: &str, width: usize) -> String {
+    single_line(&crate::escapes::without_escapes(title), width)
+}
+
 /// Compact token counts: `950` → `950`, `12400` → `12.4k`.
 #[allow(clippy::cast_precision_loss)] // display-only rounding
 pub fn compact_count(value: u64) -> String {

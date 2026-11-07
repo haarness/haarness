@@ -977,6 +977,61 @@ async fn a_prompt_for_a_session_busy_elsewhere_is_refused_with_the_servers_reaso
     daemon_guard.stop().await;
 }
 
+/// An editor that sends an image only by its address (as a web page's
+/// image) gets an answer: the model is told where the image is, and Haarness
+/// fetches nothing. One with neither data nor an address is refused in words.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_image_sent_only_by_its_address_reaches_the_model_as_a_link() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, _, _, session) =
+        acp_session(&directory).await;
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":3, "method":"session/prompt",
+               "params":{"sessionId":session, "prompt":[
+                   {"type":"text", "text":"describe it"},
+                   {"type":"image", "data":"", "mimeType":"image/png",
+                    "uri":"https://example.com/charts/q3.png"}]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let response = receive_response(&mut lines, &mut stdin, 3, &mut messages).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response:?}");
+    let reply: String = messages
+        .iter()
+        .filter_map(|message| update_text(message, "agent_message_chunk"))
+        .collect();
+    assert!(
+        reply
+            .contains(r#"<resource-link name="q3.png" uri="https://example.com/charts/q3.png" />"#),
+        "{reply:?}"
+    );
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":4, "method":"session/prompt",
+               "params":{"sessionId":session, "prompt":[
+                   {"type":"image", "data":"", "mimeType":"image/png"}]}}),
+    )
+    .await;
+    let response = receive_response(&mut lines, &mut stdin, 4, &mut messages).await;
+    assert_eq!(response["error"]["code"], -32602, "{response:?}");
+    assert!(
+        response["error"]
+            .to_string()
+            .contains("an ACP image needs its data or a uri"),
+        "{response:?}"
+    );
+
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    daemon_guard.stop().await;
+}
+
 /// A prompt a `UserPromptSubmit` hook blocks is refused with the hook's
 /// reason as an invalid request, not an internal error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

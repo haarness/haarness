@@ -402,7 +402,9 @@ impl Client {
 
     /// [`Self::bearer_until`]'s work under the credential lock: the saved
     /// access token, renewed first when it expires within `headroom` or
-    /// `rejected` names it.
+    /// `rejected` names it. A renewal asked for early that Cloud cannot
+    /// answer (an outage, the network) leaves the saved token in use while
+    /// it lasts; a revoked sign-in still signs out.
     async fn current_bearer(
         &self,
         rejected: Option<&str>,
@@ -411,7 +413,8 @@ impl Client {
         let _lock = self.config.lock().await?;
         let mut c = credentials::load(&self.config.path())?.ok_or(Error::NotLoggedIn)?;
         self.validate(&c)?;
-        if c.access_expired(Utc::now(), headroom) || rejected == Some(c.access_token.as_str()) {
+        let refused = rejected == Some(c.access_token.as_str());
+        if c.access_expired(Utc::now(), headroom) || refused {
             let result = self
                 .token(&[
                     ("grant_type", "refresh_token"),
@@ -428,6 +431,12 @@ impl Client {
                     credentials::delete(&self.config.path())?;
                     return Err(Error::NotLoggedIn);
                 }
+                // Cloud still takes a token it has not refused until it
+                // expires, so the caller gets the rest of its life.
+                Err(e)
+                    if e.is_transient()
+                        && !refused
+                        && !c.access_expired(Utc::now(), chrono::Duration::zero()) => {}
                 Err(e) => return Err(e),
             }
         }

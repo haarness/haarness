@@ -275,6 +275,10 @@ class Api(Transport):
         """POST /v1/threads/{id}/interrupt."""
         return cast("T.InterruptResponse", self.request('POST', f'/v1/threads/{self.segment(id)}/interrupt', query=query, binary_body=False, binary_response=False, options=options))
 
+    def stop_turn_work(self, id: str, body: T.StopTurnWorkRequest, *, options: RequestOptions | None = None) -> T.StopTurnWorkResult:
+        """POST /v1/threads/{id}/work/stop."""
+        return cast("T.StopTurnWorkResult", self.request('POST', f'/v1/threads/{self.segment(id)}/work/stop', body=body, binary_body=False, binary_response=False, options=options))
+
     def list_background_tasks(self, id: str, *, options: RequestOptions | None = None) -> list[T.BackgroundTaskInfo]:
         """GET /v1/threads/{id}/background."""
         return cast("list[T.BackgroundTaskInfo]", self.request('GET', f'/v1/threads/{self.segment(id)}/background', binary_body=False, binary_response=False, options=options))
@@ -803,6 +807,10 @@ class AsyncApi(AsyncTransport):
     async def interrupt_thread_tree(self, id: str, query: T.InterruptQuery | None = None, *, options: RequestOptions | None = None) -> T.InterruptResponse:
         """POST /v1/threads/{id}/interrupt."""
         return cast("T.InterruptResponse", await self.request('POST', f'/v1/threads/{self.segment(id)}/interrupt', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def stop_turn_work(self, id: str, body: T.StopTurnWorkRequest, *, options: RequestOptions | None = None) -> T.StopTurnWorkResult:
+        """POST /v1/threads/{id}/work/stop."""
+        return cast("T.StopTurnWorkResult", await self.request('POST', f'/v1/threads/{self.segment(id)}/work/stop', body=body, binary_body=False, binary_response=False, options=options))
 
     async def list_background_tasks(self, id: str, *, options: RequestOptions | None = None) -> list[T.BackgroundTaskInfo]:
         """GET /v1/threads/{id}/background."""

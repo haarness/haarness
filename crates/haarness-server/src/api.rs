@@ -28,13 +28,13 @@ use haarness_protocol::{
     ProviderInfo, PtyCreateRequest, PtyId, PtyInfo, PtyUpdateRequest, QuestionReply,
     QueueInputRequest, QueueInputResponse, ReviewFile, SCHEMA_VERSION, SESSION_ARCHIVE_CAPABILITY,
     ServerInfo, SessionArchive, SessionArchiveImportRequest, SessionArchiveImportResult,
-    ShellCommandInfo, ShellCommandOutput, SkillInfo, StartTurnRequest, Thread, ThreadActivity,
-    ThreadId, ToolCatalogResponse, ToolSettingsUpdate, Turn, TurnId, UpdateThreadRequest,
-    WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY, WorkflowId, WorkflowRun,
-    WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest, WorkspaceCreateRequest,
-    WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse, WorkspaceRefsResponse,
-    WorkspaceRemoveRequest, WorkspaceResetRequest, WorkspaceResolveRefRequest,
-    WorkspaceResolveRefResponse,
+    ShellCommandInfo, ShellCommandOutput, SkillInfo, StartTurnRequest, StopTurnWorkRequest,
+    StopTurnWorkResult, Thread, ThreadActivity, ThreadId, ToolCatalogResponse, ToolSettingsUpdate,
+    Turn, TurnId, UpdateThreadRequest, WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY,
+    WorkflowId, WorkflowRun, WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest,
+    WorkspaceCreateRequest, WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse,
+    WorkspaceRefsResponse, WorkspaceRemoveRequest, WorkspaceResetRequest,
+    WorkspaceResolveRefRequest, WorkspaceResolveRefResponse,
 };
 use haarness_pty::{PtyManager, PtySubscription};
 use haarness_workflow_catalog::{CatalogError, WorkflowCatalog};
@@ -265,6 +265,7 @@ pub async fn serve_with_access(
         .route("/threads/{id}/active", get(active_turn))
         .route("/threads/{id}/activity", get(thread_activity))
         .route("/threads/{id}/interrupt", post(interrupt_thread_tree))
+        .route("/threads/{id}/work/stop", post(stop_turn_work))
         .route(
             "/threads/{id}/background",
             get(list_background_tasks).post(promote_background_tasks),
@@ -846,6 +847,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             PTY_CAPABILITY.into(),
             SESSION_ARCHIVE_CAPABILITY.into(),
             haarness_protocol::BACKGROUND_COMMANDS_CAPABILITY.into(),
+            haarness_protocol::TURN_WORK_STOP_CAPABILITY.into(),
         ]
         .into_iter()
         .chain(
@@ -1277,6 +1279,9 @@ async fn start_workflow(
 #[serde(rename_all = "camelCase")]
 struct WorkflowRunsQuery {
     thread_id: Option<ThreadId>,
+    /// Runs launched from this chat or from any chat under it (its
+    /// subagents' and theirs), in place of `threadId`.
+    tree: Option<ThreadId>,
     limit: Option<usize>,
 }
 
@@ -1284,11 +1289,15 @@ async fn list_workflow_runs(
     State(state): State<ServerState>,
     Query(query): Query<WorkflowRunsQuery>,
 ) -> ApiResult<Json<Vec<WorkflowRun>>> {
-    Ok(Json(
-        workflow_coordinator(&state)?
-            .list(query.thread_id, query.limit.unwrap_or(50).clamp(1, 500))
-            .await?,
-    ))
+    let coordinator = workflow_coordinator(&state)?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 500);
+    Ok(Json(match query.tree {
+        Some(root) => {
+            let chats = state.runtime.thread_tree_ids(root).await?;
+            coordinator.list_launched_from(&chats, limit).await?
+        }
+        None => coordinator.list(query.thread_id, limit).await?,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -2823,12 +2832,13 @@ async fn manage_resource(
     let registry = state.management.as_ref().ok_or_else(|| {
         haarness_core::CoreError::Tool("Client management is unavailable on this server".into())
     })?;
-    // Computer use takes more reach for agents only from a person: say whether a change came from a program Haarness
-    // started (an agent's command, say). Reads skip the look at the process table.
+    // Computer use takes more reach for agents only from a person, and only a person ends their own pause: say whether
+    // a change came from a program Haarness started (an agent's command, or a program it put in the background). Reads
+    // skip the look at the process table.
     if resource == "computer-use"
         && matches!(
             input["action"].as_str(),
-            Some("accept" | "enable" | "configure" | "app")
+            Some("accept" | "enable" | "configure" | "app" | "resume")
         )
         && let Some(object) = input.as_object_mut()
     {
@@ -3041,6 +3051,55 @@ async fn interrupt_thread_tree(
         "workflows": workflows,
         "turnsAndTasks": turns_and_tasks,
     })))
+}
+/// Stop what some turns of a chat left running, telling the chat nothing:
+/// those turns if one still runs, their subagents and commands, and the
+/// named workflows launched from the chat or a chat under it and commands
+/// of it. As `/interrupt` does for a whole tree, what runs under a stopped
+/// subagent or workflow goes too, the workflows launched there included.
+/// Other turns' work goes on.
+async fn stop_turn_work(
+    State(state): State<ServerState>,
+    Path(id): Path<ThreadId>,
+    Json(request): Json<StopTurnWorkRequest>,
+) -> ApiResult<Json<StopTurnWorkResult>> {
+    let tree = state.runtime.thread_tree_ids(id).await?;
+    let mut workflows = Vec::new();
+    if let Some(coordinator) = &state.workflows {
+        for run in request.workflows {
+            if coordinator.cancel_untold(run, &tree).await? {
+                workflows.push(run);
+            }
+        }
+    }
+    let turns = request.turns.into_iter().collect();
+    let commands = request.commands.into_iter().collect();
+    let kept = request.keep_calls.into_iter().collect();
+    let mut stopped = state
+        .runtime
+        .stop_turn_work(id, &turns, &commands, &kept)
+        .await?;
+    if let Some(coordinator) = &state.workflows {
+        // The chats of the stopped subagents and workflows, and those
+        // under them: a workflow launched there (one a subagent started)
+        // would deliver its result into a chat whose work has ended.
+        let mut under = std::collections::HashSet::new();
+        for task in &stopped.subagents {
+            under.extend(state.runtime.thread_tree_ids(task.child_thread_id).await?);
+        }
+        for run in &workflows {
+            if let Some(chat) = coordinator.get(*run, None).await?.thread_id {
+                under.extend(state.runtime.thread_tree_ids(chat).await?);
+            }
+        }
+        for run in coordinator.cancel_untold_from(&under).await? {
+            if !workflows.contains(&run) {
+                workflows.push(run);
+            }
+        }
+    }
+    stopped.workflows = workflows;
+    Ok(Json(stopped))
 }
 /// Every unanswered permission prompt, oldest first — including prompts from
 /// child-agent threads, so clients can repopulate after reconnects.
@@ -3495,7 +3554,9 @@ fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
         CoreError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found", false),
         CoreError::Conflict(_) => (StatusCode::CONFLICT, "conflict", true),
         CoreError::PermissionDenied(_) => (StatusCode::FORBIDDEN, "permission_denied", false),
-        CoreError::PermissionRejected(_) => (StatusCode::FORBIDDEN, "permission_rejected", false),
+        CoreError::PermissionRejected(_) | CoreError::HookRefused { .. } => {
+            (StatusCode::FORBIDDEN, "permission_rejected", false)
+        }
         CoreError::ReviewBlocked(_) => (StatusCode::FORBIDDEN, "review_blocked", false),
         CoreError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_request", false),
         CoreError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error", true),
@@ -3508,18 +3569,27 @@ fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
         ),
         CoreError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error", true),
         CoreError::Tool(_) => (StatusCode::UNPROCESSABLE_ENTITY, "tool_error", false),
+        CoreError::Refused(_) => (StatusCode::CONFLICT, "refused", false),
         CoreError::Cancelled => (StatusCode::CONFLICT, "cancelled", false),
     }
 }
 impl IntoResponse for ApiFailure {
     fn into_response(self) -> Response {
         let (status, code, retryable) = failure_parts(&self.0);
+        let details = match &self.0 {
+            CoreError::Refused(refusal) => Some(haarness_protocol::ApiErrorDetails {
+                reason: Some(refusal.reason),
+                path: refusal.path.clone(),
+            }),
+            _ => None,
+        };
         (
             status,
             Json(ApiError {
                 code: code.into(),
                 message: self.1.unwrap_or_else(|| self.0.to_string()),
                 retryable,
+                details,
             }),
         )
             .into_response()
@@ -3597,6 +3667,31 @@ mod failure_tests {
         assert_eq!(invalid["message"], "invalid request: bad");
         let elsewhere = message(ApiFailure::from(CoreError::Tool("boom".into()))).await;
         assert_eq!(elsewhere["message"], "tool error: boom");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_reads_as_its_sentence_and_names_its_reason_for_clients() {
+        let refused = message(ApiFailure::from(CoreError::Refused(Box::new(
+            haarness_core::Refusal {
+                reason: haarness_protocol::RefusalReason::NoUndoCopy,
+                path: Some("assets/big.bin".into()),
+                message: "assets/big.bin is over 2 MiB and Undo has no copy of it.".into(),
+            },
+        ))))
+        .await;
+        assert_eq!(
+            refused["message"],
+            "assets/big.bin is over 2 MiB and Undo has no copy of it."
+        );
+        assert_eq!(refused["code"], "refused");
+        assert_eq!(refused["retryable"], false);
+        // Under `details`, where Cloud's errors carry their reasons too.
+        assert_eq!(refused["details"]["reason"], "no_undo_copy");
+        assert_eq!(refused["details"]["path"], "assets/big.bin");
+        assert!(refused.get("reason").is_none() && refused.get("path").is_none());
+        // Other failures say neither.
+        let conflict = message(ApiFailure::from(CoreError::Conflict("big.bin".into()))).await;
+        assert!(conflict.get("details").is_none());
     }
 }
 

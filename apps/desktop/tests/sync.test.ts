@@ -177,6 +177,25 @@ test("a review runs from its reviewing status until any other status or the turn
   assert.equal(review(), undefined);
 });
 
+test("a pause on computer use's strip is followed by chat and ends with the server's word or the turn", () => {
+  const [state, set] = createStore<Live>({ selected: "other", threads: [], items: [], turns: [], streams: {}, permissions: [], questions: [] });
+  let eventId = 0;
+  const event = (type: string, payload: unknown, threadId = "thread") =>
+    reduceEvent(state, set, { eventId: ++eventId, type, payload, threadId, turnId: "turn", serverInstanceId: "instance" } as EventEnvelope);
+  const paused = () => state.computerPaused;
+  event("computer_use.updated", { paused: true });
+  assert.equal(paused(), "thread", "kept while another chat is open");
+  event("computer_use.updated", { paused: false }, "elsewhere");
+  assert.equal(paused(), "thread", "another chat's end is not this one's");
+  event("computer_use.updated", { paused: false });
+  assert.equal(paused(), undefined);
+  event("computer_use.updated", { paused: true });
+  event("turn.finished", { id: "turn", status: "completed" }, "elsewhere");
+  assert.equal(paused(), "thread");
+  event("turn.finished", { id: "turn", status: "interrupted" });
+  assert.equal(paused(), undefined);
+});
+
 test("requests announced again are each updated where they stand in the queue", () => {
   const [state, set] = createStore<Live>({
     selected: "thread",

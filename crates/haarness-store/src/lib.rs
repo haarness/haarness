@@ -8,7 +8,11 @@ mod snapshots;
 mod workflows;
 pub use snapshots::{PruneReport, SqliteSnapshotFolders, SqliteSnapshotStore};
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -96,6 +100,39 @@ impl SqliteStore {
             )
             .map_err(storage)?;
         Ok(upgraded == 1)
+    }
+
+    /// The calls of one turn that no result answers, as `(call id, name)`.
+    fn unanswered_turn_calls(
+        tx: &rusqlite::Transaction<'_>,
+        thread: &str,
+        turn: &str,
+    ) -> CoreResult<Vec<(String, String)>> {
+        let mut statement = tx
+            .prepare(
+                "SELECT data_json FROM items
+                 WHERE thread_id=?1 AND turn_id=?2 AND deleted=0 ORDER BY sequence",
+            )
+            .map_err(storage)?;
+        let mut items = Vec::new();
+        for row in statement
+            .query_map(params![thread, turn], |row| row.get::<_, String>(0))
+            .map_err(storage)?
+        {
+            // An item this version cannot read is no call or result of its
+            // own, and must not keep the server from starting.
+            if let Ok(data) = serde_json::from_str::<ItemData>(&row.map_err(storage)?) {
+                items.push(data);
+            }
+        }
+        Ok(haarness_core::pair_tool_calls(&items)
+            .calls
+            .into_iter()
+            .filter_map(|index| match &items[index] {
+                ItemData::ToolCall { call_id, name, .. } => Some((call_id.clone(), name.clone())),
+                _ => None,
+            })
+            .collect())
     }
 
     /// Reconcile parent-side task checkpoints with terminal child turns.
@@ -590,6 +627,22 @@ impl SqliteStore {
                 .execute_batch("ALTER TABLE threads ADD COLUMN directory TEXT;")
                 .map_err(storage)?;
         }
+        // The files a pending undo left as they are, checked the same way:
+        // an older server ignores it, and a pending undo it records anew
+        // names another backup, which leaves these out (see
+        // `decode_unrestored`).
+        let has_unrestored: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('threads') WHERE name='revert_unrestored_json')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if !has_unrestored {
+            connection
+                .execute_batch("ALTER TABLE threads ADD COLUMN revert_unrestored_json TEXT;")
+                .map_err(storage)?;
+        }
         connection
             .execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_threads_directory ON threads(directory) WHERE directory IS NOT NULL;",
@@ -611,6 +664,49 @@ impl SqliteStore {
             )
             .map_err(storage)?;
         Ok(())
+    }
+
+    /// The thread's undo state, and the files each still-undone step of it
+    /// left as they are: those the same pending undo recorded for steps at
+    /// or after `state`'s sequence, with `step`'s for that sequence.
+    fn write_revert_state(
+        &self,
+        id: ThreadId,
+        state: Option<(u64, String, Option<String>)>,
+        step: Option<(haarness_core::UndoStepFiles, Vec<String>)>,
+    ) -> CoreResult<()> {
+        let mut connection = self.connection.lock();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let (sequence, snapshot, base_snapshot, unrestored) = match state {
+            Some((sequence, snapshot, base_snapshot)) => {
+                let recorded = tx
+                    .query_row(
+                        "SELECT revert_unrestored_json FROM threads WHERE id=?1",
+                        [id.to_string()],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+                    .map_err(storage)?
+                    .flatten();
+                let unrestored =
+                    pending_unrestored(recorded.as_deref(), &snapshot, sequence, step)?;
+                (
+                    Some(i64::try_from(sequence).map_err(storage)?),
+                    Some(snapshot),
+                    base_snapshot,
+                    unrestored,
+                )
+            }
+            None => (None, None, None, None),
+        };
+        tx.execute(
+            "UPDATE threads SET revert_sequence=?2, revert_snapshot=?3, revert_base_snapshot=?4, revert_unrestored_json=?5, updated_at=?6 WHERE id=?1",
+            params![id.to_string(), sequence, snapshot, base_snapshot, unrestored, time(Utc::now())],
+        )
+        .map_err(storage)?;
+        tx.commit().map_err(storage)
     }
 
     fn start_turn_record(
@@ -650,7 +746,7 @@ impl SqliteStore {
             request.attachments = input.attachments;
         }
         let thread_raw = tx.query_row(
-            "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory FROM threads WHERE id=?1",
+            "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json FROM threads WHERE id=?1",
             [id.to_string()], raw_thread,
         ).optional().map_err(storage)?.ok_or_else(|| CoreError::NotFound(format!("thread {id}")))?;
         let thread = decode_thread(thread_raw)?;
@@ -669,7 +765,7 @@ impl SqliteStore {
             )
             .map_err(storage)?;
             tx.execute(
-                "UPDATE threads SET revert_sequence=NULL, revert_snapshot=NULL, revert_base_snapshot=NULL WHERE id=?1",
+                "UPDATE threads SET revert_sequence=NULL, revert_snapshot=NULL, revert_base_snapshot=NULL, revert_unrestored_json=NULL WHERE id=?1",
                 [id.to_string()],
             )
             .map_err(storage)?;
@@ -836,7 +932,7 @@ impl ThreadRepository for SqliteStore {
         let connection = self.connection.lock();
         let mut statement = connection
             .prepare(
-                "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory
+                "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json
              FROM threads WHERE (?1 OR archived = 0) ORDER BY updated_at DESC",
             )
             .map_err(storage)?;
@@ -871,7 +967,7 @@ impl ThreadRepository for SqliteStore {
 
     async fn get_thread(&self, id: ThreadId) -> CoreResult<Thread> {
         let raw = self.connection.lock().query_row(
-            "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory FROM threads WHERE id=?1",
+            "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json FROM threads WHERE id=?1",
             [id.to_string()], raw_thread,
         ).optional().map_err(storage)?.ok_or_else(|| CoreError::NotFound(format!("thread {id}")))?;
         decode_thread(raw)
@@ -919,20 +1015,27 @@ impl ThreadRepository for SqliteStore {
         expected: &str,
         title: &str,
     ) -> CoreResult<Option<Thread>> {
-        // Chats created before the placeholder became "New chat" still store
-        // the old one, and expecting either means expecting an untitled chat.
-        let (expected, also) = if haarness_protocol::is_untitled_chat_title(expected) {
-            (
-                haarness_protocol::UNTITLED_CHAT_TITLE,
-                haarness_protocol::LEGACY_UNTITLED_CHAT_TITLE,
+        // The title is replaced when it reads as the one expected, however it
+        // is stored: chats created before the placeholder became "New chat"
+        // still store the old one, and an older server kept a title made only
+        // of escape sequences, which reads as "New chat" too.
+        let connection = self.connection.lock();
+        let stored = connection
+            .query_row(
+                "SELECT title FROM threads WHERE id=?1",
+                [id.to_string()],
+                |row| row.get::<_, String>(0),
             )
-        } else {
-            (expected, expected)
+            .optional()
+            .map_err(storage)?
+            .filter(|stored| shown_title(stored.clone()) == shown_title(expected.to_owned()));
+        let Some(stored) = stored else {
+            return Ok(None);
         };
-        let raw = self.connection.lock().query_row(
-            "UPDATE threads SET title=?2,updated_at=?3 WHERE id=?1 AND title IN (?4,?5)
-             RETURNING id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory",
-            params![id.to_string(), title, time(Utc::now()), expected, also], raw_thread,
+        let raw = connection.query_row(
+            "UPDATE threads SET title=?2,updated_at=?3 WHERE id=?1 AND title=?4
+             RETURNING id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json",
+            params![id.to_string(), title, time(Utc::now()), stored], raw_thread,
         ).optional().map_err(storage)?;
         raw.map(decode_thread).transpose()
     }
@@ -1322,8 +1425,20 @@ impl ThreadRepository for SqliteStore {
             let mut copied = Vec::new();
             for row in rows {
                 let (old_id, sequence, data_json, created_at) = row.map_err(storage)?;
-                copied.push((item_id(&old_id)?, sequence, data_json, created_at));
+                let data: ItemData = serde_json::from_str(&data_json).map_err(storage)?;
+                copied.push((item_id(&old_id)?, sequence, data, created_at));
             }
+            // A call whose result is not in the copied range (it was waiting
+            // or running, or a steer it ran through is the boundary) would
+            // never get one in the fork, and providers refuse a call without
+            // its result: it is left out with what was recorded for it.
+            let unanswered =
+                haarness_core::pair_tool_calls(copied.iter().map(|(_, _, data, _)| data));
+            let left_out = unanswered
+                .calls
+                .into_iter()
+                .chain(unanswered.records)
+                .collect::<HashSet<_>>();
             let id_map = copied
                 .iter()
                 .map(|(old_id, ..)| (*old_id, ItemId::new()))
@@ -1333,8 +1448,11 @@ impl ThreadRepository for SqliteStore {
                 sequence: 0,
                 item_id: None,
             };
-            for (old_id, sequence, data_json, created_at) in copied {
-                let mut data: ItemData = serde_json::from_str(&data_json).map_err(storage)?;
+            for (index, (old_id, sequence, mut data, created_at)) in copied.into_iter().enumerate()
+            {
+                if left_out.contains(&index) {
+                    continue;
+                }
                 // The fork runs none of its source's commands: a checkpoint
                 // of one still running is left out (the copied call's result
                 // still names the command), an ended one is kept.
@@ -1430,22 +1548,17 @@ impl ThreadRepository for SqliteStore {
         id: ThreadId,
         state: Option<(u64, String, Option<String>)>,
     ) -> CoreResult<()> {
-        let (sequence, snapshot, base_snapshot) = match state {
-            Some((sequence, snapshot, base_snapshot)) => (
-                Some(i64::try_from(sequence).map_err(storage)?),
-                Some(snapshot),
-                base_snapshot,
-            ),
-            None => (None, None, None),
-        };
-        self.connection
-            .lock()
-            .execute(
-                "UPDATE threads SET revert_sequence=?2, revert_snapshot=?3, revert_base_snapshot=?4, updated_at=?5 WHERE id=?1",
-                params![id.to_string(), sequence, snapshot, base_snapshot, time(Utc::now())],
-            )
-            .map_err(storage)?;
-        Ok(())
+        self.write_revert_state(id, state, None)
+    }
+
+    async fn set_revert_state_unrestored(
+        &self,
+        id: ThreadId,
+        state: (u64, String, Option<String>),
+        unrestored: haarness_core::UndoStepFiles,
+        settled: Vec<String>,
+    ) -> CoreResult<()> {
+        self.write_revert_state(id, Some(state), Some((unrestored, settled)))
     }
 
     async fn confirm_revert(&self, id: ThreadId) -> CoreResult<bool> {
@@ -1472,7 +1585,7 @@ impl ThreadRepository for SqliteStore {
         )
         .map_err(storage)?;
         tx.execute(
-            "UPDATE threads SET revert_sequence=NULL, revert_snapshot=NULL, revert_base_snapshot=NULL, updated_at=?2 WHERE id=?1",
+            "UPDATE threads SET revert_sequence=NULL, revert_snapshot=NULL, revert_base_snapshot=NULL, revert_unrestored_json=NULL, updated_at=?2 WHERE id=?1",
             params![id.to_string(), time(Utc::now())],
         )
         .map_err(storage)?;
@@ -1689,24 +1802,41 @@ impl ThreadRepository for SqliteStore {
                     "orphaned turn {turn_id} changed during recovery"
                 )));
             }
-            let data = ItemData::Error {
+            // The calls the restart cut off end here, so the chat's history
+            // holds a result for each of them and its next turn is taken.
+            // Only the first one open counts as begun. That holds for calls
+            // that run in order, but reads (and delegations) run together,
+            // and a crash leaves no record of which of those began: one
+            // after the first is marked as not run even if it began, so a
+            // rebuild of the chat's loads may leave its tool out, and the
+            // next request's tool list changes once.
+            let mut ended = Self::unanswered_turn_calls(&tx, raw_thread_id, raw_turn_id)?
+                .into_iter()
+                .enumerate()
+                .map(|(position, (call_id, name))| {
+                    haarness_core::unfinished_call_result(&call_id, &name, position == 0)
+                })
+                .collect::<Vec<_>>();
+            ended.push(ItemData::Error {
                 message: RECOVERED_TURN_MESSAGE.into(),
                 retryable: true,
-            };
-            let sequence = Self::next_sequence(&tx, thread_id)?;
-            tx.execute(
-                "INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at)
-                 VALUES(?1,?2,?3,?4,?5,?6)",
-                params![
-                    ItemId::new().to_string(),
-                    raw_thread_id,
-                    raw_turn_id,
-                    i64::try_from(sequence).map_err(storage)?,
-                    serde_json::to_string(&data).map_err(storage)?,
-                    updated_at,
-                ],
-            )
-            .map_err(storage)?;
+            });
+            for data in ended {
+                let sequence = Self::next_sequence(&tx, thread_id)?;
+                tx.execute(
+                    "INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at)
+                     VALUES(?1,?2,?3,?4,?5,?6)",
+                    params![
+                        ItemId::new().to_string(),
+                        raw_thread_id,
+                        raw_turn_id,
+                        i64::try_from(sequence).map_err(storage)?,
+                        serde_json::to_string(&data).map_err(storage)?,
+                        updated_at,
+                    ],
+                )
+                .map_err(storage)?;
+            }
             tx.execute(
                 "UPDATE threads SET updated_at=?2 WHERE id=?1",
                 params![raw_thread_id, updated_at],
@@ -1965,6 +2095,7 @@ type RawThread = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 type RawTurn = (
     String,
@@ -2000,6 +2131,7 @@ fn raw_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawThread> {
         row.get(14)?,
         row.get(15)?,
         row.get(16)?,
+        row.get(17)?,
     ))
 }
 fn raw_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawTurn> {
@@ -2039,14 +2171,37 @@ fn fork_title(parent: &str) -> String {
     }
 }
 
+/// A stored title as every client gets it. Older servers stored "New
+/// thread" for an untitled chat, and titles as written, escape sequences
+/// included: those read as the one placeholder and as plain text. The row
+/// keeps its bytes until the chat is written again.
+fn shown_title(stored: String) -> String {
+    let title = match haarness_protocol::readable_chat_title(&stored) {
+        std::borrow::Cow::Borrowed(_) => stored,
+        std::borrow::Cow::Owned(readable) => readable,
+    };
+    if title == haarness_protocol::LEGACY_UNTITLED_CHAT_TITLE {
+        haarness_protocol::UNTITLED_CHAT_TITLE.into()
+    } else {
+        title
+    }
+}
+
 fn decode_thread(raw: RawThread) -> CoreResult<Thread> {
     let revert = match (raw.9, raw.10) {
-        (Some(sequence), Some(snapshot_id)) => Some(haarness_protocol::RevertState {
-            sequence: u64::try_from(sequence)
-                .map_err(|error| CoreError::Storage(error.to_string()))?,
-            snapshot_id,
-            base_snapshot_id: raw.11,
-        }),
+        (Some(sequence), Some(snapshot_id)) => {
+            let sequence =
+                u64::try_from(sequence).map_err(|error| CoreError::Storage(error.to_string()))?;
+            let (unrestored, unrestored_count) =
+                decode_unrestored(raw.17.as_deref(), &snapshot_id, sequence);
+            Some(haarness_protocol::RevertState {
+                sequence,
+                snapshot_id,
+                base_snapshot_id: raw.11,
+                unrestored,
+                unrestored_count,
+            })
+        }
         _ => None,
     };
     Ok(Thread {
@@ -2057,21 +2212,19 @@ fn decode_thread(raw: RawThread) -> CoreResult<Thread> {
             .transpose()
             .map_err(storage)?,
         id: thread_id(&raw.0)?,
-        // Older servers stored "New thread" for an untitled chat; every
-        // client sees one placeholder.
-        title: if raw.1 == haarness_protocol::LEGACY_UNTITLED_CHAT_TITLE {
-            haarness_protocol::UNTITLED_CHAT_TITLE.into()
-        } else {
-            raw.1
-        },
+        title: shown_title(raw.1),
         parent_id: raw.2.as_deref().map(thread_id).transpose()?,
         is_subagent: raw.13,
         fork_origin: raw
             .14
             .as_deref()
-            .map(serde_json::from_str)
+            .map(serde_json::from_str::<haarness_protocol::ForkOrigin>)
             .transpose()
-            .map_err(storage)?,
+            .map_err(storage)?
+            .map(|origin| haarness_protocol::ForkOrigin {
+                title: shown_title(origin.title),
+                ..origin
+            }),
         archived: raw.3,
         agent: raw.4,
         provider: raw.5,
@@ -2083,6 +2236,115 @@ fn decode_thread(raw: RawThread) -> CoreResult<Thread> {
         directory: raw.16,
     })
 }
+/// The files a pending undo left as they are, as `revert_unrestored_json`
+/// keeps them: per undo step, for the undo that `backup` is the backup of.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct PendingUnrestored {
+    backup: String,
+    steps: Vec<UnrestoredStep>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct UnrestoredStep {
+    /// The sequence the step undid back to.
+    boundary: u64,
+    #[serde(flatten)]
+    files: haarness_core::UndoStepFiles,
+}
+
+/// The steps of `recorded` that belong to the undo backed up by `backup`
+/// and are still undone at `sequence`.
+fn still_undone(recorded: Option<&str>, backup: &str, sequence: u64) -> Vec<UnrestoredStep> {
+    recorded
+        .and_then(|text| serde_json::from_str::<PendingUnrestored>(text).ok())
+        .filter(|pending| pending.backup == backup)
+        .map(|pending| {
+            pending
+                .steps
+                .into_iter()
+                .filter(|step| step.boundary >= sequence)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What `revert_unrestored_json` becomes when the undo backed up by
+/// `backup` moves to `sequence`, `step` being the files an undo or redo step
+/// to it left and the paths it settled (see
+/// [`ThreadRepository::set_revert_state_unrestored`]).
+fn pending_unrestored(
+    recorded: Option<&str>,
+    backup: &str,
+    sequence: u64,
+    step: Option<(haarness_core::UndoStepFiles, Vec<String>)>,
+) -> CoreResult<Option<String>> {
+    let mut steps = still_undone(recorded, backup, sequence);
+    if let Some((files, settled)) = step {
+        // A file this step wrote, removed or found as its checkpoint has it
+        // is so now, or named again in `files`: the steps before no longer
+        // left it.
+        for step in &mut steps {
+            let named = step.files.files.len();
+            step.files
+                .files
+                .retain(|file| !settled.contains(&file.path));
+            let dropped = u64::try_from(named - step.files.files.len()).unwrap_or(u64::MAX);
+            step.files.count = step.files.count.saturating_sub(dropped);
+        }
+        // A redo forward to a boundary an undo step left files at: what it
+        // left joins them.
+        let mut files = files;
+        if let Some(index) = steps.iter().position(|step| step.boundary == sequence) {
+            let earlier = steps.remove(index).files;
+            let unnamed = unnamed_count(&earlier).saturating_add(unnamed_count(&files));
+            files = haarness_core::UndoStepFiles::new(earlier.files.into_iter().chain(files.files));
+            files.count = files.count.saturating_add(unnamed);
+        }
+        steps.push(UnrestoredStep {
+            boundary: sequence,
+            files,
+        });
+        steps.retain(|step| !step.files.is_empty());
+    }
+    if steps.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(&PendingUnrestored {
+        backup: backup.to_owned(),
+        steps,
+    })
+    .map(Some)
+    .map_err(storage)
+}
+
+/// How many of `files` count without a name.
+fn unnamed_count(files: &haarness_core::UndoStepFiles) -> u64 {
+    files
+        .count
+        .saturating_sub(u64::try_from(files.files.len()).unwrap_or(u64::MAX))
+}
+
+/// [`RevertState::unrestored`] and [`RevertState::unrestored_count`] of the
+/// undo backed up by `backup` at `sequence`. Anything else recorded there
+/// (an older server's undo since, an unreadable value) names none.
+///
+/// [`RevertState::unrestored`]: haarness_protocol::RevertState::unrestored
+/// [`RevertState::unrestored_count`]: haarness_protocol::RevertState::unrestored_count
+fn decode_unrestored(
+    recorded: Option<&str>,
+    backup: &str,
+    sequence: u64,
+) -> (Vec<haarness_protocol::UnrestoredFile>, Option<u64>) {
+    let steps = still_undone(recorded, backup, sequence);
+    // A step names only its first files; the rest count, unnamed.
+    let unnamed: u64 = steps.iter().map(|step| unnamed_count(&step.files)).sum();
+    let all =
+        haarness_core::UndoStepFiles::new(steps.into_iter().flat_map(|step| step.files.files));
+    let count = all.count.saturating_add(unnamed);
+    let named = u64::try_from(all.files.len()).unwrap_or(u64::MAX);
+    (all.files, (count > named).then_some(count))
+}
+
 fn decode_turn(raw: RawTurn) -> CoreResult<Turn> {
     Ok(Turn {
         id: turn_id(&raw.0)?,
@@ -2179,6 +2441,196 @@ mod tests {
             .unwrap()
             .0
             .id
+    }
+
+    #[tokio::test]
+    async fn the_files_an_undo_left_follow_its_steps_until_it_is_confirmed() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let file = |path: &str| {
+            let reason = if path.starts_with('/') {
+                haarness_protocol::UnrestoredReason::Outside
+            } else if path.starts_with("big") {
+                haarness_protocol::UnrestoredReason::Large
+            } else {
+                haarness_protocol::UnrestoredReason::Ignored
+            };
+            haarness_protocol::UnrestoredFile {
+                path: path.to_owned(),
+                reason,
+            }
+        };
+        let files =
+            |paths: &[&str]| haarness_core::UndoStepFiles::new(paths.iter().map(|path| file(path)));
+        let left = |thread: Thread| {
+            let revert = thread.revert.expect("a pending undo");
+            (revert.sequence, revert.unrestored, revert.unrestored_count)
+        };
+        let step = |sequence, base: &str| (sequence, "backup".to_owned(), Some(base.to_owned()));
+        // Two undo steps, each with a file it could not put back.
+        store
+            .set_revert_state_unrestored(thread.id, step(9, "b9"), files(&[".env"]), Vec::new())
+            .await
+            .unwrap();
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                step(5, "b5"),
+                files(&["/outside/notes.txt", "big.bin", ".env"]),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        // The one left for its size first, then the ignored, then outside.
+        assert_eq!(
+            left(store.get_thread(thread.id).await.unwrap()),
+            (
+                5,
+                vec![file("big.bin"), file(".env"), file("/outside/notes.txt")],
+                None
+            )
+        );
+        // Redoing the earlier step drops its files only.
+        store
+            .set_revert_state(thread.id, Some(step(9, "after5")))
+            .await
+            .unwrap();
+        assert_eq!(
+            left(store.get_thread(thread.id).await.unwrap()),
+            (9, vec![file(".env")], None)
+        );
+        // Another undo (another backup) starts over, and a step that left
+        // everything in place names nothing.
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                (3, "other".to_owned(), Some("b3".to_owned())),
+                files(&[]),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let thread_now = store.get_thread(thread.id).await.unwrap();
+        assert_eq!(left(thread_now.clone()), (3, Vec::new(), None));
+        assert!(
+            !serde_json::to_string(&thread_now)
+                .unwrap()
+                .contains("unrestored"),
+            "an undo that left nothing says nothing"
+        );
+        // More files than are named: the rest are counted.
+        let many = (0..120)
+            .map(|index| format!("f{index:03}"))
+            .collect::<Vec<_>>();
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                step(2, "b2"),
+                haarness_core::UndoStepFiles::new(many.iter().map(|path| file(path))),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let (_, named, count) = left(store.get_thread(thread.id).await.unwrap());
+        assert_eq!(named.len(), haarness_protocol::MAX_UNRESTORED);
+        assert_eq!(named[0], file("f000"));
+        assert_eq!(count, Some(120));
+        // Confirming the undo clears them with it.
+        assert!(store.confirm_revert(thread.id).await.unwrap());
+        assert!(store.get_thread(thread.id).await.unwrap().revert.is_none());
+        let recorded: Option<String> = store
+            .connection
+            .lock()
+            .query_row(
+                "SELECT revert_unrestored_json FROM threads WHERE id=?1",
+                [thread.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, None);
+    }
+
+    #[tokio::test]
+    async fn a_file_a_later_step_puts_back_or_names_again_is_named_once() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let large = |paths: &[&str]| {
+            haarness_core::UndoStepFiles::new(paths.iter().map(|path| {
+                haarness_protocol::UnrestoredFile {
+                    path: (*path).to_owned(),
+                    reason: haarness_protocol::UnrestoredReason::Large,
+                }
+            }))
+        };
+        let settled = |paths: &[&str]| paths.iter().map(|path| (*path).to_owned()).collect();
+        let named = |thread: Thread| {
+            let revert = thread.revert.expect("a pending undo");
+            let paths = revert
+                .unrestored
+                .into_iter()
+                .map(|file| file.path)
+                .collect::<Vec<_>>();
+            (revert.sequence, paths)
+        };
+        let step = |sequence, base: &str| (sequence, "backup".to_owned(), Some(base.to_owned()));
+        // The first step back leaves two large files; the second puts one
+        // of them back as its checkpoint has it.
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                step(9, "b9"),
+                large(&["a.bin", "b.bin"]),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                step(5, "b5"),
+                large(&[]),
+                settled(&["a.bin", "c.txt"]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            named(store.get_thread(thread.id).await.unwrap()),
+            (5, vec!["b.bin".to_owned()])
+        );
+        // A step forward that takes a file to the backup's content names it
+        // with what the step still undone there left.
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                step(9, "after5"),
+                large(&["a.bin"]),
+                settled(&["a.bin"]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            named(store.get_thread(thread.id).await.unwrap()),
+            (9, vec!["a.bin".to_owned(), "b.bin".to_owned()])
+        );
+        // Back again, the step puts both as its checkpoint has them.
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                step(5, "b5"),
+                large(&[]),
+                settled(&["a.bin", "b.bin"]),
+            )
+            .await
+            .unwrap();
+        let thread_now = store.get_thread(thread.id).await.unwrap();
+        assert_eq!(named(thread_now.clone()), (5, Vec::new()));
+        assert_eq!(thread_now.revert.unwrap().unrestored_count, None);
     }
 
     #[tokio::test]
@@ -2712,6 +3164,81 @@ mod tests {
         );
     }
 
+    /// Older servers stored titles as written. Such a row reads as plain
+    /// text everywhere, a fork is named from that text, and the row keeps
+    /// its bytes; one made only of escape sequences reads as untitled and
+    /// takes a generated title.
+    #[tokio::test]
+    async fn a_title_stored_with_escape_sequences_reads_clean() {
+        let store = SqliteStore::in_memory().unwrap();
+        let raw = "\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}Escaped";
+        let thread = store
+            .create_thread(CreateThreadRequest {
+                title: Some(raw.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(store.get_thread(thread.id).await.unwrap().title, "Escaped");
+        assert_eq!(store.list_threads(true).await.unwrap()[0].title, "Escaped");
+        let stored: String = store
+            .connection
+            .lock()
+            .query_row(
+                "SELECT title FROM threads WHERE id=?1",
+                [thread.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, raw);
+
+        let fork = store.fork_thread(thread.id, None, None).await.unwrap();
+        assert_eq!(fork.title, "Fork of Escaped");
+        assert_eq!(fork.fork_origin.unwrap().title, "Escaped");
+
+        let blank = store
+            .create_thread(CreateThreadRequest {
+                title: Some("\u{1b}]0;owned\u{7}\u{1b}[2J".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_thread(blank.id).await.unwrap().title,
+            haarness_protocol::UNTITLED_CHAT_TITLE
+        );
+        let named = store
+            .update_generated_title(blank.id, haarness_protocol::UNTITLED_CHAT_TITLE, "Named")
+            .await
+            .unwrap();
+        assert_eq!(named.unwrap().title, "Named");
+        assert!(
+            store
+                .update_generated_title(thread.id, haarness_protocol::UNTITLED_CHAT_TITLE, "No")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // The old placeholder inside sequences is the old placeholder.
+        let legacy = store
+            .create_thread(CreateThreadRequest {
+                title: Some("\u{1b}[1mNew thread\u{1b}[0m".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_thread(legacy.id).await.unwrap().title,
+            haarness_protocol::UNTITLED_CHAT_TITLE
+        );
+        let named = store
+            .update_generated_title(legacy.id, haarness_protocol::UNTITLED_CHAT_TITLE, "Named")
+            .await
+            .unwrap();
+        assert_eq!(named.unwrap().title, "Named");
+    }
+
     #[tokio::test]
     async fn an_untitled_chat_is_a_new_chat_even_in_rows_older_servers_wrote() {
         let store = SqliteStore::in_memory().unwrap();
@@ -3218,6 +3745,148 @@ mod tests {
             .unwrap();
         assert_eq!(partial.title, "Early");
         assert_eq!(store.list_items(partial.id, None).await.unwrap().len(), 1);
+    }
+
+    fn bash_call(call_id: &str) -> ItemData {
+        ItemData::ToolCall {
+            call_id: call_id.into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "sleep 120"}),
+            provider_metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn bash_result(call_id: &str) -> ItemData {
+        ItemData::ToolResult {
+            call_id: call_id.into(),
+            name: "bash".into(),
+            output: "slept".into(),
+            is_error: false,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn calls_and_results(items: &[Item]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match &item.data {
+                ItemData::ToolCall { call_id, .. } => Some(format!("call {call_id}")),
+                ItemData::ToolResult { call_id, .. } => Some(format!("result {call_id}")),
+                ItemData::TaskLink { call_id, .. } => Some(format!("link {call_id}")),
+                ItemData::TaskState { call_id, .. } => Some(format!("task {call_id}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_fork_leaves_out_a_call_still_waiting_or_running() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let turn = command_turn(&store, thread.id).await;
+        let child = ThreadId::new();
+        for data in [
+            bash_call("done"),
+            bash_result("done"),
+            ItemData::AssistantMessage {
+                text: "Now the slow part.".into(),
+            },
+            // Waits for its approval, and a subagent runs alongside it.
+            bash_call("waiting"),
+            ItemData::ToolCall {
+                call_id: "agent".into(),
+                name: "task".into(),
+                arguments: serde_json::json!({"prompt": "look around"}),
+                provider_metadata: serde_json::Value::Null,
+            },
+            ItemData::TaskLink {
+                call_id: "agent".into(),
+                child_thread_id: child,
+            },
+            ItemData::TaskState {
+                call_id: "agent".into(),
+                child_thread_id: child,
+                child_turn_id: TurnId::new(),
+                state: "running".into(),
+            },
+        ] {
+            store
+                .append_item(thread.id, Some(turn), data)
+                .await
+                .unwrap();
+        }
+
+        let fork = store.fork_thread(thread.id, None, None).await.unwrap();
+        let copied = store.list_items(fork.id, None).await.unwrap();
+        assert_eq!(calls_and_results(&copied), ["call done", "result done"]);
+        assert!(copied.iter().any(|item| matches!(
+            &item.data,
+            ItemData::AssistantMessage { text } if text == "Now the slow part."
+        )));
+        let source = store.list_items(thread.id, None).await.unwrap();
+        assert_eq!(
+            calls_and_results(&source).len(),
+            6,
+            "the source keeps its calls"
+        );
+        assert_eq!(
+            fork.fork_origin.as_ref().map(|origin| origin.sequence),
+            copied.last().map(|item| item.sequence),
+            "the fork starts after the last item it copied"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fork_before_a_steer_leaves_out_the_call_the_steer_came_during() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let turn = command_turn(&store, thread.id).await;
+        store
+            .append_item(thread.id, Some(turn), bash_call("slow"))
+            .await
+            .unwrap();
+        let steer = store
+            .append_item(
+                thread.id,
+                Some(turn),
+                ItemData::UserMessage {
+                    text: "also check the logs".into(),
+                    attachments: Vec::new(),
+                    queued: true,
+                    synthetic: false,
+                    command_line: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .append_item(thread.id, Some(turn), bash_result("slow"))
+            .await
+            .unwrap();
+
+        let fork = store
+            .fork_thread(thread.id, None, Some(steer.sequence - 1))
+            .await
+            .unwrap();
+        let copied = store.list_items(fork.id, None).await.unwrap();
+        assert!(calls_and_results(&copied).is_empty(), "{copied:?}");
+        assert!(
+            copied
+                .iter()
+                .any(|item| matches!(item.data, ItemData::UserMessage { queued: false, .. })),
+            "the turn's prompt is copied"
+        );
+        let whole = store.fork_thread(thread.id, None, None).await.unwrap();
+        assert_eq!(
+            calls_and_results(&store.list_items(whole.id, None).await.unwrap()),
+            ["call slow", "result slow"]
+        );
     }
 
     #[tokio::test]
@@ -3891,6 +4560,71 @@ mod tests {
                 .count(),
             1,
             "recovery is idempotent and never duplicates its transcript notice"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_ends_the_calls_a_restart_cut_off() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let earlier = command_turn(&store, thread.id).await;
+        store
+            .set_turn_status(earlier, TurnStatus::Completed, None)
+            .await
+            .unwrap();
+        // An earlier turn's call, answered there, with the same id.
+        for data in [bash_call("call-1"), bash_result("call-1")] {
+            store
+                .append_item(thread.id, Some(earlier), data)
+                .await
+                .unwrap();
+        }
+        let turn = command_turn(&store, thread.id).await;
+        for data in [
+            bash_call("call-0"),
+            bash_result("call-0"),
+            bash_call("call-1"),
+            bash_call("call-2"),
+        ] {
+            store
+                .append_item(thread.id, Some(turn), data)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(store.recover_interrupted().await.unwrap(), 1);
+        let items = store.list_items(thread.id, None).await.unwrap();
+        let ended = items
+            .iter()
+            .skip_while(|item| !matches!(&item.data, ItemData::ToolCall { call_id, .. } if call_id == "call-2"))
+            .skip(1)
+            .map(|item| (item.turn_id, item.data.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(ended.len(), 3, "{ended:?}");
+        // call-1 was running; call-2, after it, had not started.
+        for ((turn_id, data), (expected, ran)) in
+            ended.iter().zip([("call-1", true), ("call-2", false)])
+        {
+            assert_eq!(*turn_id, Some(turn));
+            assert!(
+                matches!(data, ItemData::ToolResult { call_id, name, output, is_error: true, metadata }
+                    if call_id == expected && name == "bash" && output == haarness_core::UNFINISHED_CALL_RESULT
+                        && metadata["unfinished"] == true
+                        && haarness_core::not_run(metadata) != ran),
+                "{data:?}"
+            );
+        }
+        assert!(matches!(
+            &ended[2].1,
+            ItemData::Error { message, .. } if message == RECOVERED_TURN_MESSAGE
+        ));
+        assert!(
+            haarness_core::pair_tool_calls(items.iter().map(|item| &item.data))
+                .calls
+                .is_empty()
         );
     }
 

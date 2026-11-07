@@ -99,6 +99,21 @@ fn destructive(label: &str, request: Value) -> Entry {
         ..entry(label, "", request)
     }
 }
+/// An MCP server's status line, with what the server said beside it (why
+/// it failed, how many tools it offers) in the words `haarness mcp ls` and
+/// Desktop's settings show.
+fn mcp_status(row: &Value) -> String {
+    let status = text(row, "runtimeStatus");
+    match row["runtimeDetail"]
+        .as_str()
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+    {
+        Some(detail) => format!("Status: {status} · {detail}"),
+        None => format!("Status: {status}"),
+    }
+}
+
 fn text<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or("")
 }
@@ -1402,12 +1417,14 @@ impl ManagementService {
                 );
                 crate::write_provider_entry(
                     &crate::provider_config_target(&self.paths, &self.workspace, project),
+                    &crate::jsonconfig::SaveScope::of(project, &self.workspace),
                     id,
                     Some(&section),
                 )?;
             }
             "edit" | "remove" => {
-                let (_, path, section) = self.provider_source(input)?;
+                let (scope, path, section) = self.provider_source(input)?;
+                let scope = crate::jsonconfig::SaveScope::of(scope == "project", &self.workspace);
                 ensure!(
                     input["revision"].as_str() == Some(&revision(&path)?),
                     "Configuration changed; reopen the provider"
@@ -1444,9 +1461,9 @@ impl ManagementService {
                     if section.models != models {
                         fields.push(("models".to_owned(), Some(json!(models))));
                     }
-                    crate::write_entry_fields(&path, "providers", id, fields)?;
+                    crate::write_entry_fields(&path, &scope, "providers", id, fields)?;
                 } else {
-                    crate::write_provider_entry(&path, id, None)?;
+                    crate::write_provider_entry(&path, &scope, id, None)?;
                 }
             }
             _ => bail!("Unsupported provider action"),
@@ -1534,7 +1551,7 @@ impl ManagementService {
             let mut view = View {
                 title: format!("MCP · {name}"),
                 lines: vec![
-                    format!("Status: {}", text(&row, "runtimeStatus")),
+                    mcp_status(&row),
                     if base {
                         format!("Source: {} (system folder, read-only)", text(&row, "file"))
                     } else {
@@ -2381,9 +2398,32 @@ fn router_form(input: &Value, needs_key: bool) -> View {
 
 #[cfg(test)]
 mod tests {
-    use super::{install_form, installed_entries, replace_label, search_entry};
+    use super::{install_form, installed_entries, mcp_status, replace_label, search_entry};
     use serde_json::{Value, json};
     use std::fs;
+
+    /// A server's page says why it failed, as `haarness mcp ls` does.
+    #[test]
+    fn an_mcp_server_page_says_what_its_server_said() {
+        let failed = json!({
+            "runtimeStatus": "failed",
+            "runtimeDetail": "Its URL names an environment variable that is not set: DOCS_HOST."
+        });
+        assert_eq!(
+            mcp_status(&failed),
+            "Status: failed · Its URL names an environment variable that is not set: DOCS_HOST."
+        );
+        assert_eq!(
+            mcp_status(
+                &json!({"runtimeStatus": "connected", "runtimeDetail": "2 tools discovered"})
+            ),
+            "Status: connected · 2 tools discovered"
+        );
+        assert_eq!(
+            mcp_status(&json!({"runtimeStatus": "disabled", "runtimeDetail": null})),
+            "Status: disabled"
+        );
+    }
 
     /// Editing a provider in Settings writes its name, address and models, and
     /// nothing else: a TOML entry keeps its context window and tool settings,

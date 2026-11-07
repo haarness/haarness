@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { Item, ItemData, Turn } from "@haarness/sdk";
 import {
   agentTasks,
+  agentTaskError,
   agentTaskStatus,
   agentTaskActiveTurn,
 } from "../src/renderer/agent-tasks";
@@ -178,4 +179,35 @@ test("stop controls belong to the exact live child run, never a newer run in its
     agentTaskActiveTurn(task, { ...progress, state: "cancelled" }, [turn]),
     undefined,
   );
+});
+
+test("a delegation a restart cut off reads stopped, not failed", () => {
+  const result = {
+    type: "tool_result",
+    call_id: "task",
+    name: "task",
+    output: "This call did not finish, so there is no result. It may have done part of its work before it stopped.",
+    is_error: true,
+    metadata: { unfinished: true },
+  } as const;
+  const [task] = [...agentTasks([item(1, call), item(2, link), item(3, result)]).values()];
+  assert.equal(agentTaskStatus(task), "stopped");
+  assert.equal(agentTaskError(task), "");
+  const failed = { ...result, metadata: null };
+  const [other] = [...agentTasks([item(1, call), item(2, link), item(3, failed)]).values()];
+  assert.equal(agentTaskStatus(other), "failed");
+  assert.notEqual(agentTaskError(other), "");
+});
+
+test("a delegation keeps its first result, and a call made again under its key starts over", () => {
+  const result = (output: string, metadata: unknown = null) =>
+    ({ type: "tool_result", call_id: "task", name: "task", output, is_error: true, metadata }) as ItemData;
+  const stored = result("This call did not finish.", { unfinished: true });
+  const late = { ...result("<task state=\"completed\">done</task>"), is_error: false } as ItemData;
+  const [task] = [...agentTasks([item(1, call), item(2, link), item(3, stored), item(4, late)]).values()];
+  assert.equal(agentTaskStatus(task), "stopped", "the late result does not overrule what the model was told");
+  const again = [
+    ...agentTasks([item(1, call), item(2, stored), item(3, call), item(4, late)]).values(),
+  ][0];
+  assert.equal(agentTaskStatus(again), "completed");
 });

@@ -113,6 +113,10 @@ definition's `whenToUse` helps choose a workflow after this gate opens and
 never opens the gate by itself. Direct `/workflow`, discovered slash-command,
 and `haarness run --workflow` execution bypass this model-facing gate.
 
+A run started in the background tells the chat that started it when it ends,
+unless that chat's own `wait` was what saw it end: the wait's answer is then the
+chat's only word of it, and its metadata carries `handedOver: true`.
+
 The tool's `name` is a workflow's invocation as `read` lists it, so a plugin's
 workflow is `plugin-name:workflow-name`. Asked for by its bare name, it is not
 found, and the error names the invocation to use: "workflow audit (a plugin's

@@ -20,6 +20,7 @@ import {
   copyFile,
   chmod,
   rename,
+  readdir,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -12001,6 +12002,205 @@ test("conversation controls undo and redo real files, preserve drafts, and compa
   expect(errors).toEqual([]);
 });
 
+test("an undo says which files it left, those left for their size first, under its notice", async () => {
+  await page.locator(".project-list .project-heading").filter({ hasText: /^workspace$/ }).click();
+  const expand = page.getByRole("button", { name: "Expand project workspace", exact: true });
+  if (await expand.count()) await expand.click();
+  const thread = await client.createThread({ title: "Undo left files fixture", provider: "echo", model: "echo-1", agent: "build" });
+  await page.getByRole("button", { name: thread.title, exact: true }).click();
+  const menu = async (name: string) => {
+    await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+    await page.getByRole("menuitem", { name, exact: true }).click();
+  };
+  const approval = page.getByRole("button", { name: /^Approvals: (Review|Auto|Yolo)$/ });
+  if (await approval.getAttribute("aria-label") !== "Approvals: Auto") await pickApprovals(page, "Auto");
+  // Ignored for this clone only, so no other test sees a changed Git status.
+  const exclude = join(workspace, ".git", "info", "exclude");
+  const excluded = await readFile(exclude, "utf8").catch(() => "");
+  await mkdir(dirname(exclude), { recursive: true });
+  await writeFile(exclude, excluded + "undo-left-*.env\n");
+  const kept = join(workspace, "undo-left-settings.env");
+  const made = join(workspace, "undo-left-tokens.env");
+  const tracked = join(workspace, "undo-left-tracked.txt");
+  // Over the checkpoints' 2 MiB: no checkpoint holds what it held before.
+  const big = join(workspace, "undo-left-big.bin");
+  await writeFile(kept, "TOKEN=old\n");
+  await writeFile(big, "x".repeat(3 * 1024 * 1024));
+  const calls = [
+    ["undo-left-settings.env", "TOKEN=new\n"],
+    ["undo-left-tokens.env", "SECRET=made\n"],
+    ["undo-left-tracked.txt", "turn output\n"],
+    ["undo-left-big.bin", "shrunk\n"],
+  ].map(([path, content]) => ({ name: "write", arguments: { path, content } }));
+  await send("!multi " + JSON.stringify(calls));
+  await expect.poll(() => readFile(tracked, "utf8").catch(() => "")).toBe("turn output\n");
+  await settled();
+  await expect(page.locator(".composer")).not.toHaveClass(/running/);
+  // The undo's notice, the one with Redo, not "Updating chat history…" that
+  // can stand beside it for a moment.
+  const notice = page.locator(".conversation-history-notice:has(> button)");
+  await menu("Undo last turn");
+  await expect(notice).toContainText("Turn undone");
+  await expect.poll(() => existsSync(tracked)).toBe(false);
+  // The toast says a file stays as the turn left it.
+  await expect(page.locator(".toast")).toContainText("Last turn undone · 1 file left as it was");
+  expect(await readFile(kept, "utf8")).toBe("TOKEN=new\n");
+  expect(await readFile(made, "utf8")).toBe("SECRET=made\n");
+  expect(await readFile(big, "utf8")).toBe("shrunk\n");
+  // First the one left for its size, in the text colour; then, quietly, the
+  // ignored ones.
+  const lines = notice.locator(".undo-unrestored");
+  await expect(lines).toHaveCount(2);
+  const pressing = lines.nth(0);
+  const quiet = lines.nth(1);
+  await expect(pressing).toHaveClass(/pressing/);
+  await expect(pressing.locator("summary")).toHaveText("1 file left as it was · too large for Undo");
+  await expect(pressing.locator("summary")).toHaveAttribute("title", "undo-left-big.bin");
+  const colour = (locator: Locator) => locator.evaluate((element) => getComputedStyle(element).color);
+  expect(await colour(pressing.locator("summary"))).toBe(await colour(notice.getByRole("button", { name: "Redo turn", exact: true })));
+  expect(await colour(pressing.locator("summary"))).not.toBe(await colour(quiet.locator("summary")));
+  await expect(quiet.locator("summary")).toHaveText("2 files weren't restored");
+  await expect(quiet.locator("summary")).toHaveAttribute("title", "undo-left-settings.env\nundo-left-tokens.env");
+  await expect(quiet.locator("li").first()).toBeHidden();
+  // The notice's first line is where it always is: the sentence, then Redo.
+  const sentence = await notice.locator("span").first().boundingBox();
+  const redo = await notice.getByRole("button", { name: "Redo turn", exact: true }).boundingBox();
+  expect(Math.abs(sentence!.y + sentence!.height / 2 - (redo!.y + redo!.height / 2))).toBeLessThan(2);
+  expect((await pressing.locator("summary").boundingBox())!.y).toBeGreaterThan(redo!.y + redo!.height - 1);
+  const shots = async (name: string) => {
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((value) => window.haarness.preferences({ theme: value }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.locator(".conversation").screenshot({ path: test.info().outputPath(`${name}-${theme}.png`) });
+    }
+  };
+  await shots("undo-unrestored-closed");
+  await pressing.locator("summary").click();
+  await quiet.locator("summary").click();
+  await expect(pressing.locator("li")).toHaveText(["undo-left-big.bin"]);
+  await expect(quiet.locator("li")).toHaveText(["undo-left-settings.env · ignored", "undo-left-tokens.env · ignored"]);
+  await shots("undo-unrestored-open");
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(quiet.locator("summary")).toHaveText(/^لم تتم استعادة (2|٢) ملفات$/);
+  await expect(pressing.locator("summary")).toHaveText("تُرك ملف واحد كما كان · أكبر من أن يستعيده التراجع");
+  await expect(quiet.locator("li bdi").first()).toHaveAttribute("dir", "ltr");
+  await shots("undo-unrestored-rtl");
+  await page.evaluate(() => window.haarness.preferences({ language: "en", theme: "dark" }));
+  // Kept with the undo across a reload.
+  await page.reload();
+  await expect(notice.locator(".undo-unrestored summary")).toHaveText(["1 file left as it was · too large for Undo", "2 files weren't restored"]);
+  await menu("Redo turn");
+  await expect.poll(() => readFile(tracked, "utf8").catch(() => "")).toBe("turn output\n");
+  await expect(notice).toHaveCount(0);
+  await writeFile(exclude, excluded);
+  for (const path of [kept, made, tracked, big]) await rm(path);
+  expect(errors).toEqual([]);
+});
+
+test("undo and redo through two turns that took a file past 2 MiB name it until the last redo", async () => {
+  await page.locator(".project-list .project-heading").filter({ hasText: /^workspace$/ }).click();
+  const expand = page.getByRole("button", { name: "Expand project workspace", exact: true });
+  if (await expand.count()) await expand.click();
+  const thread = await client.createThread({ title: "Two large turns fixture", provider: "echo", model: "echo-1", agent: "build" });
+  // Its commands run without asking.
+  await client.setApprovalMode(thread.id, { mode: "yolo" });
+  await page.getByRole("button", { name: thread.title, exact: true }).click();
+  const menu = async (name: string) => {
+    await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+    await page.getByRole("menuitem", { name, exact: true }).click();
+  };
+  const big = join(workspace, "undo-two-big.bin");
+  const other = join(workspace, "undo-two-other.txt");
+  const said = () => readFile(other, "utf8").catch(() => "");
+  // What the file starts with, or "" when there is none.
+  const head = async () => (existsSync(big) ? (await readFile(big)).subarray(0, 1).toString() : "");
+  await writeFile(other, "o0\n");
+  // Turn 1 makes a file over the checkpoints' 2 MiB, turn 2 rewrites it.
+  for (const [byte, text] of [["a", "o1\n"], ["b", "o2\n"]]) {
+    await send("!multi " + JSON.stringify([
+      { name: "bash", arguments: { command: `head -c 2500000 /dev/zero | tr '\\0' ${byte} > undo-two-big.bin` } },
+      { name: "write", arguments: { path: "undo-two-other.txt", content: text } },
+    ]));
+    await expect.poll(said).toBe(text);
+    await settled();
+  }
+  expect(await head()).toBe("b");
+  // The undo's notice, not "Updating chat history…" beside it for a moment.
+  const notice = page.locator(".conversation-history-notice:has(> button)");
+  const pressing = notice.locator(".undo-unrestored.pressing summary");
+  const left = "1 file left as it was · too large for Undo";
+  // No copy holds what turn 1 left: the first undo leaves the file and
+  // names it; the second takes it back to before turn 1, and the name goes.
+  await menu("Undo last turn");
+  await expect.poll(said).toBe("o1\n");
+  await expect(pressing).toHaveText(left);
+  await menu("Undo last turn");
+  await expect.poll(said).toBe("o0\n");
+  await expect.poll(() => existsSync(big)).toBe(false);
+  await expect(notice).toContainText("Turn undone");
+  await expect(notice.locator(".undo-unrestored")).toHaveCount(0);
+  // The first redo brings turn 1 back with the file as turn 2 left it, named.
+  await menu("Redo turn");
+  await expect.poll(said).toBe("o1\n");
+  await expect(pressing).toHaveText(left);
+  await expect(pressing).toHaveAttribute("title", "undo-two-big.bin");
+  expect(await head()).toBe("b");
+  // The toast says so too, without saying the redo left it alone.
+  await expect(page.locator(".toast")).toHaveText("Turn restored · 1 file wasn't restored");
+  await expect(page.locator(".error-banner")).toHaveCount(0);
+  const shots = async (name: string, target = page.locator(".conversation")) => {
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((value) => window.haarness.preferences({ theme: value }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await target.screenshot({ path: test.info().outputPath(`${name}-${theme}.png`) });
+    }
+  };
+  await shots("redo-two-large-named");
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(pressing).toHaveText("تُرك ملف واحد كما كان · أكبر من أن يستعيده التراجع");
+  await shots("redo-two-large-named-rtl");
+  await page.evaluate(() => window.haarness.preferences({ language: "en", theme: "dark" }));
+  // The last redo: both turns back, nothing named.
+  await menu("Redo turn");
+  await expect.poll(said).toBe("o2\n");
+  await expect(notice).toHaveCount(0);
+  await expect(page.locator(".toast")).toHaveText("Turn restored");
+  expect(await head()).toBe("b");
+
+  // Undone again, and the copies are lost: redo says why it cannot go on
+  // and what to do, and changes nothing.
+  await menu("Undo last turn");
+  await expect.poll(said).toBe("o1\n");
+  await menu("Undo last turn");
+  await expect.poll(said).toBe("o0\n");
+  const data = env.HAARNESS_DATA_DIR;
+  const folders = (await readdir(data, { recursive: true }))
+    .filter((path) => path.endsWith(".undo-copies"))
+    .map((path) => join(data, path));
+  expect(folders.length).toBeGreaterThan(0);
+  for (const folder of folders)
+    for (const set of await readdir(folder)) await rm(join(folder, set), { recursive: true });
+  await menu("Redo turn");
+  // The file is set apart from the sentence, which keeps it whole right to left.
+  await expect(page.locator(".error-banner")).toContainText(
+    "\u2068undo-two-big.bin\u2069 is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",
+  );
+  expect(await said()).toBe("o0\n");
+  expect(existsSync(big)).toBe(false);
+  await shots("redo-two-large-refused", page.locator(".error-banner"));
+  // In the reader's language, the file kept whole in a right-to-left sentence.
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(page.locator(".error-banner")).toContainText("وليست لدى التراجع نسخة منه");
+  await expect(page.locator(".error-banner")).toContainText("\u2068undo-two-big.bin\u2069");
+  await shots("redo-two-large-refused-rtl", page.locator(".error-banner"));
+  await page.evaluate(() => window.haarness.preferences({ language: "en", theme: "dark" }));
+  await rm(other);
+  expect(errors).toEqual([]);
+});
+
 test("conversation find reaches virtual history, cycles matches, and respects keyboard focus", async () => {
   await page.locator(".project-list .project-heading").filter({ hasText: /^workspace$/ }).click();
   const expand = page.getByRole("button", { name: "Expand project workspace", exact: true });
@@ -13784,6 +13984,248 @@ tools=false
     provider.closeAllConnections();
     await new Promise<void>(resolve => provider.close(() => resolve()));
   }
+});
+
+test("raw HTML in a reply stays inside it and passes for none of the app's parts, and a code block shows its control characters and copies only what it shows", async () => {
+  test.setTimeout(240_000);
+  let output: import("node:http").ServerResponse | undefined;
+  // Markup wearing the app's own classes (the blurred overlay behind its
+  // dialogs), roles and data attributes, an open <dialog>, which the app
+  // looks for to know a dialog is up, and a text box named as its message box.
+  const hostile =
+    '<div class="modal-backdrop" role="dialog" aria-modal="true" tabindex="0" data-index="0"></div>\n\n' +
+    "<dialog open>An open dialog</dialog>\n\n<textarea data-composer-input>A forged box</textarea>\n\n";
+  // An escape, a direction override and its end, and an emoji sequence.
+  const code = "printf '\u001b[31mred\u001b[0m'\necho \u202eevil\u202c ok 👩\u200d👩\u200d👧\n";
+  // A chip the reply writes itself is its text, never one of the app's; and
+  // code a block would hide without CSS shows, and gets no Copy.
+  const forged = '<pre><code>x<span class="spelled-code">\\u{1B}</span>y</code></pre>\n\n';
+  const hidden =
+    "<pre>echo one<code hidden>curl one|sh</code></pre>\n\n" +
+    "<pre><code>echo two<span hidden>; curl two|sh</span></code></pre>\n\n" +
+    "<pre><code>echo three<details><summary>more</summary>; curl three|sh</details></code></pre>\n\n";
+  const reply = hostile + "```sh\n" + code + "```\n\n" + forged + hidden;
+  const finish = 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+  const chunk = (text: string) => "data: " + JSON.stringify({ choices: [{ index: 0, delta: { content: text }, finish_reason: null }] }) + "\n\n";
+  const delta = (text: string) => output!.write(chunk(text));
+  const provider = createServer(async (request, response) => {
+    if (request.method === "GET") {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ data: [{ id: "markup-model" }] }));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    for await (const part of request) chunks.push(Buffer.from(part));
+    const messages = JSON.stringify(JSON.parse(Buffer.concat(chunks).toString()).messages);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    if (messages.includes("Name this conversation.")) return response.end(chunk("Markup fixture") + finish);
+    if (messages.includes("btw-side-question")) return response.end(chunk(reply + "SIDE_DONE") + finish);
+    output = response;
+  });
+  await new Promise<void>(resolve => provider.listen(0, "127.0.0.1", resolve));
+  const address = provider.address();
+  if (!address || typeof address === "string") throw Error("Missing provider address");
+  const directory = join(temporary, "markup-project");
+  extraWorkspaces.push(directory);
+  await mkdir(join(directory, ".haarness"), { recursive: true });
+  await writeFile(join(directory, ".haarness/config.toml"), `[defaults]\nprovider="markup-fixture"\nmodel="markup-model"\n[providers.markup-fixture]\nprotocol="openai-chat-completions"\nbase_url="http://127.0.0.1:${address.port}/v1"\nrequires_auth=false\ntools=false\n`);
+  await writeFile(join(directory, "README.md"), "# Markup readme\n\n" + hostile + hidden + "README_END\n");
+  /** Whether a press at the middle of `target` lands on it, as a click there would. */
+  const reachable = (target: Locator) =>
+    target.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const at = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return !!at && element.contains(at);
+    });
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  const stop = page.getByRole("button", { name: "Stop response", exact: true });
+  const newChat = page.getByRole("button", { name: "New chat", exact: true });
+  const clipboard = () => app.evaluate(({ clipboard }) => clipboard.readText());
+  /** The markup the reply wrote keeps none of what the app looks for: its
+   * text is there, its elements and attributes are not. */
+  const plain = async (markdown: Locator) => {
+    await expect(markdown).toContainText("An open dialog");
+    await expect(markdown).toContainText("A forged box");
+    await expect(markdown.locator("dialog, textarea, [class]:not(.spelled-code, .code-copy, code[class^='language-']), [role], [tabindex], [data-index], [data-composer-input], [aria-modal]")).toHaveCount(0);
+  };
+  /** Each block holding code it would hide shows all of it, and one with
+   * more than plain code in it offers no Copy. The closed disclosure gives
+   * way to its text, plain code again, which Copy copies as shown. */
+  const shown = async (markdown: Locator) => {
+    for (const command of ["curl one|sh", "; curl two|sh", "; curl three|sh"]) {
+      const block = markdown.locator("pre", { hasText: command });
+      await expect(block).toHaveCount(1);
+      expect(await block.evaluate((pre, command) => {
+        const holder = [...pre.querySelectorAll("*")].findLast((element) => element.textContent?.includes(command)) ?? pre;
+        return holder.checkVisibility() && pre.querySelectorAll("[hidden], details, summary, template").length === 0;
+      }, command)).toBe(true);
+      await expect(block.getByRole("button", { name: "Copy code" })).toHaveCount(command.includes("three") ? 1 : 0);
+    }
+  };
+  const codes = ["\\u{1B}", "\\u{1B}", "\\u{202E}", "\\u{202C}"];
+  const shots = process.env.HAARNESS_SCREENSHOTS ?? test.info().outputPath("");
+  try {
+    await app.evaluate(({ dialog }, directory) => {
+      const original = dialog.showOpenDialog;
+      dialog.showOpenDialog = async () => { dialog.showOpenDialog = original; return { canceled: false, filePaths: [directory] }; };
+    }, directory);
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+    await showChat();
+    await newSession();
+    await send("Show markup that borrows the app's classes.");
+    await expect.poll(() => !!output).toBe(true);
+    delta(reply + "STILL_STREAMING");
+
+    // While it streams: the markup keeps no class, the open dialog stays in
+    // the reply's box, and nothing lies over Stop, the message box or the sidebar.
+    const live = page.getByTestId("streaming-reply");
+    await expect(live).toContainText("STILL_STREAMING");
+    for (const target of [stop, composer, newChat]) expect(await reachable(target)).toBe(true);
+    await plain(live.locator(".markdown"));
+    // What markup still places by itself is placed and stacked in its box.
+    expect(await live.locator(".markdown").evaluate((element) => {
+      const style = getComputedStyle(element);
+      return [style.position, style.isolation];
+    })).toEqual(["relative", "isolate"]);
+    // Its code block shows the escape and the override as codes on chips, and
+    // the emoji as it is; the chip the reply wrote itself is plain text.
+    await expect(live.locator("pre .spelled-code")).toHaveText(codes);
+    await expect(live.locator("pre code").first()).toContainText("ok 👩\u200d👩\u200d👧");
+    await expect(live.locator("pre", { hasText: "x\\u{1B}y" }).locator("span")).not.toHaveAttribute("class");
+    await expect(live.locator("pre", { hasText: "x\\u{1B}y" })).toHaveText("x\\u{1B}y");
+    await expect(live.getByRole("button", { name: "Copy code" })).toHaveCount(0);
+
+    output!.end(finish);
+    await expect(live).toHaveCount(0);
+    const saved = page.locator(".transcript article.assistant").last();
+    await expect(saved).toContainText("STILL_STREAMING");
+    await plain(saved.locator(".markdown"));
+    for (const target of [composer, newChat]) expect(await reachable(target)).toBe(true);
+    await expect(saved.locator("pre .spelled-code")).toHaveText(codes);
+    // Copy copies the code block as the reply wrote it; a block with markup
+    // inside it (the forged chip, the code it would hide) has none.
+    await shown(saved.locator(".markdown"));
+    const copies = saved.getByRole("button", { name: "Copy code", exact: true });
+    await expect(copies).toHaveCount(2);
+    await copies.first().click();
+    await expect.poll(clipboard).toBe(code);
+    await saved.locator("pre", { hasText: "; curl three|sh" }).getByRole("button", { name: "Copy code" }).click();
+    await expect.poll(clipboard).toBe("echo threemore; curl three|sh");
+    expect(await saved.locator("pre", { hasText: "; curl three|sh" }).locator("code").innerText()).toBe("echo threemore; curl three|sh");
+    await expect(saved.locator("pre", { hasText: "x\\u{1B}y" }).getByRole("button", { name: "Copy code" })).toHaveCount(0);
+    await saved.locator("pre").first().hover();
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await saved.screenshot({ path: join(shots, `reply-markup-codes-${theme}.png`) });
+    }
+    await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
+
+    // Stop still takes the click of the next reply, under the markup on screen.
+    output = undefined;
+    await send("Stream another reply.");
+    await expect.poll(() => !!output).toBe(true);
+    delta("SECOND_STREAMING");
+    await expect(page.getByTestId("streaming-reply")).toContainText("SECOND_STREAMING");
+    expect(await reachable(stop)).toBe(true);
+    await stop.click();
+    await expect(stop).toHaveCount(0);
+
+    // With that reply on screen, the app still knows no dialog is up, and
+    // the keyboard goes to its own message box: a click on the chat's row
+    // gives the message box the keyboard, the command palette opens and Esc
+    // closes it, and Esc closes Settings.
+    await page.locator(".sessions").getByRole("button", { name: "Markup fixture", exact: true }).click();
+    await expect(composer).toBeFocused();
+    // What the command palette's key does: the menu tells the window.
+    await app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", { kind: "menu", data: "palette" }),
+    );
+    const palette = page.getByRole("dialog", { name: "Universal search" });
+    await expect(palette).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(palette).toHaveCount(0);
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+    await expect(settings).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(settings).toHaveCount(0);
+
+    // A README previewed in the Files panel.
+    await openProjectPanel("Files");
+    await page.locator(".file-tree").getByRole("button", { name: "README.md", exact: true }).click();
+    await page.locator(".file-actions").getByRole("button", { name: "Preview", exact: true }).click();
+    const readme = page.locator(".file-preview .document-preview .markdown");
+    await expect(readme).toContainText("README_END");
+    await plain(readme);
+    await shown(readme);
+    for (const target of [composer, newChat, page.locator(".file-actions").getByRole("button", { name: "Code", exact: true })])
+      expect(await reachable(target)).toBe(true);
+    await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
+
+    // The side chat's answer.
+    await composer.fill("/btw Show it beside the chat.");
+    await composer.press("Enter");
+    const side = page.locator(".side-chat-panel");
+    await expect(side).toContainText("SIDE_DONE");
+    for (const markdown of await side.locator(".side-chat-answer .markdown").all()) await plain(markdown);
+    await expect(side.locator("pre .spelled-code")).toHaveText(codes);
+    for (const target of [composer, newChat, side.getByRole("textbox", { name: "Ask a side question", exact: true })])
+      expect(await reachable(target)).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    output?.end();
+    provider.closeAllConnections();
+    await new Promise<void>(resolve => provider.close(() => resolve()));
+  }
+});
+
+test("a reply's code block reads left to right inside markup that turns it, and its ids are never the app's", async () => {
+  await newCanvasSession();
+  // A direction turned around a code block, an id the message box's command
+  // menu uses, and a drawing that names its own gradient.
+  await send(
+    '<div dir="rtl"><pre><code>./deploy.sh --prod;</code></pre></div>\n\n<p id="slash-command-1">Not the menu</p>\n\n' +
+      '<svg width="16" height="16"><defs><linearGradient id="shade"><stop offset="0" stop-color="teal"/></linearGradient></defs><rect width="16" height="16" fill="url(#shade)"/></svg>',
+  );
+  const reply = page.locator(".transcript article.assistant").last().locator(".markdown");
+  await expect(reply).toContainText("Not the menu");
+  /** Where the code's first and last characters are drawn, left to right. */
+  const order = () =>
+    reply.locator("pre code").evaluate((code) => {
+      const text = code.firstChild as Text;
+      const at = (index: number) => {
+        const range = document.createRange();
+        range.setStart(text, index);
+        range.setEnd(text, index + 1);
+        return range.getBoundingClientRect().left;
+      };
+      return { first: at(0), last: at(text.length - 1), direction: getComputedStyle(code.parentElement!).direction };
+    });
+  for (const language of ["en", "ar"]) {
+    await page.evaluate((language) => window.haarness.preferences({ language } as never), language);
+    await expect(page.locator("html")).toHaveAttribute("lang", language);
+    const drawn = await order();
+    expect(drawn.direction, language).toBe("ltr");
+    expect(drawn.first, language).toBeLessThan(drawn.last);
+  }
+  await page.evaluate(() => window.haarness.preferences({ language: "en" } as never));
+  // The drawing still finds its gradient, under an id of the reply's own.
+  const fill = await reply.locator("svg rect").getAttribute("fill");
+  expect(fill).toMatch(/^url\(#.+\)$/);
+  expect(await reply.evaluate((markdown, fill) => markdown.querySelector(fill!.slice(4, -1))?.localName, fill)).toBe("linearGradient");
+  // The message box's command menu finds its own second command, and names
+  // it as the active one, not the reply's paragraph.
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  await composer.fill("/");
+  await expect(page.locator("#slash-commands")).toBeVisible();
+  await composer.press("ArrowDown");
+  const active = await composer.getAttribute("aria-activedescendant");
+  expect(active).toBe("slash-command-1");
+  expect(await page.evaluate((id) => !!document.getElementById(id)?.closest("#slash-commands"), active!)).toBe(true);
+  await composer.fill("");
+  expect(errors).toEqual([]);
 });
 
 async function newCanvasSession() {

@@ -440,6 +440,16 @@ pub const COMMANDS: &[CommandSpec] = &[
     command("exit", &["quit", "q"], "Exit Haarness"),
 ];
 
+/// Whether this build lists `spec` among its commands. Computer use exists only on macOS, so elsewhere `/mac` is left
+/// out of the palette and `/help`; typed, it still opens what the server says about it.
+pub(crate) fn listed(spec: &CommandSpec) -> bool {
+    listed_on(spec, std::env::consts::OS)
+}
+
+pub(crate) fn listed_on(spec: &CommandSpec, os: &str) -> bool {
+    spec.name != "mac" || os == "macos"
+}
+
 const fn command(
     name: &'static str,
     aliases: &'static [&'static str],
@@ -675,6 +685,14 @@ pub(crate) fn edit_distance(left: &str, right: &str) -> usize {
 /// The `s` in "2 steps".
 const fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
+}
+
+/// The chat a word in a command names by its ID.
+enum SessionMatch {
+    None,
+    One(haarness_protocol::ThreadId),
+    /// A short ID more than one chat ends in.
+    Several,
 }
 
 impl App {
@@ -1867,6 +1885,16 @@ impl App {
         self.workspace_refs = None;
         self.workspace_custom_ref.clear();
         self.notice = match operation {
+            // A worktree whose link to its repository broke is only
+            // forgotten: the server left its folder, which still exists.
+            WorkspaceMutation::Remove { .. } | WorkspaceMutation::Cleanup { .. }
+                if response.workspace.exists =>
+            {
+                format!(
+                    "Worktree “{}” forgotten · it no longer links to its repository, so its folder was left on disk",
+                    response.workspace.name
+                )
+            }
             WorkspaceMutation::Create { .. } => format!(
                 "Created worktree “{}” from {}{} · folder switching is unavailable on attached clients",
                 response.workspace.name,
@@ -2485,6 +2513,15 @@ impl App {
                 self.open_management("sharing", &serde_json::json!({"action":"view"}), client)
                     .await?;
             }
+            // What the strip's Resume does, for an agent paused there.
+            "mac" if arguments.eq_ignore_ascii_case("resume") => {
+                let paused = self.computer_paused.is_some();
+                // The server says whether an agent was paused; from an older one, what this client heard stands in.
+                let resumed = crate::management::resume_computer(self, client).await?;
+                if !resumed.unwrap_or(paused) {
+                    self.notice = self.language.text("No agent is paused").into();
+                }
+            }
             "mac" => {
                 self.open_management(
                     "computer-use",
@@ -2689,7 +2726,25 @@ impl App {
                         self.todos = client.todos(self.thread.id).await.unwrap_or_default();
                         self.notice = self.undo_notice("Redone");
                     }
-                    Err(error) => self.notice = undo_error(&error, "Redo"),
+                    Err(error) => match crate::api::missing_undo_copy(&error) {
+                        // In the person's language, and whole: the band
+                        // cuts a long notice, where a toast wraps it.
+                        Some(path) => {
+                            let path = path.chars().filter(|c| !c.is_control()).collect::<String>();
+                            let said = self.language.format(
+                                "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",
+                                &[("path", &path)],
+                            );
+                            self.notice.clone_from(&said);
+                            self.show_toast(
+                                None,
+                                said,
+                                ToastVariant::Error,
+                                std::time::Duration::from_secs(8),
+                            );
+                        }
+                        None => self.notice = undo_error(&error, "Redo"),
+                    },
                 }
             }
             "fork" => {
@@ -2700,12 +2755,25 @@ impl App {
                 }
             }
             "rename" => {
+                let (first, rest) = arguments
+                    .split_once(char::is_whitespace)
+                    .map_or((arguments, ""), |(first, rest)| (first, rest.trim()));
+                let named = self.matching_session_id(first);
                 if arguments.is_empty() {
                     self.refuse_command("Usage: /rename [session-id] <title>");
-                } else if self.matching_session_id(arguments).is_some() {
+                } else if matches!(named, SessionMatch::Several) {
+                    // A short ID two chats share names neither; renaming the
+                    // open chat to the ID and title would surprise as much.
+                    self.refuse_command(format!(
+                        "More than one chat ends in {first} · type the full session ID"
+                    ));
+                } else if matches!(named, SessionMatch::One(_)) && rest.is_empty() {
                     self.notice = "Type a title after the session ID".into();
                 } else {
-                    let (target, title) = self.rename_target(arguments);
+                    let (target, title) = match named {
+                        SessionMatch::One(id) => (id, rest),
+                        _ => (self.thread.id, arguments),
+                    };
                     let updated = client
                         .update_thread(
                             target,
@@ -3743,7 +3811,7 @@ impl App {
                 source: None,
                 path: None,
                 args,
-                agent: Some(self.agent().into()),
+                agent: Some(self.sending_agent()),
                 model: Some(workflow_model(&self.thread.provider, &self.thread.model)),
                 variant: self.requested_effort(),
                 thread_id: Some(self.thread.id),
@@ -4021,7 +4089,7 @@ impl App {
                         self.attachments.clone()
                     },
                     resources: Vec::new(),
-                    agent: workflow.then(|| self.agent().to_owned()),
+                    agent: workflow.then(|| self.sending_agent()),
                     provider: workflow.then(|| self.thread.provider.clone()),
                     model: workflow.then(|| self.thread.model.clone()),
                     variant: workflow.then(|| self.requested_effort()).flatten(),
@@ -4099,7 +4167,7 @@ impl App {
             resources,
             synthetic: false,
             auto_approve: false,
-            agent: Some(self.agent().into()),
+            agent: Some(self.sending_agent()),
             provider: None,
             model: None,
             reasoning_effort: self.requested_effort(),
@@ -4167,11 +4235,12 @@ impl App {
             .filter(|_| !thread.is_subagent);
         let previous_root = self.root_thread_id;
         self.items = items;
-        self.agent_index = self
-            .agents
-            .iter()
-            .position(|agent| agent.id == thread.agent)
-            .unwrap_or(0);
+        self.pick_agent(
+            self.agents
+                .iter()
+                .position(|agent| agent.id == thread.agent)
+                .unwrap_or(0),
+        );
         self.thread = thread;
         if let Some(id) = abandoned {
             archive_untouched(
@@ -4364,7 +4433,9 @@ impl App {
                 "waiting_permission" => "needs approval".into(),
                 "done" => "completed".into(),
                 "failed" => "failed".into(),
-                "cancelled" | "interrupted" => "cancelled".into(),
+                "cancelled" => "cancelled".into(),
+                // Haarness stopped it before it finished, as its row says.
+                "interrupted" => self.language.text("didn't finish").into(),
                 "running" => task.elapsed_seconds().map_or_else(
                     || "running".into(),
                     |seconds| format!("running · {seconds}s"),
@@ -4726,25 +4797,21 @@ impl App {
         self.switch_thread(thread, client).await
     }
 
-    fn rename_target<'a>(&self, arguments: &'a str) -> (haarness_protocol::ThreadId, &'a str) {
-        let Some((candidate, title)) = arguments.split_once(char::is_whitespace) else {
-            return (self.thread.id, arguments);
-        };
-        let title = title.trim();
-        if title.is_empty() {
-            return (self.thread.id, arguments);
+    /// The chat `candidate` names: its full ID, or the short ID the TUI
+    /// shows (`#` optional). Any other word, even a piece of an ID ("db",
+    /// "add"), names none and starts a title.
+    fn matching_session_id(&self, candidate: &str) -> SessionMatch {
+        let candidate = candidate.strip_prefix('#').unwrap_or(candidate);
+        let mut matches = self.threads.iter().filter(|thread| {
+            let id = thread.id.to_string();
+            id.eq_ignore_ascii_case(candidate)
+                || crate::view::span::short_id(&id).eq_ignore_ascii_case(candidate)
+        });
+        match (matches.next(), matches.next()) {
+            (None, _) => SessionMatch::None,
+            (Some(thread), None) => SessionMatch::One(thread.id),
+            (Some(_), Some(_)) => SessionMatch::Several,
         }
-        self.matching_session_id(candidate)
-            .map_or((self.thread.id, arguments), |id| (id, title))
-    }
-
-    fn matching_session_id(&self, candidate: &str) -> Option<haarness_protocol::ThreadId> {
-        let mut matches = self
-            .threads
-            .iter()
-            .filter(|thread| thread.id.to_string().contains(candidate));
-        let first = matches.next()?.id;
-        matches.next().is_none().then_some(first)
     }
 
     /// `/billing`: balances on top, and the next step one Enter away instead
@@ -5025,7 +5092,7 @@ impl App {
                 },
             )
             .await?;
-        self.agent_index = index;
+        self.pick_agent(index);
         self.notice = format!("Agent: {agent}");
         Ok(())
     }

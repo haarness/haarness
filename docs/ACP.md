@@ -36,7 +36,9 @@ version 1.
   a running server at another checkout. `session/load` replays the chat's stored items as updates.
 - **Prompts.** Text blocks become the message; image and audio blocks, and embedded PDF, image, audio
   or video resources, become attachments; an embedded text resource and a resource link are added to
-  the text with their URI. Other blocks are refused. A turn that completes ends with `end_turn`, a
+  the text with their URI. An image block that carries no data but a `uri` is added to the text as a
+  resource link to that address (Haarness never downloads it), or attached when the address is a
+  `data:` URL; one with neither is refused. Other blocks are refused. A turn that completes ends with `end_turn`, a
   stopped one with `cancelled`, and a failed one as an error. A prompt the server refuses (the chat
   already has a turn running, started in another window or run; a hook blocks the prompt) is an
   invalid request (`-32600`) whose message is the server's own sentence (`prompt blocked by a hook:

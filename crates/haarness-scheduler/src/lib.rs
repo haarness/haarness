@@ -178,6 +178,10 @@ pub struct ScheduleRun {
     pub response: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// A line beside a run's result: what it stopped as it ended, though it
+    /// succeeded (a command of its own with no time limit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1066,6 +1070,43 @@ pub struct RunGuard {
     contents: Vec<u8>,
 }
 
+impl RunGuard {
+    /// What keeps this run's lock fresh while it runs (see
+    /// [`LockKeeper::refresh`]).
+    #[must_use]
+    pub fn keeper(&self) -> LockKeeper {
+        LockKeeper {
+            path: self.path.clone(),
+            contents: self.contents.clone(),
+        }
+    }
+}
+
+/// Marks a run's lock as still in use. A lock whose process cannot be
+/// checked counts as abandoned once it has not been written for an hour; a
+/// run that refreshes it every minute keeps it however long it takes.
+#[derive(Clone, Debug)]
+pub struct LockKeeper {
+    path: PathBuf,
+    contents: Vec<u8>,
+}
+
+impl LockKeeper {
+    /// Set the lock's modification time to now, while it is still this
+    /// run's lock (another runner may have taken over one it judged
+    /// abandoned). Answers whether it did.
+    pub fn refresh(&self) -> bool {
+        if fs::read(&self.path).map_or(true, |contents| contents != self.contents) {
+            return false;
+        }
+        OpenOptions::new()
+            .write(true)
+            .open(&self.path)
+            .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+            .is_ok()
+    }
+}
+
 impl Drop for RunGuard {
     fn drop(&mut self) {
         // Another runner may have taken over a lock it judged abandoned; that
@@ -1076,9 +1117,10 @@ impl Drop for RunGuard {
     }
 }
 
-/// How old a run lock must be before it counts as abandoned when nothing can
-/// tell whether its run is still going: it names no readable process, or
-/// this system cannot check the process it names.
+/// How long a run lock must go unwritten before it counts as abandoned when
+/// nothing can tell whether its run is still going: it names no readable
+/// process, or this system cannot check the process it names. A live run
+/// writes its lock every minute (see [`LockKeeper`]).
 const UNVERIFIED_LOCK_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// A process that started this long after a lock was written did not write it.
@@ -1897,6 +1939,7 @@ mod tests {
             turn_id: None,
             response: Some("done".into()),
             error: None,
+            note: None,
         };
         let finished = scheduler
             .finish(
@@ -2281,6 +2324,49 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A lock whose process nothing can check is taken once it has gone an
+    /// hour unwritten; a run that refreshes it keeps it, and never refreshes
+    /// a lock another runner wrote since.
+    #[test]
+    fn a_running_run_keeps_a_lock_nothing_can_check_by_refreshing_it() {
+        let (root, scheduler) = fixture(Backend::Launchd);
+        let schedule = create(&scheduler, &root, Trigger::Interval { seconds: 60 });
+        let path = scheduler.lock_path(schedule.id);
+        // No process to check (pid 0), and written two hours ago.
+        write_lock(&scheduler, &schedule, 0, Duration::from_secs(2 * 60 * 60));
+        let keeper = LockKeeper {
+            path: path.clone(),
+            contents: fs::read(&path).unwrap(),
+        };
+        assert!(abandoned_lock(&path).is_some());
+        assert!(keeper.refresh());
+        assert!(abandoned_lock(&path).is_none());
+        assert!(scheduler.acquire(&schedule).unwrap().is_none());
+        // Another runner's lock is left as it was written.
+        write_lock(&scheduler, &schedule, 0, Duration::from_secs(2 * 60 * 60));
+        assert!(!keeper.refresh());
+        assert!(abandoned_lock(&path).is_some());
+        // A run's own guard hands out a keeper for its lock.
+        fs::remove_file(&path).unwrap();
+        let guard = scheduler.acquire(&schedule).unwrap().unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60))
+            .unwrap();
+        assert!(guard.keeper().refresh());
+        let age = fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap();
+        assert!(age < Duration::from_secs(60), "{age:?}");
+        drop(guard);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_finished_run_removes_only_its_own_lock() {
         let (root, scheduler) = fixture(Backend::Launchd);
@@ -2321,6 +2407,7 @@ mod tests {
                         turn_id: None,
                         response: None,
                         error: None,
+                        note: None,
                     },
                 )
                 .unwrap();
