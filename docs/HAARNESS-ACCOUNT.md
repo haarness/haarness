@@ -34,8 +34,9 @@ can still prevent a listed model from serving a request.
 
 Cloud runs a sign-in's requests eight at a time and 300 a minute, and each
 router has a limit of its own. A request over one of them is not an error the
-turn ends on: it is sent again after 2, 4, 8 and 16 seconds, or once the minute
-has turned when Cloud says how long that is (`Retry-After`). A fan-out of more
+turn ends on: it is sent again after 2, 4, 8 and 16 seconds (each a random part
+of a second later, so agents refused together spread out), or as long as Cloud
+says (`Retry-After`) for a full minute or router. A fan-out of more
 than eight agents waits this way for a free slot. If Cloud is still busy after
 that, the reply says so and suggests trying again once another chat or agent
 finishes.

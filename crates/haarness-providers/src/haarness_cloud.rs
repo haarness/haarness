@@ -9,6 +9,7 @@ use haarness_core::{CoreError, CoreResult, ModelProvider, ProviderRequest, Provi
 use haarness_protocol::ProviderInfo;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -145,6 +146,17 @@ fn unauthorized(error: &CoreError) -> bool {
     matches!(error, CoreError::Provider(message) if message.starts_with("HTTP 401"))
 }
 
+/// The router's refusals for a busy key or router (see [`readable_with`]).
+fn busy(error: &CoreError) -> bool {
+    matches!(error, CoreError::Provider(message) if
+        ["[concurrency_limited]", "[router_overloaded]", "[rate_limited]"]
+            .iter()
+            .any(|code| message.contains(code)))
+}
+
+/// The most a busy refusal is held back, in milliseconds, so that agents
+/// refused together spread out their next tries.
+const BUSY_JITTER_MS: u64 = 1_000;
 
 fn error(e: impl std::fmt::Display) -> CoreError {
     CoreError::Provider(e.to_string())
@@ -257,10 +269,13 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
          allows. Try again in a moment, or once another chat or agent finishes."
             .to_owned()
     } else if message.contains("[router_overloaded]") {
-        // The router's own limit on requests at once, across every account.
-        "Haarness Cloud's router is at its rate limit for requests at once. Try again in a \
-         moment."
-            .to_owned()
+        // The router's own limit on requests at once, across every account:
+        // the wait it names spares a router that is already full.
+        let next = advised_seconds(&message).map_or_else(
+            || "Try again in a moment.".to_owned(),
+            |seconds| format!("Please retry in {seconds}s."),
+        );
+        format!("Haarness Cloud's router is at its rate limit for requests at once. {next}")
     } else if message.contains("[rate_limited]") {
         // Requests a minute: the router says when the minute turns ("Please
         // retry in 12s."), and that wait is kept.
@@ -444,6 +459,18 @@ impl ModelProvider for HaarnessCloudProvider {
                             .stream(request, cancel.clone())
                             .await
                             .map_err(readable)?;
+                    }
+                    Err(failure) if busy(&failure) => {
+                        retry = None;
+                        // Agents refused together would all try again at the
+                        // same moment, and be refused together again: each
+                        // waits a random part of a second more first.
+                        let jitter = Duration::from_millis(rand::random_range(0..BUSY_JITTER_MS));
+                        tokio::select! {
+                            () = cancel.cancelled() => {}
+                            () = tokio::time::sleep(jitter) => {}
+                        }
+                        Err::<(), _>(readable(failure))?;
                     }
                     event => {
                         retry = None;
@@ -758,6 +785,14 @@ mod tests {
                  a moment."
                     .to_owned(),
             ),
+            // A full router's own wait spares it a retry at 2 seconds.
+            (
+                "HTTP 429 Too Many Requests: [router_overloaded] router concurrency limit reached \
+                 Please retry in 17s.",
+                "Haarness Cloud's router is at its rate limit for requests at once. Please retry \
+                 in 17s."
+                    .to_owned(),
+            ),
             (
                 "HTTP 429 Too Many Requests: [rate_limited] per-key rate limit of 300 requests \
                  per minute reached",
@@ -925,6 +960,45 @@ mod tests {
             let sent = stand.sent.lock().unwrap().last().unwrap().to_string();
             assert_eq!(sent.contains("input_audio"), takes, "{model}: {sent}");
         }
+        server.abort();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Busy refusals reach the turn spread over a second, so agents refused
+    /// together do not try again together.
+    #[tokio::test]
+    async fn busy_refusals_reach_the_turn_spread_over_a_second() {
+        use futures::StreamExt as _;
+        let (provider, stand, server, root) = stand_in().await;
+        stand.refusing.store(true, Ordering::SeqCst);
+        let mut waits = Vec::new();
+        for _ in 0..6 {
+            let started = std::time::Instant::now();
+            let events = provider
+                .stream(
+                    recording("anthropic/claude-sonnet-5-5"),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            waits.push(started.elapsed());
+            let error = events.into_iter().find_map(Result::err).unwrap();
+            assert!(
+                error.to_string().contains("as its rate limit allows"),
+                "{error}"
+            );
+        }
+        let (shortest, longest) = (waits.iter().min().unwrap(), waits.iter().max().unwrap());
+        assert!(
+            longest.saturating_sub(*shortest) > std::time::Duration::from_millis(50),
+            "{waits:?}"
+        );
+        assert!(
+            *longest < std::time::Duration::from_millis(BUSY_JITTER_MS + 500),
+            "{waits:?}"
+        );
         server.abort();
         let _ = std::fs::remove_dir_all(root);
     }
