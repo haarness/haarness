@@ -25247,6 +25247,68 @@ async fn a_step_paused_on_the_strip_says_so_and_its_row_resumes_it() {
     assert_eq!(app.computer_paused, None);
 }
 
+/// A pause on the strip holds only a turn that waits on the screen: one that
+/// looked earlier and now runs a command keeps its own band and rows.
+#[tokio::test]
+async fn a_pause_says_paused_only_while_a_step_waits_on_the_screen() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let call = |sequence: u64, id: &str, name: &str| {
+        message_item_for_turn(
+            sequence,
+            &thread,
+            turn,
+            ItemData::ToolCall {
+                call_id: id.into(),
+                name: name.into(),
+                arguments: serde_json::json!({}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    let done = message_item_for_turn(
+        2,
+        &thread,
+        turn,
+        ItemData::ToolResult {
+            call_id: "c1".into(),
+            name: "mac_snapshot".into(),
+            output: "TextEdit".into(),
+            is_error: false,
+            metadata: serde_json::Value::Null,
+        },
+    );
+    let items = vec![call(1, "c1", "mac_snapshot"), done, call(3, "c2", "bash")];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.active_turn = Some(turn);
+    app.reduce(
+        fixture_event(
+            crate::management::COMPUTER_USE_UPDATED,
+            thread.id,
+            thread.id,
+            serde_json::json!({"paused": true}),
+        ),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.screen_paused());
+    assert!(
+        !app.screen_waiting(),
+        "the command is not waiting on the screen"
+    );
+    let text = frame_text(&app, (100, 30));
+    assert!(
+        !text.contains("paused") && !text.contains("/mac resume"),
+        "{text}"
+    );
+    // The next screen step is the one the pause holds.
+    app.items.push(call(4, "c3", "functions.mac_click"));
+    assert!(app.screen_waiting());
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("paused  ·  /mac resume"), "{text}");
+}
+
 /// A pause is followed in every chat, so a chat opened while it lasts shows
 /// it; a child agent's view counts as its conversation's; `/mac resume` does
 /// what the row's click does, and says so when nothing is paused.

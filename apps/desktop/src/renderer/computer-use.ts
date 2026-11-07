@@ -4,7 +4,7 @@
  * agent works, and how a `computer` approval reads. Pure, so the rules are
  * pinned in tests rather than found in the panes.
  */
-import type { PendingPermissionInfo, Thread } from "@haarness/sdk";
+import type { Item, PendingPermissionInfo, Thread } from "@haarness/sdk";
 
 export type ComputerRule = "allow" | "ask" | "deny";
 
@@ -272,6 +272,20 @@ export function pausedHere(paused: string | undefined, selected: string, threads
     chat = parents.get(chat);
   }
   return false;
+}
+
+/**
+ * Whether a turn waits on the screen: one of its `mac_*` calls has no result yet. Only then does a pause on the strip
+ * hold it; otherwise the turn's own work (a command, an edit, its reply) goes on and shows as usual.
+ */
+export function waitsOnScreen(items: Pick<Item, "turnId" | "data">[], turnId: string) {
+  const open = new Set<string>();
+  for (const item of items) {
+    if (item.turnId !== turnId) continue;
+    if (item.data.type === "tool_call" && /^(?:functions\.)?mac_/i.test(item.data.name)) open.add(item.data.call_id);
+    else if (item.data.type === "tool_result") open.delete(item.data.call_id);
+  }
+  return open.size > 0;
 }
 
 /** Catalog keys this module and its pane reach through variables, for the catalog guard. */

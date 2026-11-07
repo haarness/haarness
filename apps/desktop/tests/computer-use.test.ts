@@ -12,6 +12,7 @@ import {
   pausedHere,
   shownText,
   validBundle,
+  waitsOnScreen,
 } from "../src/renderer/computer-use";
 import { describeTool, toolActivity, toolInput } from "../src/renderer/transcript";
 import { readToolImage, screenToolImage } from "../src/renderer/project-images";
@@ -177,6 +178,22 @@ test("a pause is shown in the chat that holds the screen and in the agents it st
   assert.ok(!pausedHere("root", "", threads));
   // A parent loop in bad data ends the walk.
   assert.ok(!pausedHere("root", "a", [{ id: "a", parentId: "b" }, { id: "b", parentId: "a" }]));
+});
+
+test("a pause holds the line only while the turn waits on the screen", () => {
+  const call = (id: string, name: string, turnId = "t1") =>
+    ({ turnId, data: { type: "tool_call", call_id: id, name, arguments: {} } }) as const;
+  const done = (id: string, turnId = "t1") =>
+    ({ turnId, data: { type: "tool_result", call_id: id, name: "", output: "", is_error: false } }) as const;
+  // Typing that the strip holds.
+  assert.ok(waitsOnScreen([call("a", "mac_type")], "t1"));
+  assert.ok(waitsOnScreen([call("a", "functions.mac_click")], "t1"));
+  // It looked earlier and now runs a command, edits or writes: its own work shows.
+  assert.ok(!waitsOnScreen([call("a", "mac_snapshot"), done("a"), call("b", "bash")], "t1"));
+  assert.ok(!waitsOnScreen([call("a", "mac_snapshot"), done("a")], "t1"));
+  assert.ok(!waitsOnScreen([], "t1"));
+  // Another turn's step says nothing about this one.
+  assert.ok(!waitsOnScreen([call("a", "mac_type", "t0")], "t1"));
 });
 
 test("a whole-screen look says what goes to the model and shows no spot", () => {

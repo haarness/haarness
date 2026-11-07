@@ -2178,7 +2178,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 let paused = unfinished
                     && !awaiting
                     && !queued
-                    && name.starts_with("mac_")
+                    && bare_tool(name).starts_with("mac_")
                     && item.turn_id.is_some()
                     && item.turn_id == app.active_turn
                     && app.screen_paused();

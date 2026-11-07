@@ -1496,8 +1496,6 @@ impl App {
             .count()
     }
 
-    /// Delegated threads are inspection surfaces. Forks also have a parent
-    /// for history lineage, but remain editable conversations.
     /// Whether the person paused computer use on the strip while this chat's turn uses the screen: the paused chat is
     /// the conversation's root, so a child agent's view counts too.
     #[must_use]
@@ -1508,6 +1506,36 @@ impl App {
                 .is_some_and(|chat| chat == self.thread.id || chat == self.root_thread_id)
     }
 
+    /// Whether this chat's turn waits on the screen while the person paused computer use on the strip: one of its
+    /// `mac_*` steps has no result yet. A turn busy with anything else (a command, an edit, its reply) shows that work.
+    #[must_use]
+    pub fn screen_waiting(&self) -> bool {
+        let Some(turn) = self.active_turn.filter(|_| self.screen_paused()) else {
+            return false;
+        };
+        let mut open = std::collections::HashSet::new();
+        for item in self.items.iter().filter(|item| item.turn_id == Some(turn)) {
+            match &item.data {
+                ItemData::ToolCall { call_id, name, .. }
+                    if name
+                        .get(..10)
+                        .filter(|prefix| prefix.eq_ignore_ascii_case("functions."))
+                        .map_or(name.as_str(), |_| &name[10..])
+                        .starts_with("mac_") =>
+                {
+                    open.insert(call_id.as_str());
+                }
+                ItemData::ToolResult { call_id, .. } => {
+                    open.remove(call_id.as_str());
+                }
+                _ => {}
+            }
+        }
+        !open.is_empty()
+    }
+
+    /// Delegated threads are inspection surfaces. Forks also have a parent
+    /// for history lineage, but remain editable conversations.
     pub fn is_child_view(&self) -> bool {
         self.thread.is_subagent
     }

@@ -98,7 +98,7 @@ import { useApp } from "./state";
 import { Button, Icon, ago, stringify } from "./ui";
 import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
 import { watchOpenImages } from "./ImageViewer";
-import { barWords, computerApproval, isComputerPermission, pausedChatIn, pausedHere } from "./computer-use";
+import { barWords, computerApproval, isComputerPermission, pausedChatIn, pausedHere, waitsOnScreen } from "./computer-use";
 import "./computer-use.css";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import type { FileContent } from "../shared";
@@ -2281,11 +2281,17 @@ export function Session() {
       : "",
   );
   const [reviewClock, setReviewClock] = createSignal(0);
-  // The person paused computer use on the strip at the top of the screen: the
-  // line stops moving and offers the strip's own Resume.
-  const screenPaused = createMemo(
-    () => !!active() && pausedHere(state.computerPaused, state.selected, state.threads),
-  );
+  // The person paused computer use on the strip at the top of the screen and
+  // this turn waits on it: the line stops moving and offers the strip's own
+  // Resume. A turn busy with anything else keeps its own line.
+  const screenPaused = createMemo(() => {
+    const turn = active();
+    return (
+      !!turn &&
+      pausedHere(state.computerPaused, state.selected, state.threads) &&
+      waitsOnScreen(state.items, turn.id)
+    );
+  });
   const [resuming, setResuming] = createSignal(false);
   const resumeScreen = () =>
     void app.run(async () => {
