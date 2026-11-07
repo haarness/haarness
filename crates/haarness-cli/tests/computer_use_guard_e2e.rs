@@ -1,7 +1,8 @@
 //! Computer use gets more reach for agents, and a pause on the strip ends, only at a person's word. A request from an
 //! agent's command is refused, also from a program the command put in the background (`nohup … &` in a subshell, which
-//! the system hands to launchd, outside Haarness's process tree); a person's own client is answered, and switching
-//! off always works. The server runs the stand-in helper, so nothing touches the screen.
+//! the system hands to launchd, outside Haarness's process tree), while the command runs and after its own shell has
+//! ended; a person's own client is answered, and switching off always works. The server runs the stand-in helper, so
+//! nothing touches the screen.
 #![cfg(target_os = "macos")]
 
 use haarness_computer::{INSIDE_REFUSAL, INSIDE_RESUME_REFUSAL, terms};
@@ -293,8 +294,9 @@ fn only_a_person_widens_computer_use_or_ends_a_pause_even_from_a_program_left_ru
         fixture.read("attached-configure.json")
     );
 
-    // The same from a program the command puts in the background, which runs under launchd by the time it asks. It
-    // also tries `haarness mac` without the chat's variable.
+    // The same from a program the command puts in the background, which runs under launchd by the time it asks. The
+    // command waits for it, so its shell still leads the group: the group's live leader is what tells here. It also
+    // tries `haarness mac` without the chat's variable.
     let detached = root.join("detached.sh");
     std::fs::write(
         &detached,
@@ -357,6 +359,66 @@ fn only_a_person_widens_computer_use_or_ends_a_pause_even_from_a_program_left_ru
     assert_eq!(status["settings"]["defaultAct"], "ask", "{status}");
     assert_eq!(rules(&status), only_text_edit, "{status}");
     assert_eq!(fixture.turn_status(&held), "running");
+
+    // A program still in the command's group after the command's own shell has ended and been reaped, asking before
+    // the server stops the group. Nothing in the process table leads that group any more, and the program runs under
+    // launchd: only the server's note of the groups it started tells. The program keeps printing, so the server reads
+    // on, for two seconds at most, before it stops the group; the program asks once the shell has left the table.
+    // A stop that comes first (a very busy machine) leaves an empty answer, and the round is run again.
+    let mut refused = (false, false);
+    for round in 0..3 {
+        if refused == (true, true) {
+            break;
+        }
+        let file = |name: &str| root.join(format!("ended-{round}-{name}"));
+        let lingering = root.join(format!("ended-{round}.sh"));
+        std::fs::write(
+            &lingering,
+            [
+                "shell=$(ps -o pgid= -p $$ | tr -d ' ')\n".to_owned(),
+                "( while :; do echo tick; sleep 0.05; done ) &\nticker=$!\n".to_owned(),
+                "while ps -p \"$shell\" > /dev/null 2>&1; do sleep 0.02; done\n".to_owned(),
+                format!("touch '{}'\n", file("shell-gone").display()),
+                fixture.post_line(&json!({"action": "resume"}), &file("resume.json")),
+                fixture.post_line(
+                    &json!({"action": "configure", "defaultAct": "allow"}),
+                    &file("configure.json"),
+                ),
+                "kill \"$ticker\"\n".to_owned(),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        fixture.agent_runs(
+            &agent,
+            &format!("sh '{}' & echo started", lingering.display()),
+        );
+        let status = fixture.status();
+        assert_eq!(status["paused"], true, "round {round}: {status}");
+        assert_eq!(
+            status["settings"]["defaultAct"], "ask",
+            "round {round}: {status}"
+        );
+        assert_eq!(fixture.turn_status(&held), "running");
+        for (name, refusal, seen) in [
+            ("resume", INSIDE_RESUME_REFUSAL, &mut refused.0),
+            ("configure", INSIDE_REFUSAL, &mut refused.1),
+        ] {
+            let answer = file(&format!("{name}.json"));
+            let text = std::fs::read_to_string(answer).unwrap_or_default();
+            if text.is_empty() {
+                continue;
+            }
+            assert!(text.contains(refusal), "round {round} {name}: {text}");
+            assert!(file("shell-gone").exists(), "round {round}");
+            *seen = true;
+        }
+    }
+    assert_eq!(
+        refused,
+        (true, true),
+        "the group was stopped before its program could ask, three times"
+    );
 
     // The person's own Resume lets chat A go on.
     let resumed = fixture.api("/manage/computer-use", &json!({"action": "resume"}));
