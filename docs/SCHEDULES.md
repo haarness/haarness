@@ -83,11 +83,16 @@ Every native entry runs the hidden command
    permission prompts on their own and cannot use the question tool, since nobody is there to answer.
    Requests only a person can answer, such as a site in the user's Chrome, fail at once instead of
    waiting ([Chrome approvals](PERMISSIONS-AND-EXECUTION.md#chrome-approvals)).
-5. A shell command the agent ran in the background is waited for (it stops at the `timeout` the agent
-   gave or `execution.shell_timeout_ms`, even when the agent gave none), and so is the turn its end
-   starts; a foreground command never moves there by itself in a scheduled run.
-6. When the turn ends it records **success** or **failed** with the chat and turn ids, the answer or
-   the error (with what the agent said when its commands ended). A one-shot schedule then disables
+5. What the turn leaves in the background is waited for: subagents, workflows and shell commands (a
+   command stops at the `timeout` the agent gave or `execution.shell_timeout_ms`, even when the agent
+   gave none), and so are the turns their ends start; a foreground command never moves there by
+   itself in a scheduled run. The wait lasts 30 minutes at most, counted from the end of the first
+   turn. Whatever is still going then is stopped without telling the chat, so no turn starts there
+   after the run, and the run is recorded as **failed**, naming what was stopped.
+6. It then records **success** or **failed** with the chat and turn ids and the agent's answer: what
+   it said in its first turn and in every turn after it. The run fails, with the reason as its error,
+   when the first or the last of those turns failed or was stopped, or when a subagent it ran in the
+   background failed, as `haarness run --wait-background` does. A one-shot schedule then disables
    itself.
 
 Credentials are read from the normal `haarness auth` store or the environment when the run starts;
@@ -98,5 +103,7 @@ none are written into the native entry.
 - `crates/haarness-scheduler`: triggers and natural phrases, the job store, run history and locks,
   and the launchd, systemd and Task Scheduler backends. `cargo test -p haarness-scheduler`.
 - `crates/haarness-cli/src/main.rs`: the `schedule` commands and the trigger path above.
+- `scripts/test-schedule-background.py`: a run's subagents and commands in the background, and its
+  limit, through a real daemon with the echo provider.
 - `crates/haarness-server/src/tools.rs`: the model's `schedule` tool. `cargo test -p haarness-server schedule`.
 - `crates/haarness-cli/src/management/ui.rs`: the `schedules` management form used by the TUI and Desktop.

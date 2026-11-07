@@ -3970,42 +3970,33 @@ async fn execute_schedule(
         turn_id = Some(turn.id.0);
         let watch = RunWatch::scheduled();
         wait_for_turn_client(&client, turn.id, &watch).await?;
-        // A scheduled run waits for the commands it left running in the
-        // background (each stops at its time limit) and for what the agent
-        // says when they end.
-        let mut waited = false;
-        loop {
-            watch.answer(&client, thread.id).await?;
-            let commands = background_commands_client(&client, thread.id, turn.id).await?;
-            if commands.settled() && client.active_turn(thread.id).await?.is_none() {
-                break;
-            }
-            waited = true;
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        let items = client.items(thread.id).await?;
-        let response = if waited {
-            assistant_messages_since_turn(items, turn.id)
-        } else {
-            assistant_messages_for_turn(items, turn.id)
-        }
-        .join("\n");
-        Result::<String>::Ok(response)
+        follow_scheduled_run(
+            &client,
+            thread.id,
+            turn.id,
+            schedule_background_limit(),
+            &watch,
+        )
+        .await
     }
     .await;
 
     let run = match result {
-        Ok(response) => ScheduleRun {
+        Ok((response, outcome)) => ScheduleRun {
             id: Uuid::now_v7(),
             schedule_id: schedule.id,
-            status: ScheduleRunStatus::Success,
+            status: if outcome.is_ok() {
+                ScheduleRunStatus::Success
+            } else {
+                ScheduleRunStatus::Failed
+            },
             source,
             started_at,
             finished_at: chrono::Utc::now(),
             thread_id,
             turn_id,
             response: Some(response),
-            error: None,
+            error: outcome.err(),
         },
         Err(error) => ScheduleRun {
             id: Uuid::now_v7(),
@@ -4021,6 +4012,248 @@ async fn execute_schedule(
         },
     };
     scheduler.finish(&schedule, run, guard)
+}
+
+/// The rest of a scheduled run once its first turn `turn` completed: it
+/// waits for everything that turn left in the background (subagents,
+/// workflows, commands, each command stopping at its own time limit) and for
+/// the turns their ends start, all within `limit`, and stops what is left
+/// then, so no turn of the chat outlives the run. Answers what the agent
+/// said, and how the run ended (see [`schedule_outcome`]).
+async fn follow_scheduled_run(
+    client: &haarness_tui::api::ApiClient,
+    thread_id: ThreadId,
+    turn: TurnId,
+    limit: Duration,
+    watch: &RunWatch,
+) -> Result<(String, Result<(), String>)> {
+    let left = wait_for_background_client(
+        client,
+        thread_id,
+        turn,
+        Some(Instant::now() + limit),
+        true,
+        Duration::from_millis(250),
+        watch,
+    )
+    .await?;
+    let stopped = if left.settled() {
+        Vec::new()
+    } else {
+        stop_scheduled_work_client(client, thread_id, &left).await
+    };
+    let last = client.thread_activity(thread_id).await?.last_turn;
+    let items = client.items(thread_id).await?;
+    let failed = failed_background_subagents(&items);
+    // The turns after the first may have ended before the wait looked.
+    let response = assistant_messages_since_turn(items, turn).join("\n");
+    Ok((
+        response,
+        schedule_outcome(&stopped, limit, last.as_ref(), &failed),
+    ))
+}
+
+/// How long a scheduled run waits, after its first turn, for what that turn
+/// left in the background and for the turns their ends start.
+const SCHEDULE_BACKGROUND_LIMIT: Duration = Duration::from_secs(30 * 60);
+
+/// [`SCHEDULE_BACKGROUND_LIMIT`], or, with the test provider on, the
+/// milliseconds `HAARNESS_SCHEDULE_BACKGROUND_LIMIT_MS` gives, so the
+/// end-to-end scripts can reach it.
+fn schedule_background_limit() -> Duration {
+    schedule_background_limit_from(
+        std::env::var_os("HAARNESS_TEST_PROVIDER").is_some(),
+        std::env::var("HAARNESS_SCHEDULE_BACKGROUND_LIMIT_MS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn schedule_background_limit_from(testing: bool, value: Option<&str>) -> Duration {
+    value
+        .filter(|_| testing)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|milliseconds| *milliseconds > 0)
+        .map_or(SCHEDULE_BACKGROUND_LIMIT, Duration::from_millis)
+}
+
+/// Stop what a scheduled run's chat still has going when its wait ends: its
+/// turn, subagents, workflows and commands, none of which then tells the
+/// chat, so no turn starts there after the run. Answers what it stopped,
+/// for the run's record.
+async fn stop_scheduled_work_client(
+    client: &haarness_tui::api::ApiClient,
+    thread_id: ThreadId,
+    left: &BackgroundLeft,
+) -> Vec<String> {
+    let mut stopped = left
+        .subagents
+        .iter()
+        .map(|task| format!("subagent \u{201c}{}\u{201d}", task.description.trim()))
+        .collect::<Vec<_>>();
+    if let Ok(runs) = client.workflow_runs(500).await {
+        stopped.extend(
+            runs.iter()
+                .filter(|run| {
+                    run.definition.launch_thread_id == Some(thread_id)
+                        && run.status == haarness_protocol::WorkflowRunStatus::Running
+                })
+                .map(|run| format!("workflow \u{201c}{}\u{201d}", run.workflow_name)),
+        );
+    }
+    if let Ok(commands) = client.shell_commands(thread_id).await {
+        stopped.extend(
+            commands
+                .iter()
+                .filter(|command| command.state.is_live())
+                .map(|command| {
+                    format!("command \u{201c}{}\u{201d}", command_line(&command.command))
+                }),
+        );
+    }
+    if left.turn {
+        stopped.push("the turn in progress".into());
+    }
+    if stopped.is_empty() {
+        stopped.push("a result on its way to the chat".into());
+    }
+    // A stop while a turn runs leaves the chat's commands in the background
+    // going; once the chat is idle, a stop ends them too, untold.
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let _ = client.interrupt_session(thread_id, false).await;
+        let quiet = client
+            .thread_activity(thread_id)
+            .await
+            .is_ok_and(|activity| {
+                activity.active_turn.is_none()
+                    && activity.background == 0
+                    && activity.background_commands == 0
+            });
+        if quiet || Instant::now() >= until {
+            return stopped;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// A command's first line, short enough for a run's record.
+fn command_line(command: &str) -> String {
+    let line = command.lines().next().unwrap_or_default().trim();
+    if line.chars().count() > 60 {
+        format!("{}…", line.chars().take(59).collect::<String>().trim_end())
+    } else {
+        line.to_owned()
+    }
+}
+
+/// The subagents a chat ran in the background that failed: each one's
+/// description, or its chat's id when its call gave none.
+fn failed_background_subagents(items: &[haarness_protocol::Item]) -> Vec<String> {
+    let background = items
+        .iter()
+        .filter_map(|item| match &item.data {
+            ItemData::TaskState { call_id, state, .. } if state == "background" => {
+                Some(call_id.as_str())
+            }
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let mut failed = Vec::new();
+    for item in items {
+        let ItemData::TaskState {
+            call_id,
+            child_thread_id,
+            state,
+            ..
+        } = &item.data
+        else {
+            continue;
+        };
+        if state != "failed" || !background.contains(call_id.as_str()) {
+            continue;
+        }
+        let description = items
+            .iter()
+            .find_map(|call| match &call.data {
+                ItemData::ToolCall {
+                    call_id: id,
+                    arguments,
+                    ..
+                } if id == call_id => arguments["description"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|description| !description.is_empty())
+                    .map(str::to_owned),
+                _ => None,
+            })
+            .unwrap_or_else(|| child_thread_id.to_string());
+        if !failed.contains(&description) {
+            failed.push(description);
+        }
+    }
+    failed
+}
+
+/// How a scheduled run ended once nothing it started is left going: failed
+/// when its wait stopped work at `limit` (`stopped` names it), when the
+/// chat's last turn failed or was stopped, or when a subagent it ran in the
+/// background failed (as `haarness run --wait-background` fails); otherwise
+/// a success. The error is a line for the run's record.
+fn schedule_outcome(
+    stopped: &[String],
+    limit: Duration,
+    last: Option<&haarness_protocol::Turn>,
+    failed: &[String],
+) -> Result<(), String> {
+    if !stopped.is_empty() {
+        return Err(format!(
+            "Background work was still going after {} and was stopped: {}.",
+            wait_length(limit),
+            stopped.join(", ")
+        ));
+    }
+    if let Some(turn) =
+        last.filter(|turn| matches!(turn.status, TurnStatus::Failed | TurnStatus::Interrupted))
+    {
+        return Err(turn
+            .error
+            .clone()
+            .filter(|error| !error.trim().is_empty())
+            .unwrap_or_else(|| {
+                if turn.status == TurnStatus::Interrupted {
+                    "The run's last turn was stopped.".into()
+                } else {
+                    "The run's last turn failed.".into()
+                }
+            }));
+    }
+    let quoted = failed
+        .iter()
+        .map(|description| format!("\u{201c}{description}\u{201d}"))
+        .collect::<Vec<_>>();
+    match quoted.as_slice() {
+        [] => Ok(()),
+        [one] => Err(format!("The background subagent {one} failed.")),
+        many => Err(format!(
+            "The background subagents {} failed.",
+            many.join(", ")
+        )),
+    }
+}
+
+/// A wait's length in words: whole minutes as minutes, anything else in
+/// seconds.
+fn wait_length(limit: Duration) -> String {
+    let plural = |count: &str| if count == "1" { "" } else { "s" };
+    if limit >= Duration::from_secs(60) && limit.as_millis().is_multiple_of(60_000) {
+        let minutes = (limit.as_secs() / 60).to_string();
+        format!("{minutes} minute{}", plural(&minutes))
+    } else {
+        let seconds = format!("{:.1}", limit.as_secs_f64());
+        let seconds = seconds.strip_suffix(".0").unwrap_or(&seconds);
+        format!("{seconds} second{}", plural(seconds))
+    }
 }
 
 /// A run's status line, then its result (text as is, other values as JSON)
@@ -6930,39 +7163,40 @@ async fn settle_cli_subagents_client(
     }
 
     let deadline = timeout_ms.map(|timeout| Instant::now() + Duration::from_millis(timeout));
-    loop {
-        watch.answer(client, thread_id).await?;
-        let tasks = client.background_tasks(thread_id).await?;
-        let parent_turn = client.active_turn(thread_id).await?;
-        let commands = background_commands_client(client, thread_id, run_turn).await?;
-        if tasks.is_empty() && parent_turn.is_none() && commands.settled() {
-            break;
+    let left = wait_for_background_client(
+        client,
+        thread_id,
+        run_turn,
+        deadline,
+        false,
+        Duration::from_millis(100),
+        watch,
+    )
+    .await?;
+    if !left.settled() {
+        let tasks = &left.subagents;
+        // A run that stops waiting leaves no command it waited for.
+        let stopped = stop_background_commands_client(client, thread_id, run_turn).await;
+        let mut parts = Vec::new();
+        if !tasks.is_empty() {
+            parts.push(format!(
+                "{} subagent{} continue{} on the Haarness server",
+                tasks.len(),
+                if tasks.len() == 1 { "" } else { "s" },
+                if tasks.len() == 1 { "s" } else { "" }
+            ));
         }
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            // A run that stops waiting leaves no command it waited for.
-            let stopped = stop_background_commands_client(client, thread_id, run_turn).await;
-            let mut parts = Vec::new();
-            if !tasks.is_empty() {
-                parts.push(format!(
-                    "{} subagent{} continue{} on the Haarness server",
-                    tasks.len(),
-                    if tasks.len() == 1 { "" } else { "s" },
-                    if tasks.len() == 1 { "s" } else { "" }
-                ));
-            }
-            if stopped > 0 {
-                parts.push(format!(
-                    "{stopped} background command{} {} stopped",
-                    if stopped == 1 { "" } else { "s" },
-                    if stopped == 1 { "was" } else { "were" }
-                ));
-            }
-            if parts.is_empty() {
-                anyhow::bail!("background wait timed out");
-            }
-            anyhow::bail!("background wait timed out; {}", parts.join(", and "));
+        if stopped > 0 {
+            parts.push(format!(
+                "{stopped} background command{} {} stopped",
+                if stopped == 1 { "" } else { "s" },
+                if stopped == 1 { "was" } else { "were" }
+            ));
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        if parts.is_empty() {
+            anyhow::bail!("background wait timed out");
+        }
+        anyhow::bail!("background wait timed out; {}", parts.join(", and "));
     }
 
     let mut failures = Vec::new();
@@ -7018,6 +7252,77 @@ async fn settle_cli_subagents_client(
         anyhow::bail!("background subagent failed: {}", failures.join("; "));
     }
     Ok(())
+}
+
+/// What a chat a run waits for still has going: its subagents in the
+/// background, a turn, the commands of the run's turns (see
+/// [`BackgroundCommands`]) and, when the wait counts them, the results on
+/// their way into it (a workflow's, a command's notice), as the server
+/// counts them in `ThreadActivity::background`.
+struct BackgroundLeft {
+    subagents: Vec<haarness_protocol::BackgroundTaskInfo>,
+    turn: bool,
+    commands: BackgroundCommands,
+    owed: u32,
+}
+
+impl BackgroundLeft {
+    fn settled(&self) -> bool {
+        self.subagents.is_empty() && !self.turn && self.commands.settled() && self.owed == 0
+    }
+}
+
+/// What the chat of a run that began with turn `run_turn` still has going;
+/// with `owed`, the results on their way into it too.
+async fn background_left_client(
+    client: &haarness_tui::api::ApiClient,
+    thread_id: ThreadId,
+    run_turn: TurnId,
+    owed: bool,
+) -> Result<BackgroundLeft> {
+    // The owed count before the turn (the server reads them in that order):
+    // a result is admitted, its turn running, before it stops being owed.
+    let (owed, turn) = if owed {
+        let activity = client.thread_activity(thread_id).await?;
+        (activity.background, Some(activity.active_turn.is_some()))
+    } else {
+        (0, None)
+    };
+    let subagents = client.background_tasks(thread_id).await?;
+    let turn = match turn {
+        Some(turn) => turn,
+        None => client.active_turn(thread_id).await?.is_some(),
+    };
+    let commands = background_commands_client(client, thread_id, run_turn).await?;
+    Ok(BackgroundLeft {
+        subagents,
+        turn,
+        commands,
+        owed,
+    })
+}
+
+/// Wait, answering what the run's agents ask meanwhile and looking again
+/// `every` so long, until the chat of a run that began with turn `run_turn`
+/// has nothing left going (see [`background_left_client`]) or `deadline`
+/// passes. Answers what was left: nothing once it settled.
+async fn wait_for_background_client(
+    client: &haarness_tui::api::ApiClient,
+    thread_id: ThreadId,
+    run_turn: TurnId,
+    deadline: Option<Instant>,
+    owed: bool,
+    every: Duration,
+    watch: &RunWatch,
+) -> Result<BackgroundLeft> {
+    loop {
+        watch.answer(client, thread_id).await?;
+        let left = background_left_client(client, thread_id, run_turn, owed).await?;
+        if left.settled() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(left);
+        }
+        tokio::time::sleep(every).await;
+    }
 }
 
 /// The agents' commands of a chat a run waits for: those running in the
@@ -18721,5 +19026,322 @@ request_timeout = 0
             None
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_scheduled_run_ends_as_its_wait_and_its_last_turn_say() {
+        use super::{schedule_background_limit_from, schedule_outcome, wait_length};
+        let turn = |status, error: Option<&str>| haarness_protocol::Turn {
+            id: TurnId::new(),
+            thread_id: ThreadId::new(),
+            request_id: RequestId::new(),
+            status,
+            agent: "build".into(),
+            provider: "echo".into(),
+            model: "echo-1".into(),
+            ultracode: false,
+            error: error.map(str::to_owned),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let limit = Duration::from_secs(30 * 60);
+        let completed = turn(TurnStatus::Completed, None);
+        assert_eq!(schedule_outcome(&[], limit, Some(&completed), &[]), Ok(()));
+        // A server that does not say which turn came last.
+        assert_eq!(schedule_outcome(&[], limit, None, &[]), Ok(()));
+        let stopped = [
+            "subagent \u{201c}Index the docs\u{201d}".to_owned(),
+            "command \u{201c}sleep 600\u{201d}".to_owned(),
+        ];
+        let failed_turn = turn(TurnStatus::Failed, Some("provider error: overloaded"));
+        // What the wait stopped is the reason, whatever came after it.
+        assert_eq!(
+            schedule_outcome(&stopped, limit, Some(&failed_turn), &[]),
+            Err("Background work was still going after 30 minutes and was stopped: subagent \u{201c}Index the docs\u{201d}, command \u{201c}sleep 600\u{201d}.".into())
+        );
+        assert_eq!(
+            schedule_outcome(&[], limit, Some(&failed_turn), &["bg".into()]),
+            Err("provider error: overloaded".into())
+        );
+        assert_eq!(
+            schedule_outcome(&[], limit, Some(&turn(TurnStatus::Failed, Some(" "))), &[]),
+            Err("The run's last turn failed.".into())
+        );
+        assert_eq!(
+            schedule_outcome(&[], limit, Some(&turn(TurnStatus::Interrupted, None)), &[]),
+            Err("The run's last turn was stopped.".into())
+        );
+        assert_eq!(
+            schedule_outcome(&[], limit, Some(&completed), &["bg".into()]),
+            Err("The background subagent \u{201c}bg\u{201d} failed.".into())
+        );
+        assert_eq!(
+            schedule_outcome(&[], limit, Some(&completed), &["a".into(), "b".into()]),
+            Err("The background subagents \u{201c}a\u{201d}, \u{201c}b\u{201d} failed.".into())
+        );
+        for (limit, words) in [
+            (Duration::from_secs(30 * 60), "30 minutes"),
+            (Duration::from_secs(60), "1 minute"),
+            (Duration::from_secs(90), "90 seconds"),
+            (Duration::from_millis(1_000), "1 second"),
+            (Duration::from_millis(1_500), "1.5 seconds"),
+        ] {
+            assert_eq!(wait_length(limit), words);
+        }
+        // Only the test provider shortens the limit.
+        assert_eq!(schedule_background_limit_from(false, Some("1000")), limit);
+        assert_eq!(
+            schedule_background_limit_from(true, Some("1000")),
+            Duration::from_secs(1)
+        );
+        for value in [None, Some("0"), Some("soon")] {
+            assert_eq!(schedule_background_limit_from(true, value), limit);
+        }
+    }
+
+    #[test]
+    fn a_scheduled_run_names_the_background_subagents_that_failed() {
+        let thread = ThreadId::new();
+        let turn = TurnId::new();
+        let item = |sequence, data| Item {
+            id: ItemId::new(),
+            thread_id: thread,
+            turn_id: Some(turn),
+            sequence,
+            data,
+            created_at: chrono::Utc::now(),
+        };
+        let call = |call_id: &str, description: &str| ItemData::ToolCall {
+            call_id: call_id.into(),
+            name: "task".into(),
+            arguments: json!({"description": description, "prompt": "x", "background": true}),
+            provider_metadata: serde_json::Value::Null,
+        };
+        let state = |call_id: &str, child, state: &str| ItemData::TaskState {
+            call_id: call_id.into(),
+            child_thread_id: child,
+            child_turn_id: TurnId::new(),
+            state: state.into(),
+        };
+        let (first, second, unnamed, foreground) = (
+            ThreadId::new(),
+            ThreadId::new(),
+            ThreadId::new(),
+            ThreadId::new(),
+        );
+        let items = [
+            item(1, call("a", "Index the docs")),
+            item(2, state("a", first, "background")),
+            item(3, call("b", "Check links")),
+            item(4, state("b", second, "background")),
+            item(5, call("c", " ")),
+            item(6, state("c", unnamed, "background")),
+            item(7, call("d", "Inline")),
+            // A subagent the turn waited for is the turn's own business.
+            item(8, state("d", foreground, "failed")),
+            item(9, state("b", second, "done")),
+            item(10, state("a", first, "failed")),
+            item(11, state("c", unnamed, "failed")),
+        ];
+        assert_eq!(
+            super::failed_background_subagents(&items),
+            ["Index the docs".to_owned(), unnamed.to_string()]
+        );
+    }
+
+    /// Scripts scheduled runs. A prompt `launch: <child>` starts a subagent
+    /// in the background with the prompt `<child>`, and its result back in
+    /// the chat is answered `Done: <how it ended>`, or with `then fail` in
+    /// the prompt, by a failed turn. A child told `wait <ms>` answers after
+    /// that long, and one told `fail` fails.
+    struct ScheduledWorkProvider;
+
+    #[async_trait]
+    impl ModelProvider for ScheduledWorkProvider {
+        fn id(&self) -> &str {
+            "scheduled-test"
+        }
+
+        fn info(&self) -> ProviderInfo {
+            provider("scheduled-test", true, &["scheduled-test-1"])
+        }
+
+        async fn stream(
+            &self,
+            request: ProviderRequest,
+            cancel: CancellationToken,
+        ) -> CoreResult<ProviderStream> {
+            let said = request
+                .messages
+                .iter()
+                .filter_map(|message| match message {
+                    ProviderMessage::Text { role, content }
+                        if role == "user" && !haarness_core::is_turn_reminder(content) =>
+                    {
+                        Some(content.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let first = said.first().copied().unwrap_or_default();
+            let last = said.last().copied().unwrap_or_default();
+            let reply = |text: &str| -> CoreResult<ProviderStream> {
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ProviderEvent::TextDelta(text.into())),
+                    Ok(ProviderEvent::Finished {
+                        reason: "completed".into(),
+                    }),
+                ])))
+            };
+            if last.contains("<task id=") {
+                if first.ends_with(" then fail") {
+                    return Err(haarness_core::CoreError::ProviderBlocked("refusal".into()));
+                }
+                return reply(if last.contains(r#"state="completed""#) {
+                    "Done: completed"
+                } else {
+                    "Done: failed"
+                });
+            }
+            if let Some(child) = first.strip_prefix("launch: ") {
+                if matches!(
+                    request.messages.last(),
+                    Some(ProviderMessage::ToolResult { .. })
+                ) {
+                    return reply("Started it.");
+                }
+                return Ok(Box::pin(stream::iter(vec![
+                    Ok(ProviderEvent::ToolCall {
+                        call_id: "launch-1".into(),
+                        name: "task".into(),
+                        arguments: json!({
+                            "description": "Background check",
+                            "prompt": child.trim_end_matches(" then fail"),
+                            "agent": "general",
+                            "background": true,
+                        }),
+                        provider_metadata: serde_json::Value::Null,
+                    }),
+                    Ok(ProviderEvent::Finished {
+                        reason: "tool_calls".into(),
+                    }),
+                ])));
+            }
+            if let Some(milliseconds) = first.strip_prefix("wait ") {
+                let pause = Duration::from_millis(milliseconds.trim().parse().unwrap_or(0));
+                tokio::select! {
+                    () = cancel.cancelled() => return Err(haarness_core::CoreError::Cancelled),
+                    () = tokio::time::sleep(pause) => {}
+                }
+                return reply("child answer");
+            }
+            if first == "fail" {
+                return Err(haarness_core::CoreError::ProviderBlocked("refusal".into()));
+            }
+            reply("ok")
+        }
+    }
+
+    /// A scheduled run waits for the subagent its turn left in the
+    /// background and for the turn its result starts, records what that
+    /// turn said, and fails when the subagent or that turn fails. At its
+    /// limit it stops what is left, so no turn starts after it.
+    #[tokio::test]
+    async fn a_scheduled_run_follows_its_background_subagents_to_the_end() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-cli-schedule-wait-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = Arc::new(haarness_store::SqliteStore::open(root.join("haarness.db")).unwrap());
+        let provider: Arc<dyn ModelProvider> = Arc::new(ScheduledWorkProvider);
+        let runtime = Arc::new(AgentRuntime::new(
+            store,
+            Arc::new(haarness_core::StaticProviderRegistry::new(vec![provider])),
+            Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+            haarness_core::EventBus::new(64),
+        ));
+        let (client, server) = run_client(&runtime, &workspace).await;
+        let run = |prompt: &'static str, limit: Duration| {
+            let client = client.clone();
+            async move {
+                let thread = client
+                    .create_thread(CreateThreadRequest {
+                        provider: Some("scheduled-test".into()),
+                        model: Some("scheduled-test-1".into()),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                let turn = client
+                    .start_turn(
+                        thread.id,
+                        StartTurnRequest {
+                            request_id: RequestId::new(),
+                            text: prompt.into(),
+                            auto_approve: true,
+                            tools: Some(HashMap::from([("question".into(), false)])),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let watch = RunWatch::scheduled();
+                wait_for_turn_client(&client, turn.id, &watch)
+                    .await
+                    .unwrap();
+                let (response, outcome) = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    super::follow_scheduled_run(&client, thread.id, turn.id, limit, &watch),
+                )
+                .await
+                .expect("the run waited past its limit")
+                .unwrap();
+                (thread.id, turn.id, response, outcome)
+            }
+        };
+        let long = Duration::from_secs(60);
+
+        let (_, _, response, outcome) = run("launch: wait 300", long).await;
+        assert_eq!(outcome, Ok(()));
+        assert_eq!(response, "Started it.\nDone: completed");
+
+        let (_, _, response, outcome) = run("launch: fail", long).await;
+        assert_eq!(
+            outcome,
+            Err("The background subagent \u{201c}Background check\u{201d} failed.".into())
+        );
+        assert_eq!(response, "Started it.\nDone: failed");
+
+        let (_, _, _, outcome) = run("launch: wait 300 then fail", long).await;
+        let error = outcome.unwrap_err();
+        assert!(
+            error.starts_with("The provider's safety check stopped this response"),
+            "{error}"
+        );
+
+        let began = std::time::Instant::now();
+        let (thread, turn, response, outcome) =
+            run("launch: wait 60000", Duration::from_secs(1)).await;
+        assert!(began.elapsed() < Duration::from_secs(20));
+        assert_eq!(
+            outcome,
+            Err("Background work was still going after 1 second and was stopped: subagent \u{201c}Background check\u{201d}.".into())
+        );
+        assert_eq!(response, "Started it.");
+        // Nothing it stopped tells the chat: no turn starts after the run.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let activity = client.thread_activity(thread).await.unwrap();
+        assert!(activity.active_turn.is_none());
+        assert_eq!(activity.background, 0);
+        assert_eq!(activity.last_turn.map(|last| last.id), Some(turn));
+        assert!(client.background_tasks(thread).await.unwrap().is_empty());
+
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        // Windows will not remove the store's files while a closing turn
+        // still holds them: what is left is in the temporary folder.
+        let _ = std::fs::remove_dir_all(root);
     }
 }

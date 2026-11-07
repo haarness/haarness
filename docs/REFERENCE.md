@@ -432,7 +432,9 @@ stops them too, and so does archiving the chat. A command ended by a person or i
 agent stopped itself does not. `haarness run --wait-background` and scheduled
 runs wait for their commands and print what the agent says when they end; a
 waiting run that stops waiting (its `--background-timeout-ms`, Ctrl-C) stops
-them. A run waits for the commands started in its chat once its turn began:
+them. A scheduled run also waits for its subagents and workflows, 30 minutes
+at most after its first turn, and then stops what is left (see
+[Schedules](SCHEDULES.md#what-a-run-does)). A run waits for the commands started in its chat once its turn began:
 continuing a chat (`--session`, `--continue`) where someone else may start
 commands meanwhile, give it a `--background-timeout-ms`. Without the flag `run` leaves the commands the agent started in the
 background running on the server, until their time limit, and says how many. A command

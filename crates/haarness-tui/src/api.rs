@@ -995,6 +995,14 @@ impl ApiClient {
     pub async fn active_turn(&self, id: haarness_protocol::ThreadId) -> Result<Option<Turn>> {
         self.get(&format!("/v1/threads/{id}/active")).await
     }
+    /// What a chat is doing now: its running turn, the background results
+    /// it is still owed, and its newest turn.
+    pub async fn thread_activity(
+        &self,
+        id: haarness_protocol::ThreadId,
+    ) -> Result<haarness_protocol::ThreadActivity> {
+        self.get(&format!("/v1/threads/{id}/activity")).await
+    }
     /// Process-wide activity snapshot used after attach, session changes, and
     /// event-stream resynchronization. A client never owns these turns.
     pub async fn active_turns(&self) -> Result<Vec<Turn>> {
