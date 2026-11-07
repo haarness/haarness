@@ -219,7 +219,8 @@ struct ActiveTurn {
     /// reads as the user's own stop; a server shutdown must say so.
     stop_reason: Mutex<Option<String>>,
     /// The user stopped this turn and asked for steering it has not read yet
-    /// to be answered, rather than dropped.
+    /// to be answered, rather than dropped (as the end of a scheduled run
+    /// that stops it does).
     answer_steer: AtomicBool,
     /// The agent definition the turn runs with. Ceilings for work it starts
     /// (workflow agents, direct tools on its children) come from it, not
@@ -232,6 +233,13 @@ struct ActiveTurn {
 const STOP_CONTINUATION: &str = "<system-reminder>\nThe user stopped your previous work \
 before you read the message they sent while you were working. Reply to that message now. \
 Do not resume the stopped work unless the message asks you to.\n</system-reminder>";
+
+/// [`STOP_CONTINUATION`] when the end of a scheduled run stopped the work,
+/// not the user.
+const RUN_END_CONTINUATION: &str = "<system-reminder>\nThe scheduled run your previous work \
+belonged to has ended, and that work was stopped before you read the message the user sent \
+while it went on. Answer that message now; take the stopped work up again only if it asks \
+for that.\n</system-reminder>";
 
 /// The transcript line for a turn the runtime had to stop.
 fn stopped_turn_message(reason: &str) -> String {
@@ -2120,6 +2128,10 @@ pub struct AgentRuntime {
     /// Threads whose queued prompts wait for the user: after Stop, or after a
     /// queued prompt's own turn failed. A new message or Send resumes them.
     queue_pauses: Arc<DashMap<ThreadId, ()>>,
+    /// Turns the end of the scheduled run they belonged to stopped (see
+    /// [`AgentRuntime::stop_turn_work`]), until what follows them starts:
+    /// a message a person sent into one is answered as such.
+    run_ended: Arc<DashMap<TurnId, ()>>,
     approval_modes: Arc<crate::approval_mode::ApprovalModes>,
     /// Concurrent child agents' first requests for one prompt prefix: the
     /// first goes alone so the others can read the cache it writes.
@@ -2262,6 +2274,7 @@ impl AgentRuntime {
             chat_home: false,
             restore_gate: Arc::new(AsyncMutex::new(())),
             queue_pauses: Arc::new(DashMap::new()),
+            run_ended: Arc::new(DashMap::new()),
             approval_modes,
             prefix_warmup: crate::prefix_warmup::PrefixWarmup::default(),
             run_stances: Arc::new(RunStances::default()),
@@ -4660,24 +4673,30 @@ impl AgentRuntime {
     /// (with everything under those) and the commands they ran, and the
     /// commands of `root` itself named in `commands`. Every other turn's
     /// work goes on, so a person's turn in the chat, and what it started,
-    /// are left alone. A scheduled run ends its own work this way.
+    /// are left alone, as is what the calls in `kept` of those turns started
+    /// (a person's, once they wrote into one). A scheduled run ends its own
+    /// work this way; a message a person sent into one of its turns that
+    /// the agent has not answered is answered in a turn of its own.
     pub async fn stop_turn_work(
         &self,
         root: ThreadId,
         turns: &HashSet<TurnId>,
         commands: &HashSet<String>,
+        kept: &HashSet<String>,
     ) -> CoreResult<haarness_protocol::StopTurnWorkResult> {
         self.repository.get_thread(root).await?;
         let threads = self.repository.list_threads(true).await?;
         let tree = descendant_thread_ids(&threads, root);
-        let theirs =
-            |thread: &ThreadId, turn: &TurnId| tree.contains(thread) && turns.contains(turn);
+        // What a call in `kept` started is someone else's: it goes on.
+        let theirs = |thread: &ThreadId, turn: &TurnId, call: &str| {
+            tree.contains(thread) && turns.contains(turn) && !kept.contains(call)
+        };
         let started = self
             .background_tasks
             .iter()
             .filter(|entry| {
                 let info = entry.value().info();
-                theirs(&info.parent_thread_id, &info.parent_turn_id)
+                theirs(&info.parent_thread_id, &info.parent_turn_id, &info.call_id)
             })
             .map(|entry| Arc::clone(entry.value()))
             .collect::<Vec<_>>();
@@ -4700,10 +4719,21 @@ impl AgentRuntime {
         let running = self
             .active
             .iter()
-            .filter(|entry| theirs(entry.key(), &entry.value().id) || under.contains(entry.key()))
+            .filter(|entry| {
+                (tree.contains(entry.key()) && turns.contains(&entry.value().id))
+                    || under.contains(entry.key())
+            })
             .map(|entry| (*entry.key(), Arc::clone(entry.value())))
             .collect::<Vec<_>>();
         for (_, active) in running {
+            // Steering a person sent into one of the named turns, and that
+            // its agent has not answered, is answered once the turn stops, as
+            // after their own Stop. The turn's end checks for some, so one
+            // with none starts nothing.
+            if turns.contains(&active.id) {
+                self.run_ended.insert(active.id, ());
+                active.answer_steer.store(true, Ordering::SeqCst);
+            }
             // This turn alone: not the chat's other subagents, as a person's
             // stop of the turn would, nor the input waiting in its queue.
             active.cancel.cancel();
@@ -4720,10 +4750,10 @@ impl AgentRuntime {
                 return Err(error);
             }
         }
-        stopped.commands = self.stop_turn_commands(|id, thread, turn| {
-            theirs(thread, turn)
-                || under.contains(thread)
-                || (*thread == root && commands.contains(id))
+        stopped.commands = self.stop_turn_commands(|command| {
+            theirs(&command.thread_id, &command.turn_id, &command.call_id)
+                || under.contains(&command.thread_id)
+                || (command.thread_id == root && commands.contains(&command.id))
         });
         Ok(stopped)
     }
@@ -7332,6 +7362,7 @@ impl AgentRuntime {
             goal_accounting: Mutex::new(None),
             workflow_observations: Mutex::new(HashSet::new()),
             queue_pauses: self.queue_pauses.clone(),
+            run_ended: self.run_ended.clone(),
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
             reviews_running: std::sync::atomic::AtomicUsize::new(0),
@@ -7374,13 +7405,19 @@ impl AgentRuntime {
 
     async fn start_follow_up(&self, task: &RunnerTask, result: &CoreResult<()>, from_queue: bool) {
         let thread_id = task.thread.id;
+        let run_ended = self.run_ended.remove(&task.turn.id).is_some();
         if task.answer_steer.load(Ordering::SeqCst) {
             let request = QueueInputRequest {
                 preview: None,
                 reasoning_effort: None,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
-                text: STOP_CONTINUATION.into(),
+                text: if run_ended {
+                    RUN_END_CONTINUATION
+                } else {
+                    STOP_CONTINUATION
+                }
+                .into(),
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: true,
@@ -7784,6 +7821,7 @@ struct RunnerTask {
     /// repeated wait/inspect calls only burn context and provider tokens.
     workflow_observations: Mutex<HashSet<String>>,
     queue_pauses: Arc<DashMap<ThreadId, ()>>,
+    run_ended: Arc<DashMap<TurnId, ()>>,
     approval_modes: Arc<crate::approval_mode::ApprovalModes>,
     /// Set when a stop leaves unread steering for a continuation to answer.
     answer_steer: AtomicBool,
@@ -13341,6 +13379,7 @@ impl RunnerTask {
             goal_accounting: Mutex::new(None),
             workflow_observations: Mutex::new(HashSet::new()),
             queue_pauses: self.queue_pauses.clone(),
+            run_ended: self.run_ended.clone(),
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
             reviews_running: std::sync::atomic::AtomicUsize::new(0),
@@ -13662,6 +13701,7 @@ impl RunnerTask {
             chat_home: self.chat_home,
             restore_gate: self.restore_gate.clone(),
             queue_pauses: self.queue_pauses.clone(),
+            run_ended: self.run_ended.clone(),
             approval_modes: self.approval_modes.clone(),
             prefix_warmup: self.prefix_warmup.clone(),
             run_stances: self.run_stances.clone(),

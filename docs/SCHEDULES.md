@@ -87,8 +87,11 @@ Every native entry runs the hidden command
    waiting ([Chrome approvals](PERMISSIONS-AND-EXECUTION.md#chrome-approvals)).
 5. The run then waits for its own work: the subagents, workflows and shell commands its turn started
    in the background, the turns their results start, and what those turns start in turn. Work a
-   person starts in the chat meanwhile is theirs: the run neither waits for it nor stops it. How long
-   it waits:
+   person starts in the chat meanwhile is theirs: the run neither waits for it nor stops it. A
+   message a person sends while one of the run's turns works joins that turn, and once the agent has
+   read it the rest of the turn answers them: what the agent says from then on is not in the run's
+   answer, and what it starts from then on (subagents, workflows, commands, and the results they
+   bring) is theirs. The run still waits for the turn itself. How long it waits:
    - Subagents, workflows and the turns their results start have 30 minutes, counted from the end of
      the first turn, or from the end of the run's last command with a time limit if that came later.
      A workflow deleted meanwhile (`/workflow delete`, or the agent's own `delete`) has ended, and so
@@ -104,7 +107,10 @@ Every native entry runs the hidden command
 
    When the 30 minutes or the 12 hours run out, whatever of the run's own work is still going is
    stopped and the run is recorded as **failed**, naming it. Nothing the run stops tells the chat,
-   so no turn starts there after the run. The times are wall-clock time, so the time a computer
+   so no turn of the run starts there after the run. A turn of a person's may: the result of their
+   own work, or the answer to a message they wrote into a turn the run stopped before its agent had
+   read it (the agent is told the run ended, and replies to the message). The times are wall-clock
+   time, so the time a computer
    spends asleep counts. Questions asked in the run's own turns and subagents are declined, since
    nobody is there to answer; a person's question in the chat, or in a chat under it, is left for
    them. A server older than the `haarness` running the schedule cannot stop a run's work: the run

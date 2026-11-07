@@ -4267,6 +4267,15 @@ struct RunWork {
     failed: Vec<String>,
     /// What the agent said in the run's turns.
     said: Vec<String>,
+    /// A person's messages written into the run's turns (or the results
+    /// of a person's work delivered there) that its agent has not read
+    /// yet, by item, with their turn.
+    steers: HashMap<haarness_protocol::ItemId, TurnId>,
+    /// The run's turns whose agent has read one: what it says and starts
+    /// from then on answers the person, and is theirs.
+    answering: std::collections::HashSet<TurnId>,
+    /// The calls made in those turns since: the person's.
+    persons_calls: std::collections::HashSet<String>,
 }
 
 /// What a run still has going (see [`RunWork::left`]).
@@ -4307,11 +4316,20 @@ impl RunWork {
             running: Vec::new(),
             failed: Vec::new(),
             said: Vec::new(),
+            steers: HashMap::new(),
+            answering: std::collections::HashSet::new(),
+            persons_calls: std::collections::HashSet::new(),
         }
     }
 
     fn owns(&self, turn: Option<TurnId>) -> bool {
         turn.is_some_and(|turn| self.turns.contains(&turn))
+    }
+
+    /// Whether call `call_id` of turn `turn` is the run's: made in a turn of
+    /// the run before a person's message there was read.
+    fn owns_call(&self, turn: Option<TurnId>, call_id: &str) -> bool {
+        self.owns(turn) && !self.persons_calls.contains(call_id)
     }
 
     /// The run's most recent turn.
@@ -4405,6 +4423,33 @@ impl RunWork {
     }
 
     fn read_item(&mut self, item: &haarness_protocol::Item) {
+        // A person's message written into a turn of the run, or the result
+        // of their work delivered into one: once the agent reads it (it is
+        // marked consumed as the agent is sent it), the rest of that turn
+        // answers them.
+        if let Some(turn) = item.turn_id
+            && self.owns(Some(turn))
+            && let ItemData::UserMessage {
+                text,
+                queued: true,
+                synthetic,
+                ..
+            } = &item.data
+            && (!synthetic || (delivered(text).is_some() && !self.delivers_own(text)))
+        {
+            self.steers.insert(item.id, turn);
+        }
+        if let ItemData::QueueConsumed { item_id } = &item.data
+            && let Some(turn) = self.steers.remove(item_id)
+        {
+            self.answering.insert(turn);
+        }
+        let answering = item
+            .turn_id
+            .is_some_and(|turn| self.answering.contains(&turn));
+        if answering && let ItemData::ToolCall { call_id, .. } = &item.data {
+            self.persons_calls.insert(call_id.clone());
+        }
         if let Some(turn) = item.turn_id
             && self.begun.insert(turn)
             && let ItemData::UserMessage {
@@ -4434,7 +4479,7 @@ impl RunWork {
         {
             self.told.insert(id.to_owned());
         }
-        let own = self.owns(item.turn_id);
+        let own = self.owns(item.turn_id) && !answering;
         match &item.data {
             ItemData::AssistantMessage { text } if own => self.said.push(text.clone()),
             ItemData::ToolCall {
@@ -4464,7 +4509,7 @@ impl RunWork {
             ItemData::TaskLink {
                 call_id,
                 child_thread_id,
-            } => {
+            } if !self.persons_calls.contains(call_id) => {
                 if let Some(turn) = item.turn_id {
                     let description = self.described.get(call_id).cloned().unwrap_or_default();
                     self.subagents
@@ -4477,7 +4522,7 @@ impl RunWork {
                 child_thread_id,
                 state,
                 ..
-            } => {
+            } if !self.persons_calls.contains(call_id) => {
                 let description = self
                     .described
                     .get(call_id)
@@ -4511,7 +4556,7 @@ impl RunWork {
                 name,
                 metadata,
                 ..
-            } if own => {
+            } if self.owns_call(item.turn_id, call_id) => {
                 // A workflow the turn started: it runs in the background.
                 if name == "workflow"
                     && let Some(asked) = self.workflow_starts.get(call_id)
@@ -4559,7 +4604,16 @@ impl RunWork {
         self.listed.iter().find(|command| {
             command.id == id
                 && command.thread_id == self.thread
-                && (self.turns.contains(&command.turn_id) || self.commands.contains(id))
+                && (self.owns_call(Some(command.turn_id), &command.call_id)
+                    || self.commands.contains(id))
+        })
+    }
+
+    /// The run's subagents in the chat itself, as last listed.
+    fn own_tasks(&self) -> impl Iterator<Item = &haarness_protocol::BackgroundTaskInfo> {
+        self.tasks.iter().filter(|task| {
+            task.parent_thread_id == self.thread
+                && self.owns_call(Some(task.parent_turn_id), &task.call_id)
         })
     }
 
@@ -4580,9 +4634,7 @@ impl RunWork {
         if self.active.is_some_and(|turn| !self.begun.contains(&turn)) {
             left.held.push("a turn that has just begun".into());
         }
-        for task in self.tasks.iter().filter(|task| {
-            task.parent_thread_id == self.thread && self.owns(Some(task.parent_turn_id))
-        }) {
+        for task in self.own_tasks() {
             left.held.push(format!(
                 "subagent \u{201c}{}\u{201d}",
                 task.description.trim()
@@ -4638,11 +4690,7 @@ impl RunWork {
             going.push("the turn in progress".to_owned());
         }
         going.extend(
-            self.tasks
-                .iter()
-                .filter(|task| {
-                    task.parent_thread_id == self.thread && self.owns(Some(task.parent_turn_id))
-                })
+            self.own_tasks()
                 .map(|task| format!("subagent \u{201c}{}\u{201d}", task.description.trim())),
         );
         going.extend(self.running.iter().map(|id| {
@@ -4705,6 +4753,7 @@ async fn end_run_work(
                 .filter(|command| command.state.is_live())
                 .map(|command| command.id.clone())
                 .collect(),
+            keep_calls: work.persons_calls.iter().cloned().collect(),
         };
         client.stop_turn_work(work.thread, &request).await?;
         for what in going {
@@ -4755,9 +4804,8 @@ async fn end_loose_commands(
         .collect::<Vec<_>>();
     ensure_run_work_stops(client, work, &names).await?;
     let request = haarness_protocol::StopTurnWorkRequest {
-        turns: Vec::new(),
-        workflows: Vec::new(),
         commands: commands.iter().map(|(id, _)| id.clone()).collect(),
+        ..Default::default()
     };
     client.stop_turn_work(work.thread, &request).await?;
     for (id, name) in commands {
@@ -4833,6 +4881,10 @@ async fn decline_run_questions_client(
     for question in asked {
         let own = if question.thread_id == work.thread {
             work.owns(question.turn_id.or(work.active))
+                && !question
+                    .call_id
+                    .as_ref()
+                    .is_some_and(|call| work.persons_calls.contains(call))
         } else {
             work.owns_chat(client, question.thread_id).await?
         };
@@ -20054,6 +20106,140 @@ request_timeout = 0
         assert_eq!(work.untold_workflows(), [inspected]);
     }
 
+    /// A person's message written into a turn of the run, or the result of
+    /// a person's work delivered there, makes the rest of that turn theirs
+    /// once its agent reads it: what it says is not the run's record, and
+    /// what it starts is not the run's to wait for or stop.
+    #[test]
+    fn what_a_run_turn_does_after_reading_a_persons_message_is_theirs() {
+        let thread = ThreadId::new();
+        let (first, second) = (TurnId::new(), TurnId::new());
+        let mut work = super::RunWork::new(thread, first);
+        let mut sequence = 0;
+        let mut item = |turn: TurnId, data: ItemData| {
+            sequence += 1;
+            Item {
+                id: ItemId::new(),
+                thread_id: thread,
+                turn_id: Some(turn),
+                sequence,
+                data,
+                created_at: chrono::Utc::now(),
+            }
+        };
+        let message = |text: &str, queued, synthetic| ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued,
+            synthetic,
+            command_line: None,
+        };
+        let task = |call_id: &str, description: &str| ItemData::ToolCall {
+            call_id: call_id.into(),
+            name: "task".into(),
+            arguments: json!({"description": description, "prompt": "x", "background": true}),
+            provider_metadata: serde_json::Value::Null,
+        };
+        let state = |call_id: &str, child| ItemData::TaskState {
+            call_id: call_id.into(),
+            child_thread_id: child,
+            child_turn_id: TurnId::new(),
+            state: "background".into(),
+        };
+        let said = |text: &str| ItemData::AssistantMessage { text: text.into() };
+        let (own_child, persons_child) = (ThreadId::new(), ThreadId::new());
+        let steer = item(first, message("Also check the docs.", true, false));
+        let persons_result = item(
+            second,
+            message(
+                &format!("<task id=\"{persons_child}\" state=\"completed\">"),
+                true,
+                true,
+            ),
+        );
+        let items = [
+            item(first, message("launch", false, false)),
+            item(first, task("a", "Index the docs")),
+            item(first, state("a", own_child)),
+            steer.clone(),
+            // Said before the agent read the message: still the run's.
+            item(first, said("Started it.")),
+            item(first, ItemData::QueueConsumed { item_id: steer.id }),
+            item(first, said("Checking the docs too.")),
+            item(first, task("p", "Docs check")),
+            item(first, state("p", persons_child)),
+            item(
+                first,
+                ItemData::ToolCall {
+                    call_id: "b".into(),
+                    name: "bash".into(),
+                    arguments: json!({"command": "sleep 30", "run_in_background": true}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                first,
+                ItemData::ToolResult {
+                    call_id: "b".into(),
+                    name: "bash".into(),
+                    output: "Started.".into(),
+                    is_error: false,
+                    metadata: json!({"command": {"id": "cmd-persons"}}),
+                },
+            ),
+            // The run's subagent ends: a turn of the run, into which the
+            // result of the person's subagent then comes.
+            item(
+                second,
+                message(
+                    &format!("<task id=\"{own_child}\" state=\"completed\">"),
+                    false,
+                    true,
+                ),
+            ),
+            item(second, said("Done: completed")),
+            persons_result.clone(),
+            item(
+                second,
+                ItemData::QueueConsumed {
+                    item_id: persons_result.id,
+                },
+            ),
+            item(second, said("The docs check passed.")),
+        ];
+        for item in &items {
+            work.read_item(item);
+        }
+        assert_eq!(work.turns, [first, second]);
+        assert_eq!(work.said, ["Started it.", "Done: completed"]);
+        assert!(work.subagents.contains_key(&own_child));
+        assert!(!work.subagents.contains_key(&persons_child));
+        assert!(work.commands.is_empty(), "{:?}", work.commands);
+        assert_eq!(
+            work.persons_calls,
+            std::collections::HashSet::from(["p".to_owned(), "b".to_owned()])
+        );
+        // Listed by the server under the run's turn, the person's subagent
+        // holds nothing and is not stopped.
+        let listed =
+            |call_id: &str, child, description: &str| haarness_protocol::BackgroundTaskInfo {
+                parent_thread_id: thread,
+                parent_turn_id: first,
+                call_id: call_id.into(),
+                child_thread_id: child,
+                child_turn_id: TurnId::new(),
+                agent: "general".into(),
+                description: description.into(),
+                background: true,
+                started_at: chrono::Utc::now(),
+            };
+        work.tasks = vec![listed("p", persons_child, "Docs check")];
+        assert!(work.left().held.is_empty(), "{:?}", work.left());
+        assert!(work.going().is_empty());
+        work.tasks.push(listed("a", own_child, "Index the docs"));
+        assert_eq!(work.going(), ["subagent \u{201c}Index the docs\u{201d}"]);
+    }
+
     /// Scripts scheduled runs, from the last thing the chat was told. A
     /// prompt `launch: <child>` starts a subagent in the background with
     /// the prompt `<child>` (`launch-then-fail:` then fails the turn), and
@@ -20064,7 +20250,8 @@ request_timeout = 0
     /// `person: command <line>` does the same;
     /// `person: linger <ms>` answers after that long, and `person: ask
     /// <prompt>` asks it with the question tool. A child told `wait <ms>`
-    /// answers after that long, and one told `fail` fails.
+    /// answers after that long, and one told `fail` fails. A message
+    /// written into a running turn is read as if it came alone.
     struct ScheduledWorkProvider;
 
     #[async_trait]
@@ -20096,6 +20283,11 @@ request_timeout = 0
                 .collect::<Vec<_>>();
             let first = said.first().copied().unwrap_or_default();
             let last = said.last().copied().unwrap_or_default();
+            // A message written into a running turn comes wrapped.
+            let last = last
+                .split_once("while you were working:\n")
+                .and_then(|(_, rest)| rest.split_once("\n\nAddress it"))
+                .map_or(last, |(message, _)| message);
             let answered = matches!(
                 request.messages.last(),
                 Some(ProviderMessage::ToolResult { .. })
@@ -20959,6 +21151,147 @@ request_timeout = 0
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// What a run's turn starts for a person who wrote into it is theirs:
+    /// the run neither waits for it nor stops it, and records what its
+    /// agent said before reading the message. The server leaves the calls
+    /// it is told to keep alone.
+    #[tokio::test]
+    async fn a_scheduled_run_leaves_what_its_turn_started_for_a_person() {
+        let (client, server, runtime, root) = scheduled_client(120_000).await;
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "person: linger 1500").await;
+        let run = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                super::follow_scheduled_run(&client, thread, first, Duration::from_secs(1), CEILING)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let steered = client
+            .queue_input(
+                thread,
+                haarness_protocol::QueueInputRequest {
+                    request_id: RequestId::new(),
+                    text: "launch: wait 60000".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(steered.queued, "{steered:?}");
+        let end = tokio::time::timeout(Duration::from_secs(20), run)
+            .await
+            .expect("the run waited for the person's subagent")
+            .unwrap()
+            .unwrap();
+        assert_eq!(end.error, None);
+        assert_eq!(end.response, "Person done.");
+        let tasks = client.background_tasks(thread).await.unwrap();
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.parent_turn_id)
+                .collect::<Vec<_>>(),
+            [first],
+            "the run stopped the person's subagent"
+        );
+        let kept = haarness_protocol::StopTurnWorkRequest {
+            turns: vec![first],
+            keep_calls: vec![tasks[0].call_id.clone()],
+            ..Default::default()
+        };
+        assert!(
+            client
+                .stop_turn_work(thread, &kept)
+                .await
+                .unwrap()
+                .subagents
+                .is_empty()
+        );
+        assert_eq!(client.background_tasks(thread).await.unwrap().len(), 1);
+        let all = haarness_protocol::StopTurnWorkRequest {
+            turns: vec![first],
+            ..Default::default()
+        };
+        assert_eq!(
+            client
+                .stop_turn_work(thread, &all)
+                .await
+                .unwrap()
+                .subagents
+                .len(),
+            1
+        );
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A message a person wrote into a turn the run stops, unread by its
+    /// agent, is answered in a turn of its own, told why the work stopped.
+    #[tokio::test]
+    async fn a_message_a_run_stops_unread_is_answered() {
+        let (client, server, runtime, root) = scheduled_client(120_000).await;
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "person: linger 30000").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let steered = client
+            .queue_input(
+                thread,
+                haarness_protocol::QueueInputRequest {
+                    request_id: RequestId::new(),
+                    text: "Is it done?".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(steered.queued, "{steered:?}");
+        client
+            .stop_turn_work(
+                thread,
+                &haarness_protocol::StopTurnWorkRequest {
+                    turns: vec![first],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(settles(&client, first).await, TurnStatus::Interrupted);
+        let answer = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let last = client.thread_activity(thread).await.unwrap().last_turn;
+                if let Some(last) = last.filter(|last| last.id != first) {
+                    break last.id;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("nothing answered the person's message");
+        assert_eq!(settles(&client, answer).await, TurnStatus::Completed);
+        let items = client.items(thread).await.unwrap();
+        let of_answer = items
+            .iter()
+            .filter(|item| item.turn_id == Some(answer))
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(&of_answer[0].data, ItemData::UserMessage { text, synthetic: true, .. }
+                if text.contains("scheduled run")),
+            "{of_answer:?}"
+        );
+        assert!(
+            of_answer
+                .iter()
+                .any(|item| matches!(item.data, ItemData::AssistantMessage { .. })),
+            "{of_answer:?}"
+        );
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The server stops only what the named turns of the chat left, and the
     /// chat's own named commands: a turn named from another chat, that
     /// chat's commands, and a person's subagent in the same chat go on.
@@ -20982,6 +21315,7 @@ request_timeout = 0
                     turns: vec![first, elsewhere],
                     workflows: vec![super::WorkflowId::new()],
                     commands: vec![command.clone()],
+                    ..Default::default()
                 },
             )
             .await

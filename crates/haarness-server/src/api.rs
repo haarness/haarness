@@ -3041,7 +3041,11 @@ async fn stop_turn_work(
     }
     let turns = request.turns.into_iter().collect();
     let commands = request.commands.into_iter().collect();
-    let mut stopped = state.runtime.stop_turn_work(id, &turns, &commands).await?;
+    let kept = request.keep_calls.into_iter().collect();
+    let mut stopped = state
+        .runtime
+        .stop_turn_work(id, &turns, &commands, &kept)
+        .await?;
     stopped.workflows = workflows;
     Ok(Json(stopped))
 }

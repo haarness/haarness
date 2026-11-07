@@ -1439,6 +1439,11 @@ pub struct StopTurnWorkRequest {
     /// by id, whatever turn ran them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<String>,
+    /// Calls of those turns, by the id of their `tool_call` item, whose
+    /// subagents and commands go on: what a turn started for a person who
+    /// wrote into it. Servers before this field stop them too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keep_calls: Vec<String>,
 }
 
 /// What a `StopTurnWorkRequest` began to stop.

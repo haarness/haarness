@@ -428,15 +428,19 @@ command that completed. Enums may gain values; an unknown one reads as
   `command.updated` event reports `stopped`. Stopping an ended command answers
   it unchanged.
 - `POST /v1/threads/{id}/work/stop` with `{"turns": [...], "workflows": [...],
-  "commands": [...]}` stops what those turns of the chat left running, and
-  tells the chat nothing: any of them still running, the subagents they
-  started (with everything under them), the commands they ran (`endedBy:
-  turn_ended`), the named workflows launched from the chat, running or
-  paused, cancelled with no result delivered, and the named commands of the
-  chat itself, whichever turn ran them. Every other turn's work goes on. It
-  answers what began to stop (`StopTurnWorkResult`). A scheduled run ends its
-  own work this way, leaving a person's turns in its chat alone; servers that
-  have the route list `turn-work-stop.v1`.
+  "commands": [...], "keepCalls": [...]}` stops what those turns of the chat
+  left running, and tells the chat nothing: any of them still running, the
+  subagents they started (with everything under them), the commands they ran
+  (`endedBy: turn_ended`), the named workflows launched from the chat, running
+  or paused, cancelled with no result delivered, and the named commands of the
+  chat itself, whichever turn ran them. What the calls named in `keepCalls`
+  (by `tool_call` id) started goes on, as does every other turn's work. A
+  person's message steered into a stopped turn that its agent had not
+  answered is answered in a turn of its own, as after the person's own Stop.
+  It answers what began to stop (`StopTurnWorkResult`). A scheduled run ends
+  its own work this way, leaving a person's turns in its chat alone, and what
+  its turns started for a person who wrote into them; servers that have the
+  route list `turn-work-stop.v1`.
 - `POST /v1/threads/{id}/commands/background` sends every running foreground
   command of the chat tree to the background, the one named with
   `?commandId=` alone; it answers the commands moved. A named command that

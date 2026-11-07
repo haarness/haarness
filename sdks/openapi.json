@@ -6395,6 +6395,13 @@
             },
             "type": "array"
           },
+          "keepCalls": {
+            "description": "Calls of those turns, by the id of their `tool_call` item, whose\nsubagents and commands go on: what a turn started for a person who\nwrote into it. Servers before this field stop them too.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "turns": {
             "description": "The turns whose work stops: any of them still running, the subagents\nthey started (and everything under those) and the commands they ran.",
             "items": {
