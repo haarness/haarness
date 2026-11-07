@@ -15340,6 +15340,8 @@ async fn suspend_and_composer_history_shortcuts_do_not_overlap() {
     assert!(matches!(shifted_control, crate::input::AppAction::Continue));
     assert_eq!(app.composer.text(), "x");
 
+    // Over a dialog Ctrl+Z still suspends, and the dialog is there after
+    // `fg`; Ctrl+Shift+Z there does nothing.
     app.open_overlay(crate::state::Overlay::Models);
     let dialog_key = crate::input::handle_key(
         &mut app,
@@ -15348,7 +15350,131 @@ async fn suspend_and_composer_history_shortcuts_do_not_overlap() {
     )
     .await
     .unwrap();
-    assert!(matches!(dialog_key, crate::input::AppAction::Continue));
+    assert!(matches!(dialog_key, crate::input::AppAction::Suspend));
+    assert!(matches!(app.overlay, crate::state::Overlay::Models));
+    let shifted = crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(
+            KeyCode::Char('Z'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(shifted, crate::input::AppAction::Continue));
+    assert_eq!(app.composer.text(), "x");
+}
+
+/// A `y` still settling on an approval card when Ctrl+Z comes is sent
+/// first, as any other key sends it, and then the TUI suspends.
+#[tokio::test]
+async fn ctrl_z_sends_a_settling_answer_then_suspends() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        outside_write_event(&thread, "perm-suspend"),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    press_key(&mut app, KeyCode::Char('y')).await;
+    assert!(crate::input::settle_deadline(&app).is_some());
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+    assert!(suspends(&mut app, &client).await);
+    assert!(app.pending_permissions.is_empty());
+    let requests = server.await.unwrap();
+    assert!(
+        requests[0].contains("/permissions/perm-suspend")
+            && requests[0].contains("\"decision\":\"once\""),
+        "{}",
+        requests[0]
+    );
+}
+
+/// An embedded terminal keeps Ctrl+Z for the program in it: the key goes to
+/// the shell (here, a terminal with no connection says so) and the TUI is
+/// not suspended.
+#[tokio::test]
+async fn ctrl_z_goes_to_an_embedded_terminal() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.terminal = Some(crate::pty_view::TerminalWorkspace::new(vec![
+        haarness_protocol::PtyInfo {
+            id: haarness_protocol::PtyId::new(),
+            title: "zsh".into(),
+            command: "zsh".into(),
+            args: Vec::new(),
+            cwd: "/tmp".into(),
+            status: haarness_protocol::PtyStatus::Running,
+            pid: None,
+            cols: 80,
+            rows: 24,
+            created: false,
+            directory: None,
+        },
+    ]));
+    let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(crate::pty_view::key_bytes(key), Some(vec![0x1a]));
+    let sent = crate::input::handle_key(&mut app, key, &offline_client()).await;
+    let error = sent
+        .err()
+        .expect("the key went to the terminal, not to suspend");
+    assert!(
+        error.to_string().contains("terminal is not connected"),
+        "{error}"
+    );
+    assert!(app.terminal.is_some());
+}
+
+/// Whether Ctrl+Z, pressed now, suspends the TUI.
+async fn suspends(app: &mut App, client: &crate::api::ApiClient) -> bool {
+    let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+    matches!(
+        crate::input::handle_key(app, key, client).await.unwrap(),
+        crate::input::AppAction::Suspend
+    )
+}
+
+#[tokio::test]
+async fn ctrl_z_suspends_over_the_session_list_an_approval_and_a_question() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let client = offline_client();
+
+    app.open_overlay(crate::state::Overlay::Threads);
+    app.overlay_filter = "rel".into();
+    assert!(suspends(&mut app, &client).await);
+    assert!(matches!(app.overlay, crate::state::Overlay::Threads));
+    assert_eq!(app.overlay_filter, "rel", "the dialog is left as it was");
+    app.close_overlay();
+
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "suspend-approval"));
+    app.permission_focus = true;
+    assert!(suspends(&mut app, &client).await);
+    assert_eq!(app.pending_permissions.len(), 1, "nothing is answered");
+    assert!(app.permission_focus);
+    app.pending_permissions.clear();
+    app.permission_focus = false;
+
+    app.pending_questions
+        .push(haarness_protocol::PendingQuestionInfo {
+            question_id: "suspend-question".into(),
+            prompt: "Which color?".into(),
+            choices: vec!["red".into(), "blue".into()],
+            multiple: false,
+            custom: true,
+            thread_id: thread.id,
+            root_thread_id: Some(thread.id),
+            turn_id: None,
+            call_id: None,
+            created_at: chrono::Utc::now(),
+        });
+    app.composer.set_text("my own".into());
+    assert!(suspends(&mut app, &client).await);
+    assert_eq!(app.pending_questions.len(), 1);
+    assert_eq!(app.composer.text(), "my own", "the typed answer stays");
 }
 
 #[tokio::test]

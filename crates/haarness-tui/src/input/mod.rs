@@ -583,6 +583,12 @@ pub async fn handle_key_at(
         app.escape_interrupt = None;
         app.ctrl_c_action = None;
     }
+    // Ctrl+Z suspends the TUI whatever has the keyboard: a dialog, an
+    // approval card or a question stays as it is and is there again after
+    // `fg`. Exact modifiers, so Ctrl+Shift+Z never stops the app by accident.
+    if key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Char('z' | 'Z')) {
+        return Ok(AppAction::Suspend);
+    }
     // Reserve Shift+Esc for per-tool abort. Haarness does not yet have a
     // per-call cancellation endpoint, so it must never fall through and
     // destructively stop the whole turn.
@@ -817,9 +823,6 @@ pub async fn handle_key_at(
         }
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('d')) => return Ok(AppAction::Quit),
-            (KeyModifiers::CONTROL, KeyCode::Char('z' | 'Z')) => {
-                return Ok(AppAction::Suspend);
-            }
             (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
                 app.refresh_threads(client).await?;
                 app.open_overlay(Overlay::Threads);
@@ -1049,14 +1052,9 @@ pub async fn handle_key_at(
     {
         return Ok(AppAction::Quit);
     }
-    // Terminal and composer history bindings use exact modifiers. Keep
-    // these after prompt/dialog routing so an overlay continues to own its
-    // keystrokes, and require exact modifiers so Ctrl+Shift+Z cannot stop a
-    // running job by accident.
+    // Composer undo and redo use exact modifiers. Keep these after
+    // prompt/dialog routing so an overlay continues to own its keystrokes.
     if matches!(key.code, KeyCode::Char('z' | 'Z')) {
-        if key.modifiers == KeyModifiers::CONTROL {
-            return Ok(AppAction::Suspend);
-        }
         if key.modifiers == KeyModifiers::SUPER {
             app.composer.undo();
             return Ok(AppAction::Continue);
