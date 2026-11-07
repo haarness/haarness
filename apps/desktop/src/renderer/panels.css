@@ -639,7 +639,9 @@
 .preview-code { max-height: 400px; overflow: auto; padding: var(--s3); font: var(--ui-sm) / 1.5 var(--mono); font-variant-ligatures: none; white-space: pre-wrap; overflow-wrap: anywhere; }
 .preview-added { background: var(--diff-add); }
 .preview-removed { background: var(--diff-remove); text-decoration: line-through; }
-.preview-version-strip { padding: var(--s2) var(--s3); background: var(--surface); display: flex; justify-content: space-between; align-items: center; font-size: var(--ui); }
+.preview-version-strip { padding: var(--s2) var(--s3); background: var(--surface); display: flex; align-items: center; gap: var(--s2); font-size: var(--ui); }
+/* Its buttons sit together at the end, after what the strip says. */
+.preview-version-strip button:first-of-type { margin-inline-start: auto; }
 /* The open file moved on under unsaved edits: say so where the edits are. */
 .file-changed { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); padding: var(--s2) var(--s3); background: var(--surface); border-bottom: 1px solid var(--hairline); font-size: var(--ui); }
 .file-changed > .icon { color: var(--accent); flex: none; }
