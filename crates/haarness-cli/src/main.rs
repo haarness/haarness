@@ -4289,9 +4289,8 @@ struct RunWork {
     failed: Vec<String>,
     /// What the agent said in the run's turns.
     said: Vec<String>,
-    /// A person's messages written into the run's turns (or the results
-    /// of a person's work delivered there) that its agent has not read
-    /// yet, by item, with their turn.
+    /// A person's messages written into the run's turns that its agent
+    /// has not read yet, by item, with their turn.
     steers: HashMap<haarness_protocol::ItemId, TurnId>,
     /// The run's turns whose agent has read one: what it says and starts
     /// from then on answers the person, and is theirs.
@@ -4632,19 +4631,18 @@ impl RunWork {
     }
 
     fn read_item(&mut self, item: &haarness_protocol::Item) {
-        // A person's message written into a turn of the run, or the result
-        // of their work delivered into one: once the agent reads it (it is
-        // marked consumed as the agent is sent it), the rest of that turn
-        // answers them.
+        // A person's message written into a turn of the run: once the agent
+        // reads it (it is marked consumed as the agent is sent it), the rest
+        // of that turn answers them. The result of a person's work that
+        // comes into a turn of the run is no message of theirs: the agent
+        // reads it as the run's, and the turn stays the run's.
         if let Some(turn) = item.turn_id
             && self.owns(Some(turn))
             && let ItemData::UserMessage {
-                text,
                 queued: true,
-                synthetic,
+                synthetic: false,
                 ..
             } = &item.data
-            && (!synthetic || (delivered(text).is_some() && !self.delivers_own(text)))
         {
             self.steers.insert(item.id, turn);
         }
@@ -20318,32 +20316,31 @@ request_timeout = 0
         assert_eq!(work.untold_workflows(), [inspected]);
     }
 
-    /// A person's message written into a turn of the run, or the result of
-    /// a person's work delivered there, makes the rest of that turn theirs
-    /// once its agent reads it: what it says is not the run's record, and
-    /// what it starts is not the run's to wait for or stop.
+    /// A person's message written into a turn of the run makes the rest of
+    /// that turn theirs once its agent reads it: what it says is not the
+    /// run's record, and what it starts is not the run's to wait for or stop.
     #[test]
     fn what_a_run_turn_does_after_reading_a_persons_message_is_theirs() {
         let thread = ThreadId::new();
-        let (first, second) = (TurnId::new(), TurnId::new());
+        let first = TurnId::new();
         let mut work = super::RunWork::new(thread, first);
         let mut sequence = 0;
-        let mut item = |turn: TurnId, data: ItemData| {
+        let mut item = |data: ItemData| {
             sequence += 1;
             Item {
                 id: ItemId::new(),
                 thread_id: thread,
-                turn_id: Some(turn),
+                turn_id: Some(first),
                 sequence,
                 data,
                 created_at: chrono::Utc::now(),
             }
         };
-        let message = |text: &str, queued, synthetic| ItemData::UserMessage {
+        let message = |text: &str, queued| ItemData::UserMessage {
             text: text.into(),
             attachments: Vec::new(),
             queued,
-            synthetic,
+            synthetic: false,
             command_line: None,
         };
         let task = |call_id: &str, description: &str| ItemData::ToolCall {
@@ -20360,70 +20357,37 @@ request_timeout = 0
         };
         let said = |text: &str| ItemData::AssistantMessage { text: text.into() };
         let (own_child, persons_child) = (ThreadId::new(), ThreadId::new());
-        let steer = item(first, message("Also check the docs.", true, false));
-        let persons_result = item(
-            second,
-            message(
-                &format!("<task id=\"{persons_child}\" state=\"completed\">"),
-                true,
-                true,
-            ),
-        );
+        let steer = item(message("Also check the docs.", true));
         let items = [
-            item(first, message("launch", false, false)),
-            item(first, task("a", "Index the docs")),
-            item(first, state("a", own_child)),
+            item(message("launch", false)),
+            item(task("a", "Index the docs")),
+            item(state("a", own_child)),
             steer.clone(),
             // Said before the agent read the message: still the run's.
-            item(first, said("Started it.")),
-            item(first, ItemData::QueueConsumed { item_id: steer.id }),
-            item(first, said("Checking the docs too.")),
-            item(first, task("p", "Docs check")),
-            item(first, state("p", persons_child)),
-            item(
-                first,
-                ItemData::ToolCall {
-                    call_id: "b".into(),
-                    name: "bash".into(),
-                    arguments: json!({"command": "sleep 30", "run_in_background": true}),
-                    provider_metadata: serde_json::Value::Null,
-                },
-            ),
-            item(
-                first,
-                ItemData::ToolResult {
-                    call_id: "b".into(),
-                    name: "bash".into(),
-                    output: "Started.".into(),
-                    is_error: false,
-                    metadata: json!({"command": {"id": "cmd-persons"}}),
-                },
-            ),
-            // The run's subagent ends: a turn of the run, into which the
-            // result of the person's subagent then comes.
-            item(
-                second,
-                message(
-                    &format!("<task id=\"{own_child}\" state=\"completed\">"),
-                    false,
-                    true,
-                ),
-            ),
-            item(second, said("Done: completed")),
-            persons_result.clone(),
-            item(
-                second,
-                ItemData::QueueConsumed {
-                    item_id: persons_result.id,
-                },
-            ),
-            item(second, said("The docs check passed.")),
+            item(said("Started it.")),
+            item(ItemData::QueueConsumed { item_id: steer.id }),
+            item(said("Checking the docs too.")),
+            item(task("p", "Docs check")),
+            item(state("p", persons_child)),
+            item(ItemData::ToolCall {
+                call_id: "b".into(),
+                name: "bash".into(),
+                arguments: json!({"command": "sleep 30", "run_in_background": true}),
+                provider_metadata: serde_json::Value::Null,
+            }),
+            item(ItemData::ToolResult {
+                call_id: "b".into(),
+                name: "bash".into(),
+                output: "Started.".into(),
+                is_error: false,
+                metadata: json!({"command": {"id": "cmd-persons"}}),
+            }),
         ];
         for item in &items {
             work.read_item(item);
         }
-        assert_eq!(work.turns, [first, second]);
-        assert_eq!(work.said, ["Started it.", "Done: completed"]);
+        assert_eq!(work.turns, [first]);
+        assert_eq!(work.said, ["Started it."]);
         assert!(work.subagents.contains_key(&own_child));
         assert!(!work.subagents.contains_key(&persons_child));
         assert!(work.commands.is_empty(), "{:?}", work.commands);
@@ -20450,6 +20414,142 @@ request_timeout = 0
         assert!(work.going().is_empty());
         work.tasks.push(listed("a", own_child, "Index the docs"));
         assert_eq!(work.going(), ["subagent \u{201c}Index the docs\u{201d}"]);
+    }
+
+    /// The result of a person's own work that comes into a turn of the run
+    /// is not a message of theirs: the rest of that turn is still the
+    /// run's, so what its agent says there is in the run's record, and what
+    /// it starts there is the run's to wait for and stop.
+    #[test]
+    fn the_result_of_a_persons_work_leaves_a_run_turn_the_runs() {
+        let thread = ThreadId::new();
+        let (first, second) = (TurnId::new(), TurnId::new());
+        let mut work = super::RunWork::new(thread, first);
+        let mut sequence = 0;
+        let mut item = |turn: TurnId, data: ItemData| {
+            sequence += 1;
+            Item {
+                id: ItemId::new(),
+                thread_id: thread,
+                turn_id: Some(turn),
+                sequence,
+                data,
+                created_at: chrono::Utc::now(),
+            }
+        };
+        let notice = |text: String, queued| ItemData::UserMessage {
+            text,
+            attachments: Vec::new(),
+            queued,
+            synthetic: true,
+            command_line: None,
+        };
+        let task = |call_id: &str, description: &str| ItemData::ToolCall {
+            call_id: call_id.into(),
+            name: "task".into(),
+            arguments: json!({"description": description, "prompt": "x", "background": true}),
+            provider_metadata: serde_json::Value::Null,
+        };
+        let state = |call_id: &str, child| ItemData::TaskState {
+            call_id: call_id.into(),
+            child_thread_id: child,
+            child_turn_id: TurnId::new(),
+            state: "background".into(),
+        };
+        let said = |text: &str| ItemData::AssistantMessage { text: text.into() };
+        let (own_child, follow_up) = (ThreadId::new(), ThreadId::new());
+        let persons_result = item(
+            second,
+            notice(
+                "<command id=\"cmd-dev\" state=\"exited\" exit=\"0\">".into(),
+                true,
+            ),
+        );
+        let items = [
+            item(
+                first,
+                ItemData::UserMessage {
+                    text: "launch".into(),
+                    attachments: Vec::new(),
+                    queued: false,
+                    synthetic: false,
+                    command_line: None,
+                },
+            ),
+            item(first, task("a", "Index the docs")),
+            item(first, state("a", own_child)),
+            item(first, said("Started it.")),
+            // The run's subagent ends: a turn of the run, into which the
+            // end of a person's dev server then comes.
+            item(
+                second,
+                notice(
+                    format!("<task id=\"{own_child}\" state=\"completed\">"),
+                    false,
+                ),
+            ),
+            persons_result.clone(),
+            item(
+                second,
+                ItemData::QueueConsumed {
+                    item_id: persons_result.id,
+                },
+            ),
+            item(second, said("The index is ready.")),
+            item(second, task("f", "Check the index")),
+            item(second, state("f", follow_up)),
+            item(
+                second,
+                ItemData::ToolCall {
+                    call_id: "b".into(),
+                    name: "bash".into(),
+                    arguments: json!({"command": "sleep 30", "run_in_background": true}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                second,
+                ItemData::ToolResult {
+                    call_id: "b".into(),
+                    name: "bash".into(),
+                    output: "Started.".into(),
+                    is_error: false,
+                    metadata: json!({"command": {"id": "cmd-run"}}),
+                },
+            ),
+        ];
+        for item in &items {
+            work.read_item(item);
+        }
+        assert_eq!(work.turns, [first, second]);
+        assert_eq!(work.said, ["Started it.", "The index is ready."]);
+        assert!(work.persons_calls.is_empty(), "{:?}", work.persons_calls);
+        assert!(work.answering.is_empty());
+        assert_eq!(
+            work.subagents.get(&follow_up),
+            Some(&(second, "Check the index".to_owned()))
+        );
+        assert_eq!(
+            work.commands,
+            std::collections::HashSet::from(["cmd-run".to_owned()])
+        );
+        assert!(work.told.contains("cmd-dev"));
+        work.tasks = vec![haarness_protocol::BackgroundTaskInfo {
+            parent_thread_id: thread,
+            parent_turn_id: second,
+            call_id: "f".into(),
+            child_thread_id: follow_up,
+            child_turn_id: TurnId::new(),
+            agent: "general".into(),
+            description: "Check the index".into(),
+            background: true,
+            started_at: chrono::Utc::now(),
+        }];
+        assert_eq!(
+            work.left().held,
+            ["subagent \u{201c}Check the index\u{201d}"]
+        );
+        assert_eq!(work.going(), ["subagent \u{201c}Check the index\u{201d}"]);
     }
 
     /// Scripts scheduled runs, from the last thing the chat was told. A

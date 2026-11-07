@@ -92,8 +92,10 @@ Every native entry runs the hidden command
    theirs: the run neither waits for it nor stops it. A message a person sends while one of the
    run's turns works joins that turn, and once the agent has read it the rest of the turn answers
    them: what the agent says from then on is not in the run's answer, and what it starts from then
-   on (subagents, workflows, commands, and the results they bring) is theirs. The run still waits
-   for the turn itself. How long it waits:
+   on (subagents, workflows, commands, and the results they bring) is theirs. Only a message the
+   person wrote does that: when the result of their own work arrives in one of the run's turns, the
+   agent takes it in as part of the run, and what that turn says and starts afterwards stays the
+   run's. The run still waits for the turn itself. How long it waits:
    - Subagents, workflows and the turns their results start have 30 minutes, counted from the end of
      the first turn, or from the end of the run's last command with a time limit if that came later.
      A workflow deleted meanwhile (`/workflow delete`, or the agent's own `delete`) has ended, and so
