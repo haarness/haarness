@@ -2866,6 +2866,7 @@
   "Auto review paused": "Przegląd Auto wstrzymany",
   "Stopped by Auto's reviewer": "Zatrzymane przez weryfikatora Auto",
   "Refused by a hook": "Odrzucone przez hook",
+  "A hook could not answer": "Hook nie mógł odpowiedzieć",
   "reviewing…": "przeglądanie…",
   "Reviewing…": "Przeglądanie…",
   "Auto review is deciding…": "Przegląd Auto decyduje…",

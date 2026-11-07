@@ -2866,6 +2866,7 @@
   "Auto review paused": "Revisão automática pausada",
   "Stopped by Auto's reviewer": "Interrompido pelo revisor do Auto",
   "Refused by a hook": "Recusado por um hook",
+  "A hook could not answer": "Um hook não conseguiu responder",
   "reviewing…": "revisando…",
   "Reviewing…": "Revisando…",
   "Auto review is deciding…": "A revisão automática está decidindo…",

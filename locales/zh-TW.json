@@ -2866,6 +2866,7 @@
   "Auto review paused": "自動審查已暫停",
   "Stopped by Auto's reviewer": "已被自動模式的審核模型攔下",
   "Refused by a hook": "已被掛鉤拒絕",
+  "A hook could not answer": "掛鉤未能回應",
   "reviewing…": "審查中…",
   "Reviewing…": "審查中…",
   "Auto review is deciding…": "自動審查正在判斷…",

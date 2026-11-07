@@ -30,13 +30,14 @@ pub enum CoreError {
     #[error("{0}")]
     PermissionRejected(String),
     /// A `PermissionRequest` hook or an extension's `permission.ask`
-    /// refused the call before anyone saw it (or failed to answer, which
+    /// refused the call before anyone saw it (or `failed` to answer, which
     /// refuses it too): `message` is what the model reads, `reason` the
-    /// hook's own words, which clients show.
+    /// hook's own words (or its error), which clients show.
     #[error("{message}")]
     HookRefused {
         message: String,
         reason: Option<String>,
+        failed: bool,
     },
     /// Auto's reviewer refused the call. The model reads why, and that it
     /// should not reach the same result another way.

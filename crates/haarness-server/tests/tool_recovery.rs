@@ -1064,22 +1064,23 @@ async fn a_hooks_refusal_reads_as_the_hooks_and_a_persons_reject_as_theirs() {
             false,
             "A permission hook refused this action without asking the user: not on this \
              machine. Take a different approach, or ask the user if you need it.",
-            json!("not on this machine."),
+            json!({"refusedBy": "hook", "reason": "not on this machine."}),
         ),
         (
             None,
             false,
             "A permission hook refused this action without asking the user. Take a different \
              approach, or ask the user if you need it.",
-            Value::Null,
+            json!({"refusedBy": "hook", "reason": null}),
         ),
+        // A hook that failed says so, for clients to tell it from a refusal.
         (
             Some("lookup timed out"),
             true,
             "A permission hook could not answer (lookup timed out), so this action was \
              refused without asking the user. Take a different approach, or ask the user if \
              you need it.",
-            json!("lookup timed out"),
+            json!({"refusedBy": "hook", "reason": "lookup timed out", "failed": true}),
         ),
     ] {
         let fixture = Fixture::with_hooks(asks(), Some(Arc::new(Refuses(reason, failing))));
@@ -1093,7 +1094,7 @@ async fn a_hooks_refusal_reads_as_the_hooks_and_a_persons_reject_as_theirs() {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(metadata, json!({"refusedBy": "hook", "reason": shown}));
+        assert_eq!(metadata, shown);
         assert!(fixture.runtime.pending_permissions().is_empty());
     }
     for (feedback, said) in [

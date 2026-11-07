@@ -11643,6 +11643,17 @@ fn a_hooks_refusal_reads_as_the_hooks_decision_not_a_failure() {
     )
     .to_vec();
     items.extend(refusal(3, "call-2", "cargo test", serde_json::Value::Null));
+    // A hook that threw refused nothing: it could not answer.
+    let mut failed = refusal(
+        5,
+        "call-3",
+        "npm publish",
+        serde_json::json!("TypeError: x is undefined"),
+    );
+    if let ItemData::ToolResult { metadata, .. } = &mut failed[1].data {
+        metadata["failed"] = serde_json::json!(true);
+    }
+    items.extend(failed);
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
     let transcript = crate::view::transcript::transcript_lines(&app, 100);
     let text: String = transcript
@@ -11658,6 +11669,11 @@ fn a_hooks_refusal_reads_as_the_hooks_decision_not_a_failure() {
         text.contains("⊘ bash cargo test  Refused by a hook\n"),
         "{text}"
     );
+    assert!(
+        text.contains("⊘ bash npm publish  A hook could not answer: TypeError: x is undefined"),
+        "{text}"
+    );
+    assert!(!text.contains("Refused by a hook: TypeError"), "{text}");
     assert!(!text.contains("failed"), "{text}");
     assert!(!text.contains("A permission hook refused"), "{text}");
     for line in &transcript.lines {

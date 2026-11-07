@@ -11037,8 +11037,13 @@ impl RunnerTask {
                             // tell it from a person's reject.
                             let metadata = match &error {
                                 CoreError::ReviewBlocked(review) => json!({ "review": review }),
-                                CoreError::HookRefused { reason, .. } => {
-                                    json!({ "refusedBy": "hook", "reason": reason })
+                                CoreError::HookRefused { reason, failed, .. } => {
+                                    let mut refusal =
+                                        json!({ "refusedBy": "hook", "reason": reason });
+                                    if *failed {
+                                        refusal["failed"] = json!(true);
+                                    }
+                                    refusal
                                 }
                                 _ => serde_json::Value::Null,
                             };
@@ -11975,6 +11980,7 @@ impl RunnerTask {
                     return Err(CoreError::HookRefused {
                         message: hook_refusal_message(reason.as_deref(), failed),
                         reason,
+                        failed,
                     });
                 }
                 let message = match resolution.feedback {

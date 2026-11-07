@@ -224,7 +224,8 @@ Where each hook fires:
   no result keeps it, and a thrown error denies. The agent reads a `deny` as
   a permission hook's refusal, with its `reason` when it gives one, never as
   the user's, and a thrown error as a hook that could not answer, not as its
-  decision. The TUI shows either as **Refused by a hook**. A configured `deny` rule is
+  decision. The TUI shows the one as **Refused by a hook** and the other as
+  **A hook could not answer**, each with its reason. A configured `deny` rule is
   never reopened. `patterns` are what the prompt asks about and `detail` is
   the tool's arguments. When a prompt asks about the file a path really opens
   (a link `notes.txt -> .env` asks for `.env`), that file is asked about in a

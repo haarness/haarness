@@ -2866,6 +2866,7 @@
   "Auto review paused": "自動レビューは一時停止中",
   "Stopped by Auto's reviewer": "自動モードの審査役が停止",
   "Refused by a hook": "フックが拒否",
+  "A hook could not answer": "フックが応答できませんでした",
   "reviewing…": "レビュー中…",
   "Reviewing…": "レビュー中…",
   "Auto review is deciding…": "自動レビューが判断中…",

@@ -2171,14 +2171,20 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         format!("  {}", app.language.text(state))
                     }
                     Some("refused") => {
-                        let lead = app.language.text("Refused by a hook");
-                        let reason = result
-                            .and_then(|item| match &item.data {
-                                ItemData::ToolResult { metadata, .. } => {
-                                    metadata.get("reason").and_then(serde_json::Value::as_str)
-                                }
-                                _ => None,
-                            })
+                        let metadata = result.and_then(|item| match &item.data {
+                            ItemData::ToolResult { metadata, .. } => Some(metadata),
+                            _ => None,
+                        });
+                        // A hook that failed refused nothing of its own.
+                        let lead = app.language.text(
+                            if metadata.is_some_and(|metadata| metadata["failed"] == true) {
+                                "A hook could not answer"
+                            } else {
+                                "Refused by a hook"
+                            },
+                        );
+                        let reason = metadata
+                            .and_then(|metadata| metadata["reason"].as_str())
                             .map(str::trim)
                             .filter(|reason| !reason.is_empty());
                         match reason {
