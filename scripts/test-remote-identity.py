@@ -44,10 +44,13 @@ With HAARNESS_BASE_BIN:
    `remote enable` says it already runs and no second host appears; signing
    out with the new build stops a connector the release before runs here.
 9. A copy made by the release before on a computer of another name (Annex)
-   gets a host of its own and stops counting there; Den keeps its host.
-10. A renamed computer: Desktop's restore finds the release before's
-    connector running under the old name, so once it has stopped, the next
-    restore turns access back on with the same host.
+   is adopted with its id, as every identity without a stamp is; split as
+   REMOTE-ACCESS says, Annex gets a host of its own and Den keeps its host.
+10. Renamed computers, whose release before ran its connector under a name
+    they no longer have: with nothing running, the new release's terminal
+    start and Desktop's restore each keep the host; with it still running,
+    Desktop's restore makes it this computer's, and once it has stopped the
+    next restore turns access back on with the same host.
 
 Writes secret-free results to checks.json in a new folder under the state
 folder (default: a temporary folder, removed when the run passes).
@@ -551,18 +554,50 @@ def main() -> None:
             pre = {k: v for k, v in den.identity().items() if k != "machine"}
             (den.config / old).write_text(json.dumps(pre))
             (annex.config / old).write_text(json.dumps(pre))
+            hosts = set(cloud.hosts)
+            annex.start()
+            check(connected_as(annex, cloud) == den_id and annex.file.name == old and annex.identity().get("machine") == stamp("MACHINE-ANNEX", den_id), "a copy from a computer of another name, made before stamps, keeps its id there", annex.file.name)
+            check(annex.status_ids() == [den_id] and set(cloud.hosts) == hosts, "and counts there as that computer's, with no new host", annex.status_ids())
+            # Split as REMOTE-ACCESS says: stop it, delete the identity
+            # `remote status` lists, start again.
+            annex.cli("remote", "disable", den_id)
+            annex.stop()
+            for path, identity in annex.identities().items():
+                if identity.get("id") == den_id:
+                    path.unlink()
             annex.start()
             annex_id = connected_as(annex, cloud)
-            check(annex_id != den_id and annex.file.name == file_name(cloud, "MACHINE-ANNEX"), "a copy from a computer of another name gets a host of its own", annex_id)
-            check(json.loads((annex.config / old).read_text())["id"] == den_id and annex.status_ids() == [annex_id], "and the copy, left where it was, no longer counts there", annex.status_ids())
+            check(annex_id != den_id and annex_id not in hosts, "split, Annex registers a host of its own", annex_id)
             den.start()
             check(connected_as(den, cloud) == den_id and den.file.name == old, "while Den keeps its host")
-            check(len(cloud.connected() & {den_id, annex_id}) == 2, "both connected")
+            settled = time.time()
+            time.sleep(5)
+            check(len(cloud.connected() & {den_id, annex_id}) == 2 and not [id for at, id in cloud.takeovers if at >= settled], "both connected, neither taking the other's connection")
             annex.stop()
             den.stop()
 
-            # 10. A renamed computer: the connector of the release before runs
+            # 10. Renamed computers: the release before ran the connector
             # under a name this computer no longer has.
+            nook = computer("Nook", "MACHINE-NOOK")
+            nook.start(base, name="Old Name")
+            nook_id = connected_as(nook, cloud)
+            nook.stop()
+            hosts = set(cloud.hosts)
+            nook.start(name="Nook Pro")
+            check(connected_as(nook, cloud) == nook_id and set(cloud.hosts) == hosts and nook.file.name == old, "with nothing running, the new release's terminal start under another name keeps the host")
+            check(nook.identity().get("machine") == stamp("MACHINE-NOOK", nook_id), "stamped where it was")
+            nook.stop()
+            porch = computer("Porch", "MACHINE-PORCH")
+            porch.start(base, name="Old Name")
+            porch_id = connected_as(porch, cloud)
+            porch.stop()
+            hosts = set(cloud.hosts)
+            restored = porch.restore()
+            pid = wait_for(lambda: porch.identity().get("pid") if alive(porch.identity().get("pid")) else None, 60, "Porch's restored connector")
+            check(restored.get("state") == "on" and connected_as(porch, cloud, pid=pid) == porch_id and set(cloud.hosts) == hosts, "with nothing running, Desktop's restore turns access back on with the same host", restored)
+            others = sorted(host["name"] for id, host in cloud.hosts.items() if id != porch_id)
+            check(porch.identity().get("machine") == stamp("MACHINE-PORCH", porch_id) and porch.others() == others, "stamped, and not listed among its own Your computers", porch.others())
+            porch.cli("remote", "disable", porch_id)
             loft = computer("Loft", "MACHINE-LOFT")
             loft.start(base, name="Old Name")
             loft_id = connected_as(loft, cloud)

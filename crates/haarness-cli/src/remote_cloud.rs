@@ -1335,12 +1335,12 @@ fn identity_name(
 /// Where this computer's connector named `name` keeps its identity: under
 /// the name every computer used before names carried the computer (see
 /// [`identity_file_for`]), stamped there in place, so an earlier release run
-/// here keeps finding it with the same host id. The file named for this
-/// computer is used only when the one under the old name is another
-/// computer's: stamped by it, or written before stamps under another name
-/// (copied from a computer called something else). A connector running here
-/// under the old name makes it this computer's whatever it says. A copied or
-/// synced folder so gives each computer one host of its own.
+/// here keeps finding it with the same host id. An identity an earlier
+/// release wrote there, without a stamp, is always this computer's, whatever
+/// name it was written under: upgrading never gives a computer a new host.
+/// The file named for this computer is used only when the one under the old
+/// name carries another computer's stamp, so a folder copied or synced from
+/// a computer that stamped it gives each computer one host of its own.
 fn identity_path(
     paths: &Paths,
     client: &haarness_account::Client,
@@ -1373,30 +1373,23 @@ fn identity_path_for(
     let Some(hardware) = hardware else {
         return unchecked_identity_path(paths, client, account, workspace, session, shared, name);
     };
-    let identity = std::fs::read(&shared)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let identity = read_identity(&shared);
     let foreign = identity
         .as_ref()
         .is_some_and(|identity| stamped_elsewhere(identity, Some(hardware)));
-    // Run here, it is this computer's; under another computer's stamp, it
-    // is that computer's, on a drive both share.
+    // Run here, it is this computer's, so a second connector never starts
+    // beside it; under another computer's stamp, it is that computer's, on a
+    // drive both share.
     if !foreign && running(&shared)? {
+        adopt(&shared, hardware)?;
         return Ok(shared);
     }
     let own = identity_file_for(paths, client, account, workspace, session, Some(hardware));
-    if own.exists() {
+    if own.exists() || foreign {
         return Ok(own);
     }
-    let Some(identity) = identity else {
-        return Ok(shared);
-    };
-    let ours = if identity["machine"].is_string() {
-        !stamped_elsewhere(&identity, Some(hardware))
-    } else {
-        identity["name"].as_str() == Some(name)
-    };
-    Ok(if ours { shared } else { own })
+    adopt(&shared, hardware)?;
+    Ok(shared)
 }
 /// [`identity_path`] on a computer whose hardware id cannot be read, where
 /// no stamp can be checked: `shared` (the old name) when nothing else is
@@ -1464,36 +1457,42 @@ fn read_identity(file: &Path) -> Option<Value> {
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .filter(Value::is_object)
 }
-/// A connector running here proves its identity is this computer's: stamp
-/// it in place, so it stays so after the connector stops. An earlier release
-/// wrote it without a stamp, perhaps under a name this computer no longer
-/// has (a renamed computer, a connector started with `--name`).
-fn vouch(file: &Path) -> Result<()> {
-    vouch_for(file, machine_id().as_deref())
-}
-/// [`vouch`] on the computer with `hardware` id.
-fn vouch_for(file: &Path, hardware: Option<&str>) -> Result<()> {
-    let Some(hardware) = hardware else {
-        return Ok(());
-    };
-    if !running(file)? {
-        return Ok(());
-    }
-    let Some(mut identity) = std::fs::read(file)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .filter(Value::is_object)
-    else {
+/// Make an identity an earlier release wrote, without a stamp, this
+/// computer's (with `hardware` id): stamp it in place, its id and the rest
+/// unchanged. One that sits beside a file of this computer's own is left
+/// alone: this computer moved to that one when the old name was another
+/// computer's, and never holds two identities it stamped.
+fn adopt(file: &Path, hardware: &str) -> Result<()> {
+    let Some(mut identity) = read_identity(file) else {
         return Ok(());
     };
     let Some(host) = identity["id"].as_str().map(str::to_owned) else {
         return Ok(());
     };
-    if identity["machine"].is_null() {
-        identity["machine"] = json!(machine_stamp(hardware, &host));
-        super::write_private_json(file, &identity)?;
+    let own = own_name(&identity, hardware);
+    if !identity["machine"].is_null()
+        || (file.file_name().is_some_and(|name| *name != *own) && file.with_file_name(own).exists())
+    {
+        return Ok(());
     }
-    Ok(())
+    identity["machine"] = json!(machine_stamp(hardware, &host));
+    super::write_private_json(file, &identity)
+}
+/// The file name `identity` has on the computer with `hardware` id when that
+/// computer keeps one of its own (see [`identity_file_for`]).
+fn own_name(identity: &Value, hardware: &str) -> String {
+    let session = identity["chatId"].as_str().and_then(|id| id.parse().ok());
+    identity_name(
+        identity["apiUrl"].as_str().unwrap_or_default(),
+        identity["accountId"].as_str().unwrap_or_default(),
+        if session.is_some() {
+            identity["workspace"].as_str().unwrap_or_default()
+        } else {
+            ""
+        },
+        session,
+        Some(hardware),
+    )
 }
 /// This machine's hardware id, which tells a connector identity copied from
 /// another computer (a migrated or synced configuration folder) from its own.
@@ -1523,9 +1522,8 @@ fn machine_stamp(hardware: &str, host: &str) -> String {
 }
 /// Whether the identity in `file` is this computer's (with `hardware` id):
 /// stamped here; or from before stamps and either run by a connector here
-/// or not set aside here for a file of this computer's own (see
-/// [`identity_path`]), which a copy from a computer of another name is once
-/// this computer has started.
+/// or not beside a file this computer keeps of its own, as it does once the
+/// old name's was another computer's (see [`identity_path`]).
 fn ours(file: &Path, identity: &Value, hardware: Option<&str>) -> bool {
     let Some(hardware) = hardware else {
         return true;
@@ -1536,18 +1534,7 @@ fn ours(file: &Path, identity: &Value, hardware: Option<&str>) -> bool {
     if running(file).unwrap_or(false) {
         return true;
     }
-    let session = identity["chatId"].as_str().and_then(|id| id.parse().ok());
-    let own = identity_name(
-        identity["apiUrl"].as_str().unwrap_or_default(),
-        identity["accountId"].as_str().unwrap_or_default(),
-        if session.is_some() {
-            identity["workspace"].as_str().unwrap_or_default()
-        } else {
-            ""
-        },
-        session,
-        Some(hardware),
-    );
+    let own = own_name(identity, hardware);
     file.file_name().is_some_and(|name| *name == *own) || !file.with_file_name(own).exists()
 }
 /// Whether this computer (with `hardware` id) stamped `identity`.
@@ -2287,8 +2274,9 @@ fn host_identities(
         .collect())
 }
 /// The identity file of `account`'s host connector: the one a connector
-/// here runs, or one this computer stamped, or where its connector would
-/// keep it (see [`identity_path`]).
+/// here runs (stamped as this computer's when an earlier release runs it),
+/// or one this computer stamped, or where its connector would keep it (see
+/// [`identity_path`]).
 fn host_file(
     paths: &Paths,
     client: &haarness_account::Client,
@@ -2299,9 +2287,16 @@ fn host_file(
     if let Some((file, identity)) = host_identities(paths, client, Some(account))?
         .into_iter()
         .next()
-        && (running(&file)? || stamped_here(&identity, hardware.as_deref()))
     {
-        return Ok(file);
+        if running(&file)? {
+            if let Some(hardware) = hardware.as_deref() {
+                adopt(&file, hardware)?;
+            }
+            return Ok(file);
+        }
+        if stamped_here(&identity, hardware.as_deref()) {
+            return Ok(file);
+        }
     }
     identity_path_for(
         paths,
@@ -2431,7 +2426,6 @@ pub(crate) async fn enable_host(
         return Ok(HostAccess::new(AccessState::SignedOut));
     };
     let file = host_file(paths, client, &account, gateway)?;
-    vouch(&file)?;
     if !running(&file)? {
         forget_removed_host(client, &file).await?;
         paths.workspace_manager()?.register_chat_home(gateway)?;
@@ -2547,9 +2541,6 @@ pub(crate) async fn restore_host(
     let current = identity["version"].as_str() == Some(env!("CARGO_PKG_VERSION"));
     let turned_off = file.with_extension("stop").exists();
     if running(&file)? {
-        // Found running here before it is stopped and started again: it is
-        // this computer's, whatever name an earlier release wrote it under.
-        vouch(&file)?;
         if current {
             return host_access(client, paths, true).await;
         }
@@ -2849,12 +2840,9 @@ mod tests {
         assert_eq!(path(Some("STUDIO"), "Studio"), shared);
         assert_eq!(path(None, "Studio"), shared);
 
-        // Written by an earlier release under this computer's name: this
-        // computer's, where it is (the connector stamps it in place).
+        // Written by an earlier release: this computer's, where it is.
         write(&shared, &identity("Studio"));
         assert_eq!(path(Some("STUDIO"), "Studio"), shared);
-        // Copied from a computer called something else: not this one's.
-        assert_eq!(path(Some("LAPTOP"), "Laptop"), laptop);
         // Stamped by the studio: still the studio's, and never the laptop's,
         // which keeps a file of its own: one folder, two stable ids.
         let mut stamped = identity("Studio");
@@ -2882,48 +2870,97 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn a_connector_found_running_here_vouches_for_its_identity() {
-        let root = std::env::temp_dir().join(format!("haarness-vouch-{}", Uuid::now_v7()));
+    fn an_identity_an_earlier_release_wrote_stays_this_computers_whatever_its_name() {
+        let root = std::env::temp_dir().join(format!("haarness-adopt-{}", Uuid::now_v7()));
         let paths = Paths::new(Some(&root)).unwrap();
         std::fs::create_dir_all(paths.config_dir()).unwrap();
         let client = offline_client(&root);
         let gateway = root.join("Chat folders");
         let shared = identity_file_for(&paths, &client, "a1", &gateway, None, None);
-        let id = Uuid::now_v7().to_string();
-        // An earlier release's connector, started under a name this computer
-        // no longer has.
-        std::fs::write(
-            &shared,
-            json!({"id": id, "name": "Old Name", "registered": true}).to_string(),
-        )
-        .unwrap();
-        let path = || {
+        let own = identity_file_for(&paths, &client, "a1", &gateway, None, Some("LAPTOP"));
+        let path = |hardware: &str| {
             identity_path_for(
                 &paths,
                 &client,
                 "a1",
                 &gateway,
                 None,
-                Some("LAPTOP"),
+                Some(hardware),
                 "Laptop",
             )
             .unwrap()
         };
-        // Stopped, nothing tells it from a copy.
-        vouch_for(&shared, Some("LAPTOP")).unwrap();
-        let unchanged: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
-        assert!(unchanged["machine"].is_null());
-        assert_ne!(path(), shared);
-        // Found running, it is stamped in place, and stays this computer's
-        // once it stops.
+        let read = |file: &Path| -> Value {
+            serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
+        };
+        let write = |file: &Path, identity: &Value| {
+            std::fs::write(file, identity.to_string()).unwrap();
+        };
+        let id = Uuid::now_v7().to_string();
+        // What an earlier release wrote for a connector started under a name
+        // this computer no longer has: renamed since, or `--name` back then.
+        let earlier = json!({"id": id, "name": "Old Name", "registered": true,
+            "chatId": null, "apiUrl": client.config.api_url, "accountId": "a1"});
+
+        // With nothing running it is this computer's all the same: stamped
+        // where it is, its id and all it says unchanged, from then on.
+        write(&shared, &earlier);
+        assert_eq!(path("LAPTOP"), shared);
+        let adopted = read(&shared);
+        assert_eq!(adopted["machine"], machine_stamp("LAPTOP", &id));
+        assert_eq!(
+            (&adopted["id"], &adopted["registered"], &adopted["name"]),
+            (&json!(id), &json!(true), &json!("Old Name"))
+        );
+        assert!(!own.exists());
+        assert_eq!(path("LAPTOP"), shared);
+        // Another computer that finds it so keeps an identity of its own.
+        assert_eq!(
+            path("STUDIO"),
+            identity_file_for(&paths, &client, "a1", &gateway, None, Some("STUDIO"))
+        );
+
+        // An earlier release's connector found running is stamped too, by
+        // `remote enable` or `remote run` saying it already runs, and stays
+        // this computer's once it stops.
+        write(&shared, &earlier);
         let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
         fs2::FileExt::lock_exclusive(&lock).unwrap();
-        vouch_for(&shared, Some("LAPTOP")).unwrap();
+        assert_eq!(path("LAPTOP"), shared);
+        assert_eq!(read(&shared)["machine"], machine_stamp("LAPTOP", &id));
         drop(lock);
-        let vouched: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
-        assert_eq!(vouched["machine"], machine_stamp("LAPTOP", &id));
-        assert_eq!(vouched["registered"], true);
-        assert_eq!(path(), shared);
+
+        // Desktop finds it the same way, under this computer's own name,
+        // running or not.
+        if let Some(hardware) = machine_id() {
+            write(&shared, &earlier);
+            assert_eq!(host_file(&paths, &client, "a1", &gateway).unwrap(), shared);
+            assert_eq!(read(&shared)["machine"], machine_stamp(&hardware, &id));
+            write(&shared, &earlier);
+            let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
+            fs2::FileExt::lock_exclusive(&lock).unwrap();
+            assert_eq!(host_file(&paths, &client, "a1", &gateway).unwrap(), shared);
+            assert_eq!(read(&shared)["machine"], machine_stamp(&hardware, &id));
+            drop(lock);
+        }
+
+        // Beside a file of this computer's own (kept since the old name was
+        // another computer's), an earlier release's connector running under
+        // the old name is left unstamped, so this computer never holds two
+        // identities it stamped; once it stops, its own is the one.
+        write(
+            &own,
+            &json!({"id": Uuid::now_v7(), "name": "Laptop", "chatId": null,
+                "apiUrl": client.config.api_url, "accountId": "a1"}),
+        );
+        write(&shared, &earlier);
+        let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        assert_eq!(path("LAPTOP"), shared, "a second connector beside it");
+        assert!(read(&shared)["machine"].is_null());
+        drop(lock);
+        assert_eq!(path("LAPTOP"), own);
+        assert!(read(&shared)["machine"].is_null());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
