@@ -66,6 +66,9 @@ const CHROME_OFF_PROJECT: &str = "Agents may not use Chrome: this project's sett
 const CHROME_PAUSED: &str = "The user paused Haarness in Chrome. Ask them to resume it from the Haarness button in Chrome's toolbar; do not retry until they do.";
 const CHROME_STOPPED: &str = "The user stopped Haarness in Chrome (they cancelled the debugging bar or pressed Stop). Ask before trying again; they can click Resume on the Haarness button in Chrome's toolbar.";
 const NO_BROWSER: &str = "No browser is available to this chat. Open it in Haarness Desktop to use the Haarness browser, or set up Haarness for Chrome (/chrome in the TUI or `haarness browser setup`) to use Chrome.";
+/// What a model reads when it calls a browser tool its chat is no longer
+/// offered (the tools leave a chat's list while nothing can serve it).
+const NOT_OFFERED: &str = "No browser is available to this chat now, so the browser tools are not offered. To read a web page use webfetch. To use a browser, ask the user to open this chat in Haarness Desktop or to connect Chrome (/chrome in the TUI or `haarness browser setup`).";
 const NO_BROWSER_UNATTENDED: &str = "This scheduled run has no browser it may use unattended. Use the Haarness browser in Desktop, or pass browser \"chrome\" only if the user asked for their Chrome.";
 const REVOKED: &str =
     "The user took this tab back from Haarness. Don't use it again without asking.";
@@ -638,6 +641,24 @@ impl BrowserBroker {
     /// The Desktop host attached for a conversation.
     fn desktop(&self, thread: ThreadId) -> Option<Arc<Host>> {
         self.host(thread, None).ok()
+    }
+    /// Whether a browser can serve `thread` now, which decides whether its
+    /// chat is offered the browser tools: Desktop's browser for the chat,
+    /// Desktop showing any chat of this server (it attaches each chat's
+    /// browser as the chat is shown, so a chat just created or opened gets
+    /// it a moment after its turn may have begun), or a connected Chrome
+    /// profile, which serves every chat. A chat with none of them (the
+    /// terminal or a script without Chrome, a Cloud workspace, a phone) is
+    /// sent no browser tools: about 36 KB of schemas in every request that
+    /// could only fail.
+    pub fn serves(&self, thread: ThreadId) -> bool {
+        fn open<K>(hosts: &HashMap<K, Arc<Host>>) -> bool {
+            hosts.values().any(|host| !host.closed.is_cancelled())
+        }
+        self.desktop(thread).is_some()
+            || open(&self.hosts.lock())
+            || open(&self.drafts.lock())
+            || open(&self.extensions.lock())
     }
     /// Connected Chrome profiles, oldest hello first.
     fn extension_hosts(&self) -> Vec<Arc<Host>> {
@@ -1802,6 +1823,9 @@ impl Tool for BrowserTool {
     fn definition(&self) -> ToolDefinition {
         self.definition.clone()
     }
+    fn unavailable_to(&self, thread: ThreadId) -> Option<String> {
+        (!self.broker.serves(thread)).then(|| NOT_OFFERED.to_owned())
+    }
     fn side_effectful(&self) -> bool {
         true
     }
@@ -2332,6 +2356,45 @@ mod tests {
         assert!(!valid_state(
             &json!({"tabs":[{"id":"not-a-tab","generation":0,"url":"about:blank"}]})
         ));
+    }
+
+    // ---- Who is offered the browser tools ------------------------------
+
+    #[test]
+    fn the_browser_tools_are_offered_while_a_browser_can_serve_the_chat() {
+        let broker = BrowserBroker::new();
+        let thread = ThreadId::new();
+        let other = ThreadId::new();
+        let tools = super::tools(broker.clone());
+        let navigate = tools
+            .iter()
+            .find(|tool| tool.definition().name == "browser_navigate")
+            .unwrap();
+        // Nothing attached (the terminal, a script, a Cloud workspace).
+        assert!(!broker.serves(thread));
+        assert_eq!(
+            navigate.unavailable_to(thread).as_deref(),
+            Some(NOT_OFFERED)
+        );
+        assert!(
+            tools
+                .iter()
+                .all(|tool| tool.unavailable_to(thread).is_some())
+        );
+        // Desktop with this chat open, or showing another of this server's
+        // chats (it attaches a chat's browser as the chat is shown).
+        let (desktop, _messages) = connected(&broker, other);
+        assert!(broker.serves(other) && broker.serves(thread));
+        assert!(navigate.unavailable_to(thread).is_none());
+        desktop.closed.cancel();
+        assert!(!broker.serves(thread), "a closed host serves nothing");
+        broker.forget(&desktop);
+        // A connected Chrome profile serves every chat.
+        let (profile, _messages) = chrome(&broker, 1, None);
+        assert!(broker.serves(thread));
+        broker.forget(&profile);
+        assert!(!broker.serves(thread));
+        assert_eq!(navigate.unavailable_to(other).as_deref(), Some(NOT_OFFERED));
     }
 
     // ---- Chrome extension hosts ----------------------------------------

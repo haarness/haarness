@@ -681,8 +681,16 @@ impl ToolRegistry for CombinedTools {
         }))
     }
     fn list(&self) -> Vec<ToolDefinition> {
+        self.combined(self.inner.list())
+    }
+    fn list_for(&self, thread: ThreadId) -> Vec<ToolDefinition> {
+        self.combined(self.inner.list_for(thread))
+    }
+}
+impl CombinedTools {
+    /// `tools` with the extensions' own, as the hooks redefined them.
+    fn combined(&self, mut tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
         let overrides = self.overrides();
-        let mut tools = self.inner.list();
         tools.extend(self.extensions.tools.values().map(|tool| tool.definition()));
         for tool in &mut tools {
             if let Some(definition) = overrides.get(&tool.name) {
@@ -706,6 +714,12 @@ impl Tool for RedefinedTool {
     }
     fn definition(&self) -> ToolDefinition {
         self.definition.clone()
+    }
+    fn offered(&self) -> bool {
+        self.inner.offered()
+    }
+    fn unavailable_to(&self, thread: ThreadId) -> Option<String> {
+        self.inner.unavailable_to(thread)
     }
     fn validation_schema(&self) -> Value {
         self.inner.validation_schema()

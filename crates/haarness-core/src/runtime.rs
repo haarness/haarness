@@ -3154,7 +3154,10 @@ impl AgentRuntime {
             lazy_tools.mode = mode;
         }
         let mut response = select_tools(
-            components.tools.list(),
+            match thread_id {
+                Some(thread) => components.tools.list_for(thread),
+                None => components.tools.list(),
+            },
             &components.config.tool_availability,
             &live,
             &lazy_tools,
@@ -4275,7 +4278,7 @@ impl AgentRuntime {
         let (messages, mut origins) = provider_messages_with_origins(items);
         let messages = crate::side_question::settled(messages);
         origins.truncate(messages.len());
-        let catalog = components.tools.list();
+        let catalog = components.tools.list_for(thread_id);
         let prepared = self.prepared_prompts.lock().request(
             thread_id,
             turn_id,
@@ -7827,6 +7830,7 @@ impl AgentRuntime {
             tool_execution_gates: self.tool_execution_gates.clone(),
             tool_promotions: self.tool_promotions.clone(),
             advertised_tools: Mutex::new(HashSet::new()),
+            turn_tools: Mutex::new(HashSet::new()),
             last_tool_catalog: Mutex::new(None),
             config: components.config.clone(),
             snapshots,
@@ -8321,6 +8325,11 @@ struct RunnerTask {
     /// execution-time authority against hallucinated or prematurely-loaded
     /// calls, not merely UI bookkeeping.
     advertised_tools: Mutex<HashSet<String>>,
+    /// Every tool this turn's requests have offered: a tool the chat can no
+    /// longer use (its browser went away) stays in the list until the turn
+    /// ends, so the list the cached prompt opens with changes at most once a
+    /// turn, when a tool becomes usable (see `request_tools`).
+    turn_tools: Mutex<HashSet<String>>,
     last_tool_catalog: Mutex<Option<ToolCatalogResponse>>,
     config: Arc<RuntimeConfig>,
     /// The store of `workspace`.
@@ -10716,7 +10725,7 @@ impl RunnerTask {
                 // cached prompt prefix those sessions share. Such a tool is
                 // refused when called, naming the parent's rule.
                 let permission_engine = self.permission_engine(agent);
-                let catalog = self.tools.list();
+                let catalog = self.request_tools();
                 // The resource tools reach only servers whose tools this
                 // agent may have; with none left they would only fail.
                 let resources_open = self.tools.resource_servers().iter().any(|server| {
@@ -11909,6 +11918,29 @@ impl RunnerTask {
         )
     }
 
+    /// The tools for this turn's next request: those the chat can use now
+    /// (see [`ToolRegistry::list_for`]) and those an earlier request of the
+    /// turn offered. A browser attached mid-turn adds its tools from the next
+    /// request; one that goes away mid-turn leaves them until the turn ends,
+    /// and a call is then answered by the tool, in plain words.
+    fn request_tools(&self) -> Vec<crate::ToolDefinition> {
+        let usable: HashSet<String> = self
+            .tools
+            .list_for(self.thread.id)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        let mut offered = self.turn_tools.lock();
+        let tools: Vec<crate::ToolDefinition> = self
+            .tools
+            .list()
+            .into_iter()
+            .filter(|tool| usable.contains(&tool.name) || offered.contains(&tool.name))
+            .collect();
+        offered.extend(tools.iter().map(|tool| tool.name.clone()));
+        tools
+    }
+
     fn check_tool_name(&self, agent: &str, name: &str, require_advertised: bool) -> CoreResult<()> {
         let engine = self.permission_engine(agent);
         if name != LOAD_TOOL_NAME && self.tools.get(name).is_none() {
@@ -11936,6 +11968,17 @@ impl RunnerTask {
             return Err(CoreError::PermissionDenied(format!(
                 "tool {name} is disabled for this workflow agent turn or by permission policy. Do not retry it or try a different spelling."
             )));
+        }
+        // A tool this chat can't use now (a browser tool with no browser to
+        // serve it) says why and what to do instead.
+        if require_advertised
+            && !self.advertised_tools.lock().contains(name)
+            && let Some(reason) = self
+                .tools
+                .get(name)
+                .and_then(|tool| tool.unavailable_to(self.thread.id))
+        {
+            return Err(CoreError::Tool(reason));
         }
         let advertised = self.advertised_tools.lock();
         if require_advertised && !advertised.contains(name) {
@@ -14120,6 +14163,7 @@ impl RunnerTask {
             tool_execution_gates: self.tool_execution_gates.clone(),
             tool_promotions: self.tool_promotions.clone(),
             advertised_tools: Mutex::new(HashSet::new()),
+            turn_tools: Mutex::new(HashSet::new()),
             last_tool_catalog: Mutex::new(None),
             config: self.config.clone(),
             snapshots: self.snapshots.clone(),
