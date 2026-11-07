@@ -513,6 +513,65 @@ def scenario(mode):
             )
             # Its end reaches the chat as a turn of its own.
             runner.until("active_turn", tid, predicate=lambda value: value is None)
+            # Ending some turns' work (as a scheduled run ends its own): only
+            # what was named stops, and the chat is told nothing of it.
+            runner.until(
+                "thread_activity",
+                tid,
+                predicate=lambda activity: activity["activeTurn"] is None
+                and activity["background"] == 0
+                and activity["backgroundCommands"] == 0,
+            )
+            left = []
+            for marker in ("SDK_LEFT_A", "SDK_LEFT_B"):
+                started = c(
+                    "start_turn",
+                    tid,
+                    {
+                        "requestId": str(uuid4()),
+                        "text": "!tool bash " + json.dumps({"command": f"printf {marker}; sleep 30", "run_in_background": True}),
+                    },
+                )
+                prompts = runner.until("list_permissions")
+                c("reply_permission", prompts[0]["permissionId"], {"decision": "once"})
+                assert c("wait_turn", started["id"], {"timeout_ms": 10000})["status"] == "completed"
+                rows = runner.until(
+                    "list_shell_commands",
+                    tid,
+                    predicate=lambda rows: any(
+                        row["turnId"] == started["id"] and row["state"] == "running" for row in rows
+                    ),
+                )
+                left.append(next(row for row in rows if row["turnId"] == started["id"]))
+            first, second = left
+            assert first["background"] and second["background"], left
+            # What a kept call of the turn started goes on.
+            kept = c("stop_turn_work", tid, {"turns": [first["turnId"]], "keepCalls": [first["callId"]]})
+            assert kept == {"turns": [], "subagents": [], "commands": [], "workflows": []}, kept
+            assert c("get_shell_command", tid, first["id"])["state"] == "running"
+            # Naming the turn stops its command, not another turn's.
+            stopped = c("stop_turn_work", tid, {"turns": [first["turnId"]]})
+            assert [row["id"] for row in stopped["commands"]] == [first["id"]], stopped
+            assert not stopped["turns"] and not stopped["subagents"] and not stopped["workflows"], stopped
+            ended = runner.until(
+                "get_shell_command", tid, first["id"], predicate=lambda info: info["state"] == "stopped"
+            )
+            assert ended["endedBy"] == "turn_ended" and not ended["deliversNotice"], ended
+            assert c("get_shell_command", tid, second["id"])["state"] == "running"
+            # A running turn named stops alone; the other command goes once named.
+            slow = c("start_turn", tid, {"requestId": str(uuid4()), "text": "::mdslow"})
+            runner.until("active_turn", tid, predicate=lambda value: value is not None and value["id"] == slow["id"])
+            stopped = c("stop_turn_work", tid, {"turns": [slow["id"]], "commands": [second["id"]]})
+            assert stopped["turns"] == [slow["id"]], stopped
+            assert [row["id"] for row in stopped["commands"]] == [second["id"]], stopped
+            assert c("wait_turn", slow["id"], {"timeout_ms": 10000})["status"] == "interrupted"
+            ended = runner.until(
+                "get_shell_command", tid, second["id"], predicate=lambda info: info["state"] == "stopped"
+            )
+            assert ended["endedBy"] == "turn_ended" and not ended["deliversNotice"], ended
+            runner.until("active_turn", tid, predicate=lambda value: value is None)
+            activity = c("thread_activity", tid)
+            assert activity["lastTurn"]["id"] == slow["id"] and activity["backgroundCommands"] == 0, activity
             # MCP uses a real stdio peer with tools/resources/templates/prompts.
             c(
                 "configure_mcp",
