@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::stream;
+use futures::{StreamExt, stream};
 use haarness_core::{
     AgentRuntime, CoreResult, EventBus, ModelProvider, PermissionDecision, PermissionRule,
     ProviderEvent, ProviderMessage, ProviderRequest, ProviderStream, RuntimeConfig,
@@ -335,13 +335,15 @@ impl ToolRegistry for Calls {
 }
 
 /// Its first request asks for `calls` and, when `cut`, breaks off before
-/// it finishes. Its second asks for `then`, numbering the ids from zero
-/// again, as some providers do. Later requests answer.
+/// it finishes, or, when `stop`, stops the turn as Stop does once they are
+/// in, before any runs. Its second asks for `then`, numbering the ids from
+/// zero again, as some providers do. Later requests answer.
 #[derive(Clone, Default)]
 struct Batch {
     calls: Vec<&'static str>,
     then: Vec<&'static str>,
     cut: bool,
+    stop: bool,
     requests: Arc<Mutex<usize>>,
 }
 
@@ -358,7 +360,7 @@ impl ModelProvider for Batch {
     async fn stream(
         &self,
         request: ProviderRequest,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> CoreResult<ProviderStream> {
         let round = if request.tools.is_empty() {
             0
@@ -394,7 +396,17 @@ impl ModelProvider for Batch {
                 reason: "done".into(),
             }));
         }
-        Ok(Box::pin(stream::iter(events)))
+        // Read to its end, the response stops its turn: after its calls
+        // are in, before the first of them runs.
+        let stop = (first && self.stop).then_some(cancel);
+        Ok(Box::pin(stream::iter(events).chain(stream::poll_fn(
+            move |_| {
+                if let Some(cancel) = &stop {
+                    cancel.cancel();
+                }
+                std::task::Poll::Ready(None)
+            },
+        ))))
     }
 }
 
@@ -617,6 +629,50 @@ async fn reads_a_shutdown_outlived_count_as_begun() {
     })
     .await
     .expect("the turn's runner ends");
+}
+
+/// Stop that comes once a round's calls are in, before any runs, leaves
+/// each of them marked as not run: the delegation, started apart from the
+/// others before the first runs, as well as the read after it.
+#[tokio::test]
+async fn calls_stop_reached_before_any_ran_are_marked_not_run() {
+    let tools = BatchTools::default();
+    let runtime = batch_runtime(
+        Batch {
+            calls: vec!["task", "glance"],
+            stop: true,
+            ..Batch::default()
+        },
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &tools,
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    settled(&runtime, turn.id).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while runtime.active_turn(thread).await.unwrap().is_some()
+            || not_run(&runtime, thread).await.len() < 2
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both calls get a result");
+    assert_eq!(
+        not_run(&runtime, thread).await,
+        [("call-0".to_owned(), true), ("call-1".to_owned(), true)],
+        "Stop came before either began"
+    );
+    assert_eq!(
+        tools.glance.ran.available_permits(),
+        0,
+        "the read never ran"
+    );
 }
 
 /// A call made under an id an earlier round's call used, as providers that

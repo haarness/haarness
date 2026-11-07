@@ -225,10 +225,10 @@ struct ActiveTurn {
     /// (workflow agents, direct tools on its children) come from it, not
     /// from the agent's file as it is now.
     agent: AgentSnapshot,
-    /// The turn's calls that have begun since they were made, by call id. A
-    /// shutdown the turn outlives says the others never ran: reads (and
-    /// delegations) run together, so the first call without a result is
-    /// not the only one that began.
+    /// The turn's calls that have begun since they were made, by call id.
+    /// Stop, and a shutdown the turn outlives, say the others never ran:
+    /// reads (and delegations) run together, so the first call without a
+    /// result is not the only one that began.
     started_calls: Mutex<HashSet<String>>,
 }
 
@@ -9306,6 +9306,16 @@ impl RunnerTask {
         }
     }
 
+    /// Whether call `call_id` of this turn has begun since it was made. Once
+    /// the turn is no longer the thread's active one nothing says it has
+    /// not, so it counts as begun.
+    fn call_began(&self, call_id: &str) -> bool {
+        self.active
+            .get(&self.thread.id)
+            .filter(|entry| entry.id == self.turn.id)
+            .is_none_or(|active| active.started_calls.lock().contains(call_id))
+    }
+
     async fn stop_acceptance(&self) {
         let active = self
             .active
@@ -11083,9 +11093,16 @@ impl RunnerTask {
                             // why its child failed.
                             // A block by Auto's reviewer says so, so clients
                             // tell it from a person's reject.
+                            // A call Stop reached before it began did not
+                            // run, by the rule a shutdown follows: one
+                            // started apart (a delegation) or in a group too.
                             let metadata = match &error {
                                 CoreError::ReviewBlocked(review) => json!({ "review": review }),
-                                CoreError::Cancelled if stopped_first => crate::not_run_metadata(),
+                                CoreError::Cancelled
+                                    if stopped_first || !self.call_began(&call_id) =>
+                                {
+                                    crate::not_run_metadata()
+                                }
                                 _ => serde_json::Value::Null,
                             };
                             self.publish_item(ItemData::ToolResult {
