@@ -1937,6 +1937,7 @@
   "too large for Undo": "demasiado grande para Deshacer",
   "ignored": "ignorado",
   "outside the folder": "fuera de la carpeta",
+  "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} supera los 2 MiB y Deshacer no tiene una copia. Envía un mensaje para dejar el chat como está ahora.",
   "ctrl+] or f12 chat": "ctrl+] o f12 chat",
   "ctrl+shift+t new": "ctrl+shift+t nueva",
   "ctrl+shift+w close": "ctrl+shift+w cerrar",

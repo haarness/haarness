@@ -1937,6 +1937,7 @@
   "too large for Undo": "prevelika za poništavanje",
   "ignored": "zanemarena",
   "outside the folder": "izvan mape",
+  "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "Datoteka {path} veća je od 2 MiB, a poništavanje nema njenu kopiju. Pošaljite poruku da razgovor ostane kakav je sada.",
   "ctrl+] or f12 chat": "ctrl+] ili f12 chat",
   "ctrl+shift+t new": "ctrl+shift+t novi",
   "ctrl+shift+w close": "ctrl+shift+w zatvori",

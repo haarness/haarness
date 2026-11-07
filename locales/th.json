@@ -1937,6 +1937,7 @@
   "too large for Undo": "ใหญ่เกินกว่าจะเลิกทำได้",
   "ignored": "ถูกละเว้น",
   "outside the folder": "นอกโฟลเดอร์",
+  "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} มีขนาดเกิน 2 MiB และไม่มีสำเนาไว้สำหรับการเลิกทำ ส่งข้อความเพื่อคงแชตไว้อย่างที่เป็นอยู่ตอนนี้",
   "ctrl+] or f12 chat": "ctrl+] หรือ f12 แชต",
   "ctrl+shift+t new": "ctrl+shift+t ใหม่",
   "ctrl+shift+w close": "ctrl+shift+w ปิด",

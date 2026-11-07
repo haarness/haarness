@@ -1937,6 +1937,7 @@
   "too large for Undo": "大きすぎて元に戻せません",
   "ignored": "無視対象",
   "outside the folder": "フォルダー外",
+  "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} は 2 MiB を超えていて、元に戻すためのコピーがありません。チャットを今の状態のまま残すには、メッセージを送信してください。",
   "ctrl+] or f12 chat": "ctrl+] または f12 でチャット",
   "ctrl+shift+t new": "ctrl+shift+t 新規",
   "ctrl+shift+w close": "ctrl+shift+w 閉じる",

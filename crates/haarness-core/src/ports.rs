@@ -54,12 +54,21 @@ pub enum CoreError {
     Storage(String),
     #[error("tool error: {0}")]
     Tool(String),
-    /// Refused for good: no retry can do it, and the message says what to
-    /// do instead.
-    #[error("{0}")]
-    Refused(String),
+    /// Refused for good: no retry can do it (see [`Refusal`]).
+    #[error("{}", .0.message)]
+    Refused(Box<Refusal>),
     #[error("operation cancelled")]
     Cancelled,
+}
+
+/// What [`CoreError::Refused`] says: `message` what to do instead, in
+/// English, and `reason` and `path` the same for a client to put in the
+/// person's language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub reason: haarness_protocol::RefusalReason,
+    pub path: Option<String>,
+    pub message: String,
 }
 
 impl CoreError {

@@ -3487,12 +3487,18 @@ fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
 impl IntoResponse for ApiFailure {
     fn into_response(self) -> Response {
         let (status, code, retryable) = failure_parts(&self.0);
+        let (reason, path) = match &self.0 {
+            CoreError::Refused(refusal) => (Some(refusal.reason), refusal.path.clone()),
+            _ => (None, None),
+        };
         (
             status,
             Json(ApiError {
                 code: code.into(),
                 message: self.1.unwrap_or_else(|| self.0.to_string()),
                 retryable,
+                reason,
+                path,
             }),
         )
             .into_response()
@@ -3573,17 +3579,26 @@ mod failure_tests {
     }
 
     #[tokio::test]
-    async fn a_refusal_reads_as_its_sentence_and_is_not_worth_retrying() {
-        let refused = message(ApiFailure::from(CoreError::Refused(
-            "big.bin is over 2 MiB and Undo has no copy of it.".into(),
-        )))
+    async fn a_refusal_reads_as_its_sentence_and_names_its_reason_for_clients() {
+        let refused = message(ApiFailure::from(CoreError::Refused(Box::new(
+            haarness_core::Refusal {
+                reason: haarness_protocol::RefusalReason::NoUndoCopy,
+                path: Some("assets/big.bin".into()),
+                message: "assets/big.bin is over 2 MiB and Undo has no copy of it.".into(),
+            },
+        ))))
         .await;
         assert_eq!(
             refused["message"],
-            "big.bin is over 2 MiB and Undo has no copy of it."
+            "assets/big.bin is over 2 MiB and Undo has no copy of it."
         );
         assert_eq!(refused["code"], "refused");
         assert_eq!(refused["retryable"], false);
+        assert_eq!(refused["reason"], "no_undo_copy");
+        assert_eq!(refused["path"], "assets/big.bin");
+        // Other failures say neither.
+        let conflict = message(ApiFailure::from(CoreError::Conflict("big.bin".into()))).await;
+        assert!(conflict.get("reason").is_none() && conflict.get("path").is_none());
     }
 }
 

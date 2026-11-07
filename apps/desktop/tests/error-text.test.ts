@@ -201,3 +201,26 @@ test("a refusal that conflicts with how things stand reads as one, and keeps its
   const offline = Object.assign(new Error("computer offline"), { name: "ApiError", status: 409 });
   assert.equal(conflictAnswer(new Error(failureMessage(offline, { relay: true }))), false);
 });
+
+test("a redo Undo has no copy for says why in the reader's words, with its file, across the window", () => {
+  const english = "assets/big.bin is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.";
+  const key = "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.";
+  const body = { code: "refused", message: english, retryable: false, reason: "no_undo_copy", path: "assets/big.bin" };
+  const refused = new ApiError(409, "refused", english, false, body);
+  assert.deepEqual(errorText(refused), { message: key, values: { path: "assets/big.bin" }, known: true });
+  // Main hands the window the sentence, which it reads back the same way.
+  assert.equal(failureMessage(refused), english);
+  assert.deepEqual(errorText(new Error(failureMessage(refused))), {
+    message: key,
+    values: { path: "assets/big.bin" },
+    known: true,
+  });
+  // The reason decides, not the server's wording, which may change.
+  const reworded = new ApiError(409, "refused", "No copy of assets/big.bin.", false, { ...body, message: "No copy of assets/big.bin." });
+  assert.equal(failureMessage(reworded), english);
+  // A refusal it has no words for, or a server that names no reason, says
+  // the server's own sentence.
+  const unknown = new ApiError(409, "refused", "Something else entirely.", false, { ...body, reason: "other", message: "Something else entirely." });
+  assert.deepEqual(errorText(unknown), { message: "Something else entirely.", known: false });
+  assert.equal(failureMessage(unknown), "Something else entirely.");
+});

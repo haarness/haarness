@@ -1937,6 +1937,7 @@
   "too large for Undo": "太大，无法撤销",
   "ignored": "已忽略",
   "outside the folder": "文件夹以外",
+  "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} 超过 2 MiB，撤销没有它的副本。若要让对话保持现在的样子，请发送一条消息。",
   "ctrl+] or f12 chat": "ctrl+] 或 f12 返回聊天",
   "ctrl+shift+t new": "ctrl+shift+t 新建",
   "ctrl+shift+w close": "ctrl+shift+w 关闭",

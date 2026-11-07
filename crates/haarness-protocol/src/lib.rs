@@ -1524,6 +1524,26 @@ pub struct ApiError {
     pub code: String,
     pub message: String,
     pub retryable: bool,
+    /// Why, for a client to say in the person's own language, where
+    /// `message` says it in English: set on some refusals (`code`
+    /// `refused`), absent from other failures and from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<RefusalReason>,
+    /// The file `reason` is about, relative to the folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Why a request was refused for good (see [`ApiError::reason`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalReason {
+    /// Redo needs `path`, a file over 2 MiB, as an undone turn left it, and
+    /// Undo has no copy of that: sending a message keeps the chat as it is.
+    NoUndoCopy,
+    /// A reason from a newer server: `message` says it.
+    #[serde(other)]
+    Other,
 }
 
 #[derive(OpenApi)]
@@ -1539,6 +1559,7 @@ pub struct ApiError {
         RevertState,
         UnrestoredFile,
         UnrestoredReason,
+        RefusalReason,
         FileDiff,
         FileDiffStatus,
         DiffTruncation,

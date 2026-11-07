@@ -2689,7 +2689,25 @@ impl App {
                         self.todos = client.todos(self.thread.id).await.unwrap_or_default();
                         self.notice = self.undo_notice("Redone");
                     }
-                    Err(error) => self.notice = undo_error(&error, "Redo"),
+                    Err(error) => match crate::api::missing_undo_copy(&error) {
+                        // In the person's language, and whole: the band
+                        // cuts a long notice, where a toast wraps it.
+                        Some(path) => {
+                            let path = path.chars().filter(|c| !c.is_control()).collect::<String>();
+                            let said = self.language.format(
+                                "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",
+                                &[("path", &path)],
+                            );
+                            self.notice.clone_from(&said);
+                            self.show_toast(
+                                None,
+                                said,
+                                ToastVariant::Error,
+                                std::time::Duration::from_secs(8),
+                            );
+                        }
+                        None => self.notice = undo_error(&error, "Redo"),
+                    },
                 }
             }
             "fork" => {

@@ -541,8 +541,10 @@ whatever its size, stops the step with `409 conflict` before anything
 changes. Redo takes a file left so to where the last redo does, as it was
 before the undo, and names it until then. Redo refuses, before writing
 anything, only when a copy it needs is gone; its code is
-`refused` (409, not retryable), and a new message keeps the chat as it is
-now. The ignored and outside files that the
+`refused` (409, not retryable), with `reason` `no_undo_copy` and the file's
+`path` beside the English `message`, so a client can say it in the person's
+language (Desktop and the terminal UI do), and a new message keeps the chat
+as it is now. The ignored and outside files that the
 undone turns' `write`, `edit`, `multiedit` and `apply_patch` calls (direct,
 in a `batch`, or a child agent's during those turns) changed stay as they
 are too. The thread's `revert` lists them in `unrestored` as `{path, reason}`,

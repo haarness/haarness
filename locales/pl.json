@@ -1937,6 +1937,7 @@
   "too large for Undo": "za duży do cofnięcia",
   "ignored": "ignorowany",
   "outside the folder": "poza folderem",
+  "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "Plik {path} ma ponad 2 MiB, a Cofnij nie ma jego kopii. Wyślij wiadomość, aby zachować czat w obecnym stanie.",
   "ctrl+] or f12 chat": "ctrl+] lub f12 czat",
   "ctrl+shift+t new": "ctrl+shift+t nowa",
   "ctrl+shift+w close": "ctrl+shift+w zamknij",

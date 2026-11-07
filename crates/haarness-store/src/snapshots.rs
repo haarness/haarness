@@ -26,7 +26,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use haarness_core::{
-    ChangedFile, CoreError, CoreResult, DeltaRestore, SnapshotInfo, SnapshotStore, UndoStep,
+    ChangedFile, CoreError, CoreResult, DeltaRestore, Refusal, SnapshotInfo, SnapshotStore,
+    UndoStep,
 };
 use haarness_protocol::{FileDiff, FileDiffStatus, ThreadId, UnrestoredFile, UnrestoredReason};
 use parking_lot::Mutex;
@@ -1767,9 +1768,13 @@ fn sync_folder(_folder: &Path) -> std::io::Result<()> {
 /// a copy it needs being gone: no retry can, and a new message keeps the
 /// chat as it is.
 fn no_copy_for_redo(path: &str) -> CoreError {
-    CoreError::Refused(format!(
-        "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now."
-    ))
+    CoreError::Refused(Box::new(Refusal {
+        reason: haarness_protocol::RefusalReason::NoUndoCopy,
+        path: Some(path.to_owned()),
+        message: format!(
+            "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now."
+        ),
+    }))
 }
 
 /// `path` as its folder lists it: the entry whose name matches the last
@@ -3710,7 +3715,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&error, CoreError::Refused(message) if message.starts_with("data.txt is over 2 MiB")),
+            matches!(&error, CoreError::Refused(refusal) if refusal.message.starts_with("data.txt is over 2 MiB")),
             "{error}"
         );
         assert_eq!(read("data.txt").as_deref(), Some(&b"v1\n"[..]));
@@ -3852,7 +3857,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&error, CoreError::Refused(message) if message.starts_with("big.bin is over 2 MiB")),
+            matches!(
+                &error,
+                CoreError::Refused(refusal)
+                    if refusal.reason == haarness_protocol::RefusalReason::NoUndoCopy
+                        && refusal.path.as_deref() == Some("big.bin")
+                        && refusal.message.starts_with("big.bin is over 2 MiB")
+            ),
             "{error}"
         );
         assert_eq!(read("big.bin"), None);

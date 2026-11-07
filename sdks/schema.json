@@ -67,6 +67,24 @@
           "message": {
             "type": "string"
           },
+          "path": {
+            "description": "The file `reason` is about, relative to the folder.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RefusalReason",
+                "description": "Why, for a client to say in the person's own language, where\n`message` says it in English: set on some refusals (`code`\n`refused`), absent from other failures and from older servers."
+              }
+            ]
+          },
           "retryable": {
             "type": "boolean"
           }
@@ -4655,6 +4673,14 @@
           "sha256"
         ],
         "type": "object"
+      },
+      "RefusalReason": {
+        "description": "Why a request was refused for good (see [`ApiError::reason`]).",
+        "enum": [
+          "no_undo_copy",
+          "other"
+        ],
+        "type": "string"
       },
       "Report": {
         "properties": {

@@ -2,7 +2,7 @@ import { language, t } from "./i18n";
 import { Select } from "./Select";
 import { For, Show, createSignal, onMount, type JSX } from "solid-js";
 import { Icon, type IconName, type IconSize } from "./icons";
-import { cancelled, errorText } from "./error-text";
+import { cancelled, errorText, isolatedValues } from "./error-text";
 import { relativeTime } from "./relative-time";
 import { now } from "./clock";
 export { Icon, type IconName } from "./icons";
@@ -346,7 +346,7 @@ export function ErrorNotice(props: {
  * language: what an `ErrorNotice` or the error banner says. */
 export function ErrorWords(props: { error: unknown }) {
   const text = () => errorText(props.error);
-  const say = (value: string) => (text().known ? t(value) : value);
+  const say = (value: string) => (text().known ? t(value, isolatedValues(text().values)) : value);
   return (
     <>
       <Show when={text().title}>{(title) => <strong>{say(title())}</strong>}</Show>

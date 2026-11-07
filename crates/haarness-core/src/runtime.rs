@@ -556,8 +556,8 @@ fn failure_message(error: &mut CoreError) -> Option<&mut String> {
         | CoreError::PermissionDenied(message)
         | CoreError::Invalid(message)
         | CoreError::Storage(message)
-        | CoreError::Tool(message)
-        | CoreError::Refused(message) => Some(message),
+        | CoreError::Tool(message) => Some(message),
+        CoreError::Refused(refusal) => Some(&mut refusal.message),
         CoreError::PermissionRejected(_)
         | CoreError::ReviewBlocked(_)
         | CoreError::Provider(_)

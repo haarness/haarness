@@ -1609,6 +1609,8 @@ mod tests {
                 status,
                 code: Some("conflict".into()),
                 message: "conflict: This chat already has a turn running.".into(),
+                reason: None,
+                path: None,
             })
         };
         let error = refused(&refusal(reqwest::StatusCode::CONFLICT));

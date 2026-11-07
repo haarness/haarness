@@ -12180,13 +12180,20 @@ test("undo and redo through two turns that took a file past 2 MiB name it until 
   for (const folder of folders)
     for (const set of await readdir(folder)) await rm(join(folder, set), { recursive: true });
   await menu("Redo turn");
+  // The file is set apart from the sentence, which keeps it whole right to left.
   await expect(page.locator(".error-banner")).toContainText(
-    "undo-two-big.bin is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",
+    "\u2068undo-two-big.bin\u2069 is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",
   );
   expect(await said()).toBe("o0\n");
   expect(existsSync(big)).toBe(false);
   await shots("redo-two-large-refused", page.locator(".error-banner"));
-  await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
+  // In the reader's language, the file kept whole in a right-to-left sentence.
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(page.locator(".error-banner")).toContainText("وليست لدى التراجع نسخة منه");
+  await expect(page.locator(".error-banner")).toContainText("\u2068undo-two-big.bin\u2069");
+  await shots("redo-two-large-refused-rtl", page.locator(".error-banner"));
+  await page.evaluate(() => window.haarness.preferences({ language: "en", theme: "dark" }));
   await rm(other);
   expect(errors).toEqual([]);
 });

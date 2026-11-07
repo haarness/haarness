@@ -22872,6 +22872,8 @@ fn undo_redo_and_diff_failures_read_as_what_to_do() {
             status: reqwest::StatusCode::from_u16(status).unwrap(),
             code: Some(code.into()),
             message: message.into(),
+            reason: None,
+            path: None,
         }
         .into()
     };
@@ -23734,6 +23736,79 @@ async fn redo_typed_over_an_undone_prompt_runs_and_leaves_the_composer_empty() {
     assert!(app.composer.is_empty(), "{}", app.composer.text());
     assert!(app.thread.revert.is_none());
     assert!(app.notice.starts_with("Redone"), "{}", app.notice);
+}
+
+#[tokio::test]
+async fn a_redo_undo_has_no_copy_for_says_why_whole_in_the_persons_language() {
+    let english = "assets/big.bin is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.";
+    for language in [
+        crate::locale::Language::English,
+        crate::locale::Language::Japanese,
+        crate::locale::Language::Arabic,
+    ] {
+        let (mut app, _) = undo_fixture();
+        app.language = language;
+        app.thread.revert = Some(haarness_protocol::RevertState {
+            sequence: 2,
+            snapshot_id: "backup".into(),
+            base_snapshot_id: Some("base".into()),
+            ..Default::default()
+        });
+        let refusal = serde_json::json!({
+            "code": "refused",
+            "message": english,
+            "retryable": false,
+            "reason": "no_undo_copy",
+            "path": "assets/big.bin",
+        });
+        let (client, server) =
+            workspace_http_status_client(vec![(409, refusal.to_string())], false).await;
+        app.execute_command("/redo", &client).await.unwrap();
+        assert!(server.await.unwrap()[0].contains("/unrevert"));
+        let said = language.format(
+            "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",
+            &[("path", "assets/big.bin")],
+        );
+        if language == crate::locale::Language::English {
+            assert_eq!(said, english);
+        } else {
+            assert_ne!(said, english, "{language:?} has its own words");
+        }
+        assert!(said.contains("assets/big.bin"), "{said}");
+        assert_eq!(app.notice, said);
+        let toast = app.notification_toast.as_ref().expect("a toast");
+        assert_eq!(toast.message, said);
+        assert!(toast.variant == crate::state::ToastVariant::Error);
+        // The band cuts it at these widths; the toast has it whole, every
+        // row it wraps to on screen.
+        for width in [80_u16, 100] {
+            let lines = app.lines((u32::from(width), 30));
+            let inner = 60.min(usize::from(width) - 6) - 6;
+            for row in textwrap::wrap(&said, inner) {
+                assert!(
+                    lines.iter().any(|line| line.text().contains(row.trim())),
+                    "{language:?} {width}: {row:?} in {:#?}",
+                    lines.iter().map(Line::text).collect::<Vec<_>>()
+                );
+            }
+            assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
+        }
+    }
+
+    // A server that names no reason is said as before.
+    let (mut app, _) = undo_fixture();
+    app.thread.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+        ..Default::default()
+    });
+    let refusal = serde_json::json!({"code": "refused", "message": english, "retryable": false});
+    let (client, _server) =
+        workspace_http_status_client(vec![(409, refusal.to_string())], false).await;
+    app.execute_command("/redo", &client).await.unwrap();
+    assert_eq!(app.notice, format!("Redo failed: {english}"));
+    assert!(app.notification_toast.is_none());
 }
 
 #[tokio::test]

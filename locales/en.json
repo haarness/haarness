@@ -1937,6 +1937,7 @@
   "too large for Undo": "too large for Undo",
   "ignored": "ignored",
   "outside the folder": "outside the folder",
+  "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",
   "ctrl+] or f12 chat": "ctrl+] or f12 chat",
   "ctrl+shift+t new": "ctrl+shift+t new",
   "ctrl+shift+w close": "ctrl+shift+w close",
