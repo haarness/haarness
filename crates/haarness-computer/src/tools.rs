@@ -521,7 +521,7 @@ impl MacTool {
         match self.helper(op, input.clone(), timeout, cancel).await {
             Err(error) if error.code == "paused" => {
                 self.computer
-                    .wait_while_paused(cancel)
+                    .wait_after_refusal(cancel)
                     .await
                     .map_err(from_helper)?;
                 self.helper(op, input, timeout, cancel)
@@ -1188,7 +1188,7 @@ impl MacTool {
             Ok(_) => Ok(()),
             Err(error) if error.code == "paused" => {
                 self.computer
-                    .wait_while_paused(&context.cancel)
+                    .wait_after_refusal(&context.cancel)
                     .await
                     .map_err(from_helper)?;
                 Err(tool_error(format!("{} {RESUMED}", error.message)))
