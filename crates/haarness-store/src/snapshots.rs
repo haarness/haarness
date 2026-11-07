@@ -1836,14 +1836,14 @@ fn owner_writable(path: &Path) -> std::io::Result<()> {
 }
 
 /// Flush `folder`'s entries, so a file renamed into it stays after a crash.
-#[cfg(unix)]
+/// Only Unix opens a folder as a file to flush it; on Windows NTFS's own
+/// journal carries the rename.
 fn sync_folder(folder: &Path) -> std::io::Result<()> {
-    File::open(folder)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_folder(_folder: &Path) -> std::io::Result<()> {
-    Ok(())
+    if cfg!(unix) {
+        File::open(folder)?.sync_all()
+    } else {
+        Ok(())
+    }
 }
 
 /// The refusal of a redo that no step can take to where the last one goes,
