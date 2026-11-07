@@ -99,6 +99,21 @@ fn destructive(label: &str, request: Value) -> Entry {
         ..entry(label, "", request)
     }
 }
+/// An MCP server's status line, with what the server said beside it (why
+/// it failed, how many tools it offers) in the words `haarness mcp ls` and
+/// Desktop's settings show.
+fn mcp_status(row: &Value) -> String {
+    let status = text(row, "runtimeStatus");
+    match row["runtimeDetail"]
+        .as_str()
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+    {
+        Some(detail) => format!("Status: {status} · {detail}"),
+        None => format!("Status: {status}"),
+    }
+}
+
 fn text<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or("")
 }
@@ -1534,7 +1549,7 @@ impl ManagementService {
             let mut view = View {
                 title: format!("MCP · {name}"),
                 lines: vec![
-                    format!("Status: {}", text(&row, "runtimeStatus")),
+                    mcp_status(&row),
                     if base {
                         format!("Source: {} (system folder, read-only)", text(&row, "file"))
                     } else {
@@ -2381,9 +2396,32 @@ fn router_form(input: &Value, needs_key: bool) -> View {
 
 #[cfg(test)]
 mod tests {
-    use super::{install_form, installed_entries, replace_label, search_entry};
+    use super::{install_form, installed_entries, mcp_status, replace_label, search_entry};
     use serde_json::{Value, json};
     use std::fs;
+
+    /// A server's page says why it failed, as `haarness mcp ls` does.
+    #[test]
+    fn an_mcp_server_page_says_what_its_server_said() {
+        let failed = json!({
+            "runtimeStatus": "failed",
+            "runtimeDetail": "MCP server \"docs\" has no usable URL: the environment variable DOCS_HOST it names is not set."
+        });
+        assert_eq!(
+            mcp_status(&failed),
+            "Status: failed · MCP server \"docs\" has no usable URL: the environment variable DOCS_HOST it names is not set."
+        );
+        assert_eq!(
+            mcp_status(
+                &json!({"runtimeStatus": "connected", "runtimeDetail": "2 tools discovered"})
+            ),
+            "Status: connected · 2 tools discovered"
+        );
+        assert_eq!(
+            mcp_status(&json!({"runtimeStatus": "disabled", "runtimeDetail": null})),
+            "Status: disabled"
+        );
+    }
 
     /// Editing a provider in Settings writes its name, address and models, and
     /// nothing else: a TOML entry keeps its context window and tool settings,
