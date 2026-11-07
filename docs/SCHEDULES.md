@@ -75,7 +75,9 @@ Every native entry runs the hidden command
 
 1. A disabled schedule, or one whose previous run still holds its lock, records a **skipped** run
    and exits. A lock whose process has gone is cleared (see [Schedules](REFERENCE.md#schedules) for
-   the exact rule).
+   the exact rule). launchd, systemd and Task Scheduler start one run of a schedule at a time, so a
+   time that comes while a run is still going (or a catch-up after the computer slept) is skipped
+   without a record.
 2. It starts or reuses the folder's server over the authenticated loopback API.
 3. It creates a chat titled after the schedule, marked with the schedule's id and name, and starts
    one turn with the stored prompt, model, agent and variant.
@@ -83,17 +85,29 @@ Every native entry runs the hidden command
    permission prompts on their own and cannot use the question tool, since nobody is there to answer.
    Requests only a person can answer, such as a site in the user's Chrome, fail at once instead of
    waiting ([Chrome approvals](PERMISSIONS-AND-EXECUTION.md#chrome-approvals)).
-5. What the turn leaves in the background is waited for: subagents, workflows and shell commands (a
-   command stops at the `timeout` the agent gave or `execution.shell_timeout_ms`, even when the agent
-   gave none), and so are the turns their ends start; a foreground command never moves there by
-   itself in a scheduled run. The wait lasts 30 minutes at most, counted from the end of the first
-   turn. Whatever is still going then is stopped without telling the chat, so no turn starts there
-   after the run, and the run is recorded as **failed**, naming what was stopped.
-6. It then records **success** or **failed** with the chat and turn ids and the agent's answer: what
-   it said in its first turn and in every turn after it. The run fails, with the reason as its error,
-   when the first or the last of those turns failed or was stopped, or when a subagent it ran in the
-   background failed, as `haarness run --wait-background` does. A one-shot schedule then disables
-   itself.
+5. The run then waits for its own work: the subagents, workflows and shell commands its turn started
+   in the background, the turns their results start, and what those turns start in turn. Work a
+   person starts in the chat meanwhile is theirs: the run neither waits for it nor stops it. How long
+   it waits:
+   - Subagents, workflows and the turns their results start have 30 minutes, counted from the end of
+     the first turn, or from the end of the run's last command with a time limit if that came later.
+   - A command with a time limit of its own (the `timeout` the agent gave, or
+     `execution.shell_timeout_ms`) is waited for until it ends, however long that limit is, and so
+     is the turn its end starts. Nothing is stopped while one runs.
+   - A command with no time limit (`execution.shell_timeout_ms` set to 0) does not hold the run.
+     When everything else has ended, it is stopped, the run still succeeds, and its record's `note`
+     names the command.
+   When the 30 minutes run out, whatever of the run's own work is still going is stopped and the
+   run is recorded as **failed**, naming it. Nothing the run stops tells the chat, so no turn starts
+   there after the run. The time is wall-clock time, so the time a computer spends asleep counts.
+6. It records **success** or **failed** with the chat and turn ids and the agent's answer: what it
+   said in the run's own turns. The run fails, with the reason as its error, when its first or last
+   turn failed or was stopped, or when a subagent it ran in the background failed, as
+   `haarness run --wait-background` does. When the first turn fails, what it had started is stopped
+   and named in the error. A one-shot schedule then disables itself.
+
+A run writes its lock again every minute, so however long it runs, the next run does not take the
+lock for an abandoned one.
 
 Credentials are read from the normal `haarness auth` store or the environment when the run starts;
 none are written into the native entry.
@@ -103,7 +117,7 @@ none are written into the native entry.
 - `crates/haarness-scheduler`: triggers and natural phrases, the job store, run history and locks,
   and the launchd, systemd and Task Scheduler backends. `cargo test -p haarness-scheduler`.
 - `crates/haarness-cli/src/main.rs`: the `schedule` commands and the trigger path above.
-- `scripts/test-schedule-background.py`: a run's subagents and commands in the background, and its
-  limit, through a real daemon with the echo provider.
+- `scripts/test-scheduled-run-waits.py`: what a run waits for and stops (its subagents, workflows and
+  commands, never a person's), through a real daemon with the echo provider.
 - `crates/haarness-server/src/tools.rs`: the model's `schedule` tool. `cargo test -p haarness-server schedule`.
 - `crates/haarness-cli/src/management/ui.rs`: the `schedules` management form used by the TUI and Desktop.

@@ -432,8 +432,8 @@ stops them too, and so does archiving the chat. A command ended by a person or i
 agent stopped itself does not. `haarness run --wait-background` and scheduled
 runs wait for their commands and print what the agent says when they end; a
 waiting run that stops waiting (its `--background-timeout-ms`, Ctrl-C) stops
-them. A scheduled run also waits for its subagents and workflows, 30 minutes
-at most after its first turn, and then stops what is left (see
+them. A scheduled run also waits for its own subagents and workflows, for a
+limited time, then stops what is left of its own work and nothing else (see
 [Schedules](SCHEDULES.md#what-a-run-does)). A run waits for the commands started in its chat once its turn began:
 continuing a chat (`--session`, `--continue`) where someone else may start
 commands meanwhile, give it a `--background-timeout-ms`. Without the flag `run` leaves the commands the agent started in the
@@ -468,11 +468,13 @@ cron conversion intentionally supports the realistic daily/weekly subset and
 rejects expressions it cannot represent faithfully. On Linux an interval
 timer first fires one interval after it starts, then one interval after each
 run. One-shot jobs disable themselves after their terminal run, and an overlap
-is recorded as skipped. A run keeps its overlap lock for as long as it runs;
-the next run clears a lock whose process has exited, or whose process ID now
-belongs to a process started after the lock was taken. Where the process
-cannot be checked (Windows, or a lock without a readable process ID), a lock
-older than an hour is cleared.
+is recorded as skipped (a fire the operating system's scheduler drops because
+the previous run is still going leaves no record). A run keeps its overlap
+lock for as long as it runs, writing it again every minute; the next run
+clears a lock whose process has exited, or whose process ID now belongs to a
+process started after the lock was taken. Where the process cannot be checked
+(Windows, or a lock without a readable process ID), a lock not written for an
+hour is cleared.
 
 Each run creates an ordinary durable Haarness thread using the selected
 provider/model and the schedule's captured workspace. Headless runs explicitly
