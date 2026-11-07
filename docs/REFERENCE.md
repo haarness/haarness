@@ -834,11 +834,12 @@ A local server's `command` without a folder in it (`npx`, `uvx`) is looked for o
 Haarness runs with. Desktop opened from Finder or the Dock never ran your shell profile, so
 when the command is not there Haarness also looks where such launchers are usually
 installed: the absolute folders in `HAARNESS_MCP_PATH` first, then `~/.local/bin`,
-`~/.cargo/bin`, `~/.bun/bin`, the Node version managers' folders (Volta's `bin`, the asdf
-and mise shims, fnm's default alias, nvm's `current` link or else the version its `default`
-alias names, the newest installed one when it names none; nvm's folder is `NVM_DIR` when that
-is absolute), pnpm's and Yarn's global folders, `/opt/homebrew/bin` on macOS and
-`/usr/local/bin`. Only folders that exist are used, nothing is run to find them, and the
+`~/.cargo/bin`, `~/.bun/bin`, `/opt/homebrew/bin` on macOS and `/usr/local/bin`, and last
+the Node version managers' folders (Volta's `bin`, the asdf and mise shims, fnm's default
+alias, nvm's `current` link or else the version its `default` alias names, the newest
+installed one when it names none; nvm's folder is `NVM_DIR` when that is absolute) and pnpm's
+and Yarn's global folders, so a Homebrew `npx` still wins over a version manager's stale copy.
+Only folders that exist are used, nothing is run to find them, and the
 server starts with them after its own PATH, so `npx` finds the `node` installed beside it. An
 entry that sets `PATH` in its `env`, or names its command by path, starts as written.
 

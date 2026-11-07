@@ -39,7 +39,18 @@ pub(super) fn resolve(program: &str, config: &McpConfigureRequest) -> Option<(Pa
         home.as_deref(),
         extra.as_deref(),
         nvm.as_deref(),
+        &system_directories(),
     )
+}
+
+/// The system's own folders of installed programs.
+fn system_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    if cfg!(target_os = "macos") {
+        directories.push(PathBuf::from("/opt/homebrew/bin"));
+    }
+    directories.push(PathBuf::from("/usr/local/bin"));
+    directories
 }
 
 fn fallback_path(
@@ -49,6 +60,7 @@ fn fallback_path(
     home: Option<&OsStr>,
     extra: Option<&OsStr>,
     nvm: Option<&OsStr>,
+    system: &[PathBuf],
 ) -> Option<(PathBuf, OsString)> {
     let original = std::env::split_paths(inherited)
         .map(|path| cwd.join(path))
@@ -63,25 +75,26 @@ fn fallback_path(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let home = home.map(Path::new).filter(|home| home.is_absolute());
     if let Some(home) = home {
-        let home = Path::new(home);
-        if home.is_absolute() {
-            directories.extend([
-                home.join(".local/bin"),
-                home.join(".cargo/bin"),
-                home.join(".bun/bin"),
-            ]);
-            let nvm = nvm
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .unwrap_or_else(|| home.join(".nvm"));
-            directories.extend(node_managers(home, &nvm));
-        }
+        directories.extend([
+            home.join(".local/bin"),
+            home.join(".cargo/bin"),
+            home.join(".bun/bin"),
+        ]);
     }
-    if cfg!(target_os = "macos") {
-        directories.push(PathBuf::from("/opt/homebrew/bin"));
+    directories.extend(system.iter().cloned());
+    // The version managers' folders come last: they help only where nothing
+    // above has the launcher, so a server started without a terminal's PATH
+    // (a launchd agent, `ssh host haarness serve`) keeps the Homebrew npx it
+    // found before over a stale nvm version or a shim with no node chosen.
+    if let Some(home) = home {
+        let nvm = nvm
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| home.join(".nvm"));
+        directories.extend(node_managers(home, &nvm));
     }
-    directories.push(PathBuf::from("/usr/local/bin"));
     // Only folders that are there reach the launcher's PATH.
     directories.retain(|path| path.is_dir());
     let executable = locate(program, &directories)?;
@@ -251,6 +264,7 @@ mod tests {
             Some(root.as_os_str()),
             None,
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(path, directory.join(name));
@@ -269,7 +283,8 @@ mod tests {
                 installed.as_os_str(),
                 Some(root.as_os_str()),
                 None,
-                None
+                None,
+                &[]
             )
             .is_none()
         );
@@ -280,7 +295,8 @@ mod tests {
                 installed.as_os_str(),
                 None,
                 Some(OsStr::new("relative/fallback")),
-                None
+                None,
+                &[]
             )
             .is_none()
         );
@@ -322,6 +338,16 @@ mod tests {
         }
 
         fn find(&self, program: &str, nvm: Option<&Path>) -> Option<(PathBuf, OsString)> {
+            self.find_with(program, nvm, &[])
+        }
+
+        /// As `find`, with `system` as the system's own program folders.
+        fn find_with(
+            &self,
+            program: &str,
+            nvm: Option<&Path>,
+            system: &[PathBuf],
+        ) -> Option<(PathBuf, OsString)> {
             fallback_path(
                 program,
                 &self.0,
@@ -329,6 +355,7 @@ mod tests {
                 Some(self.0.as_os_str()),
                 None,
                 nvm.map(Path::as_os_str),
+                system,
             )
         }
     }
@@ -468,5 +495,30 @@ mod tests {
         system.launcher(".nvm/versions/node/v22.11.0/bin", "haarness-fixture-npx");
         system.file(".nvm/alias/default", "system");
         assert!(system.find("haarness-fixture-npx", None).is_none());
+    }
+
+    /// A launcher in the system's own folders (Homebrew's) is the one a
+    /// server without a terminal's PATH found before; a version manager's
+    /// stale copy never takes its place.
+    #[test]
+    fn the_systems_launcher_comes_before_a_version_managers() {
+        let home = Home::new();
+        let homebrew = home.launcher("opt/homebrew/bin", "haarness-fixture-npx");
+        for stale in [
+            ".nvm/versions/node/v14.21.3/bin",
+            ".volta/bin",
+            ".asdf/shims",
+        ] {
+            home.launcher(stale, "haarness-fixture-npx");
+        }
+        let system = [homebrew.parent().unwrap().to_path_buf()];
+        let (path, env) = home
+            .find_with("haarness-fixture-npx", None, &system)
+            .unwrap();
+        assert_eq!(path, homebrew);
+        // The managers' folders still follow, after the system's.
+        let env = std::env::split_paths(&env).collect::<Vec<_>>();
+        let at = |folder: &str| env.iter().position(|path| path == &home.0.join(folder));
+        assert!(at("opt/homebrew/bin") < at(".volta/bin"), "{env:?}");
     }
 }
