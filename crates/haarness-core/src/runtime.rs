@@ -1039,6 +1039,7 @@ fn failure_to_explain(error: &CoreError) -> bool {
     match error {
         CoreError::PermissionRejected(_)
         | CoreError::ReviewBlocked(_)
+        | CoreError::HookRefused { .. }
         | CoreError::Cancelled => false,
         // Worded where a `PreToolUse` hook's block is turned into an error.
         CoreError::PermissionDenied(message) => {
@@ -20471,6 +20472,16 @@ mod tests {
         for error in [
             CoreError::PermissionRejected("The user rejected this action.".into()),
             CoreError::PermissionDenied("blocked by a PreToolUse hook: not on main".into()),
+            CoreError::HookRefused {
+                message: "A hook refused this call: not on main".into(),
+                reason: Some("not on main".into()),
+                failed: false,
+            },
+            CoreError::HookRefused {
+                message: "A hook could not answer, so this call was refused".into(),
+                reason: Some("exit status 2".into()),
+                failed: true,
+            },
             CoreError::ReviewBlocked(Box::new(haarness_protocol::PermissionReview {
                 status: haarness_protocol::PermissionReviewStatus::Blocked,
                 risk: None,
