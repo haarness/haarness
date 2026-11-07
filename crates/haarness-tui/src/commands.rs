@@ -677,6 +677,14 @@ const fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
+/// The chat a word in a command names by its ID.
+enum SessionMatch {
+    None,
+    One(haarness_protocol::ThreadId),
+    /// A short ID more than one chat ends in.
+    Several,
+}
+
 impl App {
     /// The undoable checkpoints in this session, newest first, each labelled
     /// by the request that produced it. Stepping back one change at a time is
@@ -2700,12 +2708,25 @@ impl App {
                 }
             }
             "rename" => {
+                let (first, rest) = arguments
+                    .split_once(char::is_whitespace)
+                    .map_or((arguments, ""), |(first, rest)| (first, rest.trim()));
+                let named = self.matching_session_id(first);
                 if arguments.is_empty() {
                     self.refuse_command("Usage: /rename [session-id] <title>");
-                } else if self.matching_session_id(arguments).is_some() {
+                } else if matches!(named, SessionMatch::Several) {
+                    // A short ID two chats share names neither; renaming the
+                    // open chat to the ID and title would surprise as much.
+                    self.refuse_command(format!(
+                        "More than one chat ends in {first} · type the full session ID"
+                    ));
+                } else if matches!(named, SessionMatch::One(_)) && rest.is_empty() {
                     self.notice = "Type a title after the session ID".into();
                 } else {
-                    let (target, title) = self.rename_target(arguments);
+                    let (target, title) = match named {
+                        SessionMatch::One(id) => (id, rest),
+                        _ => (self.thread.id, arguments),
+                    };
                     let updated = client
                         .update_thread(
                             target,
@@ -4726,30 +4747,21 @@ impl App {
         self.switch_thread(thread, client).await
     }
 
-    fn rename_target<'a>(&self, arguments: &'a str) -> (haarness_protocol::ThreadId, &'a str) {
-        let Some((candidate, title)) = arguments.split_once(char::is_whitespace) else {
-            return (self.thread.id, arguments);
-        };
-        let title = title.trim();
-        if title.is_empty() {
-            return (self.thread.id, arguments);
-        }
-        self.matching_session_id(candidate)
-            .map_or((self.thread.id, arguments), |id| (id, title))
-    }
-
     /// The chat `candidate` names: its full ID, or the short ID the TUI
-    /// shows (`#` optional), when exactly one chat has it. Any other word,
-    /// even a piece of an ID ("db", "add"), is the start of a title.
-    fn matching_session_id(&self, candidate: &str) -> Option<haarness_protocol::ThreadId> {
+    /// shows (`#` optional). Any other word, even a piece of an ID ("db",
+    /// "add"), names none and starts a title.
+    fn matching_session_id(&self, candidate: &str) -> SessionMatch {
         let candidate = candidate.strip_prefix('#').unwrap_or(candidate);
         let mut matches = self.threads.iter().filter(|thread| {
             let id = thread.id.to_string();
             id.eq_ignore_ascii_case(candidate)
                 || crate::view::span::short_id(&id).eq_ignore_ascii_case(candidate)
         });
-        let first = matches.next()?.id;
-        matches.next().is_none().then_some(first)
+        match (matches.next(), matches.next()) {
+            (None, _) => SessionMatch::None,
+            (Some(thread), None) => SessionMatch::One(thread.id),
+            (Some(_), Some(_)) => SessionMatch::Several,
+        }
     }
 
     /// `/billing`: balances on top, and the next step one Enter away instead

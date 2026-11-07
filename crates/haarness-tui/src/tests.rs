@@ -17252,6 +17252,39 @@ async fn rename_takes_a_first_word_as_a_chat_only_when_it_is_that_chats_id() {
     assert_eq!(app.notice, "Type a title after the session ID");
 }
 
+/// Two chats whose IDs end alike: their short ID names neither, so the
+/// rename is refused instead of naming the open chat after the ID.
+#[tokio::test]
+async fn rename_refuses_a_short_id_two_chats_share() {
+    let chat = |id: &str, title: &str| Thread {
+        id: ThreadId(id.parse().unwrap()),
+        title: title.into(),
+        ..fixture_thread()
+    };
+    let current = chat("018f0000-1111-7222-8333-444455556666", "Current");
+    let first = chat("018f0aaa-0000-7000-8000-0000db00e2e1", "First");
+    let second = chat("018f0bbb-0000-7000-8000-0000db00e2e1", "Second");
+    let threads = vec![current.clone(), first.clone(), second.clone()];
+    let (client, renames) = renaming_server(threads.clone()).await;
+    let mut app = App::new(current.clone(), threads, vec![], vec![], vec![]);
+    app.execute_command("/rename db00e2e1 Schema work", &client)
+        .await
+        .unwrap();
+    assert!(renames.lock().unwrap().is_empty());
+    assert_eq!(
+        app.notice,
+        "More than one chat ends in db00e2e1 · type the full session ID"
+    );
+    assert_eq!(app.thread.title, "Current");
+    app.execute_command(&format!("/rename {} Schema work", second.id), &client)
+        .await
+        .unwrap();
+    assert_eq!(
+        renames.lock().unwrap().as_slice(),
+        [(second.id, "Schema work".to_owned())]
+    );
+}
+
 #[tokio::test]
 async fn sessions_all_discovers_archived_sessions_without_deleting_or_restoring_them() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
