@@ -4253,6 +4253,11 @@ struct RunWork {
     /// Whether a subagent of the run ran at the last listing of nested
     /// runs: one more listing follows its end.
     listed_running: bool,
+    /// Whether a subagent of the run was read in the chat since that
+    /// listing: the next look lists nested runs, since the subagent may
+    /// have started one and ended between two looks (as every foreground
+    /// subagent of the first turn has before the first look).
+    subagent_read: bool,
     /// The server runs no workflows (it refused to list them).
     no_workflows: bool,
     /// The `workflow` calls that start a run, by call id, with the name
@@ -4323,6 +4328,7 @@ impl RunWork {
             settled: std::collections::HashSet::new(),
             nested_chats: HashMap::new(),
             listed_running: false,
+            subagent_read: false,
             no_workflows: false,
             workflow_starts: HashMap::new(),
             commands: std::collections::HashSet::new(),
@@ -4405,8 +4411,9 @@ impl RunWork {
     /// The workflow runs started from the chats under the run's that are
     /// still going (paused ones too), any new one among them found first.
     /// The chat tree's runs are listed while a subagent of the run runs
-    /// (and once after), or while a nested run is not settled: nothing else
-    /// starts one. Only a server that can stop them lists a tree's runs.
+    /// (and once after), at the look after one of its subagents was read in
+    /// the chat, and while a nested run is not settled: nothing else starts
+    /// one. Only a server that can stop them lists a tree's runs.
     async fn nested_going(
         &mut self,
         client: &haarness_tui::api::ApiClient,
@@ -4417,7 +4424,8 @@ impl RunWork {
             .keys()
             .any(|id| !self.settled.contains(id) && !self.deleted.contains(id));
         let ran = std::mem::replace(&mut self.listed_running, running);
-        let list = running || ran || unsettled;
+        let read = std::mem::take(&mut self.subagent_read);
+        let list = running || ran || read || unsettled;
         if !list || self.no_workflows || !self.can_stop(client).await? {
             return Ok(Vec::new());
         }
@@ -4711,6 +4719,7 @@ impl RunWork {
                 call_id,
                 child_thread_id,
             } if !self.persons_calls.contains(call_id) => {
+                self.subagent_read |= self.owns(item.turn_id);
                 if let Some(turn) = item.turn_id {
                     let description = self.described.get(call_id).cloned().unwrap_or_default();
                     self.subagents
@@ -4724,6 +4733,7 @@ impl RunWork {
                 state,
                 ..
             } if !self.persons_calls.contains(call_id) => {
+                self.subagent_read |= self.owns(item.turn_id);
                 let description = self
                     .described
                     .get(call_id)
@@ -20446,9 +20456,11 @@ request_timeout = 0
     /// prompt `launch: <child>` starts a subagent in the background with
     /// the prompt `<child>` (`launch-then-fail:` then fails the turn), and
     /// its result is answered `Done: <how it ended>`, or with `then fail` in
-    /// the prompt by a failed turn. `command: <line>` (with ` within <ms>`)
-    /// runs the line in the background, and its end is answered `Command
-    /// done.` (after `<ms>` when the notice ends `linger <ms>`; a workflow's
+    /// the prompt by a failed turn; `delegate: <child>` runs one in the
+    /// foreground, then answers `Delegated.`. `command: <line>` (with
+    /// ` within <ms>`) runs the line in the background, and its end is
+    /// answered `Command done.` (after `<ms>` when the notice ends
+    /// `linger <ms>`; a workflow's
     /// end is answered `Workflow done.` the same way). A person's
     /// `person: command <line>` does the same;
     /// `person: linger <ms>` answers after that long, and `person: ask
@@ -20572,6 +20584,19 @@ request_timeout = 0
                         "prompt": child.trim_end_matches(" then fail"),
                         "agent": "general",
                         "background": true,
+                    }),
+                );
+            }
+            if let Some(child) = last.strip_prefix("delegate: ") {
+                if answered {
+                    return reply("Delegated.");
+                }
+                return call(
+                    "task",
+                    json!({
+                        "description": "Foreground check",
+                        "prompt": child,
+                        "agent": "general",
                     }),
                 );
             }
@@ -21458,6 +21483,90 @@ request_timeout = 0
             client.workflow_run(nested, None).await.unwrap().status,
             haarness_protocol::WorkflowRunStatus::Cancelled
         );
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A subagent that ended before the run first looked (as each
+    /// foreground one of the first turn has) may have started a workflow
+    /// from its chat: the run still finds it, waits for it and the turn its
+    /// result starts there, and at its limit cancels it, untold.
+    #[tokio::test]
+    async fn a_scheduled_run_finds_the_workflow_of_a_subagent_that_already_ended() {
+        let Some((client, server, runtime, root)) = scheduled_client_with_workflows().await else {
+            return;
+        };
+        let follow = |thread, first, limit| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                super::follow_scheduled_run(&client, thread, first, limit, CEILING).await
+            })
+        };
+        let said_in = async |chat: ThreadId| {
+            client
+                .items(chat)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter_map(|item| match item.data {
+                    ItemData::AssistantMessage { text } => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "delegate: wait 1200").await;
+        let run = follow(thread, first, Duration::from_secs(60));
+        let child = subagent_chat(&client, thread).await;
+        // It ends well after the subagent: its result starts a turn there.
+        let quick = background_workflow(&client, child, "nested-quick", 3_000, "linger 1000").await;
+        let end = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the run never ended")
+            .unwrap()
+            .unwrap();
+        assert_eq!(end.error, None);
+        assert_eq!(end.response, "Delegated.");
+        assert_eq!(
+            client.workflow_run(quick, None).await.unwrap().status,
+            haarness_protocol::WorkflowRunStatus::Completed
+        );
+        let activity = client.thread_activity(child).await.unwrap();
+        assert!(
+            activity.active_turn.is_none() && activity.background == 0,
+            "the run ended before its subagent's chat did: {activity:?}"
+        );
+        assert_eq!(
+            said_in(child).await.last().map(String::as_str),
+            Some("Workflow done.")
+        );
+
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "delegate: wait 1200").await;
+        let run = follow(thread, first, Duration::from_secs(3));
+        let child = subagent_chat(&client, thread).await;
+        let slow = background_workflow(&client, child, "nested-slow", 60_000, "never").await;
+        let end = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the run waited past its limit")
+            .unwrap()
+            .unwrap();
+        let slow = client.workflow_run(slow, None).await.unwrap();
+        assert_eq!(
+            end.error,
+            Some(format!(
+                "Background work was still going after 3 seconds and was stopped: workflow \u{201c}{}\u{201d}.",
+                slow.workflow_name
+            ))
+        );
+        assert_eq!(slow.status, haarness_protocol::WorkflowRunStatus::Cancelled);
+        let before = said_in(child).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let activity = client.thread_activity(child).await.unwrap();
+        assert!(activity.active_turn.is_none() && activity.background == 0);
+        assert_eq!(said_in(child).await, before);
         server.shutdown().await.unwrap();
         drop(runtime);
         let _ = std::fs::remove_dir_all(root);

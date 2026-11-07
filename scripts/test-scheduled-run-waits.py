@@ -21,7 +21,9 @@ provider may do that):
 - steer: a person's message written into the run's turn is answered outside the run's record, and
   one the run's ceiling stops unread is answered in a turn of its own.
 - nested: a workflow started from the chat of one of the run's subagents holds the run and is
-  cancelled at its limit, so nothing starts in that chat after the run either.
+  cancelled at its limit, so nothing starts in that chat after the run either; one started by a
+  subagent that ended before the run first looked (in the foreground, or quickly in the background)
+  holds the run until the turn its result starts in that chat has ended.
 """
 import json
 import os
@@ -50,6 +52,14 @@ home.mkdir()
 (workspace / ".haarness/workflows/quick.ts").write_text(
     'import { workflow } from "@haarness-ai/plugin"\n'
     'export default workflow({ name: "quick", async run() { return "workflow-finished" } })\n')
+(workspace / ".haarness/workflows/brief.ts").write_text(
+    'import { workflow } from "@haarness-ai/plugin"\n'
+    'export default workflow({ name: "brief", async run() {\n'
+    '  await new Promise((done) => setTimeout(done, 3000))\n  return "brief-finished"\n} })\n')
+# A subagent that may start workflows of its own.
+(workspace / ".haarness/haarness.json").write_text(json.dumps({"agent": {"flow-starter": {
+    "prompt": "You start workflows.", "description": "Starts workflows", "mode": "subagent",
+    "tools": {"workflow": True}}}}))
 (workspace / ".haarness/workflows/slow.ts").write_text(
     'import { workflow } from "@haarness-ai/plugin"\n'
     'export default workflow({ name: "slow", async run() {\n'
@@ -342,6 +352,32 @@ try:
     time.sleep(1)
     assert turns(child) == child_turns and api(f"/threads/{child}/activity")["activeTurn"] is None
     ok("a workflow a subagent of the run starts holds the run and is cancelled with it, untold")
+
+    # nested, started by subagents that ended before the run first looked
+    start_brief = tool("workflow", {"action": "start", "name": "brief"})
+    for name, prompt in (
+            ("nested-foreground", tool("task", {"description": "Flow starter", "subagent_type": "flow-starter",
+                                                "prompt": start_brief})),
+            ("nested-quick", "!linger 1500 !multi " + json.dumps([{"name": "task", "arguments": {
+                "description": "Quick flow starter", "subagent_type": "flow-starter", "background": True,
+                "prompt": start_brief}}]))):
+        known = {entry["id"] for entry in api("/workflows/runs?limit=500") or []}
+        schedule(name, prompt)
+        record, took, before = run(name, 60000)
+        assert record["status"] == "success" and "error" not in record, (name, record)
+        assert took >= 3, f"{name}: the run ended after {took:.1f} s, before its subagent's workflow did"
+        flows = [entry for entry in api("/workflows/runs?limit=500") or []
+                 if entry.get("workflowName") == "brief" and entry["id"] not in known]
+        assert [entry["status"] for entry in flows] == ["completed"], (name, flows)
+        child = flows[0]["definition"]["launchThreadId"]
+        assert child != record["threadId"], (name, flows)
+        results = [item for item in api(f"/threads/{child}/items") if item["data"]["type"] == "user_message"
+                   and item["data"]["text"].startswith("<workflow ")]
+        assert results and api(f"/turns/{results[-1]['turnId']}")["status"] == "completed", (name, results)
+        child_turns = turns(child)
+        settled_after(record, before)
+        assert turns(child) == child_turns and api(f"/threads/{child}/activity")["activeTurn"] is None, name
+    ok("a workflow started by a subagent that ended before the run first looked holds the run to its end")
 finally:
     if connection:
         subprocess.run(args + ["serve", "--stop"], env=env, capture_output=True, timeout=60)

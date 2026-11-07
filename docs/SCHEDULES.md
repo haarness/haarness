@@ -87,12 +87,13 @@ Every native entry runs the hidden command
    waiting ([Chrome approvals](PERMISSIONS-AND-EXECUTION.md#chrome-approvals)).
 5. The run then waits for its own work: the subagents, workflows and shell commands its turn started
    in the background, the turns their results start, and what those turns start in turn, down to
-   the workflows its subagents start and the turns their results start in a subagent's chat. Work a
-   person starts in the chat meanwhile is theirs: the run neither waits for it nor stops it. A
-   message a person sends while one of the run's turns works joins that turn, and once the agent has
-   read it the rest of the turn answers them: what the agent says from then on is not in the run's
-   answer, and what it starts from then on (subagents, workflows, commands, and the results they
-   bring) is theirs. The run still waits for the turn itself. How long it waits:
+   the workflows its subagents start (a foreground subagent's too, even once it has ended) and the
+   turns their results start in a subagent's chat. Work a person starts in the chat meanwhile is
+   theirs: the run neither waits for it nor stops it. A message a person sends while one of the
+   run's turns works joins that turn, and once the agent has read it the rest of the turn answers
+   them: what the agent says from then on is not in the run's answer, and what it starts from then
+   on (subagents, workflows, commands, and the results they bring) is theirs. The run still waits
+   for the turn itself. How long it waits:
    - Subagents, workflows and the turns their results start have 30 minutes, counted from the end of
      the first turn, or from the end of the run's last command with a time limit if that came later.
      A workflow deleted meanwhile (`/workflow delete`, or the agent's own `delete`) has ended, and so
