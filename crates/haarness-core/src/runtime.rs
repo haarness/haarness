@@ -12349,6 +12349,25 @@ impl RunnerTask {
         Ok(())
     }
 
+    /// A model's call whose only faults are numbers, booleans or nulls
+    /// written as strings gets them as the tool's schema has them, before it
+    /// is validated: Llama 3.1 sends `"timeout": "0"` and
+    /// `"run_in_background": "false"`, and refused, sends them again the
+    /// same way and then makes up what the command printed.
+    fn coerce_tool_arguments(&self, name: &str, arguments: &mut serde_json::Value) {
+        let coerced = if name == LOAD_TOOL_NAME {
+            crate::tool_validation::coerced_arguments(&crate::load_tool_definition(), arguments)
+        } else {
+            self.tools
+                .get(name)
+                .and_then(|tool| tool.coerced_arguments(arguments))
+        };
+        if let Some(coerced) = coerced {
+            tracing::info!(thread = %self.thread.id, tool = name, "reading scalars a model wrote as strings as the tool's types");
+            *arguments = coerced;
+        }
+    }
+
     fn validate_tool_arguments(&self, name: &str, arguments: &serde_json::Value) -> CoreResult<()> {
         // Arguments the provider adapter could not read never run, whatever
         // validation a tool does of its own.
@@ -12883,6 +12902,7 @@ impl RunnerTask {
             return Err(CoreError::Cancelled);
         }
         self.check_tool_name(agent, name, require_advertised)?;
+        self.coerce_tool_arguments(name, &mut arguments);
         self.validate_tool_arguments(name, &arguments)?;
         if name == LOAD_TOOL_NAME {
             return self.execute_load_tool(&arguments);

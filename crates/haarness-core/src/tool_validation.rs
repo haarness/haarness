@@ -1,6 +1,9 @@
 //! Shared model-call validation and conservative name recovery.
 
-use jsonschema::error::{TypeKind, ValidationErrorKind};
+use jsonschema::{
+    JsonType,
+    error::{TypeKind, ValidationErrorKind},
+};
 use serde_json::Value;
 
 use crate::{CoreError, CoreResult, ToolDefinition};
@@ -185,6 +188,90 @@ pub(crate) fn validate_arguments(tool: &ToolDefinition, arguments: &Value) -> Co
     )))
 }
 
+/// Arguments in which each value that failed the schema only for being a
+/// string where the schema wants a number, an integer, a boolean or null,
+/// and that is exactly one written out (Llama 3.1 sends `"timeout": "0"` and
+/// `"run_in_background": "false"`), is that value, when every fault was such
+/// a string and the arguments then pass. `None` otherwise: valid arguments,
+/// any other fault, and a string the schema takes as a string are never
+/// changed. In `anyOf` or `oneOf` the value is changed only when exactly one
+/// alternative takes it. Nested objects and arrays are read the same way.
+pub(crate) fn coerced_arguments(tool: &ToolDefinition, arguments: &Value) -> Option<Value> {
+    let validator = jsonschema::validator_for(&tool.input_schema).ok()?;
+    let mut coerced = arguments.clone();
+    let mut changed = false;
+    for error in validator.iter_errors(arguments) {
+        let Value::String(text) = error.instance().as_ref() else {
+            return None;
+        };
+        let value = match error.kind() {
+            ValidationErrorKind::Type { kind } => {
+                let wanted: Vec<JsonType> = match kind {
+                    TypeKind::Single(kind) => vec![*kind],
+                    TypeKind::Multiple(kinds) => kinds.iter().collect(),
+                };
+                written_scalar(text).filter(|value| {
+                    wanted.iter().any(|kind| match (kind, value) {
+                        (JsonType::Boolean, Value::Bool(_))
+                        | (JsonType::Null, Value::Null)
+                        | (JsonType::Number, Value::Number(_)) => true,
+                        (JsonType::Integer, Value::Number(number)) => {
+                            number.is_i64() || number.is_u64()
+                        }
+                        _ => false,
+                    })
+                })
+            }
+            ValidationErrorKind::AnyOf { .. } | ValidationErrorKind::OneOfNotValid { .. } => {
+                let alternatives = tool
+                    .input_schema
+                    .pointer(error.schema_path().as_str())?
+                    .as_array()?;
+                let value = written_scalar(text)?;
+                let mut taking = 0;
+                for alternative in alternatives {
+                    // An alternative read alone may lean on the rest of the
+                    // schema (`$ref`): one that can't be read alone stops it.
+                    if jsonschema::validator_for(alternative)
+                        .ok()?
+                        .is_valid(&value)
+                    {
+                        taking += 1;
+                    }
+                }
+                (taking == 1).then_some(value)
+            }
+            _ => None,
+        }?;
+        *coerced.pointer_mut(error.instance_path().as_str())? = value;
+        changed = true;
+    }
+    (changed && validator.is_valid(&coerced)).then_some(coerced)
+}
+
+/// The JSON literal a string is, ignoring the spaces around it, when it is
+/// one that a model writes for a scalar: `true`, `false`, `null` or a number
+/// in JSON's own form (`-3`, `1.5`, `1e5`; not `01`, `+1`, `.5`, `1.` or
+/// `0x10`). An integer is one only within what a JSON integer holds.
+fn written_scalar(text: &str) -> Option<Value> {
+    let text = text.trim();
+    match text {
+        "true" => return Some(Value::Bool(true)),
+        "false" => return Some(Value::Bool(false)),
+        "null" => return Some(Value::Null),
+        _ => {}
+    }
+    // JSON's number grammar, which `serde_json` follows exactly; anything
+    // else (`NaN`, a word, an object) is no scalar.
+    if !text.starts_with(|c: char| c == '-' || c.is_ascii_digit()) {
+        return None;
+    }
+    match serde_json::from_str::<Value>(text).ok()? {
+        Value::Number(number) => Some(Value::Number(number)),
+        _ => None,
+    }
+}
+
 fn argument_path(pointer: &str, arguments: &Value) -> String {
     let mut path = String::new();
     let mut value = Some(arguments);
@@ -269,6 +356,142 @@ mod tests {
             description: String::new(),
             input_schema: schema,
         }
+    }
+
+    fn bash_like() -> ToolDefinition {
+        definition(json!({
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "timeout": {"type": "integer", "minimum": 0},
+                "run_in_background": {"type": "boolean"},
+                "workdir": {"type": "string"},
+                "ratio": {"type": "number"},
+                "limit": {"type": ["integer", "null"]},
+            },
+            "required": ["command"],
+            "additionalProperties": false,
+        }))
+    }
+
+    #[test]
+    fn scalars_a_model_wrote_as_strings_read_as_the_schemas_types() {
+        let tool = bash_like();
+        // Llama 3.1 8B on Ollama, running the tests.
+        let written = json!({"command": "python3 test_calc.py", "timeout": "0", "run_in_background": "false", "workdir": "/p"});
+        let coerced = coerced_arguments(&tool, &written).expect("coerced");
+        assert_eq!(
+            coerced,
+            json!({"command": "python3 test_calc.py", "timeout": 0, "run_in_background": false, "workdir": "/p"})
+        );
+        validate_arguments(&tool, &coerced).unwrap();
+        let one = |key: &str, text: &str| {
+            coerced_arguments(&tool, &json!({"command": "x", key: text}))
+                .map(|value| value[key].clone())
+        };
+        // JSON's own literals, the spaces around them aside.
+        assert_eq!(
+            one("timeout", "-3"),
+            None,
+            "below the minimum after reading"
+        );
+        assert_eq!(one("timeout", " 12 "), Some(json!(12)));
+        assert_eq!(one("ratio", "1.5"), Some(json!(1.5)));
+        assert_eq!(one("ratio", "-3"), Some(json!(-3)));
+        assert_eq!(one("ratio", "1e5"), Some(json!(1e5)));
+        assert_eq!(one("run_in_background", "true"), Some(json!(true)));
+        assert_eq!(one("limit", "null"), Some(json!(null)));
+        assert_eq!(one("limit", "7"), Some(json!(7)));
+        // An integer is written as one: no exponent, no fraction.
+        for text in ["1e5", "1.5", "1.0"] {
+            assert_eq!(one("timeout", text), None, "{text}");
+        }
+        // Not JSON literals.
+        for text in [
+            "01", "+1", ".5", "1.", "0x10", "NaN", "Infinity", "True", "FALSE", "yes", "", "1 2",
+            "\"1\"",
+        ] {
+            assert_eq!(one("timeout", text), None, "{text}");
+            assert_eq!(one("ratio", text), None, "{text}");
+            assert_eq!(one("run_in_background", text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn no_valid_call_and_no_other_fault_changes() {
+        let tool = bash_like();
+        // Valid: left alone, though `command` reads as a number.
+        for valid in [
+            json!({"command": "0"}),
+            json!({"command": "true", "timeout": 5}),
+            json!({"command": "x", "limit": null}),
+        ] {
+            assert_eq!(coerced_arguments(&tool, &valid), None, "{valid}");
+        }
+        // Another fault beside it: nothing changes, and both are reported.
+        assert_eq!(coerced_arguments(&tool, &json!({"timeout": "0"})), None);
+        assert_eq!(
+            coerced_arguments(&tool, &json!({"command": "x", "timeout": "0", "extra": 1})),
+            None
+        );
+        assert_eq!(
+            coerced_arguments(&tool, &json!({"command": "x", "timeout": true})),
+            None
+        );
+        // A string the schema wants a string for, refused for another reason.
+        let short = definition(
+            json!({"type": "object", "properties": {"code": {"type": "string", "minLength": 3}}}),
+        );
+        assert_eq!(coerced_arguments(&short, &json!({"code": "1"})), None);
+        // An `enum` of numbers is no type to read a string as.
+        let choice =
+            definition(json!({"type": "object", "properties": {"level": {"enum": [1, 2, 3]}}}));
+        assert_eq!(coerced_arguments(&choice, &json!({"level": "2"})), None);
+    }
+
+    #[test]
+    fn nested_values_and_alternatives_are_read_where_the_schema_says() {
+        let tool = definition(json!({
+            "type": "object",
+            "properties": {
+                "edits": {"type": "array", "items": {
+                    "type": "object",
+                    "properties": {"line": {"type": "integer"}, "replace_all": {"type": "boolean"}},
+                }},
+                "pages": {"type": "array", "items": {"type": "integer"}},
+                "only": {"anyOf": [{"type": "integer"}, {"type": "boolean"}]},
+                "either": {"anyOf": [{"type": "integer"}, {"type": "number"}]},
+                "one": {"oneOf": [{"type": "boolean"}, {"type": "array"}]},
+                "text_too": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+            },
+        }));
+        assert_eq!(
+            coerced_arguments(
+                &tool,
+                &json!({"edits": [{"line": "3", "replace_all": "true"}], "pages": ["1", "2"]})
+            ),
+            Some(json!({"edits": [{"line": 3, "replace_all": true}], "pages": [1, 2]}))
+        );
+        // Exactly one alternative takes the value.
+        assert_eq!(
+            coerced_arguments(&tool, &json!({"only": "false"})),
+            Some(json!({"only": false}))
+        );
+        assert_eq!(
+            coerced_arguments(&tool, &json!({"one": "true"})),
+            Some(json!({"one": true}))
+        );
+        // Two do: no telling which was meant.
+        assert_eq!(coerced_arguments(&tool, &json!({"either": "5"})), None);
+        // One takes the string itself: valid, unchanged.
+        assert_eq!(coerced_arguments(&tool, &json!({"text_too": "5"})), None);
+        // An alternative that leans on the rest of the schema is not read alone.
+        let referred = definition(json!({
+            "type": "object",
+            "$defs": {"count": {"type": "integer"}},
+            "properties": {"n": {"anyOf": [{"$ref": "#/$defs/count"}, {"type": "boolean"}]}},
+        }));
+        assert_eq!(coerced_arguments(&referred, &json!({"n": "4"})), None);
     }
 
     #[test]

@@ -884,6 +884,14 @@ pub trait Tool: Send + Sync {
         definition.input_schema = self.validation_schema();
         crate::tool_validation::validate_arguments(&definition, arguments)
     }
+    /// A model's arguments whose only faults are scalars written as strings
+    /// (`"timeout": "0"`), as the validation schema's types; `None` for any
+    /// other arguments (see `tool_validation::coerced_arguments`).
+    fn coerced_arguments(&self, arguments: &Value) -> Option<Value> {
+        let mut definition = self.definition();
+        definition.input_schema = self.validation_schema();
+        crate::tool_validation::coerced_arguments(&definition, arguments)
+    }
     fn side_effectful(&self) -> bool;
     /// Whether the registry lists this tool now. A tool that depends on a
     /// setting the person can switch (computer use) leaves the list while it
