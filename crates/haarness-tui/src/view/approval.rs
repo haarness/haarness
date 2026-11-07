@@ -1240,8 +1240,9 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
 }
 
 /// The lines a file-changing request would add and remove, as `(marker,
-/// text)` pairs clipped to `width`: an `edit`'s old/new text, an
-/// `apply_patch` envelope's hunks, or the opening of a `write`.
+/// text)` pairs clipped to `width`: an `edit`'s old/new text, a
+/// `multiedit`'s edits one after another, an `apply_patch` envelope's
+/// hunks, or the opening of a `write`.
 fn change_preview(pending: &PendingPermissionInfo, width: usize) -> Vec<(char, String)> {
     let detail = &pending.detail;
     let text = |key: &str| detail.get(key).and_then(serde_json::Value::as_str);
@@ -1250,9 +1251,8 @@ fn change_preview(pending: &PendingPermissionInfo, width: usize) -> Vec<(char, S
     // hide what an escape string holds; the rest is the file's text.
     let clip =
         |line: &str| single_line(&marked_directions(line.trim_end()), width.saturating_sub(2));
-    if let (Some(old), Some(new)) = (text("old"), text("new")) {
-        let diff = similar::TextDiff::from_lines(old, new);
-        return diff
+    let changed = |old: &str, new: &str| {
+        similar::TextDiff::from_lines(old, new)
             .iter_all_changes()
             .map(|change| {
                 let marker = match change.tag() {
@@ -1262,7 +1262,17 @@ fn change_preview(pending: &PendingPermissionInfo, width: usize) -> Vec<(char, S
                 };
                 (marker, clip(change.value()))
             })
-            .collect();
+            .collect::<Vec<_>>()
+    };
+    if let (Some(old), Some(new)) = (text("old"), text("new")) {
+        return changed(old, new);
+    }
+    if let Some(edits) = detail.get("edits").and_then(serde_json::Value::as_array) {
+        let edit = |edit: &serde_json::Value| {
+            let side = |key: &str| edit.get(key).and_then(serde_json::Value::as_str);
+            Some(changed(side("old")?, side("new")?))
+        };
+        return edits.iter().filter_map(edit).flatten().collect();
     }
     if let Some(patch) = text("input")
         .or_else(|| text("patch"))

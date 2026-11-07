@@ -319,6 +319,40 @@ async fn an_edit_on_its_card_shows_what_turns_a_line_around() {
     );
 }
 
+/// A multiedit's card shows every edit's lines, one edit after another, as
+/// an edit's card shows its own.
+#[tokio::test]
+async fn a_multiedit_on_its_card_shows_each_edit() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let event = fixture_event(
+        "permission.requested",
+        thread.id,
+        thread.id,
+        serde_json::json!({
+            "permissionId": "perm-multiedit",
+            "permission": "edit",
+            "operation": "edit:win.txt",
+            "patterns": ["win.txt"],
+            "alwaysPatterns": ["edit:*"],
+            "detail": {"path": "win.txt", "edits": [
+                {"old": "beta\n", "new": "BETA\n"},
+                {"old": "gamma \u{1b}]0;x\u{7}\n", "new": "delta\n", "replaceAll": true},
+            ]},
+        }),
+    );
+    app.reduce(event, &offline_client()).await.unwrap();
+    let card = crate::view::approval::approval_lines(&app, 100, 30).lines;
+    let card_text: String = card.iter().map(|line| line_text(line) + "\n").collect();
+    let rows = ["- beta", "+ BETA", "- gamma \\u{1B}]0;x\\u{7}", "+ delta"];
+    let found: Vec<_> = rows.iter().map(|row| card_text.find(row)).collect();
+    assert!(found.iter().all(Option::is_some), "{card_text}");
+    assert!(
+        found.windows(2).all(|pair| pair[0] < pair[1]),
+        "{card_text}"
+    );
+}
+
 /// A file a request writes may hold escape strings. On its card each
 /// control character is a muted code and the text inside the string shows,
 /// also when the string never ends (APC, PM, SOS): nothing that will be
