@@ -304,7 +304,16 @@ async fn renames_are_trimmed_and_a_blank_title_is_refused() {
         .await
         .unwrap();
     assert_eq!(renamed.title, "Release notes");
-    for blank in ["", "   ", "\t\n"] {
+    // A title loses what a terminal listing the chats would act on.
+    let renamed = runtime
+        .update_thread(
+            thread.id,
+            rename("\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}Release\nnotes"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed.title, "Release notes");
+    for blank in ["", "   ", "\t\n", "\u{1b}]0;owned\u{7}\u{1b}[2J"] {
         let error = runtime
             .update_thread(thread.id, rename(blank))
             .await
@@ -316,6 +325,91 @@ async fn renames_are_trimmed_and_a_blank_title_is_refused() {
         runtime.get_thread(thread.id).await.unwrap().title,
         "Release notes"
     );
+}
+
+/// Answers a title request with escape sequences around the title, on a
+/// line of their own and inside it.
+struct EscapedTitles;
+
+#[async_trait]
+impl ModelProvider for EscapedTitles {
+    fn id(&self) -> &str {
+        "fixture"
+    }
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            id: "fixture".into(),
+            name: "Titles".into(),
+            authenticated: true,
+            models: vec![],
+        }
+    }
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        let text = if request.system == haarness_core::system_prompt_for("title") {
+            "\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}\n\u{1b}[1mSecurity\u{1b}[0m\treview"
+        } else {
+            "Main answer"
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderEvent::TextDelta(text.into())),
+            Ok(ProviderEvent::Finished {
+                reason: "completed".into(),
+            }),
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn generated_created_and_forked_titles_lose_control_characters() {
+    let events = EventBus::new(128);
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(EscapedTitles) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        events.clone(),
+        std::env::temp_dir(),
+        String::new(),
+        RuntimeConfig::default(),
+    );
+    let untitled = thread(&runtime).await;
+    let mut receiver = events.subscribe(None).receiver;
+    let turn = runtime.start_turn(untitled.id, request()).await.unwrap();
+    assert_eq!(
+        updated(&mut receiver, untitled.id).await.title,
+        "Security review"
+    );
+    finished(&runtime, &turn).await;
+
+    let create = |title: &str| CreateThreadRequest {
+        title: Some(title.into()),
+        provider: Some("fixture".into()),
+        model: Some("main".into()),
+        ..Default::default()
+    };
+    let named = runtime
+        .create_thread(create("\u{1b}]0;owned\u{7}Release\u{9b}\u{7f} notes"))
+        .await
+        .unwrap();
+    assert_eq!(named.title, "Release notes");
+    let blank = runtime.create_thread(create("\u{1b}[2J")).await.unwrap();
+    assert!(haarness_protocol::is_untitled_chat_title(&blank.title));
+
+    let fork = runtime
+        .fork_thread(named.id, Some("\u{1b}]2;tab\u{7}Try again".into()), None)
+        .await
+        .unwrap();
+    assert_eq!(fork.title, "Try again");
+    let fork = runtime
+        .fork_thread(named.id, Some("\u{1b}[2J".into()), None)
+        .await
+        .unwrap();
+    assert_eq!(fork.title, "Fork of Release notes");
 }
 
 #[tokio::test]
