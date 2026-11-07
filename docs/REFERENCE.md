@@ -324,10 +324,12 @@ cleanup) then only forgets it, leaving its folder and its branch as they are,
 and says so in one line (`worktree forgotten: …`). For a repository that moved,
 run `git worktree repair` in it instead: the worktree then opens, resets and is
 removed again although the project's old folder is gone. A worktree whose
-repository is on a disk that is not connected (under `/Volumes`, `/mnt` or
-`/media`, or in a folder a disk is mounted on that has nothing mounted on it
-now, such as one `/etc/fstab` names or a WSL drive in `/mnt`) is kept, so its
-chats stay with it, until the disk is back.
+repository is on a disk that is not connected is kept, so its chats stay with
+it, until the disk is back. That is a repository under `/Volumes`, `/mnt` or
+`/media` whose disk's folder is gone; one in a folder a disk is usually mounted
+on (one `/etc/fstab` names, or one directly in `/mnt`, as a WSL drive is) that
+is empty, with no disk on it now; and, on Linux, one behind an automount that
+found no disk when it was tried.
 
 ## Terminal UI
 

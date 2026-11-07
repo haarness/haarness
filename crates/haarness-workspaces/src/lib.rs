@@ -1078,16 +1078,30 @@ fn worktree_link(path: &Path, project: &ProjectInfo) -> WorktreeLink {
 /// Whether `path` is on a disk that is not connected: the nearest part of it
 /// that is there is a folder disks are mounted in (`/Volumes`, `/mnt`,
 /// `/media`, a person's folder in `/media` or `/run/media`), a folder a disk
-/// is mounted on that stays when the disk is gone and has nothing mounted on
-/// it now (one in `/mnt`, such as a WSL drive, or one `/etc/fstab` names), or
-/// no part of it is there (a Windows drive that is gone).
+/// is usually mounted on (one in `/mnt`, such as a WSL drive, or one
+/// `/etc/fstab` names) with nothing mounted on it now, or no part of it is
+/// there (a Windows drive that is gone). On Linux such a folder must also be
+/// empty, and a path behind an automount with no disk mounted over it is on
+/// a disk that is not connected too.
 fn on_a_missing_disk(path: &Path) -> bool {
-    on_a_missing_disk_beside(path, Path::new("/mnt"), Path::new("/etc/fstab"))
+    on_a_missing_disk_beside(
+        path,
+        Path::new("/mnt"),
+        Path::new("/etc/fstab"),
+        &Mounts::now(),
+    )
 }
 
-/// [`on_a_missing_disk`], with `mnt` as the folder disks are mounted in and
-/// `fstab` as the list of where they are mounted.
-fn on_a_missing_disk_beside(path: &Path, mnt: &Path, fstab: &Path) -> bool {
+/// [`on_a_missing_disk`], with `mnt` as the folder disks are mounted in,
+/// `fstab` as the list of where they are mounted and `mounts` as what is
+/// mounted now.
+fn on_a_missing_disk_beside(path: &Path, mnt: &Path, fstab: &Path, mounts: &Mounts) -> bool {
+    // The look that brought us here made the automount try its disk, so
+    // nothing over it means the disk did not come. Looking further in would
+    // only wait for it again.
+    if mounts.automount_alone(path) {
+        return true;
+    }
     let Some(present) = path.ancestors().find(|ancestor| ancestor.exists()) else {
         return true;
     };
@@ -1098,7 +1112,93 @@ fn on_a_missing_disk_beside(path: &Path, mnt: &Path, fstab: &Path) -> bool {
     {
         return true;
     }
-    (present.parent() == Some(mnt) || listed_mount_point(fstab, present)) && !mounted_on(present)
+    (present.parent() == Some(mnt) || listed_mount_point(fstab, present))
+        && mounts.nothing_on(present)
+}
+
+/// What is mounted where now.
+enum Mounts {
+    /// The file systems Linux lists in `/proc/self/mountinfo`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Listed(Vec<Mount>),
+    /// No list to read: a folder with a disk mounted on it is on another
+    /// device than the folder it is in.
+    Devices,
+}
+
+/// A file system Linux lists: the folder it is mounted on, and whether it is
+/// an automount, which only holds that folder until something looks in and
+/// the disk it stands for is mounted over it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct Mount {
+    folder: PathBuf,
+    automount: bool,
+}
+
+impl Mounts {
+    /// What is mounted now, from Linux's list when there is one.
+    fn now() -> Self {
+        #[cfg(target_os = "linux")]
+        if let Ok(text) = fs::read_to_string("/proc/self/mountinfo") {
+            return Self::listed(&text);
+        }
+        Self::Devices
+    }
+
+    /// The file systems a `/proc/self/mountinfo` text lists. A line's fifth
+    /// field is the folder, escaped as in `fstab`, and the field after the
+    /// lone `-` is the file system's type.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn listed(text: &str) -> Self {
+        let mounts = text.lines().filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let folder = PathBuf::from(unescape_mount_point(fields.nth(4)?));
+            let kind = fields.skip_while(|field| *field != "-").nth(1)?;
+            Some(Mount {
+                folder,
+                automount: kind == "autofs",
+            })
+        });
+        Self::Listed(mounts.collect())
+    }
+
+    /// Whether the deepest file system `path` is in is an automount with no
+    /// disk mounted over it.
+    fn automount_alone(&self, path: &Path) -> bool {
+        match self {
+            Self::Listed(mounts) => {
+                let holding = mounts
+                    .iter()
+                    .filter(|mount| path.starts_with(&mount.folder));
+                let Some(deepest) = holding
+                    .clone()
+                    .map(|mount| mount.folder.as_path())
+                    .max_by_key(|folder| folder.components().count())
+                else {
+                    return false;
+                };
+                holding
+                    .filter(|mount| mount.folder == deepest)
+                    .all(|mount| mount.automount)
+            }
+            Self::Devices => false,
+        }
+    }
+
+    /// Whether `folder` is as a disk's folder is while the disk is gone:
+    /// nothing is mounted on it now and, where Linux lists what is, nothing
+    /// is in it either.
+    fn nothing_on(&self, folder: &Path) -> bool {
+        match self {
+            Self::Listed(mounts) => {
+                !mounts
+                    .iter()
+                    .any(|mount| mount.folder == folder && !mount.automount)
+                    && !fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_some())
+            }
+            Self::Devices => !mounted_on(folder),
+        }
+    }
 }
 
 /// Whether the `fstab` file names `folder` as where a disk is mounted. Its
@@ -1114,7 +1214,8 @@ fn listed_mount_point(fstab: &Path, folder: &Path) -> bool {
         .any(|listed| Path::new(&unescape_mount_point(listed)) == folder)
 }
 
-/// A mount point as `fstab` writes it, its octal escapes read.
+/// A mount point as `fstab` and `/proc/self/mountinfo` write it, its octal
+/// escapes read.
 fn unescape_mount_point(listed: &str) -> String {
     let mut out = String::with_capacity(listed.len());
     let mut rest = listed;
@@ -3081,7 +3182,8 @@ mod tests {
     /// A disk mounted on a folder that stays when the disk is gone (one
     /// `/etc/fstab` names, a WSL drive in `/mnt`) leaves that folder empty, so
     /// a repository that was on it is out of reach, not moved. A folder with
-    /// a disk on it now, and one nothing names, are judged as before.
+    /// a disk on it now, and one nothing names, are judged as before. Here
+    /// devices tell what is mounted, as on a Mac.
     #[cfg(unix)]
     #[test]
     fn an_empty_folder_a_disk_is_mounted_on_counts_as_a_missing_disk() {
@@ -3101,7 +3203,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let missing = |path: &Path| on_a_missing_disk_beside(path, &mnt, &fstab);
+        let missing = |path: &Path| on_a_missing_disk_beside(path, &mnt, &fstab, &Mounts::Devices);
         // A WSL drive that is gone, and a disk the list names that is not
         // mounted.
         assert!(missing(&mnt.join("e/projects/app")));
@@ -3116,6 +3218,206 @@ mod tests {
             unescape_mount_point(r"/srv/a\040b\011c\134d\x\9"),
             "/srv/a b\tc\\d\\x\\9"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A folder as `fstab` and `/proc/self/mountinfo` write it.
+    #[cfg(unix)]
+    fn escaped(folder: &Path) -> String {
+        folder
+            .display()
+            .to_string()
+            .replace('\\', "\\134")
+            .replace(' ', "\\040")
+    }
+
+    /// What Linux lists as mounted, written as `/proc/self/mountinfo` writes
+    /// it: the root file system, then each folder with its file system's
+    /// type.
+    #[cfg(unix)]
+    fn mountinfo(mounts: &[(&Path, &str)]) -> Mounts {
+        let lines = mounts.iter().enumerate().map(|(at, (folder, kind))| {
+            format!(
+                "{id} 22 0:{id} / {} rw,relatime shared:{id} - {kind} /dev/sdc1 rw\n",
+                escaped(folder),
+                id = 40 + at
+            )
+        });
+        Mounts::listed(
+            &std::iter::once(
+                "22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n".into(),
+            )
+            .chain(lines)
+            .collect::<String>(),
+        )
+    }
+
+    /// A folder of its own under the system temp folder, for one test.
+    #[cfg(unix)]
+    fn mount_fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("haarness-{name}-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// Lines read from a real `/proc/self/mountinfo`: an automount a disk is
+    /// mounted over, one with nothing over it, a bind mount whose folder
+    /// has a space, a WSL drive, and a line that is not a mount.
+    #[cfg(unix)]
+    #[test]
+    fn linux_s_list_of_mounts_tells_an_automount_from_a_disk() {
+        let mounts = Mounts::listed(concat!(
+            "22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw,errors=remount-ro\n",
+            "41 22 0:38 / /data rw,relatime shared:21 - autofs systemd-1 rw,fd=52,pgrp=1,timeout=0,minproto=5,maxproto=5,direct,pipe_ino=17311\n",
+            "95 41 8:33 / /data rw,relatime shared:50 master:3 - ext4 /dev/sdc1 rw\n",
+            "63 22 0:41 / /backup rw,relatime shared:30 - autofs systemd-1 rw,fd=60,pgrp=1,timeout=0,minproto=5,maxproto=5,direct\n",
+            "70 22 259:2 /home/sam/src /srv/sam\\040src rw,relatime - ext4 /dev/nvme0n1p2 rw\n",
+            "80 22 0:50 / /mnt/c rw,noatime - 9p C:\\134 rw,dirsync,aname=drvfs\n",
+            "not a mount\n",
+        ));
+        assert!(mounts.automount_alone(Path::new("/backup/projects/app")));
+        assert!(mounts.automount_alone(Path::new("/backup")));
+        assert!(!mounts.automount_alone(Path::new("/data/projects/app")));
+        assert!(!mounts.automount_alone(Path::new("/backups/app")));
+        assert!(!mounts.automount_alone(Path::new("/srv/sam src/app")));
+        assert!(!mounts.nothing_on(Path::new("/srv/sam src")));
+        assert!(!mounts.nothing_on(Path::new("/mnt/c")));
+        assert!(!mounts.nothing_on(Path::new("/data")));
+    }
+
+    /// An `x-systemd.automount` disk that is unplugged leaves an automount
+    /// with nothing over it, which has a device of its own; so does an
+    /// automount no `fstab` line names. A repository behind one is on a
+    /// disk that is not connected, and behind one a disk is mounted over,
+    /// it is judged by the link.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_behind_an_automount_without_its_disk_is_on_a_missing_disk() {
+        let root = mount_fixture("automount");
+        let backup = root.join("backup");
+        let share = root.join("net");
+        for folder in [&backup, &share] {
+            fs::create_dir(folder).unwrap();
+        }
+        let fstab = root.join("fstab");
+        fs::write(
+            &fstab,
+            format!(
+                "UUID=0a1b {} ext4 nofail,x-systemd.automount,x-systemd.device-timeout=10s 0 2\n",
+                escaped(&backup)
+            ),
+        )
+        .unwrap();
+        let missing = |path: &Path, mounts: &Mounts| {
+            on_a_missing_disk_beside(path, &root.join("mnt"), &fstab, mounts)
+        };
+        let unplugged = mountinfo(&[(&backup, "autofs"), (&share, "autofs")]);
+        assert!(missing(&backup.join("projects/app"), &unplugged));
+        assert!(missing(&share.join("server/app"), &unplugged));
+        let plugged = mountinfo(&[
+            (&backup, "autofs"),
+            (&backup, "ext4"),
+            (&share, "autofs"),
+            (&share.join("server"), "nfs4"),
+        ]);
+        assert!(!missing(&backup.join("projects/app"), &plugged));
+        assert!(!missing(&share.join("server/app"), &plugged));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A disk mounted now on a folder `fstab` names is connected, although
+    /// it is on the folder's own device in a test and its repository is
+    /// gone: that repository moved or was deleted.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_gone_from_a_disk_that_is_mounted_is_not_on_a_missing_disk() {
+        let root = mount_fixture("mounted-disk");
+        let data = root.join("data");
+        fs::create_dir(&data).unwrap();
+        let fstab = root.join("fstab");
+        fs::write(
+            &fstab,
+            format!("UUID=0a1b {} ext4 defaults,nofail 0 2\n", escaped(&data)),
+        )
+        .unwrap();
+        let missing = |mounts: &Mounts| {
+            on_a_missing_disk_beside(&data.join("repo"), &root.join("mnt"), &fstab, mounts)
+        };
+        assert!(!missing(&mountinfo(&[(&data, "ext4")])));
+        assert!(missing(&mountinfo(&[])));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A bind mount `fstab` names shows another folder of the same disk, so
+    /// it has the device of the folder it is in; a repository deleted in it
+    /// is not on a missing disk.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_gone_from_a_bind_mount_is_not_on_a_missing_disk() {
+        let root = mount_fixture("bind-mount");
+        let src = root.join("srv/sam src");
+        fs::create_dir_all(&src).unwrap();
+        let fstab = root.join("fstab");
+        fs::write(
+            &fstab,
+            format!("/home/sam/src {} none bind 0 0\n", escaped(&src)),
+        )
+        .unwrap();
+        let missing = |mounts: &Mounts| {
+            on_a_missing_disk_beside(&src.join("app"), &root.join("mnt"), &fstab, mounts)
+        };
+        assert!(!missing(&mountinfo(&[(&src, "ext4")])));
+        // Nothing bound there now.
+        assert!(missing(&mountinfo(&[])));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A plain folder directly in `/mnt` that holds other things is where
+    /// a repository was deleted, not a drive that is gone; an empty one may
+    /// be a WSL drive that is gone, and one a drive is mounted on is there.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_gone_from_a_plain_folder_in_mnt_is_not_on_a_missing_disk() {
+        let root = mount_fixture("plain-mnt");
+        let mnt = root.join("mnt");
+        for folder in [mnt.join("work/other-repo"), mnt.join("e"), mnt.join("c")] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let missing = |path: &Path, mounts: &Mounts| {
+            on_a_missing_disk_beside(path, &mnt, &root.join("fstab"), mounts)
+        };
+        let mounts = mountinfo(&[(&mnt.join("c"), "9p")]);
+        assert!(!missing(&mnt.join("work/app"), &mounts));
+        assert!(missing(&mnt.join("e/projects/app"), &mounts));
+        assert!(!missing(&mnt.join("c/projects/app"), &mounts));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Nothing mounted on a folder `fstab` names leaves it empty; one with
+    /// files in it is where a repository was deleted.
+    #[cfg(unix)]
+    #[test]
+    fn only_an_empty_folder_with_no_disk_on_it_counts_as_a_missing_disk() {
+        let root = mount_fixture("empty-mount-point");
+        let data = root.join("data");
+        fs::create_dir(&data).unwrap();
+        let fstab = root.join("fstab");
+        fs::write(
+            &fstab,
+            format!("LABEL=data {} ext4 defaults,nofail 0 2\n", escaped(&data)),
+        )
+        .unwrap();
+        let missing = || {
+            on_a_missing_disk_beside(
+                &data.join("repo"),
+                &root.join("mnt"),
+                &fstab,
+                &mountinfo(&[]),
+            )
+        };
+        assert!(missing());
+        fs::write(data.join("notes.txt"), "kept on the system disk\n").unwrap();
+        assert!(!missing());
         fs::remove_dir_all(root).unwrap();
     }
 
