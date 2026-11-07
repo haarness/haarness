@@ -184,6 +184,8 @@ CORPUS = [
     # CDPATH set in the line
     'CDPATH=/ cd etc && cat passwd', 'export CDPATH=/ && cd etc && cat passwd', 'CDPATH=/; cd etc; cat passwd',
     'CDPATH=.: cd src && ls', 'CDPATH="$X" cd etc', 'unset CDPATH; cd src && ls', 'CDPATH=/ cd ./src && ls',
+    'export "CDPATH=/" && cd etc && cat passwd', 'env CDPATH=/ bash -c "cd etc && cat passwd"', 'echo CDPATH=/ && cd src',
+    'export "GIT_WORK_TREE=../outside" && git clean -fdx', "declare -x 'GIT_WORK_TREE=../outside'; git clean -fdx",
     # A here-document delimiter written against an operator
     'cat <<EOF; rm -rf ~/x\nbody\nEOF', 'cat > notes.txt <<EOF; ls\nbody\nEOF', 'cat <<EOF;\nbody\nEOF\nrm -rf victim',
     'cat <<EOF&&rm -rf ../outside/x\nbody\nEOF', 'cat <<EOF|sh\nrm -rf victim\nEOF', 'cat <<EOF>out.txt\nbody\nEOF',

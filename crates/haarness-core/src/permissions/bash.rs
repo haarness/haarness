@@ -1095,7 +1095,7 @@ impl Reader<'_> {
         let mut cursor = tree.walk();
         while let Some((node, parent)) = stack.pop() {
             sets_tree = sets_tree || sets_work_tree(node, parent, command);
-            note_cdpath(node, command, &mut cdpaths);
+            note_cdpath(node, parent, command, &mut cdpaths);
             if node.kind() == "command" {
                 command_nodes.push((node, parent));
             }
@@ -2988,7 +2988,8 @@ fn work_tree_settings(command: tree_sitter::Node<'_>, source: &str) -> Vec<(usiz
 /// Whether `node` (with its `parent`) sets `GIT_WORK_TREE` to a value: an
 /// assignment (before a command, on its own, or made by `export`, `declare`,
 /// `local` or `readonly`), `export GIT_WORK_TREE` of a value set elsewhere, a
-/// word a command such as `env` or `sudo` is given (`GIT_WORK_TREE=x`), or
+/// word a command such as `env` or `sudo` is given (`GIT_WORK_TREE=x`) or
+/// `export` is, quoted or not (`export "GIT_WORK_TREE=x"`), or
 /// `${GIT_WORK_TREE:=x}`. An empty value sets none (git refuses it), and
 /// reading it (`"$GIT_WORK_TREE"`) or `unset` sets nothing.
 fn sets_work_tree(
@@ -3017,7 +3018,9 @@ fn sets_work_tree(
             .and_then(|rest| rest.strip_prefix(NAME))
             .is_some_and(|rest| rest.starts_with('=') || rest.starts_with(":=")),
         kind if WORD_KINDS.contains(&kind)
-            && parent.is_some_and(|parent| parent.kind() == "command")
+            && parent.is_some_and(|parent| {
+                matches!(parent.kind(), "command" | "declaration_command")
+            })
             && text(node).trim_start_matches(['"', '\'']).starts_with(NAME) =>
         {
             let (value, literal) = unquote(node, source);
@@ -3030,13 +3033,38 @@ fn sets_work_tree(
     }
 }
 
-/// The value an assignment to `CDPATH` in `node` gives it (`CDPATH=/x:.`,
-/// also one `export` makes), added to `values`: `None` for one only known
-/// when it runs, and for `${CDPATH:=…}`.
-fn note_cdpath(node: tree_sitter::Node<'_>, source: &str, values: &mut Vec<Option<String>>) {
+/// The value an assignment to `CDPATH` in `node` (with its `parent`) gives
+/// it (`CDPATH=/x:.`, also one `export` makes, or a word `export`, `env` or
+/// `sudo` is given, quoted or not: `export "CDPATH=/x"`, `env CDPATH=/x sh
+/// -c …`), added to `values`: `None` for one only known when it runs, and for
+/// `${CDPATH:=…}`.
+fn note_cdpath(
+    node: tree_sitter::Node<'_>,
+    parent: Option<tree_sitter::Node<'_>>,
+    source: &str,
+    values: &mut Vec<Option<String>>,
+) {
     const NAME: &str = "CDPATH";
     let text = |node: tree_sitter::Node<'_>| source.get(node.byte_range()).unwrap_or_default();
     match node.kind() {
+        kind if WORD_KINDS.contains(&kind)
+            && text(node).trim_start_matches(['"', '\'']).starts_with(NAME)
+            && parent.is_some_and(|parent| match parent.kind() {
+                "declaration_command" => true,
+                "command" => parent.child_by_field_name("name").is_some_and(|name| {
+                    matches!(program_name(text(name)).as_str(), "env" | "sudo")
+                }),
+                _ => false,
+            }) =>
+        {
+            let (value, literal) = unquote(node, source);
+            if let Some(path) = value
+                .strip_prefix(NAME)
+                .and_then(|rest| rest.strip_prefix('='))
+            {
+                values.push(literal.then(|| path.to_owned()));
+            }
+        }
         "variable_assignment"
             if node
                 .child_by_field_name("name")
@@ -6969,6 +6997,10 @@ mod regression {
             "CDPATH=.:/ cd etc",
             "eval 'CDPATH=/'; cd etc",
             "CDPATH=/ bash -c 'cd etc && cat passwd'",
+            "export \"CDPATH=/\" && cd etc && cat passwd",
+            "export 'CDPATH=/'; cd etc",
+            "env CDPATH=/ bash -c \"cd etc && cat passwd\"",
+            "sudo CDPATH=/ sh -c 'cd etc'",
         ] {
             let found = analyze(command, &workspace).external_dirs;
             assert!(
@@ -6992,6 +7024,8 @@ mod regression {
             "CDPATH= cd src",
             "unset CDPATH; cd src",
             "echo \"$CDPATH\"; cd src",
+            "export \"CDPATH=\"; cd src",
+            "echo CDPATH=/ && cd src",
         ] {
             assert!(
                 analyze(command, &workspace).external_dirs.is_empty(),
@@ -8182,6 +8216,9 @@ mod readings {
             "export GIT_WORK_TREE; git clean -fdx",
             ": \"${GIT_WORK_TREE:=../outside/cache}\"; git clean -fdx",
             "eval 'export GIT_WORK_TREE=../outside/cache'; git clean -fdx",
+            "export \"GIT_WORK_TREE=../outside/cache\" && git clean -fdx",
+            "export 'GIT_WORK_TREE=../outside/cache' && git clean -fdx",
+            "declare -x \"GIT_WORK_TREE=../outside/cache\"; git clean -fdx",
         ] {
             assert_eq!(
                 found(command),

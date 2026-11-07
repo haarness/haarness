@@ -44,7 +44,8 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
 15. auto_deletions: in Auto, a `git clean -f` whose work tree (`--work-tree`, `GIT_WORK_TREE`) is outside the
    project, and an `rm` a trap runs there, ask though the reviewer allows them; a clean of the project runs.
 16. cdpath: a `cd` under a `CDPATH` the line sets asks for the folder it may enter (`CDPATH=/ cd etc && cat
-   hosts` asks for `/etc` before the line runs), while `CDPATH=.: cd sub && cat inside.txt` runs.
+   hosts` asks for `/etc` before the line runs, also when `export` is given it quoted), while `CDPATH=.: cd sub &&
+   cat inside.txt` runs.
 17. heredoc_line: what follows a here-document's delimiter on its line, written against it or not, meets the
    rules (`cat <<EOF; rm -rf victim` against an `rm *` deny), plain lines of that shape run, and one whose
    delimiter cannot be set apart (`cat<<EOF; touch x`) asks.
@@ -604,7 +605,8 @@ def case_cdpath():
     (folder / 'sub' / 'inside.txt').write_text('inside\n')
     etc = Path('/etc').resolve()
     try:
-        for line in ['CDPATH=/ cd etc && cat hosts', 'export CDPATH=/ && cd etc && cat hosts']:
+        for line in ['CDPATH=/ cd etc && cat hosts', 'export CDPATH=/ && cd etc && cat hosts',
+                     'export "CDPATH=/" && cd etc && cat hosts']:
             output = bash(env, folder, line, code=1)
             assert 'Stopped:' in output and str(etc) in output, (line, output)
             assert 'localhost' not in output, (line, output)
