@@ -186,6 +186,23 @@ pub fn clean_chat_title(title: &str) -> String {
     clean.trim().to_owned()
 }
 
+/// A title kept as it was written (an older server's row, an archive) as a
+/// client gets it: borrowed, unchanged, when it holds no control character;
+/// else [`clean_chat_title`], or the untitled placeholder when nothing
+/// printable is left of it.
+#[must_use]
+pub fn readable_chat_title(title: &str) -> Cow<'_, str> {
+    if !title.chars().any(char::is_control) {
+        return Cow::Borrowed(title);
+    }
+    let clean = clean_chat_title(title);
+    Cow::Owned(if clean.is_empty() {
+        crate::UNTITLED_CHAT_TITLE.to_owned()
+    } else {
+        clean
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +291,20 @@ mod tests {
         }
         assert_eq!(clean_chat_title("\u{1b}]0;owned\u{7}\u{1b}[2J"), "");
         assert_eq!(clean_chat_title(" \n\t"), "");
+    }
+
+    #[test]
+    fn a_title_kept_as_written_reads_clean_and_an_ordinary_one_as_it_is() {
+        assert_eq!(
+            readable_chat_title("\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}Escaped"),
+            "Escaped"
+        );
+        assert_eq!(
+            readable_chat_title("\u{1b}]0;owned\u{7}\u{1b}[2J"),
+            crate::UNTITLED_CHAT_TITLE
+        );
+        for title in ["  Spaced title ", "", "日本語 👩\u{200d}🔬"] {
+            assert!(matches!(readable_chat_title(title), Cow::Borrowed(same) if same == title));
+        }
     }
 }

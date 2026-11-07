@@ -21,7 +21,7 @@ pub use approval::*;
 pub use archive::*;
 pub use btw::*;
 pub use cloud::*;
-pub use control_text::{clean_chat_title, without_escapes};
+pub use control_text::{clean_chat_title, readable_chat_title, without_escapes};
 pub use goal::*;
 pub use home::{
     SYSTEM_CONFIG_DIR_ENV, home_dir, system_config_dir, system_config_dir_from,

@@ -101,10 +101,10 @@ if target_cli sessions import "$temporary/unsupported.json" >/dev/null 2>&1; the
 fi
 test "$(target_cli sessions list --json | jq 'length')" -eq 2
 
-# An imported chat keeps the title its archive holds, escape sequences
-# included. Printed, it is plain words: listing the chats neither sets the
-# terminal's title nor writes its clipboard, and JSON writes DEL and C1
-# controls as escapes that read back as the title.
+# An archive's title with escape sequences is stored as its words, and a fork
+# of the imported chat is named from them. Printed, it is plain words:
+# listing the chats neither sets the terminal's title nor writes its
+# clipboard, and JSON holds no raw DEL or C1 control.
 escaped_title='\u001b]0;owned\u0007\u001b]52;c;aGk=\u0007Escaped\u009b title\u007f'
 jq --arg root "$root_id" \
     "(.threads[] | select(.thread.id == \$root) | .thread.title) = \"$escaped_title\"" \
@@ -123,7 +123,8 @@ if [ "$(printf '%s' "$listed_json" | jq -Rs 'test("[\u007f-\u009f]")')" != false
     exit 1
 fi
 printf '%s' "$listed_json" | jq -e --arg root "$root_id" \
-    ".[] | select(.id == \$root) | .title == \"$escaped_title\"" >/dev/null
+    '.[] | select(.id == $root) | .title == "Escaped title"' >/dev/null
+escape_cli sessions fork "$root_id" --json | jq -e '.title == "Fork of Escaped title"' >/dev/null
 archived=$(escape_cli sessions archive "$root_id")
 test "$archived" = "Archived Escaped title ($root_id)"
 
