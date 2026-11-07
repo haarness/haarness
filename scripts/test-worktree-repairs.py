@@ -8,7 +8,8 @@
 2. A worktree whose link to its repository broke (its `.git` names a Git folder that is gone): `haarness
    worktree remove` forgets it and says in one line that its folder was left on disk, with the work in
    it; the TUI's /workspace Remove says the same in its notice. A worktree whose link works is still
-   removed whole, and one whose repository is out of reach (moved) is kept, naming `git worktree repair`.
+   removed whole, and one whose repository moved names `git worktree repair`, after which it opens and is
+   removed again.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-worktree-repairs.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -151,17 +152,20 @@ try:
     removed = cli(project, "worktree", "remove", "linked", "--confirm")
     check("A worktree whose link works is still removed whole", "removed worktree" in removed.stdout and not linked.exists())
 
-    # A repository out of reach (moved, or on a disk not connected) keeps its worktree.
+    # A repository that moved: its worktree says how to mend it, and works again once mended.
     elsewhere = repository("elsewhere")
     cli(elsewhere, "worktree", "create", "away")
     away = next(item for item in listed(elsewhere)["workspaces"] if item["name"] == "away")
     moved = root / "elsewhere-moved"
     elsewhere.rename(moved)
-    kept = cli(main, "worktree", "remove", away["id"], "--confirm", ok=False)
-    still = any(item["id"] == away["id"] for item in listed(main)["workspaces"])
-    moved.rename(elsewhere)
-    check("A worktree whose repository is out of reach is kept, saying how to repair it",
-          kept.returncode != 0 and "not reachable" in kept.stderr and "git worktree repair" in kept.stderr and still)
+    refused = cli(main, "worktree", "open", away["id"], "--path-only", ok=False)
+    check("Opening a worktree of a moved repository says to run git worktree repair there",
+          refused.returncode != 0 and "git worktree repair" in refused.stderr and "not reachable" not in refused.stderr)
+    git("worktree", "repair", cwd=moved)
+    opened = cli(main, "worktree", "open", away["id"], "--path-only")
+    removed = cli(main, "worktree", "remove", away["id"], "--confirm")
+    check("Once repaired there, it opens again and is removed whole, its project's old folder gone",
+          opened.stdout.strip() == away["path"] and "removed worktree" in removed.stdout and not Path(away["path"]).exists())
 
     # The TUI's /workspace Remove.
     cli(project, "worktree", "create", "tui unlinked")

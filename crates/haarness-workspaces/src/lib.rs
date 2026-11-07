@@ -609,7 +609,7 @@ impl WorkspaceManager {
             .or(workspace.from_ref.as_deref())
             .unwrap_or("HEAD")
             .to_owned();
-        let commit = verify_commit(Path::new(&project.root), &target_ref)?;
+        let commit = verify_commit(&repository_home(project, &path)?, &target_ref)?;
         ensure_reset_paths_safe(&path, &commit, request.remove_untracked)?;
         git_checked(&path, ["reset", "--hard", &commit])?;
         if request.remove_untracked {
@@ -688,7 +688,8 @@ impl WorkspaceManager {
             args.push("--force");
         }
         args.push(&workspace.path);
-        git_checked(Path::new(&project.root), args)?;
+        let home = repository_home(&project, &path)?;
+        git_checked(&home, args)?;
 
         registry
             .workspaces
@@ -698,7 +699,7 @@ impl WorkspaceManager {
         let mut branch_deleted = false;
         if request.delete_branch {
             if let Some(branch) = live_branch.as_deref() {
-                match git_checked(Path::new(&project.root), ["branch", "-d", branch]) {
+                match git_checked(&home, ["branch", "-d", branch]) {
                     Ok(_) => {
                         branch_deleted = true;
                         let _ = write!(&mut message, " and deleted merged branch {branch}");
@@ -1024,14 +1025,17 @@ enum WorktreeLink {
     /// would be on is (Git's record of the worktree was pruned, or the
     /// repository moved). Git refuses every command in such a folder.
     Broken,
-    /// Its repository may come back: the project's folder is missing, or the
-    /// Git folder named is on a disk that is not connected. Holds where.
+    /// Its repository may come back: the project's folder, or the Git folder
+    /// the link names, is on a disk that is not connected. Holds where.
     Unreachable(PathBuf),
 }
 
 fn worktree_link(path: &Path, project: &ProjectInfo) -> WorktreeLink {
+    // A project whose folder is on a disk that is not connected may come
+    // back; one moved or deleted elsewhere is judged by the worktree's link,
+    // which `git worktree repair` in the moved repository mends.
     let root = Path::new(&project.root);
-    if !root.exists() {
+    if !root.exists() && on_a_missing_disk(root) {
         return WorktreeLink::Unreachable(root.to_path_buf());
     }
     let gone = |error: &std::io::Error| {
@@ -1090,9 +1094,21 @@ fn on_a_missing_disk(path: &Path) -> bool {
 /// Why a worktree whose repository is out of reach is kept.
 fn unreachable(place: &Path) -> String {
     format!(
-        "the worktree's repository is not reachable ({}): connect the disk it is on, or if the repository moved, run `git worktree repair` there; the worktree is kept",
+        "the worktree's repository is on a disk that is not connected ({}); connect it to use the worktree, which is kept until then",
         place.display()
     )
+}
+
+/// Where Git commands about a worktree run: the project's folder, or, when
+/// that is gone because the repository moved (and `git worktree repair` there
+/// mended the worktree's link), the repository's Git folder, found through
+/// the worktree.
+fn repository_home(project: &ProjectInfo, worktree: &Path) -> Result<PathBuf> {
+    let root = PathBuf::from(&project.root);
+    if root.exists() {
+        return Ok(root);
+    }
+    git_common_dir(worktree)
 }
 
 fn requested_worktree_path(
@@ -1284,8 +1300,13 @@ fn verify_workspace_identity(workspace: &WorkspaceInfo, project: &ProjectInfo) -
             "managed workspace identity could not be verified: {error}"
         ))
     })?;
+    // A project folder that is gone (the repository moved, and its link was
+    // mended there) has nothing to compare: the identity marker below, kept
+    // in the worktree's own Git folder, is what proves it is the same one.
+    let moved = !Path::new(&project.root).exists();
     if !identity.git
-        || !(same_path(&identity.root, Path::new(&project.root))
+        || !(moved
+            || same_path(&identity.root, Path::new(&project.root))
             || same_repository(path, Path::new(&project.root)))
     {
         return Err(WorkspaceError::Conflict(
@@ -2956,15 +2977,33 @@ mod tests {
                 WorktreeLink::Unreachable(away)
             );
         }
-        // So may one whose project folder is missing.
+        // A project folder that moved is judged by the link, which works here.
+        fs::write(
+            folder.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
         let moved = ProjectInfo {
             root: root.join("moved").display().to_string(),
             ..project.clone()
         };
-        assert_eq!(
-            worktree_link(&folder, &moved),
-            WorktreeLink::Unreachable(root.join("moved"))
-        );
+        assert_eq!(worktree_link(&folder, &moved), WorktreeLink::Working);
+        // One on a disk that is not connected may come back.
+        if let Some(mounts) = ["/Volumes", "/mnt"]
+            .into_iter()
+            .map(Path::new)
+            .find(|mounts| mounts.is_dir())
+        {
+            let away = mounts.join(format!("haarness-unplugged-{}/repo", Uuid::now_v7()));
+            let unplugged = ProjectInfo {
+                root: away.display().to_string(),
+                ..project.clone()
+            };
+            assert_eq!(
+                worktree_link(&folder, &unplugged),
+                WorktreeLink::Unreachable(away)
+            );
+        }
         // A repository of its own.
         fs::remove_file(folder.join(".git")).unwrap();
         fs::create_dir(folder.join(".git")).unwrap();
@@ -2972,52 +3011,74 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// A worktree whose repository cannot be reached (its disk unplugged,
-    /// or the project's folder gone) is kept: forgetting it would cut off its
-    /// chats, which are filed under its record, once the disk is back.
+    /// A repository that moved leaves its worktree's link broken: opening it
+    /// says how to mend it, and once `git worktree repair` ran in the moved
+    /// repository the worktree opens, resets and is removed again although
+    /// the project's folder is gone.
     #[test]
-    fn a_worktree_whose_repository_is_out_of_reach_is_kept() {
+    fn a_worktree_of_a_moved_repository_works_again_once_repaired() {
         let fixture = Fixture::new();
-        let workspace = fixture.create("away");
+        let workspace = fixture.create("moved");
+        let path = PathBuf::from(&workspace.path);
         let moved = fixture.root.join("moved-repository");
         fs::rename(&fixture.repository, &moved).unwrap();
-        for result in [
-            fixture
-                .manager
-                .remove_worktree(
-                    &workspace.id,
-                    &WorkspaceRemoveRequest {
-                        confirm: true,
-                        discard_changes: true,
-                        delete_branch: false,
-                    },
-                )
-                .map(|_| ()),
-            fixture
-                .manager
-                .cleanup_missing_workspace(
-                    &workspace.id,
-                    &WorkspaceCleanupRequest { confirm: true },
-                )
-                .map(|_| ()),
-            fixture.manager.open_workspace(&workspace.id).map(|_| ()),
-        ] {
-            assert!(
-                matches!(
-                    &result,
-                    Err(WorkspaceError::Conflict(message))
-                        if message.contains("repository is not reachable")
-                            && message.contains("git worktree repair")
-                ),
-                "{result:?}"
-            );
-        }
-        assert_eq!(fixture.manager.get(&workspace.id).unwrap().id, workspace.id);
-        fs::rename(&moved, &fixture.repository).unwrap();
+        assert!(matches!(
+            fixture.manager.open_workspace(&workspace.id),
+            Err(WorkspaceError::Conflict(message))
+                if message == BROKEN_LINK && message.contains("git worktree repair")
+        ));
+        // Desktop lets a removal go on without the worktree's server only on
+        // this refusal, which it knows by these words.
+        assert!(BROKEN_LINK.starts_with("the worktree no longer links to its repository"));
+        command(&moved, ["worktree", "repair"]);
         assert_eq!(
             fixture.manager.open_workspace(&workspace.id).unwrap().id,
             workspace.id
         );
+        fs::write(path.join("tracked.txt"), "changed\n").unwrap();
+        fixture
+            .manager
+            .reset_worktree(
+                &workspace.id,
+                &WorkspaceResetRequest {
+                    confirm: true,
+                    discard_changes: true,
+                    ..WorkspaceResetRequest::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        fixture
+            .manager
+            .remove_worktree(
+                &workspace.id,
+                &WorkspaceRemoveRequest {
+                    confirm: true,
+                    delete_branch: true,
+                    ..WorkspaceRemoveRequest::default()
+                },
+            )
+            .unwrap();
+        assert!(!path.exists());
+        // Unrepaired, a moved repository's worktree is forgotten, its folder kept.
+        fs::rename(&moved, &fixture.repository).unwrap();
+        let other = fixture.create("left behind");
+        fs::rename(&fixture.repository, &moved).unwrap();
+        let forgotten = fixture
+            .manager
+            .remove_worktree(
+                &other.id,
+                &WorkspaceRemoveRequest {
+                    confirm: true,
+                    ..WorkspaceRemoveRequest::default()
+                },
+            )
+            .unwrap();
+        assert!(forgotten.workspace.exists && Path::new(&other.path).is_dir());
+        fs::rename(&moved, &fixture.repository).unwrap();
     }
 
     #[test]

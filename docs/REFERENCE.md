@@ -321,11 +321,11 @@ project that is itself a worktree of a bare repository (`git clone --bare`, then
 A worktree whose link to its repository broke (its `.git` names a Git folder that
 is gone) cannot be opened or checked; `worktree remove` (and the stale-folder
 cleanup) then only forgets it, leaving its folder and its branch as they are,
-and says so in one line (`worktree forgotten: …`). A worktree whose repository is
-out of reach instead, on a disk that is not connected (under `/Volumes`, `/mnt`
-or `/media`) or with the project's folder missing, is kept, so its chats stay
-with it: connect the disk, or for a repository that moved, run
-`git worktree repair` in it.
+and says so in one line (`worktree forgotten: …`). For a repository that moved,
+run `git worktree repair` in it instead: the worktree then opens, resets and is
+removed again although the project's old folder is gone. A worktree whose
+repository is on a disk that is not connected (under `/Volumes`, `/mnt` or
+`/media`) is kept, so its chats stay with it, until the disk is back.
 
 ## Terminal UI
 
