@@ -2824,8 +2824,8 @@ async fn manage_resource(
         haarness_core::CoreError::Tool("Client management is unavailable on this server".into())
     })?;
     // Computer use takes more reach for agents only from a person, and only a person ends their own pause: say whether
-    // a change came from a program Haarness started (an agent's command, say). Reads skip the look at the process
-    // table.
+    // a change came from a program Haarness started (an agent's command, or a program it put in the background). Reads
+    // skip the look at the process table.
     if resource == "computer-use"
         && matches!(
             input["action"].as_str(),
