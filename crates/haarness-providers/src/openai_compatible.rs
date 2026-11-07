@@ -1816,10 +1816,14 @@ fn first_window(entry: &Value, keys: &[&str]) -> Option<u64> {
         .find_map(|key| first_u64(entry, &[key]).filter(|window| *window > 0))
 }
 
+/// A number a catalog wrote as a number or a string. Rust parses "NaN",
+/// "inf" and "1e999" as floats; none is a price, and a NaN would make every
+/// turn's cost NaN.
 fn json_number(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str()?.parse::<f64>().ok())
+        .filter(|number| number.is_finite())
 }
 
 fn override_bool(entry: &Value, key: &str, target: &mut bool) {
@@ -3088,6 +3092,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(info.display_name, "Qwen3.8-27B");
+    }
+
+    #[test]
+    fn a_price_that_is_not_a_finite_number_is_no_price() {
+        let price = |prompt: &str, cache_read: &str| {
+            discovered_model_info(
+                "openrouter",
+                &json!({"id": "vendor/model", "pricing": {
+                    "prompt": prompt, "completion": "0.000002", "input_cache_read": cache_read
+                }}),
+                CompatibleModelDefaults::default(),
+            )
+            .unwrap()
+            .pricing
+        };
+        for broken in ["NaN", "inf", "-inf", "1e999"] {
+            assert!(price(broken, "0").is_none(), "{broken}");
+            // A broken cache rate is no rate, not a NaN in every cost.
+            let pricing = price("0.000001", broken).unwrap();
+            assert!(pricing.cache_read.abs() < 1e-12, "{broken}");
+            assert!((pricing.input - 1.0).abs() < 1e-9);
+        }
     }
 
     #[test]
