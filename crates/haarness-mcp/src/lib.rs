@@ -2120,10 +2120,10 @@ fn describe_timeout(timeout: Duration) -> String {
     }
 }
 
-/// The status of a remote server whose url, its references read, is not
-/// an http or https address with a host. A status sits under the server's
-/// name, so it does not repeat it.
-const URL_WITHOUT_HOST: &str = "Its URL is not an http or https address with a host.";
+/// The status of a remote server whose url, its references read, names no
+/// web address (http or https) with a host. A status sits under the
+/// server's name, so it does not repeat it.
+const URL_WITHOUT_HOST: &str = "Its URL is not a web address (http or https) with a host.";
 
 /// The address remote server is asked at: `url` with each `${VAR}` and
 /// `${VAR:-fallback}` read from the environment when the server starts, as

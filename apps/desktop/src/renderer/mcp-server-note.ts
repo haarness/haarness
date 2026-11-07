@@ -18,8 +18,8 @@ export function mcpServerNote(server: { status: string; detail?: string | null }
 }
 
 function failureReason(detail: string) {
-  if (detail === "Its URL is not an http or https address with a host.")
-    return t("Its URL is not an http or https address with a host.");
+  if (detail === "Its URL is not a web address (http or https) with a host.")
+    return t("Its URL is not a web address (http or https) with a host.");
   const one = /^Its URL names an environment variable that is not set: (.+)\.$/.exec(detail);
   if (one) return t("Its URL names an environment variable that is not set: {variable}.", { variable: one[1] });
   const many = /^Its URL names environment variables that are not set: (.+)\.$/.exec(detail);

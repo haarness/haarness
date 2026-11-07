@@ -188,7 +188,7 @@ test("a remote server whose url cannot be asked says so in one sentence, without
   await openMcpSettings();
   const bad = block("badurl");
   await expect(bad.locator(".mcp-server-detail")).toHaveText(
-    "Its URL is not an http or https address with a host.",
+    "Its URL is not a web address (http or https) with a host.",
   );
   await expect(bad).not.toContainText("e2e-url-secret");
   await pictures(bad, "mcp-bad-url-detail");

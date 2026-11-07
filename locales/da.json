@@ -3106,7 +3106,7 @@
   "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "En agent spørger, før den handler i en app, du ikke har tilladt. Når du har tilladt en app, handler den der uden at spørge, og det, den gør, er stadig dit ansvar.",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS giver Tilgængelighed og Skærmoptagelse til den app, Haarness kører i, enten Haarness selv eller din terminal, og hvert program, der startes fra den app, arver dem.",
   "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Slå computerbrug fra, når du vil, under Indstillinger → Computerbrug, eller kør haarness mac off.",
-  "Its URL is not an http or https address with a host.": "Dens URL er ikke en http- eller https-adresse med en vært.",
+  "Its URL is not a web address (http or https) with a host.": "Dens URL er ikke en webadresse (http eller https) med en vært.",
   "Its URL names an environment variable that is not set: {variable}.": "Dens URL nævner en miljøvariabel, der ikke er sat: {variable}.",
   "Its URL names environment variables that are not set: {variables}.": "Dens URL nævner miljøvariabler, der ikke er sat: {variables}.",
   "Left out as not valid MCP tools: {tools}": "Udeladt, da de ikke er gyldige MCP-værktøjer: {tools}"

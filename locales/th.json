@@ -3106,7 +3106,7 @@
   "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "เอเจนต์จะถามก่อนทำงานในแอปที่คุณยังไม่ได้อนุญาต เมื่อคุณอนุญาตแอปแล้ว เอเจนต์จะทำงานในแอปนั้นโดยไม่ถาม และคุณยังคงต้องรับผิดชอบต่อสิ่งที่เอเจนต์ทำ",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS ให้สิทธิ์การช่วยการเข้าถึงและการบันทึกหน้าจอแก่แอปที่ Haarness ทำงานอยู่ ซึ่งก็คือ Haarness เองหรือเทอร์มินัลของคุณ และทุกโปรแกรมที่เปิดจากแอปนั้นจะได้รับสิทธิ์เหล่านี้ไปด้วย",
   "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "ปิดการใช้คอมพิวเตอร์ได้ทุกเมื่อที่การตั้งค่า → การใช้คอมพิวเตอร์ หรือเรียกใช้ haarness mac off",
-  "Its URL is not an http or https address with a host.": "URL ไม่ใช่ที่อยู่ http หรือ https ที่มีโฮสต์",
+  "Its URL is not a web address (http or https) with a host.": "URL ไม่ใช่ที่อยู่เว็บ (http หรือ https) ที่มีโฮสต์",
   "Its URL names an environment variable that is not set: {variable}.": "URL อ้างถึงตัวแปรสภาพแวดล้อมที่ไม่ได้ตั้งค่า: {variable}",
   "Its URL names environment variables that are not set: {variables}.": "URL อ้างถึงตัวแปรสภาพแวดล้อมที่ไม่ได้ตั้งค่า: {variables}",
   "Left out as not valid MCP tools: {tools}": "ละไว้เพราะไม่ใช่เครื่องมือ MCP ที่ถูกต้อง: {tools}"

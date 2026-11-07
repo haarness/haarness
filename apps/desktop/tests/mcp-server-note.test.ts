@@ -4,8 +4,8 @@ import { mcpServerNote } from "../src/renderer/mcp-server-note";
 
 test("a failed server's reason reads as Haarness wrote it, a server's own words as they are", () => {
   assert.deepEqual(
-    mcpServerNote({ status: "failed", detail: "Its URL is not an http or https address with a host." }),
-    { text: "Its URL is not an http or https address with a host.", quiet: false },
+    mcpServerNote({ status: "failed", detail: "Its URL is not a web address (http or https) with a host." }),
+    { text: "Its URL is not a web address (http or https) with a host.", quiet: false },
   );
   assert.deepEqual(
     mcpServerNote({ status: "failed", detail: "Its URL names an environment variable that is not set: DOCS_HOST." }),

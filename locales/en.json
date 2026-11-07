@@ -3106,7 +3106,7 @@
   "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.",
   "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.",
-  "Its URL is not an http or https address with a host.": "Its URL is not an http or https address with a host.",
+  "Its URL is not a web address (http or https) with a host.": "Its URL is not a web address (http or https) with a host.",
   "Its URL names an environment variable that is not set: {variable}.": "Its URL names an environment variable that is not set: {variable}.",
   "Its URL names environment variables that are not set: {variables}.": "Its URL names environment variables that are not set: {variables}.",
   "Left out as not valid MCP tools: {tools}": "Left out as not valid MCP tools: {tools}"

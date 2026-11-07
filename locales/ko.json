@@ -3106,7 +3106,7 @@
   "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "에이전트는 허용하지 않은 앱에서 작업하기 전에 묻습니다. 앱을 허용하면 묻지 않고 작업하며, 그 결과에 대한 책임은 여전히 사용자에게 있습니다.",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS는 손쉬운 사용과 화면 기록 권한을 Haarness가 실행 중인 앱, 즉 Haarness 자체나 터미널에 부여하며, 그 앱에서 실행한 모든 프로그램이 이 권한을 물려받습니다.",
   "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "설정 → 컴퓨터 사용에서 언제든 컴퓨터 사용을 끄거나 haarness mac off를 실행하세요.",
-  "Its URL is not an http or https address with a host.": "URL이 호스트가 있는 http 또는 https 주소가 아닙니다.",
+  "Its URL is not a web address (http or https) with a host.": "URL이 호스트가 있는 웹 주소(http 또는 https)가 아닙니다.",
   "Its URL names an environment variable that is not set: {variable}.": "URL이 설정되지 않은 환경 변수를 사용합니다: {variable}.",
   "Its URL names environment variables that are not set: {variables}.": "URL이 설정되지 않은 환경 변수를 사용합니다: {variables}.",
   "Left out as not valid MCP tools: {tools}": "유효한 MCP 도구가 아니어서 제외됨: {tools}"

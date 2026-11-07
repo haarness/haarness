@@ -51,7 +51,7 @@ keychain = root/'keychain.json'
 SECRET = 'ghp_e2e-' + uuid.uuid4().hex
 URL_SECRET = 'url-e2e-' + uuid.uuid4().hex
 # A JSON setting fills an unset variable with nothing; a server configured through the API keeps the reference.
-BAD_URL = 'Its URL is not an http or https address with a host.'
+BAD_URL = 'Its URL is not a web address (http or https) with a host.'
 BAD_VAR = 'Its URL names an environment variable that is not set: HAARNESS_E2E_UNSET_HOST.'
 # Quotes, backslashes and length the old `security -i` path split or mangled.
 AWKWARD = 'a"b\\c\\"d \'e\' $(f) %g% ' + 'x' * 4096
