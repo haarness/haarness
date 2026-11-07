@@ -11,13 +11,16 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
-/// How long each closing read of an ask or a wait (the turn's last state,
-/// its history) may take once its deadline has passed.
+/// The least time a read of an ask or a wait gets, even when its deadline is
+/// nearer or has passed: a slow workspace still answers the reads that close
+/// the answer.
 const CLOSING: Duration = Duration::from_secs(5);
 /// Why an ask or a wait answered with what it knew: a read was not answered
 /// in time.
 const UNANSWERED: &str = "The workspace did not answer within timeoutSeconds. Its work goes on: use wait with these IDs, and do not submit the message again.";
 const UNSENT: &str = "The workspace did not answer within timeoutSeconds, so no message was submitted. Ask again with this workspaceId; do not create a duplicate workspace.";
+const UNREAD: &str = "The workspace did not answer within timeoutSeconds, so its messages are not here: read them with messages.";
+const STARTING: &str = "Haarness Cloud did not answer within timeoutSeconds while the workspace started, so this is how it was last seen and no chat message was submitted. Get it to see its state, and ask using this workspaceId once it is running; do not create a duplicate workspace.";
 mod events;
 
 use haarness_protocol::{
@@ -80,35 +83,31 @@ fn validate_configuration(configuration: Option<&Value>) -> Result<()> {
     Ok(())
 }
 
-/// When a read of an ask or a wait gives up: at the deadline while there is
-/// time left. Once it has passed, each read that closes the answer gets a
-/// moment of its own.
+/// When a read of an ask or a wait gives up: at the deadline, or
+/// [`CLOSING`] after it starts when that is later.
 fn answer_by(deadline: Instant) -> Instant {
-    let now = Instant::now();
-    if now < deadline {
-        deadline
-    } else {
-        now + CLOSING
-    }
+    deadline.max(Instant::now() + CLOSING)
 }
 
 /// The answer of an ask or a wait whose workspace did not answer a read in
 /// time before the turn was known: an ask's message was not submitted, and a
-/// wait reports the work as going on, for the next wait to read.
+/// wait has nothing to report but that, for the next wait to read.
 fn unanswered(
     id: Uuid,
     url: &str,
     thread: Option<Uuid>,
     turn: Option<Uuid>,
     asking: bool,
-    observed: &Value,
 ) -> Value {
     let url = thread.map_or_else(|| url.to_owned(), |thread| format!("{url}?thread={thread}"));
+    let mut answer = json!({"workspaceId":id,"threadId":thread,"url":url,"status":"unanswered","messageSubmitted":false});
     if asking {
-        json!({"workspaceId":id,"threadId":thread,"url":url,"status":observed,"messageSubmitted":false,"message":UNSENT})
+        answer["message"] = json!(UNSENT);
     } else {
-        json!({"workspaceId":id,"threadId":thread,"turnId":turn,"url":url,"status":"running","messageSubmitted":false,"message":UNANSWERED})
+        answer["turnId"] = json!(turn);
+        answer["message"] = json!(UNANSWERED);
     }
+    answer
 }
 
 /// Whether a turn in this state is still going.
@@ -466,7 +465,6 @@ impl Cloud {
                 Some(chat_id),
                 input.turn_id,
                 matches!(input.action, ChatAction::Ask),
-                &workspace["observedState"],
             );
             result["chatId"] = json!(chat_id);
             return Ok(result);
@@ -620,7 +618,13 @@ impl Cloud {
             if input.start != Some(false)
                 && (matches!(input.action, WorkspaceAction::Ask) || input.wait.unwrap_or(true))
             {
-                workspace = self.ready(id, workspace, deadline).await?;
+                let answered;
+                (workspace, answered) = self.ready(id, workspace, deadline).await?;
+                if !answered {
+                    return Ok(
+                        json!({"workspace":workspace,"workspaceId":id,"url":url,"status":"starting","messageSubmitted":false,"message":STARTING}),
+                    );
+                }
             } else {
                 workspace = self.owned("workspaces", id).await?;
             }
@@ -643,16 +647,7 @@ impl Cloud {
             matches!(input.action, WorkspaceAction::Ask | WorkspaceAction::Wait)
                 .then(|| answer_by(deadline))
         };
-        let cut = |thread| {
-            Ok(unanswered(
-                id,
-                &url,
-                thread,
-                input.turn_id,
-                asking,
-                &workspace["observedState"],
-            ))
-        };
+        let cut = |thread| Ok(unanswered(id, &url, thread, input.turn_id, asking));
         let thread = if let Some(thread) = input.thread_id {
             if remote
                 .read_by(&format!("v1/threads/{thread}"), by())
@@ -751,9 +746,13 @@ impl Cloud {
                     turn
                 };
                 if turn.is_null() {
-                    return Ok(
-                        json!({"workspaceId":id,"threadId":thread,"url":url,"status":"idle","messages":remote.items(thread,input.after,count,None).await?}),
-                    );
+                    let mut answer =
+                        json!({"workspaceId":id,"threadId":thread,"url":url,"status":"idle"});
+                    match remote.items(thread, input.after, count, by()).await? {
+                        Some(messages) => answer["messages"] = messages,
+                        None => answer["message"] = json!(UNREAD),
+                    }
+                    return Ok(answer);
                 }
                 let turn_id: Uuid = serde_json::from_value(turn["id"].clone())?;
                 let (result, answered) = if !asking || input.wait.unwrap_or(true) {
@@ -764,19 +763,20 @@ impl Cloud {
                 // These cursors are sufficient to continue a timed-out or asynchronous call without resubmission.
                 let mut answer = json!({"workspaceId":id,"threadId":thread,"turnId":turn_id,"url":format!("{url}?thread={thread}"),"status":result["status"],"messageSubmitted":asking,"turn":result});
                 // A workspace that left a read unanswered is not asked for the
-                // history too; a finished turn's history is read in full.
-                let history = if !answered {
-                    None
-                } else if going(&answer["status"]) || answer["status"] == "needs_attention" {
+                // history too.
+                let history = if answered {
                     remote
                         .items(thread, input.after, count, Some(answer_by(deadline)))
                         .await?
                 } else {
-                    remote.items(thread, input.after, count, None).await?
+                    None
                 };
+                let still = going(&answer["status"]) || answer["status"] == "needs_attention";
                 match history {
                     Some(messages) => answer["messages"] = messages,
-                    None => answer["message"] = json!(UNANSWERED),
+                    None if still => answer["message"] = json!(UNANSWERED),
+                    // It ended: nothing goes on, only the history is missing.
+                    None => answer["message"] = json!(UNREAD),
                 }
                 Ok(answer)
             }
@@ -784,15 +784,15 @@ impl Cloud {
         }
     }
 
-    /// The workspace once it is running or settled, or as it was last seen
-    /// (`last` at first) when `deadline` passes.
-    async fn ready(&self, id: Uuid, mut last: Value, deadline: Instant) -> Result<Value> {
+    /// The workspace once it is running or settled, or when `deadline`
+    /// passes, with `true`; as it was last seen (`last` at first), with
+    /// `false`, when Cloud has not answered a read in time.
+    async fn ready(&self, id: Uuid, mut last: Value, deadline: Instant) -> Result<(Value, bool)> {
         let mut updates = events::Updates::control(self.clone(), id, deadline).await;
         loop {
             let read = tokio::time::timeout_at(answer_by(deadline), self.owned("workspaces", id));
             let Ok(read) = read.await else {
-                // Cloud did not answer in time.
-                return Ok(last);
+                return Ok((last, false));
             };
             let workspace = match read {
                 Err(_) if self.cancel.is_cancelled() => {
@@ -809,7 +809,7 @@ impl Cloud {
                 && workspace["desiredState"] != "running")
                 || Instant::now() >= deadline
             {
-                return Ok(workspace);
+                return Ok((workspace, true));
             }
             last = workspace;
             updates.wait(deadline, &self.cancel).await;

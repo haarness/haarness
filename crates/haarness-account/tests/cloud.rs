@@ -53,6 +53,10 @@ struct Data {
     runtime_answers: Option<usize>,
     /// The same for Cloud's reads of the workspace.
     workspace_answers: Option<usize>,
+    /// Never answer a read of a chat's history.
+    silent_history: bool,
+    /// How long every runtime request takes to answer.
+    runtime_delay: std::time::Duration,
 }
 type Shared = Arc<Mutex<Data>>;
 fn agent(d: &Data) -> Value {
@@ -83,15 +87,21 @@ async fn handler(State(state): State<Shared>, req: Request) -> Response {
             && d.runtime_answers.is_some_and(|n| seen("/runtime/") >= n)
             || method == "GET"
                 && format!("{path}?") == workspace
-                && d.workspace_answers.is_some_and(|n| seen(&workspace) >= n);
+                && d.workspace_answers.is_some_and(|n| seen(&workspace) >= n)
+            || d.silent_history && path.ends_with("/items");
         if silent {
             d.requests
                 .push((method.clone(), format!("{path}?{query}"), body.clone()));
         }
-        silent
+        (
+            silent,
+            path.starts_with("/runtime/").then_some(d.runtime_delay),
+        )
     };
-    if silent {
-        return std::future::pending().await;
+    match silent {
+        (true, _) => return std::future::pending().await,
+        (false, Some(delay)) => tokio::time::sleep(delay).await,
+        (false, None) => {}
     }
     let mut d = state.lock().unwrap();
     d.requests
@@ -1480,16 +1490,17 @@ async fn a_wait_on_a_workspace_that_never_answers_ends_at_its_deadline() {
     f.data.lock().unwrap().runtime_answers = Some(0);
     let cloud = f.cloud(CancellationToken::new()).await;
 
-    // The chat cannot even be read: the wait says the work goes on.
+    // The chat cannot even be read, and the wait says so. Each read has at
+    // least five seconds, so it ends five seconds after the read began.
     let (result, took) = answered_within(
-        Wall::from_secs(6),
+        Wall::from_secs(10),
         cloud.chat(json!({"action":"wait","workspaceId":WORKSPACE,"chatId":THREAD,"turnId":TURN,"timeoutSeconds":2})),
     )
     .await;
     let result = result.unwrap();
-    assert!(took >= Wall::from_millis(1900), "{took:?}");
-    assert!(took < Wall::from_secs(3), "{took:?}");
-    assert_eq!(result["status"], "running");
+    assert!(took >= Wall::from_millis(4900), "{took:?}");
+    assert!(took < Wall::from_secs(6), "{took:?}");
+    assert_eq!(result["status"], "unanswered");
     assert_eq!(result["chatId"], THREAD);
     assert_eq!(result["threadId"], THREAD);
     assert_eq!(result["turnId"], TURN);
@@ -1504,12 +1515,14 @@ async fn a_wait_on_a_workspace_that_never_answers_ends_at_its_deadline() {
 
     // An ask that cannot reach its chat submits nothing and says so.
     let (result, took) = answered_within(
-        Wall::from_secs(6),
+        Wall::from_secs(10),
         cloud.workspace(json!({"action":"ask","workspaceId":WORKSPACE,"threadId":THREAD,"message":"hello","timeoutSeconds":1})),
     )
     .await;
     let result = result.unwrap();
-    assert!(took < Wall::from_secs(2), "{took:?}");
+    assert!(took < Wall::from_secs(6), "{took:?}");
+    // Not the workspace's state: the message is not in.
+    assert_eq!(result["status"], "unanswered");
     assert_eq!(result["messageSubmitted"], false);
     assert!(
         result["message"]
@@ -1553,13 +1566,14 @@ async fn a_workspace_that_stops_answering_mid_wait_gets_its_last_known_turn_back
     }
     let cloud = f.cloud(CancellationToken::new()).await;
     let (result, took) = answered_within(
-        Wall::from_secs(8),
+        Wall::from_secs(12),
         cloud.workspace(json!({"action":"wait","workspaceId":WORKSPACE,"threadId":THREAD,"turnId":TURN,"timeoutSeconds":3})),
     )
     .await;
     let result = result.unwrap();
+    // The poll that goes unanswered starts about a second in.
     assert!(took >= Wall::from_millis(2900), "{took:?}");
-    assert!(took < Wall::from_secs(4), "{took:?}");
+    assert!(took < Wall::from_secs(7), "{took:?}");
     assert_eq!(result["status"], "running");
     assert_eq!(result["turn"]["id"], TURN);
     assert_eq!(result["turnId"], TURN);
@@ -1585,14 +1599,102 @@ async fn a_startup_wait_cloud_does_not_answer_ends_at_its_deadline_with_nothing_
     f.data.lock().unwrap().workspace_answers = Some(0);
     let cloud = f.cloud(CancellationToken::new()).await;
     let (result, took) = answered_within(
-        Wall::from_secs(6),
+        Wall::from_secs(10),
         cloud.workspace(json!({"action":"ask","message":"hello","timeoutSeconds":1})),
     )
     .await;
     let result = result.unwrap();
-    assert!(took < Wall::from_secs(2), "{took:?}");
+    assert!(took < Wall::from_secs(6), "{took:?}");
     assert_eq!(result["workspaceId"], WORKSPACE);
-    assert_eq!(result["status"], "pending");
+    // Cloud took the start; the snapshot is the one from before it.
+    assert_eq!(result["status"], "starting");
+    assert_eq!(result["workspace"]["observedState"], "pending");
+    assert!(result["message"].as_str().unwrap().contains("last seen"));
     assert_eq!(result["messageSubmitted"], false);
     assert_eq!(f.count("POST", "/api/v1/workspaces"), 1);
+
+    // An explicit start that Cloud then does not answer reads the same, not
+    // as the stopped workspace it was before it was asked to start.
+    let f = Fixture::new(true).await;
+    {
+        let mut d = f.data.lock().unwrap();
+        d.stopped = true;
+        d.workspace_answers = Some(1);
+    }
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let (result, _) = answered_within(
+        Wall::from_secs(10),
+        cloud.workspace(json!({"action":"start","workspaceId":WORKSPACE,"timeoutSeconds":1})),
+    )
+    .await;
+    let result = result.unwrap();
+    assert_eq!(
+        f.count("POST", &format!("/api/v1/workspaces/{WORKSPACE}/start")),
+        1
+    );
+    assert_eq!(result["status"], "starting");
+}
+
+#[tokio::test]
+async fn a_slow_workspace_that_answers_still_gives_the_history_at_the_deadline() {
+    use std::time::Duration as Wall;
+    let f = Fixture::new(true).await;
+    {
+        let mut d = f.data.lock().unwrap();
+        d.running_turn = true;
+        d.runtime_delay = Wall::from_millis(300);
+    }
+    let cloud = f.cloud(CancellationToken::new()).await;
+    for call in [
+        json!({"action":"wait","workspaceId":WORKSPACE,"chatId":THREAD,"turnId":TURN,"timeoutSeconds":1}),
+        json!({"action":"ask","workspaceId":WORKSPACE,"chatId":THREAD,"message":"hello","timeoutSeconds":1}),
+    ] {
+        let (result, took) = answered_within(Wall::from_secs(10), cloud.chat(call)).await;
+        let result = result.unwrap();
+        assert!(took < Wall::from_secs(4), "{took:?}");
+        assert_eq!(result["status"], "running");
+        assert_eq!(result["messages"]["items"][4]["sequence"], 5, "{result}");
+        assert!(result.get("message").is_none(), "{result}");
+    }
+}
+
+#[tokio::test]
+async fn an_ended_turn_whose_history_goes_unanswered_says_only_that() {
+    use std::time::Duration as Wall;
+    // The turn and the chat answer; the history does not.
+    let f = Fixture::new(true).await;
+    f.data.lock().unwrap().silent_history = true;
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let (result, took) = answered_within(
+        Wall::from_secs(10),
+        cloud.workspace(json!({"action":"wait","workspaceId":WORKSPACE,"threadId":THREAD,"turnId":TURN,"timeoutSeconds":1})),
+    )
+    .await;
+    let result = result.unwrap();
+    assert!(took < Wall::from_secs(7), "{took:?}");
+    assert_eq!(result["status"], "completed");
+    assert!(result.get("messages").is_none(), "{result}");
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("read them with messages"),
+        "{result}"
+    );
+
+    // An ended turn whose first poll goes unanswered: the turn as read just
+    // before, which ended, and no word about work going on.
+    let f = Fixture::new(true).await;
+    // The chat and the turn; then nothing.
+    f.data.lock().unwrap().runtime_answers = Some(2);
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let (result, _) = answered_within(
+        Wall::from_secs(10),
+        cloud.workspace(json!({"action":"wait","workspaceId":WORKSPACE,"threadId":THREAD,"turnId":TURN,"timeoutSeconds":1})),
+    )
+    .await;
+    let result = result.unwrap();
+    assert_eq!(result["status"], "completed");
+    let message = result["message"].as_str().unwrap();
+    assert!(!message.contains("goes on"), "{result}");
 }
