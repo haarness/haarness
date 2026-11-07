@@ -2,7 +2,8 @@
 """Real server, echo provider: MCP results carried only as structured content reach the model and workflows;
 resources embedded as base64 reach the model as what they hold (an image as an attachment, text as text, anything
 else named), never as base64; audio of a type Haarness does not carry is named rather than attached; and a 200 KB result reaches the model cut with the whole saved, while a workflow gets
-all of it.
+all of it. One-line JSON is laid out a value a line within a few times its length, however
+deep it nests.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-structured.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -174,6 +175,16 @@ try:
         time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
     assert run_state['status'] == 'completed' and run_state.get('result') == {'tree': 1, 'truncated': False, 'text': 80 * 1024}, run_state.get('result')
     check('a workflow gets the server\'s own metadata for a cut result, its own `truncated` included')
+
+    # Two spaces a level would make this 1.8 GB; past 32 levels the rest stays on its line.
+    started = time.monotonic()
+    result = call(thread, 'nested')
+    assert not result['is_error'] and len(result['output']) < 52 * 1024, len(result['output'])
+    saved = pathlib.Path(result['metadata']['outputPath']).read_text()
+    assert len(saved) < 2 * 60000 and len(saved.splitlines()) == 65, (len(saved), len(saved.splitlines()))
+    assert saved.replace('\n', '').replace(' ', '') == '[' * 30000 + ']' * 30000
+    assert time.monotonic() - started < 20, time.monotonic() - started
+    check('JSON nested 30,000 deep is laid out 32 levels down, its saved file about as long as the server\'s text')
 
     result = call(thread, 'loud_failure')
     assert result['is_error'] and len(result['output']) < 52 * 1024, len(result['output'])

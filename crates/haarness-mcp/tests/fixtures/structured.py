@@ -38,6 +38,8 @@ TOOLS = {
     # The same JSON after a heading line.
     'found': {'content': [{'type': 'text', 'text': 'Found 800 entries:\n[%s]' % ','.join(
         ['{"wei":1234567890123456789012345,"key":1,"key":2}'] * 1600)}]},
+    # 60 KB of arrays nested 30,000 deep.
+    'nested': {'content': [{'type': 'text', 'text': '[' * 30000 + ']' * 30000}]},
     # Structured content that names `truncated` itself, beside 80 KB of text.
     'tree': {'content': [{'type': 'text', 'text': 't' * 80 * 1024}],
              'structuredContent': {'tree': [{'path': 'a'}], 'truncated': False}},

@@ -596,8 +596,10 @@ impl Tool for ExecuteTool {
             .map_err(|error| CoreError::Tool(format!("code mode failed: {error}")))?;
         let value = output.value.unwrap_or(Value::Null);
         // A script hands back whole texts, so what it returns is cut for
-        // the model as an MCP tool's text is.
-        let text = serde_json::to_string_pretty(&value).map_err(tool_error)?;
+        // the model as an MCP tool's text is, as JSON laid out, which
+        // indenting bounds as it bounds a server's.
+        let compact = serde_json::to_string(&value).map_err(tool_error)?;
+        let text = indent_json(&compact).unwrap_or(compact);
         let (mut cut, _) = cut_mcp_text(text, &tool_output_dir(), false).await?;
         let mut metadata = match cut.metadata {
             Value::Object(object) => object,
@@ -5385,10 +5387,11 @@ pub(crate) const LONG_LINE_BYTES: usize = 2_000;
 /// it longer than [`LONG_LINE_BYTES`] that is one. Only whitespace outside strings is
 /// added, so every value stays as the server wrote it, its digits and
 /// repeated keys included, where parsing and writing it again would round
-/// a long number and keep one of two same keys.
+/// a long number and keep one of two same keys. JSON that [`indent_json`]
+/// leaves alone stays as written.
 pub(crate) fn indented_json(text: &str) -> Option<String> {
     if let Some(whole) = json_container(text) {
-        return Some(indent_json(whole));
+        return indent_json(whole);
     }
     let mut changed = false;
     let mut readable = String::with_capacity(text.len());
@@ -5396,10 +5399,11 @@ pub(crate) fn indented_json(text: &str) -> Option<String> {
         match (line.len() > LONG_LINE_BYTES)
             .then(|| json_container(line))
             .flatten()
+            .and_then(indent_json)
         {
             Some(json) => {
                 changed = true;
-                readable.push_str(&indent_json(json));
+                readable.push_str(&json);
                 if line.ends_with('\n') {
                     readable.push('\n');
                 }
@@ -5417,10 +5421,23 @@ fn json_container(text: &str) -> Option<&str> {
         .then_some(json)
 }
 
+/// How deep JSON is indented: what a container nested deeper holds stays
+/// on its line, so no line starts with more than 64 spaces.
+const JSON_INDENT_DEPTH: usize = 32;
+/// How many times longer than written indenting may make JSON. Short
+/// values nested deep gain the most, and a hostile text (`[[[…1…]]]`)
+/// gains space with the square of its length, so past this it is left as
+/// written.
+const JSON_INDENT_GROWTH: usize = 4;
+
 /// Valid JSON `json` laid out one value a line, two spaces an indent, as
-/// `serde_json::to_string_pretty` lays it out, with every token as written.
-fn indent_json(json: &str) -> String {
+/// `serde_json::to_string_pretty` lays it out, with every token as written,
+/// down to [`JSON_INDENT_DEPTH`] levels, or `None` when that would make it
+/// more than [`JSON_INDENT_GROWTH`] times as long.
+fn indent_json(json: &str) -> Option<String> {
+    let most = json.len().saturating_mul(JSON_INDENT_GROWTH);
     let mut out = String::with_capacity(json.len() + json.len() / 2);
+    // How many containers the next character is in.
     let mut depth = 0usize;
     let mut chars = json.chars().peekable();
     let line = |out: &mut String, depth: usize| {
@@ -5430,6 +5447,10 @@ fn indent_json(json: &str) -> String {
         }
     };
     while let Some(c) = chars.next() {
+        if out.len() > most {
+            return None;
+        }
+        let laid_out = depth <= JSON_INDENT_DEPTH;
         match c {
             '"' => {
                 out.push('"');
@@ -5454,24 +5475,30 @@ fn indent_json(json: &str) -> String {
                     out.extend(chars.next());
                 } else {
                     depth += 1;
-                    line(&mut out, depth);
+                    if depth <= JSON_INDENT_DEPTH {
+                        line(&mut out, depth);
+                    }
                 }
             }
             '}' | ']' => {
                 depth = depth.saturating_sub(1);
-                line(&mut out, depth);
+                if laid_out {
+                    line(&mut out, depth);
+                }
                 out.push(c);
             }
             ',' => {
                 out.push(',');
-                line(&mut out, depth);
+                if laid_out {
+                    line(&mut out, depth);
+                }
             }
-            ':' => out.push_str(": "),
+            ':' => out.push_str(if laid_out { ": " } else { ":" }),
             ' ' | '\t' | '\n' | '\r' => {}
             c => out.push(c),
         }
     }
-    out
+    Some(out)
 }
 
 /// The first 50 KiB (and at most 2,000 lines) of `text`, the line that
@@ -10589,8 +10616,58 @@ mod webfetch_tests {
         assert!(file.lines().all(|line| line.len() < 200));
         std::fs::remove_file(saved(&found)).unwrap();
         assert_eq!(
-            indent_json("{\"a\":[],\"b\":{ },\"c\":[1,{\"d\":null}]}"),
+            indent_json("{\"a\":[],\"b\":{ },\"c\":[1,{\"d\":null}]}").unwrap(),
             "{\n  \"a\": [],\n  \"b\": {},\n  \"c\": [\n    1,\n    {\n      \"d\": null\n    }\n  ]\n}"
+        );
+    }
+
+    /// Indenting gave each line two spaces a level, so JSON nested deep grew
+    /// with the square of its length: `[[[…]]]` of 200 KB came to 20 GB,
+    /// built in memory and saved. What a container 32 levels deep holds now
+    /// stays on its line, and JSON that indenting would make more than four
+    /// times as long stays as written.
+    #[tokio::test]
+    async fn deeply_nested_json_is_laid_out_within_a_few_times_its_length() {
+        let started = std::time::Instant::now();
+        let directory =
+            std::env::temp_dir().join(format!("haarness-deep-json-{}", uuid::Uuid::now_v7()));
+        let arrays = format!("{}{}", "[".repeat(30_000), "]".repeat(30_000));
+        let objects = format!("{}1{}", "{\"a\":".repeat(30_000), "}".repeat(30_000));
+        for json in [arrays, objects.clone(), format!("Deep:\n{objects}")] {
+            let (cut, saved) = cut_mcp_text(json.clone(), &directory, false).await.unwrap();
+            assert!(cut.text.len() < 52 * 1024, "{}", cut.text.len());
+            let (file, laid_out) = saved.unwrap();
+            assert!(laid_out);
+            let file = std::fs::read_to_string(file).unwrap();
+            assert!(
+                file.len() < 2 * json.len(),
+                "{} from {}",
+                file.len(),
+                json.len()
+            );
+            // Lines 32 levels down and 32 up, only spaces and breaks added.
+            assert!(file.lines().count() <= 66, "{}", file.lines().count());
+            assert!(file.lines().all(|line| !line.starts_with(&" ".repeat(65))));
+            assert_eq!(file.replace(['\n', ' '], ""), json.replace(['\n', ' '], ""));
+        }
+        // Short values 32 levels deep would be 33 times as long laid out.
+        let wide = format!(
+            "{}{}1{}",
+            "[".repeat(32),
+            "1,".repeat(30_000),
+            "]".repeat(32)
+        );
+        assert_eq!(indented_json(&wide), None);
+        let (cut, saved) = cut_mcp_text(wide.clone(), &directory, false).await.unwrap();
+        let (file, laid_out) = saved.unwrap();
+        assert!(!laid_out);
+        assert_eq!(std::fs::read_to_string(file).unwrap(), wide);
+        assert!(cut.text.starts_with(&wide[..50 * 1024]));
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
         );
     }
 
