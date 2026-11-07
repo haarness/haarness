@@ -335,10 +335,12 @@ impl ToolRegistry for Calls {
 }
 
 /// Its first request asks for `calls` and, when `cut`, breaks off before
-/// it finishes; later requests answer.
-#[derive(Clone)]
+/// it finishes. Its second asks for `then`, numbering the ids from zero
+/// again, as some providers do. Later requests answer.
+#[derive(Clone, Default)]
 struct Batch {
     calls: Vec<&'static str>,
+    then: Vec<&'static str>,
     cut: bool,
     requests: Arc<Mutex<usize>>,
 }
@@ -358,13 +360,23 @@ impl ModelProvider for Batch {
         request: ProviderRequest,
         _cancel: CancellationToken,
     ) -> CoreResult<ProviderStream> {
-        let first = !request.tools.is_empty() && {
+        let round = if request.tools.is_empty() {
+            0
+        } else {
             let mut requests = self.requests.lock().unwrap();
             *requests += 1;
-            *requests == 1
+            *requests
         };
-        let mut events = if first {
-            self.calls
+        let first = round == 1;
+        let calls = match round {
+            1 => self.calls.as_slice(),
+            2 => self.then.as_slice(),
+            _ => &[],
+        };
+        let mut events = if calls.is_empty() {
+            vec![Ok(ProviderEvent::TextDelta("done".into()))]
+        } else {
+            calls
                 .iter()
                 .enumerate()
                 .map(|(index, name)| {
@@ -376,8 +388,6 @@ impl ModelProvider for Batch {
                     })
                 })
                 .collect::<Vec<_>>()
-        } else {
-            vec![Ok(ProviderEvent::TextDelta("done".into()))]
         };
         if !(first && self.cut) {
             events.push(Ok(ProviderEvent::Finished {
@@ -502,7 +512,7 @@ async fn calls_that_never_started_are_marked_not_run() {
         Batch {
             calls: vec!["stubborn"],
             cut: true,
-            requests: Arc::default(),
+            ..Batch::default()
         },
         patient.clone(),
         &BatchTools::default(),
@@ -516,8 +526,7 @@ async fn calls_that_never_started_are_marked_not_run() {
         let stopped = batch_runtime(
             Batch {
                 calls: vec!["patient", next],
-                cut: false,
-                requests: Arc::default(),
+                ..Batch::default()
             },
             patient.clone(),
             &BatchTools::default(),
@@ -561,8 +570,7 @@ async fn reads_a_shutdown_outlived_count_as_begun() {
     let runtime = batch_runtime(
         Batch {
             calls: vec!["wait", "glance", "patient"],
-            cut: false,
-            requests: Arc::default(),
+            ..Batch::default()
         },
         Arc::new(Patient {
             started: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -601,6 +609,64 @@ async fn reads_a_shutdown_outlived_count_as_begun() {
     );
 
     // Let the read go, so the turn's runner winds down.
+    tools.held.release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while runtime.active_turn(thread).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the turn's runner ends");
+}
+
+/// A call made under an id an earlier round's call used, as providers that
+/// number each response's calls afresh do, has not begun until it does: a
+/// shutdown the turn outlives marks it as not run.
+#[tokio::test]
+async fn a_call_made_again_under_its_id_has_not_begun() {
+    let tools = BatchTools::default();
+    let runtime = batch_runtime(
+        Batch {
+            calls: vec!["glance", "glance"],
+            then: vec!["wait", "patient"],
+            ..Batch::default()
+        },
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &tools,
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    // The second round's read is running; the call after it waits.
+    tokio::time::timeout(Duration::from_secs(10), tools.held.started.acquire())
+        .await
+        .expect("the second round's read starts")
+        .unwrap()
+        .forget();
+
+    runtime
+        .interrupt_active_turns("Haarness stopped")
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.turn(turn.id).await.unwrap().status,
+        TurnStatus::Interrupted
+    );
+    assert_eq!(
+        not_run(&runtime, thread).await,
+        [
+            ("call-0".to_owned(), false),
+            ("call-1".to_owned(), false),
+            ("call-0".to_owned(), false),
+            ("call-1".to_owned(), true),
+        ],
+        "the first round's call-1 ran; the second round's had not begun"
+    );
+
     tools.held.release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(10), async {
         while runtime.active_turn(thread).await.unwrap().is_some() {
