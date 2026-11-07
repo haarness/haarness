@@ -162,14 +162,23 @@ fn finish(kept: &mut String, pending: &mut Vec<Pending>) {
     }
 }
 
-/// `title` as a chat stores it: escape sequences and other control
-/// characters taken out ([`without_escapes`]), each run of tabs and line
-/// breaks read as one space so the words on either side stay apart, and
-/// the ends trimmed. Every other character stays as written. Empty when
-/// nothing printable is left.
+/// `title` as a chat stores it. Escape sequences and the other control
+/// characters are dropped ([`without_escapes`]); a run of those that break
+/// or space a line (tab, line feed, vertical tab, form feed, carriage
+/// return, next line) becomes one space, so `Fix\nthe parser` is stored as
+/// `Fix the parser`; then the ends are trimmed. Nothing else is touched.
+/// Empty when no printable character is left.
 #[must_use]
 pub fn clean_chat_title(title: &str) -> String {
-    let text = without_escapes(title);
+    // Read as tabs, which the escape reader keeps and handles as it does
+    // these three inside a sequence.
+    const BREAKS: [char; 3] = ['\u{b}', '\u{c}', '\u{85}'];
+    let spaced = if title.contains(BREAKS) {
+        Cow::Owned(title.replace(BREAKS, "\t"))
+    } else {
+        Cow::Borrowed(title)
+    };
+    let text = without_escapes(&spaced);
     let mut clean = String::with_capacity(text.len());
     let mut space = false;
     for character in text.chars() {
@@ -283,8 +292,12 @@ mod tests {
             ("\u{1b}[1mBold\u{1b}[0m title", "Bold title"),
             ("\u{9b}31mtext", "31mtext"),
             ("Fix bug\nin parser\r\n", "Fix bug in parser"),
+            (
+                "alpha\u{85}beta\u{b}gamma\u{c}\u{c}delta",
+                "alpha beta gamma delta",
+            ),
             ("  Plan\t\tthe   release  ", "Plan the   release"),
-            ("ring\u{7}\u{0}\u{7f}\u{85}less", "ringless"),
+            ("ring\u{7}\u{0}\u{7f}\u{9b}less", "ringless"),
             ("日本語 👩\u{200d}🔬 مرحبا", "日本語 👩\u{200d}🔬 مرحبا"),
         ] {
             assert_eq!(clean_chat_title(raw), stored, "{raw:?}");

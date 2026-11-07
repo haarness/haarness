@@ -3052,18 +3052,18 @@ fn one_line_metadata(value: &str) -> String {
         .replace(['\r', '\n'], " ")
 }
 
-/// A chat title or a terminal's name as the CLI prints it: on one line,
-/// without the escape sequences and other control characters a terminal
-/// would act on (set its title, write its clipboard). Titles stored before
-/// the server cleaned them, or imported, may still hold some.
+/// A chat title or a terminal's name as the CLI prints it: one line, with
+/// nothing in it a terminal would act on (a sequence that sets the window
+/// title or writes the clipboard). An older server's title or a name a
+/// program set can still hold one.
 fn printed_title(title: &str) -> String {
-    one_line_metadata(&haarness_protocol::without_escapes(title))
+    one_line_metadata(&haarness_protocol::clean_chat_title(title))
 }
 
-/// `value` as pretty JSON for a terminal: serde_json escapes the C0
-/// controls, but writes DEL and the C1 controls (U+007F–U+009F) as they
-/// are, and some terminals read U+009B as `ESC [`. Those are written as
-/// `\u` escapes too; the JSON reads back the same.
+/// `value` as indented JSON fit for a terminal. A string holding DEL or a
+/// code of the 8-bit control set (U+007F–U+009F) comes out of serde_json
+/// unescaped; here each is a `\u` escape instead, which decodes to the same
+/// string.
 fn printed_json(value: &impl Serialize) -> Result<String> {
     Ok(json_without_raw_controls(serde_json::to_string_pretty(
         value,
@@ -15960,6 +15960,10 @@ request_timeout = 0
             ("\u{1b}[31mred\u{1b}[0m title", "red title"),
             ("\u{9b}2Jclear\u{7f}ed", "2Jcleared"),
             ("Fix bug\nin\tparser\r\n", "Fix bug in parser"),
+            (
+                "alpha\u{85}beta\u{b}gamma\u{c}delta",
+                "alpha beta gamma delta",
+            ),
             ("Plain title", "Plain title"),
         ] {
             assert_eq!(super::printed_title(title), printed, "{title:?}");
