@@ -515,7 +515,13 @@ made before forks left such calls out, can still hold one: once a later turn
 has begun after it (or, in a fork, a message the person wrote there), requests
 give it the same kind of result after the calls and results it was made with,
 so the provider takes the history. A running turn's calls, a steer queued
-meanwhile included, are left as they are. Active goals recover as paused with
+meanwhile included, are left as they are. `"notRun": true` in a result's
+metadata says its call never began: a call of a round that broke off before its
+calls ran, one Stop reached first, or one still waiting its turn when a
+shutdown or crash cut the turn off. After a crash only the turn's first open
+call counts as begun, since recovery cannot tell which of several reads running
+together had. Rebuilding a chat's loaded tools after a restart or in a fork
+skips these calls. Active goals recover as paused with
 `awaitingUserInput=true`, so elapsed indicators cannot claim a stale execution
 is still pursuing after process death.
 

@@ -225,6 +225,11 @@ struct ActiveTurn {
     /// (workflow agents, direct tools on its children) come from it, not
     /// from the agent's file as it is now.
     agent: AgentSnapshot,
+    /// The turn's calls that have begun since they were made, by call id. A
+    /// shutdown the turn outlives says the others never ran: reads (and
+    /// delegations) run together, so the first call without a result is
+    /// not the only one that began.
+    started_calls: Mutex<HashSet<String>>,
 }
 
 /// Model-facing prompt for the turn that answers steering the user sent
@@ -7157,6 +7162,7 @@ impl AgentRuntime {
             stop_reason: Mutex::new(None),
             answer_steer: AtomicBool::new(false),
             agent: agent.clone(),
+            started_calls: Mutex::new(HashSet::new()),
         });
         self.active.insert(thread_id, active.clone());
 
@@ -7678,16 +7684,15 @@ impl AgentRuntime {
                     .into_iter()
                     .filter(|item| item.turn_id == Some(active_turn.id))
                     .collect::<Vec<_>>();
-                // A turn runs its calls in order: the first one open was
-                // running, the ones after it had not started.
+                // The runner noted the calls that began; the others never ran.
+                let started = active_turn.started_calls.lock().clone();
                 let ended = crate::pair_tool_calls(turn_items.iter().map(|item| &item.data))
                     .calls
                     .into_iter()
-                    .enumerate()
-                    .filter_map(|(position, call)| match &turn_items[call].data {
-                        ItemData::ToolCall { call_id, name, .. } => {
-                            Some(crate::unfinished_call_result(call_id, name, position == 0))
-                        }
+                    .filter_map(|call| match &turn_items[call].data {
+                        ItemData::ToolCall { call_id, name, .. } => Some(
+                            crate::unfinished_call_result(call_id, name, started.contains(call_id)),
+                        ),
                         _ => None,
                     });
                 for data in ended {
@@ -9281,6 +9286,24 @@ impl RunnerTask {
                 retryable: true,
             })
             .await;
+    }
+
+    /// Notes that call `call_id` of this turn has begun, or (`started` false)
+    /// that it was just made and has not; see `ActiveTurn::started_calls`.
+    fn note_call_start(&self, call_id: &str, started: bool) {
+        let Some(active) = self
+            .active
+            .get(&self.thread.id)
+            .filter(|entry| entry.id == self.turn.id)
+        else {
+            return;
+        };
+        let mut calls = active.started_calls.lock();
+        if started {
+            calls.insert(call_id.to_owned());
+        } else {
+            calls.remove(call_id);
+        }
     }
 
     async fn stop_acceptance(&self) {
@@ -10981,7 +11004,10 @@ impl RunnerTask {
                     }
                 }
                 for (index, (call_id, name, arguments)) in calls.iter().cloned().enumerate() {
+                    // After Stop no group starts: its calls go one by one,
+                    // each found not to have begun.
                     if !task_handles.contains_key(&index)
+                        && !self.cancel.is_cancelled()
                         && self
                             .tools
                             .get(&name)
@@ -11144,6 +11170,10 @@ impl RunnerTask {
     }
 
     async fn publish_item(&self, data: ItemData) -> CoreResult<Item> {
+        // A call made again under an id it used before has not begun yet.
+        if let ItemData::ToolCall { call_id, .. } = &data {
+            self.note_call_start(call_id, false);
+        }
         let item = self
             .repository
             .append_item(self.thread.id, Some(self.turn.id), data)
@@ -11806,6 +11836,9 @@ impl RunnerTask {
                 "tool {name} is disabled for this workflow agent turn"
             )));
         }
+        // The call begins here: its tool joins the chat's list, and a
+        // shutdown it outlives says it ran.
+        self.note_call_start(call_id, true);
         if !is_essential_tool(name) {
             let _ = self.promote_tools([name.to_owned()]);
         }
@@ -13278,6 +13311,7 @@ impl RunnerTask {
             stop_reason: Mutex::new(None),
             answer_steer: AtomicBool::new(false),
             agent: definition.clone(),
+            started_calls: Mutex::new(HashSet::new()),
         });
         self.active.insert(child.id, active.clone());
         let mut accepting = active.accepting.lock().await;

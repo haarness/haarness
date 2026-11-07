@@ -1742,9 +1742,13 @@ impl ThreadRepository for SqliteStore {
                 )));
             }
             // The calls the restart cut off end here, so the chat's history
-            // holds a result for each of them and its next turn is taken. A
-            // turn runs its calls in order: the first one open was running,
-            // the ones after it had not started.
+            // holds a result for each of them and its next turn is taken.
+            // Only the first one open counts as begun. That holds for calls
+            // that run in order, but reads (and delegations) run together,
+            // and a crash leaves no record of which of those began: one
+            // after the first is marked as not run even if it began, so a
+            // rebuild of the chat's loads may leave its tool out, and the
+            // next request's tool list changes once.
             let mut ended = Self::unanswered_turn_calls(&tx, raw_thread_id, raw_turn_id)?
                 .into_iter()
                 .enumerate()

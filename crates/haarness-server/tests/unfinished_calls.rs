@@ -271,19 +271,66 @@ impl Tool for Patient {
     }
 }
 
-struct Calls(Arc<Patient>, Arc<Stubborn>);
+/// A read, which runs beside the reads next to it: at once, or, `held`,
+/// as its stubborn tool does. `ran` counts its starts.
+struct Read {
+    name: &'static str,
+    held: Option<Arc<Stubborn>>,
+    ran: Arc<tokio::sync::Semaphore>,
+}
 
-impl ToolRegistry for Calls {
-    fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        match name {
-            "patient" => Some(self.0.clone() as Arc<dyn Tool>),
-            "stubborn" => Some(self.1.clone() as Arc<dyn Tool>),
-            _ => None,
+impl Read {
+    fn new(name: &'static str, held: Option<Arc<Stubborn>>) -> Arc<Self> {
+        Arc::new(Self {
+            name,
+            held,
+            ran: Arc::new(tokio::sync::Semaphore::new(0)),
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for Read {
+    fn parallel_safe(&self, _arguments: &Value) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name.into(),
+            description: "Read beside other reads".into(),
+            input_schema: json!({"type": "object", "additionalProperties": false}),
         }
     }
 
+    fn side_effectful(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, arguments: Value, context: ToolContext) -> CoreResult<ToolOutput> {
+        self.ran.add_permits(1);
+        match &self.held {
+            Some(tool) => tool.execute(arguments, context).await,
+            None => Ok(ToolOutput {
+                text: "read".into(),
+                metadata: Value::Null,
+            }),
+        }
+    }
+}
+
+struct Calls(Vec<Arc<dyn Tool>>);
+
+impl ToolRegistry for Calls {
+    fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.0
+            .iter()
+            .find(|tool| tool.definition().name == name)
+            .cloned()
+    }
+
     fn list(&self) -> Vec<ToolDefinition> {
-        vec![self.0.definition(), self.1.definition()]
+        self.0.iter().map(|tool| tool.definition()).collect()
     }
 }
 
@@ -341,12 +388,14 @@ impl ModelProvider for Batch {
     }
 }
 
-fn batch_runtime(provider: Batch, patient: Arc<Patient>) -> AgentRuntime {
+/// A runtime with `patient`, `stubborn` (let go at once), and the reads
+/// `glance` (at once) and `wait` (held by `held`).
+fn batch_runtime(provider: Batch, patient: Arc<Patient>, tools: &BatchTools) -> AgentRuntime {
     let mut config = RuntimeConfig {
         approval_mode: haarness_protocol::ApprovalMode::Review,
         ..RuntimeConfig::default()
     };
-    for pattern in ["patient:*", "stubborn:*"] {
+    for pattern in ["patient:*", "stubborn:*", "glance:*", "wait:*"] {
         config.base_rules.push(PermissionRule {
             pattern: pattern.into(),
             decision: PermissionDecision::Allow,
@@ -361,12 +410,50 @@ fn batch_runtime(provider: Batch, patient: Arc<Patient>) -> AgentRuntime {
         Arc::new(StaticProviderRegistry::new(vec![
             Arc::new(provider) as Arc<dyn ModelProvider>
         ])),
-        Arc::new(Calls(patient, stubborn)),
+        Arc::new(Calls(vec![
+            patient as Arc<dyn Tool>,
+            stubborn,
+            tools.glance.clone(),
+            tools.wait.clone(),
+        ])),
         EventBus::new(256),
         std::env::temp_dir(),
         String::new(),
         config,
     )
+}
+
+/// The reads of a batch runtime, and the stubborn tool `wait` waits on.
+struct BatchTools {
+    glance: Arc<Read>,
+    wait: Arc<Read>,
+    held: Arc<Stubborn>,
+}
+
+impl Default for BatchTools {
+    fn default() -> Self {
+        let held = Arc::new(Stubborn {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+        });
+        Self {
+            glance: Read::new("glance", None),
+            wait: Read::new("wait", Some(held.clone())),
+            held,
+        }
+    }
+}
+
+async fn chat(runtime: &AgentRuntime) -> haarness_protocol::ThreadId {
+    runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("scripted".into()),
+            model: Some("scripted-1".into()),
+            ..CreateThreadRequest::default()
+        })
+        .await
+        .unwrap()
+        .id
 }
 
 /// Whether each call's stored result says it never ran, by call id.
@@ -404,7 +491,8 @@ async fn settled(runtime: &AgentRuntime, turn: haarness_protocol::TurnId) -> Tur
 
 /// The results of calls that never started say so, so a rebuild of the
 /// chat's loads does not count them: a round that broke off before its calls
-/// ran, and the calls Stop reached before they began.
+/// ran, and the calls Stop reached before they began, one at a time or a
+/// read that would have run beside others.
 #[tokio::test]
 async fn calls_that_never_started_are_marked_not_run() {
     let patient = Arc::new(Patient {
@@ -417,62 +505,108 @@ async fn calls_that_never_started_are_marked_not_run() {
             requests: Arc::default(),
         },
         patient.clone(),
+        &BatchTools::default(),
     );
-    let thread = cut
-        .create_thread(CreateThreadRequest {
-            provider: Some("scripted".into()),
-            model: Some("scripted-1".into()),
-            ..CreateThreadRequest::default()
+    let thread = chat(&cut).await;
+    let turn = cut.start_turn(thread, turn_request("go")).await.unwrap();
+    assert_eq!(settled(&cut, turn.id).await, TurnStatus::Completed);
+    assert_eq!(not_run(&cut, thread).await, [("call-0".to_owned(), true)]);
+
+    for next in ["stubborn", "glance"] {
+        let stopped = batch_runtime(
+            Batch {
+                calls: vec!["patient", next],
+                cut: false,
+                requests: Arc::default(),
+            },
+            patient.clone(),
+            &BatchTools::default(),
+        );
+        let thread = chat(&stopped).await;
+        let turn = stopped
+            .start_turn(thread, turn_request("go"))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), patient.started.acquire())
+            .await
+            .expect("the first call starts")
+            .unwrap()
+            .forget();
+        stopped.interrupt(turn.id).await.unwrap();
+        settled(&stopped, turn.id).await;
+        // The runner records the results as it winds down.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while stopped.active_turn(thread).await.unwrap().is_some()
+                || not_run(&stopped, thread).await.len() < 2
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         })
         .await
-        .unwrap();
-    let turn = cut.start_turn(thread.id, turn_request("go")).await.unwrap();
-    assert_eq!(settled(&cut, turn.id).await, TurnStatus::Completed);
-    assert_eq!(
-        not_run(&cut, thread.id).await,
-        [("call-0".to_owned(), true)]
-    );
+        .expect("both calls get a result");
+        assert_eq!(
+            not_run(&stopped, thread).await,
+            [("call-0".to_owned(), false), ("call-1".to_owned(), true)],
+            "the running call was stopped; the next one ({next}) never began"
+        );
+    }
+}
 
-    let stopped = batch_runtime(
+/// A shutdown the turn outlives marks as not run only the calls that had
+/// not begun: a read that ran beside the one still running began, even
+/// though its result, which follows that one's, was not stored yet.
+#[tokio::test]
+async fn reads_a_shutdown_outlived_count_as_begun() {
+    let tools = BatchTools::default();
+    let runtime = batch_runtime(
         Batch {
-            calls: vec!["patient", "stubborn"],
+            calls: vec!["wait", "glance", "patient"],
             cut: false,
             requests: Arc::default(),
         },
-        patient.clone(),
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &tools,
     );
-    let thread = stopped
-        .create_thread(CreateThreadRequest {
-            provider: Some("scripted".into()),
-            model: Some("scripted-1".into()),
-            ..CreateThreadRequest::default()
-        })
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
         .await
         .unwrap();
-    let turn = stopped
-        .start_turn(thread.id, turn_request("go"))
+    for (read, ran) in [("wait", &tools.held.started), ("glance", &tools.glance.ran)] {
+        tokio::time::timeout(Duration::from_secs(10), ran.acquire())
+            .await
+            .unwrap_or_else(|_| panic!("{read} starts"))
+            .unwrap()
+            .forget();
+    }
+
+    runtime
+        .interrupt_active_turns("Haarness stopped")
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), patient.started.acquire())
-        .await
-        .expect("the first call starts")
-        .unwrap()
-        .forget();
-    stopped.interrupt(turn.id).await.unwrap();
-    settled(&stopped, turn.id).await;
-    // The runner records the results as it winds down.
+    assert_eq!(
+        runtime.turn(turn.id).await.unwrap().status,
+        TurnStatus::Interrupted
+    );
+    assert_eq!(
+        not_run(&runtime, thread).await,
+        [
+            ("call-0".to_owned(), false),
+            ("call-1".to_owned(), false),
+            ("call-2".to_owned(), true),
+        ],
+        "both reads began; the call after them never did"
+    );
+
+    // Let the read go, so the turn's runner winds down.
+    tools.held.release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(10), async {
-        while stopped.active_turn(thread.id).await.unwrap().is_some()
-            || not_run(&stopped, thread.id).await.len() < 2
-        {
+        while runtime.active_turn(thread).await.unwrap().is_some() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("both calls get a result");
-    assert_eq!(
-        not_run(&stopped, thread.id).await,
-        [("call-0".to_owned(), false), ("call-1".to_owned(), true)],
-        "the running call was stopped; the next one never began"
-    );
+    .expect("the turn's runner ends");
 }
