@@ -2751,37 +2751,76 @@ fn parse_sse_event(event: &[u8]) -> Option<(String, String)> {
 }
 
 fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<ToolOutput> {
+    use haarness_core::mcp_content::{self, Blob};
     let mut text_parts = Vec::new();
     let mut attachments = Vec::new();
     let mut attachment_bytes = 0usize;
+    // Whether the result says anything in text, apart from the lines that
+    // stand for its media and blobs.
+    let mut has_text = false;
     for content in &result.content {
         match content {
-            rmcp::model::ContentBlock::Text(text) => text_parts.push(text.text.clone()),
+            rmcp::model::ContentBlock::Text(text) => {
+                has_text |= !text.text.is_empty();
+                text_parts.push(text.text.clone());
+            }
             rmcp::model::ContentBlock::Image(image) => {
                 count_mcp_attachment(&image.data, &mut attachment_bytes)?;
-                attachments.push(format!("data:{};base64,{}", image.mime_type, image.data));
-                text_parts.push(format!("[{} image attachment]", image.mime_type));
+                let mime = mcp_content::media_type(&image.mime_type);
+                attachments.push(format!("data:{mime};base64,{}", image.data));
+                text_parts.push(format!("[{mime} image attachment]"));
             }
             rmcp::model::ContentBlock::Audio(audio) => {
                 count_mcp_attachment(&audio.data, &mut attachment_bytes)?;
-                attachments.push(format!("data:{};base64,{}", audio.mime_type, audio.data));
-                text_parts.push(format!("[{} audio attachment]", audio.mime_type));
+                let mime = mcp_content::media_type(&audio.mime_type);
+                attachments.push(format!("data:{mime};base64,{}", audio.data));
+                text_parts.push(format!("[{mime} audio attachment]"));
             }
+            // A blob reaches the model as what it holds: its text in place
+            // of the base64 (the resource reads as a text resource would),
+            // an image or PDF as an attachment, anything else named.
+            rmcp::model::ContentBlock::Resource(embedded) => match &embedded.resource {
+                rmcp::model::ResourceContents::BlobResourceContents {
+                    uri,
+                    mime_type,
+                    blob,
+                    ..
+                } => {
+                    match mcp_content::blob(uri, mime_type.as_deref(), blob, &mut attachment_bytes)
+                    {
+                        Blob::Text(text) => {
+                            has_text |= !text.is_empty();
+                            let mut block = serde_json::to_value(content).unwrap_or_default();
+                            if let Some(resource) =
+                                block.get_mut("resource").and_then(Value::as_object_mut)
+                            {
+                                resource.remove("blob");
+                                resource.insert("text".into(), text.into());
+                            }
+                            text_parts.push(block.to_string());
+                        }
+                        Blob::Attached { data_url, note } => {
+                            attachments.push(data_url);
+                            text_parts.push(note);
+                        }
+                        Blob::Note(note) => text_parts.push(note),
+                    }
+                }
+                resource => {
+                    has_text |= matches!(
+                        resource,
+                        rmcp::model::ResourceContents::TextResourceContents { text, .. } if !text.is_empty()
+                    );
+                    text_parts.push(serde_json::to_string(content).unwrap_or_default());
+                }
+            },
             other => text_parts.push(serde_json::to_string(other).unwrap_or_default()),
         }
     }
     // A tool that declares an output schema may return its result only as
     // structured content, with no text beside it (no content at all, or only
-    // images, audio or links). The model and workflows read text, so it
-    // becomes the text.
-    let has_text = result.content.iter().any(|content| match content {
-        rmcp::model::ContentBlock::Text(text) => !text.text.is_empty(),
-        rmcp::model::ContentBlock::Resource(embedded) => matches!(
-            &embedded.resource,
-            rmcp::model::ResourceContents::TextResourceContents { text, .. } if !text.is_empty()
-        ),
-        _ => false,
-    });
+    // images, audio, links or blobs that are not text). The model and
+    // workflows read text, so it becomes the text.
     if !has_text && let Some(structured) = &result.structured_content {
         text_parts.push(structured.to_string());
     }
@@ -2819,12 +2858,11 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
 }
 
 fn count_mcp_attachment(encoded: &str, total: &mut usize) -> CoreResult<()> {
-    const MAX_MCP_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
     let decoded = STANDARD
         .decode(encoded)
         .map_err(|error| CoreError::Tool(format!("invalid MCP media base64: {error}")))?;
     *total = total.saturating_add(decoded.len());
-    if *total > MAX_MCP_ATTACHMENT_BYTES {
+    if *total > haarness_core::mcp_content::MAX_ATTACHMENT_BYTES {
         return Err(CoreError::Tool(
             "MCP media attachments exceed the 10 MiB request limit".into(),
         ));
@@ -4554,6 +4592,81 @@ mod tests {
                 "data:image/png;base64,iVBORw0KGgo=",
                 "data:audio/mpeg;base64,SUQz"
             ])
+        );
+    }
+
+    /// An embedded blob went to the model as its JSON, base64 and all: a
+    /// 1 MB image was 1.4 M characters of text and no attachment.
+    #[test]
+    fn embedded_blobs_reach_the_model_as_what_they_hold() {
+        use rmcp::model::{ContentBlock, ResourceContents};
+        let png = STANDARD.encode(b"\x89PNG\r\n\x1a\nfixture");
+        let blob = |uri: &str, mime: &str, data: &str| {
+            ContentBlock::resource(ResourceContents::blob(data, uri).with_mime_type(mime))
+        };
+        let result = rmcp::model::CallToolResult::success(vec![
+            ContentBlock::text("Here is the chart."),
+            blob("ui://chart.png", "IMAGE/PNG; charset=binary", &png),
+            blob(
+                "data://row.json",
+                "application/json",
+                &STANDARD.encode(r#"{"id":7}"#),
+            ),
+            blob(
+                "files://a.zip",
+                "application/zip",
+                &STANDARD.encode([0u8; 300]),
+            ),
+            ContentBlock::embedded_text("notes://today", "Ship on Friday."),
+        ]);
+        let output = to_output(result, "chart").unwrap();
+        assert_eq!(
+            output.metadata["attachments"],
+            json!([format!("data:image/png;base64,{png}")])
+        );
+        assert!(!output.text.contains(&png), "{}", output.text);
+        let lines: Vec<&str> = output.text.lines().collect();
+        assert_eq!(lines[0], "Here is the chart.");
+        assert_eq!(lines[1], "[image/png attachment: ui://chart.png]");
+        let row: Value = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(
+            row,
+            json!({"type": "resource", "resource": {"uri": "data://row.json", "mimeType": "application/json", "text": r#"{"id":7}"#}})
+        );
+        assert_eq!(lines[3], "[files://a.zip: application/zip, 300 bytes]");
+        // A text resource reads as it always has.
+        assert_eq!(
+            serde_json::from_str::<Value>(lines[4]).unwrap()["resource"]["text"],
+            "Ship on Friday."
+        );
+        // Images past the 10 MiB a result attaches are named, not attached,
+        // and an image block's type is compared the same way.
+        let big = STANDARD.encode(vec![0u8; 10 * 1024 * 1024 + 1]);
+        let result = rmcp::model::CallToolResult::success(vec![
+            blob("files://scan.pdf", "application/pdf", &big),
+            ContentBlock::image(&png, "Image/PNG"),
+        ]);
+        let output = to_output(result, "scan").unwrap();
+        assert_eq!(
+            output.metadata["attachments"],
+            json!([format!("data:image/png;base64,{png}")])
+        );
+        assert!(
+            output
+                .text
+                .starts_with("[files://scan.pdf: application/pdf, ")
+                && output.text.ends_with("[image/png image attachment]"),
+            "{}",
+            output.text
+        );
+        // Structured content is the text when the blobs say nothing in text.
+        let mut result = rmcp::model::CallToolResult::structured(json!({"pages": 2}));
+        result.content = vec![blob("files://a.zip", "application/zip", "AAAA")];
+        assert!(
+            to_output(result, "pack")
+                .unwrap()
+                .text
+                .contains(r#""pages":2"#)
         );
     }
 

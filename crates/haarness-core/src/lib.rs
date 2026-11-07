@@ -16,6 +16,7 @@ mod image_budget;
 pub mod images;
 pub mod instructions;
 pub mod links;
+pub mod mcp_content;
 pub mod patch;
 mod permissions;
 mod ports;

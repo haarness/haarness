@@ -1,5 +1,8 @@
 """MCP stdio fixture that declares resources: a text page, an image, a template, and a page that never answers.
 
+Two more are read but not listed: `docs://notes`, text sent as base64, and `docs://shout`, the image under a type in
+capitals with a parameter.
+
 A read of `docs://slow` gets no answer; the cancellation the client sends for it is appended to CANCEL_LOG.
 With REQUEST_LOG set, the method of every request is appended to it. LIST_SLOW=1 lists `docs://slow` too.
 A listing waits LIST_DELAY seconds, or as many as the file LIST_DELAY_FILE holds while it exists.
@@ -67,6 +70,11 @@ for line in sys.stdin:
             contents = [{'uri': uri, 'mimeType': 'text/markdown', 'text': '# Setup\nRun the fixture.'}]
         elif uri == 'docs://logo':
             contents = [{'uri': uri, 'mimeType': 'image/png', 'blob': PNG}]
+        elif uri == 'docs://notes':
+            contents = [{'uri': uri, 'mimeType': 'text/plain; charset=utf-8',
+                         'blob': base64.b64encode(b'Ship the fixture on Friday.\n').decode()}]
+        elif uri == 'docs://shout':
+            contents = [{'uri': uri, 'mimeType': 'IMAGE/PNG; charset=binary', 'blob': PNG}]
         elif uri.startswith('docs://page/'):
             contents = [{'uri': uri, 'mimeType': 'text/plain', 'text': 'Page ' + uri.rsplit('/', 1)[1]}]
         else:
