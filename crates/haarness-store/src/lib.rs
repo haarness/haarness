@@ -1742,10 +1742,15 @@ impl ThreadRepository for SqliteStore {
                 )));
             }
             // The calls the restart cut off end here, so the chat's history
-            // holds a result for each of them and its next turn is taken.
+            // holds a result for each of them and its next turn is taken. A
+            // turn runs its calls in order: the first one open was running,
+            // the ones after it had not started.
             let mut ended = Self::unanswered_turn_calls(&tx, raw_thread_id, raw_turn_id)?
                 .into_iter()
-                .map(|(call_id, name)| haarness_core::unfinished_call_result(&call_id, &name))
+                .enumerate()
+                .map(|(position, (call_id, name))| {
+                    haarness_core::unfinished_call_result(&call_id, &name, position == 0)
+                })
                 .collect::<Vec<_>>();
             ended.push(ItemData::Error {
                 message: RECOVERED_TURN_MESSAGE.into(),
@@ -4137,12 +4142,16 @@ mod tests {
             .map(|item| (item.turn_id, item.data.clone()))
             .collect::<Vec<_>>();
         assert_eq!(ended.len(), 3, "{ended:?}");
-        for ((turn_id, data), expected) in ended.iter().zip(["call-1", "call-2"]) {
+        // call-1 was running; call-2, after it, had not started.
+        for ((turn_id, data), (expected, ran)) in
+            ended.iter().zip([("call-1", true), ("call-2", false)])
+        {
             assert_eq!(*turn_id, Some(turn));
             assert!(
                 matches!(data, ItemData::ToolResult { call_id, name, output, is_error: true, metadata }
                     if call_id == expected && name == "bash" && output == haarness_core::UNFINISHED_CALL_RESULT
-                        && metadata["unfinished"] == true),
+                        && metadata["unfinished"] == true
+                        && haarness_core::not_run(metadata) != ran),
                 "{data:?}"
             );
         }

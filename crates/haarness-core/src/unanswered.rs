@@ -16,18 +16,38 @@ use haarness_protocol::ItemData;
 /// without one.
 pub const UNFINISHED_CALL_RESULT: &str = "This call did not finish, so there is no result. It may have done part of its work before it stopped.";
 
+/// The metadata of a result whose call never started (its round broke off
+/// before it ran, Stop came before it, a batch stopped before reaching it):
+/// nothing it would have loaded was, so a rebuild of the chat's loads skips
+/// it (see `tool_catalog::promoted_in`).
+#[must_use]
+pub fn not_run_metadata() -> serde_json::Value {
+    serde_json::json!({ "notRun": true })
+}
+
+/// Whether a result's metadata says its call never started.
+#[must_use]
+pub fn not_run(metadata: &serde_json::Value) -> bool {
+    metadata.get("notRun").and_then(serde_json::Value::as_bool) == Some(true)
+}
+
 /// The stored result of a call Haarness stopped before it finished (startup
 /// recovery after a crash, or a shutdown the call outlived). `unfinished` in
 /// its metadata lets clients say so in a few words of their own; the model
-/// reads [`UNFINISHED_CALL_RESULT`].
+/// reads [`UNFINISHED_CALL_RESULT`]. A call that had not `started` is marked
+/// as not run too.
 #[must_use]
-pub fn unfinished_call_result(call_id: &str, name: &str) -> ItemData {
+pub fn unfinished_call_result(call_id: &str, name: &str, started: bool) -> ItemData {
+    let mut metadata = serde_json::json!({ "unfinished": true });
+    if !started {
+        metadata["notRun"] = true.into();
+    }
     ItemData::ToolResult {
         call_id: call_id.to_owned(),
         name: name.to_owned(),
         output: UNFINISHED_CALL_RESULT.to_owned(),
         is_error: true,
-        metadata: serde_json::json!({ "unfinished": true }),
+        metadata,
     }
 }
 

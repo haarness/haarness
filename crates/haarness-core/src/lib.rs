@@ -77,7 +77,8 @@ pub use turn_context::{
     AGENT_MESSAGE_PREFIX, SESSION_MESSAGE_PREFIX, is_session_message, is_turn_reminder,
 };
 pub use unanswered::{
-    ToolCallPairs, UNFINISHED_CALL_RESULT, pair_tool_calls, unfinished_call_result,
+    ToolCallPairs, UNFINISHED_CALL_RESULT, not_run, not_run_metadata, pair_tool_calls,
+    unfinished_call_result,
 };
 pub use workflows::{WorkflowLogDraft, WorkflowRepository};
 

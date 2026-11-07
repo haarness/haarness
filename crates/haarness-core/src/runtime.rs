@@ -7678,12 +7678,15 @@ impl AgentRuntime {
                     .into_iter()
                     .filter(|item| item.turn_id == Some(active_turn.id))
                     .collect::<Vec<_>>();
+                // A turn runs its calls in order: the first one open was
+                // running, the ones after it had not started.
                 let ended = crate::pair_tool_calls(turn_items.iter().map(|item| &item.data))
                     .calls
                     .into_iter()
-                    .filter_map(|call| match &turn_items[call].data {
+                    .enumerate()
+                    .filter_map(|(position, call)| match &turn_items[call].data {
                         ItemData::ToolCall { call_id, name, .. } => {
-                            Some(crate::unfinished_call_result(call_id, name))
+                            Some(crate::unfinished_call_result(call_id, name, position == 0))
                         }
                         _ => None,
                     });
@@ -10724,7 +10727,7 @@ impl RunnerTask {
                                 name,
                                 output: reason.clone(),
                                 is_error: true,
-                                metadata: serde_json::Value::Null,
+                                metadata: crate::not_run_metadata(),
                             })
                             .await?;
                         }
@@ -11004,6 +11007,9 @@ impl RunnerTask {
                         }
                     }
                     let fingerprint_arguments = arguments.clone();
+                    // Stop came before this call began: it will not run.
+                    let stopped_first =
+                        !task_handles.contains_key(&index) && self.cancel.is_cancelled();
                     let result = if let Some(handle) = task_handles.remove(&index) {
                         match handle.await {
                             Ok(result) => result,
@@ -11053,6 +11059,7 @@ impl RunnerTask {
                             // tell it from a person's reject.
                             let metadata = match &error {
                                 CoreError::ReviewBlocked(review) => json!({ "review": review }),
+                                CoreError::Cancelled if stopped_first => crate::not_run_metadata(),
                                 _ => serde_json::Value::Null,
                             };
                             self.publish_item(ItemData::ToolResult {

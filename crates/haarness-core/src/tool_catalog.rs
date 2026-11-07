@@ -497,8 +497,10 @@ pub fn load_tool_result(
 /// it ran: those `load_tool` loaded and the optional tools the model called,
 /// a `batch` call's steps included, in the order the calls were made and at
 /// most [`MAX_PROMOTED_TOOLS`]. A call counts whatever its outcome, as its
-/// tool was promoted when it started, unless it was refused before it could
-/// start (see [`refused_before_running`]); a call with no result does not.
+/// tool was promoted when it started, unless it never started: its result
+/// says so (`notRun`, see [`crate::not_run_metadata`]) or reads as a refusal
+/// made before the start (see [`refused_before_running`]). A call with no
+/// result does not count either.
 /// For a process that has no record of the chat's loads (after a restart, or
 /// in a fork, whose history holds its source's). `tools` are the registered
 /// names, which a called name is read as. Code Mode's calls are not in the
@@ -538,7 +540,7 @@ pub fn promoted_in(items: &[Item], tools: &[String]) -> HashSet<String> {
         else {
             continue;
         };
-        if *is_error && refused_before_running(output) {
+        if crate::not_run(metadata) || (*is_error && refused_before_running(output)) {
             continue;
         }
         let name = resolve(name);
@@ -854,6 +856,7 @@ mod tests {
             "session_manage",
             "skill",
             "cloud_chat",
+            "workflow",
         ]
         .map(String::from);
         let refused = |id: &str, name: &str, error: &str| {
@@ -877,6 +880,17 @@ mod tests {
             refused("6", "skill", "invalid request: The skill tool was called with invalid arguments. Fix the input and retry the same tool."),
             refused("7", "nope", "tool error: unknown tool: nope. Use an exact available tool name."),
             ran("8", LOAD_TOOL_NAME, true, Value::Null),
+            // Never started: its round broke off, Stop came first, or a
+            // restart stopped the batch before it.
+            ran("8a", "session_manage", true, json!({"notRun": true})),
+            ran(
+                "8b",
+                "skill",
+                true,
+                json!({"unfinished": true, "notRun": true}),
+            ),
+            // The call a restart cut off while it ran.
+            ran("8c", "workflow", true, json!({"unfinished": true})),
             // A batch's steps, the refused one left out.
             ran(
                 "9",
@@ -900,6 +914,7 @@ mod tests {
                 "memory_read".to_owned(),
                 "memory_save".to_owned(),
                 "cloud_chat".to_owned(),
+                "workflow".to_owned(),
             ])
         );
     }
