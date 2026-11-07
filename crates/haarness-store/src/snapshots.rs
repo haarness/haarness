@@ -25,7 +25,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use haarness_core::{CoreError, CoreResult, SnapshotInfo, SnapshotStore};
+use haarness_core::{CoreError, CoreResult, DeltaRestore, SnapshotInfo, SnapshotStore};
 use haarness_protocol::{FileDiff, FileDiffStatus, ThreadId};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -142,6 +142,11 @@ impl ManifestEntry {
 
     fn is_unreadable(&self) -> bool {
         self.kind == EntryKind::Omitted && self.hash == UNREADABLE
+    }
+
+    /// A file over [`MAX_FILE_BYTES`]: its hash is kept, its content is not.
+    fn is_large(&self) -> bool {
+        self.kind == EntryKind::Omitted && !self.is_unreadable()
     }
 }
 
@@ -1421,7 +1426,7 @@ impl SnapshotStore for SqliteSnapshotStore {
         &self,
         expected_snapshot_id: &str,
         desired_snapshot_id: &str,
-    ) -> CoreResult<Vec<String>> {
+    ) -> CoreResult<DeltaRestore> {
         let expected = self.load_manifest(expected_snapshot_id)?;
         let desired = self.load_manifest(desired_snapshot_id)?;
         let paths: BTreeSet<&String> = expected.keys().chain(desired.keys()).collect();
@@ -1432,6 +1437,7 @@ impl SnapshotStore for SqliteSnapshotStore {
             .collect();
 
         let mut prepared = Vec::with_capacity(changed.len());
+        let mut skipped = Vec::new();
         // This is deliberately a separate complete preflight pass. If any
         // path contains a later human edit, no earlier path is touched.
         for path in &changed {
@@ -1449,6 +1455,25 @@ impl SnapshotStore for SqliteSnapshotStore {
                 )));
             }
             let actual = scan_live_entry(&target, path, &self.workspace)?;
+            // A file over the size limit on either side stays as it is: the
+            // content one side held is gone, and changing the file now would
+            // lose the other side's for good, so a redo could never bring
+            // it back. The rest of the change is restored without it. One
+            // already as desired (a redo of such an undo) needs nothing; one
+            // changed since still conflicts below.
+            if [expected.get(path), desired.get(path)]
+                .into_iter()
+                .flatten()
+                .any(ManifestEntry::is_large)
+            {
+                if optional_entry_matches(desired.get(path), actual.as_ref()) {
+                    continue;
+                }
+                if optional_entry_matches(expected.get(path), actual.as_ref()) {
+                    skipped.push(path.clone());
+                    continue;
+                }
+            }
             if !optional_entry_matches(expected.get(path), actual.as_ref()) {
                 return Err(CoreError::Conflict(format!(
                     "workspace path changed since snapshot: {path}"
@@ -1491,7 +1516,7 @@ impl SnapshotStore for SqliteSnapshotStore {
             touched.push(change.path.clone());
         }
         journal.finish(failure)?;
-        Ok(touched)
+        Ok(DeltaRestore { touched, skipped })
     }
 
     async fn diff_live(&self, snapshot_id: &str) -> CoreResult<Vec<FileDiff>> {
@@ -2324,7 +2349,8 @@ mod tests {
         let after = store.capture(ThreadId::new()).await.unwrap();
 
         let undone = store.restore_delta(&after.id, &before.id).await.unwrap();
-        assert_eq!(undone, vec!["added", "delete-me", "src/main.rs"]);
+        assert_eq!(undone.touched, vec!["added", "delete-me", "src/main.rs"]);
+        assert!(undone.skipped.is_empty());
         assert_eq!(
             fs::read_to_string(workspace.join("src/main.rs")).unwrap(),
             "before\n"
@@ -2336,7 +2362,7 @@ mod tests {
         assert!(!workspace.join("added").exists());
 
         let redone = store.restore_delta(&before.id, &after.id).await.unwrap();
-        assert_eq!(redone, vec!["delete-me", "added", "src/main.rs"]);
+        assert_eq!(redone.touched, vec!["delete-me", "added", "src/main.rs"]);
         assert_eq!(
             fs::read_to_string(workspace.join("src/main.rs")).unwrap(),
             "after\n"
@@ -2418,7 +2444,10 @@ mod tests {
         }
         for attempt in ["delta", "legacy overlay"] {
             let error = if attempt == "delta" {
-                store.restore_delta(&after.id, &before.id).await
+                store
+                    .restore_delta(&after.id, &before.id)
+                    .await
+                    .map(|restored| restored.touched)
             } else {
                 store.restore(&before.id).await
             }
@@ -2448,7 +2477,10 @@ mod tests {
         // Fixed, the same undo passes its checks and completes.
         drop(unlock);
         let undone = store.restore_delta(&after.id, &before.id).await.unwrap();
-        assert_eq!(undone, vec!["added", "a", "dir-restored/d", "locked/b"]);
+        assert_eq!(
+            undone.touched,
+            vec!["added", "a", "dir-restored/d", "locked/b"]
+        );
         assert_eq!(fs::read_to_string(workspace.join("a")).unwrap(), "old-a");
         assert_eq!(
             fs::read_to_string(workspace.join("dir-restored/d")).unwrap(),
@@ -2561,21 +2593,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn omitted_large_entry_is_explicit_and_restore_refuses_it() {
+    async fn a_large_file_stays_as_it_is_and_the_rest_is_restored() {
         let (guard, store) = fixture();
         let workspace = guard.0.join("ws");
-        fs::write(workspace.join("huge.bin"), vec![7_u8; 3 * 1024 * 1024]).unwrap();
-        let with_large = store.capture(ThreadId::new()).await.unwrap();
-        assert_eq!(with_large.file_count, 1);
-        fs::remove_file(workspace.join("huge.bin")).unwrap();
-        let without_large = store.capture(ThreadId::new()).await.unwrap();
+        let large = |byte| vec![byte; 3 * 1024 * 1024];
+        fs::write(workspace.join("huge.bin"), large(7)).unwrap();
+        fs::write(workspace.join("gone.bin"), large(8)).unwrap();
+        fs::write(workspace.join("small.txt"), "before\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        assert_eq!(before.file_count, 3);
+        assert_eq!(
+            store.load_manifest(&before.id).unwrap()["huge.bin"].kind,
+            EntryKind::Omitted
+        );
+        // The turn changes a large file, deletes another, makes a third and
+        // edits a small one.
+        fs::write(workspace.join("huge.bin"), large(9)).unwrap();
+        fs::remove_file(workspace.join("gone.bin")).unwrap();
+        fs::write(workspace.join("made.bin"), large(10)).unwrap();
+        fs::write(workspace.join("small.txt"), "after\n").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
 
+        let undone = store.restore_delta(&after.id, &before.id).await.unwrap();
+        assert_eq!(undone.touched, vec!["small.txt"]);
+        assert_eq!(undone.skipped, vec!["gone.bin", "huge.bin", "made.bin"]);
+        assert_eq!(
+            fs::read_to_string(workspace.join("small.txt")).unwrap(),
+            "before\n"
+        );
+        assert_eq!(fs::read(workspace.join("huge.bin")).unwrap(), large(9));
+        assert!(!workspace.join("gone.bin").exists());
+        assert_eq!(fs::read(workspace.join("made.bin")).unwrap(), large(10));
+
+        // Redo finds the large files as it wants them and redoes the rest.
+        let redone = store.restore_delta(&before.id, &after.id).await.unwrap();
+        assert_eq!(redone.touched, vec!["small.txt"]);
+        assert!(redone.skipped.is_empty());
+        assert_eq!(
+            fs::read_to_string(workspace.join("small.txt")).unwrap(),
+            "after\n"
+        );
+
+        // A large file changed again since still stops the undo, as any
+        // later edit does.
+        fs::write(workspace.join("huge.bin"), large(11)).unwrap();
         let error = store
-            .restore_delta(&without_large.id, &with_large.id)
+            .restore_delta(&after.id, &before.id)
             .await
             .unwrap_err();
-        assert!(matches!(error, CoreError::Conflict(_)));
-        assert!(!workspace.join("huge.bin").exists());
+        assert!(matches!(error, CoreError::Conflict(_)), "{error}");
+        assert_eq!(
+            fs::read_to_string(workspace.join("small.txt")).unwrap(),
+            "after\n"
+        );
     }
 
     #[tokio::test]
@@ -2830,7 +2900,7 @@ mod tests {
 
         // A path that stayed unreadable is no change: undo restores the rest.
         let undone = store.restore_delta(&after.id, &before.id).await.unwrap();
-        assert_eq!(undone, vec!["src/main.rs"]);
+        assert_eq!(undone.touched, vec!["src/main.rs"]);
         assert_eq!(
             fs::read_to_string(workspace.join("src/main.rs")).unwrap(),
             "before\n"
@@ -2982,7 +3052,11 @@ mod tests {
 
             // The recapture restores like any other.
             assert_eq!(
-                store.restore_delta(&edited_id, &unchanged).await.unwrap(),
+                store
+                    .restore_delta(&edited_id, &unchanged)
+                    .await
+                    .unwrap()
+                    .touched,
                 vec!["c"]
             );
             assert_eq!(fs::read_to_string(workspace.join("c")).unwrap(), "other\n");

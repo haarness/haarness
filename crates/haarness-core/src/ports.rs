@@ -913,11 +913,13 @@ pub trait SnapshotStore: Send + Sync {
     /// Restore only paths whose state differs between `expected_snapshot_id`
     /// and `desired_snapshot_id`. Every live path must still match `expected`;
     /// otherwise fail before writing so human/later edits are not clobbered.
+    /// A path whose content one side could not keep (a file over the size
+    /// limit) is left as it is and named in [`DeltaRestore::skipped`].
     async fn restore_delta(
         &self,
         expected_snapshot_id: &str,
         desired_snapshot_id: &str,
-    ) -> CoreResult<Vec<String>>;
+    ) -> CoreResult<DeltaRestore>;
     /// Compare one checkpoint with the live workspace for Last turn `/diff`.
     async fn diff_live(&self, snapshot_id: &str) -> CoreResult<Vec<haarness_protocol::FileDiff>>;
     /// Stable diff between a pre-mutation and completion checkpoint.
@@ -977,6 +979,16 @@ pub trait SnapshotFolders: Send + Sync {
 pub struct SnapshotInfo {
     pub id: String,
     pub file_count: u64,
+}
+
+/// What [`SnapshotStore::restore_delta`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeltaRestore {
+    /// Paths written or removed.
+    pub touched: Vec<String>,
+    /// Paths left as they are because a checkpoint holds no content for
+    /// them: files over the size limit, which no restore could put back.
+    pub skipped: Vec<String>,
 }
 
 /// Durable secret storage. Implemented by the CLI over owner-only auth.json;

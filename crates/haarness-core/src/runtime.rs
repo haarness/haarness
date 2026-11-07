@@ -5243,7 +5243,7 @@ impl AgentRuntime {
             let compensation = if let Some(base) = &state.base_snapshot_id {
                 snapshots.restore_delta(&desired, base).await
             } else {
-                Ok(Vec::new())
+                Ok(crate::DeltaRestore::default())
             };
             return Err(match compensation {
                 Ok(_) => error,
