@@ -11,6 +11,8 @@ for line in sys.stdin:
             print(json.dumps({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32603,'message':'fixture list failure'}}), flush=True)
             continue
         result = {'tools':[{'name':name,'description':name,'inputSchema':{'type':'object'}} for name in (['refresh','new_tool'] if changed else ['refresh','old_tool'])]}
+        # BROKEN_REFRESH=1: the changed listing also holds a tool without an inputSchema.
+        if changed and os.environ.get('BROKEN_REFRESH') == '1': result['tools'].append({'name':'broken_tool'})
     elif method == 'tools/call':
         changed = True
         print(json.dumps({'jsonrpc':'2.0','method':'notifications/tools/list_changed'}), flush=True)

@@ -237,6 +237,9 @@ struct CatalogClient {
     /// Whether the server's interactive apps are on (its `apps` setting).
     /// Off, it is a plain MCP server to Haarness.
     apps_on: bool,
+    /// The tools the last listing left out because they are not valid MCP
+    /// tools, by the names they gave (see [`Self::list_tools`]).
+    skipped: Arc<RwLock<Vec<String>>>,
 }
 impl CatalogClient {
     fn new(
@@ -254,7 +257,100 @@ impl CatalogClient {
             apps: Arc::default(),
             resources: Arc::default(),
             apps_on,
+            skipped: Arc::default(),
         }
+    }
+    /// Every tool the server lists, across its pages. rmcp reads a page
+    /// whole, so a single tool listed in a form MCP does not allow (no
+    /// `inputSchema`, a schema that is not an object) made the page
+    /// unreadable as a tool listing ("Unexpected response type") and failed
+    /// the whole server. The pages are then asked for again and read one tool
+    /// at a time: a tool that cannot be read is left out, with a warning
+    /// that names it, and the others are offered.
+    async fn list_tools(
+        &self,
+        peer: &rmcp::service::Peer<RoleClient>,
+    ) -> Result<Vec<rmcp::model::Tool>, rmcp::ServiceError> {
+        match peer.list_all_tools().await {
+            Err(rmcp::ServiceError::UnexpectedResponse) => {}
+            listed => {
+                self.skipped.write().clear();
+                return listed;
+            }
+        }
+        let mut tools = Vec::new();
+        let mut skipped = Vec::new();
+        let mut cursor = None;
+        loop {
+            let request = rmcp::model::ClientRequest::ListToolsRequest(
+                rmcp::model::ListToolsRequest::with_param(
+                    rmcp::model::PaginatedRequestParams::default().with_cursor(cursor),
+                ),
+            );
+            // A page rmcp cannot read as a listing comes back as the JSON it
+            // is; one it reads as some other result has no tools to read.
+            let page = match peer.send_request(request).await? {
+                rmcp::model::ServerResult::ListToolsResult(page) => {
+                    tools.extend(page.tools);
+                    cursor = page.next_cursor;
+                    if cursor.is_none() {
+                        break;
+                    }
+                    continue;
+                }
+                rmcp::model::ServerResult::CustomResult(rmcp::model::CustomResult(page)) => page,
+                _ => return Err(rmcp::ServiceError::UnexpectedResponse),
+            };
+            let listed = page
+                .get("tools")
+                .and_then(Value::as_array)
+                .ok_or(rmcp::ServiceError::UnexpectedResponse)?;
+            for item in listed {
+                match serde_json::from_value::<rmcp::model::Tool>(item.clone()) {
+                    Ok(tool) => tools.push(tool),
+                    Err(error) => {
+                        let tool = item.get("name").and_then(Value::as_str);
+                        tracing::warn!(
+                            server = %self.name,
+                            tool = tool.unwrap_or("<unnamed>"),
+                            %error,
+                            "an MCP server listed a tool that is not a valid MCP tool; it is left out"
+                        );
+                        skipped.push(tool.map_or_else(
+                            || "a tool without a name".to_owned(),
+                            |tool| format!("{:?}", tool.chars().take(64).collect::<String>()),
+                        ));
+                    }
+                }
+            }
+            cursor = page
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        *self.skipped.write() = skipped;
+        Ok(tools)
+    }
+    /// The status of a server whose listing just came to `count` tools,
+    /// naming the tools it left out (see [`Self::list_tools`]).
+    fn discovered(&self, count: usize) -> String {
+        let skipped = self.skipped.read();
+        let names = match skipped.as_slice() {
+            [] => return format!("{count} tools discovered"),
+            [one] => format!("{one}, which is not a valid MCP tool"),
+            [first, second] => format!("{first} and {second}, which are not valid MCP tools"),
+            [first, second, third] => {
+                format!("{first}, {second} and {third}, which are not valid MCP tools")
+            }
+            [first, second, rest @ ..] => format!(
+                "{first}, {second} and {} more that are not valid MCP tools",
+                rest.len()
+            ),
+        };
+        format!("{count} tools discovered; left out {names}")
     }
     /// [`Self::catalog`] for a connection that just started, which also
     /// records what the server declared it offers.
@@ -304,7 +400,7 @@ impl rmcp::ClientHandler for CatalogClient {
             }
             entry.forget_catalog();
         }
-        let Ok(tools) = context.peer.list_all_tools().await else {
+        let Ok(tools) = self.list_tools(&context.peer).await else {
             return;
         };
         let Some(servers) = self.home.read().upgrade() else {
@@ -321,7 +417,7 @@ impl rmcp::ClientHandler for CatalogClient {
             return;
         }
         entry.set_catalog(&self.name, self.catalog(&tools));
-        entry.info.detail = Some(format!("{} tools discovered", entry.tools.len()));
+        entry.info.detail = Some(self.discovered(entry.tools.len()));
         entry.info.app_tools = self.app_tools();
     }
 }
@@ -1402,7 +1498,11 @@ impl McpStart {
                                 CoreError::Tool(format!("cannot start {program}: {error}"))
                             })?;
                         let client = handler.clone().serve(transport).await.map_err(mcp_error)?;
-                        let tools = client.list_all_tools().await.map_err(mcp_error)?;
+                        let tools = client
+                            .service()
+                            .list_tools(client.peer())
+                            .await
+                            .map_err(mcp_error)?;
                         let definitions = client.service().connected(client.peer(), &tools);
                         let limit = Limit {
                             name: name.to_owned(),
@@ -1512,7 +1612,7 @@ impl McpStart {
             entry.resources = handler.resources.load(Ordering::Acquire);
             entry.info.app_tools = handler.app_tools();
             entry.info.status = "connected".into();
-            entry.info.detail = Some(format!("{count} tools discovered"));
+            entry.info.detail = Some(handler.discovered(count));
             (Ok(entry.info.clone()), Some(servers.clone()))
         });
         let Some((result, connected)) = settled else {
@@ -2107,7 +2207,8 @@ where
         Err(error) => return Err(ActivationError::Core(initialize_error(&error, url))),
     };
     let tools = client
-        .list_all_tools()
+        .service()
+        .list_tools(client.peer())
         .await
         .map_err(mcp_error)
         .map_err(ActivationError::Core)?;
@@ -2432,7 +2533,11 @@ async fn activate_legacy_sse(
             )
             .await?;
             let client = handler.clone().serve(transport).await.map_err(mcp_error)?;
-            let tools = client.list_all_tools().await.map_err(mcp_error)?;
+            let tools = client
+                .service()
+                .list_tools(client.peer())
+                .await
+                .map_err(mcp_error)?;
             let definitions = client.service().connected(client.peer(), &tools);
             let tx = spawn_worker(client, None, None);
             CoreResult::Ok((definitions, tx))
@@ -4926,6 +5031,95 @@ mod recovery_tests {
         })
         .await
         .unwrap();
+        registry.disconnect("catalog").await.unwrap();
+    }
+
+    /// One tool listed in a form MCP does not allow made rmcp refuse the
+    /// whole page, and the server failed with "Unexpected response type".
+    /// Now such a tool is left out by name, on every page, and the rest are
+    /// offered and answer; a listing changed later is read the same way.
+    #[tokio::test]
+    async fn a_tool_that_is_not_a_valid_mcp_tool_is_left_out_and_the_rest_are_offered() {
+        use serde_json::json;
+        let registry = NativeMcpRegistry::default();
+        let mut config = names_config("shelf", &["first", "second", "third"]);
+        config.env.insert(
+            "LISTED".into(),
+            json!([
+                {"name": "broken", "description": "no input schema"},
+                {"name": "odd", "inputSchema": "not an object"},
+                {"description": "no name"}
+            ])
+            .to_string(),
+        );
+        config.env.insert("PAGE".into(), "2".into());
+        let info = registry.configure("shelf", config).await.unwrap();
+        assert_eq!(info.status, "connected");
+        assert_eq!(
+            info.detail.as_deref(),
+            Some(
+                "3 tools discovered; left out \"broken\", \"odd\" and a tool without a name, which are not valid MCP tools"
+            )
+        );
+        let mut offered: Vec<_> = registry
+            .tool_snapshot()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        offered.sort();
+        assert_eq!(
+            offered,
+            [
+                "mcp__shelf__first",
+                "mcp__shelf__second",
+                "mcp__shelf__third"
+            ]
+        );
+        assert_eq!(
+            reached(&registry, "mcp__shelf__third").await["tool"],
+            "third"
+        );
+        // A listing of valid tools across pages reads as before.
+        let mut paged = names_config("paged", &["one", "two", "three"]);
+        paged.env.insert("PAGE".into(), "1".into());
+        let info = registry.configure("paged", paged).await.unwrap();
+        assert_eq!(info.detail.as_deref(), Some("3 tools discovered"));
+        registry.disconnect("shelf").await.unwrap();
+        registry.disconnect("paged").await.unwrap();
+
+        let catalog: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "stdio", "command": PYTHON,
+            "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/catalog.py")],
+            "env": {"BROKEN_REFRESH": "1"}, "enabled": true
+        }))
+        .unwrap();
+        registry.configure("catalog", catalog).await.unwrap();
+        registry
+            .call("catalog", "refresh", json!({}))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !registry
+                .tool_snapshot()
+                .iter()
+                .any(|tool| tool.name == "mcp__catalog__new_tool")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the changed listing was read");
+        assert!(
+            !registry
+                .tool_snapshot()
+                .iter()
+                .any(|tool| tool.name.contains("broken_tool"))
+        );
+        let info = registry.list().await.unwrap();
+        assert_eq!(
+            info[0].detail.as_deref(),
+            Some("2 tools discovered; left out \"broken_tool\", which is not a valid MCP tool")
+        );
         registry.disconnect("catalog").await.unwrap();
     }
 
