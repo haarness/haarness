@@ -306,6 +306,13 @@ pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
         // (as before) from the first line that contains the locator, else
         // from the cursor.
         let mut froms = Vec::new();
+        // The line that is the locator once trimmed: the hunk is the first
+        // place its lines match after it, as the format has it, also when
+        // they match again further on (a `return result` every function
+        // ends with).
+        let named = header.and_then(|header| {
+            (cursor..lines.len()).find(|&index| lines[index].text.trim() == header)
+        });
         if let Some(header) = header {
             let within = (cursor..lines.len()).find(|&index| lines[index].text.contains(header));
             froms.extend(locate(&lines, cursor, header));
@@ -315,7 +322,7 @@ pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
             froms.push(cursor);
         }
         let last = lines.len().saturating_sub(old.len());
-        let matches = froms
+        let (searched_from, matches) = froms
             .into_iter()
             .map(|search_from| {
                 // An end-of-file hunk is tried only where its old lines end
@@ -333,10 +340,15 @@ pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
                                 .is_some_and(|actual| actual.text.trim_end() == expected.trim_end())
                         })
                     })
-                    .collect::<Vec<usize>>()
+                    .collect::<Vec<usize>>();
+                (search_from, matches)
             })
-            .find(|matches| !matches.is_empty())
+            .find(|(_, matches)| !matches.is_empty())
             .unwrap_or_default();
+        let matches = match matches.as_slice() {
+            [first, _, ..] if named == Some(searched_from) => vec![*first],
+            _ => matches,
+        };
         match matches.as_slice() {
             [] if hunk.end_of_file => {
                 return Err(format!(
@@ -686,6 +698,34 @@ five\n\
             .unwrap(),
             "impl B {\n    fn run() {\n        old();\n    }\n}\nimpl A {\n    fn run() {\n        new();\n    }\n}\n"
         );
+    }
+
+    #[test]
+    fn a_locator_takes_the_first_match_after_it_when_the_lines_recur_further_on() {
+        let file = "def handle_orders(items):\n    result = []\n    return result\n\n\ndef handle_returns(items):\n    result = []\n    return result\n";
+        // Before, the copy in the second function made this "ambiguous (2
+        // matches)", although the locator names the first.
+        assert_eq!(
+            patched(
+                file,
+                "@@ def handle_orders(items):\n     result = []\n+    result.sort()\n     return result\n"
+            )
+            .unwrap(),
+            "def handle_orders(items):\n    result = []\n    result.sort()\n    return result\n\n\ndef handle_returns(items):\n    result = []\n    return result\n"
+        );
+        // The second function's own locator still reaches its copy.
+        assert!(
+            patched(
+                file,
+                "@@ def handle_returns(items):\n-    return result\n+    return []\n"
+            )
+            .unwrap()
+            .ends_with("    result = []\n    return []\n")
+        );
+        // Without a locator the hunk names no place, and is still refused.
+        let error =
+            patched(file, "@@\n     result = []\n+    x\n     return result\n").unwrap_err();
+        assert!(error.contains("ambiguous (2 matches)"), "{error}");
     }
 
     #[test]
