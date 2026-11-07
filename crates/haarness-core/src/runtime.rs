@@ -243,10 +243,31 @@ fn stopped_turn_message(reason: &str) -> String {
 type GoalMutationLocks = DashMap<ThreadId, Arc<AsyncMutex<()>>>;
 type TurnAdmissionLocks = DashMap<ThreadId, Arc<AsyncMutex<()>>>;
 type BackgroundTasks = DashMap<ThreadId, Arc<BackgroundTask>>;
-type ToolPromotions = DashMap<ThreadId, HashSet<String>>;
+type ToolPromotions = DashMap<ThreadId, ChatTools>;
 type ToolExecutionGates = DashMap<String, Arc<AsyncRwLock<()>>>;
 /// Subagent slot pools by (depth, concurrency limit), shared by a runtime and its turns.
 type SubagentSlots = Arc<Mutex<HashMap<(u8, usize), Arc<Semaphore>>>>;
+
+/// What a chat's tool list holds beyond its catalog. Kept while this process
+/// runs; for a chat it has none of (after a restart, or a fork) the loads
+/// are read back from the chat's history.
+#[derive(Debug, Clone, Default)]
+struct ChatTools {
+    /// Tools the model loaded or called, which stay in its list.
+    promoted: HashSet<String>,
+}
+
+impl ChatTools {
+    fn from_history(items: &[Item], tools: &[crate::ToolDefinition]) -> Self {
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        Self {
+            promoted: crate::tool_catalog::promoted_in(items, &names),
+        }
+    }
+}
 
 fn tool_execution_gate(gates: &ToolExecutionGates, name: &str) -> Arc<AsyncRwLock<()>> {
     gates
@@ -2098,7 +2119,7 @@ pub struct AgentRuntime {
     /// serialize behind one global execution lock.
     tool_execution_gates: Arc<ToolExecutionGates>,
     /// Session-local schema promotions survive turns without leaking between
-    /// threads. They reset with the provider process by design.
+    /// threads. A restart rebuilds them from each chat's history.
     tool_promotions: Arc<ToolPromotions>,
     snapshots: Option<Arc<dyn crate::SnapshotStore>>,
     /// Stores of the chats that work in a folder of their own: each such
@@ -2708,6 +2729,25 @@ impl AgentRuntime {
         names.own_keys(tools).into_iter().collect()
     }
 
+    /// `thread`'s tool state, read back from its history when this process
+    /// has none.
+    async fn chat_tools(
+        &self,
+        thread: ThreadId,
+        components: &RuntimeComponents,
+    ) -> CoreResult<ChatTools> {
+        if let Some(tools) = self.tool_promotions.get(&thread) {
+            return Ok(tools.clone());
+        }
+        let items = self.repository.list_items(thread, None).await?;
+        let rebuilt = ChatTools::from_history(&items, &components.tools.list());
+        Ok(self
+            .tool_promotions
+            .entry(thread)
+            .or_insert(rebuilt)
+            .clone())
+    }
+
     /// Authoritative catalog for clients. With a thread id, session-local
     /// promotions and that thread's provider context are reflected.
     pub async fn tool_catalog(
@@ -2717,6 +2757,7 @@ impl AgentRuntime {
         let components = self.components();
         let (context_window, promoted) = if let Some(thread_id) = thread_id {
             let thread = self.repository.get_thread(thread_id).await?;
+            let tools = self.chat_tools(thread_id, &components).await?;
             (
                 components
                     .providers
@@ -2724,9 +2765,7 @@ impl AgentRuntime {
                     .into_iter()
                     .find(|candidate| candidate.id == thread.model)
                     .and_then(|candidate| candidate.context_window),
-                self.tool_promotions
-                    .get(&thread_id)
-                    .map_or_else(HashSet::new, |entry| entry.value().clone()),
+                tools.promoted.clone(),
             )
         } else {
             let context = components
@@ -3939,10 +3978,7 @@ impl AgentRuntime {
                 .into_iter()
                 .find(|model| model.id == thread.model)
                 .and_then(|model| model.context_window);
-            let promoted = self
-                .tool_promotions
-                .get(&thread_id)
-                .map_or_else(HashSet::new, |entry| entry.value().clone());
+            let tools = self.chat_tools(thread_id, &components).await?;
             let selection = select_tools(
                 catalog
                     .iter()
@@ -3952,7 +3988,7 @@ impl AgentRuntime {
                 &components.config.tool_availability,
                 &self.tool_availability.read(),
                 &lazy,
-                &promoted,
+                &tools.promoted,
                 context_window,
             );
             if selection.response.lazy_active {
@@ -10020,22 +10056,13 @@ impl RunnerTask {
                 {
                     lazy_settings.mode = haarness_protocol::LazyToolMode::Off;
                 }
-                let promoted = self
-                    .tool_promotions
-                    .get(&self.thread.id)
-                    .map_or_else(HashSet::new, |entry| entry.value().clone());
                 let context_window = provider_models
                     .iter()
                     .find(|candidate| candidate.id == model)
                     .and_then(|candidate| candidate.context_window);
-                let selection = select_tools(
-                    eligible_tools,
-                    &self.config.tool_availability,
-                    &self.tool_availability.read(),
-                    &lazy_settings,
-                    &promoted,
-                    context_window,
-                );
+                let selection = self
+                    .round_tools(eligible_tools, &lazy_settings, context_window)
+                    .await?;
                 if selection.response.lazy_active {
                     system.push_str(crate::side_question::LAZY_INSTRUCTIONS);
                 }
@@ -11483,8 +11510,39 @@ impl RunnerTask {
         ))
     }
 
+    /// This round's tools, from the chat's tool state (read back from its
+    /// history when this process has none).
+    async fn round_tools(
+        &self,
+        eligible: Vec<crate::ToolDefinition>,
+        settings: &crate::LazyToolSettings,
+        context_window: Option<u64>,
+    ) -> CoreResult<crate::tool_catalog::ToolSelection> {
+        if !self.tool_promotions.contains_key(&self.thread.id) {
+            let items = self.repository.list_items(self.thread.id, None).await?;
+            let rebuilt = ChatTools::from_history(&items, &self.tools.list());
+            self.tool_promotions
+                .entry(self.thread.id)
+                .or_insert(rebuilt);
+        }
+        let promoted = self
+            .tool_promotions
+            .get(&self.thread.id)
+            .map(|tools| tools.promoted.clone())
+            .unwrap_or_default();
+        Ok(select_tools(
+            eligible,
+            &self.config.tool_availability,
+            &self.tool_availability.read(),
+            settings,
+            &promoted,
+            context_window,
+        ))
+    }
+
     fn promote_tools(&self, names: impl IntoIterator<Item = String>) -> Vec<String> {
-        let mut promoted = self.tool_promotions.entry(self.thread.id).or_default();
+        let mut tools = self.tool_promotions.entry(self.thread.id).or_default();
+        let promoted = &mut tools.promoted;
         let mut accepted = Vec::new();
         for name in names {
             if promoted.contains(&name) {

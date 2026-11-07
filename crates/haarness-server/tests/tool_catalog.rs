@@ -1253,3 +1253,212 @@ async fn a_side_question_names_tools_as_the_turns_do() {
     assert!(side.contains(&docs), "{side:?}");
     assert!(side.contains(&"mcp__srv__what_".to_owned()), "{side:?}");
 }
+
+/// Answers each request with the next of its scripted events (a text reply
+/// once they run out) and records the tools each request offered.
+#[derive(Clone, Default)]
+struct Scripted {
+    script: Arc<std::sync::Mutex<std::collections::VecDeque<ProviderEvent>>>,
+    tools: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Scripted {
+    fn then(&self, event: ProviderEvent) -> &Self {
+        self.script.lock().unwrap().push_back(event);
+        self
+    }
+
+    fn offered(&self) -> Vec<String> {
+        self.tools.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ModelProvider for Scripted {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            id: "scripted".into(),
+            name: "Scripted fixture".into(),
+            authenticated: true,
+            models: vec![ModelInfo {
+                id: "scripted-1".into(),
+                display_name: "Scripted fixture".into(),
+                reasoning: false,
+                reasoning_efforts: Vec::new(),
+                images: false,
+                video: false,
+                tools: true,
+                context_window: Some(128_000),
+                max_output_tokens: Some(2_000),
+                pricing: None,
+            }],
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        // A chat's title is asked for without tools, alongside its turn.
+        let event = if request.tools.is_empty() {
+            ProviderEvent::TextDelta("Scripted chat".into())
+        } else {
+            self.tools
+                .lock()
+                .unwrap()
+                .push(serde_json::to_string(&request.tools).unwrap());
+            self.script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| ProviderEvent::TextDelta("done".into()))
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(event),
+            Ok(ProviderEvent::Finished {
+                reason: "done".into(),
+            }),
+        ])))
+    }
+}
+
+fn call(call_id: &str, name: &str, arguments: Value) -> ProviderEvent {
+    ProviderEvent::ToolCall {
+        call_id: call_id.into(),
+        name: name.into(),
+        arguments,
+        provider_metadata: Value::Null,
+    }
+}
+
+fn scripted_runtime(
+    store: Arc<SqliteStore>,
+    provider: &Scripted,
+    root: &std::path::Path,
+) -> AgentRuntime {
+    AgentRuntime::with_config(
+        store,
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(FixtureRegistry::new()),
+        EventBus::new(128),
+        root.to_path_buf(),
+        String::new(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            lazy_tools: LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            ..RuntimeConfig::default()
+        },
+    )
+}
+
+/// A tool the model loaded stays in the chat's tool list after Haarness
+/// restarts and in a fork of the chat: the list (which opens the cached
+/// prompt) is the one the chat had, and a call of the tool runs at once
+/// instead of being refused as deferred.
+#[tokio::test]
+async fn a_loaded_tool_stays_offered_after_a_restart_and_in_a_fork() {
+    let root = std::env::temp_dir().join(format!("haarness-tool-loads-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(SqliteStore::open(root.join("state.db")).unwrap());
+    let ran_sessions = |items: &[haarness_protocol::Item]| {
+        items
+            .iter()
+            .filter(|item| {
+                matches!(&item.data, haarness_protocol::ItemData::ToolResult { name, is_error: false, .. }
+                    if name == "session_manage")
+            })
+            .count()
+    };
+
+    let before = Scripted::default();
+    before.then(call(
+        "load-1",
+        "load_tool",
+        json!({"queries": ["session_manage"]}),
+    ));
+    let runtime = scripted_runtime(store.clone(), &before, &root);
+    runtime.recover().await.unwrap();
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("scripted".into()),
+            model: Some("scripted-1".into()),
+            ..CreateThreadRequest::default()
+        })
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(thread.id, turn_request("load the sessions tool"))
+        .await
+        .unwrap();
+    wait_done(&runtime, turn.id).await;
+    let loaded = before.offered().last().cloned().unwrap();
+    assert!(loaded.contains("session_manage"), "{loaded}");
+    assert_ne!(before.offered()[0], loaded, "the load adds the tool");
+    drop(runtime);
+
+    let after = Scripted::default();
+    after.then(call(
+        "sessions-1",
+        "session_manage",
+        json!({"action": "list"}),
+    ));
+    let restarted = scripted_runtime(store.clone(), &after, &root);
+    restarted.recover().await.unwrap();
+    let catalog = restarted.tool_catalog(Some(thread.id)).await.unwrap();
+    assert!(
+        catalog
+            .tools
+            .iter()
+            .any(|tool| tool.id == "session_manage" && tool.loaded && tool.advertised),
+        "{catalog:?}"
+    );
+    let turn = restarted
+        .start_turn(thread.id, turn_request("list the sessions"))
+        .await
+        .unwrap();
+    wait_done(&restarted, turn.id).await;
+    assert_eq!(
+        after.offered()[0],
+        loaded,
+        "the same tools after the restart"
+    );
+    assert_eq!(
+        ran_sessions(&restarted.items(thread.id, None).await.unwrap()),
+        1
+    );
+
+    let fork = restarted.fork_thread(thread.id, None, None).await.unwrap();
+    after.then(call(
+        "sessions-2",
+        "session_manage",
+        json!({"action": "list"}),
+    ));
+    let turn = restarted
+        .start_turn(fork.id, turn_request("and the sessions in the fork?"))
+        .await
+        .unwrap();
+    wait_done(&restarted, turn.id).await;
+    let fork_first = after.offered().len() - 2;
+    assert_eq!(
+        after.offered()[fork_first],
+        loaded,
+        "the fork has its source's tools"
+    );
+    assert_eq!(
+        ran_sessions(&restarted.items(fork.id, None).await.unwrap()),
+        2
+    );
+
+    drop(restarted);
+    std::fs::remove_dir_all(root).unwrap();
+}

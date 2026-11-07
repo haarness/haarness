@@ -5,7 +5,7 @@ use std::{
     hash::BuildHasher,
 };
 
-use haarness_protocol::{LazyToolMode, ToolCatalogEntry, ToolCatalogResponse};
+use haarness_protocol::{Item, ItemData, LazyToolMode, ToolCatalogEntry, ToolCatalogResponse};
 use serde_json::{Value, json};
 
 use crate::ToolDefinition;
@@ -404,6 +404,61 @@ pub fn load_tool_result(ids: &[String], catalog: &ToolCatalogResponse) -> Value 
     })
 }
 
+/// The tools a chat's history shows promoted, as the chat held them while
+/// it ran: those `load_tool` loaded and the optional tools the model called,
+/// oldest first and at most [`MAX_PROMOTED_TOOLS`]. For a process that has
+/// no record of the chat's loads (after a restart, or in a fork, whose
+/// history holds its source's). `tools` are the registered names, which a
+/// called name is read as.
+#[must_use]
+pub fn promoted_in(items: &[Item], tools: &[String]) -> HashSet<String> {
+    let registered = tools.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut promoted = HashSet::new();
+    for item in items {
+        let ItemData::ToolResult {
+            name,
+            is_error: false,
+            metadata,
+            ..
+        } = &item.data
+        else {
+            continue;
+        };
+        let name = if name == LOAD_TOOL_NAME || registered.contains(name.as_str()) {
+            name.clone()
+        } else {
+            crate::tool_validation::resolve_name(
+                name,
+                tools
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(LOAD_TOOL_NAME.to_owned())),
+            )
+        };
+        let names = if name == LOAD_TOOL_NAME {
+            metadata
+                .get("loaded")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|tool| tool.get("id").and_then(Value::as_str))
+                .map(ToOwned::to_owned)
+                .collect()
+        } else if is_essential_tool(&name) {
+            continue;
+        } else {
+            vec![name]
+        };
+        for name in names {
+            if !promoted.contains(&name) && promoted.len() == MAX_PROMOTED_TOOLS {
+                return promoted;
+            }
+            promoted.insert(name);
+        }
+    }
+    promoted
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -536,6 +591,68 @@ mod tests {
                 &["documentation tool".into()]
             ),
             ["mcp__docs__search"]
+        );
+    }
+
+    fn result(name: &str, is_error: bool, metadata: Value) -> Item {
+        Item {
+            id: haarness_protocol::ItemId::new(),
+            thread_id: haarness_protocol::ThreadId::new(),
+            turn_id: None,
+            sequence: 0,
+            data: ItemData::ToolResult {
+                call_id: "call".into(),
+                name: name.into(),
+                output: String::new(),
+                is_error,
+                metadata,
+            },
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn loads(ids: &[&str]) -> Value {
+        json!({
+            "loaded": ids.iter().map(|id| json!({"id": id})).collect::<Vec<_>>(),
+            "message": "The matching tool schemas will be available on the next model round.",
+        })
+    }
+
+    #[test]
+    fn a_chats_loads_and_calls_are_read_back_from_its_history() {
+        let tools =
+            ["read", "memory_read", "mcp__docs__search", "session_manage"].map(String::from);
+        let items = [
+            result(LOAD_TOOL_NAME, false, loads(&["mcp__docs__search"])),
+            // Called while every tool was offered.
+            result("Memory_Read", false, Value::Null),
+            // Core tools are always offered; nothing to keep.
+            result("read", false, Value::Null),
+            // Refused: it was deferred and not loaded.
+            result("session_manage", true, Value::Null),
+            result(LOAD_TOOL_NAME, true, Value::Null),
+        ];
+        assert_eq!(
+            promoted_in(&items, &tools),
+            HashSet::from(["mcp__docs__search".to_owned(), "memory_read".to_owned()])
+        );
+
+        let many = (0..MAX_PROMOTED_TOOLS + 6)
+            .map(|index| format!("mcp__many__tool_{index:03}"))
+            .collect::<Vec<_>>();
+        let items = many
+            .chunks(10)
+            .map(|chunk| {
+                let ids = chunk.iter().map(String::as_str).collect::<Vec<_>>();
+                result(LOAD_TOOL_NAME, false, loads(&ids))
+            })
+            .collect::<Vec<_>>();
+        let promoted = promoted_in(&items, &many);
+        assert_eq!(promoted.len(), MAX_PROMOTED_TOOLS);
+        assert!(promoted.contains(&many[MAX_PROMOTED_TOOLS - 1]));
+        assert!(
+            !promoted.contains(&many[MAX_PROMOTED_TOOLS]),
+            "the oldest loads are kept"
         );
     }
 
