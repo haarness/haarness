@@ -25309,6 +25309,31 @@ async fn a_pause_says_paused_only_while_a_step_waits_on_the_screen() {
     assert!(text.contains("paused  ·  /mac resume"), "{text}");
 }
 
+/// `/mac resume` words its notice from the server's answer: an agent this
+/// client never heard was paused (another chat's, or a missed event) was
+/// still resumed, and one it thought paused may have gone on already.
+#[tokio::test]
+async fn mac_resume_says_what_the_server_did() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (client, _) = sign_in_server(vec![
+        SignInReply::Json(
+            r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null,"resumed":true}}"#,
+        ),
+        SignInReply::Json(
+            r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null,"resumed":false}}"#,
+        ),
+    ])
+    .await;
+    app.notice.clear();
+    app.execute_command("/mac resume", &client).await.unwrap();
+    assert_ne!(app.notice, "No agent is paused", "it did resume one");
+    app.computer_paused = Some(thread.id);
+    app.execute_command("/mac resume", &client).await.unwrap();
+    assert_eq!(app.notice, "No agent is paused");
+    assert_eq!(app.computer_paused, None);
+}
+
 /// A pause is followed in every chat, so a chat opened while it lasts shows
 /// it; a child agent's view counts as its conversation's; `/mac resume` does
 /// what the row's click does, and says so when nothing is paused.

@@ -429,12 +429,12 @@ fn paused_chat(answer: &Value) -> Option<haarness_protocol::ThreadId> {
 
 /// Resume from this client (`/mac resume`, or a click on the paused step): the agent goes on, as with the strip's own
 /// Resume.
-pub(crate) async fn resume_computer(app: &mut App, client: &ApiClient) -> Result<()> {
+pub(crate) async fn resume_computer(app: &mut App, client: &ApiClient) -> Result<Option<bool>> {
     let answer = client
         .manage("computer-use", &json!({"action": "resume"}))
         .await?;
     app.computer_paused = paused_chat(&answer);
-    Ok(())
+    Ok(answer["data"]["resumed"].as_bool())
 }
 
 /// The words of the bar computer use shows at the top of the screen, in

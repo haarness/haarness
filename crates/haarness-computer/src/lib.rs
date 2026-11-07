@@ -214,10 +214,11 @@ impl Computer {
     }
 
     /// Resume pressed in a client: the strip is told first, so it shows the agent at work and lets its next request
-    /// through, and then the waiting agent goes on. Nothing happens while nothing is paused.
-    async fn resume_from_client(&self) {
+    /// through, and then the waiting agent goes on. Nothing happens while nothing is paused. Reports whether an agent
+    /// was paused.
+    async fn resume_from_client(&self) -> bool {
         if !self.is_paused() {
-            return;
+            return false;
         }
         if let Err(error) = self.helper.resume().await {
             // The helper answers this at once, ahead of any request; one that cannot has stopped, and a new one starts
@@ -226,6 +227,7 @@ impl Computer {
         }
         tracing::info!("computer use resumed from a client");
         self.resume();
+        true
     }
 
     /// The chat the person paused, while the pause lasts.
@@ -765,9 +767,13 @@ impl Computer {
             // A client handing over the bar's words (on connecting, say): no status, so no helper starts. The answer says
             // which chat is paused, so a client that connects during a pause shows it from the start.
             "words" => return Ok(self.brief()),
+            // `resumed` says whether an agent was paused, so a client words its answer from it rather than from what
+            // it had heard.
             "resume" => {
-                self.resume_from_client().await;
-                return Ok(self.brief());
+                let resumed = self.resume_from_client().await;
+                let mut answer = self.brief();
+                answer["resumed"] = json!(resumed);
+                return Ok(answer);
             }
             "get" | "view" => {}
             "accept" => self.accept(input["version"].as_str().unwrap_or_default())?,
@@ -952,6 +958,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(calm["paused"], false);
+        assert_eq!(calm["resumed"], false);
         computer.pause();
         assert!(computer.widens(&json!({"action": "resume"})));
         let refused = computer
@@ -962,6 +969,7 @@ mod tests {
         assert!(computer.is_paused());
         let answer = computer.manage(&json!({"action": "resume"})).await.unwrap();
         assert_eq!(answer["paused"], false);
+        assert_eq!(answer["resumed"], true);
         assert!(!computer.is_paused());
     }
 

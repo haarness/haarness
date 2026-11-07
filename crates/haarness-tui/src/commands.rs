@@ -2498,8 +2498,9 @@ impl App {
             // What the strip's Resume does, for an agent paused there.
             "mac" if arguments.eq_ignore_ascii_case("resume") => {
                 let paused = self.computer_paused.is_some();
-                crate::management::resume_computer(self, client).await?;
-                if !paused {
+                // The server says whether an agent was paused; from an older one, what this client heard stands in.
+                let resumed = crate::management::resume_computer(self, client).await?;
+                if !resumed.unwrap_or(paused) {
                     self.notice = self.language.text("No agent is paused").into();
                 }
             }
