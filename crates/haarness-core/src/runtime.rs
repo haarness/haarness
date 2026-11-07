@@ -9998,8 +9998,11 @@ impl RunnerTask {
                         "The previous provider response ended before completion. Continue from the saved partial response without repeating it. Completed tool results are already in the conversation; do not repeat those actions.".into() });
                     recovering = false;
                 }
-                // Asked until the provider takes the request: a retry, an
-                // image retry or a compaction before then asks again.
+                // Asked in every request until a reply to it shows words, a
+                // tool call or structured output, or ends: a retry, an image
+                // retry, a compaction, or a recovery after a cut that brought
+                // only usage, reasoning or blank text asks again. Words the
+                // person sends meanwhile take its place.
                 if explain_failure {
                     messages.push(ProviderMessage::Text {
                         role: "user".into(),
@@ -10448,9 +10451,20 @@ impl RunnerTask {
                     compacted_for_size = false;
                     retries.accepted();
                     // The request to explain a failure is answered once the
-                    // reply holds anything or ends: one cut before that (after
-                    // only its usage, say) is sent again still asking.
-                    if content || matches!(event, ProviderEvent::Finished { .. }) {
+                    // reply shows something (words, a tool call or structured
+                    // output) or ends. One cut before that, after only usage,
+                    // reasoning or blank text, is sent again still asking.
+                    let answered = match &event {
+                        ProviderEvent::TextDelta(delta) => !delta.trim().is_empty(),
+                        ProviderEvent::ToolCall { .. }
+                        | ProviderEvent::StructuredOutput(_)
+                        | ProviderEvent::Finished { .. } => true,
+                        ProviderEvent::ReasoningDelta(_)
+                        | ProviderEvent::ContentStarted
+                        | ProviderEvent::Usage { .. }
+                        | ProviderEvent::Cost { .. } => false,
+                    };
+                    if answered {
                         explain_failure = false;
                     }
                     match event {

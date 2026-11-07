@@ -1323,6 +1323,72 @@ async fn reliability_a_cut_before_any_reply_still_asks_the_model_to_explain_the_
 }
 
 #[tokio::test]
+async fn reliability_a_cut_after_only_reasoning_or_blank_text_still_asks_the_model_to_explain() {
+    // The reply to the request to explain begins with reasoning, as a
+    // thinking model's does, or with a bare line break, and is cut off
+    // there: nothing the person can read arrived, so the recovery request
+    // still asks, and the model's answer ends the turn.
+    for first in [
+        ProviderEvent::ReasoningDelta("The read failed because".into()),
+        text("\n"),
+    ] {
+        let label = format!("{first:?}");
+        let (directory, runtime, provider, hooks) = setup_streams(
+            vec![
+                vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+                vec![Ok(usage()), Ok(finish("stop"))],
+                vec![Ok(usage()), Ok(first), cut(CUTS[0])],
+                vec![
+                    Ok(text("The file is not there.")),
+                    Ok(usage()),
+                    Ok(finish("stop")),
+                ],
+            ],
+            RuntimeConfig::default(),
+            true,
+        );
+        let thread = echo_thread(&runtime).await;
+        let turn = runtime
+            .start_turn(thread.id, turn_request("read the notes"))
+            .await
+            .unwrap();
+        let finished = settled(&runtime, &turn).await;
+        assert_eq!(
+            finished.status,
+            TurnStatus::Completed,
+            "{label}: {:?}",
+            finished.error
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 4, "{label}");
+        {
+            let requests = provider.requests.lock().unwrap();
+            let notes = requests.iter().map(explain_note).collect::<Vec<_>>();
+            assert_eq!(notes, [false, false, true, true], "{label}");
+            // The partial reply is continued from, and the request to
+            // explain still comes last.
+            assert!(recovery_note(&requests[3]), "{label}");
+            assert!(
+                matches!(requests[3].messages.last(),
+                Some(ProviderMessage::Text {role,content}) if role == "user"
+                    && content.starts_with("Your last reply was empty")),
+                "{label}"
+            );
+        }
+        let items = runtime.items(thread.id, None).await.unwrap();
+        let said = items
+            .iter()
+            .filter_map(|item| match &item.data {
+                ItemData::AssistantMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(said.last(), Some(&"The file is not there."), "{label}");
+        assert!(hooks.failures.lock().unwrap().is_empty(), "{label}");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn reliability_words_sent_during_a_retry_wait_go_without_the_request_to_explain() {
     // The request to explain meets an overloaded provider, and the person
     // writes while the turn waits to try again: the request sent next ends
