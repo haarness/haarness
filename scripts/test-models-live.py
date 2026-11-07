@@ -12,6 +12,15 @@ into evidence; a supplied store may refresh OAuth credentials normally.
   schema     return a file's marker as workflow structured output (ctx.agent schema)
   cost       report usage and a price for every turn
   fallback   also run the tool turns with a level the model lacks (none/minimal); the server must pick a valid one
+  coding     fix a failing unit test (bash, read or grep, edit or apply_patch, bash again), then add a
+             function and its test in a follow-up turn; the harness runs the tests itself after each turn
+  long       find a marker near the end of a message of about 30,000 tokens
+
+A model written as `provider/model>provider2/model2` switches the chat to the second model between the
+coding scenario's two turns, as the model picker does. --config appends a file's TOML to the private
+workspace configuration, and --global-config writes the private profile's global one (where a provider's
+base_url may point at a recording proxy).
+The image scenario is skipped for a model whose catalog entry takes no images.
 """
 import argparse
 import base64
@@ -21,6 +30,7 @@ import os
 import pathlib
 import queue
 import re
+import shutil
 import secrets
 import subprocess
 import tempfile
@@ -48,14 +58,22 @@ def main():
     parser.add_argument('--models', help='Comma-separated provider/model pairs; absent models fail')
     parser.add_argument('--workers', type=int, default=2)
     parser.add_argument('--timeout', type=int, default=180)
-    parser.add_argument('--scenarios', default='tools', help='Comma-separated: tools,reasoning,image,schema,cost,fallback')
+    parser.add_argument('--scenarios', default='tools', help='Comma-separated: tools,reasoning,image,schema,cost,fallback,coding,long')
+    parser.add_argument('--config', type=pathlib.Path, help='TOML appended to the workspace configuration')
+    parser.add_argument('--global-config', type=pathlib.Path, help='TOML for the private profile\'s global configuration (a project cannot move a provider\'s base_url)')
     args = parser.parse_args()
     scenarios = set(args.scenarios.split(','))
     binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
     root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-models-live-')).resolve()
     workspace = root/'workspace'
     (workspace/'.haarness').mkdir(parents=True)
-    (workspace/'.haarness/config.toml').write_text('[permissions]\nread="allow"\nexternal_directory="deny"\n[providers.ollama]\nenabled=false\n[providers.lmstudio]\nenabled=false\n')
+    config = '[permissions]\nread="allow"\nexternal_directory="deny"\n[providers.ollama]\nenabled=false\n[providers.lmstudio]\nenabled=false\n'
+    if args.config:
+        config += '\n'+args.config.read_text()
+    (workspace/'.haarness/config.toml').write_text(config)
+    if args.global_config:
+        (root/'profile/config').mkdir(parents=True)
+        (root/'profile/config/config.toml').write_text(args.global_config.read_text())
     token = secrets.token_hex(24)
     env = {**os.environ, 'HAARNESS_DATA_DIR': str(root/'profile'), 'HAARNESS_SERVER_TOKEN': token}
     env.pop('HAARNESS_TEST_PROVIDER', None)
@@ -95,14 +113,30 @@ def main():
             assert len({m['id'] for m in provider['models']}) == len(provider['models'])
             print('CATALOG '+provider['id']+': '+str(len(provider['models']))+' unique models', flush=True)
         cases = []
-        explicit = [value.split('/', 1) for value in args.models.split(',')] if args.models else None
+        switches = {}
+        explicit = None
+        if args.models:
+            explicit = []
+            for value in args.models.split(','):
+                value, _, target = value.partition('>')
+                explicit.append(value.split('/', 1))
+                if target:
+                    switches[tuple(explicit[-1])] = target.split('/', 1)
         requested = explicit or [(provider, model) for provider in args.providers.split(',') for model in CANDIDATES.get(provider, [])]
+        listed = {}
+
+        def model_info(provider, model):
+            return next((m for m in selected.get(provider, {}).get('models', []) if m['id'] == model), None)
+
         for provider, model in requested:
-            info = next((m for m in selected.get(provider, {}).get('models', []) if m['id'] == model), None)
-            if info is None:
-                item = {'provider': provider, 'model': model, 'status': 'unavailable', 'reason': 'Not in authenticated live catalog'}
+            info = model_info(provider, model)
+            target = switches.get((provider, model))
+            if info is None or (target and model_info(*target) is None):
+                missing = provider+'/'+model if info is None else '/'.join(target)
+                item = {'provider': provider, 'model': model, 'status': 'unavailable', 'reason': missing+' is not in the authenticated live catalog'}
                 (results if explicit else skipped).append(item)
                 continue
+            listed[(provider, model)] = info
             efforts = info['reasoningEfforts']
             effort = 'low' if 'low' in efforts else ('high' if 'high' in efforts else None)
             cases.append((provider, model, effort))
@@ -145,6 +179,9 @@ def main():
             report.update(reasoning_chars=len(reasoning))
 
         def run_image(thread, effort, report):
+            if not listed[(thread['provider'], thread['model'])]['images']:
+                report['image'] = 'skipped: the catalog entry takes no images'
+                return
             data = 'data:image/png;base64,'+base64.b64encode(png(64, 64, (220, 30, 30))).decode()
             value = {'requestId': str(uuid.uuid4()), 'text': 'What single colour fills the attached image? Reply with one lowercase word.', 'attachments': [data]}
             if effort:
@@ -177,6 +214,80 @@ def main():
             report['workflow'] = run['id']
             assert run['status'] == 'completed', 'Workflow '+run['status']+': '+json.dumps(run.get('error') or run.get('logs', [])[-3:])[:400]
             assert run.get('result') == {'marker': marker}, 'Structured result: '+json.dumps(run.get('result'))[:200]
+
+        def run_coding(thread, directory, turn, report, target):
+            project = directory/'shop'
+            (project/'shop').mkdir(parents=True)
+            (project/'tests').mkdir()
+            (project/'shop/__init__.py').write_text('')
+            (project/'tests/__init__.py').write_text('')
+            (project/'shop/pricing.py').write_text(
+                '"""Prices for a small shop."""\n\n\n'
+                'def subtotal(items):\n    """Sum of price times quantity."""\n    return sum(item["price"] * item["qty"] for item in items)\n\n\n'
+                'def apply_discount(total, percent):\n    """Take `percent` percent off `total`."""\n    return total - total * percent\n\n\n'
+                'def format_price(value):\n    return f"${value:,.2f}"\n')
+            (project/'shop/catalog.py').write_text(
+                'from shop.pricing import apply_discount, format_price\n\n\n'
+                'def sale_label(price, percent):\n    return format_price(apply_discount(price, percent))\n')
+            tests = (
+                'import unittest\n\nfrom shop.pricing import apply_discount, format_price, subtotal\n\n\n'
+                'class PricingTest(unittest.TestCase):\n'
+                '    def test_subtotal(self):\n        self.assertEqual(subtotal([{"price": 2.5, "qty": 4}, {"price": 1.0, "qty": 1}]), 11.0)\n\n'
+                '    def test_discount(self):\n        self.assertAlmostEqual(apply_discount(200.0, 10), 180.0)\n\n'
+                '    def test_format(self):\n        self.assertEqual(format_price(1234.5), "$1,234.50")\n\n\n'
+                'if __name__ == "__main__":\n    unittest.main()\n')
+            (project/'tests/test_pricing.py').write_text(tests)
+            folder = str(project.relative_to(workspace))
+
+            def unit_tests(extra=''):
+                if extra:
+                    (project/'tests/test_hidden.py').write_text(extra)
+                try:
+                    done = subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', 'tests', '-t', '.'], cwd=project, capture_output=True, text=True, timeout=60)
+                finally:
+                    (project/'tests/test_hidden.py').unlink(missing_ok=True)
+                    shutil.rmtree(project/'tests/__pycache__', ignore_errors=True)
+                return done.returncode == 0, done.stderr[-400:]
+
+            def kinds(items, since):
+                return {item['data'].get('name') for item in items[since:] if item['data']['type'] == 'tool_call'}
+
+            items = turn('The unit tests in the folder '+folder+' fail. From that folder run `python3 -m unittest discover -s tests -t .` with the bash tool, '
+                         'find the bug in the shop package (grep or read the code), and fix the code, not the tests. Run the tests again; when they pass, reply with the word FIXED.', 'FIXED')
+            first = kinds(items, 0)
+            passed, output = unit_tests()
+            assert passed, 'Tests still fail after the fix: '+output
+            assert (project/'tests/test_pricing.py').read_text() == tests, 'The model changed the tests instead of the code'
+            assert 'bash' in first and first & {'edit', 'apply_patch', 'write'}, 'Expected bash and an edit in the first coding turn, saw '+str(sorted(first))
+            report['coding_turn1_tools'] = sorted(first)
+            since = len(items)
+            if target:
+                saved = api('/v1/threads/'+thread['id'], {'provider': target[0], 'model': target[1]}, 'PATCH')
+                assert (saved['provider'], saved['model']) == tuple(target), 'Model switch was not saved'
+                report['switched_to'] = '/'.join(target)
+            items = turn('In the same folder add a function `total_with_tax(items, rate_percent)` to shop/pricing.py that returns the subtotal of the items '
+                         'plus that percentage of tax, rounded to 2 decimals. Add a test for it to tests/test_pricing.py, run the tests, and reply with ADDED when they pass.', 'ADDED')
+            second = kinds(items, since)
+            passed, output = unit_tests(
+                'import unittest\n\nfrom shop.pricing import total_with_tax\n\n\n'
+                'class HiddenTest(unittest.TestCase):\n    def test_tax(self):\n'
+                '        self.assertAlmostEqual(total_with_tax([{"price": 10.0, "qty": 2}], 8), 21.6)\n')
+            assert passed, 'The follow-up function is wrong or the tests fail: '+output
+            assert 'total_with_tax' in (project/'tests/test_pricing.py').read_text(), 'No test was added for total_with_tax'
+            report['coding_turn2_tools'] = sorted(second)
+            report['coding_tool_calls'] = sum(item['data']['type'] == 'tool_call' for item in items)
+
+        def run_long(turn, report):
+            marker = 'release-'+secrets.token_hex(6)
+            words = ['alpha', 'build', 'cache', 'delta', 'error', 'fetch', 'graph', 'hello', 'index', 'json', 'kernel', 'lint']
+            lines = []
+            for number in range(1, 1601):
+                lines.append('%04d %s step %s finished in %d ms with status ok' % (number, words[number % 12], words[(number * 7) % 12], (number * 37) % 997))
+                if number == 1500:
+                    lines.append('NOTE the release code for this build is '+marker)
+            text = 'Below is a build log. Without tools, reply with only the release code it mentions.\n\n'+'\n'.join(lines)
+            turn(text, marker)
+            report['long_chars'] = len(text)
 
         def check_cost(thread, report):
             usage = api('/v1/threads/'+thread['id']+'/usage')
@@ -243,6 +354,12 @@ def main():
                 if 'tools' in scenarios:
                     run_tools(thread, directory, turn, marker, first, report)
                     done.append('tools')
+                if 'coding' in scenarios:
+                    run_coding(thread, directory, turn, report, switches.get((provider, model)))
+                    done.append('coding')
+                if 'long' in scenarios:
+                    run_long(turn, report)
+                    done.append('long')
                 if 'image' in scenarios:
                     run_image(thread, effort, report)
                     done.append('image')
@@ -253,7 +370,8 @@ def main():
                     check_cost(thread, report)
                     done.append('cost')
                 saved = api('/v1/threads/'+thread['id'])
-                assert (saved['provider'], saved['model']) == (provider, model), 'Model selection changed'
+                expected = tuple(switches.get((provider, model)) or (provider, model)) if 'coding' in scenarios else (provider, model)
+                assert (saved['provider'], saved['model']) == expected, 'Model selection changed'
                 report.update(status='passed', scenarios=done)
             except Exception as error:
                 report.update(status='failed', error=str(error)[:500])
