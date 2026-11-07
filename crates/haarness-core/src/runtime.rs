@@ -5522,6 +5522,8 @@ impl AgentRuntime {
             folder: (workspace != self.workspace).then(|| workspace.clone()),
             folder_is_project: self.chat_home,
         };
+        // Hooks, like everything after them, are shown the file a read opens.
+        recover_read_path(name, &mut arguments, &workspace, &cancel).await?;
         if let Some(hooks) = &components.hooks {
             let decision = tokio::select! {
                 biased;
@@ -5538,6 +5540,7 @@ impl AgentRuntime {
             if let Some(updated) = decision.updated_input {
                 arguments = updated;
                 tool.validate_arguments(&arguments)?;
+                recover_read_path(name, &mut arguments, &workspace, &cancel).await?;
             }
         }
         if hook_permission == Some(PermissionDecision::Deny) {
@@ -5548,7 +5551,6 @@ impl AgentRuntime {
         arguments = tool
             .prepare_arguments(arguments, thread_id, cancel.clone())
             .await?;
-        recover_read_path(name, &mut arguments, &workspace);
         if is_resource_tool(name) {
             let custom = self.custom_agent(&thread.agent);
             arguments = scope_resource_arguments(
@@ -11672,6 +11674,8 @@ impl RunnerTask {
         let mut hook_permission = None;
         let mut hook_context = None;
         let hook_call = self.hook_call(Some(agent));
+        // Hooks, like everything after them, are shown the file a read opens.
+        recover_read_path(name, &mut arguments, &self.workspace, &self.cancel).await?;
         if let Some(hooks) = &self.hooks {
             let decision = tokio::select! {
                 biased;
@@ -11688,6 +11692,7 @@ impl RunnerTask {
             if let Some(updated) = decision.updated_input {
                 arguments = updated;
                 self.validate_tool_arguments(name, &arguments)?;
+                recover_read_path(name, &mut arguments, &self.workspace, &self.cancel).await?;
             }
         }
         // A hook may rewrite a read-only shell command or tool payload into a
@@ -11720,7 +11725,6 @@ impl RunnerTask {
                 .prepare_arguments(arguments, self.thread.id, self.cancel.clone())
                 .await?;
         }
-        recover_read_path(name, &mut arguments, &self.workspace);
         if is_resource_tool(name) {
             let engine = self.permission_engine(agent);
             arguments =
@@ -15554,28 +15558,45 @@ fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
     vec![combined]
 }
 
+/// A read of a file that is not there whose name differs from one file in
+/// its folder only by no-break spaces (a typed macOS screenshot name) reads
+/// that file instead: its path replaces the one written before anything
+/// judges the call, hooks included, so the rules, the secret-file asks and
+/// the outside-folder ask are about the file the tool opens. The folder is
+/// listed off the async workers, and Stop ends a listing that hangs (an
+/// unreachable network share).
+async fn recover_read_path(
+    name: &str,
+    arguments: &mut serde_json::Value,
+    workspace: &Path,
+    cancel: &CancellationToken,
+) -> CoreResult<()> {
+    let Some(path) = arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| name == "read" && path.contains([' ', '\u{a0}', '\u{202f}']))
+        .map(str::to_owned)
+    else {
+        return Ok(());
+    };
+    let workspace = workspace.to_path_buf();
+    let lookup = tokio::task::spawn_blocking(move || {
+        crate::permissions::no_break_space_twin(&workspace, &path)
+    });
+    let twin = tokio::select! {
+        () = cancel.cancelled() => return Err(CoreError::Cancelled),
+        found = lookup => found.ok().flatten(),
+    };
+    if let Some(twin) = twin {
+        arguments["path"] = serde_json::Value::String(twin);
+    }
+    Ok(())
+}
+
 /// The permission groups for one tool call. Bash commands are shell-parsed:
 /// each command in a chain becomes its own pattern with an arity-generalized
 /// "always" rule, and touching paths outside the workspace raises a separate
 /// `external_directory` group.
-/// A read of a file that is not there whose name differs from one file in
-/// its folder only by no-break spaces (a typed macOS screenshot name) reads
-/// that file instead: its path replaces the one written before anything
-/// judges the call, so the rules, the secret-file asks and the outside
-/// folder ask are about the file the tool opens.
-fn recover_read_path(name: &str, arguments: &mut serde_json::Value, workspace: &Path) {
-    if name != "read" {
-        return;
-    }
-    if let Some(twin) = arguments
-        .get("path")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|path| crate::permissions::no_break_space_twin(workspace, path))
-    {
-        arguments["path"] = serde_json::Value::String(twin);
-    }
-}
-
 fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec<AskPlan> {
     if name == "agent_switch" {
         // Hex keeps glob syntax in custom agent names literal. Session identity also
@@ -21667,8 +21688,8 @@ mod read_recovery_tests {
     /// file has U+202F) reads the file, and everything that judges the call
     /// judges that file: the outside folder ask names it, and a rule written
     /// for its real name applies. A write keeps the name it was given.
-    #[test]
-    fn a_typed_screenshot_name_is_read_and_judged_as_the_file_it_opens() {
+    #[tokio::test]
+    async fn a_typed_screenshot_name_is_read_and_judged_as_the_file_it_opens() {
         let root =
             std::env::temp_dir().join(format!("haarness-read-twin-{}", uuid::Uuid::now_v7()));
         let project = root.join("project");
@@ -21682,7 +21703,10 @@ mod read_recovery_tests {
             .display()
             .to_string();
         let mut arguments = json!({ "path": typed });
-        recover_read_path("read", &mut arguments, &project);
+        let cancel = CancellationToken::new();
+        recover_read_path("read", &mut arguments, &project, &cancel)
+            .await
+            .unwrap();
         assert_eq!(arguments["path"], real.display().to_string());
         let plans = ask_plans("read", &arguments, &project);
         let outside = plans
@@ -21715,7 +21739,9 @@ mod read_recovery_tests {
         // Writes and other tools keep the path they were given.
         for tool in ["write", "edit", "list"] {
             let mut arguments = json!({ "path": typed });
-            recover_read_path(tool, &mut arguments, &project);
+            recover_read_path(tool, &mut arguments, &project, &cancel)
+                .await
+                .unwrap();
             assert_eq!(arguments["path"], typed, "{tool}");
         }
         std::fs::remove_dir_all(root).unwrap();

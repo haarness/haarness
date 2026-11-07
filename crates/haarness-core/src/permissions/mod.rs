@@ -1380,8 +1380,12 @@ pub fn resolve_permission_path(workspace: &Path, value: &str) -> PathBuf {
 /// file it makes.
 #[must_use]
 pub fn no_break_space_twin(workspace: &Path, value: &str) -> Option<String> {
-    // A folder this big is not listed; the read fails as it would have.
-    const MAX_ENTRIES: usize = 50_000;
+    // Past this many entries a folder is not looked through, and the read
+    // fails as it would have.
+    twin_among(workspace, value, 50_000)
+}
+
+fn twin_among(workspace: &Path, value: &str, max_entries: usize) -> Option<String> {
     let plain = |name: &str| name.replace(['\u{a0}', '\u{202f}'], " ");
     let name = value.rsplit(['/', std::path::MAIN_SEPARATOR]).next()?;
     if name.is_empty() || !name.contains([' ', '\u{a0}', '\u{202f}']) {
@@ -1393,14 +1397,27 @@ pub fn no_break_space_twin(workspace: &Path, value: &str) -> Option<String> {
     }
     let folder = joined.parent()?;
     let wanted = plain(name);
-    let mut twins = std::fs::read_dir(folder)
-        .ok()?
-        .take(MAX_ENTRIES)
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|entry| entry != name && plain(entry) == wanted);
-    let twin = twins.next()?;
-    if twins.next().is_some() || !folder.join(&twin).is_file() {
+    let mut entries = 0;
+    let mut twins = Vec::new();
+    for entry in std::fs::read_dir(folder).ok()? {
+        entries += 1;
+        if entries > max_entries {
+            return None;
+        }
+        let Some(entry) = entry
+            .ok()
+            .and_then(|entry| entry.file_name().into_string().ok())
+        else {
+            continue;
+        };
+        if entry != name && plain(&entry) == wanted {
+            twins.push(entry);
+        }
+    }
+    let [twin] = twins.as_slice() else {
+        return None;
+    };
+    if !folder.join(twin).is_file() {
         return None;
     }
     Some(format!("{}{twin}", &value[..value.len() - name.len()]))
@@ -2915,6 +2932,18 @@ mod tests {
         );
         std::fs::create_dir(shots.join("Album\u{202f}A")).unwrap();
         assert_eq!(no_break_space_twin(&root, "shots/Album A"), None);
+        // A folder past the limit is not looked through at all.
+        let many = root.join("many");
+        std::fs::create_dir(&many).unwrap();
+        std::fs::write(many.join("Shot 1.00\u{202f}PM.png"), "e").unwrap();
+        for index in 0..3 {
+            std::fs::write(many.join(format!("other {index}")), "f").unwrap();
+        }
+        assert_eq!(
+            twin_among(&root, "many/Shot 1.00 PM.png", 4).as_deref(),
+            Some("many/Shot 1.00\u{202f}PM.png")
+        );
+        assert_eq!(twin_among(&root, "many/Shot 1.00 PM.png", 3), None);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
