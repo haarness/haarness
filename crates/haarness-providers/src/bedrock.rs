@@ -979,7 +979,7 @@ fn bedrock_request(
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                blocks.push(json!({"toolUse":{"toolUseId":call_id,"name":name,"input":arguments}}));
+                blocks.push(json!({"toolUse":{"toolUseId":crate::tool_ids::portable(&call_id),"name":name,"input":arguments}}));
                 messages.push(json!({"role":"assistant","content":blocks}));
             }
             ProviderMessage::ToolResult {
@@ -1003,7 +1003,7 @@ fn bedrock_request(
                 for item in media {
                     content.push(block(item, Unreadable::FromTool)?);
                 }
-                messages.push(json!({"role":"user","content":[{"toolResult":{"toolUseId":call_id,"content":content,"status":if is_error {"error"} else {"success"}}}]}));
+                messages.push(json!({"role":"user","content":[{"toolResult":{"toolUseId":crate::tool_ids::portable(&call_id),"content":content,"status":if is_error {"error"} else {"success"}}}]}));
             }
         }
     }
@@ -1975,9 +1975,9 @@ mod tests {
                     "<system-reminder>\nToday's date is now 2026-10-14.\n</system-reminder>",
                 ),
                 call("a"),
-                call("b"),
+                call("functions.b:1"),
                 result("a"),
-                result("b"),
+                result("functions.b:1"),
                 text("assistant", "Done"),
             ],
             tools: Vec::new(),
@@ -1993,8 +1993,15 @@ mod tests {
             .collect();
         assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
         assert_eq!(messages[0]["content"].as_array().unwrap().len(), 2);
-        assert_eq!(messages[1]["content"][1]["toolUse"]["toolUseId"], "b");
-        assert_eq!(messages[2]["content"][1]["toolResult"]["toolUseId"], "b");
+        // Another model's id, in the characters Converse takes.
+        assert_eq!(
+            messages[1]["content"][1]["toolUse"]["toolUseId"],
+            "functions_b_1"
+        );
+        assert_eq!(
+            messages[2]["content"][1]["toolResult"]["toolUseId"],
+            "functions_b_1"
+        );
     }
 
     #[test]
