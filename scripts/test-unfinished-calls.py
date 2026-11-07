@@ -303,7 +303,8 @@ try:
         before = len(REQUESTS)
         assert finished(start(thread, "and now?"))["status"] == "completed", REFUSED
         assert replies(thread)[-1] == "REPLY_OK", replies(thread)
-        sent = json.dumps(REQUESTS[before]["messages"])
+        # The chat's own request: a title request, which may come first, has no tools.
+        sent = json.dumps(next(body for body in REQUESTS[before:] if body.get("tools"))["messages"])
         assert "did not finish" in sent, sent
     print("PASS chats stored with a call and no result are answered again", flush=True)
 
