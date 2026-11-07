@@ -45,6 +45,52 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// The fields of a listed tool MCP leaves optional, in the order a tool
+/// that fails to read is tried again without them.
+const OPTIONAL_TOOL_FIELDS: [&str; 6] = [
+    "outputSchema",
+    "annotations",
+    "icons",
+    "title",
+    "description",
+    "_meta",
+];
+
+/// A listed tool, read on its own: as it is, or else without the optional
+/// field (and failing that, all of them) that keeps it from being read, so
+/// a tool whose only fault is, say, an `outputSchema` that is not an object
+/// is offered without it. Gives the fields left out, or why the tool cannot
+/// be read at all (no name, no `inputSchema`).
+fn lenient_tool(item: &Value) -> Result<(rmcp::model::Tool, Vec<&'static str>), serde_json::Error> {
+    let error = match serde_json::from_value(item.clone()) {
+        Ok(tool) => return Ok((tool, Vec::new())),
+        Err(error) => error,
+    };
+    let Some(object) = item.as_object() else {
+        return Err(error);
+    };
+    let present: Vec<&'static str> = OPTIONAL_TOOL_FIELDS
+        .into_iter()
+        .filter(|field| object.contains_key(*field))
+        .collect();
+    let without = |fields: &[&str]| {
+        let mut trimmed = object.clone();
+        for field in fields {
+            trimmed.remove(*field);
+        }
+        serde_json::from_value::<rmcp::model::Tool>(Value::Object(trimmed)).ok()
+    };
+    for field in &present {
+        if let Some(tool) = without(&[*field]) {
+            return Ok((tool, vec![*field]));
+        }
+    }
+    match without(&present) {
+        Some(tool) if !present.is_empty() => Ok((tool, present)),
+        _ => Err(error),
+    }
+}
+
 /// Connection, discovery and header-helper deadline for a server that sets
 /// no `timeout_ms`.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -238,8 +284,9 @@ struct CatalogClient {
     /// Off, it is a plain MCP server to Haarness.
     apps_on: bool,
     /// The tools the last listing left out because they are not valid MCP
-    /// tools, by the names they gave (see [`Self::list_tools`]).
-    skipped: Arc<RwLock<Vec<String>>>,
+    /// tools, by the names they gave, quoted (`None` for one with no name;
+    /// see [`Self::list_tools`]).
+    skipped: Arc<RwLock<Vec<Option<String>>>>,
 }
 impl CatalogClient {
     fn new(
@@ -306,20 +353,29 @@ impl CatalogClient {
                 .and_then(Value::as_array)
                 .ok_or(rmcp::ServiceError::UnexpectedResponse)?;
             for item in listed {
-                match serde_json::from_value::<rmcp::model::Tool>(item.clone()) {
-                    Ok(tool) => tools.push(tool),
+                let tool = item.get("name").and_then(Value::as_str);
+                match lenient_tool(item) {
+                    Ok((parsed, dropped)) => {
+                        if !dropped.is_empty() {
+                            tracing::warn!(
+                                server = %self.name,
+                                tool = tool.unwrap_or_default(),
+                                fields = ?dropped,
+                                "an MCP server listed a tool with fields that are not valid MCP; it is offered without them"
+                            );
+                        }
+                        tools.push(parsed);
+                    }
                     Err(error) => {
-                        let tool = item.get("name").and_then(Value::as_str);
                         tracing::warn!(
                             server = %self.name,
                             tool = tool.unwrap_or("<unnamed>"),
                             %error,
                             "an MCP server listed a tool that is not a valid MCP tool; it is left out"
                         );
-                        skipped.push(tool.map_or_else(
-                            || "a tool without a name".to_owned(),
-                            |tool| format!("{:?}", tool.chars().take(64).collect::<String>()),
-                        ));
+                        skipped.push(tool.map(|tool| {
+                            format!("{:?}", tool.chars().take(64).collect::<String>())
+                        }));
                     }
                 }
             }
@@ -335,22 +391,31 @@ impl CatalogClient {
         Ok(tools)
     }
     /// The status of a server whose listing just came to `count` tools,
-    /// naming the tools it left out (see [`Self::list_tools`]).
+    /// naming the tools it left out (see [`Self::list_tools`]): at most
+    /// three by name, the rest (and those without one) counted, as in
+    /// `3 tools discovered; left out as not valid MCP tools: "broken" +1`.
+    /// Desktop reads the part after `; ` to say it in the person's language.
     fn discovered(&self, count: usize) -> String {
         let skipped = self.skipped.read();
-        let names = match skipped.as_slice() {
-            [] => return format!("{count} tools discovered"),
-            [one] => format!("{one}, which is not a valid MCP tool"),
-            [first, second] => format!("{first} and {second}, which are not valid MCP tools"),
-            [first, second, third] => {
-                format!("{first}, {second} and {third}, which are not valid MCP tools")
+        if skipped.is_empty() {
+            return format!("{count} tools discovered");
+        }
+        let named: Vec<&str> = skipped
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .take(3)
+            .collect();
+        let mut listed = named.join(", ");
+        let rest = skipped.len() - named.len();
+        if rest > 0 {
+            if !listed.is_empty() {
+                listed.push(' ');
             }
-            [first, second, rest @ ..] => format!(
-                "{first}, {second} and {} more that are not valid MCP tools",
-                rest.len()
-            ),
-        };
-        format!("{count} tools discovered; left out {names}")
+            listed.push('+');
+            listed.push_str(&rest.to_string());
+        }
+        format!("{count} tools discovered; left out as not valid MCP tools: {listed}")
     }
     /// [`Self::catalog`] for a connection that just started, which also
     /// records what the server declared it offers.
@@ -5268,7 +5333,11 @@ mod recovery_tests {
             json!([
                 {"name": "broken", "description": "no input schema"},
                 {"name": "odd", "inputSchema": "not an object"},
-                {"description": "no name"}
+                {"description": "no name"},
+                // Only optional fields are wrong: offered without them.
+                {"name": "lenient", "inputSchema": {"type": "object"}, "outputSchema": "not an object"},
+                {"name": "loose", "inputSchema": {"type": "object"}, "outputSchema": [],
+                 "annotations": {"readOnlyHint": "yes"}}
             ])
             .to_string(),
         );
@@ -5277,9 +5346,7 @@ mod recovery_tests {
         assert_eq!(info.status, "connected");
         assert_eq!(
             info.detail.as_deref(),
-            Some(
-                "3 tools discovered; left out \"broken\", \"odd\" and a tool without a name, which are not valid MCP tools"
-            )
+            Some("5 tools discovered; left out as not valid MCP tools: \"broken\", \"odd\" +1")
         );
         let mut offered: Vec<_> = registry
             .tool_snapshot()
@@ -5291,9 +5358,15 @@ mod recovery_tests {
             offered,
             [
                 "mcp__shelf__first",
+                "mcp__shelf__lenient",
+                "mcp__shelf__loose",
                 "mcp__shelf__second",
                 "mcp__shelf__third"
             ]
+        );
+        assert_eq!(
+            reached(&registry, "mcp__shelf__loose").await["tool"],
+            "loose"
         );
         assert_eq!(
             reached(&registry, "mcp__shelf__third").await["tool"],
@@ -5338,7 +5411,7 @@ mod recovery_tests {
         let info = registry.list().await.unwrap();
         assert_eq!(
             info[0].detail.as_deref(),
-            Some("2 tools discovered; left out \"broken_tool\", which is not a valid MCP tool")
+            Some("2 tools discovered; left out as not valid MCP tools: \"broken_tool\"")
         );
         registry.disconnect("catalog").await.unwrap();
     }
