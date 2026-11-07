@@ -42,8 +42,10 @@ pub struct BashAnalysis {
     /// The line cannot be read as the shell would: its patterns passed
     /// [`MAX_PATTERN_BYTES`], it is longer than [`MAX_COMMAND_BYTES`], or a
     /// here-document delimiter in it could not be set apart from the operator
-    /// written against it (see [`separated_delimiters`]). Its written
-    /// patterns may be clipped, and no rule allows it.
+    /// written against it (see [`separated_delimiters`]), or what follows a
+    /// here-document's operator on its line comes after no command
+    /// (`X=1 <<EOF ; make`). Its written patterns may be clipped, and no rule
+    /// allows it.
     pub unreadable: bool,
     /// What the line deletes or overwrites, wherever it runs the program
     /// (behind a wrapper, in text run again): `rm`, `rmdir`, `unlink`,
@@ -154,6 +156,11 @@ pub struct Derived {
     pub written: usize,
     /// Its generalized "don't ask again" pattern.
     pub always: String,
+    /// It is a command of the line itself that the parser put inside the
+    /// written command: one after a here-document's operator on its line
+    /// (`cat <<EOF ; make`). It is judged as a written command is, and its
+    /// "always" pattern is in [`BashAnalysis::always`].
+    pub own: bool,
 }
 
 /// Commands whose non-flag arguments are filesystem paths worth resolving.
@@ -972,7 +979,9 @@ struct Reader<'w> {
     /// see [`Self::repeats`].
     loops: Vec<std::ops::Range<usize>>,
     /// A here-document delimiter in the text read could not be set apart
-    /// from the operator written against it (see [`separated_delimiters`]).
+    /// from the operator written against it (see [`separated_delimiters`]),
+    /// or what follows such an operator in the line as written has no
+    /// command of the line to be read for.
     unseparated: bool,
 }
 
@@ -1011,6 +1020,11 @@ struct Depth {
     text: u8,
     /// Wrappers and strings around it, together.
     hops: u8,
+    /// The text is the line's own: what follows a here-document's operator
+    /// on a line of the command as written, which the shell runs as more
+    /// commands of that line. Its commands are the line's (see
+    /// [`Derived::own`]); what they run again is not.
+    own: bool,
 }
 
 /// Where a wrapper runs the command it is given: see
@@ -1313,7 +1327,7 @@ impl Reader<'_> {
                     if depth.text == 0 {
                         self.write(command_text, always);
                     } else {
-                        self.derive(command_text, always);
+                        self.derive_as(command_text, always, depth.own);
                     }
                 }
             }
@@ -1361,7 +1375,7 @@ impl Reader<'_> {
             }) {
                 consumed.insert(statement);
                 for line in lines {
-                    self.nested(line, depth);
+                    self.nested_as(line, depth, depth.text == 0 || depth.own);
                 }
             }
             // `r\<newline>m -rf x`: the shell drops a line continuation
@@ -1405,11 +1419,15 @@ impl Reader<'_> {
                 if let Some(source) = last[before].or(first[before]) {
                     self.source = Some(source);
                 } else if depth.text == 0 || self.source.is_none() {
+                    // `X=1 <<EOF ; make`: no command of the line is there
+                    // to read the line's own commands for, so the line is
+                    // not read whole.
+                    self.unseparated |= depth.text == 0;
                     self.unplaced = true;
                     continue;
                 }
                 for line in &hidden[&statement] {
-                    self.nested(line, depth);
+                    self.nested_as(line, depth, depth.text == 0 || depth.own);
                 }
             }
             for heredoc in heredocs {
@@ -1567,6 +1585,12 @@ impl Reader<'_> {
 
     /// A pattern read from inside the written command being read.
     fn derive(&mut self, pattern: String, always: String) {
+        self.derive_as(pattern, always, false);
+    }
+
+    /// [`Self::derive`], `own` when it is a command of the line itself (see
+    /// [`Derived::own`]).
+    fn derive_as(&mut self, pattern: String, always: String, own: bool) {
         if self.overflow {
             return;
         }
@@ -1577,6 +1601,19 @@ impl Reader<'_> {
             return;
         }
         if self.readings.contains(&(pattern.clone(), source)) {
+            // Read before as something the command runs, and written in the
+            // line too.
+            if own
+                && let Some(derived) = self
+                    .analysis
+                    .derived
+                    .iter_mut()
+                    .find(|derived| derived.pattern == pattern && derived.written == source)
+                && !derived.own
+            {
+                derived.own = true;
+                push_unique(&mut self.analysis.always, derived.always.clone());
+            }
             return;
         }
         let count = self.counts.entry(source).or_default();
@@ -1595,10 +1632,14 @@ impl Reader<'_> {
         if self.patterns.insert(pattern.clone()) {
             self.analysis.patterns.push(pattern.clone());
         }
+        if own {
+            push_unique(&mut self.analysis.always, always.clone());
+        }
         self.analysis.derived.push(Derived {
             pattern,
             written: source,
             always,
+            own,
         });
     }
 
@@ -1756,6 +1797,12 @@ impl Reader<'_> {
     /// Text a shell runs again, read as a command of its own: once for
     /// each written command, within the limits on nesting and size.
     fn nested(&mut self, text: &str, depth: Depth) {
+        self.nested_as(text, depth, false);
+    }
+
+    /// [`Self::nested`] for text that is the line's own when `own` (see
+    /// [`Depth::own`]).
+    fn nested_as(&mut self, text: &str, depth: Depth, own: bool) {
         if text.trim().is_empty() {
             return;
         }
@@ -1770,6 +1817,7 @@ impl Reader<'_> {
             return;
         };
         depth.text += 1;
+        depth.own = own;
         if depth.text > MAX_NESTING
             || text.len() > MAX_NESTED_BYTES
             || self.read_bytes + text.len() > MAX_READ_BYTES
@@ -6469,6 +6517,7 @@ mod tests {
                 pattern: "git commit -m x".into(),
                 written: 1,
                 always: "git commit *".into(),
+                own: false,
             }]
         );
     }
@@ -7655,7 +7704,8 @@ mod readings {
         let written = analyze("cat <<EOF>../outside/f\nbody\nEOF", &workspace);
         assert!(!written.external_dirs.is_empty(), "{written:?}");
         // A delimiter with no blank to take, or whose `<<` would join the
-        // word before it or take it in, is not read whole.
+        // word before it or take it in, and what follows an operator that no
+        // command of the line opens are not read whole.
         for command in [
             "cat<<EOF; rm -rf ~/x\nbody\nEOF",
             "cat 2 <<EOF; rm -rf ~/x\nbody\nEOF",
@@ -7665,6 +7715,7 @@ mod readings {
             "mysql -uroot <<EOF; rm -rf ~/x\nselect 1;\nEOF",
             "git clean -fdx <<EOF; true\nbody\nEOF",
             "X=1 <<EOF; rm -rf ~/x\nbody\nEOF",
+            "X=1 <<EOF ; rm -rf ~/x\nbody\nEOF",
         ] {
             assert!(analyze(command, &workspace).unreadable, "{command}");
             assert!(!is_obviously_read_only(command), "{command}");
@@ -7684,6 +7735,53 @@ mod readings {
             let (reading, whole, _) = parser_input(command);
             assert_eq!((reading, whole), (command.into(), true), "{command}");
         }
+    }
+
+    #[test]
+    fn commands_after_a_here_document_operator_are_the_lines_own() {
+        let workspace = workspace();
+        let own = |command: &str| -> Vec<(String, bool)> {
+            analyze(command, &workspace)
+                .derived
+                .into_iter()
+                .map(|derived| (derived.pattern, derived.own))
+                .collect()
+        };
+        for command in [
+            "cat <<EOF ; git push --force\nbody\nEOF",
+            "cat <<EOF; git push --force\nbody\nEOF",
+            "cat <<'EOF' 2>&1 | git push --force\nbody\nEOF",
+            "for f in a; do cat; done <<EOF & git push --force\nbody\nEOF",
+        ] {
+            assert!(
+                own(command).contains(&("git push --force".to_owned(), true)),
+                "{command}: {:?}",
+                own(command)
+            );
+            // An Always answer remembers it.
+            let always = analyze(command, &workspace).always;
+            assert!(
+                always.contains(&"git push *".to_owned()),
+                "{command}: {always:?}"
+            );
+        }
+        // What such a command runs is read from it, as for one written on a
+        // line of its own.
+        assert_eq!(
+            own("cat <<EOF ; sudo git push --force\nbody\nEOF"),
+            vec![
+                ("sudo git push --force".to_owned(), true),
+                ("git push --force".to_owned(), false)
+            ]
+        );
+        // Text a shell runs again keeps its commands, after a here-document
+        // or not, the shell's.
+        let nested = analyze("bash -c 'cat <<EOF ; git push --force\nb\nEOF'", &workspace);
+        assert!(
+            nested.derived.iter().all(|derived| !derived.own),
+            "{nested:?}"
+        );
+        assert!(!nested.always.contains(&"git push *".to_owned()));
     }
 
     #[test]

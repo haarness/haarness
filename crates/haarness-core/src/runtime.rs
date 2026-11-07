@@ -14988,6 +14988,9 @@ struct ShellReadings {
     sources: HashMap<String, Vec<usize>>,
     /// Each reading's "always" pattern.
     always: HashMap<String, String>,
+    /// The readings that are commands of the line itself, which the parser
+    /// put inside a written one (see `Derived::own`): judged as written.
+    own: HashSet<String>,
     /// Whether a rule also names a written command, by (index, rule): a
     /// written command may be long (a here-document), so each is matched
     /// once per rule.
@@ -15017,6 +15020,12 @@ impl ShellReadings {
                 .entry(derived.pattern.clone())
                 .or_insert_with(|| derived.always.clone());
         }
+        let own = analysis
+            .derived
+            .iter()
+            .filter(|derived| derived.own)
+            .map(|derived| derived.pattern.clone())
+            .collect();
         Self {
             written: analysis
                 .written
@@ -15031,6 +15040,7 @@ impl ShellReadings {
                 .collect(),
             sources,
             always,
+            own,
             covered: Mutex::new(HashMap::new()),
             limited: Mutex::new(HashMap::new()),
             unreadable: analysis.unreadable,
@@ -15083,12 +15093,17 @@ impl AskPlan {
     /// allow for the wrapper adds no question. A written command whose
     /// readings a limit stopped asks when a bash rule narrower than it denies
     /// or asks, since its readings may have missed what that rule is about.
+    /// A command of the line that the parser put inside a written one (after
+    /// a here-document's operator on its line) is judged as a written
+    /// command: an allow for the command it was read from does not cover it.
     fn evaluate(&self, engine: &PermissionEngine, pattern: &str) -> crate::permissions::Evaluation {
         let operation = self.operation(pattern);
         let Some(shell) = &self.shell else {
             return engine.evaluate_detailed(&operation);
         };
-        if let Some(sources) = shell.sources.get(pattern) {
+        if let Some(sources) = shell.sources.get(pattern)
+            && !shell.own.contains(pattern)
+        {
             return engine.evaluate_reading(&operation, &|rule| {
                 sources.iter().all(|&index| shell.covers(rule, index))
             });
@@ -16997,6 +17012,51 @@ mod shell_reading_tests {
         assert_eq!(
             plan.asking(vec!["sudo rm x".into(), "rm x".into()]).always,
             vec!["sudo *", "rm *"]
+        );
+    }
+
+    #[test]
+    fn a_command_after_a_here_document_operator_is_judged_as_written() {
+        use PermissionDecision::{Allow, Ask};
+        let allowlist = engine(&[
+            ("bash:*", Ask),
+            ("bash:cat *", Allow),
+            ("bash:ls *", Allow),
+            ("bash:cargo build *", Allow),
+            ("bash:bash *", Allow),
+        ]);
+        for command in [
+            "cat <<EOF ; git push --force\nbody\nEOF",
+            "cat <<EOF; git push --force\nbody\nEOF",
+            "cat <<EOF & git push --force\nbody\nEOF",
+            "cat <<'EOF' 2>&1 | git push --force\nbody\nEOF",
+            "ls <<EOF ; git push --force\nbody\nEOF",
+            "cargo build <<EOF ; git push --force\nb\nEOF",
+        ] {
+            assert_eq!(
+                verdicts(&allowlist, command),
+                vec![("git push --force".to_owned(), Ask)],
+                "{command}"
+            );
+            // Always remembers it, not the command it was read from.
+            let plan = ask_plans(
+                "bash",
+                &json!({"command": command}),
+                Path::new("/workspace"),
+            )
+            .into_iter()
+            .find(|plan| plan.permission == "bash")
+            .unwrap();
+            assert!(plan.always.contains(&"git push *".to_owned()), "{command}");
+            assert_eq!(
+                plan.asking(vec!["git push --force".into()]).always,
+                vec!["git push *"]
+            );
+        }
+        // What a shell runs again stays covered by the rule for the shell.
+        assert_eq!(
+            verdicts(&allowlist, "bash -c 'cat <<EOF ; git push --force\nb\nEOF'"),
+            Vec::new()
         );
     }
 }

