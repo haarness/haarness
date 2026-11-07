@@ -3,8 +3,8 @@
 resources embedded as base64 reach the model as what they hold (an image as an attachment, text as text, anything
 else named), never as base64; audio of a type Haarness does not carry is named rather than attached; and a 200 KB result reaches the model cut with the whole saved, while a workflow gets
 all of it. One-line JSON is laid out a value a line, whole when it then fits, and within a few times its length however deep
-it nests; what a Code Mode script returns is cut too, a string as its own lines. A script gets the server's metadata
-for its own call, never an earlier call's with the same text.
+it nests; what a Code Mode script returns is cut too, a string as its own lines, a list whole on one line when only that
+fits. A script gets the server's metadata for its own call, never an earlier call's with the same text.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-structured.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -244,6 +244,11 @@ try:
     nested = execute(thread, "return { m: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] };")
     assert nested['output'] == json.dumps({'m': [[0, 0, 0]] * 3}, indent=2), nested['output']
     check('JSON that indenting every level would make too long is still laid out a value a line, indented less deep, and a short nested value a script returns is laid out in full')
+
+    ids = execute(thread, "return Array.from({ length: 2500 }, (_, n) => n);")
+    assert ids['output'] == json.dumps(list(range(2500)), separators=(',', ':')), ids['output'][:200]
+    assert 'outputPath' not in (ids.get('metadata') or {}), ids.get('metadata')
+    check('a Code Mode list past 2,000 lines laid out comes whole on one line when that fits')
 
     result = call(thread, 'loud_failure')
     assert result['is_error'] and len(result['output']) < 52 * 1024, len(result['output'])

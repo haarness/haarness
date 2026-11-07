@@ -589,20 +589,34 @@ impl Tool for ExecuteTool {
             calls: std::sync::atomic::AtomicUsize::new(0),
             max_calls: context.execution.code_max_calls,
         });
-        let output = executor
+        let value = executor
             .execute(invocation, host, context.cancel)
             .await
-            .map_err(|error| CoreError::Tool(format!("code mode failed: {error}")))?;
-        let value = output.value.unwrap_or(Value::Null);
+            .map_err(|error| CoreError::Tool(format!("code mode failed: {error}")))?
+            .value
+            .unwrap_or(Value::Null);
         // A script hands back whole texts, so what it returns is cut for
         // the model as an MCP tool's text is: a string as itself, so a long
-        // one reads back by line, and anything else as JSON laid out, which
-        // indenting bounds as it bounds a server's.
-        let text = match &value {
-            Value::String(text) => text.clone(),
-            value => indent_json(&serde_json::to_string(value).map_err(tool_error)?),
+        // one reads back by line, and anything else as JSON laid out (as
+        // indenting bounds a server's), or on one line when only that fits.
+        let mut cut = match &value {
+            Value::String(text) => {
+                cut_mcp_text(text.clone(), &tool_output_dir(), false)
+                    .await?
+                    .0
+            }
+            value => {
+                let compact = serde_json::to_string(value).map_err(tool_error)?;
+                let laid_out = indent_json(&compact);
+                if within_tool_output_limits(&laid_out) {
+                    output(laid_out)
+                } else if within_tool_output_limits(&compact) {
+                    output(compact)
+                } else {
+                    cut_laid_out(&laid_out, &tool_output_dir(), false).await?.0
+                }
+            }
         };
-        let (mut cut, _) = cut_mcp_text(text, &tool_output_dir(), false).await?;
         let mut metadata = match cut.metadata {
             Value::Object(object) => object,
             _ => serde_json::Map::new(),
@@ -5415,7 +5429,18 @@ pub(crate) async fn cut_mcp_text(
     if reformatted && within_tool_output_limits(&readable) {
         return Ok((output(readable), None));
     }
-    let preview = filled_preview(&readable);
+    let (cut, path) = cut_laid_out(&readable, directory, failed).await?;
+    Ok((cut, Some((path, reformatted))))
+}
+
+/// `readable`, text past the limits as [`cut_mcp_text`] lays it out, cut:
+/// its start, then where the whole was saved in `directory`.
+async fn cut_laid_out(
+    readable: &str,
+    directory: &Path,
+    failed: bool,
+) -> CoreResult<(ToolOutput, PathBuf)> {
+    let preview = filled_preview(readable);
     let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
         .await
         .map_err(tool_error)?;
@@ -5430,7 +5455,7 @@ pub(crate) async fn cut_mcp_text(
             text: format!("{preview}\n\n{notice}"),
             metadata: json!({"truncated": true, "outputPath": path}),
         },
-        Some((path, reformatted)),
+        path,
     ))
 }
 
@@ -10381,6 +10406,31 @@ mod webfetch_tests {
             let nested = run(code).await.unwrap();
             assert_eq!(nested.text, serde_json::to_string_pretty(&value).unwrap());
         }
+        // A list past 2,000 lines laid out comes whole on one line when
+        // that fits, and is cut laid out when it does not.
+        let ids = run("return Array.from({ length: 2500 }, (_, n) => n)")
+            .await
+            .unwrap();
+        assert_eq!(
+            ids.text,
+            serde_json::to_string(&(0..2_500).collect::<Vec<_>>()).unwrap()
+        );
+        assert_eq!(ids.metadata.get("outputPath"), None);
+        let many = run("return Array.from({ length: 20000 }, (_, n) => n)")
+            .await
+            .unwrap();
+        assert!(
+            many.text.starts_with("[\n  0,\n  1,\n"),
+            "{:.40}",
+            many.text
+        );
+        let file = many.metadata["outputPath"].as_str().unwrap();
+        let saved = std::fs::read_to_string(file).unwrap();
+        assert_eq!(
+            saved,
+            serde_json::to_string_pretty(&(0..20_000).collect::<Vec<_>>()).unwrap()
+        );
+        std::fs::remove_file(file).unwrap();
     }
 
     #[tokio::test]
