@@ -131,7 +131,9 @@ pub fn take_over(path: PathBuf) -> (usize, Recording) {
 pub struct Recorded(Option<(Arc<Ledger>, i32)>);
 
 /// Records the process group `leader` leads, just started. The group is also
-/// noted as one Haarness started ([`crate::process_tree::inside_haarness`]).
+/// noted as one Haarness started ([`crate::process_tree::inside_haarness`]),
+/// in every host: only the computer use guard reads that note, and only in
+/// this same process.
 pub fn recorded(leader: Option<u32>) -> Recorded {
     let Some(pid) = leader else {
         return Recorded(None);

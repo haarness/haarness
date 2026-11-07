@@ -51,6 +51,10 @@ static STARTED: std::sync::LazyLock<Mutex<BTreeSet<i32>>> =
 
 /// Notes that this process just started the process group `leader` leads, for a command (see
 /// [`crate::process_groups::recorded`]), and forgets the groups no process runs in any more.
+///
+/// Every host that records a group lands here (shell commands, workflows, extension and MCP hosts), but none of them
+/// reads the note: only [`inside_haarness`] does, for the computer use settings, and a note counts only in the process
+/// that started the group. That is the server; `haarness mac` starts no groups, so its own set stays empty.
 pub(crate) fn mark_started(leader: u32) {
     let Ok(group) = i32::try_from(leader) else {
         return;
