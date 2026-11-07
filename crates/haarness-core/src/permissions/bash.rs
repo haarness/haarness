@@ -406,12 +406,16 @@ fn parser_input(command: &str) -> (std::borrow::Cow<'_, str>, bool, Option<tree_
     }
 }
 
-/// How many times [`separated_delimiters`] parses a line: each parse shows
-/// the delimiters up to the first one the parser misreads inside another. A
-/// line one parse leaves misread costs that parse each time (`cat <<EOF;`
-/// many times over), so the passes are few: a line that needs more is not
-/// read whole.
-const MAX_DELIMITER_PASSES: usize = 4;
+/// How many bytes [`separated_delimiters`] parses for a line, in all, when
+/// it parses more than [`MIN_DELIMITER_PASSES`] times: each parse shows the
+/// delimiters up to the first one the parser misreads inside another, so a
+/// line of many documents needs a parse for each, and a line one parse
+/// leaves misread costs that parse each time (`cat <<EOF;` many times over).
+/// A line that needs more is not read whole.
+const MAX_DELIMITER_BYTES: usize = 64 * 1024;
+/// How many times [`separated_delimiters`] may parse any line, the last
+/// parse only checking the moves before it.
+const MIN_DELIMITER_PASSES: usize = 4;
 
 /// How a delimiter written against an operator is set apart from it: see
 /// [`separated_delimiters`].
@@ -464,7 +468,8 @@ fn separated_delimiters(
     }
     let mut bytes = text.as_bytes().to_vec();
     let mut changed = false;
-    for _ in 0..MAX_DELIMITER_PASSES {
+    let passes = (MAX_DELIMITER_BYTES / text.len().max(1)).max(MIN_DELIMITER_PASSES);
+    for pass in 1..=passes {
         // Only whole characters move, and a blank takes an ASCII byte's
         // place: the text is still UTF-8.
         let Ok(current) = std::str::from_utf8(&bytes) else {
@@ -481,6 +486,10 @@ fn separated_delimiters(
                 std::borrow::Cow::Borrowed(text)
             };
             return (text, moves.is_some(), Some(tree));
+        }
+        // No parse is left to check these moves.
+        if pass == passes {
+            break;
         }
         for apart in moves.unwrap_or_default() {
             match apart {
@@ -7794,7 +7803,7 @@ mod readings {
         // Many that share a line and a delimiter are set apart together.
         let chain = format!(
             "{}rm -rf ~/x\nbody\nEOF",
-            "cat <<EOF; ".repeat(4 * MAX_DELIMITER_PASSES)
+            "cat <<EOF; ".repeat(4 * MIN_DELIMITER_PASSES)
         );
         let analysis = analyze(&chain, &workspace);
         assert!(!analysis.unreadable);
@@ -7876,6 +7885,24 @@ mod readings {
             assert!(analyze(command, &workspace).unreadable, "{command}");
             assert!(!is_obviously_read_only(command), "{command}");
         }
+        // Each document on a line of its own needs a parse of its own, up to
+        // the bytes the parses of one line may take in all.
+        let documents = |count: usize, body: &str| -> String {
+            use std::fmt::Write as _;
+            let mut line = String::new();
+            for n in 0..count {
+                let _ = write!(line, "cat > f{n}.txt <<EOF&& echo ok{n}\n{body}\nEOF\n");
+            }
+            line
+        };
+        let many = analyze(&documents(8, "body"), &workspace);
+        assert!(!many.unreadable);
+        for n in 0..8 {
+            assert!(many.patterns.contains(&format!("echo ok{n}")), "{n}");
+        }
+        let body = "x".repeat(MAX_DELIMITER_BYTES / MIN_DELIMITER_PASSES);
+        assert!(!analyze(&documents(MIN_DELIMITER_PASSES - 1, &body), &workspace).unreadable);
+        assert!(analyze(&documents(MIN_DELIMITER_PASSES, &body), &workspace).unreadable);
         // Lines whose delimiters the parser reads as the shell does are
         // given to it as written.
         for command in [

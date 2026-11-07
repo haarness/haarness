@@ -202,6 +202,8 @@ CORPUS = [
     # A delimiter that cannot move left, against an operator with a blank after it or not
     'kubectl apply -f - <<EOF; kubectl get pods\nkind: x\nEOF', 'psql -v ON_ERROR_STOP=1 <<SQL; echo ok\nselect 1;\nSQL',
     'cat<<EOF;ls\nbody\nEOF', 'cat<<EOF>out.txt\nbody\nEOF',
+    # Documents written against operators, each on lines of its own
+    ''.join(f'cat > f{n}.txt <<EOF&& echo ok{n}\nbody\nEOF\n' for n in range(6)),
     # A double-quoted script over several lines
     'bash -c "true\nrm -rf victim"', 'bash -c "set -e\ncd src\nls"', 'git commit -m "fix: the thing\n\nBody line."',
     'eval "true\nrm -rf ~/x"', 'echo "a\nb" > notes.txt',
