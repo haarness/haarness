@@ -1,4 +1,6 @@
-"""MCP stdio fixture whose tools answer with structured content and little or no text."""
+"""MCP stdio fixture whose tools answer with structured content and little or no text, or embed resources as
+base64 blobs (an image under a type in capitals, text, an archive), or answer with 200 KB of text."""
+import base64
 import json
 import sys
 
@@ -14,6 +16,18 @@ TOOLS = {
     'broken': {'content': [], 'isError': True},
     # A failure that says why in structured content only.
     'refused': {'content': [], 'structuredContent': {'code': 'E42-refused-proof'}, 'isError': True},
+    # Resources embedded as blobs: an image, text and an archive.
+    'embedded': {'content': [
+        {'type': 'text', 'text': 'Three files.'},
+        {'type': 'resource', 'resource': {'uri': 'ui://chart.png', 'mimeType': 'IMAGE/PNG; charset=binary', 'blob': PIXEL}},
+        {'type': 'resource', 'resource': {'uri': 'data://row.json', 'mimeType': 'application/json',
+                                          'blob': base64.b64encode(b'{"proof": "embedded-text-proof"}').decode()}},
+        {'type': 'resource', 'resource': {'uri': 'files://pack.zip', 'mimeType': 'application/zip',
+                                          'blob': base64.b64encode(bytes(300)).decode()}},
+    ]},
+    # 200 KB of text, as a tool that returns a whole table does.
+    'wide': {'content': [{'type': 'text', 'text': ''.join('row %05d %s\n' % (n, 'w' * 90) for n in range(2000))}],
+             'structuredContent': {'rows': 2000}},
 }
 
 for line in sys.stdin:

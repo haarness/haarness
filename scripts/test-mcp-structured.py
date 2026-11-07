@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Real server, echo provider: MCP results carried only as structured content reach the model and workflows.
+"""Real server, echo provider: MCP results carried only as structured content reach the model and workflows;
+resources embedded as base64 reach the model as what they hold (an image as an attachment, text as text, anything
+else named), never as base64; and a 200 KB result reaches the model cut with the whole saved, while a workflow gets
+all of it.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-structured.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -67,6 +70,23 @@ try:
     assert result['is_error'] and 'E42-refused-proof' in result['output'], result
     check('a failure without text names the tool, or gives its structured reason')
 
+    PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+    result = call(thread, 'embedded')
+    output = result['output']
+    assert not result['is_error'] and output.startswith('Three files.\n[image/png attachment: ui://chart.png]\n'), output
+    assert 'embedded-text-proof' in output and '[files://pack.zip: application/zip, 300 bytes]' in output, output
+    assert PIXEL not in output and 'blob' not in output, output
+    assert result['metadata']['attachments'] == ['data:image/png;base64,' + PIXEL], result['metadata']
+    check('embedded resources reach the model as what they hold: an image under IMAGE/PNG as an attachment, base64 JSON as its text, an archive named by type and size, and no base64 text')
+
+    WIDE = ''.join('row %05d %s\n' % (n, 'w' * 90) for n in range(2000))
+    result = call(thread, 'wide')
+    assert not result['is_error'] and len(result['output']) < 52 * 1024, len(result['output'])
+    assert result['output'].startswith('row 00000 ') and 'Full output saved to: ' in result['output'], result['output'][-300:]
+    saved = pathlib.Path(result['metadata']['outputPath'])
+    assert saved.read_text() == WIDE and result['metadata']['truncated'] is True and result['metadata']['rows'] == 2000, result['metadata']
+    check('a 200 KB result reaches the model as its first 50 KiB, the whole saved where the note says, its structured content kept')
+
     source = ("export const meta = { name: 'structured-mcp', phases: ['call'] };\n"
               "phase('call');\n"
               "const result = await tool('mcp__structured__weather', {});\n"
@@ -78,6 +98,25 @@ try:
     assert run_state['status'] == 'completed', run_state
     assert 'structured-only-proof' in json.dumps(run_state.get('result')), run_state.get('result')
     check('a workflow tool() call to that MCP tool returns the structured content as its output')
+
+    source = ("export const meta = { name: 'whole-mcp-text', phases: ['call'] };\n"
+              "phase('call');\n"
+              "const result = await tool('mcp__structured__wide', {});\n"
+              "return result.output.length;\n")
+    run_state = api('/workflows/run', {'source': source, 'model': 'echo/echo-1'})
+    deadline = time.monotonic() + 60
+    while run_state['status'] == 'running' and time.monotonic() < deadline:
+        time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
+    assert run_state['status'] == 'completed' and run_state.get('result') == len(WIDE), run_state.get('result')
+    check('a workflow tool() call to the 200 KB tool gets all of its text')
+
+    before = len(results(thread))
+    code = "return (await tool('mcp__structured__wide', {})).text.length;"
+    api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': '!tool execute ' + json.dumps({'code': code})})
+    until(lambda: not api('/turns/active') and any(item['name'] == 'execute' for item in results(thread)[before:]), 'execute: no result', 60)
+    coded = next(item for item in results(thread)[before:] if item['name'] == 'execute')
+    assert not coded['is_error'] and json.loads(coded['output']) == len(WIDE), coded['output'][:400]
+    check('Code Mode gets all of the 200 KB tool\'s text too')
 
     (root/'result.json').write_text(json.dumps({'passed': True, 'checks': checks}, indent=2))
     print(f'PASS {len(checks)} MCP structured-content scenarios.', flush=True)
