@@ -1349,6 +1349,30 @@ fn prompt_content(blocks: Vec<ContentBlock>) -> AcpResult<(String, Vec<String>)>
     for block in blocks {
         match block {
             ContentBlock::Text(content) => text.push_str(&content.text),
+            ContentBlock::Image(content) if content.data.trim().is_empty() => {
+                // An image sent only by its address. One written as a data
+                // URL is the image itself; any other address (a web page's,
+                // a file's) reaches the model the way a resource link does,
+                // and Haarness never fetches it.
+                let uri = content
+                    .uri
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|uri| !uri.is_empty())
+                    .ok_or_else(|| invalid("an ACP image needs its data or a uri"))?;
+                if uri
+                    .get(..5)
+                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+                {
+                    attachments.push(uri.to_owned());
+                } else {
+                    let _ = write!(
+                        text,
+                        "\n\n<resource-link name={:?} uri={uri:?} />",
+                        image_link_name(uri)
+                    );
+                }
+            }
             ContentBlock::Image(content) => attachments.push(format!(
                 "data:{};base64,{}",
                 content.mime_type, content.data
@@ -1393,6 +1417,20 @@ fn prompt_content(blocks: Vec<ContentBlock>) -> AcpResult<(String, Vec<String>)>
         }
     }
     Ok((text, attachments))
+}
+
+/// The file name at the end of an image's address (`chart.png` for
+/// `https://example.com/a/chart.png?v=2`), or `image` when it has none.
+fn image_link_name(uri: &str) -> String {
+    let path = url::Url::parse(uri).map_or_else(
+        |_| uri.split(['?', '#']).next().unwrap_or_default().to_owned(),
+        |url| url.path().to_owned(),
+    );
+    path.rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("image")
+        .to_owned()
 }
 
 fn mcp_config(server: McpServer, cwd: &Path) -> AcpResult<(String, McpConfigureRequest)> {
@@ -1702,6 +1740,52 @@ mod tests {
                 "data:application/pdf;base64,JVBERi0xLjQ="
             ]
         );
+    }
+
+    /// An image given only by its address reaches the model as a link to
+    /// it, as a resource link does, instead of an empty image that refuses
+    /// the whole prompt; an image with neither data nor an address is refused
+    /// in words.
+    #[test]
+    fn an_image_given_only_by_its_address_becomes_a_link() {
+        let (text, attachments) = prompt_content(vec![
+            ContentBlock::Text(TextContent::new("compare these")),
+            ContentBlock::Image(
+                ImageContent::new("", "image/png").uri("https://example.com/a/chart.png?v=2"),
+            ),
+            ContentBlock::Image(ImageContent::new("", "image/png").uri("file:///tmp/shot.png")),
+            ContentBlock::Image(ImageContent::new("", "image/png").uri("https://example.com/")),
+            ContentBlock::Image(
+                ImageContent::new("", "image/png").uri("DATA:image/png;base64,YWJj"),
+            ),
+            ContentBlock::Image(
+                ImageContent::new("YWJj", "image/png").uri("https://example.com/x.png"),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            text,
+            "compare these\
+             \n\n<resource-link name=\"chart.png\" uri=\"https://example.com/a/chart.png?v=2\" />\
+             \n\n<resource-link name=\"shot.png\" uri=\"file:///tmp/shot.png\" />\
+             \n\n<resource-link name=\"image\" uri=\"https://example.com/\" />"
+        );
+        assert_eq!(
+            attachments,
+            ["DATA:image/png;base64,YWJj", "data:image/png;base64,YWJj"]
+        );
+        for image in [
+            ImageContent::new("", "image/png"),
+            ImageContent::new(" ", "image/png").uri(" "),
+        ] {
+            let error = prompt_content(vec![ContentBlock::Image(image)]).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("an ACP image needs its data or a uri"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
