@@ -334,11 +334,13 @@ try:
     # Pause on the bar, Resume in a client (what Desktop's paused line and /mac resume send): the status names the
     # paused chat, the bar hears the Resume and shows the agent at work again, and the agent is told it may go on.
     # The typing cut short by the pause does not pick up by itself: the person may have moved things meanwhile, so
-    # the agent hears how far it got and looks again before its next step.
+    # the agent hears how far it got and looks again before its next step. The turn lingers after that answer, since
+    # the bar comes down with its turn.
     chat.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
     typed_before = len(state().get("name", ""))
     turn = api("/threads/" + chat.thread + "/turns",
-               {"requestId": str(uuid.uuid4()), "text": "!tool mac_type " + json.dumps({"ref": refs["name"], "text": "x" * 1500})})
+               {"requestId": str(uuid.uuid4()),
+                "text": "!linger 4000 !tool mac_type " + json.dumps({"ref": refs["name"], "text": "x" * 1500})})
     until(lambda: len(state().get("name", "")) > typed_before + 20, "typing started before the pause")
     assert bar("press", "一時停止").returncode == 0
     until(lambda: api("/manage/computer-use", {"action": "get"})["data"].get("pausedChat") == chat.thread,
@@ -379,6 +381,8 @@ try:
     until(lambda: api("/turns/" + turn["id"])["status"] == "running", "the lingering turn runs")
     time.sleep(max(0, 47 - (time.monotonic() - look_started)))
     subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--press-escape"], check=True)
+    # The press must have happened for the turn going on to mean anything.
+    until(lambda: state().get("keys", [])[-1:] == ["\x1b"], "the Escape reached the lab", seconds=5)
     time.sleep(1)
     assert api("/turns/" + turn["id"])["status"] == "running", "Escape stopped a turn long after its last look"
     finished = until(lambda: (value if (value := api("/turns/" + turn["id"]))["status"] not in ("running", "queued") else None),

@@ -10,7 +10,10 @@ import ApplicationServices
 if CommandLine.arguments.dropFirst().first == "--press-escape" {
     let source = CGEventSource(stateID: .hidSystemState)
     CGEvent(keyboardEventSource: source, virtualKey: 0x35, keyDown: true)?.post(tap: .cghidEventTap)
+    usleep(40_000)
     CGEvent(keyboardEventSource: source, virtualKey: 0x35, keyDown: false)?.post(tap: .cghidEventTap)
+    // Leaving at once can lose the press on a busy Mac: neither the front app nor the helper ever sees it.
+    usleep(300_000)
     exit(0)
 }
 if CommandLine.arguments.dropFirst().first == "--windows", let pid = Int32(CommandLine.arguments.last ?? "") {
