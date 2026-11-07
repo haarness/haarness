@@ -52,10 +52,21 @@ With HAARNESS_BASE_BIN:
     start and Desktop's restore each keep the host; with it still running,
     Desktop's restore makes it this computer's, and once it has stopped the
     next restore turns access back on with the same host.
+
+Either way, from an identity written as the release before leaves one, and
+with HAARNESS_BASE_BIN once more from the folder that release itself left:
+
 11. One folder Bay and Cove keep in step, one host under the release before:
     Bay runs this release first and keeps the host; Cove's Desktop then turns
     access back on as a host of its own, both stay connected, and Cove keeps
     that host when Desktop starts again.
+12. Cove turns access off and forgets its host, then forgets one whose
+    connector stopped by itself: each time Desktop starting there leaves
+    access off and registers nothing, while turning it on registers a host
+    afresh.
+13. Cove's host is removed in Cloud while its connector runs: Desktop's
+    status check reads off and deletes the identity, and Desktop starting
+    there leaves access off.
 
 Writes secret-free results to checks.json in a new folder under the state
 folder (default: a temporary folder, removed when the run passes).
@@ -75,6 +86,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
 import e2e_scratch
 
@@ -145,6 +157,15 @@ class Cloud:
                 return web.json_response({"error": {"message": "Not found"}}, status=404)
             return web.json_response(self.row(id))
 
+        async def delete(request):
+            id = request.match_info["id"]
+            if self.hosts.pop(id, None) is None:
+                return web.json_response({"error": {"message": "Not found"}}, status=404)
+            ws = self.sockets.pop(id, None)
+            if ws is not None:
+                await ws.close(code=4403, message=b"Removed")
+            return web.json_response({})
+
         async def connect(request):
             id = request.match_info["id"]
             if id not in self.hosts:
@@ -172,6 +193,7 @@ class Cloud:
         app.router.add_post("/api/v1/remote-hosts", register)
         app.router.add_get("/api/v1/remote-hosts", listing)
         app.router.add_get("/api/v1/remote-hosts/{id}", host)
+        app.router.add_delete("/api/v1/remote-hosts/{id}", delete)
         app.router.add_get("/api/v1/remote-hosts/{id}/connect", connect)
 
         async def start():
@@ -189,6 +211,15 @@ class Cloud:
 
     def connected(self) -> set[str]:
         return set(self.sockets)
+
+    def remove(self, id: str) -> None:
+        """Remove access to host `id`, as a phone or the web does, before its
+        connector hears of it: its connection is still up."""
+        self.hosts.pop(id, None)
+
+    def known(self, id: str, name: str) -> None:
+        """Host `id`, registered by an earlier release."""
+        self.hosts[id] = {"id": id, "accountId": ACCOUNT, "name": name, "mode": "host", "metadata": {}}
 
 
 class Computer:
@@ -295,22 +326,29 @@ class Computer:
         listed = json.loads(self.cli("account", "--rpc", input=json.dumps({"action": "remote-hosts"})))
         return sorted(item["name"] for item in listed["items"])
 
+    def accessing(self, change=None, check=False) -> subprocess.CompletedProcess:
+        """Desktop's Remote access: the account bridge's `remote-access`,
+        reporting (asking Cloud with `check`) or making `change`."""
+        home = self.folder / "chat-home"
+        request = {"action": "remote-access", "chatHome": str(home)}
+        if change:
+            request["change"] = change
+        if check:
+            request["check"] = True
+        return self.run("--chat-home", "account", "--rpc", workspace=home, input=json.dumps(request))
+
+    def access(self, change=None, check=False) -> dict:
+        result = self.accessing(change, check)
+        if result.returncode != 0:
+            raise SystemExit(f"FAIL: {self.name}: remote access {change or 'status'}: {result.stderr}")
+        return json.loads(result.stdout)
+
     def restoring(self) -> subprocess.CompletedProcess:
         """Desktop starting: the account bridge's remote access `restore`."""
-        home = self.folder / "chat-home"
-        return self.run(
-            "--chat-home",
-            "account",
-            "--rpc",
-            workspace=home,
-            input=json.dumps({"action": "remote-access", "change": "restore", "chatHome": str(home)}),
-        )
+        return self.accessing("restore")
 
     def restore(self) -> dict:
-        result = self.restoring()
-        if result.returncode != 0:
-            raise SystemExit(f"FAIL: {self.name}: restore: {result.stderr}")
-        return json.loads(result.stdout)
+        return self.access("restore")
 
     def copied_lines(self) -> list[str]:
         return [line for line in self.log.read_text().splitlines() if line.startswith(COPIED)] if self.log.exists() else []
@@ -507,6 +545,99 @@ def computers_apart(root, cloud, computer, check, old) -> None:
     desk.stop()
 
 
+def own_connector(each: Computer, machine: str):
+    """The pid of a connector running on `each` with an identity stamped as
+    the computer `machine`'s."""
+    for identity in each.identities().values():
+        if alive(identity.get("pid")) and identity.get("machine") == stamp(machine, identity.get("id", "")):
+            return identity["pid"]
+    return None
+
+
+def kept_in_step(root, cloud, computer, check, old, base, names) -> None:
+    """Steps 11 to 13: two computers (`names`) keep one folder in step, one
+    host under the release before: run by `base`, or written as it leaves
+    an identity."""
+    kept = root / f"{names[0].lower()}-config"
+    kept.mkdir()
+    machines = [f"MACHINE-{name.upper()}" for name in names]
+    bay = computer(names[0], machines[0], config=kept)
+    cove = computer(names[1], machines[1], config=kept)
+
+    # 11. The first on this release keeps the host, the other's Desktop
+    # turns access on as its own.
+    if base:
+        bay.start(base)
+        bay_id = connected_as(bay, cloud)
+        bay.stop()
+        cove.start(base)
+        check(connected_as(cove, cloud) == bay_id, "under the release before, both computers of one kept folder are one host")
+        cove.stop()
+    else:
+        # As the release before leaves it once its connector ran: unstamped
+        # under the old name, registered, its lock beside it.
+        bay_id = str(uuid.uuid4())
+        (kept / old).write_text(
+            json.dumps({"id": bay_id, "workspace": str(bay.project), "chatId": None, "accountId": ACCOUNT, "name": bay.name, "apiUrl": cloud.url + "/", "version": "0.1.16", "registered": True})
+        )
+        (kept / old).with_suffix(".lock").touch()
+        cloud.known(bay_id, bay.name)
+        check(bay.status_ids() == [bay_id] and cove.status_ids() == [bay_id], "an identity the release before wrote in a kept folder is both computers' own until one runs this release", (bay.status_ids(), cove.status_ids()))
+    bay.start()
+    check(connected_as(bay, cloud) == bay_id and bay.file.name == old and bay.identity().get("machine") == stamp(machines[0], bay_id), f"{bay.name}, first on this release, keeps the host, stamped as {bay.name}'s")
+    hosts = set(cloud.hosts)
+    restored = cove.restore()
+    pid = wait_for(lambda: own_connector(cove, machines[1]), 60, f"{cove.name}'s restored connector")
+    cove_id = connected_as(cove, cloud, pid=pid)
+    check(restored.get("state") == "on" and cove_id != bay_id and set(cloud.hosts) - hosts == {cove_id}, f"{cove.name}'s Desktop restore then turns access on, as a host of its own", restored)
+    own = kept / file_name(cloud, machines[1])
+    check(cove.file.name == own.name and json.loads((kept / old).read_text())["id"] == bay_id, f"in a file named for {cove.name}, leaving {bay.name}'s as it was", cove.file.name)
+    settled = time.time()
+    time.sleep(5)
+    check({bay_id, cove_id} <= cloud.connected() and not [id for at, id in cloud.takeovers if at >= settled], "both stay connected, neither taking the other's connection")
+    os.kill(pid, signal.SIGTERM)
+    wait_for(lambda: not alive(pid), 30, f"{cove.name}'s connector to stop")
+    again = cove.restore()
+    pid = wait_for(lambda: own_connector(cove, machines[1]), 60, f"{cove.name}'s connector, restored again")
+    check(again.get("state") == "on" and connected_as(cove, cloud, pid=pid) == cove_id and set(cloud.hosts) - hosts == {cove_id}, f"and Desktop starting again keeps {cove.name}'s host", again)
+
+    # 12. Turned off and forgotten there, it stays off when Desktop starts.
+    cove.cli("remote", "disable", cove_id)
+    cove.cli("remote", "forget", cove_id)
+    check(cove_id not in cloud.hosts and not own.exists(), f"{cove.name}'s remote disable and forget end its host and delete its identity")
+    hosts = set(cloud.hosts)
+    again = cove.restore()
+    check(again.get("state") == "off" and set(cloud.hosts) == hosts and own_connector(cove, machines[1]) is None and not own.exists(), f"Desktop starting on {cove.name} then leaves access off and registers nothing", again)
+    check(bay_id in cloud.connected() and json.loads((kept / old).read_text())["id"] == bay_id, f"while {bay.name} stays connected with its own host")
+    on = cove.access("on")
+    pid = wait_for(lambda: own_connector(cove, machines[1]), 60, f"{cove.name}'s connector turned on")
+    fresh = connected_as(cove, cloud, pid=pid)
+    check(on.get("state") == "on" and fresh not in hosts and set(cloud.hosts) - hosts == {fresh}, f"turning access on there registers {cove.name} afresh", on)
+    # Stopped by itself (it quit, or the computer shut down), so with no
+    # stop file, then forgotten.
+    os.kill(pid, signal.SIGTERM)
+    wait_for(lambda: not alive(pid), 30, f"{cove.name}'s connector to stop")
+    cove.cli("remote", "forget", fresh)
+    hosts = set(cloud.hosts)
+    again = cove.restore()
+    check(again.get("state") == "off" and set(cloud.hosts) == hosts and own_connector(cove, machines[1]) is None and not own.exists() and not own.with_suffix(".stop").exists(), f"forgotten after it stopped by itself, Desktop starting on {cove.name} leaves access off too", again)
+    on = cove.access("on")
+    pid = wait_for(lambda: own_connector(cove, machines[1]), 60, f"{cove.name}'s connector turned on again")
+    fresh = connected_as(cove, cloud, pid=pid)
+    check(on.get("state") == "on" and set(cloud.hosts) - hosts == {fresh}, f"and turning access on registers {cove.name} afresh again", on)
+
+    # 13. Removed in Cloud while its connector runs.
+    cloud.remove(fresh)
+    status = cove.access(check=True)
+    check(status.get("state") == "off" and not own.exists(), f"after Remove access, Desktop's status check on {cove.name} reads off and deletes its identity", status)
+    wait_for(lambda: not alive(pid), 30, f"{cove.name}'s removed connector to stop")
+    hosts = set(cloud.hosts)
+    again = cove.restore()
+    check(again.get("state") == "off" and set(cloud.hosts) == hosts and own_connector(cove, machines[1]) is None and not own.exists(), f"and Desktop starting on {cove.name} again leaves access off and registers nothing", again)
+    check(bay_id in cloud.connected(), f"while {bay.name} stays connected")
+    bay.stop()
+
+
 def main() -> None:
     state = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else None
     if state is not None:
@@ -532,6 +663,7 @@ def main() -> None:
         old = file_name(cloud, None)
         if os.environ.get("HAARNESS_IDENTITY_RELEASES_ONLY") != "1":
             computers_apart(root, cloud, computer, check, old)
+            kept_in_step(root, cloud, computer, check, old, None, ("Bay", "Cove"))
 
         if not base:
             print("SKIP releases side by side: set HAARNESS_BASE_BIN to the release before", flush=True)
@@ -629,43 +761,7 @@ def main() -> None:
             check(again.get("state") == "on" and restored == loft_id and set(cloud.hosts) == hosts, "after it stopped, the next restore turns access back on with the same host", again)
             loft.cli("remote", "disable", loft_id)
 
-            # 11. One folder kept in step: the first computer on this release
-            # keeps the host, the other's Desktop turns access on as its own.
-            kept = root / "kept-config"
-            kept.mkdir()
-            bay = computer("Bay", "MACHINE-BAY", config=kept)
-            cove = computer("Cove", "MACHINE-COVE", config=kept)
-            bay.start(base)
-            bay_id = connected_as(bay, cloud)
-            bay.stop()
-            cove.start(base)
-            check(connected_as(cove, cloud) == bay_id, "under the release before, both computers of one kept folder are one host")
-            cove.stop()
-            bay.start()
-            check(connected_as(bay, cloud) == bay_id and bay.file.name == old and bay.identity().get("machine") == stamp("MACHINE-BAY", bay_id), "Bay, first on this release, keeps the host, stamped as Bay's")
-            hosts = set(cloud.hosts)
-
-            def own_connector(each, machine):
-                for path, identity in each.identities().items():
-                    if alive(identity.get("pid")) and identity.get("machine") == stamp(machine, identity.get("id", "")):
-                        return identity["pid"]
-                return None
-
-            restored = cove.restore()
-            pid = wait_for(lambda: own_connector(cove, "MACHINE-COVE"), 60, "Cove's restored connector")
-            cove_id = connected_as(cove, cloud, pid=pid)
-            check(restored.get("state") == "on" and cove_id != bay_id and set(cloud.hosts) - hosts == {cove_id}, "Cove's Desktop restore then turns access on, as a host of its own", restored)
-            check(cove.file.name == file_name(cloud, "MACHINE-COVE") and json.loads((kept / old).read_text())["id"] == bay_id, "in a file named for Cove, leaving Bay's as it was", cove.file.name)
-            settled = time.time()
-            time.sleep(5)
-            check({bay_id, cove_id} <= cloud.connected() and not [id for at, id in cloud.takeovers if at >= settled], "both stay connected, neither taking the other's connection")
-            os.kill(pid, signal.SIGTERM)
-            wait_for(lambda: not alive(pid), 30, "Cove's connector to stop")
-            again = cove.restore()
-            pid = wait_for(lambda: own_connector(cove, "MACHINE-COVE"), 60, "Cove's connector, restored again")
-            check(again.get("state") == "on" and connected_as(cove, cloud, pid=pid) == cove_id and set(cloud.hosts) - hosts == {cove_id}, "and Desktop starting again keeps Cove's host", again)
-            cove.cli("remote", "disable", cove_id)
-            bay.stop()
+            kept_in_step(root, cloud, computer, check, old, base, ("Port", "Quay"))
         (root / "checks.json").write_text(json.dumps({"verdict": "PASS", "checks": checks}, indent=2))
     except BaseException as error:
         (root / "checks.json").write_text(json.dumps({"verdict": "FAIL", "error": str(error), "checks": checks}, indent=2))

@@ -158,24 +158,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
     let client = super::account::client()?;
     match args.command {
         RemoteCommand::Forget { id } => {
-            let file =
-                local_file(paths, id)?.context("This host has no local connector identity")?;
-            ensure!(
-                !running(&file)?,
-                "Disable this connector before forgetting it"
-            );
-            client
-                .request(
-                    reqwest::Method::DELETE,
-                    &format!("/api/v1/remote-hosts/{id}"),
-                    None,
-                )
-                .await
-                .or_else(|error| match error {
-                    haarness_account::Error::Api { status: 404, .. } => Ok(Value::Null),
-                    other => Err(other),
-                })?;
-            std::fs::remove_file(file)?;
+            forget_host(&client, paths, id).await?;
             println!(
                 "Remote access revoked and local identity forgotten. The next enable registers a new host."
             );
@@ -1878,6 +1861,29 @@ fn local_file(paths: &Paths, id: Uuid) -> Result<Option<std::path::PathBuf>> {
     }
     Ok(found)
 }
+/// `remote forget`: end Cloud access for host `id` and delete the identity
+/// of its stopped connector here. Only a start someone asks for registers
+/// this computer again (see [`kept_here`]).
+async fn forget_host(client: &haarness_account::Client, paths: &Paths, id: Uuid) -> Result<()> {
+    let file = local_file(paths, id)?.context("This host has no local connector identity")?;
+    ensure!(
+        !running(&file)?,
+        "Disable this connector before forgetting it"
+    );
+    client
+        .request(
+            reqwest::Method::DELETE,
+            &format!("/api/v1/remote-hosts/{id}"),
+            None,
+        )
+        .await
+        .or_else(|error| match error {
+            haarness_account::Error::Api { status: 404, .. } => Ok(Value::Null),
+            other => Err(other),
+        })?;
+    std::fs::remove_file(file)?;
+    Ok(())
+}
 
 /// Start a background connector and return once it holds its lock, with the
 /// log offset its output starts at. The connector outlives the caller: the
@@ -1901,6 +1907,11 @@ async fn spawn_connector(
     }
     let output = options.open(&log)?;
     let start = output.metadata()?.len();
+    #[cfg(test)]
+    if let Some(connector) = tests::CONNECTOR.with_borrow(Clone::clone) {
+        connector(file)?;
+        return Ok(start);
+    }
     let mut command = std::process::Command::new(std::env::current_exe()?);
     if let Some(root) = &paths.root {
         command.arg("--data-dir").arg(root);
@@ -2664,9 +2675,11 @@ pub(crate) async fn restore_host(
         // No identity of this computer's own yet, beside one another computer
         // stamped under the old name: a folder both keep, where the two were
         // one host before this release. Access that was on there comes back
-        // on here too, as a host of this computer's own.
+        // on here too, as a host of this computer's own. Only the first time:
+        // once this computer kept one, its host forgotten or removed in Cloud
+        // stays gone until access is turned on again.
         let shared = identity_file_for(paths, client, &account, gateway, None, None);
-        if file != shared && left_on_elsewhere(&shared, hardware) {
+        if file != shared && !kept_here(&file) && left_on_elsewhere(&shared, hardware) {
             return enable_for(client, paths, gateway, &account, hardware).await;
         }
         return host_access(client, paths, false).await;
@@ -2682,6 +2695,16 @@ pub(crate) async fn restore_host(
         return host_access(client, paths, false).await;
     }
     enable_for(client, paths, gateway, &account, hardware).await
+}
+/// Whether a connector of this computer ever kept its identity in `file`:
+/// each one that started left its lock there, and turning access off or
+/// signing out a stop file, both of which stay when `remote forget` or a
+/// host removed in Cloud deletes the identity. A start that failed before
+/// it took the identity leaves only its log, which says nothing.
+fn kept_here(file: &Path) -> bool {
+    ["lock", "stop"]
+        .into_iter()
+        .any(|extension| file.with_extension(extension).exists())
 }
 /// Whether the identity in `shared` is another computer's (stamped there by
 /// a computer other than the one with `hardware` id) and was left on: its
@@ -2943,7 +2966,14 @@ mod tests {
         /// stands in for it, empty for one that cannot be read.
         pub(super) static HARDWARE: std::cell::RefCell<Option<String>> =
             const { std::cell::RefCell::new(None) };
+        /// What [`spawn_connector`] runs on this thread instead of a
+        /// connector process while a test stands in for one.
+        pub(super) static CONNECTOR: std::cell::RefCell<Option<Connector>> =
+            const { std::cell::RefCell::new(None) };
     }
+    /// A stand-in for a connector process, given the identity file it is
+    /// started for.
+    pub(super) type Connector = std::rc::Rc<dyn Fn(&Path) -> Result<()>>;
     /// This thread's hardware id reads as `id` (`None`: it cannot be read)
     /// until the returned guard drops.
     fn hardware_reads(id: Option<&str>) -> impl Drop {
@@ -3846,6 +3876,205 @@ mod tests {
         own.sort();
         assert_eq!(listed, own);
         assert_eq!(local_file(&paths, studio_id).unwrap(), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// [`spawn_connector`] on this thread runs `connector` instead of a
+    /// connector process until the returned guard drops.
+    fn connectors_run(connector: impl Fn(&Path) -> Result<()> + 'static) -> impl Drop {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                CONNECTOR.set(None);
+            }
+        }
+        CONNECTOR.set(Some(std::rc::Rc::new(connector)));
+        Reset
+    }
+    #[tokio::test]
+    async fn a_second_computer_comes_back_on_as_its_own_host_and_stays_off_once_that_host_is_gone()
+    {
+        use axum::{Json, Router, extract::Path as Route, http::StatusCode, routing::get};
+        use std::{
+            cell::Cell,
+            collections::HashSet,
+            rc::Rc,
+            sync::{
+                Mutex,
+                atomic::{AtomicBool, Ordering},
+            },
+        };
+        let root = std::env::temp_dir().join(format!("haarness-kept-{}", Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        let account = Uuid::now_v7();
+        // The hosts Cloud keeps, each connected while it is kept.
+        let hosts = Arc::new(Mutex::new(HashSet::<Uuid>::new()));
+        let router = Router::new()
+            .route(
+                "/api/v1/key",
+                get(move || async move {
+                    Json(json!({"key":{"id":Uuid::now_v7(),"accountId":account,"label":"Desk","scopes":[]},
+                        "accountName":"Personal"}))
+                }),
+            )
+            .route(
+                "/api/v1/remote-hosts/{id}",
+                get({
+                    let hosts = hosts.clone();
+                    move |Route(id): Route<Uuid>| async move {
+                        if hosts.lock().unwrap().contains(&id) {
+                            Ok(Json(json!({"id": id, "connected": true})))
+                        } else {
+                            Err(StatusCode::NOT_FOUND)
+                        }
+                    }
+                })
+                .delete({
+                    let hosts = hosts.clone();
+                    move |Route(id): Route<Uuid>| async move {
+                        hosts.lock().unwrap().remove(&id);
+                        Json(json!({}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = haarness_account::Client::new(
+            haarness_account::Config::new(&api, root.join("cloud"), "test")
+                .unwrap()
+                .with_api_key("hck_fixture".into())
+                .unwrap(),
+        )
+        .unwrap();
+        let gateway = root.join("Chat folders");
+        std::fs::create_dir_all(&gateway).unwrap();
+        let account = account.to_string();
+        // A folder Studio and Laptop keep in step: Studio, first on this
+        // release, keeps the host the two were under the old name, and left
+        // access on.
+        let shared = identity_file_for(&paths, &client, &account, &gateway, None, None);
+        let own = identity_file_for(&paths, &client, &account, &gateway, None, Some("LAPTOP"));
+        let studio_id = Uuid::now_v7();
+        let studio = json!({"id": studio_id, "name": "Studio", "chatId": null,
+            "accountId": account, "apiUrl": client.config.api_url, "registered": true,
+            "machine": machine_stamp("STUDIO", &studio_id.to_string())});
+        std::fs::write(&shared, studio.to_string()).unwrap();
+        hosts.lock().unwrap().insert(studio_id);
+        let _laptop = hardware_reads(Some("LAPTOP"));
+        // Laptop's connectors, as `remote run` starts: take the identity,
+        // register, and run until the stop file appears or it quits.
+        let (started, fail) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(false)));
+        let quit = Arc::new(AtomicBool::new(false));
+        let _connectors = connectors_run({
+            let (paths, client, account) = (paths.clone(), client.clone(), account.clone());
+            let (gateway, hosts, started, fail, quit) = (
+                gateway.clone(),
+                hosts.clone(),
+                started.clone(),
+                fail.clone(),
+                quit.clone(),
+            );
+            move |file| {
+                started.set(started.get() + 1);
+                anyhow::ensure!(!fail.replace(false), "The chat home's server did not start");
+                let Claimed {
+                    file: claimed,
+                    lock,
+                    mut identity,
+                    id,
+                } = claim(
+                    &paths,
+                    &client,
+                    &account,
+                    &gateway,
+                    None,
+                    "Laptop",
+                    machine_id().as_deref(),
+                )?;
+                assert_eq!(claimed, file);
+                identity["registered"] = json!(true);
+                crate::write_private_json(&claimed, &identity)?;
+                hosts.lock().unwrap().insert(id);
+                let (stop, quit) = (claimed.with_extension("stop"), quit.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..500 {
+                        if stop.exists() || quit.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    drop(lock);
+                });
+                Ok(())
+            }
+        });
+        let restore = || restore_host(&client, &paths, &gateway);
+        let own_id = || -> Uuid {
+            read_identity(&own).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+
+        // Desktop starting on Laptop turns access on as a host of its own,
+        // also when its first try failed before taking an identity.
+        fail.set(true);
+        assert!(restore().await.is_err());
+        assert!(own.with_extension("log").exists() && !own.exists());
+        assert_eq!(restore().await.unwrap().state, AccessState::On);
+        assert_eq!(started.get(), 2);
+        let first = own_id();
+        assert!(first != studio_id && stamped_here(&read_identity(&own).unwrap(), Some("LAPTOP")));
+        assert_eq!(restore().await.unwrap().state, AccessState::On);
+        assert_eq!(started.get(), 2, "a second connector started");
+
+        // Turned off and forgotten there, it stays off when Desktop starts,
+        // until access is turned on, which registers a host afresh.
+        assert_eq!(
+            disable_host(&client, &paths).await.unwrap().state,
+            AccessState::Off
+        );
+        forget_host(&client, &paths, first).await.unwrap();
+        assert!(!own.exists() && !hosts.lock().unwrap().contains(&first));
+        let off = restore().await.unwrap();
+        assert_eq!((off.state, off.error), (AccessState::Off, None));
+        assert_eq!(started.get(), 2, "Desktop registered a forgotten host anew");
+        let on = enable_host(&client, &paths, &gateway).await.unwrap();
+        assert_eq!((on.state, started.get()), (AccessState::On, 3));
+        let second = own_id();
+        assert_ne!(second, first);
+
+        // One that stopped by itself (it quit, or Ctrl-C ended `remote run`),
+        // leaving no stop file, and was then forgotten stays off too.
+        quit.store(true, Ordering::SeqCst);
+        for _ in 0..250 {
+            if !running(&own).unwrap() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        quit.store(false, Ordering::SeqCst);
+        forget_host(&client, &paths, second).await.unwrap();
+        assert!(!own.exists() && !own.with_extension("stop").exists());
+        let off = restore().await.unwrap();
+        assert_eq!((off.state, off.error), (AccessState::Off, None));
+        assert_eq!(started.get(), 3, "Desktop registered a forgotten host anew");
+        let on = enable_host(&client, &paths, &gateway).await.unwrap();
+        assert_eq!((on.state, started.get()), (AccessState::On, 4));
+        let third = own_id();
+
+        // Removed in Cloud while it runs: Desktop's status check deletes the
+        // identity, and Desktop starting leaves access off.
+        hosts.lock().unwrap().remove(&third);
+        let gone = host_access(&client, &paths, true).await.unwrap();
+        assert_eq!(gone.state, AccessState::Off);
+        assert!(!own.exists());
+        let off = restore().await.unwrap();
+        assert_eq!((off.state, off.error), (AccessState::Off, None));
+        assert_eq!(started.get(), 4, "Desktop registered a removed host anew");
+        assert_eq!(read_identity(&shared), Some(studio));
         std::fs::remove_dir_all(root).unwrap();
     }
     /// `wait` is `nominal` milliseconds, jittered at most a fifth shorter.
