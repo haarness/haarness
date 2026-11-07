@@ -4425,6 +4425,15 @@ impl RunWork {
         {
             self.told.insert(id.to_owned());
         }
+        // A `wait` that took a workflow's result, in any turn of the chat:
+        // its end reached the chat there, and no message of it follows.
+        if let ItemData::ToolResult { name, metadata, .. } = &item.data
+            && name == "workflow"
+            && metadata["handedOver"] == true
+            && let Some(id) = metadata["runID"].as_str()
+        {
+            self.told.insert(id.to_owned());
+        }
         let own = self.owns(item.turn_id);
         match &item.data {
             ItemData::AssistantMessage { text } if own => self.said.push(text.clone()),
@@ -4586,8 +4595,9 @@ impl RunWork {
             ));
         }
         // A background workflow that ended and whose result has not
-        // reached the chat yet (and is still owed to it: one the agent
-        // waited for has handed its result over in that wait).
+        // reached the chat yet, while the chat is owed something (one the
+        // agent waited for handed its result over in that wait, which a
+        // server says; from an older one, only the count tells).
         for (id, name) in &self.workflows {
             if self.owed > 0 && !self.running.contains(id) && !self.told.contains(&id.to_string()) {
                 left.held
@@ -19980,6 +19990,68 @@ request_timeout = 0
         assert!(work.left().held.is_empty(), "{:?}", work.left());
         work.active = Some(result_turn);
         assert_eq!(work.left().held, ["the turn in progress"]);
+    }
+
+    /// A workflow of the run whose result a `wait` took has ended for the
+    /// run, however much else the chat is owed: no message of its end
+    /// follows. One the agent only looked at still has its message to come.
+    #[test]
+    fn a_workflow_the_agent_waited_for_holds_the_run_no_more() {
+        let thread = ThreadId::new();
+        let first = TurnId::new();
+        let mut work = super::RunWork::new(thread, first);
+        let (waited, inspected) = (super::WorkflowId::new(), super::WorkflowId::new());
+        let mut sequence = 0;
+        let mut item = |data: ItemData| {
+            sequence += 1;
+            Item {
+                id: ItemId::new(),
+                thread_id: thread,
+                turn_id: Some(first),
+                sequence,
+                data,
+                created_at: chrono::Utc::now(),
+            }
+        };
+        let call = |call_id: &str, arguments: serde_json::Value| ItemData::ToolCall {
+            call_id: call_id.into(),
+            name: "workflow".into(),
+            arguments,
+            provider_metadata: serde_json::Value::Null,
+        };
+        let result = |call_id: &str, metadata: serde_json::Value| ItemData::ToolResult {
+            call_id: call_id.into(),
+            name: "workflow".into(),
+            output: "{}".into(),
+            is_error: false,
+            metadata,
+        };
+        let items = [
+            item(call("s1", json!({"action": "start", "name": "nightly"}))),
+            item(result("s1", json!({"runID": waited}))),
+            item(call("s2", json!({"action": "start", "name": "weekly"}))),
+            item(result("s2", json!({"runID": inspected}))),
+            item(call("w", json!({"action": "wait", "runID": waited}))),
+            item(result(
+                "w",
+                json!({"runID": waited, "workflowStatus": "completed", "handedOver": true}),
+            )),
+            item(call("i", json!({"action": "inspect", "runID": inspected}))),
+            item(result(
+                "i",
+                json!({"runID": inspected, "workflowStatus": "completed"}),
+            )),
+        ];
+        for item in &items {
+            work.read_item(item);
+        }
+        // What the chat is owed is a person's background subagent.
+        work.owed = 1;
+        assert_eq!(
+            work.left().held,
+            ["the result of workflow \u{201c}weekly\u{201d}"]
+        );
+        assert_eq!(work.untold_workflows(), [inspected]);
     }
 
     /// Scripts scheduled runs, from the last thing the chat was told. A
