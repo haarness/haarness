@@ -4,6 +4,7 @@ use super::{
     release_base_mcp_copy, system_mcp_entry, validate_asset_name, validate_mcp_name,
     validate_qualified_model, write_mcp_changes, write_mcp_entry,
 };
+use crate::jsonconfig::SaveScope;
 use crate::plugins;
 use anyhow::{Context as _, Result, bail};
 use async_trait::async_trait;
@@ -783,7 +784,12 @@ impl ManagementService {
                 if read_mcp_entry(&target, name).is_ok() {
                     bail!("MCP server '{name}' already exists in {}", target.display());
                 }
-                write_mcp_entry(&target, name, Some(&entry))?;
+                write_mcp_entry(
+                    &target,
+                    &SaveScope::of(scope == Scope::Local, &self.workspace),
+                    name,
+                    Some(&entry),
+                )?;
                 Ok(json!({
                     "action": "add", "resource": "mcp", "name": name,
                     "scope": scope.name(), "file": target, "config": redact_mcp(&entry)?,
@@ -798,7 +804,13 @@ impl ManagementService {
                 let mut entry = before.clone();
                 apply_mcp_edit(&mut entry, input)?;
                 validate_mcp_entry(&entry)?;
-                write_mcp_changes(&target, name, &before, &entry)?;
+                write_mcp_changes(
+                    &target,
+                    &SaveScope::of(scope == Scope::Local, &self.workspace),
+                    name,
+                    &before,
+                    &entry,
+                )?;
                 Ok(json!({
                     "action": "edit", "resource": "mcp", "name": name,
                     "scope": scope.name(), "file": target, "config": redact_mcp(&entry)?,
@@ -809,7 +821,12 @@ impl ManagementService {
             "remove" => {
                 let name = required_string(input, "name")?;
                 let (target, scope, _) = self.resolve_mcp(name, optional_scope(input)?)?;
-                write_mcp_entry(&target, name, None)?;
+                write_mcp_entry(
+                    &target,
+                    &SaveScope::of(scope == Scope::Local, &self.workspace),
+                    name,
+                    None,
+                )?;
                 Ok(
                     json!({"action":"remove","resource":"mcp","name":name,"scope":scope.name(),"file":target,"restartRequired":false}),
                 )
@@ -932,7 +949,13 @@ impl ManagementService {
                 let (target, scope, before) = self.resolve_mcp(name, optional_scope(input)?)?;
                 let mut entry = before.clone();
                 entry.enabled = action == "enable";
-                write_mcp_changes(&target, name, &before, &entry)?;
+                write_mcp_changes(
+                    &target,
+                    &SaveScope::of(scope == Scope::Local, &self.workspace),
+                    name,
+                    &before,
+                    &entry,
+                )?;
                 // Turned back on as the system folder has it: its entry applies again.
                 if action == "enable"
                     && let Some(source) = release_base_mcp_copy(

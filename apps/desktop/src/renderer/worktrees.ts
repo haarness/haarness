@@ -167,21 +167,28 @@ export async function removeWorktree(
     ))
   )
     return;
-  if (await dropWorktree(app, project, location))
-    app.notify(t("Worktree removed."));
+  const dropped = await dropWorktree(app, project, location);
+  if (dropped)
+    app.notify(
+      dropped === "kept"
+        ? t("Worktree forgotten. Its folder no longer links to its repository, so it was left on disk.")
+        : t("Worktree removed."),
+    );
 }
 
 /**
  * Removes a worktree without asking: the folder and its registration, or
  * only the registration of one whose folder is gone. The server keeps a
- * worktree with local changes or a running server and says why. False when
- * Desktop could not switch away from the worktree first.
+ * worktree with local changes or a running server and says why. A worktree
+ * whose link to its repository broke is only forgotten, its folder left
+ * where it is ("kept"). False when Desktop could not switch away from the
+ * worktree first.
  */
 export async function dropWorktree(
   app: ReturnType<typeof useApp>,
   project: DesktopProject,
   location: Recent,
-) {
+): Promise<false | "removed" | "kept"> {
   if (!location.checkout?.managed) return false;
   const connection = await rootConnection(app, project);
   if (
@@ -189,12 +196,13 @@ export async function dropWorktree(
     !(await app.activateProject(connection.id))
   )
     return false;
-  await window.haarness.api(
+  const response = await window.haarness.api<WorkspaceOperationResponse | undefined>(
     connection.id,
     location.checkout.exists ? "removeWorkspace" : "cleanupWorkspace",
     [location.checkout.id, { confirm: true }],
   );
   await window.haarness.forget(location.id);
   await app.refreshProjects();
-  return true;
+  // The server answers with the folder as it left it.
+  return response?.workspace?.exists ? "kept" : "removed";
 }

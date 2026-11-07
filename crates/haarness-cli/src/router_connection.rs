@@ -177,7 +177,8 @@ pub(crate) async fn connect(
         store.set(&id, &Credential::api(request.key.trim().to_owned()))?;
     }
     let target = crate::provider_config_target(paths, workspace, request.project);
-    if let Err(error) = crate::write_provider_entry(&target, &id, Some(&section)) {
+    let scope = crate::jsonconfig::SaveScope::of(request.project, workspace);
+    if let Err(error) = crate::write_provider_entry(&target, &scope, &id, Some(&section)) {
         if requires_auth {
             let _ = store.remove(&id);
         }

@@ -2399,7 +2399,8 @@ async fn provider_command(
                 ..ProviderSection::default()
             };
             let target = provider_config_target(paths, workspace, project);
-            write_provider_entry(&target, &id, Some(&section))?;
+            let scope = jsonconfig::SaveScope::of(project, workspace);
+            write_provider_entry(&target, &scope, &id, Some(&section))?;
             println!("Added custom provider '{id}' to {}.", target.display());
             if section.requires_auth && section.api_key_env.is_none() && section.headers.is_empty()
             {
@@ -2414,7 +2415,8 @@ async fn provider_command(
         ProviderCommand::Remove { id, project } => {
             validate_provider_id(&id)?;
             let target = provider_config_target(paths, workspace, project);
-            write_provider_entry(&target, &id, None)?;
+            let scope = jsonconfig::SaveScope::of(project, workspace);
+            write_provider_entry(&target, &scope, &id, None)?;
             println!("Removed custom provider '{id}' from {}.", target.display());
             println!(
                 "Stored credentials were retained; use `haarness auth logout {id}` to remove them."
@@ -9244,7 +9246,8 @@ async fn mcp_command(
                 _ => anyhow::bail!("provide exactly one of --command or --url"),
             };
             let target = mcp_entry_target(paths, workspace, project, &name);
-            write_mcp_entry(&target, &name, Some(&entry))?;
+            let scope = jsonconfig::SaveScope::of(project, workspace);
+            write_mcp_entry(&target, &scope, &name, Some(&entry))?;
             // The entry stays saved when the server cannot start: fixing the
             // program or the URL and reconnecting is the usual next step.
             match client
@@ -9287,7 +9290,12 @@ async fn mcp_command(
             let mut entry = loaded_mcp_entry(&target, read_mcp_entry(&target, &name)?);
             entry.enabled = false;
             client.configure_mcp(&name, &entry).await?;
-            write_mcp_entry(&target, &name, None)?;
+            write_mcp_entry(
+                &target,
+                &jsonconfig::SaveScope::of(project, workspace),
+                &name,
+                None,
+            )?;
             println!("Removed MCP server '{name}' from {}.", target.display());
         }
     }
@@ -9452,22 +9460,21 @@ async fn answer_mcp_oauth_callback(
         return None;
     };
     let (status, body, query) = match mcp_oauth_callback(&target, &state) {
-        McpOAuthCallback::Elsewhere => ("404 Not Found", "Not found.\n", None),
+        McpOAuthCallback::Elsewhere => ("404 Not Found", "Not found.\n".to_owned(), None),
         McpOAuthCallback::Foreign => (
             "400 Bad Request",
-            "This is not the authorization Haarness started.\n",
+            "This is not the authorization Haarness started.\n".to_owned(),
             None,
         ),
-        McpOAuthCallback::Ours(query) => (
-            "200 OK",
-            "Authorization received. You may return to the Haarness CLI.\n",
-            Some(query),
-        ),
+        McpOAuthCallback::Ours(query) => {
+            let (status, body) = mcp_oauth_callback_page(&query);
+            (status, body, Some(query))
+        }
     };
     let _ = stream
         .write_all(
             format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             )
             .as_bytes(),
@@ -9510,6 +9517,55 @@ enum McpOAuthCallback {
     Foreign,
     /// The callback for the authorization Haarness opened: its `?query`.
     Ours(String),
+}
+
+/// The page the browser shows on its return from the provider: whether the
+/// provider let the sign-in through, worded for whichever Haarness app
+/// started it. How the token exchange that follows went, that app reports.
+/// The provider's own description of a refusal is shown as plain text, on
+/// one line and cut short.
+fn mcp_oauth_callback_page(query: &str) -> (&'static str, String) {
+    const MAX_REASON_CHARS: usize = 300;
+    let pairs: HashMap<String, String> =
+        url::form_urlencoded::parse(query.strip_prefix('?').unwrap_or(query).as_bytes())
+            .into_owned()
+            .collect();
+    let given = |name: &str| {
+        pairs
+            .get(name)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+    };
+    if given("error").is_none() && given("code").is_some() {
+        return (
+            "200 OK",
+            "Authorization received. Haarness is finishing the sign-in; you can close this page.\n"
+                .to_owned(),
+        );
+    }
+    let reason = given("error_description")
+        .or_else(|| given("error"))
+        .unwrap_or("the provider sent no authorization code.");
+    let mut reason = reason
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    if let Some((cut, _)) = reason.char_indices().nth(MAX_REASON_CHARS) {
+        reason.truncate(cut);
+        reason.push('…');
+    }
+    (
+        "400 Bad Request",
+        format!(
+            "The sign-in did not finish: {reason}\nYou can close this page and try again from Haarness.\n"
+        ),
+    )
 }
 
 fn mcp_oauth_callback(target: &str, state: &str) -> McpOAuthCallback {
@@ -9569,7 +9625,13 @@ fn set_mcp_enabled(
     let before = read_mcp_entry(&target, name)?;
     let mut entry = before.clone();
     entry.enabled = enabled;
-    write_mcp_changes(&target, name, &before, &entry)?;
+    write_mcp_changes(
+        &target,
+        &jsonconfig::SaveScope::of(project, workspace),
+        name,
+        &before,
+        &entry,
+    )?;
     if enabled && let Some(source) = release_base_mcp_copy(paths, workspace, name, project)? {
         println!(
             "Enabled MCP server '{name}' from the system folder ({}).",
@@ -9807,15 +9869,17 @@ fn adopt_system_mcp_entry(
         return Ok(());
     };
     let target = scoped_config_target(paths, workspace, project);
+    let scope = jsonconfig::SaveScope::of(project, workspace);
     if target.extension().is_some_and(|value| value != "toml") {
         jsonconfig::write_entry(
             &target,
+            &scope,
             "mcp",
             name,
             Some(raw_config_entry(&source, "mcp", name)?),
         )
     } else {
-        write_mcp_entry(&target, name, Some(&entry))
+        write_mcp_entry(&target, &scope, name, Some(&entry))
     }
 }
 
@@ -9844,7 +9908,12 @@ fn release_base_mcp_copy(
     if !mine.enabled || !base.enabled || comparable(&mine) != comparable(&base) {
         return Ok(None);
     }
-    write_mcp_entry(&target, name, None)?;
+    write_mcp_entry(
+        &target,
+        &jsonconfig::SaveScope::of(project, workspace),
+        name,
+        None,
+    )?;
     Ok(Some(source))
 }
 
@@ -9869,6 +9938,7 @@ fn raw_config_entry(path: &Path, section: &str, name: &str) -> Result<serde_json
 /// formatting; TOML round-trips its values and loses its comments.
 fn write_entry_fields(
     path: &Path,
+    scope: &jsonconfig::SaveScope,
     section: &str,
     name: &str,
     fields: Vec<(String, Option<serde_json::Value>)>,
@@ -9877,26 +9947,28 @@ fn write_entry_fields(
         return Ok(());
     }
     if path.extension().is_some_and(|value| value != "toml") {
-        return jsonconfig::write_entry_fields(path, section, name, fields);
+        return jsonconfig::write_entry_fields(path, scope, section, name, fields);
     }
-    let mut root: toml::Value = toml::from_str(&fs::read_to_string(path)?)?;
-    let entry = root
-        .get_mut(section)
-        .and_then(|entries| entries.get_mut(name))
-        .and_then(toml::Value::as_table_mut)
-        .with_context(|| format!("no {section} entry named '{name}' in {}", path.display()))?;
-    for (key, value) in fields {
-        match value {
-            Some(value) => {
-                entry.insert(key, toml::Value::try_from(value)?);
-            }
-            None => {
-                entry.remove(&key);
+    let missing = || format!("no {section} entry named '{name}' in {}", path.display());
+    jsonconfig::replace_config_file(path, jsonconfig::ConfigMode::Kept, scope, |text| {
+        let mut root: toml::Value = toml::from_str(text.with_context(missing)?)?;
+        let entry = root
+            .get_mut(section)
+            .and_then(|entries| entries.get_mut(name))
+            .and_then(toml::Value::as_table_mut)
+            .with_context(missing)?;
+        for (key, value) in fields {
+            match value {
+                Some(value) => {
+                    entry.insert(key, toml::Value::try_from(value)?);
+                }
+                None => {
+                    entry.remove(&key);
+                }
             }
         }
-    }
-    fs::write(path, toml::to_string_pretty(&root)?)?;
-    Ok(())
+        Ok(toml::to_string_pretty(&root)?)
+    })
 }
 
 /// Saves `after`, an edit of the MCP entry `before` read from `path`: only
@@ -9906,12 +9978,13 @@ fn write_entry_fields(
 /// keys Haarness does not know stay.
 fn write_mcp_changes(
     path: &Path,
+    scope: &jsonconfig::SaveScope,
     name: &str,
     before: &McpConfigureRequest,
     after: &McpConfigureRequest,
 ) -> Result<()> {
     let raw = raw_config_entry(path, "mcp", name)?;
-    write_entry_fields(path, "mcp", name, mcp_changes(&raw, before, after))
+    write_entry_fields(path, scope, "mcp", name, mcp_changes(&raw, before, after))
 }
 
 /// The keys to write into the entry `raw` (as written) for the edit from
@@ -10057,128 +10130,135 @@ fn mcp_changes(
 /// Upsert or delete `[mcp.<name>]` in a TOML config file. TOML round-trips
 /// through `toml::Value`, so comments in the file are not preserved — noted
 /// in the CLI docs; JSON configs remain untouched.
-fn write_mcp_entry(path: &Path, name: &str, entry: Option<&McpConfigureRequest>) -> Result<()> {
+fn write_mcp_entry(
+    path: &Path,
+    scope: &jsonconfig::SaveScope,
+    name: &str,
+    entry: Option<&McpConfigureRequest>,
+) -> Result<()> {
     if path.extension().is_some_and(|value| value != "toml") {
         return jsonconfig::write_entry(
             path,
+            scope,
             "mcp",
             name,
             entry.map(serde_json::to_value).transpose()?,
         );
     }
-    let mut root: toml::Value = if path.exists() {
-        toml::from_str(&fs::read_to_string(path)?)?
-    } else {
-        toml::Value::Table(toml::map::Map::new())
-    };
-    let table = root.as_table_mut().context("config root must be a table")?;
-    let mcp = table
-        .entry("mcp")
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
-        .as_table_mut()
-        .context("[mcp] must be a table")?;
-    match entry {
-        Some(entry) => {
-            let mut server = toml::map::Map::new();
-            server.insert(
-                "transport".into(),
-                toml::Value::String(entry.transport.clone()),
-            );
-            if let Some(command) = &entry.command {
-                server.insert("command".into(), toml::Value::String(command.clone()));
-            }
-            if !entry.args.is_empty() {
+    jsonconfig::replace_config_file(path, jsonconfig::ConfigMode::Kept, scope, |text| {
+        let mut root: toml::Value = match text {
+            Some(text) => toml::from_str(text)?,
+            None => toml::Value::Table(toml::map::Map::new()),
+        };
+        let table = root.as_table_mut().context("config root must be a table")?;
+        let mcp = table
+            .entry("mcp")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+            .as_table_mut()
+            .context("[mcp] must be a table")?;
+        match entry {
+            Some(entry) => {
+                let mut server = toml::map::Map::new();
                 server.insert(
-                    "args".into(),
-                    toml::Value::Array(
-                        entry
-                            .args
-                            .iter()
-                            .map(|arg| toml::Value::String(arg.clone()))
-                            .collect(),
-                    ),
+                    "transport".into(),
+                    toml::Value::String(entry.transport.clone()),
                 );
+                if let Some(command) = &entry.command {
+                    server.insert("command".into(), toml::Value::String(command.clone()));
+                }
+                if !entry.args.is_empty() {
+                    server.insert(
+                        "args".into(),
+                        toml::Value::Array(
+                            entry
+                                .args
+                                .iter()
+                                .map(|arg| toml::Value::String(arg.clone()))
+                                .collect(),
+                        ),
+                    );
+                }
+                if !entry.env.is_empty() {
+                    server.insert(
+                        "env".into(),
+                        toml::Value::Table(
+                            entry
+                                .env
+                                .iter()
+                                .map(|(key, value)| {
+                                    (key.clone(), toml::Value::String(value.clone()))
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
+                if let Some(cwd) = &entry.cwd {
+                    server.insert("cwd".into(), toml::Value::String(cwd.clone()));
+                }
+                if let Some(url) = &entry.url {
+                    server.insert("url".into(), toml::Value::String(url.clone()));
+                }
+                if !entry.headers.is_empty() {
+                    server.insert(
+                        "headers".into(),
+                        toml::Value::Table(
+                            entry
+                                .headers
+                                .iter()
+                                .map(|(key, value)| {
+                                    (key.clone(), toml::Value::String(value.clone()))
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
+                if let Some(helper) = &entry.headers_helper {
+                    server.insert("headersHelper".into(), toml::Value::String(helper.clone()));
+                }
+                if let Some(timeout) = entry.timeout_ms {
+                    server.insert(
+                        "timeoutMs".into(),
+                        toml::Value::Integer(i64::try_from(timeout).unwrap_or(i64::MAX)),
+                    );
+                }
+                if let Some(oauth) = entry.oauth {
+                    server.insert("oauth".into(), toml::Value::Boolean(oauth));
+                }
+                if let Some(client_id) = &entry.oauth_client_id {
+                    server.insert(
+                        "oauthClientId".into(),
+                        toml::Value::String(client_id.clone()),
+                    );
+                }
+                if !entry.oauth_scopes.is_empty() {
+                    server.insert(
+                        "oauthScopes".into(),
+                        toml::Value::Array(
+                            entry
+                                .oauth_scopes
+                                .iter()
+                                .map(|scope| toml::Value::String(scope.clone()))
+                                .collect(),
+                        ),
+                    );
+                }
+                if let Some(apps) = entry.apps {
+                    server.insert("apps".into(), toml::Value::Boolean(apps));
+                }
+                server.insert("enabled".into(), toml::Value::Boolean(entry.enabled));
+                mcp.insert(name.to_owned(), toml::Value::Table(server));
             }
-            if !entry.env.is_empty() {
-                server.insert(
-                    "env".into(),
-                    toml::Value::Table(
-                        entry
-                            .env
-                            .iter()
-                            .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
-                            .collect(),
-                    ),
-                );
+            None => {
+                if mcp.remove(name).is_none() {
+                    anyhow::bail!("no MCP server named '{name}' in {}", path.display());
+                }
             }
-            if let Some(cwd) = &entry.cwd {
-                server.insert("cwd".into(), toml::Value::String(cwd.clone()));
-            }
-            if let Some(url) = &entry.url {
-                server.insert("url".into(), toml::Value::String(url.clone()));
-            }
-            if !entry.headers.is_empty() {
-                server.insert(
-                    "headers".into(),
-                    toml::Value::Table(
-                        entry
-                            .headers
-                            .iter()
-                            .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
-                            .collect(),
-                    ),
-                );
-            }
-            if let Some(helper) = &entry.headers_helper {
-                server.insert("headersHelper".into(), toml::Value::String(helper.clone()));
-            }
-            if let Some(timeout) = entry.timeout_ms {
-                server.insert(
-                    "timeoutMs".into(),
-                    toml::Value::Integer(i64::try_from(timeout).unwrap_or(i64::MAX)),
-                );
-            }
-            if let Some(oauth) = entry.oauth {
-                server.insert("oauth".into(), toml::Value::Boolean(oauth));
-            }
-            if let Some(client_id) = &entry.oauth_client_id {
-                server.insert(
-                    "oauthClientId".into(),
-                    toml::Value::String(client_id.clone()),
-                );
-            }
-            if !entry.oauth_scopes.is_empty() {
-                server.insert(
-                    "oauthScopes".into(),
-                    toml::Value::Array(
-                        entry
-                            .oauth_scopes
-                            .iter()
-                            .map(|scope| toml::Value::String(scope.clone()))
-                            .collect(),
-                    ),
-                );
-            }
-            if let Some(apps) = entry.apps {
-                server.insert("apps".into(), toml::Value::Boolean(apps));
-            }
-            server.insert("enabled".into(), toml::Value::Boolean(entry.enabled));
-            mcp.insert(name.to_owned(), toml::Value::Table(server));
         }
-        None => {
-            if mcp.remove(name).is_none() {
-                anyhow::bail!("no MCP server named '{name}' in {}", path.display());
-            }
+        if mcp.is_empty() {
+            table.remove("mcp");
         }
-    }
-    if mcp.is_empty() {
-        table.remove("mcp");
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, toml::to_string_pretty(&root)?)?;
-    Ok(())
+        Ok(toml::to_string_pretty(&root)?)
+    })
 }
 
 fn provider_config_target(paths: &Paths, workspace: &Path, project: bool) -> PathBuf {
@@ -10187,100 +10267,105 @@ fn provider_config_target(paths: &Paths, workspace: &Path, project: bool) -> Pat
 
 /// Upsert or delete `[providers.<id>]`. Like MCP management, this intentionally
 /// round-trips TOML values and therefore does not preserve comments.
-fn write_provider_entry(path: &Path, id: &str, entry: Option<&ProviderSection>) -> Result<()> {
+fn write_provider_entry(
+    path: &Path,
+    scope: &jsonconfig::SaveScope,
+    id: &str,
+    entry: Option<&ProviderSection>,
+) -> Result<()> {
     if path.extension().is_some_and(|value| value != "toml") {
         return jsonconfig::write_entry(
             path,
+            scope,
             "providers",
             id,
             entry.map(serde_json::to_value).transpose()?,
         );
     }
-    let mut root: toml::Value = if path.exists() {
-        toml::from_str(&fs::read_to_string(path)?)?
-    } else {
-        toml::Value::Table(toml::map::Map::new())
-    };
-    let table = root.as_table_mut().context("config root must be a table")?;
-    let providers = table
-        .entry("providers")
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
-        .as_table_mut()
-        .context("[providers] must be a table")?;
-    match entry {
-        Some(entry) => {
-            let mut provider = toml::map::Map::new();
-            provider.insert(
-                "protocol".into(),
-                toml::Value::String(entry.protocol.clone()),
-            );
-            if let Some(name) = &entry.name {
-                provider.insert("name".into(), toml::Value::String(name.clone()));
-            }
-            if let Some(url) = &entry.base_url {
-                provider.insert("base_url".into(), toml::Value::String(url.clone()));
-            }
-            if let Some(variable) = &entry.api_key_env {
-                provider.insert("api_key_env".into(), toml::Value::String(variable.clone()));
-            }
-            if !entry.headers.is_empty() {
+    jsonconfig::replace_config_file(path, jsonconfig::ConfigMode::Kept, scope, |text| {
+        let mut root: toml::Value = match text {
+            Some(text) => toml::from_str(text)?,
+            None => toml::Value::Table(toml::map::Map::new()),
+        };
+        let table = root.as_table_mut().context("config root must be a table")?;
+        let providers = table
+            .entry("providers")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+            .as_table_mut()
+            .context("[providers] must be a table")?;
+        match entry {
+            Some(entry) => {
+                let mut provider = toml::map::Map::new();
                 provider.insert(
-                    "headers".into(),
-                    toml::Value::Table(
-                        entry
-                            .headers
-                            .iter()
-                            .map(|(name, value)| (name.clone(), toml::Value::String(value.clone())))
-                            .collect(),
-                    ),
+                    "protocol".into(),
+                    toml::Value::String(entry.protocol.clone()),
                 );
-            }
-            if !entry.models.is_empty() {
-                provider.insert(
-                    "models".into(),
-                    toml::Value::Array(
-                        entry
-                            .models
-                            .iter()
-                            .map(|model| toml::Value::String(model.clone()))
-                            .collect(),
-                    ),
-                );
-            }
-            provider.insert(
-                "requires_auth".into(),
-                toml::Value::Boolean(entry.requires_auth),
-            );
-            for (key, seconds) in [
-                ("stream_idle_timeout", entry.stream_idle_timeout),
-                ("request_timeout", entry.request_timeout),
-            ] {
-                if let Some(seconds) = seconds {
+                if let Some(name) = &entry.name {
+                    provider.insert("name".into(), toml::Value::String(name.clone()));
+                }
+                if let Some(url) = &entry.base_url {
+                    provider.insert("base_url".into(), toml::Value::String(url.clone()));
+                }
+                if let Some(variable) = &entry.api_key_env {
+                    provider.insert("api_key_env".into(), toml::Value::String(variable.clone()));
+                }
+                if !entry.headers.is_empty() {
                     provider.insert(
-                        key.into(),
-                        toml::Value::Integer(i64::try_from(seconds).unwrap_or(i64::MAX)),
+                        "headers".into(),
+                        toml::Value::Table(
+                            entry
+                                .headers
+                                .iter()
+                                .map(|(name, value)| {
+                                    (name.clone(), toml::Value::String(value.clone()))
+                                })
+                                .collect(),
+                        ),
                     );
                 }
+                if !entry.models.is_empty() {
+                    provider.insert(
+                        "models".into(),
+                        toml::Value::Array(
+                            entry
+                                .models
+                                .iter()
+                                .map(|model| toml::Value::String(model.clone()))
+                                .collect(),
+                        ),
+                    );
+                }
+                provider.insert(
+                    "requires_auth".into(),
+                    toml::Value::Boolean(entry.requires_auth),
+                );
+                for (key, seconds) in [
+                    ("stream_idle_timeout", entry.stream_idle_timeout),
+                    ("request_timeout", entry.request_timeout),
+                ] {
+                    if let Some(seconds) = seconds {
+                        provider.insert(
+                            key.into(),
+                            toml::Value::Integer(i64::try_from(seconds).unwrap_or(i64::MAX)),
+                        );
+                    }
+                }
+                if let Some(integration) = &entry.integration {
+                    provider.insert("integration".into(), toml::Value::try_from(integration)?);
+                }
+                providers.insert(id.to_owned(), toml::Value::Table(provider));
             }
-            if let Some(integration) = &entry.integration {
-                provider.insert("integration".into(), toml::Value::try_from(integration)?);
+            None => {
+                if providers.remove(id).is_none() {
+                    anyhow::bail!("no custom provider named '{id}' in {}", path.display());
+                }
             }
-            providers.insert(id.to_owned(), toml::Value::Table(provider));
         }
-        None => {
-            if providers.remove(id).is_none() {
-                anyhow::bail!("no custom provider named '{id}' in {}", path.display());
-            }
+        if providers.is_empty() {
+            table.remove("providers");
         }
-    }
-    if providers.is_empty() {
-        table.remove("providers");
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, toml::to_string_pretty(&root)?)?;
-    Ok(())
+        Ok(toml::to_string_pretty(&root)?)
+    })
 }
 
 /// Linux keeps its trusted roots in a package (ca-certificates) that minimal
@@ -14017,7 +14102,8 @@ mod tests {
         prepare_start_log, read_mcp_entry, receive_oauth_callback,
         replace_incompatible_workspace_server, resolved_credentials, select_run_thread_client,
         server_compatibility_error, set_goal_for_run_client, start_failure, valid_provider_url,
-        wait_for_goal_client, write_mcp_entry, write_provider_entry, write_runtime,
+        wait_for_goal_client, write_entry_fields, write_mcp_entry, write_provider_entry,
+        write_runtime,
     };
     use super::{
         Approver, NO_MODEL_CONNECTED, Refusals, RunWatch, TurnStatus, allow_rule_example,
@@ -14516,6 +14602,51 @@ mod tests {
         );
     }
 
+    /// The page after the provider's return says plainly whether the
+    /// provider let the sign-in through, naming no particular app.
+    #[test]
+    fn the_mcp_sign_in_page_says_when_the_provider_refused() {
+        let (status, page) = super::mcp_oauth_callback_page("?code=c%2B1&state=st-1");
+        assert_eq!(status, "200 OK");
+        assert!(page.starts_with("Authorization received."), "{page}");
+        for (query, reason) in [
+            (
+                "?error=access_denied&error_description=The+user+said+no&state=st-1",
+                "The user said no",
+            ),
+            ("?error=access_denied&state=st-1", "access_denied"),
+            ("?error=server_error&code=c&state=st-1", "server_error"),
+            ("?state=st-1", "the provider sent no authorization code."),
+            (
+                "?code=&state=st-1",
+                "the provider sent no authorization code.",
+            ),
+            (
+                "?error=x&error_description=line%0D%0AX-Injected:%201",
+                "line  X-Injected: 1",
+            ),
+        ] {
+            let (status, page) = super::mcp_oauth_callback_page(query);
+            assert_eq!(status, "400 Bad Request", "{query}");
+            assert_eq!(
+                page,
+                format!(
+                    "The sign-in did not finish: {reason}\nYou can close this page and try again from Haarness.\n"
+                ),
+                "{query}"
+            );
+        }
+        let long = format!("?error=x&error_description={}", "a".repeat(400));
+        let (_, page) = super::mcp_oauth_callback_page(&long);
+        assert!(page.contains(&format!("{}…\n", "a".repeat(300))), "{page}");
+        for (_, page) in [
+            super::mcp_oauth_callback_page("?code=c&state=st-1"),
+            super::mcp_oauth_callback_page("?error=access_denied&state=st-1"),
+        ] {
+            assert!(!page.contains("CLI") && !page.contains("Desktop"), "{page}");
+        }
+    }
+
     #[tokio::test]
     async fn serve_takes_a_free_port_only_when_the_default_one_is_taken() {
         let host: std::net::IpAddr = std::net::Ipv4Addr::LOCALHOST.into();
@@ -14595,6 +14726,48 @@ mod tests {
             receive_oauth_callback(&listener, &redirect, "https://auth.example/authorize")
                 .await
                 .is_err()
+        );
+    }
+
+    /// A refused sign-in still ends the wait (the session reports it), and
+    /// the browser is told it did not finish.
+    #[tokio::test]
+    async fn a_refused_mcp_sign_in_ends_the_wait_with_a_failure_page() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let redirect = format!("http://127.0.0.1:{port}/mcp/oauth/callback");
+        let browser = async {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(
+                    b"GET /mcp/oauth/callback?error=access_denied&error_description=Access+was+denied&state=st-1 HTTP/1.1\r\nHost: x\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        };
+        let (callback, response) = tokio::join!(
+            receive_oauth_callback(
+                &listener,
+                &redirect,
+                "https://auth.example/authorize?client_id=c&state=st-1"
+            ),
+            browser
+        );
+        assert!(callback.unwrap().contains("error=access_denied"));
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert!(
+            response.contains("\r\nX-Content-Type-Options: nosniff\r\n"),
+            "{response}"
+        );
+        assert!(
+            response.ends_with("\r\n\r\nThe sign-in did not finish: Access was denied\nYou can close this page and try again from Haarness.\n"),
+            "{response}"
         );
     }
 
@@ -14841,7 +15014,13 @@ mod tests {
         let mut entry = read_mcp_entry(&path, "fixture").unwrap();
         assert_eq!(entry.env["TOKEN"], "${HAARNESS_FIXTURE_UNSET_TOKEN}");
         entry.enabled = true;
-        write_mcp_entry(&path, "fixture", Some(&entry)).unwrap();
+        write_mcp_entry(
+            &path,
+            &crate::jsonconfig::SaveScope::Global,
+            "fixture",
+            Some(&entry),
+        )
+        .unwrap();
         let written: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written["mcp"]["fixture"]["command"], "${HOME}/server");
@@ -14884,7 +15063,13 @@ mod tests {
             enabled: false,
             apps: None,
         };
-        write_mcp_entry(&path, "fixture", Some(&entry)).unwrap();
+        write_mcp_entry(
+            &path,
+            &crate::jsonconfig::SaveScope::Global,
+            "fixture",
+            Some(&entry),
+        )
+        .unwrap();
         let restored = read_mcp_entry(&path, "fixture").unwrap();
         assert_eq!(restored.headers, entry.headers);
         assert_eq!(restored.oauth, Some(true));
@@ -14898,6 +15083,93 @@ mod tests {
         assert_eq!(explicit["headers"]["Authorization"], "Bearer ${TOKEN}");
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Two `haarness mcp add` at once against a TOML file both land: each
+    /// save reads the file under the folder's lock and replaces it whole.
+    /// The file keeps its permissions and a link to it stays a link.
+    #[test]
+    fn concurrent_toml_writes_keep_every_entry_the_file_mode_and_a_link() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-toml-race-{}", uuid::Uuid::now_v7()));
+        let dotfiles = root.join("dotfiles");
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        let target = dotfiles.join("config.toml");
+        fs::write(&target, "[defaults]\nmodel = \"echo/echo-1\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        #[cfg(unix)]
+        let path = {
+            let path = root.join("config/config.toml");
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            path
+        };
+        #[cfg(not(unix))]
+        let path = target.clone();
+        let server = |index: usize| McpConfigureRequest {
+            transport: "stdio".into(),
+            command: Some(format!("server-{index}")),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            url: None,
+            headers: BTreeMap::new(),
+            headers_helper: None,
+            timeout_ms: None,
+            oauth: None,
+            oauth_client_id: None,
+            oauth_scopes: Vec::new(),
+            enabled: true,
+            apps: None,
+        };
+        let writers: Vec<_> = (0..8)
+            .map(|writer| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for index in (0..6).map(|step| writer * 6 + step) {
+                        write_mcp_entry(
+                            &path,
+                            &crate::jsonconfig::SaveScope::Global,
+                            &format!("server{index}"),
+                            Some(&server(index)),
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let written: toml::Value = toml::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(written["mcp"].as_table().unwrap().len(), 48);
+        assert_eq!(written["defaults"]["model"].as_str(), Some("echo/echo-1"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert!(fs::symlink_metadata(&path).unwrap().is_symlink());
+            assert_eq!(
+                fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+        // The edit of one entry's fields goes the same way.
+        write_entry_fields(
+            &path,
+            &crate::jsonconfig::SaveScope::Global,
+            "mcp",
+            "server3",
+            vec![("enabled".into(), Some(serde_json::json!(false)))],
+        )
+        .unwrap();
+        let written: toml::Value = toml::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(written["mcp"]["server3"]["enabled"].as_bool(), Some(false));
+        assert_eq!(fs::read_dir(&dotfiles).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -15063,7 +15335,13 @@ mod tests {
             models: vec!["company-flash".into()],
             ..ProviderSection::default()
         };
-        write_provider_entry(&path, "company-gateway", Some(&section)).unwrap();
+        write_provider_entry(
+            &path,
+            &crate::jsonconfig::SaveScope::Global,
+            "company-gateway",
+            Some(&section),
+        )
+        .unwrap();
 
         let config: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let saved = config.providers.get("company-gateway").unwrap();
@@ -15077,7 +15355,13 @@ mod tests {
                 .contains("api_key =")
         );
 
-        write_provider_entry(&path, "company-gateway", None).unwrap();
+        write_provider_entry(
+            &path,
+            &crate::jsonconfig::SaveScope::Global,
+            "company-gateway",
+            None,
+        )
+        .unwrap();
         let config: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(config.providers.is_empty());
         let _ = std::fs::remove_dir_all(root);

@@ -156,7 +156,13 @@ pub(crate) fn set_enabled(config_dir: &Path, enabled: bool) -> Result<()> {
         .into_iter()
         .find(|path| path.exists())
         .unwrap_or_else(|| config_dir.join("haarness.json"));
-    crate::jsonconfig::write_entry(&target, "telemetry", "usage", Some(json!(enabled)))
+    crate::jsonconfig::write_entry(
+        &target,
+        &crate::jsonconfig::SaveScope::Global,
+        "telemetry",
+        "usage",
+        Some(json!(enabled)),
+    )
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

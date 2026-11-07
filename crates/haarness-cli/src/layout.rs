@@ -311,6 +311,19 @@ pub fn system_config_dir() -> Option<PathBuf> {
     None
 }
 
+/// The global configuration folder this process reads (the one `main`
+/// recorded from its layout). This crate's own tests never read the one of
+/// the machine they run on: a test that needs it passes it.
+#[cfg(not(test))]
+pub fn global_config_dir() -> Option<PathBuf> {
+    haarness_core::global_config_dir()
+}
+
+#[cfg(test)]
+pub fn global_config_dir() -> Option<PathBuf> {
+    None
+}
+
 /// The real roots of `workspace`'s project, where a cloned repository puts
 /// what it likes: its worktree root and the workspace itself.
 pub fn project_roots(workspace: &Path) -> Vec<PathBuf> {

@@ -20,11 +20,15 @@
    that ignores case, named agents.md.
 7. read_end, edit_empty: a read past the last line says how long the file is; an edit with an empty
    old says to use write.
+8. read_twin: a typed macOS screenshot name (a plain space where the file has U+202F before PM)
+   reads the screenshot; a read rule, or a PreToolUse hook, written for the real name applies to it,
+   and a typed name a hook rewrites the path to is recovered; two files that both fit, or a write,
+   keep the name as typed.
 
 Usage: python3 scripts/test-file-tools.py   (HAARNESS_BIN picks the binary, HAARNESS_E2E_ROOT a
 folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of read_line,
 read_budget, read_text, read_pipe, grep_line, grep_limit, home, edit_crlf, rg, instructions,
-read_end and edit_empty). No model is
+read_end, edit_empty and read_twin). No model is
 called.
 """
 import json
@@ -333,9 +337,54 @@ def case_edit_empty():
     passed('an edit with an empty old says to use write and leaves the file alone')
 
 
+def case_read_twin():
+    import struct, zlib
+    def chunk(kind, body):
+        return struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body))
+    png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+           + chunk(b'IDAT', zlib.compress(b'\x00\xff\x00\x00')) + chunk(b'IEND', b''))
+    desktop = home / 'Desktop'
+    desktop.mkdir(exist_ok=True)
+    shot = desktop / 'Screenshot 2026-11-05 at 10.00.00\u202fPM.png'
+    shot.write_bytes(png)
+    output = tool(files, 'read', {'path': '~/Desktop/Screenshot 2026-11-05 at 10.00.00 PM.png'})
+    assert f'Image read successfully: {shot}' in output, output
+    passed('a typed screenshot name with a plain space before PM reads the file named with U+202F')
+    guarded = project('twin-rules', {'permission': {'read': {'*\u202fPM.txt': 'deny'}}})
+    (guarded / 'Notes 1.00\u202fPM.txt').write_text('PRIVATE\n')
+    output = tool(guarded, 'read', {'path': 'Notes 1.00 PM.txt'})
+    assert 'PRIVATE' not in output and 'denied by permission rule' in output, output
+    passed('a read rule written for the real name refuses the typed name too')
+    # A PreToolUse hook is shown the file the read opens, so one that guards it by path still does,
+    # and a path a hook rewrites to a typed name is recovered as well.
+    blocker = r"""grep -q "$(printf 'Return 1.00\342\200\257PM')" && { echo 'tax files stay private' >&2; exit 2; }; exit 0"""
+    hooked = project('twin-hooks', {'hooks': {'PreToolUse': [{'matcher': 'read', 'hooks': [{'type': 'command', 'command': blocker}]}]}})
+    (hooked / 'Tax Return 1.00\u202fPM.txt').write_text('PRIVATE TAX\n')
+    output = tool(hooked, 'read', {'path': 'Tax Return 1.00 PM.txt'})
+    assert 'PRIVATE TAX' not in output and 'tax files stay private' in output, output
+    passed('a PreToolUse hook that blocks the real name blocks the typed name too')
+    rewrite = ("grep -q placeholder && printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\","
+               "\"updatedInput\":{\"path\":\"Moved 2.00 PM.txt\"}}}'; exit 0")
+    rewriting = project('twin-rewrite', {'hooks': {'PreToolUse': [{'matcher': 'read', 'hooks': [{'type': 'command', 'command': rewrite}]}]}})
+    (rewriting / 'Moved 2.00\u202fPM.txt').write_text('MOVED TEXT\n')
+    output = tool(rewriting, 'read', {'path': 'placeholder.txt'})
+    assert 'MOVED TEXT' in output, output
+    passed('a typed name a hook rewrites the path to is recovered too')
+    (guarded / 'Both 2.00\u202fPM.md').write_text('one\n')
+    (guarded / 'Both 2.00\u00a0PM.md').write_text('two\n')
+    output = tool(guarded, 'read', {'path': 'Both 2.00 PM.md'})
+    assert 'No such file' in output, output
+    passed('two files that both fit leave the typed name not found')
+    (guarded / 'Draft 3.00\u202fPM.md').write_text('original\n')
+    tool(guarded, 'write', {'path': 'Draft 3.00 PM.md', 'content': 'typed\n'})
+    assert (guarded / 'Draft 3.00 PM.md').read_text() == 'typed\n'
+    assert (guarded / 'Draft 3.00\u202fPM.md').read_text() == 'original\n'
+    passed('a write keeps the name it was given and leaves the file that differs by a no-break space alone')
+
+
 CASES = {name: globals()['case_' + name] for name in ['read_line', 'read_budget', 'read_text', 'read_pipe',
                                                        'grep_line', 'grep_limit', 'home', 'edit_crlf', 'rg',
-                                                       'instructions', 'read_end', 'edit_empty']}
+                                                       'instructions', 'read_end', 'edit_empty', 'read_twin']}
 selected = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
 try:
     for name in selected:

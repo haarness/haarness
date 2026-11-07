@@ -1636,6 +1636,8 @@
   "Working tree": "工作目录",
   "Working…": "工作中…",
   "Worktree removed.": "工作树已移除。",
+  "{count} worktrees forgotten. Their folders no longer link to their repository, so they were left on disk.": "已忘记 {count} 个工作树。它们的文件夹已不再关联到其仓库，因此保留在磁盘上。",
+  "Worktree forgotten. Its folder no longer links to its repository, so it was left on disk.": "已忘记工作树。它的文件夹已不再关联到其仓库，因此保留在磁盘上。",
   "Worktree reset.": "工作树已重置。",
   "Your tasks keep running when you close this window.": "关闭此窗口后，你的任务仍会继续运行。",
   "Zoom in": "放大",

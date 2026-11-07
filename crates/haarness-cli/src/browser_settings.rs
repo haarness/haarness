@@ -3,6 +3,7 @@
 //! every other setting, and `browser.chrome` for the user's own Chrome, which
 //! only the global layer sets (a project may only tighten it).
 use crate::input_settings::{files, layers, project_files, target};
+use crate::jsonconfig::SaveScope;
 use anyhow::{Result, bail, ensure};
 use haarness_server::browser_policy::{
     BrowserPolicy, BrowserSettings, ChromeLayering, ChromeRestriction, ChromeSettings,
@@ -220,6 +221,7 @@ pub(super) fn request(
             if let Some(policy) = policy {
                 crate::jsonconfig::write_entry(
                     &target(global, workspace, scope),
+                    &SaveScope::of(scope == "project", workspace),
                     "browser",
                     "policy",
                     Some(serde_json::to_value(policy)?),
@@ -228,6 +230,7 @@ pub(super) fn request(
             if let Some(chrome) = chrome {
                 crate::jsonconfig::write_entry(
                     &target(global, workspace, "global"),
+                    &SaveScope::Global,
                     "browser",
                     "chrome",
                     Some(serde_json::to_value(chrome)?),
@@ -243,14 +246,26 @@ pub(super) fn request(
                     project_files(workspace)
                 } {
                     if read(&path)?.0.is_some() {
-                        crate::jsonconfig::write_entry(&path, "browser", "policy", None)?;
+                        crate::jsonconfig::write_entry(
+                            &path,
+                            &SaveScope::of(scope == "project", workspace),
+                            "browser",
+                            "policy",
+                            None,
+                        )?;
                     }
                 }
             }
             if chrome {
                 for path in files(global) {
                     if read(&path)?.1.is_some() {
-                        crate::jsonconfig::write_entry(&path, "browser", "chrome", None)?;
+                        crate::jsonconfig::write_entry(
+                            &path,
+                            &SaveScope::Global,
+                            "browser",
+                            "chrome",
+                            None,
+                        )?;
                     }
                 }
             }

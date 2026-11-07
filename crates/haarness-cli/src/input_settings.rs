@@ -203,6 +203,7 @@ pub(super) fn request(
         if let Some(value) = value {
             crate::jsonconfig::write_entry(
                 &target(global, workspace, scope),
+                &crate::jsonconfig::SaveScope::of(scope == "project", workspace),
                 "input",
                 "delivery",
                 Some(json!(value)),
@@ -215,7 +216,13 @@ pub(super) fn request(
             };
             for path in owned {
                 if delivery(&path)?.is_some() {
-                    crate::jsonconfig::write_entry(&path, "input", "delivery", None)?;
+                    crate::jsonconfig::write_entry(
+                        &path,
+                        &crate::jsonconfig::SaveScope::of(scope == "project", workspace),
+                        "input",
+                        "delivery",
+                        None,
+                    )?;
                 }
             }
         }

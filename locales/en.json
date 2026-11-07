@@ -1636,6 +1636,8 @@
   "Working tree": "Working tree",
   "Working…": "Working…",
   "Worktree removed.": "Worktree removed.",
+  "{count} worktrees forgotten. Their folders no longer link to their repository, so they were left on disk.": "{count} worktrees forgotten. Their folders no longer link to their repository, so they were left on disk.",
+  "Worktree forgotten. Its folder no longer links to its repository, so it was left on disk.": "Worktree forgotten. Its folder no longer links to its repository, so it was left on disk.",
   "Worktree reset.": "Worktree reset.",
   "Your tasks keep running when you close this window.": "Your tasks keep running when you close this window.",
   "Zoom in": "Zoom in",

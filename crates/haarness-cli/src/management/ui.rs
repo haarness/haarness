@@ -1402,12 +1402,14 @@ impl ManagementService {
                 );
                 crate::write_provider_entry(
                     &crate::provider_config_target(&self.paths, &self.workspace, project),
+                    &crate::jsonconfig::SaveScope::of(project, &self.workspace),
                     id,
                     Some(&section),
                 )?;
             }
             "edit" | "remove" => {
-                let (_, path, section) = self.provider_source(input)?;
+                let (scope, path, section) = self.provider_source(input)?;
+                let scope = crate::jsonconfig::SaveScope::of(scope == "project", &self.workspace);
                 ensure!(
                     input["revision"].as_str() == Some(&revision(&path)?),
                     "Configuration changed; reopen the provider"
@@ -1444,9 +1446,9 @@ impl ManagementService {
                     if section.models != models {
                         fields.push(("models".to_owned(), Some(json!(models))));
                     }
-                    crate::write_entry_fields(&path, "providers", id, fields)?;
+                    crate::write_entry_fields(&path, &scope, "providers", id, fields)?;
                 } else {
-                    crate::write_provider_entry(&path, id, None)?;
+                    crate::write_provider_entry(&path, &scope, id, None)?;
                 }
             }
             _ => bail!("Unsupported provider action"),

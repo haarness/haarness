@@ -316,6 +316,21 @@ Reset and removal apply only to Haarness-managed Git worktrees, always require
 `--confirm`, refuse active servers, and preserve dirty/untracked work unless
 the matching discard flags are supplied. Removal from inside the target
 directory is refused; branch deletion uses Git's safe merged-branch check.
+A worktree belongs to its project when the two share one Git repository, so a
+project that is itself a worktree of a bare repository (`git clone --bare`, then
+`git worktree add`) creates, opens, resets and removes worktrees like any other.
+A worktree whose link to its repository broke (its `.git` names a Git folder that
+is gone) cannot be opened or checked; `worktree remove` (and the stale-folder
+cleanup) then only forgets it, leaving its folder and its branch as they are,
+and says so in one line (`worktree forgotten: …`). For a repository that moved,
+run `git worktree repair` in it instead: the worktree then opens, resets and is
+removed again although the project's old folder is gone. A worktree whose
+repository is on a disk that is not connected is kept, so its chats stay with
+it, until the disk is back. That is a repository under `/Volumes`, `/mnt` or
+`/media` whose disk's folder is gone; one in a folder a disk is usually mounted
+on (one `/etc/fstab` names, or one directly in `/mnt`, as a WSL drive is) that
+is empty, with no disk on it now; and, on Linux, one behind an automount that
+found no disk when it was tried.
 
 ## Terminal UI
 
@@ -518,7 +533,7 @@ A local (stdio) server answers one JSON message per line, and one message may ho
 
 Haarness tells every MCP server it connects to that it renders [MCP App](https://modelcontextprotocol.io/extensions/apps) pages (the `io.modelcontextprotocol/ui` extension), unless that server's interactive apps are turned off with `"apps": false` in its entry (Desktop's **Interactive apps** switch writes it; on is the default and is saved as no key). A server with its apps off is a plain MCP server to Haarness: it is not told pages render, its results carry no page, its `ui://` pages are not served, and changing the setting reconnects it once the configuration reloads. Otherwise a server may pair a tool with a `ui://` page (`_meta.ui.resourceUri`, or the older `_meta["ui/resourceUri"]`). The model, workflows and the TUI still get the tool's text; a successful result of such a tool also carries `mcp_app` in its metadata, beside its structured content: the server, the page's URI, the tool as declared and the whole `CallToolResult` for the page (images, audio and binary resources are left out of that copy past 512 KB, and a result still larger is left out with `result_too_large: true`). Haarness Desktop shows the page under the tool's row (see [Desktop](DESKTOP.md#mcp-app-pages)); the TUI says under the row that the tool has an app to open in Desktop. A page cannot yet call tools, change what the model reads, download files or go full screen.
 
-The commercial extension boundary is provider-neutral. Remote MCP authorization uses only public OAuth metadata discovery, authorization code + PKCE, optional dynamic client registration, and owner-only local credential storage. Haarness contains no company-internal identity broker, authentication transport, hostname, marketplace, or service dependency.
+The commercial extension boundary is provider-neutral. Remote MCP authorization uses only public OAuth metadata discovery, authorization code + PKCE, optional dynamic client registration, and owner-only local credential storage. Haarness contains no company-internal identity broker, authentication transport, hostname, marketplace, or service dependency. When the browser comes back from the provider, its page says the authorization was received, or, when the provider refused it (`error=access_denied`) or sent no code, that the sign-in did not finish, with the provider's own description as plain text; it names no particular app, and the one that started the sign-in (`haarness mcp auth`, Desktop, the TUI) reports how the rest of it went.
 
 ## Providers
 
@@ -541,7 +556,14 @@ Latin-1 file) shows `�` for what does not decode, with a note that `edit`
 cannot change it and `write` would replace those bytes (`edit` and `multiedit`
 refuse it as not UTF-8 text). A file with a NUL byte in its first 8 KiB counts
 as binary data: its lines are shown only when they are UTF-8, and a read that
-meets one that is not is refused (`… holds binary data, not text`). A folder, pipe or device is refused instead of waited on. Since
+meets one that is not is refused (`… holds binary data, not text`). A folder, pipe or device is refused instead of waited on. A
+`read` of a name that is not there, when exactly one file in that folder has the same name once
+each no-break space (U+00A0, U+202F) counts as a space, reads that file: macOS names screenshots
+and recordings with U+202F before AM or PM, so `Screenshot 2026-11-05 at 10.00.00 PM.png` typed
+with a plain space opens the screenshot. The call is then judged as a read of that file, by its
+real name, for rules, secret files, folders outside the project and `PreToolUse` hooks (which see
+that name in `tool_input.path`, also after one rewrites the input); two such files, or a folder,
+leave the name not found, and `write` and the other tools keep the name they are given. Since
 `read` shows lines without their `\r`, in a file whose lines mostly end in CRLF
 `edit` and `multiedit` give an `old` of several lines those ends when it does
 not occur as written (one that does, a stretch of LF lines, keeps its own), and
@@ -809,15 +831,29 @@ TUI's `/reasoning` (`/reasoning off`) runs your next messages at the model's own
 instead.
 
 `${NAME}` and `${NAME:-fallback}` in an MCP entry come from the server's environment.
-Environment values and headers (and the headers helper's environment) are resolved once,
-when Haarness connects; the headers helper is shell text and keeps its references for its
-shell, which reads them from that environment (see
+Environment values, headers and the `url` (and the headers helper's environment) are
+resolved once, when Haarness starts the server, also in a JSON file, so a value that holds a
+reference is never resolved a second time; the headers helper is shell text and keeps its
+references for its shell, which reads them from that environment (see
 [Hooks](CONFIGURATION-SCOPES.md)); in a JSON file the other fields are resolved when the
 configuration loads. A variable's value is used as it is, so a `${OTHER}` inside it
 reaches the MCP server as that text, and what a headers helper prints is never resolved.
 The references stay in the file: `haarness mcp enable`/`disable`, `mcp_manage` and Desktop
 edits write only the keys they change, in the entry's own shape, and `haarness mcp get
 --show-secrets` shows the entry as written.
+
+A local server's `command` without a folder in it (`npx`, `uvx`) is looked for on the PATH
+Haarness runs with. Desktop opened from Finder or the Dock never ran your shell profile, so
+when the command is not there Haarness also looks where such launchers are usually
+installed: the absolute folders in `HAARNESS_MCP_PATH` first, then `~/.local/bin`,
+`~/.cargo/bin`, `~/.bun/bin`, `/opt/homebrew/bin` on macOS and `/usr/local/bin`, and last
+the Node version managers' folders (Volta's `bin`, the asdf and mise shims, fnm's default
+alias, nvm's `current` link or else the version its `default` alias names, the newest
+installed one when it names none; nvm's folder is `NVM_DIR` when that is absolute) and pnpm's
+and Yarn's global folders, so a Homebrew `npx` still wins over a version manager's stale copy.
+Only folders that exist are used, nothing is run to find them, and the
+server starts with them after its own PATH, so `npx` finds the `node` installed beside it. An
+entry that sets `PATH` in its `env`, or names its command by path, starts as written.
 
 Answering an approval with **Always** (`a`) saves the rule shown on the card, which is a pattern rather than the exact call (approving `rm -rf build` allows every `rm` command), for every chat on that server until it stops. **This folder** (`w`) and **Repository** (`r`) answers are saved in the local database and apply after restarts. See [Permissions and approvals](https://haarness.ai/docs/security/permissions#what-does-always-remember). Global skills live in `~/.config/haarness/skills/<name>/SKILL.md` (where `haarness skill create` writes them); project skills live in `.haarness/skills/<name>/SKILL.md`.
 

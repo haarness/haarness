@@ -1636,6 +1636,8 @@
   "Working tree": "作業ツリー",
   "Working…": "作業中…",
   "Worktree removed.": "ワークツリーを削除しました。",
+  "{count} worktrees forgotten. Their folders no longer link to their repository, so they were left on disk.": "{count} 件のワークツリーの登録を解除しました。フォルダーがリポジトリにリンクされなくなっているため、ディスク上に残しました。",
+  "Worktree forgotten. Its folder no longer links to its repository, so it was left on disk.": "ワークツリーの登録を解除しました。フォルダーがリポジトリにリンクされなくなっているため、ディスク上に残しました。",
   "Worktree reset.": "ワークツリーをリセットしました。",
   "Your tasks keep running when you close this window.": "このウィンドウを閉じても、タスクは実行され続けます。",
   "Zoom in": "拡大",

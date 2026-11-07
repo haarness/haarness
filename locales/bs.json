@@ -1636,6 +1636,8 @@
   "Working tree": "Radno stablo",
   "Working…": "Radi…",
   "Worktree removed.": "Radno stablo uklonjeno.",
+  "{count} worktrees forgotten. Their folders no longer link to their repository, so they were left on disk.": "Zaboravljeno radnih stabala: {count}. Njihove mape više nisu povezane s repozitorijem, pa su ostavljene na disku.",
+  "Worktree forgotten. Its folder no longer links to its repository, so it was left on disk.": "Radno stablo zaboravljeno. Njegova mapa više nije povezana s repozitorijem, pa je ostavljena na disku.",
   "Worktree reset.": "Radno stablo poništeno.",
   "Your tasks keep running when you close this window.": "Vaši zadaci nastavljaju raditi kada zatvorite ovaj prozor.",
   "Zoom in": "Uvećaj",

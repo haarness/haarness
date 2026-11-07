@@ -499,3 +499,42 @@ async fn a_server_a_client_configured_holds_up_no_other_chat() {
     );
     shut_down(&client, address, child).await;
 }
+
+/// A server started without the shell's PATH (Desktop opened from Finder)
+/// still starts a launcher that only a Node version manager put on it, with
+/// the folder it was found in on its own PATH.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_launcher_from_a_node_version_manager_starts_without_the_shells_path() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = TestDirectory::new();
+    let python = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|folder| folder.join(PYTHON))
+        .find(|path| path.is_file())
+        .expect("python3 on PATH");
+    let folder = directory.0.join("home/.nvm/versions/node/v22.11.0/bin");
+    std::fs::create_dir_all(&folder).expect("create nvm folder");
+    let launcher = folder.join("haarness-e2e-npx");
+    std::fs::write(
+        &launcher,
+        format!("#!/bin/sh\nexec '{}' '{FIXTURE}'\n", python.display()),
+    )
+    .expect("write launcher");
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+        .expect("make launcher executable");
+    directory.configure(&json!({"nvm": {
+        "command": "haarness-e2e-npx",
+        "env": {"INIT_DELAY": "0", "CALL_LOG": directory.0.join("calls"), "LAUNCH_LOG": directory.0.join("launches")}
+    }}));
+    let address = unused_address().await;
+    let child = server_command(&directory, address)
+        .env("PATH", "/usr/bin:/bin")
+        .spawn()
+        .expect("launch Haarness server");
+    let client = Client::new();
+    wait_until_answering(&client, address).await;
+    wait_for_mcp_status(&client, address, "nvm", "connected").await;
+    let ping = post_json(&client, address, "/mcp/nvm/tools/ping", &json!({})).await;
+    assert_eq!(ping["text"], "pong", "{ping}");
+    shut_down(&client, address, child).await;
+}

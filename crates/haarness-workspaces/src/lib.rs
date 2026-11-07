@@ -609,7 +609,7 @@ impl WorkspaceManager {
             .or(workspace.from_ref.as_deref())
             .unwrap_or("HEAD")
             .to_owned();
-        let commit = verify_commit(Path::new(&project.root), &target_ref)?;
+        let commit = verify_commit(&repository_home(project, &path)?, &target_ref)?;
         ensure_reset_paths_safe(&path, &commit, request.remove_untracked)?;
         git_checked(&path, ["reset", "--hard", &commit])?;
         if request.remove_untracked {
@@ -652,6 +652,13 @@ impl WorkspaceManager {
                     .into(),
             ));
         }
+        match worktree_link(&path, &project) {
+            WorktreeLink::Broken => return self.forget_unlinked(&mut registry, workspace),
+            WorktreeLink::Unreachable(place) => {
+                return Err(WorkspaceError::Conflict(unreachable(&place)));
+            }
+            WorktreeLink::Working => {}
+        }
         // The registry's branch is a discovery cache, not deletion authority:
         // users may switch branches inside a worktree between registry writes.
         // Resolve the live branch while the checkout still exists and use only
@@ -681,7 +688,8 @@ impl WorkspaceManager {
             args.push("--force");
         }
         args.push(&workspace.path);
-        git_checked(Path::new(&project.root), args)?;
+        let home = repository_home(&project, &path)?;
+        git_checked(&home, args)?;
 
         registry
             .workspaces
@@ -691,7 +699,7 @@ impl WorkspaceManager {
         let mut branch_deleted = false;
         if request.delete_branch {
             if let Some(branch) = live_branch.as_deref() {
-                match git_checked(Path::new(&project.root), ["branch", "-d", branch]) {
+                match git_checked(&home, ["branch", "-d", branch]) {
                     Ok(_) => {
                         branch_deleted = true;
                         let _ = write!(&mut message, " and deleted merged branch {branch}");
@@ -741,6 +749,16 @@ impl WorkspaceManager {
         ensure_managed_worktree(&workspace)?;
         let _activity = self.acquire_inactive_guard(&workspace.id)?;
         if Path::new(&workspace.path).exists() {
+            match worktree_link(
+                Path::new(&workspace.path),
+                project_for(&registry, &workspace)?,
+            ) {
+                WorktreeLink::Broken => return self.forget_unlinked(&mut registry, workspace),
+                WorktreeLink::Unreachable(place) => {
+                    return Err(WorkspaceError::Conflict(unreachable(&place)));
+                }
+                WorktreeLink::Working => {}
+            }
             return Err(WorkspaceError::Conflict(
                 "workspace directory exists; stale-registration cleanup cannot remove a live checkout"
                     .into(),
@@ -761,6 +779,36 @@ impl WorkspaceManager {
         }
         Ok(WorkspaceOperationResponse {
             workspace: removed,
+            message,
+        })
+    }
+
+    /// Removes the record of a managed worktree whose link to its
+    /// repository is broken, and only that: nothing can confirm the folder
+    /// is still the checkout Haarness made, so it stays on disk as it is and
+    /// Git is not asked. The returned workspace still `exists`, which tells
+    /// a client the folder was left in place.
+    fn forget_unlinked(
+        &self,
+        registry: &mut Registry,
+        workspace: WorkspaceInfo,
+    ) -> Result<WorkspaceOperationResponse> {
+        registry
+            .workspaces
+            .retain(|candidate| candidate.id != workspace.id);
+        self.write_registry(registry)?;
+        let mut message = format!(
+            "worktree forgotten: {} no longer links to its repository, so its folder was left on disk",
+            workspace.path
+        );
+        if let Some(branch) = workspace.branch.as_deref() {
+            let _ = write!(&mut message, " and branch {branch} was kept");
+        }
+        Ok(WorkspaceOperationResponse {
+            workspace: WorkspaceInfo {
+                exists: true,
+                ..workspace
+            },
             message,
         })
     }
@@ -930,14 +978,7 @@ fn project_identity(path: &Path) -> Result<ProjectIdentity> {
             linked: false,
         });
     };
-    let common = git_checked(path, ["rev-parse", "--git-common-dir"])?;
-    let common = PathBuf::from(common.trim());
-    let common = if common.is_absolute() {
-        common
-    } else {
-        path.join(common)
-    };
-    let common = dunce::canonicalize(&common).map_err(io_error)?;
+    let common = git_common_dir(path)?;
     let root = common
         .file_name()
         .is_some_and(|name| name == ".git")
@@ -949,6 +990,293 @@ fn project_identity(path: &Path) -> Result<ProjectIdentity> {
         root: dunce::canonicalize(&root).map_err(io_error)?,
         git: true,
     })
+}
+
+/// The canonical Git folder every checkout of `path`'s repository shares:
+/// the repository's `.git`, or a bare repository itself.
+fn git_common_dir(path: &Path) -> Result<PathBuf> {
+    let common = PathBuf::from(git_checked(path, ["rev-parse", "--git-common-dir"])?.trim());
+    let common = if common.is_absolute() {
+        common
+    } else {
+        path.join(common)
+    };
+    dunce::canonicalize(&common).map_err(io_error)
+}
+
+/// Whether the checkouts at `left` and `right` belong to one repository. The
+/// worktrees of a bare repository each have a root of their own, so their
+/// roots differ although Git keeps them together.
+fn same_repository(left: &Path, right: &Path) -> bool {
+    match (git_common_dir(left), git_common_dir(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// What became of a managed worktree's link to its repository.
+#[derive(Debug, PartialEq, Eq)]
+enum WorktreeLink {
+    /// Git can follow it, or it is nothing Haarness can judge (a `.git`
+    /// folder, which is a repository of its own, or one that cannot be read).
+    Working,
+    /// It leads nowhere: the folder's `.git` is gone, is not a `gitdir:`
+    /// link, or names a Git folder that is not there although the disk it
+    /// would be on is (Git's record of the worktree was pruned, or the
+    /// repository moved). Git refuses every command in such a folder.
+    Broken,
+    /// Its repository may come back: the project's folder, or the Git folder
+    /// the link names, is on a disk that is not connected. Holds where.
+    Unreachable(PathBuf),
+}
+
+fn worktree_link(path: &Path, project: &ProjectInfo) -> WorktreeLink {
+    // A project whose folder is on a disk that is not connected may come
+    // back; one moved or deleted elsewhere is judged by the worktree's link,
+    // which `git worktree repair` in the moved repository mends.
+    let root = Path::new(&project.root);
+    if !root.exists() && on_a_missing_disk(root) {
+        return WorktreeLink::Unreachable(root.to_path_buf());
+    }
+    let gone = |error: &std::io::Error| {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        )
+    };
+    let dot = path.join(".git");
+    match fs::metadata(&dot) {
+        Err(error) if gone(&error) => return WorktreeLink::Broken,
+        Err(_) => return WorktreeLink::Working,
+        Ok(metadata) if metadata.is_dir() => return WorktreeLink::Working,
+        Ok(_) => {}
+    }
+    let Ok(text) = fs::read_to_string(&dot) else {
+        return WorktreeLink::Working;
+    };
+    let Some(link) = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|link| !link.is_empty())
+    else {
+        return WorktreeLink::Broken;
+    };
+    // A relative link is read from where the folder really is, as Git reads it.
+    let folder = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let git_dir = folder.join(link);
+    match fs::symlink_metadata(git_dir.join("HEAD")) {
+        Err(error) if gone(&error) && on_a_missing_disk(&git_dir) => {
+            WorktreeLink::Unreachable(git_dir)
+        }
+        Err(error) if gone(&error) => WorktreeLink::Broken,
+        _ => WorktreeLink::Working,
+    }
+}
+
+/// Whether `path` is on a disk that is not connected: the nearest part of it
+/// that is there is a folder disks are mounted in (`/Volumes`, `/mnt`,
+/// `/media`, a person's folder in `/media` or `/run/media`), a folder a disk
+/// is usually mounted on (one in `/mnt`, such as a WSL drive, or one
+/// `/etc/fstab` names) with nothing mounted on it now, or no part of it is
+/// there (a Windows drive that is gone). On Linux such a folder must also be
+/// empty, and a path behind an automount with no disk mounted over it is on
+/// a disk that is not connected too.
+fn on_a_missing_disk(path: &Path) -> bool {
+    on_a_missing_disk_beside(
+        path,
+        Path::new("/mnt"),
+        Path::new("/etc/fstab"),
+        &Mounts::now(),
+    )
+}
+
+/// [`on_a_missing_disk`], with `mnt` as the folder disks are mounted in,
+/// `fstab` as the list of where they are mounted and `mounts` as what is
+/// mounted now.
+fn on_a_missing_disk_beside(path: &Path, mnt: &Path, fstab: &Path, mounts: &Mounts) -> bool {
+    // The look that brought us here made the automount try its disk, so
+    // nothing over it means the disk did not come. Looking further in would
+    // only wait for it again.
+    if mounts.automount_alone(path) {
+        return true;
+    }
+    let Some(present) = path.ancestors().find(|ancestor| ancestor.exists()) else {
+        return true;
+    };
+    if [Path::new("/Volumes"), mnt, Path::new("/media")].contains(&present)
+        || present.parent().is_some_and(|parent| {
+            parent == Path::new("/media") || parent == Path::new("/run/media")
+        })
+    {
+        return true;
+    }
+    (present.parent() == Some(mnt) || listed_mount_point(fstab, present))
+        && mounts.nothing_on(present)
+}
+
+/// What is mounted where now.
+enum Mounts {
+    /// The file systems Linux lists in `/proc/self/mountinfo`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Listed(Vec<Mount>),
+    /// No list to read: a folder with a disk mounted on it is on another
+    /// device than the folder it is in.
+    Devices,
+}
+
+/// A file system Linux lists: the folder it is mounted on, and whether it is
+/// an automount, which only holds that folder until something looks in and
+/// the disk it stands for is mounted over it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct Mount {
+    folder: PathBuf,
+    automount: bool,
+}
+
+impl Mounts {
+    /// What is mounted now, from Linux's list when there is one.
+    fn now() -> Self {
+        #[cfg(target_os = "linux")]
+        if let Ok(text) = fs::read_to_string("/proc/self/mountinfo") {
+            return Self::listed(&text);
+        }
+        Self::Devices
+    }
+
+    /// The file systems a `/proc/self/mountinfo` text lists. A line's fifth
+    /// field is the folder, escaped as in `fstab`, and the field after the
+    /// lone `-` is the file system's type.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn listed(text: &str) -> Self {
+        let mounts = text.lines().filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let folder = PathBuf::from(unescape_mount_point(fields.nth(4)?));
+            let kind = fields.skip_while(|field| *field != "-").nth(1)?;
+            Some(Mount {
+                folder,
+                automount: kind == "autofs",
+            })
+        });
+        Self::Listed(mounts.collect())
+    }
+
+    /// Whether the deepest file system `path` is in is an automount with no
+    /// disk mounted over it.
+    fn automount_alone(&self, path: &Path) -> bool {
+        match self {
+            Self::Listed(mounts) => {
+                let holding = mounts
+                    .iter()
+                    .filter(|mount| path.starts_with(&mount.folder));
+                let Some(deepest) = holding
+                    .clone()
+                    .map(|mount| mount.folder.as_path())
+                    .max_by_key(|folder| folder.components().count())
+                else {
+                    return false;
+                };
+                holding
+                    .filter(|mount| mount.folder == deepest)
+                    .all(|mount| mount.automount)
+            }
+            Self::Devices => false,
+        }
+    }
+
+    /// Whether `folder` is as a disk's folder is while the disk is gone:
+    /// nothing is mounted on it now and, where Linux lists what is, nothing
+    /// is in it either.
+    fn nothing_on(&self, folder: &Path) -> bool {
+        match self {
+            Self::Listed(mounts) => {
+                !mounts
+                    .iter()
+                    .any(|mount| mount.folder == folder && !mount.automount)
+                    && !fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_some())
+            }
+            Self::Devices => !mounted_on(folder),
+        }
+    }
+}
+
+/// Whether the `fstab` file names `folder` as where a disk is mounted. Its
+/// second field is the folder, with a space, tab or backslash in it written
+/// as `\040`, `\011` or `\134`.
+fn listed_mount_point(fstab: &Path, folder: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(fstab) else {
+        return false;
+    };
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .any(|listed| Path::new(&unescape_mount_point(listed)) == folder)
+}
+
+/// A mount point as `fstab` and `/proc/self/mountinfo` write it, its octal
+/// escapes read.
+fn unescape_mount_point(listed: &str) -> String {
+    let mut out = String::with_capacity(listed.len());
+    let mut rest = listed;
+    while let Some(at) = rest.find('\\') {
+        out.push_str(&rest[..at]);
+        let code = rest
+            .get(at + 1..at + 4)
+            .and_then(|digits| u8::from_str_radix(digits, 8).ok())
+            .filter(u8::is_ascii);
+        match code {
+            Some(code) => {
+                out.push(char::from(code));
+                rest = &rest[at + 4..];
+            }
+            None => {
+                out.push('\\');
+                rest = &rest[at + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether a disk is mounted on `folder` now: it is on another device than
+/// the folder it is in.
+#[cfg(unix)]
+fn mounted_on(folder: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let Some(parent) = folder.parent() else {
+        return true;
+    };
+    match (fs::metadata(folder), fs::metadata(parent)) {
+        (Ok(folder), Ok(parent)) => folder.dev() != parent.dev(),
+        _ => true,
+    }
+}
+
+#[cfg(not(unix))]
+fn mounted_on(_folder: &Path) -> bool {
+    true
+}
+
+/// Why a worktree whose repository is out of reach is kept.
+fn unreachable(place: &Path) -> String {
+    format!(
+        "the worktree's repository is on a disk that is not connected ({}); connect it to use the worktree, which is kept until then",
+        place.display()
+    )
+}
+
+/// Where Git commands about a worktree run: the project's folder, or, when
+/// that is gone because the repository moved (and `git worktree repair` there
+/// mended the worktree's link), the repository's Git folder, found through
+/// the worktree.
+fn repository_home(project: &ProjectInfo, worktree: &Path) -> Result<PathBuf> {
+    let root = PathBuf::from(&project.root);
+    if root.exists() {
+        return Ok(root);
+    }
+    git_common_dir(worktree)
 }
 
 fn requested_worktree_path(
@@ -1119,6 +1447,8 @@ fn registry_changed() -> WorkspaceError {
     WorkspaceError::Conflict("the workspace changed while it was being checked; try again".into())
 }
 
+const BROKEN_LINK: &str = "the worktree no longer links to its repository, so Git cannot check it; if the repository moved, run `git worktree repair` there, or remove the worktree to forget it (its folder stays on disk)";
+
 fn verify_workspace_identity(workspace: &WorkspaceInfo, project: &ProjectInfo) -> Result<()> {
     let path = Path::new(&workspace.path);
     if !path.is_dir() {
@@ -1126,12 +1456,27 @@ fn verify_workspace_identity(workspace: &WorkspaceInfo, project: &ProjectInfo) -
             "workspace directory is missing; managed identity cannot be verified".into(),
         ));
     }
+    match worktree_link(path, project) {
+        WorktreeLink::Broken => return Err(WorkspaceError::Conflict(BROKEN_LINK.into())),
+        WorktreeLink::Unreachable(place) => {
+            return Err(WorkspaceError::Conflict(unreachable(&place)));
+        }
+        WorktreeLink::Working => {}
+    }
     let identity = project_identity(path).map_err(|error| {
         WorkspaceError::Conflict(format!(
             "managed workspace identity could not be verified: {error}"
         ))
     })?;
-    if !identity.git || !same_path(&identity.root, Path::new(&project.root)) {
+    // A project folder that is gone (the repository moved, and its link was
+    // mended there) has nothing to compare: the identity marker below, kept
+    // in the worktree's own Git folder, is what proves it is the same one.
+    let moved = !Path::new(&project.root).exists();
+    if !identity.git
+        || !(moved
+            || same_path(&identity.root, Path::new(&project.root))
+            || same_repository(path, Path::new(&project.root)))
+    {
         return Err(WorkspaceError::Conflict(
             "workspace path belongs to a different Git project; refusing destructive operation"
                 .into(),
@@ -2596,6 +2941,554 @@ mod tests {
             fixture.manager.get(&workspace.id),
             Err(WorkspaceError::NotFound(_))
         ));
+    }
+
+    /// The worktrees of a bare repository have roots of their own, yet one
+    /// Haarness creates from such a project is that project's: it opens,
+    /// resets and is removed like any other.
+    #[test]
+    fn a_worktree_of_a_bare_repository_opens_resets_and_is_removed() {
+        let fixture = Fixture::new();
+        let bare = fixture.root.join("bare.git");
+        command(
+            &fixture.root,
+            [
+                "clone",
+                "--quiet",
+                "--bare",
+                fixture.repository.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        let main = fixture.root.join("main");
+        command(&bare, ["worktree", "add", main.to_str().unwrap(), "main"]);
+        let project = fixture.manager.register_local(&main).unwrap();
+        assert_eq!(project.kind, WorkspaceKind::Local);
+        let workspace = fixture
+            .manager
+            .create_worktree(
+                &project.id,
+                &WorkspaceCreateRequest {
+                    name: "bare feature".into(),
+                    ..WorkspaceCreateRequest::default()
+                },
+            )
+            .unwrap()
+            .workspace;
+        assert_eq!(workspace.project_id, project.project_id);
+        let opened = fixture.manager.open_workspace(&workspace.id).unwrap();
+        assert_eq!(opened.id, workspace.id);
+        fs::write(Path::new(&workspace.path).join("tracked.txt"), "changed\n").unwrap();
+        fixture
+            .manager
+            .reset_worktree(
+                &workspace.id,
+                &WorkspaceResetRequest {
+                    confirm: true,
+                    discard_changes: true,
+                    ..WorkspaceResetRequest::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(Path::new(&workspace.path).join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        fixture
+            .manager
+            .remove_worktree(
+                &workspace.id,
+                &WorkspaceRemoveRequest {
+                    confirm: true,
+                    ..WorkspaceRemoveRequest::default()
+                },
+            )
+            .unwrap();
+        assert!(!Path::new(&workspace.path).exists());
+        // Another repository's checkout is still refused.
+        let other = fixture.create("ordinary");
+        let mut moved = other.clone();
+        moved.project_id = project.project_id.clone();
+        let registry_project = ProjectInfo {
+            root: main.display().to_string(),
+            ..fixture.manager.read_registry().unwrap().projects[0].clone()
+        };
+        assert!(matches!(
+            verify_workspace_identity(&moved, &registry_project),
+            Err(WorkspaceError::Conflict(message)) if message.contains("different Git project")
+        ));
+    }
+
+    /// A worktree whose link to its repository broke (here its `.git` file
+    /// names a Git folder that is gone, as after the repository moved) can
+    /// be neither checked nor removed by Git. Removal and cleanup forget it
+    /// and leave its folder, with everything in it, where it is.
+    #[test]
+    fn a_worktree_whose_link_broke_is_forgotten_and_its_folder_kept() {
+        let fixture = Fixture::new();
+        for (index, cleanup) in [false, true].into_iter().enumerate() {
+            let workspace = fixture.create(&format!("unlinked {index}"));
+            let path = PathBuf::from(&workspace.path);
+            fs::write(path.join("work.txt"), "unsaved\n").unwrap();
+            fs::write(
+                path.join(".git"),
+                "gitdir: /nowhere/at/all/.git/worktrees/x\n",
+            )
+            .unwrap();
+            assert!(matches!(
+                fixture.manager.open_workspace(&workspace.id),
+                Err(WorkspaceError::Conflict(message)) if message == BROKEN_LINK
+            ));
+            let forgotten = if cleanup {
+                fixture.manager.cleanup_missing_workspace(
+                    &workspace.id,
+                    &WorkspaceCleanupRequest { confirm: true },
+                )
+            } else {
+                fixture.manager.remove_worktree(
+                    &workspace.id,
+                    &WorkspaceRemoveRequest {
+                        confirm: true,
+                        discard_changes: true,
+                        delete_branch: true,
+                    },
+                )
+            }
+            .unwrap();
+            assert!(forgotten.workspace.exists, "the folder was kept");
+            assert!(
+                forgotten.message.starts_with("worktree forgotten: ")
+                    && forgotten.message.contains("its folder was left on disk"),
+                "{}",
+                forgotten.message
+            );
+            assert_eq!(
+                fs::read_to_string(path.join("work.txt")).unwrap(),
+                "unsaved\n"
+            );
+            assert!(matches!(
+                fixture.manager.get(&workspace.id),
+                Err(WorkspaceError::NotFound(_))
+            ));
+            let branch = workspace.branch.unwrap();
+            assert!(
+                git_success(
+                    &fixture.repository,
+                    [
+                        "show-ref",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{branch}")
+                    ]
+                )
+                .unwrap(),
+                "the branch stays"
+            );
+        }
+        // A link that still leads to its repository is never forgotten.
+        let linked = fixture.create("linked");
+        assert!(matches!(
+            fixture
+                .manager
+                .cleanup_missing_workspace(&linked.id, &WorkspaceCleanupRequest { confirm: true }),
+            Err(WorkspaceError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn a_broken_worktree_link_is_told_from_a_working_one_and_an_unreachable_one() {
+        let root = std::env::temp_dir().join(format!("haarness-git-link-{}", Uuid::now_v7()));
+        let folder = root.join("checkout");
+        let gitdir = root.join("repository/.git/worktrees/checkout");
+        fs::create_dir_all(&folder).unwrap();
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let project = ProjectInfo {
+            id: "project".into(),
+            name: "repository".into(),
+            root: root.join("repository").display().to_string(),
+            git: true,
+            created_at: Utc::now(),
+        };
+        let link = |text: &str| {
+            fs::write(folder.join(".git"), text).unwrap();
+            worktree_link(&folder, &project)
+        };
+        // No `.git` at all, a link to nowhere, and one that is not a link.
+        assert_eq!(worktree_link(&folder, &project), WorktreeLink::Broken);
+        assert_eq!(
+            link("gitdir: ../repository/.git/worktrees/gone\n"),
+            WorktreeLink::Broken
+        );
+        assert_eq!(link("not a link\n"), WorktreeLink::Broken);
+        // A relative link, and an absolute one, that lead to the Git folder.
+        assert_eq!(
+            link("gitdir: ../repository/.git/worktrees/checkout\n"),
+            WorktreeLink::Working
+        );
+        assert_eq!(
+            link(&format!("gitdir: {}\n", gitdir.display())),
+            WorktreeLink::Working
+        );
+        // A repository on a disk that is not connected may come back.
+        if let Some(mounts) = ["/Volumes", "/mnt"]
+            .into_iter()
+            .map(Path::new)
+            .find(|mounts| mounts.is_dir())
+        {
+            let away = mounts.join(format!(
+                "haarness-unplugged-{}/repo/.git/worktrees/x",
+                Uuid::now_v7()
+            ));
+            assert_eq!(
+                link(&format!("gitdir: {}\n", away.display())),
+                WorktreeLink::Unreachable(away)
+            );
+        }
+        // A project folder that moved is judged by the link, which works here.
+        fs::write(
+            folder.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        let moved = ProjectInfo {
+            root: root.join("moved").display().to_string(),
+            ..project.clone()
+        };
+        assert_eq!(worktree_link(&folder, &moved), WorktreeLink::Working);
+        // One on a disk that is not connected may come back.
+        if let Some(mounts) = ["/Volumes", "/mnt"]
+            .into_iter()
+            .map(Path::new)
+            .find(|mounts| mounts.is_dir())
+        {
+            let away = mounts.join(format!("haarness-unplugged-{}/repo", Uuid::now_v7()));
+            let unplugged = ProjectInfo {
+                root: away.display().to_string(),
+                ..project.clone()
+            };
+            assert_eq!(
+                worktree_link(&folder, &unplugged),
+                WorktreeLink::Unreachable(away)
+            );
+        }
+        // A repository of its own.
+        fs::remove_file(folder.join(".git")).unwrap();
+        fs::create_dir(folder.join(".git")).unwrap();
+        assert_eq!(worktree_link(&folder, &project), WorktreeLink::Working);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A disk mounted on a folder that stays when the disk is gone (one
+    /// `/etc/fstab` names, a WSL drive in `/mnt`) leaves that folder empty, so
+    /// a repository that was on it is out of reach, not moved. A folder with
+    /// a disk on it now, and one nothing names, are judged as before. Here
+    /// devices tell what is mounted, as on a Mac.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_folder_a_disk_is_mounted_on_counts_as_a_missing_disk() {
+        let root = std::env::temp_dir().join(format!("haarness-mount-points-{}", Uuid::now_v7()));
+        let mnt = root.join("mnt");
+        let data = root.join("data disk");
+        for folder in [mnt.join("e"), data.clone(), root.join("plain")] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let fstab = root.join("fstab");
+        fs::write(
+            &fstab,
+            format!(
+                "# <file system> <mount point> <type> <options> <dump> <pass>\nUUID=0a1b {} ext4 defaults,nofail 0 2\n  # /dev/sdc1 {} ext4\ndevtmpfs /dev devtmpfs defaults 0 0\n",
+                data.display().to_string().replace(' ', "\\040"),
+                root.join("plain").display()
+            ),
+        )
+        .unwrap();
+        let missing = |path: &Path| on_a_missing_disk_beside(path, &mnt, &fstab, &Mounts::Devices);
+        // A WSL drive that is gone, and a disk the list names that is not
+        // mounted.
+        assert!(missing(&mnt.join("e/projects/app")));
+        assert!(missing(&data.join("repo")));
+        // The folder disks are mounted in, as before.
+        assert!(missing(&mnt.join("gone/app")));
+        // A folder only a comment names: a repository that moved.
+        assert!(!missing(&root.join("plain/repo")));
+        // A folder with a file system on it now.
+        assert!(!missing(Path::new("/dev/haarness-no-such-folder/repo")));
+        assert_eq!(
+            unescape_mount_point(r"/srv/a\040b\011c\134d\x\9"),
+            "/srv/a b\tc\\d\\x\\9"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A folder as `fstab` and `/proc/self/mountinfo` write it.
+    #[cfg(unix)]
+    fn escaped(folder: &Path) -> String {
+        folder
+            .display()
+            .to_string()
+            .replace('\\', "\\134")
+            .replace(' ', "\\040")
+    }
+
+    /// What Linux lists as mounted, written as `/proc/self/mountinfo` writes
+    /// it: the root file system, then each folder with its file system's
+    /// type.
+    #[cfg(unix)]
+    fn mountinfo(mounts: &[(&Path, &str)]) -> Mounts {
+        let lines = mounts.iter().enumerate().map(|(at, (folder, kind))| {
+            format!(
+                "{id} 22 0:{id} / {} rw,relatime shared:{id} - {kind} /dev/sdc1 rw\n",
+                escaped(folder),
+                id = 40 + at
+            )
+        });
+        Mounts::listed(
+            &std::iter::once(
+                "22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n".into(),
+            )
+            .chain(lines)
+            .collect::<String>(),
+        )
+    }
+
+    /// A folder of its own under the system temp folder, for one test.
+    #[cfg(unix)]
+    fn mount_fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("haarness-{name}-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// Lines read from a real `/proc/self/mountinfo`: an automount a disk is
+    /// mounted over, one with nothing over it, a bind mount whose folder
+    /// has a space, a WSL drive, and a line that is not a mount.
+    #[cfg(unix)]
+    #[test]
+    fn linux_s_list_of_mounts_tells_an_automount_from_a_disk() {
+        let mounts = Mounts::listed(concat!(
+            "22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw,errors=remount-ro\n",
+            "41 22 0:38 / /data rw,relatime shared:21 - autofs systemd-1 rw,fd=52,pgrp=1,timeout=0,minproto=5,maxproto=5,direct,pipe_ino=17311\n",
+            "95 41 8:33 / /data rw,relatime shared:50 master:3 - ext4 /dev/sdc1 rw\n",
+            "63 22 0:41 / /backup rw,relatime shared:30 - autofs systemd-1 rw,fd=60,pgrp=1,timeout=0,minproto=5,maxproto=5,direct\n",
+            "70 22 259:2 /home/sam/src /srv/sam\\040src rw,relatime - ext4 /dev/nvme0n1p2 rw\n",
+            "80 22 0:50 / /mnt/c rw,noatime - 9p C:\\134 rw,dirsync,aname=drvfs\n",
+            "not a mount\n",
+        ));
+        assert!(mounts.automount_alone(Path::new("/backup/projects/app")));
+        assert!(mounts.automount_alone(Path::new("/backup")));
+        assert!(!mounts.automount_alone(Path::new("/data/projects/app")));
+        assert!(!mounts.automount_alone(Path::new("/backups/app")));
+        assert!(!mounts.automount_alone(Path::new("/srv/sam src/app")));
+        assert!(!mounts.nothing_on(Path::new("/srv/sam src")));
+        assert!(!mounts.nothing_on(Path::new("/mnt/c")));
+        assert!(!mounts.nothing_on(Path::new("/data")));
+    }
+
+    /// An `x-systemd.automount` disk that is unplugged leaves an automount
+    /// with nothing over it, which has a device of its own; so does an
+    /// automount no `fstab` line names. A repository behind one is on a
+    /// disk that is not connected, and behind one a disk is mounted over,
+    /// it is judged by the link.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_behind_an_automount_without_its_disk_is_on_a_missing_disk() {
+        let root = mount_fixture("automount");
+        let backup = root.join("backup");
+        let share = root.join("net");
+        for folder in [&backup, &share] {
+            fs::create_dir(folder).unwrap();
+        }
+        let fstab = root.join("fstab");
+        fs::write(
+            &fstab,
+            format!(
+                "UUID=0a1b {} ext4 nofail,x-systemd.automount,x-systemd.device-timeout=10s 0 2\n",
+                escaped(&backup)
+            ),
+        )
+        .unwrap();
+        let missing = |path: &Path, mounts: &Mounts| {
+            on_a_missing_disk_beside(path, &root.join("mnt"), &fstab, mounts)
+        };
+        let unplugged = mountinfo(&[(&backup, "autofs"), (&share, "autofs")]);
+        assert!(missing(&backup.join("projects/app"), &unplugged));
+        assert!(missing(&share.join("server/app"), &unplugged));
+        let plugged = mountinfo(&[
+            (&backup, "autofs"),
+            (&backup, "ext4"),
+            (&share, "autofs"),
+            (&share.join("server"), "nfs4"),
+        ]);
+        assert!(!missing(&backup.join("projects/app"), &plugged));
+        assert!(!missing(&share.join("server/app"), &plugged));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A disk mounted now on a folder `fstab` names is connected, although
+    /// it is on the folder's own device in a test and its repository is
+    /// gone: that repository moved or was deleted.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_gone_from_a_disk_that_is_mounted_is_not_on_a_missing_disk() {
+        let root = mount_fixture("mounted-disk");
+        let data = root.join("data");
+        fs::create_dir(&data).unwrap();
+        let fstab = root.join("fstab");
+        fs::write(
+            &fstab,
+            format!("UUID=0a1b {} ext4 defaults,nofail 0 2\n", escaped(&data)),
+        )
+        .unwrap();
+        let missing = |mounts: &Mounts| {
+            on_a_missing_disk_beside(&data.join("repo"), &root.join("mnt"), &fstab, mounts)
+        };
+        assert!(!missing(&mountinfo(&[(&data, "ext4")])));
+        assert!(missing(&mountinfo(&[])));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A bind mount `fstab` names shows another folder of the same disk, so
+    /// it has the device of the folder it is in; a repository deleted in it
+    /// is not on a missing disk.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_gone_from_a_bind_mount_is_not_on_a_missing_disk() {
+        let root = mount_fixture("bind-mount");
+        let src = root.join("srv/sam src");
+        fs::create_dir_all(&src).unwrap();
+        let fstab = root.join("fstab");
+        fs::write(
+            &fstab,
+            format!("/home/sam/src {} none bind 0 0\n", escaped(&src)),
+        )
+        .unwrap();
+        let missing = |mounts: &Mounts| {
+            on_a_missing_disk_beside(&src.join("app"), &root.join("mnt"), &fstab, mounts)
+        };
+        assert!(!missing(&mountinfo(&[(&src, "ext4")])));
+        // Nothing bound there now.
+        assert!(missing(&mountinfo(&[])));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A plain folder directly in `/mnt` that holds other things is where
+    /// a repository was deleted, not a drive that is gone; an empty one may
+    /// be a WSL drive that is gone, and one a drive is mounted on is there.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_gone_from_a_plain_folder_in_mnt_is_not_on_a_missing_disk() {
+        let root = mount_fixture("plain-mnt");
+        let mnt = root.join("mnt");
+        for folder in [mnt.join("work/other-repo"), mnt.join("e"), mnt.join("c")] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let missing = |path: &Path, mounts: &Mounts| {
+            on_a_missing_disk_beside(path, &mnt, &root.join("fstab"), mounts)
+        };
+        let mounts = mountinfo(&[(&mnt.join("c"), "9p")]);
+        assert!(!missing(&mnt.join("work/app"), &mounts));
+        assert!(missing(&mnt.join("e/projects/app"), &mounts));
+        assert!(!missing(&mnt.join("c/projects/app"), &mounts));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Nothing mounted on a folder `fstab` names leaves it empty; one with
+    /// files in it is where a repository was deleted.
+    #[cfg(unix)]
+    #[test]
+    fn only_an_empty_folder_with_no_disk_on_it_counts_as_a_missing_disk() {
+        let root = mount_fixture("empty-mount-point");
+        let data = root.join("data");
+        fs::create_dir(&data).unwrap();
+        let fstab = root.join("fstab");
+        fs::write(
+            &fstab,
+            format!("LABEL=data {} ext4 defaults,nofail 0 2\n", escaped(&data)),
+        )
+        .unwrap();
+        let missing = || {
+            on_a_missing_disk_beside(
+                &data.join("repo"),
+                &root.join("mnt"),
+                &fstab,
+                &mountinfo(&[]),
+            )
+        };
+        assert!(missing());
+        fs::write(data.join("notes.txt"), "kept on the system disk\n").unwrap();
+        assert!(!missing());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A repository that moved leaves its worktree's link broken: opening it
+    /// says how to mend it, and once `git worktree repair` ran in the moved
+    /// repository the worktree opens, resets and is removed again although
+    /// the project's folder is gone.
+    #[test]
+    fn a_worktree_of_a_moved_repository_works_again_once_repaired() {
+        let fixture = Fixture::new();
+        let workspace = fixture.create("moved");
+        let path = PathBuf::from(&workspace.path);
+        let moved = fixture.root.join("moved-repository");
+        fs::rename(&fixture.repository, &moved).unwrap();
+        assert!(matches!(
+            fixture.manager.open_workspace(&workspace.id),
+            Err(WorkspaceError::Conflict(message))
+                if message == BROKEN_LINK && message.contains("git worktree repair")
+        ));
+        // Desktop lets a removal go on without the worktree's server only on
+        // this refusal, which it knows by these words.
+        assert!(BROKEN_LINK.starts_with("the worktree no longer links to its repository"));
+        command(&moved, ["worktree", "repair"]);
+        assert_eq!(
+            fixture.manager.open_workspace(&workspace.id).unwrap().id,
+            workspace.id
+        );
+        fs::write(path.join("tracked.txt"), "changed\n").unwrap();
+        fixture
+            .manager
+            .reset_worktree(
+                &workspace.id,
+                &WorkspaceResetRequest {
+                    confirm: true,
+                    discard_changes: true,
+                    ..WorkspaceResetRequest::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        fixture
+            .manager
+            .remove_worktree(
+                &workspace.id,
+                &WorkspaceRemoveRequest {
+                    confirm: true,
+                    delete_branch: true,
+                    ..WorkspaceRemoveRequest::default()
+                },
+            )
+            .unwrap();
+        assert!(!path.exists());
+        // Unrepaired, a moved repository's worktree is forgotten, its folder kept.
+        fs::rename(&moved, &fixture.repository).unwrap();
+        let other = fixture.create("left behind");
+        fs::rename(&fixture.repository, &moved).unwrap();
+        let forgotten = fixture
+            .manager
+            .remove_worktree(
+                &other.id,
+                &WorkspaceRemoveRequest {
+                    confirm: true,
+                    ..WorkspaceRemoveRequest::default()
+                },
+            )
+            .unwrap();
+        assert!(forgotten.workspace.exists && Path::new(&other.path).is_dir());
+        fs::rename(&moved, &fixture.repository).unwrap();
     }
 
     #[test]
