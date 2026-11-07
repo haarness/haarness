@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { cssReferencesOutside, loadsNetworkPath, parsedAddress } from "../src/renderer/link-target";
+import { replyAttribute } from "../src/renderer/remote-images";
 
 // Markdown sanitizing needs a DOM, which these tests do not have, so this
 // reads the source: replies are sanitized by a DOMPurify of their own, and
@@ -118,4 +119,44 @@ test("an SVG attribute's url() may point only into the reply", async () => {
     assert.ok(attributes.includes(`"${name}"`), name);
   assert.match(markdown, /CSS_URL_ATTRIBUTES\.has\(data\.attrName\) \|\| \/url\\\(\/i\.test\(data\.attrValue\)/);
   assert.match(markdown, /if \(css && cssReferencesOutside\(data\.attrValue\)\) data\.keepAttr = false;/);
+});
+
+// A class is the app's own vocabulary. Kept, a reply's
+// `<div class="modal-backdrop">` drew the app's blurred overlay over the chat
+// while the reply streamed, so Stop could not be clicked, and a README with it
+// did the same in the Files panel's preview.
+test("a reply keeps no class but the language Markdown writes on a code block's code", async () => {
+  for (const [element, value] of [
+    ["DIV", "modal-backdrop"],
+    ["DIV", "dialog-shell palette"],
+    ["SPAN", "spelled-code"],
+    ["SPAN", "code-copy"],
+    ["PRE", "language-ts"],
+    ["LI", "task-item"],
+    ["rect", "icon"],
+    ["CODE", "modal-backdrop"],
+    ["CODE", "languages"],
+    ["CODE", "language-"],
+    ["CODE", ""],
+  ])
+    assert.equal(replyAttribute("class", value, element), undefined, `${element} ${value}`);
+  assert.equal(replyAttribute("class", "language-ts", "CODE"), "language-ts");
+  assert.equal(replyAttribute("class", "language-c++", "CODE"), "language-c++");
+  assert.equal(replyAttribute("class", " modal-backdrop language-rust  open ", "CODE"), "language-rust");
+  assert.equal(replyAttribute("CLASS", "language-py overlay", "code"), "language-py");
+  // Other attributes stay as written.
+  assert.equal(replyAttribute("title", "modal-backdrop", "DIV"), "modal-backdrop");
+
+  // The sanitizer asks it about every attribute, naming the element.
+  const markdown = await readFile(new URL("../src/renderer/markdown-dom.ts", import.meta.url), "utf8");
+  assert.match(markdown, /replyAttribute\(data\.attrName, data\.attrValue, node\.nodeName\)/);
+});
+
+// The second guard: what a reply's markup still places by itself (an open
+// <dialog>) is placed and stacked inside its own Markdown box.
+test("Markdown places and stacks what it draws inside its own box", async () => {
+  const css = await readFile(new URL("../src/renderer/chat.css", import.meta.url), "utf8");
+  const rule = /\n\.markdown \{([^}]*)\}/.exec(css)?.[1] ?? "";
+  assert.match(rule, /\bposition: relative;/);
+  assert.match(rule, /\bisolation: isolate;/);
 });

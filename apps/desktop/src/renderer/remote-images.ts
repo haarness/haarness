@@ -129,17 +129,21 @@ export function markMade(node: Node) {
 }
 
 /**
- * What the sanitizer keeps of an attribute a reply wrote: never the
- * `data-remote-*` and `data-project-*` attributes or the `remote-image*` and
- * `project-image*` classes placeholders use, nor the mark of an image that
- * opens larger, so markup cannot dress as one. Undefined drops the attribute.
+ * What the sanitizer keeps of an attribute a reply wrote on `element` (its
+ * tag name): never the `data-remote-*` and `data-project-*` attributes
+ * placeholders use, nor the mark of an image that opens larger, so markup
+ * cannot dress as one. Classes are the app's own: one a reply borrowed would
+ * be styled as the app styles it, so `<div class="modal-backdrop">` would lay
+ * the app's overlay over the chat and `remote-image` would pass for a
+ * placeholder. So a reply keeps no class but the `language-…` that Markdown
+ * writes on a code block's `code`, which names its language. Undefined drops
+ * the attribute.
  */
-export function replyAttribute(name: string, value: string): string | undefined {
+export function replyAttribute(name: string, value: string, element: string): string | undefined {
   if (/^data-(?:remote|project)-|^data-image-open$/i.test(name)) return undefined;
   if (name.toLowerCase() !== "class") return value;
-  const tokens = value.split(/\s+/).filter(Boolean);
-  const kept = tokens.filter((token) => !/^(?:remote|project)-image/i.test(token));
-  if (kept.length === tokens.length) return value;
+  if (element.toLowerCase() !== "code") return undefined;
+  const kept = value.split(/\s+/).filter((token) => /^language-./i.test(token));
   return kept.length ? kept.join(" ") : undefined;
 }
 

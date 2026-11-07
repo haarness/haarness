@@ -35,9 +35,11 @@ const written = new WeakMap<Element, string>();
 // tabs and newlines anywhere, so `/<TAB>/host/x.png` names one too. A CSS
 // `url()` (an SVG `mask`, `filter`, `fill`…) may point only into the reply.
 purifier.addHook("uponSanitizeAttribute", (node, data) => {
-  // Image placeholders are the app's own (remote-images.ts): a reply keeps
-  // none of their classes or data attributes, so it cannot forge one.
-  const kept = replyAttribute(data.attrName, data.attrValue);
+  // Classes and image placeholders are the app's own (remote-images.ts): a
+  // reply keeps no class but a code block's language, and none of the
+  // placeholders' data attributes, so it can neither forge a placeholder nor
+  // wear the app's styles.
+  const kept = replyAttribute(data.attrName, data.attrValue, node.nodeName);
   if (kept === undefined) {
     data.keepAttr = false;
     return;
@@ -154,6 +156,7 @@ function taskBoxes(fragment: DocumentFragment) {
     input.replaceWith(box);
   }
 }
+
 export function createMarkdownDOM(
   host: HTMLElement,
   images?: {

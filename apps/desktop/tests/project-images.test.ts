@@ -259,12 +259,12 @@ test("a read's preview is the image its result carries, or the project file it r
 });
 
 test("a reply's own markup cannot dress as a project image or as one that opens larger", () => {
-  assert.equal(replyAttribute("data-project-path", "../../etc/a.png"), undefined);
-  assert.equal(replyAttribute("DATA-PROJECT-ALT", "x"), undefined);
-  assert.equal(replyAttribute("data-image-open", ""), undefined);
-  assert.equal(replyAttribute("class", "project-image"), undefined);
-  assert.equal(replyAttribute("class", "wide project-image-loaded Project-Image-note"), "wide");
-  assert.equal(replyAttribute("data-image-opener", "x"), "x");
+  assert.equal(replyAttribute("data-project-path", "../../etc/a.png", "IMG"), undefined);
+  assert.equal(replyAttribute("DATA-PROJECT-ALT", "x", "SPAN"), undefined);
+  assert.equal(replyAttribute("data-image-open", "", "IMG"), undefined);
+  assert.equal(replyAttribute("class", "project-image", "SPAN"), undefined);
+  assert.equal(replyAttribute("class", "wide project-image-loaded Project-Image-note", "IMG"), undefined);
+  assert.equal(replyAttribute("data-image-opener", "x", "IMG"), "x");
 });
 
 test("what each server event means for the images: the viewed chat's turn at once, another's once per turn, a write at its result", () => {

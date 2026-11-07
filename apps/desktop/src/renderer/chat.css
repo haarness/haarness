@@ -304,7 +304,16 @@
 }
 
 /* ---------------------------------------------------------------- markdown */
+/* What a reply's raw HTML places by itself (an open <dialog> is placed
+   absolutely) is placed in this box and stacks inside it, so it never lies
+   over the message box or the rest of the window; the app's classes it
+   might borrow to do more are dropped before it is drawn (remote-images.ts).
+   This clips nothing and moves nothing: layout containment would keep the
+   margins of a first or last quote's text from meeting those around the
+   reply, and keep wide content in a previewed file from scrolling. */
 .markdown {
+  position: relative;
+  isolation: isolate;
   line-height: var(--lh-read);
   font-size: var(--font-size);
   overflow-wrap: anywhere;

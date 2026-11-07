@@ -13786,6 +13786,122 @@ tools=false
   }
 });
 
+test("raw HTML in a reply stays inside it, so Stop, the message box and the sidebar take clicks as it streams and after", async () => {
+  test.setTimeout(240_000);
+  let output: import("node:http").ServerResponse | undefined;
+  // Markup wearing the app's own classes, among them the blurred overlay
+  // behind its dialogs, and an open <dialog>, which the browser places itself.
+  const hostile = '<div class="modal-backdrop"></div>\n\n<dialog open>An open dialog</dialog>\n\n';
+  const finish = 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+  const chunk = (text: string) => "data: " + JSON.stringify({ choices: [{ index: 0, delta: { content: text }, finish_reason: null }] }) + "\n\n";
+  const delta = (text: string) => output!.write(chunk(text));
+  const provider = createServer(async (request, response) => {
+    if (request.method === "GET") {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ data: [{ id: "markup-model" }] }));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    for await (const part of request) chunks.push(Buffer.from(part));
+    const messages = JSON.stringify(JSON.parse(Buffer.concat(chunks).toString()).messages);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    if (messages.includes("Name this conversation.")) return response.end(chunk("Markup fixture") + finish);
+    if (messages.includes("btw-side-question")) return response.end(chunk(hostile + "SIDE_DONE") + finish);
+    output = response;
+  });
+  await new Promise<void>(resolve => provider.listen(0, "127.0.0.1", resolve));
+  const address = provider.address();
+  if (!address || typeof address === "string") throw Error("Missing provider address");
+  const directory = join(temporary, "markup-project");
+  extraWorkspaces.push(directory);
+  await mkdir(join(directory, ".haarness"), { recursive: true });
+  await writeFile(join(directory, ".haarness/config.toml"), `[defaults]\nprovider="markup-fixture"\nmodel="markup-model"\n[providers.markup-fixture]\nprotocol="openai-chat-completions"\nbase_url="http://127.0.0.1:${address.port}/v1"\nrequires_auth=false\ntools=false\n`);
+  await writeFile(join(directory, "README.md"), "# Markup readme\n\n" + hostile + "README_END\n");
+  /** Whether a press at the middle of `target` lands on it, as a click there would. */
+  const reachable = (target: Locator) =>
+    target.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const at = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return !!at && element.contains(at);
+    });
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  const stop = page.getByRole("button", { name: "Stop response", exact: true });
+  const newChat = page.getByRole("button", { name: "New chat", exact: true });
+  try {
+    await app.evaluate(({ dialog }, directory) => {
+      const original = dialog.showOpenDialog;
+      dialog.showOpenDialog = async () => { dialog.showOpenDialog = original; return { canceled: false, filePaths: [directory] }; };
+    }, directory);
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+    await showChat();
+    await newSession();
+    await send("Show markup that borrows the app's classes.");
+    await expect.poll(() => !!output).toBe(true);
+    delta(hostile + "STILL_STREAMING");
+
+    // While it streams: the markup keeps no class, the open dialog stays in
+    // the reply's box, and nothing lies over Stop, the message box or the sidebar.
+    const live = page.getByTestId("streaming-reply");
+    await expect(live).toContainText("STILL_STREAMING");
+    for (const target of [stop, composer, newChat]) expect(await reachable(target)).toBe(true);
+    await expect(live.locator(".markdown div")).toHaveCount(1);
+    await expect(live.locator(".markdown div")).not.toHaveAttribute("class");
+    await expect(live.locator("dialog[open]")).toHaveText("An open dialog");
+    expect(await live.locator(".markdown").evaluate((element) => {
+      const style = getComputedStyle(element);
+      return [style.position, style.isolation];
+    })).toEqual(["relative", "isolate"]);
+    // The dialog is placed in the reply's own box.
+    expect(await live.locator(".markdown").evaluate((element) => element.querySelector("dialog")?.offsetParent === element)).toBe(true);
+
+    output!.end(finish);
+    await expect(live).toHaveCount(0);
+    const saved = page.locator(".transcript article.assistant").last();
+    await expect(saved).toContainText("STILL_STREAMING");
+    await expect(saved.locator(".markdown div")).not.toHaveAttribute("class");
+    await expect(saved.locator("dialog[open]")).toHaveText("An open dialog");
+    for (const target of [composer, newChat]) expect(await reachable(target)).toBe(true);
+
+    // Stop still takes the click of the next reply, under the markup on screen.
+    output = undefined;
+    await send("Stream another reply.");
+    await expect.poll(() => !!output).toBe(true);
+    delta("SECOND_STREAMING");
+    await expect(page.getByTestId("streaming-reply")).toContainText("SECOND_STREAMING");
+    expect(await reachable(stop)).toBe(true);
+    await stop.click();
+    await expect(stop).toHaveCount(0);
+
+    // A README previewed in the Files panel.
+    await openProjectPanel("Files");
+    await page.locator(".file-tree").getByRole("button", { name: "README.md", exact: true }).click();
+    await page.locator(".file-actions").getByRole("button", { name: "Preview", exact: true }).click();
+    const readme = page.locator(".file-preview .document-preview .markdown");
+    await expect(readme).toContainText("README_END");
+    await expect(readme.locator("div")).not.toHaveAttribute("class");
+    await expect(readme.locator("dialog[open]")).toHaveText("An open dialog");
+    for (const target of [composer, newChat, page.locator(".file-actions").getByRole("button", { name: "Code", exact: true })])
+      expect(await reachable(target)).toBe(true);
+    await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
+
+    // The side chat's answer.
+    await composer.fill("/btw Show it beside the chat.");
+    await composer.press("Enter");
+    const side = page.locator(".side-chat-panel");
+    await expect(side).toContainText("SIDE_DONE");
+    await expect(side.locator(".markdown div")).not.toHaveAttribute("class");
+    await expect(side.locator("dialog[open]")).toHaveText("An open dialog");
+    for (const target of [composer, newChat, side.getByRole("textbox", { name: "Ask a side question", exact: true })])
+      expect(await reachable(target)).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    output?.end();
+    provider.closeAllConnections();
+    await new Promise<void>(resolve => provider.close(() => resolve()));
+  }
+});
+
 async function newCanvasSession() {
   // Other scenarios can leave a different provider/project selected.
   await app.evaluate(({ dialog }, directory) => {
