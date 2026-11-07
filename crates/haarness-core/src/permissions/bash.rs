@@ -160,6 +160,35 @@ const PATH_COMMANDS: &[&str] = &[
     "cd", "pushd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "chgrp", "cat",
 ];
 
+/// Wrappers that run the command they are given in the folder they run in
+/// themselves, unless an option of theirs names another (`env -C`, `sudo
+/// -D`): after a plain `cd` that opens the line's `&&` chain, what they run
+/// is read from where the `cd` went (see [`Reader::carried`]). `pkexec`
+/// starts its command in the user's home folder and `find -execdir` in
+/// each file's, so they are not among them.
+const KEEPS_FOLDER: &[&str] = &[
+    "builtin",
+    "busybox",
+    "caffeinate",
+    "chrt",
+    "command",
+    "doas",
+    "env",
+    "exec",
+    "flock",
+    "ionice",
+    "nice",
+    "nohup",
+    "setsid",
+    "stdbuf",
+    "sudo",
+    "taskset",
+    "time",
+    "timeout",
+    "gtimeout",
+    "xargs",
+];
+
 /// Programs that only look at the files they are given (their names, sizes,
 /// where they lead), never print or change what is in them, whatever their
 /// options say. `file` and `du` are not among them: `file -f`, `file -m`
@@ -286,6 +315,7 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         folder: None,
         here: None,
         lost: false,
+        carried: None,
         names_work_tree: false,
         work_trees: Vec::new(),
     };
@@ -670,6 +700,12 @@ struct Reader<'w> {
     /// what runs behind a wrapper whose folder nobody can place (`env -C
     /// "$d"`, `sudo -i`, `find -execdir`).
     lost: bool,
+    /// [`Self::here`] carried into what a written command runs: while every
+    /// wrapper on the way is one of [`KEEPS_FOLDER`] and names no folder of
+    /// its own, the command it runs starts where the `cd`s left the shell.
+    /// `None` behind any other wrapper and in text run again, where it
+    /// starts where the shell started, as before.
+    carried: Option<Rc<Path>>,
     /// The text being read, or one it is read from, names `GIT_WORK_TREE`:
     /// a `git clean` may clean a work tree set where it is not read.
     names_work_tree: bool,
@@ -921,6 +957,7 @@ impl Reader<'_> {
         // of the reading around it are its own again afterwards.
         let outer_folder = self.folder.take();
         let outer_here = self.here.take();
+        let outer_carried = self.carried.take();
         let outer_lost = self.lost;
         let outer_names_work_tree = self.names_work_tree;
         self.names_work_tree |= command.contains("GIT_WORK_TREE");
@@ -1022,10 +1059,12 @@ impl Reader<'_> {
                 wrappers: &wrappers,
                 documents: &documents,
             };
+            self.carried.clone_from(&here);
             self.here = here;
             self.lost = !open.contains(&node.id());
             self.unwrap(&words, Some(stdin), command, depth);
             self.here = None;
+            self.carried = None;
             self.work_trees.clear();
             if let Some(lines) = parent.and_then(|statement| hidden.get(&statement.id())) {
                 for line in lines {
@@ -1141,6 +1180,7 @@ impl Reader<'_> {
         }
         self.folder = outer_folder;
         self.here = outer_here;
+        self.carried = outer_carried;
         self.lost = outer_lost;
         self.names_work_tree = outer_names_work_tree;
         self.work_trees = outer_work_trees;
@@ -1371,9 +1411,13 @@ impl Reader<'_> {
         };
         let outer = std::mem::replace(&mut self.folder, folder);
         let outer_lost = std::mem::replace(&mut self.lost, lost);
+        // A folder nobody can place leaves the command read from where the
+        // shell started.
+        let outer_carried = self.carried.take();
         self.moved += 1;
         self.invocation(words, stdin, source, depth);
         self.moved -= 1;
+        self.carried = outer_carried;
         self.lost = outer_lost;
         self.folder = outer;
     }
@@ -1431,6 +1475,31 @@ impl Reader<'_> {
     /// a shell, `eval`, `env -S`, `source` or `trap` runs again. `stdin` is
     /// the written command whose standard input the program reads.
     fn unwrap(
+        &mut self,
+        words: &[Word<'_>],
+        stdin: Option<Stdin<'_, '_>>,
+        source: &str,
+        depth: Depth,
+    ) {
+        let Some(program) = words.first() else {
+            return;
+        };
+        // Behind any wrapper but those that keep their folder, what it runs
+        // is read from where the shell started.
+        let keeps =
+            program.literal && KEEPS_FOLDER.contains(&program_name(&program.value).as_str());
+        let outer = if keeps {
+            self.carried.clone()
+        } else {
+            self.carried.take()
+        };
+        self.unwrap_program(words, stdin, source, depth);
+        self.carried = outer;
+    }
+
+    /// [`Self::unwrap`], by the program.
+    #[allow(clippy::too_many_lines)]
+    fn unwrap_program(
         &mut self,
         words: &[Word<'_>],
         stdin: Option<Stdin<'_, '_>>,
@@ -1725,9 +1794,13 @@ impl Reader<'_> {
         }
     }
 
-    /// Where a relative path being checked starts: see [`Self::folder`].
+    /// Where a relative path being checked starts: see [`Self::folder`] and
+    /// [`Self::carried`].
     fn from(&self) -> &Path {
-        self.folder.as_deref().unwrap_or(self.start)
+        self.folder
+            .as_deref()
+            .or(self.carried.as_deref())
+            .unwrap_or(self.start)
     }
 
     /// An argument of a command in [`PATH_COMMANDS`] that leads outside the
@@ -4465,13 +4538,16 @@ const RUNS_IN_SHELL: &[&str] = &["time", "trap", "mapfile", "readarray", "enable
 /// redirect's included) or word after a redirect. After them, every step is read from the folder they
 /// reached while each step before it is a command that cannot move the
 /// shell: a program written as a literal name that is not a builtin
-/// [`moves_shell`] or [`RUNS_IN_SHELL`] names. Any other step (a pipeline, a
-/// subshell, a group, an `||` list, `popd`, a `cd` that is not plain, a
-/// program nobody can name …), and a `cd` after a step that ran (it may have
-/// set `CDPATH` or `HOME`, or made a link where the `cd` goes), leaves the
-/// rest of the line read from where the shell started, as for any line.
-/// Past [`MAX_MOVES`] or a folder of [`MAX_PLACED_BYTES`] nothing more is
-/// followed.
+/// [`moves_shell`] or [`RUNS_IN_SHELL`] names, or a pipeline of such
+/// commands. The commands in a step's substitutions and the stages of a
+/// pipeline start there too, with their redirects, when nothing in the step
+/// can move the shell (see [`stays`]). Any other step (a subshell, a group,
+/// an `||` list, `popd`, a `cd` that is not plain, a program nobody can name,
+/// a pipeline with any other stage …), and a `cd` after a step that ran (it
+/// may have set `CDPATH` or `HOME`, or made a link where the `cd` goes),
+/// leaves the rest of the line read from where the shell started, as for
+/// any line. Past [`MAX_MOVES`] or a folder of [`MAX_PLACED_BYTES`] nothing
+/// more is followed.
 ///
 /// Also the steps where a `cd` would be followed, by the node id of their
 /// command: each plain step before any other step ran. A wrapper's folder is
@@ -4486,6 +4562,27 @@ fn chain_folders(
     let mut folder: Rc<Path> = Rc::from(workspace);
     let (mut moves, mut ran) = (0, false);
     for (node, outer) in steps(chain) {
+        // A pipeline's stages each run in a subshell started where the shell
+        // is, and leave it there. A redirect the tree hangs on the list
+        // around it (`cd sub && a | b > f`) is its last stage's.
+        if node.kind() == "pipeline" {
+            let stages: Vec<_> = node.named_children(&mut node.walk()).collect();
+            if !stages.iter().all(|stage| {
+                statement(*stage, &[]).0.is_some()
+                    && !heredoc_holds_more(*stage)
+                    && stays(*stage, source)
+            }) || !outer.iter().all(|redirect| stays(*redirect, source))
+            {
+                break;
+            }
+            if moves > 0 {
+                for node in std::iter::once(node).chain(outer) {
+                    place(&mut folders, node, &folder);
+                }
+            }
+            ran = true;
+            continue;
+        }
         let (Some(command), redirects) = statement(node, &outer) else {
             break;
         };
@@ -4504,6 +4601,10 @@ fn chain_folders(
                 .chain(inner)
             {
                 folders.insert(node.id(), Rc::clone(&folder));
+            }
+            // What its substitutions run starts there too.
+            if stays(node, source) {
+                place(&mut folders, node, &folder);
             }
         }
         let words = words(command, source);
@@ -5573,6 +5674,12 @@ fn heredoc_holds_more(node: tree_sitter::Node<'_>) -> bool {
         })
 }
 
+/// The builtins that may move the shell, or redefine a command that does:
+/// see [`moves_shell`].
+const MOVES_SHELL: &[&str] = &[
+    "cd", "pushd", "popd", "eval", "source", ".", "builtin", "command", "alias",
+];
+
 /// Whether a command under `node` may move the shell, or redefine one that
 /// does: `cd`, `pushd`, `popd`, `eval`, `source`, `.`, `builtin`, `command`,
 /// `alias`, or a function definition.
@@ -5582,17 +5689,7 @@ fn moves_shell(node: tree_sitter::Node<'_>, source: &str) -> bool {
         if node.kind() == "function_definition"
             || node.kind() == "command"
                 && node.child_by_field_name("name").is_some_and(|name| {
-                    matches!(
-                        program_name(&literal(name, source).0).as_str(),
-                        "cd" | "pushd"
-                            | "popd"
-                            | "eval"
-                            | "source"
-                            | "."
-                            | "builtin"
-                            | "command"
-                            | "alias"
-                    )
+                    MOVES_SHELL.contains(&program_name(&literal(name, source).0).as_str())
                 })
         {
             return true;
@@ -5600,6 +5697,47 @@ fn moves_shell(node: tree_sitter::Node<'_>, source: &str) -> bool {
         stack.extend(node.children(&mut node.walk()));
     }
     false
+}
+
+/// Whether every command under `node` runs where it starts and leaves the
+/// shell there: each has a program written out (not `$run`) that is not one
+/// of [`MOVES_SHELL`] or [`RUNS_IN_SHELL`], and there is no function
+/// definition.
+fn stays(node: tree_sitter::Node<'_>, source: &str) -> bool {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "function_definition" => return false,
+            "command" => {
+                let Some(name) = node.child_by_field_name("name") else {
+                    return false;
+                };
+                let (name, complete) = literal(name, source);
+                let name = program_name(&name);
+                if !complete
+                    || MOVES_SHELL.contains(&name.as_str())
+                    || RUNS_IN_SHELL.contains(&name.as_str())
+                {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        stack.extend(node.children(&mut node.walk()));
+    }
+    true
+}
+
+/// `folder` as where every command and file redirect under `node` starts,
+/// its own included: see [`chain_folders`].
+fn place(folders: &mut HashMap<usize, Rc<Path>>, node: tree_sitter::Node<'_>, folder: &Rc<Path>) {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "command" | "file_redirect") {
+            folders.insert(node.id(), Rc::clone(folder));
+        }
+        stack.extend(node.children(&mut node.walk()));
+    }
 }
 
 /// A redirect's operator.
@@ -6218,6 +6356,21 @@ mod regression {
             "cd sub && cd deeper && cat ../../README.md",
             "cd sub &&\ncat ../README.md",
             "cd a/l && cat ../../../README.md",
+            // The stages of a pipeline, what a step's substitutions run and
+            // what a wrapper that keeps its folder runs start there too.
+            "cd sub && cat ../README.md | head",
+            "cd sub && cat ../README.md | grep x | wc -l",
+            "cd sub && cat x | head > ../top.txt",
+            "cd sub && cat x | head 2> ../err.log",
+            "cd sub && cat ../README.md | head && cat ../README.md",
+            "cd sub && echo \"$(cat ../README.md)\"",
+            "cd sub && diff <(cat ../README.md) x",
+            "cd sub && sudo cat ../README.md",
+            "cd sub && time cat ../README.md",
+            "cd sub && timeout 5 nice cat ../README.md | head",
+            "cd sub && env A=1 cat ../README.md",
+            "cd sub && ls | xargs cat ../README.md",
+            "cd a/l && cat ../../../README.md | head",
         ] {
             assert!(
                 analyze(command, &workspace).external_dirs.is_empty(),
@@ -6232,6 +6385,12 @@ mod regression {
             "cd sub && cat <<'EOF' > ../../notes.md\n# x\nEOF",
             "cd sub > ../log.txt && cat ../README.md",
             "cd a/l && cat ../../../../x",
+            "cd sub && cat ../../x | head",
+            "cd sub && cat x | head > ../../out.txt",
+            "cd sub && echo \"$(cat ../../x)\"",
+            "cd sub && sudo cat ../../x",
+            "cd sub && cat ../README.md | head && cat ../../x",
+            "cd a/l && cat ../../../../x | head",
         ] {
             assert_eq!(
                 analyze(command, &workspace).external_dirs,
@@ -6267,11 +6426,27 @@ mod regression {
             "cd sub && popd && cat ../x",
             "cd sub > >(cat) && cat ../x",
             "cd sub 2> \"$(mktemp)\" && cat ../x",
-            "cd sub && cat ../x | head",
             "cd sub || cat ../x",
             "env cd sub && cat ../x",
             "/usr/bin/cd sub && cat ../x",
             &format!("cd sub && c\\\nd {} && cat ../x", workspace.display()),
+            // A pipeline or a substitution where something may move the
+            // shell, a stage that is not a command, and what a wrapper runs
+            // elsewhere or as text of its own.
+            "cd sub && cd .. | cat ../x",
+            "cd sub && eval true | cat ../x",
+            "cd sub && $run | cat ../x",
+            "cd sub && cat ../x | while read -r l; do echo \"$l\"; done",
+            "cd sub && cat ../x | (cat)",
+            "cd sub && echo \"$(f() { true; }; cat ../x)\"",
+            "cd sub && echo \"$($run; cat ../x)\"",
+            "cd sub && pkexec cat ../x",
+            "cd sub && find . -exec cat ../x \\;",
+            "cd sub && sudo -i cat ../x",
+            "cd sub && env -C \"$D\" cat ../x",
+            "cd sub && bash -c 'cat ../x'",
+            "cd sub && sudo pkexec cat ../x",
+            "cd sub; cat ../x | head",
         ] {
             assert_eq!(
                 analyze(command, &workspace).external_dirs,
@@ -6279,6 +6454,16 @@ mod regression {
                 "{command}"
             );
         }
+        // Where Auto's reviewer places a deletion is as before: only a line
+        // that is one `&&` chain of commands is followed.
+        assert_eq!(
+            outside_deletions("cd sub && rm -rf ../x | cat", &workspace, None),
+            vec![OutsideDeletion {
+                path: "../x".into(),
+                placed: false,
+                effect: Effect::Deletes,
+            }]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

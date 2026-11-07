@@ -158,6 +158,24 @@ CORPUS = [
     'git --work-tree=. clean -fdx', 'git --work-tree=build clean -fdx', 'git -C src --work-tree=.. clean -fdx',
     'git --git-dir=.git clean -fdx', 'git --work-tree=../outside clean -fdx sub',
     'export GIT_WORK_TREE=../outside && git clean -fdx', 'git clean -fdx -- build', 'git --work-tree=../outside status',
+    # Pipelines, wrappers and substitutions after a `cd`
+    'cd src && cat ../README.md | head', 'cd deep/er && cat ../../README.md | wc -l',
+    'cd src && cat ../../outside/secret | head', 'cd src && cat ../README.md | grep x | wc -l',
+    'cd src && grep -n main main.rs | head -5', 'cd src && cat main.rs | head > ../top.txt',
+    'cd src && cat main.rs | head > ../../outside/top.txt', 'cd src && sudo cat ../README.md',
+    'cd src && time cat ../README.md', 'cd src && nice cat ../README.md', 'cd src && timeout 5 cat ../README.md',
+    'cd src && echo "$(cat ../README.md)"', 'cd src && echo "$(cat ../../outside/secret)"',
+    'cd src && cat ../README.md 2>&1 | head && cat ../README.md', 'cd src && cat ../README.md | head && cat ../README.md',
+    'cd src && cat ../README.md | head && cd .. && ls', 'cd src && cd .. | cat ../x',
+    'cd src && env -C ../deep cat ../README.md | head', 'cd src && pkexec cat ../README.md',
+    'cd src && find . -execdir cat ../README.md \\;', 'cd src && xargs cat ../README.md < ../files.txt',
+    'cd a/l && cat ../../../README.md | head', 'cd a/l && cat ../../../../x | head', 'cd src && $run ../README.md | head',
+    'cd src && cat ../README.md | sudo tee ../out.txt', 'cd src && cat ../README.md | while read l; do echo $l; done',
+    "cd src && bash -c 'cat ../README.md' | head", 'cd src && cat ../README.md | (cd ..; cat ../x)',
+    'cd src && echo $(cd ..; cat ../x)', 'cd src && sudo -i cat ../README.md', 'cd src && sudo env -C ../deep cat ../README.md',
+    'cd src && rm -rf ../build | true', 'cd src && cargo test 2>&1 | tee ../test.log', 'cd src && ls | xargs rm -f',
+    'cd src && cat ../package.json | jq .scripts', 'cd src && touch ../notes.txt | true',
+    'cd deep/er && cp ../../README.md . | true', 'cd src && diff <(cat ../README.md) main.rs',
 ]
 
 

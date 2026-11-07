@@ -38,13 +38,16 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
 13. owners_and_dots: `chgrp` of a folder outside the project asks, a `chmod` or `chgrp` of `.*` (which
    `/bin/sh` expands to `..` too) asks for the folder above, and so does a dash-led path after `--` that leaves
    the project; `chmod 600 .env*`, `chmod -R u+w src/.*` and `chgrp <group> notes.txt` run.
-14. auto_deletions: in Auto, a `git clean -f` whose work tree (`--work-tree`, `GIT_WORK_TREE`) is outside the
+14. cd_pipeline: after a plain `cd sub &&`, the stages of a pipeline, what a substitution runs and what `time`
+   runs are read from `sub`, so `cd sub && cat ../README.md | head -1` runs without asking, while a path that
+   leaves the project from there still asks.
+15. auto_deletions: in Auto, a `git clean -f` whose work tree (`--work-tree`, `GIT_WORK_TREE`) is outside the
    project, and an `rm` a trap runs there, ask though the reviewer allows them; a clean of the project runs.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
 toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins, holding_always,
-workdir_home, wrappers, trap, owners_and_dots, auto_deletions). No model is
+workdir_home, wrappers, trap, owners_and_dots, cd_pipeline, auto_deletions). No model is
 called; nothing outside the fixture is touched.
 """
 import grp
@@ -539,6 +542,35 @@ def case_owners_and_dots():
            'project ask; .env*, src/.* and a chgrp in the project run')
 
 
+def case_cd_pipeline():
+    """After a plain cd, a pipeline's stages, a substitution and a wrapped command are read from there."""
+    _, env = environment('cd-pipeline')
+    folder = project('cd-pipeline', REVIEW)
+    (folder / 'sub').mkdir(exist_ok=True)
+    (folder / 'README.md').write_text('# piped read\n')
+    outside = folder.parent / 'outside'
+    outside.mkdir(exist_ok=True)
+    (outside / 'secret').write_text('outside secret\n')
+    try:
+        for line, said in [('cd sub && cat ../README.md | head -1', '# piped read'),
+                           ('cd sub && cat ../README.md | grep -c piped', '1'),
+                           ('cd sub && echo "seen: $(cat ../README.md)"', 'seen: # piped read'),
+                           ('cd sub && time cat ../README.md', '# piped read'),
+                           ('cd sub && cat ../README.md | head -1 > ../top.txt', '')]:
+            output = bash(env, folder, line, code=0)
+            assert 'Stopped' not in output and said in output, (line, output)
+        assert (folder / 'top.txt').read_text() == '# piped read\n'
+        for line in ['cd sub && cat ../../outside/secret | head -1', 'cd sub && echo "$(cat ../../outside/secret)"',
+                     'cd sub && time cat ../../outside/secret', 'cd sub && cd .. | cat ../outside/secret']:
+            output = bash(env, folder, line, code=1)
+            assert 'Stopped:' in output and str(outside) in output, (line, output)
+            assert 'outside secret' not in output, (line, output)
+    finally:
+        stop(env, folder)
+    passed('after a plain cd, a pipeline, a substitution and time read from where it went without asking; a path '
+           'that leaves the project from there still asks')
+
+
 def case_auto_deletions():
     """In Auto, a deletion outside the project asks though the reviewer allows it."""
     _, env = environment('auto-deletions')
@@ -563,7 +595,8 @@ CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias
          'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev,
          'action_case': case_action_case, 'sign_ins': case_sign_ins, 'holding_always': case_holding_always,
          'workdir_home': case_workdir_home, 'wrappers': case_wrappers, 'trap': case_trap,
-         'owners_and_dots': case_owners_and_dots, 'auto_deletions': case_auto_deletions}
+         'owners_and_dots': case_owners_and_dots, 'cd_pipeline': case_cd_pipeline,
+         'auto_deletions': case_auto_deletions}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
