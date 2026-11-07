@@ -113,6 +113,11 @@ fn classify(name: &str) -> Classification {
                 | "plugin_manage"
                 | "skill_manage"
                 | "command_manage"
+                // Installing from the marketplace, and turning installed
+                // capabilities on or off, as the other managers: only when
+                // asked. Resident, they were 4.5 KB of every request.
+                | "marketplace_manage"
+                | "capability_manage"
                 | "skill"
         )
     {
@@ -606,6 +611,23 @@ fn refused_before_running(error: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_marketplace_and_capability_managers_wait_to_be_loaded_like_the_other_managers() {
+        for name in [
+            "marketplace_manage",
+            "capability_manage",
+            "skill_manage",
+            "mcp_manage",
+        ] {
+            let kind = super::classify(name);
+            assert_eq!(kind.group, "extensions", "{name}");
+            assert!(!kind.essential, "{name}");
+        }
+        for name in ["read", "edit", "apply_patch", "bash", "grep", "glob"] {
+            assert!(super::classify(name).essential, "{name}");
+        }
+    }
+
     #[test]
     fn cloud_tools_are_deferred_in_the_cloud_group() {
         for name in ["cloud_agent_manage", "cloud_workspace"] {
