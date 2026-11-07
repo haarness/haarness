@@ -1,35 +1,48 @@
 #!/usr/bin/env python3
-"""Connector identities in a configuration folder two computers have, against a fake Cloud.
+"""Connector identities of computers that share a configuration folder, or run several releases, against a fake Cloud.
 
-  scripts/test-remote-identity.py [state-folder]   (HAARNESS_BIN picks the binary, default target/debug/haarness)
+  scripts/test-remote-identity.py [state-folder]
+  HAARNESS_BIN picks the binary (default target/debug/haarness); HAARNESS_BASE_BIN,
+  the release before it, adds the upgrade, downgrade and mixed-release cases, and
+  HAARNESS_IDENTITY_RELEASES_ONLY=1 runs only those.
 
 Migration Assistant copies the configuration folder `remote enable` keeps its
-identities in, and a synced or shared dotfiles folder keeps two computers'
-in step. Each computer here is a folder of its own (home, data, Cloud
-sign-in, project with the echo provider), and `HAARNESS_TEST_MACHINE_ID`,
-honoured only with `HAARNESS_TEST_PROVIDER`, stands in for its hardware id.
-The fake Cloud registers hosts (keeping a known host's name, as Cloud does),
-lists them and holds one relay connection per host, closing the older one
-when a host connects again, as Cloud does.
+identities in, a synced or shared dotfiles folder keeps two computers' in
+step, and Desktop and the terminal update separately while sharing it. Each
+computer here is a folder of its own (home, data, Cloud sign-in, project with
+the echo provider), and `HAARNESS_TEST_MACHINE_ID`, honoured only with
+`HAARNESS_TEST_PROVIDER`, stands in for its hardware id. The fake Cloud
+registers hosts (keeping a known host's name, as Cloud does), lists them and
+holds one relay connection per host, closing the older one when a host
+connects again, as Cloud does.
 
-1. Studio shares itself: its identity file is named for Studio and stamped
-   as Studio's.
-2. Studio's configuration folder is copied to Laptop. There, before Laptop
-   connects, the account bridge (Desktop's Your computers) lists Studio,
-   `remote status` lists nothing and `remote forget` of Studio's host is
-   refused, leaving it registered.
-3. Laptop shares itself: a host of its own under its own name, and both stay
-   connected for 15 seconds without taking the connection from each other.
-   Each bridge lists the other computer only; restarting either keeps its id.
-4. Mini and Air share one configuration folder: started and each restarted
-   twice, they keep two ids, and each `remote status` lists only its own.
-5. An identity from before names carried the computer is taken over by the
-   computer whose name it has (same id, stamped, renamed), and a copy of it
-   on a computer of another name is left alone while that one starts afresh.
-6. A computer that cannot tell its hardware id (an empty override) uses the
-   name every computer used before and keeps the identity there as it is.
-7. Without `HAARNESS_TEST_PROVIDER` the override is ignored: Desk, given
-   Studio's stand-in id and Studio's folder, still reads its own hardware id.
+1. Studio shares itself: its identity stays under the name every release
+   looks under, stamped as Studio's.
+2. Studio's folder is copied to Laptop. There, before Laptop connects, the
+   account bridge (Desktop's Your computers) lists Studio, `remote status`
+   lists nothing and `remote forget` of Studio's host is refused.
+3. Laptop shares itself: a host of its own, in a file named for Laptop, and
+   both stay connected for 15 seconds without taking the connection from each
+   other. Each bridge lists the other only; restarts keep each id.
+4. Mini and Air share one folder: started and each restarted twice, they keep
+   two ids, and each `remote status` lists only its own.
+5. A computer that cannot tell its hardware id (an empty override) keeps the
+   identity under the old name as it is; one whose id fails for a single
+   start keeps its host, under the old name or in the one file it has.
+6. Without `HAARNESS_TEST_PROVIDER` the override is ignored.
+
+With HAARNESS_BASE_BIN:
+
+7. Upgrade: Den shared by the release before keeps its host under the new one,
+   stamped where it was. Downgrade: the release before then keeps it too.
+8. Mixed releases: with the new connector running, the release before's
+   `remote enable` says it already runs and no second host appears; signing
+   out with the new build stops a connector the release before runs here.
+9. A copy made by the release before on a computer of another name (Annex)
+   gets a host of its own and stops counting there; Den keeps its host.
+10. A renamed computer: Desktop's restore finds the release before's
+    connector running under the old name, so once it has stopped, the next
+    restore turns access back on with the same host.
 
 Writes secret-free results to checks.json in a new folder under the state
 folder (default: a temporary folder, removed when the run passes).
@@ -94,6 +107,9 @@ class Cloud:
         async def token(request):
             return web.json_response({"access_token": "renewed", "refresh_token": "next", "expires_in": 3600})
 
+        async def revoke(request):
+            return web.json_response({})
+
         async def register(request):
             body = await request.json()
             known = self.hosts.get(body["id"])
@@ -139,6 +155,7 @@ class Cloud:
         app = web.Application()
         app.router.add_get("/api/v1/me", me)
         app.router.add_post("/oauth/token", token)
+        app.router.add_post("/oauth/revoke", revoke)
         app.router.add_post("/api/v1/remote-hosts", register)
         app.router.add_get("/api/v1/remote-hosts", listing)
         app.router.add_get("/api/v1/remote-hosts/{id}", host)
@@ -164,15 +181,16 @@ class Cloud:
 class Computer:
     def __init__(self, root: pathlib.Path, cloud: Cloud, name: str, machine, test_provider: bool = True, config=None) -> None:
         self.name = name
+        self.cloud = cloud
         self.folder = root / name
-        for sub in ("home", "data", "account", "project/.haarness"):
+        for sub in ("home", "data", "account", "project/.haarness", "chat-home"):
             (self.folder / sub).mkdir(parents=True)
+        (self.folder / "project/.haarness/config.toml").write_text(CONFIG if test_provider else "[lsp]\nenabled=false\n")
+        self.project = self.folder / "project"
         # Where this data folder keeps its configuration, and so identities.
         self.config = self.folder / "data/config"
         if config is not None:
             self.config.symlink_to(config, target_is_directory=True)
-        (self.folder / "project/.haarness/config.toml").write_text(CONFIG if test_provider else "[lsp]\nenabled=false\n")
-        self.project = self.folder / "project"
         self.env = {
             **os.environ,
             "HAARNESS_HOME": str(self.folder / "home"),
@@ -189,34 +207,45 @@ class Computer:
             self.env["HAARNESS_TEST_PROVIDER"] = "1"
         if machine is not None:
             self.env["HAARNESS_TEST_MACHINE_ID"] = machine
+        self.sign_in()
+        self.log = self.folder / "connector.log"
+        self.connector = None
+        self.file = None
+
+    def sign_in(self) -> None:
         expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
         credentials = self.folder / "account/credentials.json"
         credentials.write_text(
             json.dumps(
                 {
-                    "apiUrl": cloud.url + "/",
-                    "accessToken": f"access-{name}",
+                    "apiUrl": self.cloud.url + "/",
+                    "accessToken": f"access-{self.name}",
                     "accessExpiresAt": expires.isoformat().replace("+00:00", "Z"),
-                    "refreshToken": f"refresh-{name}",
+                    "refreshToken": f"refresh-{self.name}",
                 }
             )
         )
         os.chmod(credentials, 0o600)
-        self.log = self.folder / "connector.log"
-        self.connector = None
-        self.cloud = cloud
+
+    def run(self, *args, binary=None, input=None, workspace=None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [binary or BIN, "--workspace", str(workspace or self.project), *args],
+            env=self.env,
+            input=input,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
 
     def cli(self, *args, input=None) -> str:
-        result = subprocess.run(
-            [BIN, "--workspace", str(self.project), *args], env=self.env, input=input, capture_output=True, text=True, timeout=120
-        )
+        result = self.run(*args, input=input)
         if result.returncode != 0:
             raise SystemExit(f"FAIL: {self.name}: {' '.join(args)}: {result.stderr}")
         return result.stdout
 
-    def start(self) -> None:
+    def start(self, binary=None, name=None) -> None:
         self.connector = subprocess.Popen(
-            [BIN, "--workspace", str(self.project), "remote", "run", "--name", self.name],
+            [binary or BIN, "--workspace", str(self.project), "remote", "run", "--name", name or self.name],
             stdout=open(self.log, "a"),
             stderr=subprocess.STDOUT,
             env=self.env,
@@ -233,27 +262,39 @@ class Computer:
                 self.connector.wait()
         self.connector = None
 
-    def identity_file(self) -> pathlib.Path:
-        """The file this computer's connector keeps its identity in."""
-        machine = self.env.get("HAARNESS_TEST_MACHINE_ID") or None
-        return self.config / file_name(self.cloud, machine)
+    def identities(self) -> dict[pathlib.Path, dict]:
+        found = {}
+        for path in self.config.glob("remote-*.json") if self.config.exists() else []:
+            try:
+                found[path] = json.loads(path.read_text())
+            except ValueError:
+                pass
+        return found
 
     def identity(self) -> dict:
-        path = self.identity_file()
-        return json.loads(path.read_text()) if path.exists() else {}
+        return json.loads(self.file.read_text()) if self.file and self.file.exists() else {}
 
     def status_ids(self) -> list[str]:
         return [item["id"] for item in json.loads(self.cli("remote", "status", "--json"))["items"]]
-
-    def forget(self, id: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [BIN, "--workspace", str(self.project), "remote", "forget", id], env=self.env, capture_output=True, text=True, timeout=60
-        )
 
     def others(self) -> list[str]:
         """What the account bridge lists for Desktop on this computer."""
         listed = json.loads(self.cli("account", "--rpc", input=json.dumps({"action": "remote-hosts"})))
         return sorted(item["name"] for item in listed["items"])
+
+    def restore(self) -> dict:
+        """Desktop starting: the account bridge's remote access `restore`."""
+        home = self.folder / "chat-home"
+        result = self.run(
+            "--chat-home",
+            "account",
+            "--rpc",
+            workspace=home,
+            input=json.dumps({"action": "remote-access", "change": "restore", "chatHome": str(home)}),
+        )
+        if result.returncode != 0:
+            raise SystemExit(f"FAIL: {self.name}: restore: {result.stderr}")
+        return json.loads(result.stdout)
 
     def copied_lines(self) -> list[str]:
         return [line for line in self.log.read_text().splitlines() if line.startswith(COPIED)] if self.log.exists() else []
@@ -264,8 +305,8 @@ def stamp(machine: str, host: str) -> str:
 
 
 def file_name(cloud: Cloud, machine: str | None) -> str:
-    """A host connector's identity file: named for `machine`, or the name
-    every computer used before names carried the computer."""
+    """A host connector's identity file: the name every release looks under,
+    or the name of a computer's own when that one is another's."""
     key = f"{cloud.url}/|{ACCOUNT}||None" + (f"|{machine}" if machine else "")
     return f"remote-{hashlib.sha256(key.encode()).hexdigest()}.json"
 
@@ -280,23 +321,126 @@ def wait_for(check, timeout: float, what: str):
     raise SystemExit(f"FAIL: timed out waiting for {what}")
 
 
-def connected_as(computer: Computer, cloud: Cloud) -> str:
-    """The host id `computer` connects as, once its running connector (not a
-    copied file) registered and Cloud holds its connection."""
+def connected_as(computer: Computer, cloud: Cloud, pid=None) -> str:
+    """The host id `computer`'s connector (or the one with `pid`) connects
+    as, once it registered and Cloud holds its connection; remembers its file."""
 
     def check():
-        identity = computer.identity()
-        id = identity.get("id")
-        ours = identity.get("pid") == computer.connector.pid
-        return id if ours and identity.get("registered") and id in cloud.connected() else None
+        want = pid or computer.connector.pid
+        for path, identity in computer.identities().items():
+            if identity.get("pid") == want and identity.get("registered") and identity.get("id") in cloud.connected():
+                computer.file = path
+                return identity["id"]
+        return None
 
     return wait_for(check, 90, f"{computer.name} to connect")
+
+
+def alive(pid) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, TypeError):
+        return False
+
+
+def computers_apart(root, cloud, computer, check, old) -> None:
+    """Steps 1 to 6: copied and shared folders, and hardware ids that fail."""
+    studio = computer("Studio", "MACHINE-STUDIO")
+    laptop = computer("Laptop", "MACHINE-LAPTOP")
+
+    # 1. Studio shares itself.
+    studio.start()
+    first = connected_as(studio, cloud)
+    check(studio.file.name == old and studio.identity().get("machine") == stamp("MACHINE-STUDIO", first), "Studio keeps its identity under the old name, stamped as Studio's", studio.file.name)
+
+    # 2. Its configuration folder is copied to Laptop.
+    laptop.config.mkdir(parents=True, exist_ok=True)
+    for path in studio.config.glob("remote-*"):
+        shutil.copy2(path, laptop.config / path.name)
+    check(laptop.others() == ["Studio"], "before Laptop connects, its bridge lists Studio", laptop.others())
+    check(laptop.status_ids() == [], "Laptop's remote status does not list Studio's connector", laptop.status_ids())
+    forgot = laptop.run("remote", "forget", first)
+    check(forgot.returncode != 0 and first in cloud.hosts and first in cloud.connected(), "remote forget on Laptop leaves Studio's host alone", forgot.stderr)
+
+    # 3. Laptop shares itself: a host of its own, and no fight.
+    laptop.start()
+    second = connected_as(laptop, cloud)
+    check(second != first and not laptop.copied_lines(), "Laptop connects as a new host, never reading the copy as its own", (first, second))
+    check(laptop.file.name == file_name(cloud, "MACHINE-LAPTOP") and laptop.identity().get("machine") == stamp("MACHINE-LAPTOP", second), "in a file named for Laptop, stamped as Laptop's")
+    check(json.loads((laptop.config / old).read_text())["id"] == first, "the copy of Studio's identity is left as it was")
+    check(cloud.hosts[first]["name"] == "Studio" and cloud.hosts[second]["name"] == "Laptop", "each host has its own computer's name", {id: host["name"] for id, host in cloud.hosts.items()})
+    settled = time.time()
+    time.sleep(15)
+    opens = [id for at, id in cloud.opens if at >= settled]
+    takeovers = [id for at, id in cloud.takeovers if at >= settled - 5]
+    check(cloud.connected() >= {first, second}, "both stay connected", sorted(cloud.connected()))
+    check(not opens and not takeovers, "neither takes the connection from the other", {"opens": opens, "takeovers": takeovers})
+    check(studio.others() == ["Laptop"] and laptop.others() == ["Studio"], "each bridge lists the other computer only", (studio.others(), laptop.others()))
+    check(laptop.status_ids() == [second], "Laptop's remote status lists its own connector only", laptop.status_ids())
+    for each, id in ((studio, first), (laptop, second)):
+        each.stop()
+        each.start()
+        check(connected_as(each, cloud) == id, f"{each.name} keeps host …{id[-8:]} when it starts again")
+    studio.stop()
+    laptop.stop()
+
+    # 4. One configuration folder for two computers.
+    shared = root / "shared-config"
+    shared.mkdir()
+    mini = computer("Mini", "MACHINE-MINI", config=shared)
+    air = computer("Air", "MACHINE-AIR", config=shared)
+    before = set(cloud.hosts)
+    ids = {}
+    for each in (mini, air):
+        each.start()
+        ids[each.name] = {connected_as(each, cloud)}
+    for _ in range(2):
+        for each in (mini, air):
+            each.stop()
+            each.start()
+            ids[each.name].add(connected_as(each, cloud))
+    check(all(len(found) == 1 for found in ids.values()) and len(set().union(*ids.values())) == 2, "in one shared folder each computer keeps one id over three starts", ids)
+    check(len(set(cloud.hosts) - before) == 2, "and Cloud has two hosts for them, no more", sorted(set(cloud.hosts) - before))
+    check(mini.status_ids() == list(ids["Mini"]) and air.status_ids() == list(ids["Air"]), "each one's remote status lists its own connector only", (mini.status_ids(), air.status_ids()))
+    mini.stop()
+    air.stop()
+
+    # 5. Hardware ids that cannot be read.
+    attic = computer("Attic", "")
+    attic.config.mkdir(parents=True, exist_ok=True)
+    before_attic = {k: v for k, v in json.loads((studio.config / old).read_text()).items() if k != "machine"}
+    (attic.config / old).write_text(json.dumps(before_attic))
+    attic.start()
+    check(connected_as(attic, cloud) == first, "without a hardware id the identity under the old name keeps its host")
+    check("machine" not in attic.identity(), "and gets no stamp")
+    attic.stop()
+    for each, id in ((studio, first), (laptop, second)):
+        each.env["HAARNESS_TEST_MACHINE_ID"] = ""
+        if each is laptop:
+            # Only Laptop's own file: the copy of Studio's is gone.
+            (laptop.config / old).unlink()
+        each.start()
+        check(connected_as(each, cloud) == id, f"a start of {each.name} that cannot read its hardware id keeps its host")
+        each.stop()
+        each.env["HAARNESS_TEST_MACHINE_ID"] = f"MACHINE-{each.name.upper()}"
+
+    # 6. The stand-in id needs the test providers.
+    desk = computer("Desk", "MACHINE-STUDIO", test_provider=False)
+    desk.config.mkdir(parents=True, exist_ok=True)
+    for path in studio.config.glob("remote-*"):
+        shutil.copy2(path, desk.config / path.name)
+    desk.start()
+    third = connected_as(desk, cloud)
+    check(third != first and desk.identity().get("machine") != stamp("MACHINE-STUDIO", third), "without the test providers the override is ignored", third)
+    desk.stop()
 
 
 def main() -> None:
     state = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else None
     if state is not None:
         state.mkdir(parents=True, exist_ok=True)
+    base = os.environ.get("HAARNESS_BASE_BIN")
     root = pathlib.Path(tempfile.mkdtemp(prefix="remote-identity-", dir=state))
     cloud = Cloud()
     checks: list[str] = []
@@ -308,147 +452,104 @@ def main() -> None:
         checks.append(f"PASS {line}")
         print(f"PASS {line}", flush=True)
 
+    def computer(*args, **kwargs) -> Computer:
+        made = Computer(root, cloud, *args, **kwargs)
+        computers.append(made)
+        return made
+
     try:
-        studio = Computer(root, cloud, "Studio", "MACHINE-STUDIO")
-        laptop = Computer(root, cloud, "Laptop", "MACHINE-LAPTOP")
-        computers += [studio, laptop]
+        old = file_name(cloud, None)
+        if os.environ.get("HAARNESS_IDENTITY_RELEASES_ONLY") != "1":
+            computers_apart(root, cloud, computer, check, old)
 
-        # 1. Studio shares itself.
-        studio.start()
-        first = connected_as(studio, cloud)
-        check(studio.identity().get("machine") == stamp("MACHINE-STUDIO", first), "Studio's identity is named for Studio and stamped as Studio's")
+        if not base:
+            print("SKIP releases side by side: set HAARNESS_BASE_BIN to the release before", flush=True)
+        else:
+            # 7. Upgrade and downgrade.
+            den = computer("Den", "MACHINE-DEN")
+            den.start(base)
+            den_id = connected_as(den, cloud)
+            check(den.file.name == old and "machine" not in den.identity(), "the release before keeps Den's identity under the old name, unstamped")
+            den.stop()
+            hosts = set(cloud.hosts)
+            den.start()
+            check(connected_as(den, cloud) == den_id and den.file.name == old, "after the upgrade Den keeps its host, in the same file")
+            check(den.identity().get("machine") == stamp("MACHINE-DEN", den_id), "stamped where it was")
+            den.stop()
+            den.start(base)
+            check(connected_as(den, cloud) == den_id and set(cloud.hosts) == hosts, "going back to the release before keeps the same host, and no new one")
+            check(den.identity().get("machine") == stamp("MACHINE-DEN", den_id), "and the stamp stays")
+            den.stop()
 
-        # 2. Its configuration folder is copied to Laptop.
-        laptop.config.mkdir(parents=True, exist_ok=True)
-        for path in studio.config.glob("remote-*"):
-            shutil.copy2(path, laptop.config / path.name)
-        check(laptop.others() == ["Studio"], "before Laptop connects, its bridge lists Studio", laptop.others())
-        check(laptop.status_ids() == [], "Laptop's remote status does not list Studio's connector", laptop.status_ids())
-        forgot = laptop.forget(first)
-        check(forgot.returncode != 0 and first in cloud.hosts and first in cloud.connected(), "remote forget on Laptop leaves Studio's host alone", forgot.stderr)
+            # 8. Releases side by side.
+            den.start()
+            connected_as(den, cloud)
+            enable = den.run("remote", "enable", "--name", "Den", binary=base)
+            time.sleep(4)
+            check(enable.returncode == 0 and "already running" in enable.stdout and set(cloud.hosts) == hosts, "the release before's remote enable beside the new connector says it already runs", enable.stdout + enable.stderr)
+            den.stop()
+            leaver = computer("Leaver", "MACHINE-LEAVER")
+            leaver.start(base)
+            leaver_id = connected_as(leaver, cloud)
+            pid = leaver.connector.pid
+            leaver.cli("account", "--rpc", input=json.dumps({"action": "logout"}))
+            wait_for(lambda: leaver.connector.poll() is not None, 30, "the release before's connector to stop at sign-out")
+            check(leaver_id not in cloud.connected() and not alive(pid), "signing out stops a connector the release before runs here")
 
-        # 3. Laptop shares itself: a host of its own, and no fight.
-        laptop.start()
-        second = connected_as(laptop, cloud)
-        check(second != first, "Laptop connects as a new host", (first, second))
-        check(not laptop.copied_lines(), "without ever reading the copy as its own")
-        check(laptop.identity().get("machine") == stamp("MACHINE-LAPTOP", second), "Laptop's identity is its own file, stamped as Laptop's")
-        check(
-            json.loads((laptop.config / file_name(cloud, "MACHINE-STUDIO")).read_text())["id"] == first,
-            "the copy of Studio's identity is left as it was",
-        )
-        check(
-            cloud.hosts[first]["name"] == "Studio" and cloud.hosts[second]["name"] == "Laptop",
-            "each host has its own computer's name",
-            {id: host["name"] for id, host in cloud.hosts.items()},
-        )
-        settled = time.time()
-        time.sleep(15)
-        opens = [id for at, id in cloud.opens if at >= settled]
-        takeovers = [id for at, id in cloud.takeovers if at >= settled - 5]
-        check(cloud.connected() >= {first, second}, "both stay connected", sorted(cloud.connected()))
-        check(not opens and not takeovers, "neither takes the connection from the other", {"opens": opens, "takeovers": takeovers})
-        check(studio.others() == ["Laptop"] and laptop.others() == ["Studio"], "each bridge lists the other computer only", (studio.others(), laptop.others()))
-        check(laptop.status_ids() == [second], "Laptop's remote status lists its own connector only", laptop.status_ids())
-        for computer, id in ((studio, first), (laptop, second)):
-            computer.stop()
-            computer.start()
-            check(connected_as(computer, cloud) == id, f"{computer.name} keeps host …{id[-8:]} when it starts again")
-        studio.stop()
-        laptop.stop()
+            # 9. A copy the release before made, on a computer of another name.
+            annex = computer("Annex", "MACHINE-ANNEX")
+            annex.config.mkdir(parents=True, exist_ok=True)
+            pre = {k: v for k, v in den.identity().items() if k != "machine"}
+            (den.config / old).write_text(json.dumps(pre))
+            (annex.config / old).write_text(json.dumps(pre))
+            annex.start()
+            annex_id = connected_as(annex, cloud)
+            check(annex_id != den_id and annex.file.name == file_name(cloud, "MACHINE-ANNEX"), "a copy from a computer of another name gets a host of its own", annex_id)
+            check(json.loads((annex.config / old).read_text())["id"] == den_id and annex.status_ids() == [annex_id], "and the copy, left where it was, no longer counts there", annex.status_ids())
+            den.start()
+            check(connected_as(den, cloud) == den_id and den.file.name == old, "while Den keeps its host")
+            check(len(cloud.connected() & {den_id, annex_id}) == 2, "both connected")
+            annex.stop()
+            den.stop()
 
-        # 4. One configuration folder for two computers.
-        shared = root / "shared-config"
-        shared.mkdir()
-        mini = Computer(root, cloud, "Mini", "MACHINE-MINI", config=shared)
-        air = Computer(root, cloud, "Air", "MACHINE-AIR", config=shared)
-        computers += [mini, air]
-        before = set(cloud.hosts)
-        ids = {}
-        for computer in (mini, air):
-            computer.start()
-            ids[computer.name] = {connected_as(computer, cloud)}
-        for _ in range(2):
-            for computer in (mini, air):
-                computer.stop()
-                computer.start()
-                ids[computer.name].add(connected_as(computer, cloud))
-        check(all(len(found) == 1 for found in ids.values()) and len(set().union(*ids.values())) == 2, "in one shared folder each computer keeps one id over three starts", ids)
-        check(len(set(cloud.hosts) - before) == 2, "and Cloud has two hosts for them, no more", sorted(set(cloud.hosts) - before))
-        check(
-            mini.status_ids() == list(ids["Mini"]) and air.status_ids() == list(ids["Air"]),
-            "each one's remote status lists its own connector only",
-            (mini.status_ids(), air.status_ids()),
-        )
-        mini.stop()
-        air.stop()
-
-        # 5. An identity from before names carried the computer.
-        old = studio.identity()
-        old.pop("machine")
-        legacy = studio.config / file_name(cloud, None)
-        studio.identity_file().unlink()
-        legacy.write_text(json.dumps(old))
-        (laptop.config / file_name(cloud, None)).write_text(json.dumps(old))
-        (laptop.config / file_name(cloud, "MACHINE-LAPTOP")).unlink()
-        studio.start()
-        check(connected_as(studio, cloud) == first, "an identity from before keeps its host on the computer of its name")
-        check(not legacy.exists() and studio.identity().get("machine") == stamp("MACHINE-STUDIO", first), "and moves to that computer's own file, stamped")
-        laptop.start()
-        renewed = connected_as(laptop, cloud)
-        check(renewed not in (first, second), "a copy of it on a computer of another name starts afresh", renewed)
-        check((laptop.config / file_name(cloud, None)).exists(), "and is left where it was")
-        check(laptop.status_ids() == [renewed], "and no longer counts as Laptop's", laptop.status_ids())
-        check(len(cloud.connected() & {first, renewed}) == 2, "both connected")
-        studio.stop()
-        laptop.stop()
-
-        # 6. A computer that cannot tell its hardware id changes nothing.
-        attic = Computer(root, cloud, "Attic", "")
-        computers.append(attic)
-        attic.config.mkdir(parents=True, exist_ok=True)
-        (attic.config / file_name(cloud, None)).write_text(json.dumps(old))
-        attic.start()
-        check(connected_as(attic, cloud) == first, "without a hardware id the identity under the old name keeps its host")
-        check("machine" not in attic.identity(), "and gets no stamp")
-        attic.stop()
-
-        # 7. The stand-in id needs the test providers.
-        desk = Computer(root, cloud, "Desk", "MACHINE-STUDIO", test_provider=False)
-        computers.append(desk)
-        desk.config.mkdir(parents=True, exist_ok=True)
-        for path in studio.config.glob("remote-*"):
-            shutil.copy2(path, desk.config / path.name)
-        desk.start()
-        # Its file is named for its real hardware id: find it by its pid.
-        def desk_identity():
-            for path in desk.config.glob("remote-*.json"):
-                identity = json.loads(path.read_text())
-                if identity.get("pid") == desk.connector.pid and identity.get("registered") and identity["id"] in cloud.connected():
-                    return identity
-            return None
-        third = wait_for(desk_identity, 90, "Desk to connect")
-        check(third["id"] != first and third.get("machine") != stamp("MACHINE-STUDIO", third["id"]), "without the test providers the override is ignored", third["id"])
-        desk.stop()
+            # 10. A renamed computer: the connector of the release before runs
+            # under a name this computer no longer has.
+            loft = computer("Loft", "MACHINE-LOFT")
+            loft.start(base, name="Old Name")
+            loft_id = connected_as(loft, cloud)
+            hosts = set(cloud.hosts)
+            first_restore = loft.restore()
+            check(first_restore.get("state") in ("on", "connecting") and loft.identity().get("machine") == stamp("MACHINE-LOFT", loft_id), "Desktop's restore finds it running and makes it this computer's", first_restore)
+            loft.stop()
+            again = loft.restore()
+            restored = connected_as(loft, cloud, pid=wait_for(lambda: loft.identity().get("pid") if alive(loft.identity().get("pid")) else None, 60, "the restored connector"))
+            check(again.get("state") == "on" and restored == loft_id and set(cloud.hosts) == hosts, "after it stopped, the next restore turns access back on with the same host", again)
+            loft.cli("remote", "disable", loft_id)
         (root / "checks.json").write_text(json.dumps({"verdict": "PASS", "checks": checks}, indent=2))
     except BaseException as error:
         (root / "checks.json").write_text(json.dumps({"verdict": "FAIL", "error": str(error), "checks": checks}, indent=2))
-        for computer in computers:
-            if computer.log.exists():
-                print(f"--- {computer.name} connector output\n{computer.log.read_text()[-3000:]}", flush=True)
+        for each in computers:
+            if each.log.exists():
+                print(f"--- {each.name} connector output\n{each.log.read_text()[-3000:]}", flush=True)
         raise
     finally:
-        for computer in computers:
-            computer.stop()
+        for each in computers:
+            each.stop()
+            # Connectors started in the background (`remote enable`, Desktop's
+            # restore) name their pid in the identity they run.
+            for identity in each.identities().values():
+                pid = identity.get("pid")
+                if alive(pid) and str(root) in subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout:
+                    os.kill(pid, signal.SIGTERM)
         # A project server a stopped connector was still starting comes up
         # after the first stop, so each is stopped once more a moment later.
         for attempt in range(2):
             if attempt:
                 time.sleep(3)
-            for computer in computers:
-                subprocess.run(
-                    [BIN, "--workspace", str(computer.project), "serve", "--stop"], env=computer.env, capture_output=True, timeout=60
-                )
+            for each in computers:
+                for workspace in (each.project, each.folder / "chat-home"):
+                    for binary in filter(None, (BIN, base)):
+                        each.run("serve", "--stop", binary=binary, workspace=workspace)
         cloud.loop.call_soon_threadsafe(cloud.loop.stop)
         # A state folder named on the command line is the caller's to keep.
         if state is None:
