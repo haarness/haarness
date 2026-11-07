@@ -8,7 +8,11 @@ mod snapshots;
 mod workflows;
 pub use snapshots::{PruneReport, SqliteSnapshotFolders, SqliteSnapshotStore};
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -1322,8 +1326,20 @@ impl ThreadRepository for SqliteStore {
             let mut copied = Vec::new();
             for row in rows {
                 let (old_id, sequence, data_json, created_at) = row.map_err(storage)?;
-                copied.push((item_id(&old_id)?, sequence, data_json, created_at));
+                let data: ItemData = serde_json::from_str(&data_json).map_err(storage)?;
+                copied.push((item_id(&old_id)?, sequence, data, created_at));
             }
+            // A call whose result is not in the copied range (it was waiting
+            // or running, or a steer it ran through is the boundary) would
+            // never get one in the fork, and providers refuse a call without
+            // its result: it is left out with what was recorded for it.
+            let unanswered =
+                haarness_core::unanswered_calls(copied.iter().map(|(_, _, data, _)| data));
+            let left_out = unanswered
+                .calls
+                .into_iter()
+                .chain(unanswered.records)
+                .collect::<HashSet<_>>();
             let id_map = copied
                 .iter()
                 .map(|(old_id, ..)| (*old_id, ItemId::new()))
@@ -1333,8 +1349,11 @@ impl ThreadRepository for SqliteStore {
                 sequence: 0,
                 item_id: None,
             };
-            for (old_id, sequence, data_json, created_at) in copied {
-                let mut data: ItemData = serde_json::from_str(&data_json).map_err(storage)?;
+            for (index, (old_id, sequence, mut data, created_at)) in copied.into_iter().enumerate()
+            {
+                if left_out.contains(&index) {
+                    continue;
+                }
                 // The fork runs none of its source's commands: a checkpoint
                 // of one still running is left out (the copied call's result
                 // still names the command), an ended one is kept.
@@ -3218,6 +3237,148 @@ mod tests {
             .unwrap();
         assert_eq!(partial.title, "Early");
         assert_eq!(store.list_items(partial.id, None).await.unwrap().len(), 1);
+    }
+
+    fn bash_call(call_id: &str) -> ItemData {
+        ItemData::ToolCall {
+            call_id: call_id.into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "sleep 120"}),
+            provider_metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn bash_result(call_id: &str) -> ItemData {
+        ItemData::ToolResult {
+            call_id: call_id.into(),
+            name: "bash".into(),
+            output: "slept".into(),
+            is_error: false,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn calls_and_results(items: &[Item]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match &item.data {
+                ItemData::ToolCall { call_id, .. } => Some(format!("call {call_id}")),
+                ItemData::ToolResult { call_id, .. } => Some(format!("result {call_id}")),
+                ItemData::TaskLink { call_id, .. } => Some(format!("link {call_id}")),
+                ItemData::TaskState { call_id, .. } => Some(format!("task {call_id}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_fork_leaves_out_a_call_still_waiting_or_running() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let turn = command_turn(&store, thread.id).await;
+        let child = ThreadId::new();
+        for data in [
+            bash_call("done"),
+            bash_result("done"),
+            ItemData::AssistantMessage {
+                text: "Now the slow part.".into(),
+            },
+            // Waits for its approval, and a subagent runs alongside it.
+            bash_call("waiting"),
+            ItemData::ToolCall {
+                call_id: "agent".into(),
+                name: "task".into(),
+                arguments: serde_json::json!({"prompt": "look around"}),
+                provider_metadata: serde_json::Value::Null,
+            },
+            ItemData::TaskLink {
+                call_id: "agent".into(),
+                child_thread_id: child,
+            },
+            ItemData::TaskState {
+                call_id: "agent".into(),
+                child_thread_id: child,
+                child_turn_id: TurnId::new(),
+                state: "running".into(),
+            },
+        ] {
+            store
+                .append_item(thread.id, Some(turn), data)
+                .await
+                .unwrap();
+        }
+
+        let fork = store.fork_thread(thread.id, None, None).await.unwrap();
+        let copied = store.list_items(fork.id, None).await.unwrap();
+        assert_eq!(calls_and_results(&copied), ["call done", "result done"]);
+        assert!(copied.iter().any(|item| matches!(
+            &item.data,
+            ItemData::AssistantMessage { text } if text == "Now the slow part."
+        )));
+        let source = store.list_items(thread.id, None).await.unwrap();
+        assert_eq!(
+            calls_and_results(&source).len(),
+            6,
+            "the source keeps its calls"
+        );
+        assert_eq!(
+            fork.fork_origin.as_ref().map(|origin| origin.sequence),
+            copied.last().map(|item| item.sequence),
+            "the fork starts after the last item it copied"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fork_before_a_steer_leaves_out_the_call_the_steer_came_during() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let turn = command_turn(&store, thread.id).await;
+        store
+            .append_item(thread.id, Some(turn), bash_call("slow"))
+            .await
+            .unwrap();
+        let steer = store
+            .append_item(
+                thread.id,
+                Some(turn),
+                ItemData::UserMessage {
+                    text: "also check the logs".into(),
+                    attachments: Vec::new(),
+                    queued: true,
+                    synthetic: false,
+                    command_line: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .append_item(thread.id, Some(turn), bash_result("slow"))
+            .await
+            .unwrap();
+
+        let fork = store
+            .fork_thread(thread.id, None, Some(steer.sequence - 1))
+            .await
+            .unwrap();
+        let copied = store.list_items(fork.id, None).await.unwrap();
+        assert!(calls_and_results(&copied).is_empty(), "{copied:?}");
+        assert!(
+            copied
+                .iter()
+                .any(|item| matches!(item.data, ItemData::UserMessage { queued: false, .. })),
+            "the turn's prompt is copied"
+        );
+        let whole = store.fork_thread(thread.id, None, None).await.unwrap();
+        assert_eq!(
+            calls_and_results(&store.list_items(whole.id, None).await.unwrap()),
+            ["call slow", "result slow"]
+        );
     }
 
     #[tokio::test]

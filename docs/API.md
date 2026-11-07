@@ -149,7 +149,11 @@ The API retains `{title?, beforeItemId?}` for older integrations that use an
 exclusive user-message boundary; clients may send both boundary fields only
 when the sequence is immediately before the named message. Forking is one
 SQLite transaction: copied items receive new IDs and internal
-`QueueConsumed.itemId` references are remapped to those IDs.
+`QueueConsumed.itemId` references are remapped to those IDs. A tool call whose
+result is not among the copied items (it was waiting for approval or still
+running, or a steer sent while it ran is the boundary) is left out, with its
+`task_link`, `task_state` and `command_state` items: nothing would ever give the
+fork's copy a result, and providers refuse a call without one.
 New forks also persist optional `forkOrigin: {title, sequence, itemId}` on the
 thread in that transaction. `parentId` identifies the immediate source;
 `title` is its title at fork time, `sequence` is the last item actually copied,

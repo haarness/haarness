@@ -31,6 +31,7 @@ mod stream_limits;
 mod tool_catalog;
 mod tool_validation;
 mod turn_context;
+mod unanswered;
 pub mod wire_names;
 mod workflows;
 
@@ -75,6 +76,7 @@ pub use tool_catalog::{LOAD_TOOL_NAME, LazyToolSettings, load_tool_definition, s
 pub use turn_context::{
     AGENT_MESSAGE_PREFIX, SESSION_MESSAGE_PREFIX, is_session_message, is_turn_reminder,
 };
+pub use unanswered::{UNFINISHED_CALL_RESULT, UnansweredCalls, unanswered_calls};
 pub use workflows::{WorkflowLogDraft, WorkflowRepository};
 
 /// The `tracing` target for events that may be exported with OpenTelemetry

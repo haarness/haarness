@@ -2,7 +2,7 @@
 set -eu
 
 session="haarness-compact-fork-$$"
-test_root="$(mktemp -d)"
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/haarness-compact-fork.XXXXXX")"
 binary="${HAARNESS_BIN:-$PWD/target/debug/haarness}"
 
 cleanup() {
@@ -34,11 +34,14 @@ if [ -z "${HAARNESS_BIN:-}" ]; then
 fi
 mkdir -p "$test_root/ws"
 
+# A running tmux server starts the pane with its own environment: the pane
+# clears every HAARNESS_* setting it has from there before setting its own.
 tmux new-session -d -x 110 -y 30 -s "$session" \
-  "env HAARNESS_DATA_DIR='$test_root' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --workspace '$test_root/ws'"
+  "sh -c 'for name in \$(env | sed -n \"s/^\\(HAARNESS_[A-Za-z0-9_]*\\)=.*/\\1/p\"); do unset \"\$name\"; done; exec \"\$@\"' sh env HAARNESS_TELEMETRY=0 HAARNESS_DATA_DIR='$test_root' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --workspace '$test_root/ws'"
 
+# A debug build on a busy machine can take a while to start its server.
 attempt=0
-while [ "$attempt" -lt 100 ]; do
+while [ "$attempt" -lt 400 ]; do
   pane="$(capture)"
   echo "$pane" | grep -q '/ commands' && break
   attempt=$((attempt + 1))
@@ -237,5 +240,57 @@ resume_from_picker() {
 }
 resume_from_picker "$source_id" 'Echo: SECOND FORK E2E PROMPT'
 resume_from_picker "$fork_id" 'Echo: CONTINUE ASSISTANT FORK'
+
+# A fork taken while a call waits for its approval (in Review, a read outside
+# the project asks) leaves that call out: the fork's copy would never get a
+# result, and providers refuse a call without one, so every turn in the fork
+# would fail. The fork answers in the TUI.
+api() {
+  curl -sf -H "Authorization: Bearer $runtime_token" -H 'Content-Type: application/json' "$@"
+}
+api -X PUT -d '{"mode":"review"}' "$runtime_url/v1/threads/$source_id/approval-mode" >/dev/null
+api -d "{\"requestId\":\"$(uuidgen | tr 'A-Z' 'a-z')\",\"text\":\"!tool read {\\\"path\\\":\\\"/etc/hosts\\\"}\"}" \
+  "$runtime_url/v1/threads/$source_id/turns" >/dev/null
+attempt=0
+while [ "$attempt" -lt 150 ]; do
+  permission_id="$(api "$runtime_url/v1/permissions" \
+    | jq -r --arg source "$source_id" 'first(.[] | select(.threadId == $source) | .permissionId) // empty')"
+  [ -n "$permission_id" ] && break
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
+if [ -z "$permission_id" ]; then
+  api "$runtime_url/v1/threads/$source_id/items" >&2
+  echo 'The waiting call did not ask for its approval' >&2
+  exit 1
+fi
+unanswered='([.[] | .data | select(.type == "tool_call") | .call_id] - [.[] | .data | select(.type == "tool_result") | .call_id]) | length'
+if [ "$(api "$runtime_url/v1/threads/$source_id/items" | jq "$unanswered")" != 1 ]; then
+  echo 'The source chat does not show its waiting call' >&2
+  exit 1
+fi
+waiting_fork="$(api -d '{"title":"Fork while waiting"}' "$runtime_url/v1/threads/$source_id/fork" | jq -er '.id')"
+waiting_items="$(api "$runtime_url/v1/threads/$waiting_fork/items")"
+if [ "$(echo "$waiting_items" | jq "$unanswered")" != 0 ]; then
+  echo "$waiting_items" >&2
+  echo 'The fork copied a call without its result' >&2
+  exit 1
+fi
+resume_from_picker "$waiting_fork" 'Echo: SECOND FORK E2E PROMPT'
+tmux send-keys -l -t "$session":0.0 'CONTINUE WAITING FORK'
+tmux send-keys -t "$session":0.0 Enter
+attempt=0
+while [ "$attempt" -lt 150 ]; do
+  pane="$(capture)"
+  echo "$pane" | grep -q 'Echo: CONTINUE WAITING FORK' && break
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
+if ! echo "$pane" | grep -q 'Echo: CONTINUE WAITING FORK'; then
+  echo "$pane" >&2
+  echo 'The fork taken while a call waited did not answer' >&2
+  exit 1
+fi
+api -d '{"decision":"reject"}' "$runtime_url/v1/permissions/$permission_id" >/dev/null
 capture > /tmp/haarness-assistant-fork-tmux.txt
 echo 'Compaction and assistant reply fork tmux E2E passed'
