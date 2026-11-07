@@ -9388,17 +9388,16 @@ async fn answer_mcp_oauth_callback(
         return None;
     };
     let (status, body, query) = match mcp_oauth_callback(&target, &state) {
-        McpOAuthCallback::Elsewhere => ("404 Not Found", "Not found.\n", None),
+        McpOAuthCallback::Elsewhere => ("404 Not Found", "Not found.\n".to_owned(), None),
         McpOAuthCallback::Foreign => (
             "400 Bad Request",
-            "This is not the authorization Haarness started.\n",
+            "This is not the authorization Haarness started.\n".to_owned(),
             None,
         ),
-        McpOAuthCallback::Ours(query) => (
-            "200 OK",
-            "Authorization received. You may return to the Haarness CLI.\n",
-            Some(query),
-        ),
+        McpOAuthCallback::Ours(query) => {
+            let (status, body) = mcp_oauth_callback_page(&query);
+            (status, body, Some(query))
+        }
     };
     let _ = stream
         .write_all(
@@ -9446,6 +9445,55 @@ enum McpOAuthCallback {
     Foreign,
     /// The callback for the authorization Haarness opened: its `?query`.
     Ours(String),
+}
+
+/// The page the browser shows on its return from the provider: whether the
+/// provider let the sign-in through, worded for whichever Haarness app
+/// started it. How the token exchange that follows went, that app reports.
+/// The provider's own description of a refusal is shown as plain text, on
+/// one line and cut short.
+fn mcp_oauth_callback_page(query: &str) -> (&'static str, String) {
+    const MAX_REASON_CHARS: usize = 300;
+    let pairs: HashMap<String, String> =
+        url::form_urlencoded::parse(query.strip_prefix('?').unwrap_or(query).as_bytes())
+            .into_owned()
+            .collect();
+    let given = |name: &str| {
+        pairs
+            .get(name)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+    };
+    if given("error").is_none() && given("code").is_some() {
+        return (
+            "200 OK",
+            "Authorization received. Haarness is finishing the sign-in; you can close this page.\n"
+                .to_owned(),
+        );
+    }
+    let reason = given("error_description")
+        .or_else(|| given("error"))
+        .unwrap_or("the provider sent no authorization code.");
+    let mut reason = reason
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    if let Some((cut, _)) = reason.char_indices().nth(MAX_REASON_CHARS) {
+        reason.truncate(cut);
+        reason.push('…');
+    }
+    (
+        "400 Bad Request",
+        format!(
+            "The sign-in did not finish: {reason}\nYou can close this page and try again from Haarness.\n"
+        ),
+    )
 }
 
 fn mcp_oauth_callback(target: &str, state: &str) -> McpOAuthCallback {
@@ -14449,6 +14497,51 @@ mod tests {
         );
     }
 
+    /// The page after the provider's return says plainly whether the
+    /// provider let the sign-in through, naming no particular app.
+    #[test]
+    fn the_mcp_sign_in_page_says_when_the_provider_refused() {
+        let (status, page) = super::mcp_oauth_callback_page("?code=c%2B1&state=st-1");
+        assert_eq!(status, "200 OK");
+        assert!(page.starts_with("Authorization received."), "{page}");
+        for (query, reason) in [
+            (
+                "?error=access_denied&error_description=The+user+said+no&state=st-1",
+                "The user said no",
+            ),
+            ("?error=access_denied&state=st-1", "access_denied"),
+            ("?error=server_error&code=c&state=st-1", "server_error"),
+            ("?state=st-1", "the provider sent no authorization code."),
+            (
+                "?code=&state=st-1",
+                "the provider sent no authorization code.",
+            ),
+            (
+                "?error=x&error_description=line%0D%0AX-Injected:%201",
+                "line  X-Injected: 1",
+            ),
+        ] {
+            let (status, page) = super::mcp_oauth_callback_page(query);
+            assert_eq!(status, "400 Bad Request", "{query}");
+            assert_eq!(
+                page,
+                format!(
+                    "The sign-in did not finish: {reason}\nYou can close this page and try again from Haarness.\n"
+                ),
+                "{query}"
+            );
+        }
+        let long = format!("?error=x&error_description={}", "a".repeat(400));
+        let (_, page) = super::mcp_oauth_callback_page(&long);
+        assert!(page.contains(&format!("{}…\n", "a".repeat(300))), "{page}");
+        for (_, page) in [
+            super::mcp_oauth_callback_page("?code=c&state=st-1"),
+            super::mcp_oauth_callback_page("?error=access_denied&state=st-1"),
+        ] {
+            assert!(!page.contains("CLI") && !page.contains("Desktop"), "{page}");
+        }
+    }
+
     #[tokio::test]
     async fn serve_takes_a_free_port_only_when_the_default_one_is_taken() {
         let host: std::net::IpAddr = std::net::Ipv4Addr::LOCALHOST.into();
@@ -14528,6 +14621,44 @@ mod tests {
             receive_oauth_callback(&listener, &redirect, "https://auth.example/authorize")
                 .await
                 .is_err()
+        );
+    }
+
+    /// A refused sign-in still ends the wait (the session reports it), and
+    /// the browser is told it did not finish.
+    #[tokio::test]
+    async fn a_refused_mcp_sign_in_ends_the_wait_with_a_failure_page() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let redirect = format!("http://127.0.0.1:{port}/mcp/oauth/callback");
+        let browser = async {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(
+                    b"GET /mcp/oauth/callback?error=access_denied&error_description=Access+was+denied&state=st-1 HTTP/1.1\r\nHost: x\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        };
+        let (callback, response) = tokio::join!(
+            receive_oauth_callback(
+                &listener,
+                &redirect,
+                "https://auth.example/authorize?client_id=c&state=st-1"
+            ),
+            browser
+        );
+        assert!(callback.unwrap().contains("error=access_denied"));
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert!(
+            response.ends_with("\r\n\r\nThe sign-in did not finish: Access was denied\nYou can close this page and try again from Haarness.\n"),
+            "{response}"
         );
     }
 
