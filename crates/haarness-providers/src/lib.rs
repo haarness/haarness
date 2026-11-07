@@ -9,6 +9,7 @@ mod cloud;
 #[cfg(test)]
 mod compatibility_tests;
 pub mod connect;
+pub mod endpoint;
 mod gemini;
 mod haarness_cloud;
 mod key_check;
@@ -27,6 +28,7 @@ pub use auth::{
 };
 pub use bedrock::BedrockProvider;
 pub use cloud::{AzureProvider, CopilotProvider, VertexProvider};
+pub use endpoint::ends_with_version;
 pub use gemini::GeminiProvider;
 pub use openai::OpenAiProvider;
 pub use openai_compatible::{
@@ -483,6 +485,9 @@ impl CompatibleProtocol {
             "google-vertex" | "vertex" => Ok(Self::GoogleVertex),
             "github-copilot" | "copilot" => Ok(Self::GithubCopilot),
             "amazon-bedrock" | "bedrock" => Ok(Self::AmazonBedrock),
+            "openai-responses" | "responses" => Err(
+                "Custom endpoints speak OpenAI Chat Completions, not the Responses API: use openai-chat-completions, which OpenAI and the servers compatible with it also serve.".into(),
+            ),
             other => Err(format!(
                 "unsupported protocol {other}; expected openai-chat-completions, anthropic-messages, gemini-generate-content, azure-openai, google-vertex, github-copilot, or amazon-bedrock"
             )),
