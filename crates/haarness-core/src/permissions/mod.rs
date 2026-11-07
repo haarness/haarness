@@ -121,7 +121,7 @@ pub fn is_credential_store_path(path: &Path) -> bool {
     let key = |path: &Path| path.to_string_lossy().to_lowercase();
     let spellings = |path: &Path| {
         let mut spellings = vec![key(path)];
-        if let Ok(real) = dunce::canonicalize(path) {
+        if let Ok(real) = crate::paths::canonicalize(path) {
             spellings.push(key(&real));
         }
         spellings
@@ -140,7 +140,7 @@ pub fn is_credential_store_path(path: &Path) -> bool {
             })
         })
     };
-    let real = dunce::canonicalize(path).ok();
+    let real = crate::paths::canonicalize(path).ok();
     [Some(written), real]
         .into_iter()
         .flatten()
@@ -276,10 +276,13 @@ pub fn is_global_config_path(path: &Path, global: &Path) -> bool {
         "opencode.jsonc",
     ];
     let path = normalize_absolute(path);
-    let real_path = dunce::canonicalize(&path).ok();
+    let real_path = crate::paths::canonicalize(&path).ok();
     let names = |candidate: &Path| path == candidate || real_path.as_deref() == Some(candidate);
     let global = normalize_absolute(global);
-    let roots = [Some(global.clone()), dunce::canonicalize(&global).ok()];
+    let roots = [
+        Some(global.clone()),
+        crate::paths::canonicalize(&global).ok(),
+    ];
     // A path inside the folder, as written or through the folder's link.
     let inside = roots.iter().flatten().any(|root| {
         [Some(&path), real_path.as_ref()]
@@ -303,10 +306,10 @@ pub fn is_global_config_path(path: &Path, global: &Path) -> bool {
     inside
         || FILES
             .iter()
-            .filter_map(|name| dunce::canonicalize(global.join(name)).ok())
+            .filter_map(|name| crate::paths::canonicalize(global.join(name)).ok())
             .any(|real| names(&real))
         || ["extensions", "prompts"].iter().any(|folder| {
-            dunce::canonicalize(global.join(folder)).is_ok_and(|real| {
+            crate::paths::canonicalize(global.join(folder)).is_ok_and(|real| {
                 [Some(&path), real_path.as_ref()]
                     .into_iter()
                     .flatten()
@@ -321,9 +324,9 @@ pub fn is_global_config_path(path: &Path, global: &Path) -> bool {
 #[must_use]
 pub fn is_system_config_path(path: &Path, base: &Path) -> bool {
     let path = normalize_absolute(path);
-    let real_path = dunce::canonicalize(&path).ok();
+    let real_path = crate::paths::canonicalize(&path).ok();
     let base = normalize_absolute(base);
-    [Some(base.clone()), dunce::canonicalize(&base).ok()]
+    [Some(base.clone()), crate::paths::canonicalize(&base).ok()]
         .iter()
         .flatten()
         .any(|root| {
@@ -945,7 +948,7 @@ impl PermissionEngine {
             return Vec::new();
         }
         let configured = normalize_absolute(workspace);
-        let root = dunce::canonicalize(workspace).unwrap_or_else(|_| configured.clone());
+        let root = crate::paths::canonicalize(workspace).unwrap_or_else(|_| configured.clone());
         let given = Path::new(target);
         let mut spellings = Vec::new();
         if given.is_absolute() {
@@ -1146,7 +1149,7 @@ fn real_folder_rule(pattern: &str) -> Option<String> {
     if folder.is_empty() || !Path::new(folder).is_absolute() {
         return None;
     }
-    let real = dunce::canonicalize(Path::new(folder)).ok()?;
+    let real = crate::paths::canonicalize(Path::new(folder)).ok()?;
     let real = real.to_string_lossy();
     (real != folder).then(|| format!("{EXTERNAL_DIRECTORY}{real}{rest}"))
 }
@@ -1353,9 +1356,18 @@ impl Drop for TestHome {
 /// A tool path with a leading `~` read as a shell reads it: `~` alone and
 /// `~/…` (and `~\…` on Windows) are in the home folder. `~name/…` and a `~`
 /// anywhere else stay as written, so a project folder named `~` is written
-/// `./~`. Without a home folder the path stays as written.
+/// `./~`. Without a home folder the path stays as written. On Windows a Git
+/// Bash, Cygwin or WSL drive path and a path in double quotes are read as the
+/// drive path they name ([`crate::paths::windows_spelling`]).
 #[must_use]
 pub fn expand_home(value: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(spelled) = crate::paths::windows_spelling(value) {
+        return std::borrow::Cow::Owned(home_expanded(&spelled).into_owned());
+    }
+    home_expanded(value)
+}
+
+fn home_expanded(value: &str) -> std::borrow::Cow<'_, str> {
     let rest = if value == "~" {
         Some("")
     } else {
@@ -1454,7 +1466,7 @@ pub fn resolve_permission_entry(workspace: &Path, value: &str) -> PathBuf {
 /// leading `~` read as the home folder ([`expand_home`]).
 fn joined_path(workspace: &Path, value: &str) -> PathBuf {
     let workspace =
-        dunce::canonicalize(workspace).unwrap_or_else(|_| normalize_absolute(workspace));
+        crate::paths::canonicalize(workspace).unwrap_or_else(|_| normalize_absolute(workspace));
     let value = expand_home(value);
     let requested = Path::new(value.as_ref());
     normalize_absolute(&if requested.is_absolute() {
@@ -1465,7 +1477,7 @@ fn joined_path(workspace: &Path, value: &str) -> PathBuf {
 }
 
 fn resolve_joined(joined: &Path) -> PathBuf {
-    if let Ok(path) = dunce::canonicalize(joined) {
+    if let Ok(path) = crate::paths::canonicalize(joined) {
         return path;
     }
 
@@ -1482,7 +1494,7 @@ fn resolve_joined(joined: &Path) -> PathBuf {
         ancestor = parent;
     }
     let mut resolved =
-        dunce::canonicalize(ancestor).unwrap_or_else(|_| normalize_absolute(ancestor));
+        crate::paths::canonicalize(ancestor).unwrap_or_else(|_| normalize_absolute(ancestor));
     for component in suffix.into_iter().rev() {
         resolved.push(component);
     }
@@ -1494,7 +1506,7 @@ fn resolve_joined(joined: &Path) -> PathBuf {
 /// still names a path inside.
 pub(crate) fn names_inside(workspace: &Path, value: &str) -> bool {
     let configured = normalize_absolute(workspace);
-    let root = dunce::canonicalize(workspace).unwrap_or_else(|_| configured.clone());
+    let root = crate::paths::canonicalize(workspace).unwrap_or_else(|_| configured.clone());
     let value = expand_home(value);
     let given = Path::new(value.as_ref());
     if given.is_absolute() {
@@ -2222,7 +2234,7 @@ mod tests {
         std::fs::create_dir_all(root.join("real/sub")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
         let link = root.join("link").to_string_lossy().into_owned();
-        let real = dunce::canonicalize(root.join("real")).unwrap();
+        let real = crate::paths::canonicalize(root.join("real")).unwrap();
         let real = real.to_string_lossy();
         let engine = PermissionEngine::new(vec![
             rule(
@@ -2251,7 +2263,7 @@ mod tests {
         std::fs::create_dir_all(root.join("elsewhere")).unwrap();
         std::fs::remove_file(root.join("link")).unwrap();
         std::os::unix::fs::symlink(root.join("elsewhere"), root.join("link")).unwrap();
-        let elsewhere = dunce::canonicalize(root.join("elsewhere")).unwrap();
+        let elsewhere = crate::paths::canonicalize(root.join("elsewhere")).unwrap();
         assert_eq!(
             engine.evaluate(&format!("external_directory:{}/*", elsewhere.display())),
             PermissionDecision::Ask
@@ -2261,7 +2273,7 @@ mod tests {
             PermissionDecision::Allow
         );
         // macOS's /tmp is /private/tmp, the folder an ask names.
-        let tmp = dunce::canonicalize(Path::new("/tmp")).unwrap();
+        let tmp = crate::paths::canonicalize(Path::new("/tmp")).unwrap();
         if tmp != Path::new("/tmp") {
             let engine = PermissionEngine::new(vec![rule(
                 "external_directory:/tmp/*",
@@ -2283,8 +2295,8 @@ mod tests {
         std::fs::create_dir_all(root.join("first")).unwrap();
         std::fs::create_dir_all(root.join("second")).unwrap();
         std::os::unix::fs::symlink(root.join("first"), root.join("link")).unwrap();
-        let first = dunce::canonicalize(root.join("first")).unwrap();
-        let second = dunce::canonicalize(root.join("second")).unwrap();
+        let first = crate::paths::canonicalize(root.join("first")).unwrap();
+        let second = crate::paths::canonicalize(root.join("second")).unwrap();
         let pattern = format!("external_directory:{}/*", root.join("link").display());
         let ask = |folder: &Path| format!("external_directory:{}/*", folder.display());
         // Engines are built afresh for every tool call.
@@ -2406,8 +2418,8 @@ mod tests {
         let workspace =
             std::env::temp_dir().join(format!("haarness-tilde-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(workspace.join("~")).unwrap();
-        let workspace = dunce::canonicalize(&workspace).unwrap();
-        let real_home = dunce::canonicalize(&home).unwrap_or_else(|_| home.clone());
+        let workspace = crate::paths::canonicalize(&workspace).unwrap();
+        let real_home = crate::paths::canonicalize(&home).unwrap_or_else(|_| home.clone());
         // Never a folder named `~` inside the project.
         assert_eq!(
             resolve_permission_path(&workspace, "~/haarness-no-such-file"),
@@ -2452,8 +2464,8 @@ mod tests {
             .join("home");
         let workspace = root.join("project");
         std::fs::create_dir_all(workspace.join("secrets")).unwrap();
-        let home = dunce::canonicalize(&root).unwrap();
-        let workspace = dunce::canonicalize(&workspace).unwrap();
+        let home = crate::paths::canonicalize(&root).unwrap();
+        let workspace = crate::paths::canonicalize(&workspace).unwrap();
         let guard = TestHome::set(&home);
         assert_eq!(
             resolve_permission_path(&workspace, "~/project/secrets/key"),
@@ -2601,7 +2613,7 @@ mod tests {
     fn a_project_path_through_a_folder_link_is_still_a_project_path() {
         // macOS keeps temporary folders under /private/var, also reachable
         // as /var: a rule for the project meets a path through either.
-        let project = dunce::canonicalize(std::env::temp_dir())
+        let project = crate::paths::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!("haarness-path-rules-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(project.join("secrets")).unwrap();
@@ -2783,7 +2795,7 @@ mod tests {
             assert!(is_credential_store_path(&project.join("data/auth.json")));
             assert!(!is_credential_store_path(&project.join("notes.txt")));
             assert!(is_credential_store_path(
-                &dunce::canonicalize(project.join("notes.txt")).unwrap()
+                &crate::paths::canonicalize(project.join("notes.txt")).unwrap()
             ));
         }
         let mut engine = PermissionEngine::build_defaults();

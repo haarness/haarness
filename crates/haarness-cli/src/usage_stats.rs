@@ -25,22 +25,30 @@ const FIRST_CHECK_AFTER: std::time::Duration = std::time::Duration::from_secs(60
 const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 /// Built-in tools reported by name. Any other tool (plugins, extensions, MCP
-/// servers) is counted as `mcp` or `other`, so custom names never leave.
+/// servers) is counted as `mcp` or `other`, so custom names never leave; a
+/// name the model made up counts as `other` too.
 const BUILTIN_TOOLS: &[&str] = &[
     "apply_patch",
     "bash",
     "bash_output",
     "bash_stop",
+    "batch",
     "edit",
+    "execute",
     "get_goal",
     "glob",
     "grep",
+    "image_generate",
     "list",
     "load_tool",
+    "lsp",
     "memory_read",
+    "multiedit",
+    "preview",
     "propose_goal_criteria",
     "question",
     "read",
+    "schedule",
     "session_manage",
     "skill",
     "StructuredOutput",
@@ -49,8 +57,10 @@ const BUILTIN_TOOLS: &[&str] = &[
     "todoread",
     "todowrite",
     "update_goal",
+    "video_generate",
     "webfetch",
     "websearch",
+    "workflow",
     "write",
 ];
 
@@ -676,6 +686,11 @@ mod tests {
             );
         }
         assert_eq!(reported_tool("bash"), "bash");
+        // Built-in tools outside the first list were counted as `other`,
+        // multiedit's errors among them.
+        for builtin in ["multiedit", "batch", "execute", "lsp", "workflow"] {
+            assert_eq!(reported_tool(builtin), builtin);
+        }
         assert_eq!(reported_tool("mcp__acme__deploy"), "mcp");
         assert_eq!(reported_tool("acme_release"), "other");
         assert_eq!(clean("claude sonnet<script>"), "claudesonnetscript");

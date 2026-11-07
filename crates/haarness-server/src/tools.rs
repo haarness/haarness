@@ -70,15 +70,38 @@ const GLOB_DESCRIPTION: &str = "Find paths by glob pattern within a directory. S
 
 const GREP_DESCRIPTION: &str = "Search UTF-8 file contents with a Rust regular expression. path defaults to the workspace. The search respects standard ignore files and returns path:line:text matches. Use this for locating content; use bash with rg only when you need unsupported operations such as match counts or file-type filters. For a known file or a small set of files, use grep/read directly; reserve task for a genuinely open-ended, multi-step investigation that benefits from independent context.";
 
-const WRITE_DESCRIPTION: &str = "Write a complete UTF-8 file, creating missing parent directories and overwriting the target if it exists. Read an existing file first so its current contents and unrelated user changes are understood. Prefer edit or apply_patch for existing files; use write for a genuinely new file or an intentional full replacement. Do not proactively create README or other documentation files unless the user requested documentation or the task requires it.";
+const WRITE_DESCRIPTION: &str = "Write a complete UTF-8 file, creating missing parent directories and overwriting the target if it exists. Read an existing file first so its current contents and unrelated user changes are understood. Prefer edit or multiedit for existing files; use write for a genuinely new file or an intentional full replacement. Do not proactively create README or other documentation files unless the user requested documentation or the task requires it.";
 
-const EDIT_DESCRIPTION: &str = "Replace exactly one occurrence of old with new in a UTF-8 file. Read the file first and preserve its exact whitespace. The call fails when old is absent or appears more than once, so include enough surrounding context to identify one location. Use apply_patch for multiple edits or multi-file changes; use write only for an intentional full-file replacement.";
+const EDIT_DESCRIPTION: &str = "Replace exactly one occurrence of old with new in a UTF-8 file. Read the file first and preserve its exact whitespace. The call fails when old is absent or appears more than once, so include enough surrounding context to identify one location. Use multiedit for several edits to one file; use write only for an intentional full-file replacement.";
 
 const MULTIEDIT_DESCRIPTION: &str = "Apply several exact replacements to one UTF-8 file atomically and in order. Every edit is validated against the result of the preceding edit before anything is written. By default old must occur exactly once; set replaceAll=true to replace every occurrence. The whole call fails without changing the file when any edit is invalid.";
 
 const APPLY_PATCH_DESCRIPTION: &str = "Apply a V4A patch envelope across one or more files. Use *** Begin Patch and *** End Patch, with an explicit *** Add File, *** Update File, or *** Delete File header for every operation. Prefix every line of a new file with '+'. Update hunks use @@ locators and must include enough unchanged context to identify exactly one location; use a unique locator instead of a bare brace. *** Move to may follow an Update File header. If verification reports ambiguity, read the region and retry with more context. Prefer this tool for coordinated or multi-file text edits.";
 
-const BASH_DESCRIPTION: &str = "Run a terminal command through the workspace shell. Use bash for builds, tests, git, package managers, process inspection, and other terminal operations. Do not use it for ordinary file reading, listing, searching, writing, or editing when read, list, glob, grep, write, edit, or apply_patch can express the operation more clearly. Ripgrep (rg) is bundled and available on PATH for searches requiring flags or pipelines beyond the grep/glob tools; no installation is needed. Use workdir instead of 'cd <dir> && ...'. Quote paths containing spaces. timeout is milliseconds, defaults to the configured deadline (normally 120000), and has no fixed upper limit; set 0 for no deadline. Output includes the exit code and combined stdout/stderr. Do not create commits or push unless the user explicitly asks, and do not use destructive git or filesystem operations without clear authorization. Set run_in_background for a command that keeps running or takes minutes, such as a dev server, a file watcher, or a full build or test suite: the call returns at once with the command's id, you keep working, and when it ends a message gives its exit status and the last lines it printed. Meanwhile read its output with bash_output, which can also wait for it, and end it with bash_stop. Keep quick commands, and any command whose result your next step needs, in the foreground, and wait for a background one with bash_output when the answer depends on it. Never start a lasting process with a trailing & or nohup; use run_in_background so Haarness can follow and stop it. A timeout you give limits the whole run, in the background too. In some chats a foreground command that runs long moves to the background by itself; its result then says so and gives its id.";
+/// The `bash` tool's description on every system.
+macro_rules! bash_description {
+    () => {
+        "Run a terminal command through the workspace shell. Use bash for builds, tests, git, package managers, process inspection, and other terminal operations. Do not use it for ordinary file reading, listing, searching, writing, or editing when read, list, glob, grep, write or edit can express the operation more clearly. Ripgrep (rg) is bundled and available on PATH for searches requiring flags or pipelines beyond the grep/glob tools; no installation is needed. Use workdir instead of 'cd <dir> && ...'. Quote paths containing spaces. timeout is milliseconds, defaults to the configured deadline (normally 120000), and has no fixed upper limit; set 0 for no deadline. Output includes the exit code and combined stdout/stderr. Do not create commits or push unless the user explicitly asks, and do not use destructive git or filesystem operations without clear authorization. Set run_in_background for a command that keeps running or takes minutes, such as a dev server, a file watcher, or a full build or test suite: the call returns at once with the command's id, you keep working, and when it ends a message gives its exit status and the last lines it printed. Meanwhile read its output with bash_output, which can also wait for it, and end it with bash_stop. Keep quick commands, and any command whose result your next step needs, in the foreground, and wait for a background one with bash_output when the answer depends on it. Never start a lasting process with a trailing & or nohup; use run_in_background so Haarness can follow and stop it. A timeout you give limits the whole run, in the background too. In some chats a foreground command that runs long moves to the background by itself; its result then says so and gives its id."
+    };
+}
+/// What the model reads of `bash`, naming the shell it runs in: on Windows
+/// Git for Windows' bash, or cmd.exe where Git is not installed. Models
+/// otherwise write POSIX shell for cmd.exe (`ls`, `cat`, `mkdir -p`,
+/// `2>/dev/null`, heredocs), which it refuses or misreads, and Windows
+/// `/switches` for bash, which turns them into paths.
+fn bash_description(shell: &haarness_core::agent_shell::AgentShell) -> String {
+    use haarness_core::agent_shell::AgentShell;
+    let note = match shell {
+        AgentShell::Posix => "",
+        AgentShell::GitBash(_) => {
+            " On this Windows computer commands run in Git Bash (bash from Git for Windows): write POSIX shell; ls, cat, grep, sed, find and the other usual tools are there, and so are Windows programs. Paths may be written C:/Users/name or /c/Users/name. Before it starts a Windows program, this shell turns arguments that look like paths into Windows paths, so write a Windows /switch with two slashes (cmd //c dir, taskkill //F //PID 4321), or put MSYS_NO_PATHCONV=1 before the command."
+        }
+        AgentShell::Cmd => {
+            " On this Windows computer commands run in cmd.exe (Command Prompt), not a POSIX shell, since Git for Windows is not installed: write cmd syntax (dir, type, findstr, copy, move, del, rmdir /s /q, mkdir without -p, set NAME=value and %NAME%, && and ||, double quotes) or run PowerShell with powershell -NoProfile -Command \"...\". POSIX tools such as ls, cat, grep, sed, head, rm, touch and which, heredocs, $(...) and 2>/dev/null do not work there unless the person installed them; paths take backslashes."
+        }
+    };
+    format!("{}{note}", bash_description!())
+}
 
 const BASH_OUTPUT_DESCRIPTION: &str = "Follow the shell commands bash started in this chat. With an id it returns what that command printed since your last read of it (at most 30 KB; tail_lines keeps only the last lines), whether it still runs or how it ended, and a cursor to read from later. Without an id it lists the chat's commands with their ids and states. wait_seconds waits up to that long before answering: until the command ends (until=exit, the default), until it prints nothing for quiet_seconds (until=quiet), or until a line matches pattern (until=match); a match is looked for from your last read of that command on, earlier output in that span included. A foreground command's result already holds its output; use this for commands in the background.";
 
@@ -366,7 +389,8 @@ impl InstructionDiscovery {
             if seen.len() >= NESTED_INSTRUCTION_LIMIT {
                 break;
             }
-            let key = dunce::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+            let key = haarness_core::paths::canonicalize(&candidate)
+                .unwrap_or_else(|_| candidate.clone());
             if seen.contains(&key) {
                 continue;
             }
@@ -827,8 +851,8 @@ impl Tool for LspTool {
         };
         let requested = string(&arguments, "filePath")?;
         let file = haarness_core::resolve_permission_path(&context.workspace, requested);
-        let root =
-            dunce::canonicalize(&context.workspace).unwrap_or_else(|_| context.workspace.clone());
+        let root = haarness_core::paths::canonicalize(&context.workspace)
+            .unwrap_or_else(|_| context.workspace.clone());
         if !file.starts_with(root) && !context.authorized_external_paths.contains(&file) {
             return Err(CoreError::Invalid(
                 "LSP path is outside the workspace and was not authorized".into(),
@@ -869,7 +893,8 @@ fn required_u32(arguments: &Value, name: &str) -> CoreResult<u32> {
 }
 
 fn language_path(workspace: &Path, requested: &str) -> Option<PathBuf> {
-    let workspace = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let workspace =
+        haarness_core::paths::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     let resolved = haarness_core::resolve_permission_path(&workspace, requested);
     resolved.starts_with(&workspace).then_some(resolved)
 }
@@ -930,7 +955,12 @@ async fn refresh_formatted_diffs(
 ) {
     let mut replacements = HashMap::new();
     for (requested, path, before) in before {
-        let replacement = match tokio::fs::read_to_string(&path).await {
+        let read = tokio::fs::read(&path).await.and_then(|bytes| {
+            text::decode(&bytes)
+                .map(|(text, _)| text.into_owned())
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))
+        });
+        let replacement = match read {
             Ok(after) => match &before {
                 ExistingDiffBody::Text(previous) if previous == &after => None,
                 _ => Some(replacement_diff(&requested, before, &after)),
@@ -967,7 +997,8 @@ async fn refresh_formatted_diffs(
 
 fn append_language_report(output: &mut ToolOutput, workspace: &Path, reports: &[FileReport]) {
     let mut lines = Vec::new();
-    let workspace = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let workspace =
+        haarness_core::paths::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     for report in reports {
         let file = report
             .file
@@ -2178,15 +2209,15 @@ fn in_folder(schedule: &haarness_scheduler::Schedule, folder: &Path) -> bool {
     schedule
         .directory
         .as_deref()
-        .and_then(|directory| dunce::canonicalize(directory).ok())
+        .and_then(|directory| haarness_core::paths::canonicalize(directory).ok())
         .is_some_and(|directory| directory == folder)
 }
 
 /// The call's working folder when it is a chat's own folder rather than the
 /// project folder `project`.
 fn chat_folder(project: &Path, context: &ToolContext) -> Option<PathBuf> {
-    let project = dunce::canonicalize(project).ok()?;
-    let folder = dunce::canonicalize(&context.workspace).ok()?;
+    let project = haarness_core::paths::canonicalize(project).ok()?;
+    let folder = haarness_core::paths::canonicalize(&context.workspace).ok()?;
     (folder != project).then_some(folder)
 }
 
@@ -3240,6 +3271,11 @@ impl Tool for BuiltinTool {
                 input_schema: json!({"type":"object","properties":{"name":{"type":"string","description":"Exact skill name from the available skills catalog."},"arguments":{"type":"string"}},"required":["name"],"additionalProperties":false}),
             };
         }
+        let bash_text = if matches!(self.kind, Kind::Bash) {
+            bash_description(&haarness_core::agent_shell::current())
+        } else {
+            String::new()
+        };
         let (name, description, properties, required) = match self.kind {
             Kind::Read => (
                 "read",
@@ -3336,7 +3372,7 @@ impl Tool for BuiltinTool {
             ),
             Kind::Bash => (
                 "bash",
-                BASH_DESCRIPTION,
+                bash_text.as_str(),
                 json!({
                     "command":{"type":"string","description":"Shell command to execute."},
                     "timeout":{"type":"integer","minimum":0,"description":"Optional timeout in milliseconds; defaults to the configured deadline (normally 120000). Zero disables the deadline."},
@@ -3655,7 +3691,7 @@ impl Tool for BuiltinTool {
                     ));
                 }
                 let pattern = root.join(pattern).to_string_lossy().into_owned();
-                let workspace = dunce::canonicalize(&context.workspace)
+                let workspace = haarness_core::paths::canonicalize(&context.workspace)
                     .unwrap_or_else(|_| context.workspace.clone());
                 // A file a `read` rule denies is left out like a secret one.
                 let rules = context
@@ -3703,7 +3739,11 @@ impl Tool for BuiltinTool {
                 })
             }
             Kind::Grep => {
-                let regex = regex::Regex::new(string(&args, "pattern")?).map_err(tool_error)?;
+                let regex = regex::Regex::new(string(&args, "pattern")?).map_err(|error| {
+                    CoreError::Invalid(format!(
+                        "pattern is not a valid regular expression: {error}\nEscape ( ) [ ] {{ }} . * + ? | ^ $ and \\ with a backslash to search for them as written"
+                    ))
+                })?;
                 let requested = args.get("path").and_then(Value::as_str).unwrap_or(".");
                 let root = resolve_existing(requested, &context)?;
                 // A file a `read` rule denies is left out like a secret one.
@@ -3766,11 +3806,20 @@ impl Tool for BuiltinTool {
                 if let Some(parent) = path.parent() {
                     tokio::fs::create_dir_all(parent)
                         .await
-                        .map_err(tool_error)?;
+                        .map_err(|error| io_error(requested_path, parent, &error))?;
                 }
-                tokio::fs::write(&path, new_contents)
+                // A file replaced keeps its byte order mark and UTF-16, as
+                // the editor that made it saves it; a new one is written as
+                // given.
+                let spelling = tokio::fs::read(&path)
                     .await
-                    .map_err(tool_error)?;
+                    .ok()
+                    .and_then(|bytes| text::decode(&bytes).map(|(_, spelling)| spelling))
+                    .unwrap_or_default()
+                    .for_new_text(new_contents);
+                tokio::fs::write(&path, spelling.encode(new_contents))
+                    .await
+                    .map_err(|error| io_error(requested_path, &path, &error))?;
                 Ok(output_with_diffs(
                     format!("wrote {}", path.display()),
                     vec![replacement_diff(requested_path, existing, new_contents)],
@@ -3780,9 +3829,11 @@ impl Tool for BuiltinTool {
             Kind::Edit => {
                 let requested_path = string(&args, "path")?;
                 let path = resolve_existing(requested_path, &context)?;
-                let before = string(&args, "old")?;
-                let after = string(&args, "new")?;
-                let text = text::read_utf8(&path, "edit").await?;
+                // A byte order mark the model copied from an older read is
+                // not part of the text it means: the file keeps its own.
+                let before = without_bom(string(&args, "old")?);
+                let after = without_bom(string(&args, "new")?);
+                let (text, spelling) = text::read_text_file(&path, requested_path, "edit").await?;
                 // An empty old is found between every two characters; said
                 // plainly rather than as a count of those places. An empty
                 // file still takes its first text this way.
@@ -3792,18 +3843,32 @@ impl Tool for BuiltinTool {
                             .into(),
                     ));
                 }
-                let (before, after) = text::crlf_edit(&text, before, after);
-                let (before, after) = (before.as_ref(), after.as_ref());
-                let count = text.matches(before).count();
-                if count != 1 {
-                    return Err(CoreError::Tool(format!(
-                        "expected exactly one match, found {count}"
-                    )));
-                }
-                let updated = text.replacen(before, after, 1);
-                tokio::fs::write(&path, &updated)
+                let (spelled_before, spelled_after) = text::crlf_edit(&text, before, after);
+                let count = text.matches(spelled_before.as_ref()).count();
+                let updated = match count {
+                    1 => text.replacen(spelled_before.as_ref(), spelled_after.as_ref(), 1),
+                    // A file of mixed line ends, which no one spelling of old meets.
+                    0 => match text::any_line_ends(&text, before, after).as_slice() {
+                        [(range, replacement)] => {
+                            let mut updated = text.clone();
+                            updated.replace_range(range.clone(), replacement);
+                            updated
+                        }
+                        found => {
+                            return Err(CoreError::Tool(not_one_match(
+                                requested_path,
+                                found.len(),
+                                None,
+                            )));
+                        }
+                    },
+                    count => {
+                        return Err(CoreError::Tool(not_one_match(requested_path, count, None)));
+                    }
+                };
+                tokio::fs::write(&path, spelling.encode(&updated))
                     .await
-                    .map_err(tool_error)?;
+                    .map_err(|error| io_error(requested_path, &path, &error))?;
                 Ok(output_with_diffs(
                     format!("updated {}", path.display()),
                     vec![text_file_diff(
@@ -3825,44 +3890,55 @@ impl Tool for BuiltinTool {
                     .ok_or_else(|| {
                         CoreError::Invalid("edits must contain 1 to 100 entries".into())
                     })?;
-                let original = text::read_utf8(&path, "multiedit").await?;
+                let (original, spelling) =
+                    text::read_text_file(&path, requested_path, "multiedit").await?;
                 let mut updated = original.clone();
                 for (index, edit) in edits.iter().enumerate() {
-                    let before = string(edit, "old")?;
-                    let after = string(edit, "new")?;
+                    let before = without_bom(string(edit, "old")?);
+                    let after = without_bom(string(edit, "new")?);
                     if before.is_empty() {
                         return Err(CoreError::Invalid(format!(
                             "edit {} old must not be empty",
                             index + 1
                         )));
                     }
-                    let (before, after) = text::crlf_edit(&updated, before, after);
-                    let (before, after) = (before.as_ref(), after.as_ref());
-                    let count = updated.matches(before).count();
+                    let (spelled_before, spelled_after) = text::crlf_edit(&updated, before, after);
+                    let (spelled_before, spelled_after) =
+                        (spelled_before.as_ref(), spelled_after.as_ref());
+                    let count = updated.matches(spelled_before).count();
                     let replace_all = edit
                         .get("replaceAll")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    if count == 0 || (!replace_all && count != 1) {
-                        let expectation = if replace_all {
-                            "at least one match"
-                        } else {
-                            "exactly one match"
-                        };
-                        return Err(CoreError::Tool(format!(
-                            "edit {} expected {expectation}, found {count}; file was not changed",
-                            index + 1
+                    // A file of mixed line ends, which no one spelling of old meets.
+                    let mixed = if count == 0 {
+                        text::any_line_ends(&updated, before, after)
+                    } else {
+                        Vec::new()
+                    };
+                    let found = if count == 0 { mixed.len() } else { count };
+                    if found == 0 || (!replace_all && found != 1) {
+                        return Err(CoreError::Tool(not_one_match(
+                            requested_path,
+                            found,
+                            Some(index + 1),
                         )));
                     }
-                    updated = if replace_all {
-                        updated.replace(before, after)
+                    updated = if !mixed.is_empty() {
+                        let mut respelled = updated.clone();
+                        for (range, replacement) in mixed.iter().rev() {
+                            respelled.replace_range(range.clone(), replacement);
+                        }
+                        respelled
+                    } else if replace_all {
+                        updated.replace(spelled_before, spelled_after)
                     } else {
-                        updated.replacen(before, after, 1)
+                        updated.replacen(spelled_before, spelled_after, 1)
                     };
                 }
-                tokio::fs::write(&path, &updated)
+                tokio::fs::write(&path, spelling.encode(&updated))
                     .await
-                    .map_err(tool_error)?;
+                    .map_err(|error| io_error(requested_path, &path, &error))?;
                 Ok(output_with_diffs(
                     format!("applied {} edits to {}", edits.len(), path.display()),
                     vec![text_file_diff(
@@ -4094,9 +4170,9 @@ impl Tool for BuiltinTool {
     }
 }
 /// What a patch leaves at a path once its earlier operations are done: the
-/// new text, or nothing.
+/// new text and how the file spells it, or nothing.
 enum Planned {
-    Text(String),
+    Text(String, text::Spelling),
     Removed,
 }
 
@@ -4238,7 +4314,7 @@ enum PatchStep {
     Write {
         file: String,
         path: PathBuf,
-        content: String,
+        content: Vec<u8>,
     },
     Remove {
         file: String,
@@ -4252,7 +4328,7 @@ enum PatchStep {
         entry: PathBuf,
         destination: PathBuf,
         target_entry: PathBuf,
-        content: String,
+        content: Vec<u8>,
     },
 }
 
@@ -4285,13 +4361,14 @@ async fn plan_patch(
                     replacement_diff(&path, existing, &content),
                     &mut plan.diffs_truncated,
                 );
-                planned.insert(resolved.clone(), Planned::Text(content.clone()));
+                let spelling = text::Spelling::Utf8.for_new_text(&content);
+                planned.insert(resolved.clone(), Planned::Text(content.clone(), spelling));
                 plan.steps.push((
                     format!("added {path}"),
                     PatchStep::Write {
                         file: path,
                         path: resolved,
-                        content,
+                        content: spelling.encode(&content),
                     },
                 ));
             }
@@ -4307,21 +4384,21 @@ async fn plan_patch(
                 // A file an earlier operation writes is read as it leaves it.
                 let earlier = match resolve_new(&path, context) {
                     Ok(key) => match planned.find(&key) {
-                        Some((key, Planned::Text(text))) => Some((key.clone(), text.clone())),
+                        Some((key, Planned::Text(text, spelling))) => {
+                            Some((key.clone(), text.clone(), *spelling))
+                        }
                         Some((_, Planned::Removed)) => return Err(gone()),
                         None => None,
                     },
                     Err(_) => None,
                 };
-                let (resolved, text) = match earlier {
+                let (resolved, text, spelling) = match earlier {
                     Some(earlier) => earlier,
                     None => {
-                        let resolved =
-                            resolve_existing(&path, context).map_err(|error| at(&path, error))?;
-                        let text = tokio::fs::read_to_string(&resolved)
-                            .await
-                            .map_err(|error| CoreError::Tool(format!("{path}: {error}")))?;
-                        (resolved, text)
+                        let resolved = resolve_existing(&path, context)?;
+                        let (text, spelling) =
+                            text::read_text_file(&resolved, &path, "apply_patch").await?;
+                        (resolved, text, spelling)
                     }
                 };
                 let updated = haarness_core::patch::apply_hunks(&text, &hunks)
@@ -4333,10 +4410,10 @@ async fn plan_patch(
                     let entry = match resolve_entry(&path, context) {
                         Ok(entry) => entry,
                         Err(_) if planned.get(&resolved).is_some() => resolved.clone(),
-                        Err(error) => return Err(at(&path, error)),
+                        Err(error) => return Err(error),
                     };
                     let removed = match planned.get(&entry) {
-                        Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
+                        Some(Planned::Text(text, _)) => ExistingDiffBody::Text(text.clone()),
                         _ => entry_diff_body(&entry).await,
                     };
                     let destination = planned_target(&target, &planned, context)?;
@@ -4362,7 +4439,10 @@ async fn plan_patch(
                         &mut plan.diffs_truncated,
                     );
                     planned.insert(entry.clone(), Planned::Removed);
-                    planned.insert(destination.clone(), Planned::Text(updated.clone()));
+                    planned.insert(
+                        destination.clone(),
+                        Planned::Text(updated.clone(), spelling),
+                    );
                     plan.steps.push((
                         format!("moved {path} → {target}"),
                         PatchStep::Move {
@@ -4371,7 +4451,7 @@ async fn plan_patch(
                             entry,
                             destination,
                             target_entry,
-                            content: updated,
+                            content: spelling.encode(&updated),
                         },
                     ));
                 } else {
@@ -4385,13 +4465,13 @@ async fn plan_patch(
                         ),
                         &mut plan.diffs_truncated,
                     );
-                    planned.insert(resolved.clone(), Planned::Text(updated.clone()));
+                    planned.insert(resolved.clone(), Planned::Text(updated.clone(), spelling));
                     plan.steps.push((
                         format!("updated {path}"),
                         PatchStep::Write {
                             file: path,
                             path: resolved,
-                            content: updated,
+                            content: spelling.encode(&updated),
                         },
                     ));
                 }
@@ -4410,12 +4490,12 @@ async fn plan_patch(
                         .ok()
                         .and_then(|key| planned.find(&key))
                     {
-                        Some((key, Planned::Text(_))) => key.clone(),
-                        _ => return Err(at(&path, error)),
+                        Some((key, Planned::Text(..))) => key.clone(),
+                        _ => return Err(error),
                     },
                 };
                 let existing = match planned.get(&resolved) {
-                    Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
+                    Some(Planned::Text(text, _)) => ExistingDiffBody::Text(text.clone()),
                     _ => entry_diff_body(&resolved).await,
                 };
                 push_tool_diff(
@@ -4467,7 +4547,7 @@ fn planned_target(path: &str, planned: &PatchFiles, context: &ToolContext) -> Co
 /// What `path` holds before an operation, as the earlier ones leave it.
 async fn planned_body(planned: &PatchFiles, path: &Path) -> ExistingDiffBody {
     match planned.get(path) {
-        Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
+        Some(Planned::Text(text, _)) => ExistingDiffBody::Text(text.clone()),
         Some(Planned::Removed) => ExistingDiffBody::Missing,
         None => existing_diff_body(path).await,
     }
@@ -4526,19 +4606,11 @@ async fn write_patch(steps: Vec<(String, PatchStep)>) -> CoreResult<()> {
 }
 
 /// Write `content` to `path`, creating the folders it needs.
-async fn write_file(path: &Path, content: &str) -> std::io::Result<()> {
+async fn write_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::write(path, content).await
-}
-
-/// An I/O failure of one patch operation, naming its file.
-fn at(path: &str, error: CoreError) -> CoreError {
-    match error {
-        CoreError::Tool(message) => CoreError::Tool(format!("{path}: {message}")),
-        error => error,
-    }
 }
 
 /// A patch that failed before writing, saying so when it had other
@@ -4555,21 +4627,114 @@ fn unchanged(error: CoreError, several: bool) -> CoreError {
     }
 }
 
+/// A file system failure on `path`, which the call named `named`, in words
+/// that say what to do: a path that is not there names its missing folder
+/// or, when only the file is missing, names like it in its folder.
+pub(crate) fn io_error(named: &str, path: &Path, error: &std::io::Error) -> CoreError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => CoreError::Tool(missing_path(named, path)),
+        std::io::ErrorKind::PermissionDenied => CoreError::Tool(format!(
+            "{named}: the system refused access ({error}); another program may hold it open, or it is read-only"
+        )),
+        std::io::ErrorKind::InvalidFilename => CoreError::Tool(format!(
+            "{named} is not a path this system can open ({error}); give the path without quotes, wildcards or < > | characters"
+        )),
+        _ => CoreError::Tool(format!("{named}: {error}")),
+    }
+}
+
+/// `text` without the byte order mark a model may copy from a read.
+fn without_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
+/// Why an `edit` (or edit `number` of a `multiedit`) of `named` changed
+/// nothing: `old` is found `count` times, not once, and how to retry.
+fn not_one_match(named: &str, count: usize, number: Option<usize>) -> String {
+    let which = number.map_or_else(|| "old".to_owned(), |number| format!("edit {number}'s old"));
+    let unchanged = "nothing was changed";
+    if count == 0 {
+        format!(
+            "{which} was not found in {named}; {unchanged}. Read the file again and copy the text exactly as it is now, with its indentation and line breaks"
+        )
+    } else if number.is_some() {
+        format!(
+            "{which} occurs {count} times in {named}; {unchanged}. Add the lines around the place to change so old names one, or set replaceAll to change every one"
+        )
+    } else {
+        format!(
+            "{which} occurs {count} times in {named}; {unchanged}. Add the lines around the place to change so old names one, or use multiedit with replaceAll to change every one"
+        )
+    }
+}
+
+/// Why `path` (named `named`) is not there, and where to look instead.
+fn missing_path(named: &str, path: &Path) -> String {
+    const FIND: &str = "use glob or list to find the right path";
+    let mut gone = path;
+    let mut folder = path.parent();
+    while let Some(parent) = folder.filter(|parent| !parent.is_dir()) {
+        gone = parent;
+        folder = parent.parent();
+    }
+    let Some(folder) = folder else {
+        return format!("{named} does not exist; {FIND}");
+    };
+    let name = |path: &Path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    };
+    if gone != path {
+        let missing = name(gone).unwrap_or_default();
+        return format!(
+            "{named} does not exist: there is no folder {missing} in {}; {FIND}",
+            folder.display()
+        );
+    }
+    // Names in the folder that hold the wanted one or are held in it, letter
+    // case aside (`readme.md` for `README.md`, `core.py` for `core.pyi`), or
+    // share its stem (`core.ts` for `core.js`).
+    let wanted = name(path).unwrap_or_default().to_lowercase();
+    let stem = wanted.split('.').next().unwrap_or(&wanted).to_owned();
+    let mut alike: Vec<String> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .take(10_000)
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|entry| {
+            let entry = entry.to_lowercase();
+            !wanted.is_empty()
+                && (entry.contains(&wanted)
+                    || wanted.contains(&entry)
+                    || (!stem.is_empty() && entry.split('.').next() == Some(stem.as_str())))
+        })
+        .collect();
+    alike.sort();
+    alike.truncate(3);
+    if alike.is_empty() {
+        return format!("{named} does not exist; {FIND}");
+    }
+    let prefix = named.rfind(['/', '\\']).map_or("", |end| &named[..=end]);
+    let alike: Vec<String> = alike
+        .iter()
+        .map(|entry| format!("{prefix}{entry}"))
+        .collect();
+    format!("{named} does not exist. Did you mean {}?", alike.join(", "))
+}
+
 // Paths resolve where the call works (`ToolContext::workspace`): a chat's own
 // folder, or the project folder.
 fn resolve_existing(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
-    let path = dunce::canonicalize(haarness_core::resolve_permission_path(
-        &context.workspace,
-        value,
-    ))
-    .map_err(tool_error)?;
+    let joined = haarness_core::resolve_permission_path(&context.workspace, value);
+    let path = haarness_core::paths::canonicalize(&joined)
+        .map_err(|error| io_error(value, &joined, &error))?;
     ensure_within(path, context)
 }
 /// A file the tool removes (a delete, the old name of a move): a link
 /// there is the entry itself, so only the folder holding it is followed.
 fn resolve_entry(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
     let path = haarness_core::resolve_permission_entry(&context.workspace, value);
-    std::fs::symlink_metadata(&path).map_err(tool_error)?;
+    std::fs::symlink_metadata(&path).map_err(|error| io_error(value, &path, &error))?;
     ensure_within(path, context)
 }
 fn resolve_new(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
@@ -4578,7 +4743,10 @@ fn resolve_new(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
     }
     let joined = haarness_core::resolve_permission_path(&context.workspace, value);
     if joined.exists() {
-        return ensure_within(dunce::canonicalize(&joined).map_err(tool_error)?, context);
+        return ensure_within(
+            haarness_core::paths::canonicalize(&joined).map_err(tool_error)?,
+            context,
+        );
     }
     if std::fs::symlink_metadata(&joined).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(CoreError::PermissionDenied(format!(
@@ -4592,10 +4760,10 @@ fn resolve_new(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
     ensure_within(joined, context)
 }
 fn ensure_within(path: PathBuf, context: &ToolContext) -> CoreResult<PathBuf> {
-    let root = dunce::canonicalize(&context.workspace).map_err(tool_error)?;
+    let root = haarness_core::paths::canonicalize(&context.workspace).map_err(tool_error)?;
     let output_root = tool_output_dir();
-    let is_tool_output =
-        dunce::canonicalize(&output_root).is_ok_and(|output_root| path.starts_with(output_root));
+    let is_tool_output = haarness_core::paths::canonicalize(&output_root)
+        .is_ok_and(|output_root| path.starts_with(output_root));
     let is_authorized_external = context.authorized_external_paths.contains(&path);
     if !path.starts_with(&root) && !is_tool_output && !is_authorized_external {
         return Err(CoreError::PermissionDenied(format!(
@@ -4724,7 +4892,8 @@ impl SecretFilter {
     ) -> Self {
         Self {
             workspaces: [
-                dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf()),
+                haarness_core::paths::canonicalize(workspace)
+                    .unwrap_or_else(|_| workspace.to_path_buf()),
                 workspace.to_path_buf(),
             ],
             root: root.to_path_buf(),
@@ -4776,7 +4945,7 @@ impl SecretFilter {
     /// [`Self::names_hidden`], or a link that leads to a file left out.
     fn hides(&self, path: &Path) -> Option<Hidden> {
         self.names_hidden(path).or_else(|| {
-            dunce::canonicalize(path)
+            haarness_core::paths::canonicalize(path)
                 .ok()
                 .filter(|target| target != path)
                 .and_then(|target| self.judge(&target))
@@ -4866,7 +5035,7 @@ fn glob_walk(
         // is left out, as a list of that folder would ask first.
         let parent = path.parent().unwrap_or(&scope.root).to_path_buf();
         let inside = *folders.entry(parent).or_insert_with_key(|parent| {
-            dunce::canonicalize(parent).is_ok_and(|real| {
+            haarness_core::paths::canonicalize(parent).is_ok_and(|real| {
                 real.starts_with(&scope.root) || real.starts_with(&scope.workspace)
             })
         });
@@ -4986,7 +5155,7 @@ fn same_file(left: &Path, right: &Path) -> bool {
     #[cfg(not(unix))]
     {
         matches!(
-            (dunce::canonicalize(left), dunce::canonicalize(right)),
+            (haarness_core::paths::canonicalize(left), haarness_core::paths::canonicalize(right)),
             (Ok(left), Ok(right)) if left == right
         )
     }
@@ -5504,10 +5673,11 @@ enum ExistingDiffBody {
 
 async fn existing_diff_body(path: &Path) -> ExistingDiffBody {
     match tokio::fs::read(path).await {
-        Ok(bytes) => String::from_utf8(bytes).map_or(
-            ExistingDiffBody::Opaque { binary: true },
-            ExistingDiffBody::Text,
-        ),
+        // As the text tools read it: no byte order mark, UTF-16 as its text.
+        Ok(bytes) => text::decode(&bytes)
+            .map_or(ExistingDiffBody::Opaque { binary: true }, |(text, _)| {
+                ExistingDiffBody::Text(text.into_owned())
+            }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => ExistingDiffBody::Missing,
         Err(_) => ExistingDiffBody::Opaque { binary: false },
     }
@@ -6073,8 +6243,8 @@ fn output_preview(text: &str) -> String {
 pub(crate) fn within_chat_home(path: &Path, chat_home: Option<&Path>) -> bool {
     chat_home.is_some_and(|home| {
         path.starts_with(home)
-            || dunce::canonicalize(path).is_ok_and(|path| {
-                dunce::canonicalize(home).is_ok_and(|home| path.starts_with(home))
+            || haarness_core::paths::canonicalize(path).is_ok_and(|path| {
+                haarness_core::paths::canonicalize(home).is_ok_and(|home| path.starts_with(home))
             })
     })
 }
@@ -6170,7 +6340,7 @@ mod tests {
         std::fs::write(root.join("crates/AGENTS.md"), "CRATE_RULES").unwrap();
         std::fs::write(root.join("crates/api/CLAUDE.md"), "CLAUDE_RULES").unwrap();
         std::fs::write(root.join("crates/api/src/lib.rs"), "fn api() {}").unwrap();
-        let workspace = dunce::canonicalize(&root).unwrap();
+        let workspace = haarness_core::paths::canonicalize(&root).unwrap();
 
         let registry = NativeToolRegistry::new(workspace.clone());
         let read = registry.get("read").unwrap();
@@ -6254,7 +6424,7 @@ mod tests {
         std::fs::write(root.join("crates/AGENTS.md"), "CRATE_RULES").unwrap();
         std::fs::write(root.join("crates/api/src/lib.rs"), "fn api() {}").unwrap();
         std::fs::write(root.join("crates/api/src/main.rs"), "fn main() {}").unwrap();
-        let workspace = dunce::canonicalize(&root).unwrap();
+        let workspace = haarness_core::paths::canonicalize(&root).unwrap();
         let registry = NativeToolRegistry::new(workspace.clone());
         let read = registry.get("read").unwrap();
         let view = haarness_core::instructions::InContext::default();
@@ -6306,7 +6476,10 @@ mod tests {
         assert_eq!(pdf_output.metadata["mime"], "application/pdf");
         assert_eq!(
             pdf_output.metadata["attachments"][0],
-            dunce::canonicalize(&pdf).unwrap().display().to_string()
+            haarness_core::paths::canonicalize(&pdf)
+                .unwrap()
+                .display()
+                .to_string()
         );
 
         let audio_output = registry
@@ -6319,7 +6492,10 @@ mod tests {
         assert_eq!(audio_output.metadata["mime"], "audio/mpeg");
         assert_eq!(
             audio_output.metadata["attachments"][0],
-            dunce::canonicalize(&audio).unwrap().display().to_string()
+            haarness_core::paths::canonicalize(&audio)
+                .unwrap()
+                .display()
+                .to_string()
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -6361,7 +6537,7 @@ mod tests {
         assert_eq!(kept.metadata["mime"], "image/png");
         assert_eq!(
             kept.metadata["attachments"][0],
-            dunce::canonicalize(root.join("dot.png"))
+            haarness_core::paths::canonicalize(root.join("dot.png"))
                 .unwrap()
                 .display()
                 .to_string()
@@ -6859,7 +7035,7 @@ mod tests {
                 "trigger": {"type": "cron", "expression": "0 8 * * *"}
             })
         };
-        let canonical = dunce::canonicalize(&folder).unwrap();
+        let canonical = haarness_core::paths::canonicalize(&folder).unwrap();
         let in_folder = tool
             .execute(create("from-chat"), context(&folder))
             .await
@@ -6870,7 +7046,7 @@ mod tests {
         );
         assert_eq!(
             in_folder.metadata["schedule"]["workspace"],
-            dunce::canonicalize(&workspace)
+            haarness_core::paths::canonicalize(&workspace)
                 .unwrap()
                 .display()
                 .to_string()
@@ -7176,7 +7352,7 @@ export default workflow({
         let path = PathBuf::from(created["path"].as_str().unwrap());
         assert_eq!(
             path,
-            dunce::canonicalize(&workspace)
+            haarness_core::paths::canonicalize(&workspace)
                 .unwrap()
                 .join(".haarness/workflows/safe-audit.ts")
         );
@@ -7223,9 +7399,9 @@ export default workflow({
             .get("bash")
             .unwrap()
             .execute(
-                // Windows runs a command in cmd.exe, where `cd` prints the folder.
+                // cmd.exe, Windows' shell without Git, prints the folder with `cd`.
                 json!({
-                    "command": if cfg!(windows) { "cd & exit 7" } else { "pwd; exit 7" },
+                    "command": if haarness_core::agent_shell::current().posix() { "pwd; exit 7" } else { "cd & exit 7" },
                     "timeout": 10_000,
                     "workdir": "nested"
                 }),
@@ -7333,13 +7509,20 @@ export default workflow({
 
         let write = definition("write");
         assert!(write.description.contains("Read an existing file first"));
-        assert!(write.description.contains("Prefer edit or apply_patch"));
+        assert!(write.description.contains("Prefer edit or multiedit"));
         assert!(write.description.contains("unrelated user changes"));
 
         let edit = definition("edit");
         assert!(edit.description.contains("exactly one occurrence"));
         assert!(edit.description.contains("enough surrounding context"));
-        assert!(edit.description.contains("Use apply_patch"));
+        assert!(edit.description.contains("Use multiedit"));
+        // Not every model is offered apply_patch, so no other tool sends it there.
+        for tool in ["write", "edit", "bash"] {
+            assert!(
+                !definition(tool).description.contains("apply_patch"),
+                "{tool}"
+            );
+        }
 
         let patch = definition("apply_patch");
         assert!(patch.description.contains("explicit *** Add File"));
@@ -7659,7 +7842,9 @@ export default workflow({
         .unwrap_err()
         .to_string();
         assert!(
-            error.contains("second.txt: hunk context not found: \"absent\"; no file was changed"),
+            error.contains(
+                "second.txt: hunk context not found: \"absent\"; the file's lines differ"
+            ) && error.ends_with("; no file was changed"),
             "{error}"
         );
         assert_eq!(
@@ -8004,7 +8189,7 @@ export default workflow({
             return;
         };
         // The mount itself and a folder without letters below it.
-        let sensitive = dunce::canonicalize(PathBuf::from(sensitive)).unwrap();
+        let sensitive = haarness_core::paths::canonicalize(PathBuf::from(sensitive)).unwrap();
         let digits = sensitive.join(std::process::id().to_string());
         std::fs::create_dir(&digits).unwrap();
         assert!(!folds_case(&digits));
@@ -8054,7 +8239,7 @@ export default workflow({
         for name in ["a.txt", "b.txt"] {
             std::fs::write(workspace.join(name), "one\ntwo\n").unwrap();
         }
-        let workspace = dunce::canonicalize(&workspace).unwrap();
+        let workspace = haarness_core::paths::canonicalize(&workspace).unwrap();
         let registry = NativeToolRegistry::new(workspace.clone());
         // Another call holds both files, so both patches queue for them.
         let held = crate::file_lock::lock(
@@ -8220,7 +8405,7 @@ export default workflow({
 
         // A call waiting for a file another call holds ends on Stop.
         let held = crate::file_lock::lock(
-            [dunce::canonicalize(workspace.join("notes.slow")).unwrap()],
+            [haarness_core::paths::canonicalize(workspace.join("notes.slow")).unwrap()],
             &CancellationToken::new(),
         )
         .await
@@ -8457,9 +8642,10 @@ export default workflow({
             .await;
         assert!(matches!(denied, Err(CoreError::PermissionDenied(_))));
 
-        context
-            .authorized_external_paths
-            .push(dunce::canonicalize(&external).expect("external test directory canonicalizes"));
+        context.authorized_external_paths.push(
+            haarness_core::paths::canonicalize(&external)
+                .expect("external test directory canonicalizes"),
+        );
         let allowed = registry
             .get("list")
             .unwrap()
@@ -8558,7 +8744,7 @@ export default workflow({
         }
         std::fs::create_dir_all(workspace.join("conf.env.d")).unwrap();
         // Results name paths relative to the workspace only under its real path.
-        let workspace = dunce::canonicalize(&workspace).unwrap();
+        let workspace = haarness_core::paths::canonicalize(&workspace).unwrap();
         // Every file holds the needle and its own name.
         for file in [
             ".env",
@@ -8753,7 +8939,7 @@ export default workflow({
         std::fs::create_dir_all(workspace.join("private")).unwrap();
         std::fs::create_dir_all(workspace.join("public")).unwrap();
         // Search output names files relative to the workspace as configured.
-        let workspace = dunce::canonicalize(&workspace).unwrap();
+        let workspace = haarness_core::paths::canonicalize(&workspace).unwrap();
         for file in [
             "private/key.txt",
             "private/notes.md",
@@ -8841,7 +9027,7 @@ export default workflow({
         let workspace =
             std::env::temp_dir().join(format!("haarness-search-sign-ins-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(workspace.join("data")).unwrap();
-        let workspace = dunce::canonicalize(&workspace).unwrap();
+        let workspace = haarness_core::paths::canonicalize(&workspace).unwrap();
         for file in [
             "data/auth.json",
             "data/auth.json.lock",
@@ -8944,7 +9130,7 @@ export default workflow({
     #[cfg(unix)]
     #[tokio::test]
     async fn a_glob_stays_in_the_folder_it_searches() {
-        let root = dunce::canonicalize(std::env::temp_dir())
+        let root = haarness_core::paths::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!("haarness-glob-scope-{}", uuid::Uuid::now_v7()));
         let workspace = root.join("workspace");
@@ -9034,7 +9220,7 @@ export default workflow({
     #[cfg(unix)]
     #[test]
     fn a_glob_over_links_back_up_the_tree_ends() {
-        let workspace = dunce::canonicalize(std::env::temp_dir())
+        let workspace = haarness_core::paths::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!("haarness-glob-loops-{}", uuid::Uuid::now_v7()));
         for file in ["top.txt", "a/note.txt", "p/x.txt", "q/y.txt"] {
@@ -9086,7 +9272,7 @@ export default workflow({
     #[cfg(unix)]
     #[test]
     fn a_glob_stops_at_its_budget_of_entries_read_through_links_and_says_so() {
-        let root = dunce::canonicalize(std::env::temp_dir())
+        let root = haarness_core::paths::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!("haarness-glob-entries-{}", uuid::Uuid::now_v7()));
         let workspace = root.join("workspace");
@@ -9134,7 +9320,7 @@ export default workflow({
     #[cfg(unix)]
     #[test]
     fn a_glob_through_a_link_out_of_the_project_stops_at_its_budget_and_on_stop() {
-        let root = dunce::canonicalize(std::env::temp_dir())
+        let root = haarness_core::paths::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!("haarness-glob-budget-{}", uuid::Uuid::now_v7()));
         let workspace = root.join("workspace");
@@ -9233,7 +9419,7 @@ export default workflow({
     fn read_fixture(name: &str, body: &[u8]) -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!("haarness-read-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = dunce::canonicalize(&root).unwrap();
+        let root = haarness_core::paths::canonicalize(&root).unwrap();
         std::fs::write(root.join(name), body).unwrap();
         (root.clone(), root.join(name))
     }
@@ -9251,7 +9437,7 @@ export default workflow({
     async fn read_shows_the_head_of_a_line_that_never_ends() {
         let root = std::env::temp_dir().join(format!("haarness-read-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = dunce::canonicalize(&root).unwrap();
+        let root = haarness_core::paths::canonicalize(&root).unwrap();
         // 40 MiB on one line, as a minified bundle or a JSON dump.
         {
             use std::io::Write as _;
@@ -9460,7 +9646,7 @@ export default workflow({
         assert!(
             refused
                 .to_string()
-                .contains("latin1.txt is not UTF-8 text, so edit cannot change it"),
+                .contains("latin1.txt is not UTF-8 or UTF-16 text"),
             "{refused}"
         );
         // A NUL near the start marks binary data: only UTF-8 shows, as before.
@@ -9486,7 +9672,7 @@ export default workflow({
     async fn read_refuses_a_pipe_rather_than_waiting_on_it() {
         let root = std::env::temp_dir().join(format!("haarness-read-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = dunce::canonicalize(&root).unwrap();
+        let root = haarness_core::paths::canonicalize(&root).unwrap();
         assert!(
             std::process::Command::new("mkfifo")
                 .arg(root.join("pipe"))
@@ -9624,7 +9810,7 @@ export default workflow({
     async fn grep_leaves_the_async_workers_free_and_stop_ends_it() {
         let root = std::env::temp_dir().join(format!("haarness-grep-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = dunce::canonicalize(&root).unwrap();
+        let root = haarness_core::paths::canonicalize(&root).unwrap();
         let line = format!("{}\n", "w".repeat(200));
         for index in 0..4_000 {
             std::fs::write(root.join(format!("f{index}.txt")), line.repeat(20)).unwrap();
@@ -9650,6 +9836,309 @@ export default workflow({
             .unwrap()
             .execute(args, tool_context(root))
             .await
+    }
+
+    /// A file as Windows PowerShell 5.1's `>` and `Out-File` write it:
+    /// UTF-16LE behind a byte order mark.
+    fn utf16le(text: &str) -> Vec<u8> {
+        [0xff, 0xfe]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn utf16_text_is_read_searched_and_changed_in_utf16() {
+        let (root, file) = read_fixture(
+            "version.txt",
+            &utf16le("version=1.2.3\r\nchannel=stable\r\n"),
+        );
+        // Before, read said it held binary data, grep left it out and edit
+        // said it was not UTF-8.
+        let shown = read_text_of(&root, json!({"path":"version.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(shown.text, "version=1.2.3\nchannel=stable");
+        let found = edit_in(&root, "grep", json!({"pattern":"^channel"}))
+            .await
+            .unwrap();
+        assert_eq!(found.text, "version.txt:2:channel=stable");
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"version.txt","old":"1.2.3","new":"1.2.4"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            utf16le("version=1.2.4\r\nchannel=stable\r\n")
+        );
+        edit_in(
+            &root,
+            "multiedit",
+            json!({"path":"version.txt","edits":[{"old":"stable","new":"beta"}]}),
+        )
+        .await
+        .unwrap();
+        edit_in(
+            &root,
+            "apply_patch",
+            json!({"input":"*** Begin Patch\n*** Update File: version.txt\n@@\n-version=1.2.4\n+version=2.0.0\n*** End Patch\n"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            utf16le("version=2.0.0\r\nchannel=beta\r\n")
+        );
+        // A whole new text keeps the file's encoding.
+        edit_in(
+            &root,
+            "write",
+            json!({"path":"version.txt","content":"version=3\r\n"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), utf16le("version=3\r\n"));
+    }
+
+    #[tokio::test]
+    async fn a_byte_order_mark_is_neither_shown_nor_matched_and_the_file_keeps_it() {
+        const BOM: &str = "\u{feff}";
+        let body = format!(
+            "{BOM}using System;\r\nusing System.Collections.Generic;\r\n\r\nnamespace Inventory\r\n{{\r\n}}\r\n"
+        );
+        let (root, file) = read_fixture("Program.cs", body.as_bytes());
+        let shown = read_text_of(&root, json!({"path":"Program.cs"}))
+            .await
+            .unwrap();
+        assert!(
+            shown.text.starts_with("using System;\n"),
+            "{:?}",
+            shown.text
+        );
+        let found = edit_in(&root, "grep", json!({"pattern":"^using System;$"}))
+            .await
+            .unwrap();
+        assert_eq!(found.text, "Program.cs:1:using System;");
+        // A hunk for the first line written without the mark: before, its
+        // context was not found.
+        edit_in(
+            &root,
+            "apply_patch",
+            json!({"input":"*** Begin Patch\n*** Update File: Program.cs\n@@\n using System;\n+using System.Linq;\n using System.Collections.Generic;\n*** End Patch\n"}),
+        )
+        .await
+        .unwrap();
+        // An old and a new that copied the mark from an older read.
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"Program.cs","old":format!("{BOM}using System;\nusing System.Linq;"),"new":format!("{BOM}using System;\nusing System.IO;\nusing System.Linq;")}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            format!(
+                "{BOM}using System;\r\nusing System.IO;\r\nusing System.Linq;\r\nusing System.Collections.Generic;\r\n\r\nnamespace Inventory\r\n{{\r\n}}\r\n"
+            )
+        );
+        edit_in(
+            &root,
+            "write",
+            json!({"path":"Program.cs","content":"namespace Inventory {}\r\n"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            format!("{BOM}namespace Inventory {{}}\r\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_edit_across_mixed_line_ends_finds_the_lines_read_showed() {
+        // config/legacy.ini of a Windows checkout, committed with mixed ends,
+        // and the old gpt-6-luna sent for it: before, "expected exactly one
+        // match, found 0".
+        let body = b"[network]\r\nhost = inventory.local\r\ntimeout = 30\n\n[storage]\r\npath = C:\\data\r\nbackup = false\n";
+        let (root, file) = read_fixture("legacy.ini", body);
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"legacy.ini","old":"[network]\nhost = inventory.local\ntimeout = 30\n","new":"[network]\nhost = inventory.local\ntimeout = 60\nretries = 3\n"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"[network]\r\nhost = inventory.local\r\ntimeout = 60\r\nretries = 3\r\n\n[storage]\r\npath = C:\\data\r\nbackup = false\n"
+        );
+        edit_in(
+            &root,
+            "multiedit",
+            json!({"path":"legacy.ini","edits":[{"old":"retries = 3\n\n[storage]\npath = C:\\data","new":"retries = 5\n\n[storage]\npath = D:\\data"}]}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("retries = 5\r\n\r\n[storage]\r\npath = D:\\data\r\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_path_says_which_part_is_missing_and_names_like_it() {
+        let (root, _) = read_fixture("README.md", b"# Inventory\n");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/core.py"), "x = 1\n").unwrap();
+        // Before, each said only "No such file or directory (os error 2)"
+        // ("File not found." on Windows), naming no path.
+        let missing = read_text_of(&root, json!({"path":"README.txt"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing.contains("README.txt does not exist. Did you mean README.md?"),
+            "{missing}"
+        );
+        let folder = edit_in(
+            &root,
+            "edit",
+            json!({"path":"lib/core.py","old":"x","new":"y"}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            folder.contains("lib/core.py does not exist: there is no folder lib in "),
+            "{folder}"
+        );
+        assert!(
+            folder.ends_with("use glob or list to find the right path"),
+            "{folder}"
+        );
+        let patch = edit_in(
+            &root,
+            "apply_patch",
+            json!({"input":"*** Begin Patch\n*** Update File: src/core.pyi\n@@\n-x = 1\n+x = 2\n*** End Patch\n"}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            patch.contains("src/core.pyi does not exist. Did you mean src/core.py?"),
+            "{patch}"
+        );
+        assert!(!patch.contains("src/core.pyi: src/core.pyi"), "{patch}");
+    }
+
+    #[tokio::test]
+    async fn a_pattern_that_is_not_a_regular_expression_says_how_to_search_as_written() {
+        let (root, _) = read_fixture("main.py", b"print(total)\n");
+        let refused = edit_in(&root, "grep", json!({"pattern":"print(total"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.starts_with("invalid request: pattern is not a valid regular expression: "),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("with a backslash to search for them as written"),
+            "{refused}"
+        );
+        let found = edit_in(&root, "grep", json!({"pattern":"print\\(total"}))
+            .await
+            .unwrap();
+        assert_eq!(found.text, "main.py:1:print(total)");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn git_bash_drive_paths_and_quoted_paths_reach_the_file_on_windows() {
+        let (root, file) = read_fixture("notes.txt", b"one\r\n");
+        let forward = file.display().to_string().replace('\\', "/");
+        let (drive, rest) = forward.split_once(':').unwrap();
+        let drive = drive.to_lowercase();
+        // Before, each was "Path not found. (os error 3)" or "Invalid name.
+        // (os error 123)".
+        for path in [
+            format!("/{drive}{rest}"),
+            format!("/cygdrive/{drive}{rest}"),
+            format!("\"{}\"", file.display()),
+            "\"notes.txt\"".to_owned(),
+        ] {
+            let shown = read_text_of(&root, json!({ "path": path })).await;
+            assert_eq!(
+                shown
+                    .map(|output| output.text)
+                    .map_err(|error| error.to_string()),
+                Ok("one".to_owned()),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shell_tool_names_the_shell_its_commands_run_in() {
+        use haarness_core::agent_shell::AgentShell;
+        let posix = bash_description(&AgentShell::Posix);
+        assert!(!posix.contains("Windows"), "{posix}");
+        let bash = bash_description(&AgentShell::GitBash(PathBuf::from("bash.exe")));
+        assert!(
+            bash.contains("commands run in Git Bash (bash from Git for Windows)"),
+            "{bash}"
+        );
+        assert!(bash.contains("cmd //c dir"), "{bash}");
+        let cmd = bash_description(&AgentShell::Cmd);
+        assert!(
+            cmd.contains("commands run in cmd.exe (Command Prompt), not a POSIX shell"),
+            "{cmd}"
+        );
+        // The tool says which one runs here.
+        let registry = NativeToolRegistry::new(std::env::temp_dir());
+        let described = registry.get("bash").unwrap().definition().description;
+        assert_eq!(
+            described,
+            bash_description(&haarness_core::agent_shell::current())
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_file_deeper_than_260_characters_is_inside_the_project_on_windows() {
+        let (root, _) = read_fixture("a.txt", b"");
+        let deep = (1..=6)
+            .map(|level| format!("module_level_{level:02}_with_a_long_folder_name"))
+            .collect::<Vec<_>>()
+            .join("/");
+        std::fs::create_dir_all(root.join(&deep)).unwrap();
+        std::fs::write(
+            root.join(&deep).join("settings.json"),
+            b"{\"debug\": false}\r\n",
+        )
+        .unwrap();
+        let file = format!("{deep}/settings.json");
+        assert!(root.join(&file).as_os_str().len() > 260);
+        // Before, its canonical path kept `\\?\` and every tool refused it as
+        // outside the project, or left it out of a glob.
+        let shown = read_text_of(&root, json!({ "path": file })).await.unwrap();
+        assert_eq!(shown.text, "{\"debug\": false}");
+        edit_in(
+            &root,
+            "edit",
+            json!({"path": file, "old": "false", "new": "true"}),
+        )
+        .await
+        .unwrap();
+        let found = edit_in(&root, "glob", json!({"pattern": "**/settings.json"}))
+            .await
+            .unwrap();
+        assert_eq!(found.text, file);
     }
 
     #[tokio::test]
@@ -9751,17 +10240,34 @@ export default workflow({
         )
         .await
         .unwrap_err();
-        assert!(ambiguous.to_string().contains("found 2"), "{ambiguous}");
-        // A file mostly of LF line ends is matched as written.
+        assert!(
+            ambiguous
+                .to_string()
+                .contains("old occurs 2 times in main.c"),
+            "{ambiguous}"
+        );
+        // A file mostly of LF line ends: an old across its one CRLF break
+        // is found line by line, as read showed those lines (before, it was
+        // not found), and lines that are not there are still not found.
         std::fs::write(&file, b"a\nb\nc\r\nd\n").unwrap();
         let missed = edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"c\nq","new":"z"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            missed.to_string().contains("old was not found in main.c"),
+            "{missed}"
+        );
+        edit_in(
             &root,
             "edit",
             json!({"path":"main.c","old":"c\nd","new":"z"}),
         )
         .await
-        .unwrap_err();
-        assert!(missed.to_string().contains("found 0"), "{missed}");
+        .unwrap();
         edit_in(
             &root,
             "edit",
@@ -9769,7 +10275,7 @@ export default workflow({
         )
         .await
         .unwrap();
-        assert_eq!(std::fs::read(&file).unwrap(), b"ab\nc\r\nd\n");
+        assert_eq!(std::fs::read(&file).unwrap(), b"ab\nz\n");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

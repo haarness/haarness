@@ -12,7 +12,7 @@ One snapshot per UTC day for the last seven days, computed from the history alre
 
 - **Per day:** chats, turns (completed, failed, stopped), turns run by subagents and by schedules, input/output/cache tokens, known cost in USD, tool calls and tool errors, files changed and lines added/removed.
 - **Per model:** provider and model id, turns, tokens and cost. Providers are named only when Haarness ships them (with their presets), and model ids only when Haarness's own model catalog lists them: a fine-tune or any other model is reported as `other`. Azure, Google Vertex and Amazon Bedrock model ids name your own deployments and inference profiles, so those models are reported as `custom`. A provider you configured yourself is reported as `custom` without its model; local runtimes (Ollama, LM Studio) report their models as `local`.
-- **Per tool:** calls and errors for Haarness's built-in tools. Every MCP tool counts as `mcp`, every plugin or extension tool as `other`.
+- **Per tool:** calls and errors for each of Haarness's built-in tools, `multiedit`, `batch` and `lsp` among them. Every MCP tool counts as `mcp`; every plugin or extension tool, and a tool name a model made up, as `other`.
 - **About the app:** the Haarness version, operating system, CPU architecture, release or development build, and a random installation id stored in `<data>/telemetry/state.json`.
 
 **Never sent:** prompts, model answers, tool arguments or output, code, file names, paths, project or chat titles, custom provider, model or tool names, environment variables or credentials.

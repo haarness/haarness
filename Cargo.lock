@@ -1894,6 +1894,7 @@ dependencies = [
  "nix 0.31.3",
  "opentelemetry",
  "parking_lot",
+ "process-wrap",
  "regex",
  "reqwest",
  "rusqlite",

@@ -33,6 +33,37 @@ impl Default for LazyToolSettings {
     }
 }
 
+/// Whether `model` comes from a family trained on `apply_patch`'s V4A
+/// patches, whatever provider serves it (`openai/gpt-5.4` through
+/// OpenRouter, `gpt-oss-120b` on Groq, `haarness/openai/gpt-6.1-sol`, an
+/// `openai.gpt-oss-…` Bedrock id): OpenAI's GPT models from GPT-4.1 on, its
+/// o-series reasoning models, its Codex models and gpt-oss. Other models
+/// change files with `edit`, `multiedit` and `write`, which every model has;
+/// given the patch tool too they write diffs it cannot read.
+#[must_use]
+pub fn writes_patches(model: &str) -> bool {
+    let name = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    let name = name.strip_prefix("openai.").unwrap_or(&name);
+    if name.starts_with("gpt-oss") || name.contains("codex") {
+        return true;
+    }
+    if let Some(version) = name.strip_prefix("gpt-") {
+        let major: String = version.chars().take_while(char::is_ascii_digit).collect();
+        return match major.parse::<u32>() {
+            Ok(major) if major >= 5 => true,
+            Ok(4) => version.starts_with("4.1"),
+            _ => false,
+        };
+    }
+    // o1, o3, o4-mini, o3-pro.
+    let mut characters = name.chars();
+    characters.next() == Some('o') && characters.next().is_some_and(|c| c.is_ascii_digit())
+}
+
 /// A compact search tool replaces deferred schemas. Search results become
 /// provider-visible on the following round and remain promoted for the thread.
 #[must_use]
@@ -633,6 +664,45 @@ fn refused_before_running(error: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::writes_patches;
+
+    #[test]
+    fn the_patch_tool_goes_to_the_model_families_trained_on_it_under_any_provider() {
+        for model in [
+            "gpt-5.4",
+            "gpt-6-luna",
+            "openai/gpt-6.1-sol",
+            "haarness/openai/gpt-6.1-sol",
+            "gpt-4.1-mini",
+            "gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "openai.gpt-oss-120b-1:0",
+            "o3",
+            "o4-mini",
+            "gpt-5-codex",
+            "codex-mini-latest",
+            "GPT-5",
+        ] {
+            assert!(writes_patches(model), "{model}");
+        }
+        for model in [
+            "claude-sonnet-5-5",
+            "anthropic/claude-opus-5-5",
+            "gemini-3.8-flash",
+            "deepseek-flash",
+            "gpt-4o",
+            "gpt-4",
+            "gpt-3.5-turbo",
+            "grok-4.3",
+            "qwen3-coder",
+            "my-deployment",
+            "ollama/llama4",
+            "openrouter/auto",
+        ] {
+            assert!(!writes_patches(model), "{model}");
+        }
+    }
+
     #[test]
     fn the_marketplace_and_capability_managers_wait_to_be_loaded_like_the_other_managers() {
         for name in [

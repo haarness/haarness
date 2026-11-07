@@ -179,31 +179,77 @@ fn path_with_binary(binary: &Path, existing: Option<&OsStr>) -> io::Result<OsStr
 /// Keep the existing login-shell behavior, restoring the bundled directory after
 /// profiles run. Pass its path as an argument, never interpolate it as shell code.
 /// When the bundled rg cannot be put in place, the command still runs, with
-/// `PATH` as it is (said once in the log).
-pub fn shell_command(script: &str) -> io::Result<Command> {
-    shell_from(script, binary_path())
+/// `PATH` as it is (said once in the log). On Windows `windows_bash` is the
+/// bash to run it in (Git for Windows'), else it runs in cmd.exe.
+pub fn shell_command(script: &str, windows_bash: Option<&Path>) -> io::Result<Command> {
+    shell_from(script, binary_path(), windows_bash)
 }
 
-fn shell_from(script: &str, binary: io::Result<PathBuf>) -> io::Result<Command> {
+fn shell_from(
+    script: &str,
+    binary: io::Result<PathBuf>,
+    windows_bash: Option<&Path>,
+) -> io::Result<Command> {
     match binary {
-        Ok(binary) => shell_with_binary(script, Some(&binary)),
+        Ok(binary) => shell_with_binary(script, Some(&binary), windows_bash),
         Err(error) => {
             unavailable(&error);
-            shell_with_binary(script, None)
+            shell_with_binary(script, None, windows_bash)
         }
     }
 }
 
-fn shell_with_binary(script: &str, binary: Option<&Path>) -> io::Result<Command> {
+/// `argument` as the MSYS and Cygwin runtime reads a Windows command line
+/// back into one word: always in double quotes (an unquoted word holding
+/// `*`, `?`, `[` or a brace is globbed), and inside them each backslash and
+/// quote escaped, since there `\\` reads as one backslash and `\"` as a quote.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn msys_quoted(argument: &str) -> String {
+    let mut quoted = String::with_capacity(argument.len() + 2);
+    quoted.push('"');
+    for character in argument.chars() {
+        if matches!(character, '\\' | '"') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn shell_with_binary(
+    script: &str,
+    binary: Option<&Path>,
+    windows_bash: Option<&Path>,
+) -> io::Result<Command> {
     #[cfg(windows)]
     let mut command = {
         use std::os::windows::process::CommandExt as _;
-        // cmd.exe parses its own command line, not C-runtime quoting: given
-        // `"a b"` as one argument it saw `\"a b\"` and split it. With /s it
-        // drops only the outer quotes and runs the script as written.
-        let mut command = Command::new("cmd");
-        command.raw_arg(format!("/d /s /c \"{script}\""));
-        command
+        if let Some(bash) = windows_bash {
+            // A login shell, as elsewhere, so Git's profile puts its tools
+            // and the Windows PATH on PATH (`MSYS2_PATH_TYPE=inherit`); it
+            // stays in the command's folder (`CHERE_INVOKING`), and a `cd`
+            // goes where the script says, never through a `CDPATH`.
+            let mut command = Command::new(bash);
+            command
+                .raw_arg("-lc")
+                .raw_arg(msys_quoted(&format!(
+                    "command unset CDPATH 2>/dev/null || :\n{script}"
+                )))
+                .env("CHERE_INVOKING", "1")
+                .env("MSYS2_PATH_TYPE", "inherit")
+                .env_remove("CDPATH");
+            command
+        } else {
+            // cmd.exe parses its own command line, not C-runtime quoting:
+            // given `"a b"` as one argument it saw `\"a b\"` and split it.
+            // With /s it drops only the outer quotes and runs the script as
+            // written.
+            let mut command = Command::new("cmd");
+            command.raw_arg(format!("/d /s /c \"{script}\""));
+            command
+        }
     };
     // A `cd` goes where the script says (as a permission card reads it),
     // never through a `CDPATH`: none is inherited, and one a login profile
@@ -259,6 +305,48 @@ mod tests {
             }
         }
         panic!("{} stayed busy", binary.display());
+    }
+
+    #[test]
+    fn a_script_is_quoted_for_the_msys_runtime_whole_and_unglobbed() {
+        assert_eq!(msys_quoted("ls"), "\"ls\"");
+        assert_eq!(msys_quoted("ls *.py"), "\"ls *.py\"");
+        assert_eq!(
+            msys_quoted(r#"printf '%s\n' "a\\b" C:\x\"#),
+            r#""printf '%s\\n' \"a\\\\b\" C:\\x\\""#
+        );
+    }
+
+    /// Git for Windows' bash gets the script exactly as written: what it
+    /// runs (`$BASH_EXECUTION_STRING`) is the script, its quotes, backslashes,
+    /// globs, braces, dollars and line breaks untouched.
+    #[cfg(windows)]
+    #[test]
+    fn git_bash_runs_the_script_exactly_as_written() {
+        let bash = Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        if !bash.is_file() {
+            eprintln!("no Git for Windows here; skipped");
+            return;
+        }
+        for script in [
+            "printf %s \"$BASH_EXECUTION_STRING\"",
+            "printf %s \"$BASH_EXECUTION_STRING\" # *.py ? [ab] {a,b} ~ 'q' \"d\" \\ \\\\ \\\" C:\\x\\ %PATH% ! ^ & | < >",
+            "printf %s \"$BASH_EXECUTION_STRING\"\n# second line\t\u{65e5}\u{672c} \\\n",
+            "printf %s \"$BASH_EXECUTION_STRING\" # ends in a backslash \\",
+        ] {
+            let output = shell_with_binary(script, None, Some(bash))
+                .unwrap()
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let ran = String::from_utf8(output.stdout).unwrap();
+            assert_eq!(
+                ran.strip_prefix("command unset CDPATH 2>/dev/null || :\n"),
+                Some(script),
+                "{ran:?}"
+            );
+        }
     }
 
     #[test]
@@ -326,7 +414,7 @@ mod tests {
         #[cfg(unix)]
         {
             let root = tempfile::tempdir().unwrap();
-            let output = shell_from("printf 'ran:%s' \"$#\"", failed())
+            let output = shell_from("printf 'ran:%s' \"$#\"", failed(), None)
                 .unwrap()
                 .current_dir(root.path())
                 .env("HOME", root.path())
@@ -347,7 +435,7 @@ mod tests {
         home: &Path,
         cdpath: Option<&Path>,
     ) -> std::process::Output {
-        let mut command = shell_with_binary(script, Some(&folder.join("bin/rg"))).unwrap();
+        let mut command = shell_with_binary(script, Some(&folder.join("bin/rg")), None).unwrap();
         command.current_dir(folder).env("HOME", home);
         if let Some(cdpath) = cdpath {
             command.env("CDPATH", cdpath);
@@ -419,6 +507,7 @@ mod tests {
         let output = shell_with_binary(
             "command -v rg; rg --version; printf 'args:%s' \"$#\"",
             Some(&binary),
+            None,
         )
         .unwrap()
         .env("PATH", "/usr/bin:/bin")

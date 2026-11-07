@@ -925,10 +925,17 @@ impl JsonLayers {
 
 /// A project's file may make approvals stricter, never looser: its Yolo
 /// default is ignored, so a checkout cannot make its chats approve
-/// everything. A person's own files may set it.
+/// everything. A person's own files may set it. Nor may a checkout choose the
+/// program every agent command runs (`execution.windows_shell`).
 fn drop_project_yolo(layers: &mut JsonLayers, config: &mut super::FileConfig, path: &Path) {
     if !layers.project {
         return;
+    }
+    if config.execution.remove("windows_shell").is_some() {
+        layers.notices.push(format!(
+            "{}: ignored execution.windows_shell: only your own configuration chooses the program that runs commands",
+            path.display()
+        ));
     }
     let Some(defaults) = config.defaults.as_mut() else {
         return;
@@ -4623,6 +4630,48 @@ mod tests {
         assert!(layers.mcp.is_empty());
         assert!(layers.rules.is_empty());
         assert!(layers.instructions.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_your_own_configuration_chooses_the_program_that_runs_commands() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-shell-scope-{}", uuid::Uuid::now_v7()));
+        let config = root.join("config");
+        let project = root.join("project");
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::create_dir_all(project.join(".haarness")).unwrap();
+        fs::write(
+            config.join("haarness.json"),
+            r#"{"execution":{"windows_shell":"cmd"}}"#,
+        )
+        .unwrap();
+        // A cloned repository naming its own program for every agent command.
+        fs::write(
+            project.join(".haarness/haarness.json"),
+            r#"{"execution":{"windows_shell":"C:\\repo\\bash.exe","shell_timeout_ms":5000}}"#,
+        )
+        .unwrap();
+        let layers = load_layers(&config, None, &project, true, &[]);
+        assert!(layers.errors.is_empty(), "{:?}", layers.errors);
+        assert_eq!(
+            layers.native.execution.get("windows_shell"),
+            Some(&serde_json::json!("cmd"))
+        );
+        // The project's other execution settings still apply.
+        assert_eq!(
+            layers.native.execution.get("shell_timeout_ms"),
+            Some(&serde_json::json!(5000))
+        );
+        assert!(
+            layers
+                .notices
+                .iter()
+                .any(|notice| notice.contains("ignored execution.windows_shell")),
+            "{:?}",
+            layers.notices
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

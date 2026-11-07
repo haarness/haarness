@@ -206,13 +206,13 @@ impl Walk {
     /// Whether the folder the link at `link` leads to holds the link, or a
     /// folder the walk came through to reach it.
     fn leads_back(&mut self, link: &Path) -> bool {
-        let Ok(target) = dunce::canonicalize(link) else {
+        let Ok(target) = haarness_core::paths::canonicalize(link) else {
             return true;
         };
         link.ancestors().skip(1).any(|folder| {
             self.real
                 .entry(folder.to_path_buf())
-                .or_insert_with(|| dunce::canonicalize(folder).ok())
+                .or_insert_with(|| haarness_core::paths::canonicalize(folder).ok())
                 .as_ref()
                 .is_some_and(|real| real.starts_with(&target))
         })
@@ -383,7 +383,7 @@ fn real_path(entry: &Entry) -> Option<PathBuf> {
     entry
         .real
         .clone()
-        .or_else(|| dunce::canonicalize(&entry.path).ok())
+        .or_else(|| haarness_core::paths::canonicalize(&entry.path).ok())
 }
 
 /// How much of `pattern` is its root (`/`, or a drive on Windows), as
@@ -427,7 +427,7 @@ mod tests {
     use super::*;
 
     fn tree(name: &str, files: &[&str]) -> PathBuf {
-        let root = dunce::canonicalize(std::env::temp_dir())
+        let root = haarness_core::paths::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
                 "haarness-bounded-glob-{name}-{}",

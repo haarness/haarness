@@ -2856,6 +2856,7 @@ impl AgentRuntime {
     ) -> Self {
         let commands = config.commands.clone();
         let agents = config.custom_agents.clone();
+        crate::agent_shell::configure(config.execution.windows_shell.as_deref());
         let approval_modes = Arc::new(crate::approval_mode::ApprovalModes::new(
             repository.clone(),
             workspace.display().to_string(),
@@ -3331,6 +3332,7 @@ impl AgentRuntime {
         }
         let commands = config.commands.clone();
         let agents = config.custom_agents.clone();
+        crate::agent_shell::configure(config.execution.windows_shell.as_deref());
         *self.approval_modes.fallback.lock() = config.approval_mode;
         *self.components.write() = Arc::new(RuntimeComponents {
             providers,
@@ -9035,7 +9037,7 @@ fn script_readable(
     move |path| {
         let read = format!("read:{}", path.display());
         let inside = path.starts_with(&workspace)
-            || dunce::canonicalize(&workspace).is_ok_and(|root| path.starts_with(root));
+            || crate::paths::canonicalize(&workspace).is_ok_and(|root| path.starts_with(root));
         engine.evaluate(&read) == PermissionDecision::Allow
             && skill
                 .as_ref()
@@ -9075,7 +9077,7 @@ async fn script_for_person(
 /// counts too.
 fn script_changed(path: &str, workspace: &Path) -> String {
     let path = Path::new(path);
-    let canonical = dunce::canonicalize(workspace).ok();
+    let canonical = crate::paths::canonicalize(workspace).ok();
     let shown = path
         .strip_prefix(workspace)
         .ok()
@@ -11039,6 +11041,10 @@ impl RunnerTask {
                             && !permission_engine.hides_tool(&tool.name)
                             && (goal_for_request.is_some() || !is_goal_tool(&tool.name))
                             && (resources_open || !is_resource_tool(&tool.name))
+                            // The patch tool goes to the models trained on
+                            // its format; every model has edit and write.
+                            && (tool.name != "apply_patch"
+                                || crate::tool_catalog::writes_patches(&model))
                     })
                     .collect::<Vec<_>>();
                 if eligible_tools.iter().any(|tool| tool.name == "preview") {
@@ -12328,7 +12334,10 @@ impl RunnerTask {
             return Err(CoreError::Tool(reason));
         }
         let advertised = self.advertised_tools.lock();
-        if require_advertised && !advertised.contains(name) {
+        // apply_patch is offered only to the models trained on its format
+        // (`writes_patches`); a call another model makes still runs, as
+        // scripts, clients and workflows that name it do.
+        if require_advertised && !advertised.contains(name) && name != "apply_patch" {
             let catalog = self.last_tool_catalog.lock();
             if advertised.contains(LOAD_TOOL_NAME)
                 && catalog.as_ref().is_some_and(|catalog| {
@@ -18180,7 +18189,7 @@ fn patch_paths(operation: &crate::patch::FileOp) -> Vec<(&str, ExternalPathKind)
 }
 
 fn resolved_pattern(workspace: &Path, target: &str, resolved: &Path) -> Option<String> {
-    let root = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let root = crate::paths::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     // `~/notes.txt` names the file in the home folder, which leads nowhere else.
     let expanded = crate::permissions::expand_home(target);
     let given = Path::new(expanded.as_ref());
@@ -18603,7 +18612,7 @@ mod shell_reading_tests {
         std::fs::create_dir_all(root.join("outside")).unwrap();
         std::fs::write(project.join("README.md"), "# x\n").unwrap();
         std::os::unix::fs::symlink(root.join("outside"), project.join("vendor/lib")).unwrap();
-        let outside = dunce::canonicalize(root.join("outside")).unwrap();
+        let outside = crate::paths::canonicalize(root.join("outside")).unwrap();
         let asked = |arguments: serde_json::Value| {
             ask_plans("bash", &arguments, &project)
                 .into_iter()
@@ -18641,7 +18650,7 @@ mod shell_reading_tests {
         std::fs::create_dir_all(made.join("home/.ssh")).unwrap();
         std::fs::create_dir_all(made.join("home/other")).unwrap();
         std::fs::write(made.join("home/.gitconfig"), "[user]\n").unwrap();
-        let home = dunce::canonicalize(made.join("home")).unwrap();
+        let home = crate::paths::canonicalize(made.join("home")).unwrap();
         let project = home.join("work/app");
         let file = |name: &str| home.join(name).display().to_string();
         let folder = |name: &str| format!("{}/*", home.join(name).display());
@@ -19086,7 +19095,7 @@ fn external_path_request(
     } else {
         crate::permissions::resolve_permission_path(workspace, value)
     };
-    let root = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let root = crate::paths::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     if path.starts_with(root) {
         return None;
     }
@@ -19152,10 +19161,13 @@ fn outside_pattern(workspace: &Path, folder: &str, named: Option<(&Path, Named)>
 /// written or where it really is, lies inside `folder`, as written or where
 /// it really is.
 fn holds_project(workspace: &Path, folder: &Path) -> bool {
-    let folders = [Some(folder.to_path_buf()), dunce::canonicalize(folder).ok()];
+    let folders = [
+        Some(folder.to_path_buf()),
+        crate::paths::canonicalize(folder).ok(),
+    ];
     let projects = [
         Some(workspace.to_path_buf()),
-        dunce::canonicalize(workspace).ok(),
+        crate::paths::canonicalize(workspace).ok(),
     ];
     folders.iter().flatten().any(|folder| {
         projects
@@ -23114,7 +23126,7 @@ mod tests {
         assert_eq!(plans[1].permission, "list");
         assert_eq!(plans[1].patterns[0], "/tmp");
         // Where a linked folder really is (macOS's /tmp is /private/tmp).
-        let real = dunce::canonicalize(std::path::Path::new("/tmp")).unwrap();
+        let real = crate::paths::canonicalize(std::path::Path::new("/tmp")).unwrap();
         if real != std::path::Path::new("/tmp") {
             assert_eq!(plans[1].patterns[1..], [real.display().to_string()]);
         }
@@ -23129,7 +23141,7 @@ mod tests {
         let workspace = root.join("project");
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(root.join("home")).unwrap();
-        let home = dunce::canonicalize(root.join("home")).unwrap();
+        let home = crate::paths::canonicalize(root.join("home")).unwrap();
         let _home = crate::permissions::TestHome::set(&home);
         for (tool, arguments) in [
             ("read", json!({"path":"~/notes.txt"})),
@@ -23233,8 +23245,8 @@ mod tests {
         let workspace = root.join("work/project");
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(root.join("home")).unwrap();
-        let home = dunce::canonicalize(root.join("home")).unwrap();
-        let workspace = dunce::canonicalize(&workspace).unwrap();
+        let home = crate::paths::canonicalize(root.join("home")).unwrap();
+        let workspace = crate::paths::canonicalize(&workspace).unwrap();
         let _home = crate::permissions::TestHome::set(&home);
         let hook = DenyHome(home.clone(), parking_lot::Mutex::new(Vec::new()));
         let call = crate::HookCall::new(ThreadId::new());
@@ -23345,7 +23357,7 @@ mod tests {
         assert!(asks);
         assert_eq!(
             patterns[1],
-            dunce::canonicalize(&workspace)
+            crate::paths::canonicalize(&workspace)
                 .unwrap()
                 .join(".env")
                 .display()
@@ -23549,7 +23561,7 @@ mod tests {
         // A move still reads through the link, so the folder it leads to is
         // asked about and its target meets the rules, as before.
         let moved = plans("*** Update File: out.txt\n*** Move to: copy.txt\n@@\n-x\n+y\n");
-        let outside_folder = dunce::canonicalize(&outside).unwrap();
+        let outside_folder = crate::paths::canonicalize(&outside).unwrap();
         assert_eq!(moved[0].permission, "external_directory");
         assert_eq!(
             moved[0].external_paths,
@@ -25189,7 +25201,7 @@ mod read_recovery_tests {
             .expect("an outside folder ask");
         assert_eq!(
             outside.external_paths,
-            [dunce::canonicalize(&real).unwrap()]
+            [crate::paths::canonicalize(&real).unwrap()]
         );
         let mut engine = PermissionEngine::build_defaults();
         engine.add_rule(PermissionRule {

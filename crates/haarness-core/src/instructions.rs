@@ -79,8 +79,8 @@ pub fn find_in(dir: &Path, claude: bool) -> Vec<PathBuf> {
 /// yield nothing.
 #[must_use]
 pub fn nested(file: &Path, workspace: &Path, claude: bool) -> Vec<PathBuf> {
-    let root = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    let target = dunce::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let root = crate::paths::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let target = crate::paths::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
     let mut out = Vec::new();
     let mut current = target.parent();
     while let Some(dir) = current {
@@ -385,8 +385,8 @@ pub fn file_left_out(
     trusted: bool,
     omit: ImportFilter<'_>,
 ) -> Option<&'static str> {
-    let canonical = dunce::canonicalize(path).ok()?;
-    let root = dunce::canonicalize(workspace).ok();
+    let canonical = crate::paths::canonicalize(path).ok()?;
+    let root = crate::paths::canonicalize(workspace).ok();
     let inside = root
         .as_deref()
         .is_some_and(|root| canonical.starts_with(root));
@@ -424,7 +424,7 @@ fn holds_credentials(canonical: &Path) -> bool {
     const NAMES: [&str; 5] = [".netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass"];
     const EXTENSIONS: [&str; 6] = ["pem", "key", "p12", "pfx", "jks", "keystore"];
     let in_folder = haarness_protocol::home_dir()
-        .and_then(|home| dunce::canonicalize(&home).ok())
+        .and_then(|home| crate::paths::canonicalize(&home).ok())
         .is_some_and(|home| {
             FOLDERS
                 .iter()
@@ -540,13 +540,13 @@ fn resolve(
                 continue;
             }
             let target = locate(&reference.path, base, home);
-            let Ok(canonical) = dunce::canonicalize(&target) else {
+            let Ok(canonical) = crate::paths::canonicalize(&target) else {
                 continue;
             };
             if !canonical.is_file() {
                 continue;
             }
-            let root = dunce::canonicalize(workspace).ok();
+            let root = crate::paths::canonicalize(workspace).ok();
             let inside = root
                 .as_deref()
                 .is_some_and(|workspace| canonical.starts_with(workspace));
@@ -696,7 +696,7 @@ mod tests {
 
     #[test]
     fn nested_discovery_walks_up_to_but_not_including_the_workspace() {
-        let root = dunce::canonicalize(temp("nested")).unwrap();
+        let root = crate::paths::canonicalize(temp("nested")).unwrap();
         fs::create_dir_all(root.join("a/b/c")).unwrap();
         fs::write(root.join("AGENTS.md"), "root").unwrap();
         fs::write(root.join("a/AGENTS.md"), "a").unwrap();
@@ -790,7 +790,7 @@ mod tests {
             "@.env\n@.env.example\n@private/notes.md\n@public/notes.md\n@public/link.md\n",
         )
         .unwrap();
-        let private = dunce::canonicalize(&root).unwrap().join("private");
+        let private = crate::paths::canonicalize(&root).unwrap().join("private");
         let deny = |file: &Path| {
             file.starts_with(&private)
                 .then_some("a read rule denies it")

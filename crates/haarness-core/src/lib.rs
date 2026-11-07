@@ -1,5 +1,6 @@
 //! Provider, storage, and transport independent agent runtime.
 
+pub mod agent_shell;
 mod agents;
 mod approval_mode;
 pub mod attachments;
@@ -18,6 +19,7 @@ pub mod instructions;
 pub mod links;
 pub mod mcp_content;
 pub mod patch;
+pub mod paths;
 mod permissions;
 mod ports;
 mod prefix_warmup;

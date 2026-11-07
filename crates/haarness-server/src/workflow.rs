@@ -671,9 +671,9 @@ impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
         call: HostCall,
     ) -> Result<Option<Value>, HostError> {
         match call.method {
+            // Boxed: a tool's call holds its whole execution context.
             HostRequestMethod::Tool => {
-                self.request_tool(thread_id, &call.params, &call.cancellation)
-                    .await
+                Box::pin(self.request_tool(thread_id, &call.params, &call.cancellation)).await
             }
             HostRequestMethod::Shell => {
                 self.request_shell(thread_id, &call.params, &call.cancellation)
