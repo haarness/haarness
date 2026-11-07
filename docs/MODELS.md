@@ -131,6 +131,7 @@ Found by running coding chats on each provider with the owner's own keys, on the
 | xAI, OpenAI (ChatGPT sign-in) | A sign-in whose renewal the provider refuses (a refresh token that expired, was revoked or was spent elsewhere) says to connect the provider again, not "refresh token returned 400 Bad Request: Invalid or unknown refresh token". |
 | OpenAI (API key) | `insufficient_quota` says the API account has no credit or is at its spending limit, where to add credit, and that signing in with ChatGPT is the other way in: a ChatGPT plan doesn't pay for API keys. |
 | Mistral | A reasoning model's thinking, streamed a few words a part, goes back in later requests as one part instead of one per chunk, which made it four to six times larger in every later request. |
+| Gemini | A new Gemini connection, and a chat that names no Gemini model, starts on Google's newest Flash model (Gemini 3.8 Flash today), which free Google AI Studio keys can use; Gemini 4 Argon is listed next and stays choosable. A model someone chose, or set as the default, stays as it is. |
 | All | `marketplace_manage` and `capability_manage` wait behind `load_tool` like the other managers instead of going out with every request (4.5 KB). |
 
 ## Provider fixes: 2026-11-07

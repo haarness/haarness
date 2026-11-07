@@ -163,7 +163,10 @@ impl GeminiProvider {
                 .as_str()
                 .filter(|token| !token.is_empty())
             else {
-                return Some(crate::merge_discovered_models(self.models.clone(), models));
+                return Some(flash_first(crate::merge_discovered_models(
+                    self.models.clone(),
+                    models,
+                )));
             };
             if page_token.as_deref() == Some(cursor) {
                 return None;
@@ -580,8 +583,35 @@ fn supports_harness_chat(id: &str) -> bool {
             .any(|word| segments.contains(&format!("-{word}-")))
 }
 
+/// The newest Flash model's version, when `id` names one: `gemini-3.8-flash`
+/// is (3, 8); a Lite, preview, dated or otherwise varied Flash is not.
+fn flash_version(id: &str) -> Option<(u32, u32)> {
+    let version = id.strip_prefix("gemini-")?.strip_suffix("-flash")?;
+    let (major, minor) = version.split_once('.').unwrap_or((version, "0"));
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// The models with Google's newest Flash model first, the rest in their
+/// order. A new connection, and a chat that names no model, starts on the
+/// first model of the list: Flash works on a free Google AI Studio key,
+/// where Gemini 4 Argon (the most capable, listed next) has no free tier
+/// and fails the first message. A model someone chose stays chosen.
+fn flash_first(mut models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    let newest = models
+        .iter()
+        .enumerate()
+        .filter_map(|(index, model)| Some((flash_version(&model.id)?, index)))
+        .max_by_key(|(version, index)| (*version, std::cmp::Reverse(*index)))
+        .map(|(_, index)| index);
+    if let Some(index) = newest {
+        let flash = models.remove(index);
+        models.insert(0, flash);
+    }
+    models
+}
+
 pub(crate) fn preferred_models() -> Vec<ModelInfo> {
-    vec![
+    flash_first(vec![
         model("gemini-4-argon"),
         model("gemini-3.8-flash"),
         model("gemini-3.7-flash"),
@@ -594,7 +624,7 @@ pub(crate) fn preferred_models() -> Vec<ModelInfo> {
         model("gemini-2.5-pro"),
         model("gemini-2.5-flash"),
         model("gemini-2.5-flash-lite"),
-    ]
+    ])
 }
 fn provider_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Provider(error.to_string())
@@ -899,13 +929,56 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
             .discover_models()
             .await;
         let models = provider.info().models;
-        assert!(models.iter().any(|model| model.id == "gemini-3.7-flash"));
+        // The newest Flash the key lists leads the discovered list too.
+        assert_eq!(models[0].id, "gemini-3.7-flash");
         let future = models
             .iter()
             .find(|model| model.id == "gemini-future-4-flash")
             .unwrap();
         assert_eq!(future.context_window, Some(2_097_152));
         assert_eq!(future.max_output_tokens, Some(131_072));
+    }
+
+    #[test]
+    fn a_new_connection_starts_on_the_newest_flash_and_keeps_argon_choosable() {
+        let ids = |models: Vec<haarness_protocol::ModelInfo>| -> Vec<String> {
+            models.into_iter().map(|model| model.id).collect()
+        };
+        // Before discovery: Flash, then Argon and the rest as listed.
+        let listed = ids(super::preferred_models());
+        assert_eq!(listed[..2], ["gemini-3.8-flash", "gemini-4-argon"]);
+        assert_eq!(listed.len(), 12);
+        // A newer Flash Google lists leads; Lite, preview and dated Flash
+        // models never do.
+        let models = [
+            "gemini-4-argon",
+            "gemini-3.8-flash",
+            "gemini-3.9-flash-lite",
+            "gemini-3.9-flash-preview",
+            "gemini-3.9-flash-001",
+            "gemini-3.9-flash",
+            "gemini-3.7-flash",
+        ];
+        let found = super::flash_first(models.iter().map(|id| super::model(id)).collect());
+        assert_eq!(
+            ids(found),
+            [
+                "gemini-3.9-flash",
+                "gemini-4-argon",
+                "gemini-3.8-flash",
+                "gemini-3.9-flash-lite",
+                "gemini-3.9-flash-preview",
+                "gemini-3.9-flash-001",
+                "gemini-3.7-flash"
+            ]
+        );
+        // Without a Flash model the list is left as it is.
+        let other = ids(super::flash_first(vec![
+            super::model("gemini-4-argon"),
+            super::model("gemini-3.1-pro-preview"),
+        ]));
+        assert_eq!(other, ["gemini-4-argon", "gemini-3.1-pro-preview"]);
+        assert_eq!(super::flash_version("gemini-4-flash"), Some((4, 0)));
     }
 
     #[tokio::test]
@@ -1314,7 +1387,8 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
         provider.refresh_models(true).await;
         let models = provider.info().models;
         let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
-        assert_eq!(ids, ["gemini-5-pro", "gemini-3.9-flash"]);
+        // The newest Flash leads, so a new connection starts on it.
+        assert_eq!(ids, ["gemini-3.9-flash", "gemini-5-pro"]);
         for model in &models {
             assert!(model.reasoning && model.tools, "{}", model.id);
             assert_eq!(
