@@ -154,9 +154,11 @@ impl OpenAiCompatibleProvider {
         let provider_id = instance.id.clone();
         Self {
             client: reqwest::Client::new(),
+            // A base pasted with its endpoint (`…/v1/chat/completions`)
+            // still reaches it.
             endpoint: format!(
                 "{}/chat/completions",
-                instance.base_url.trim_end_matches('/')
+                crate::endpoint::chat_completions_base(&instance.base_url)
             ),
             id: instance.id,
             name: instance.name,
@@ -234,15 +236,18 @@ impl OpenAiCompatibleProvider {
     #[must_use]
     pub fn from_environment() -> Option<Self> {
         let base = std::env::var("OPENAI_COMPATIBLE_BASE_URL").ok()?;
+        let model = std::env::var("OPENAI_COMPATIBLE_MODEL")
+            .ok()
+            .filter(|model| !model.trim().is_empty());
         Some(Self::new(CompatibleInstance {
             id: "openai-compatible".into(),
             name: "OpenAI-compatible".into(),
             base_url: base,
             api_key: std::env::var("OPENAI_COMPATIBLE_API_KEY").ok(),
-            models: vec![
-                std::env::var("OPENAI_COMPATIBLE_MODEL").unwrap_or_else(|_| "default".into()),
-            ],
-            discover_models: false,
+            // Without a model named, the server's own list says which it
+            // serves; `default` stays only for a server that lists none.
+            discover_models: model.is_none(),
+            models: vec![model.unwrap_or_else(|| "default".into())],
             server_output_limit: false,
             replay_observed_reasoning: true,
             model_defaults: CompatibleModelDefaults::default(),
@@ -2177,12 +2182,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
                                 message["reasoning"] = json!(reasoning);
                             }
                         }
+                        // Empty too: a server that named the field wants it back.
                         ReasoningReplay::Observed if own => {
                             for field in REASONING_FIELDS {
-                                if let Some(reasoning) = provider_metadata[field]
-                                    .as_str()
-                                    .filter(|reasoning| !reasoning.is_empty())
-                                {
+                                if let Some(reasoning) = provider_metadata[field].as_str() {
                                     message[field] = json!(reasoning);
                                 }
                             }
@@ -2193,6 +2196,26 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         && let Some(content) = provider_metadata.get("mistral_content")
                     {
                         message["content"] = content.clone();
+                    }
+                    // A server the person set up gets the words the model
+                    // wrote before a call in the call's own message, as the
+                    // API returns them: chat templates that want roles to
+                    // alternate refuse two assistant messages in a row, and
+                    // DeepSeek refuses a thinking turn's message that lacks
+                    // its reasoning field.
+                    if replay == ReasoningReplay::Observed
+                        && message["content"].is_null()
+                        && let Some(previous) = messages.last().filter(|previous| {
+                            previous["role"] == "assistant"
+                                && previous.get("tool_calls").is_none()
+                                && previous["content"].is_string()
+                        })
+                    {
+                        let words = previous["content"].as_str().unwrap_or_default().to_owned();
+                        messages.pop();
+                        if !words.trim().is_empty() {
+                            message["content"] = json!(words);
+                        }
                     }
                     push_tool_call_message(&mut messages, message);
                 }
@@ -2398,11 +2421,50 @@ impl ModelProvider for OpenAiCompatibleProvider {
             let builder = self
                 .client
                 .post(&self.endpoint)
-                .headers(headers)
+                .headers(headers.clone())
                 .json(&body);
             response = crate::sse::send(builder, limits).await?;
         }
-        let request_id = crate::request_id(response.headers());
+        // A refusal read here is the stream's first item, as one the stream
+        // reads itself would be.
+        let mut request_id = crate::request_id(response.headers());
+        let answer = if !response.status().is_success() && !self.server_output_limit {
+            let status = response.status();
+            let headers_seen = response.headers().clone();
+            let idle = limits.idle(crate::sse::is_loopback(response.url()));
+            let text = crate::sse::within(idle, response.text())
+                .await?
+                .unwrap_or_default();
+            // Some servers (older gateways and local runtimes) refuse the
+            // usage option instead of ignoring it: ask once more without it.
+            if matches!(status.as_u16(), 400 | 422)
+                && body.get("stream_options").is_some()
+                && text.contains("stream_options")
+            {
+                tracing::info!(provider = %self.id, "asking again without stream_options");
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("stream_options");
+                }
+                let builder = self
+                    .client
+                    .post(&self.endpoint)
+                    .headers(headers)
+                    .json(&body);
+                let response = crate::sse::send(builder, limits).await?;
+                request_id = crate::request_id(response.headers());
+                Ok(response)
+            } else if matches!(status.as_u16(), 404 | 405) && missing_route(&text) {
+                Err(CoreError::ProviderUnavailable(format!(
+                    "{} has no chat API at {}. Change the provider's base URL to the one in its API documentation: it usually ends in /v1.",
+                    self.name,
+                    redacted_url(&self.endpoint)
+                )))
+            } else {
+                Err(crate::sse::status_error(status, &headers_seen, &text))
+            }
+        } else {
+            Ok(response)
+        };
         let provider_id = self.id.clone();
         let reasoning_model = model.clone();
         // The DeepSeek model whose rates price this request: its own
@@ -2415,7 +2477,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
         } else {
             None
         };
-        let mut events = json_stream(response, cancel, limits);
+        let mut events = match answer {
+            Ok(response) => json_stream(response, cancel, limits),
+            Err(error) => Box::pin(futures::stream::once(std::future::ready(Err(error)))),
+        };
         // A Cloud workspace's own router (the Haarness Cloud provider translates its errors itself).
         if self.server_output_limit && self.id != "haarness" {
             events = Box::pin(futures::StreamExt::map(events, |event| {
@@ -2441,6 +2506,11 @@ impl ModelProvider for OpenAiCompatibleProvider {
             let mut reasoning_content = String::new();
             // The field the server streamed its reasoning in, first seen.
             let mut reasoning_field: Option<&'static str> = None;
+            // A field the server named with nothing in it. DeepSeek in
+            // thinking mode streams `"reasoning_content": ""` before a call
+            // it did not think about, and refuses the call's next request
+            // unless the field comes back, empty or not.
+            let mut named_reasoning_field: Option<&'static str> = None;
             let mut mistral_content: Vec<Value> = Vec::new();
             // The last detail whose text reached the transcript, so a new
             // block can be separated from the one before it.
@@ -2503,7 +2573,16 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     };
                     Err(CoreError::Provider(message))?;
                 }
-                let delta=&event["choices"][0]["delta"];
+                // A reply sent whole carries `message` where a stream's
+                // chunks carry `delta`.
+                let whole;
+                let delta = match event["choices"][0].get("message") {
+                    Some(message) if event["choices"][0].get("delta").is_none() => {
+                        whole = whole_reply_delta(message);
+                        &whole
+                    }
+                    _ => &event["choices"][0]["delta"],
+                };
                 if let Some(text)=delta["content"].as_str().filter(|text| !text.is_empty()){
                     if native_json {
                         if json_output.is_empty() { yield ProviderEvent::ContentStarted; }
@@ -2530,6 +2609,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     reasoning_field.get_or_insert(field);
                     reasoning_content.push_str(reasoning);
                     yield ProviderEvent::ReasoningDelta(reasoning.into());
+                } else if named_reasoning_field.is_none() {
+                    named_reasoning_field = REASONING_FIELDS
+                        .into_iter()
+                        .find(|field| delta.get(*field).is_some_and(Value::is_string));
                 }
                 let previous_direct = std::mem::replace(
                     &mut last_direct_reasoning,
@@ -2587,12 +2670,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
             // Kept with the provider that produced it (see the replay above).
             match replay {
                 ReasoningReplay::Required => {
-                    provider_metadata[reasoning_field.unwrap_or("reasoning_content")] = json!(reasoning_content);
+                    provider_metadata[reasoning_field.or(named_reasoning_field).unwrap_or("reasoning_content")] = json!(reasoning_content);
                     provider_metadata[REASONING_SOURCE] = json!(provider_id);
                 }
                 // Structured details, when the server sends them, are what it
-                // takes back; the plain text would only repeat them.
-                ReasoningReplay::Observed => if let Some(field) = reasoning_field.filter(|_| reasoning_details.is_empty() && !reasoning_content.is_empty()) {
+                // takes back; the plain text would only repeat them. A field
+                // it only named goes back empty.
+                ReasoningReplay::Observed => if let Some(field) = reasoning_field.or(named_reasoning_field).filter(|_| reasoning_details.is_empty()) {
                     provider_metadata[field] = json!(reasoning_content);
                     provider_metadata[REASONING_SOURCE] = json!(provider_id);
                 },
@@ -2604,9 +2688,18 @@ impl ModelProvider for OpenAiCompatibleProvider {
             if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
                 yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens }; if let Some(usd) = charged.take() { yield ProviderEvent::Cost { usd }; }
             }
+            // A call whose arguments are not JSON is dropped, and the
+            // response ends as a malformed call, which the runtime answers by
+            // running the calls that parsed and asking the model again,
+            // rather than failing the whole turn on one bad call.
+            let mut dropped_call = false;
             for (call_id, name, arguments) in calls.drain(..) {
                 if !name.is_empty() {
-                    let arguments = serde_json::from_str(&arguments).map_err(|error| CoreError::Provider(format!("OpenAI-compatible provider returned invalid tool arguments: {error}")))?;
+                    let Some(arguments) = tool_arguments(&arguments) else {
+                        tracing::warn!(provider = %provider_id, tool = %name, bytes = arguments.len(), "dropping a tool call whose arguments are not JSON");
+                        dropped_call = true;
+                        continue;
+                    };
                     if structured_output.is_some() && name == STRUCTURED_OUTPUT_TOOL_NAME {
                         yield ProviderEvent::StructuredOutput(arguments);
                     } else {
@@ -2618,7 +2711,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 let value = serde_json::from_str(&json_output).map_err(|error| CoreError::Provider(format!("OpenAI-compatible provider returned invalid structured output: {error}")))?;
                 yield ProviderEvent::StructuredOutput(value);
             }
-            let reason = finish_reason.unwrap_or_else(||"incomplete".into());
+            let reason = if dropped_call { "malformed_function_call".into() } else { finish_reason.unwrap_or_else(||"incomplete".into()) };
             crate::log_blocked_finish(&provider_id, &reason, request_id.as_deref(), response_id.as_deref());
             yield ProviderEvent::Finished{reason};
             if let Some(error) = broken_after_finish {
@@ -2680,6 +2773,77 @@ fn openai_compatible_media_message(
     }
     Ok(json!({"role":role,"content":blocks}))
 }
+/// A tool call's arguments as streamed: empty ones (some servers send
+/// nothing for a call without parameters) are `{}`, and arguments encoded
+/// twice, as a JSON string holding the object, are that object. `None` for
+/// anything that is not JSON.
+fn tool_arguments(raw: &str) -> Option<Value> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Some(json!({}));
+    }
+    match serde_json::from_str::<Value>(raw).ok()? {
+        Value::String(inner) => serde_json::from_str::<Value>(&inner)
+            .ok()
+            .filter(Value::is_object)
+            .or(Some(Value::String(inner))),
+        value => Some(value),
+    }
+}
+
+/// A whole reply's message as one chunk's delta: each tool call gets the
+/// index a stream would have given it.
+fn whole_reply_delta(message: &Value) -> Value {
+    let mut delta = message.clone();
+    if let Some(calls) = delta.get_mut("tool_calls").and_then(Value::as_array_mut) {
+        for (index, call) in calls.iter_mut().enumerate() {
+            if call.get("index").is_none() {
+                call["index"] = json!(index);
+            }
+        }
+    }
+    delta
+}
+
+/// Whether a 404 or 405 body says the address has no such route, rather
+/// than that a model is missing (`The model ... does not exist`, `No
+/// endpoints found for ...`), which the provider's own words explain.
+fn missing_route(body: &str) -> bool {
+    let Some(detail) = crate::sse::provider_error_detail(body) else {
+        // Nothing, or a web server's HTML page.
+        return true;
+    };
+    let lower = detail.to_ascii_lowercase();
+    !lower.contains("model")
+        && !lower.contains("endpoints found")
+        && [
+            "not found",
+            "unknown request url",
+            "invalid url",
+            "unknown url",
+            "no route",
+            "cannot post",
+            "unrecognized request url",
+            "method not allowed",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+/// `url` without credentials or a query, fit to show.
+fn redacted_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut url) => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        }
+        Err(_) => url.to_owned(),
+    }
+}
+
 fn provider_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Provider(error.to_string())
 }
@@ -5217,7 +5381,8 @@ mod tests {
             events.last(),
             Some(Err(haarness_core::CoreError::Provider(message))) if message == "Upstream overloaded"
         ));
-        // Tool arguments that do not parse fail the request after its usage.
+        // A call whose arguments do not parse is dropped after the usage is
+        // reported, and the response ends as a malformed call.
         let events = stream_events(concat!(
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"read\",\"arguments\":\"{broken\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":90,\"completion_tokens\":7}}\n\n",
@@ -5225,7 +5390,15 @@ mod tests {
         ))
         .await;
         assert_eq!(reported(&events), [(90, 7, 0, 0)]);
-        assert!(events.last().is_some_and(Result::is_err));
+        assert!(matches!(
+            events.last(),
+            Some(Ok(ProviderEvent::Finished { reason })) if reason == "malformed_function_call"
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(ProviderEvent::ToolCall { .. })))
+        );
     }
 
     #[tokio::test]
@@ -5674,6 +5847,25 @@ mod tests {
         ([(CONTENT_TYPE, "text/event-stream")], stream)
     }
 
+    /// A server in thinking mode that calls `read` without thinking first:
+    /// it names `field` empty, then null, as DeepSeek does.
+    async fn empty_reasoning_in_field(
+        State((state, field)): State<(FixtureState, &'static str)>,
+        Json(request): Json<Value>,
+    ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+        use std::fmt::Write as _;
+        state.0.lock().push(request);
+        let mut stream = String::new();
+        for chunk in [
+            json!({"choices":[{"delta":{"role":"assistant","content":"",field: ""}}]}),
+            json!({"choices":[{"delta":{field: null,"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]}}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+        ] {
+            let _ = write!(stream, "data: {chunk}\n\n");
+        }
+        ([(CONTENT_TYPE, "text/event-stream")], stream)
+    }
+
     /// Runs one round against a server streaming reasoning in `field` as
     /// provider `id` (a server the user set up when `own`), then sends that
     /// call back as history, with its metadata or `history` when given.
@@ -5685,9 +5877,19 @@ mod tests {
         own: bool,
         history: Option<Value>,
     ) -> (Value, Value) {
+        round_trip_with(post(reasoning_in_field), id, field, own, history).await
+    }
+
+    async fn round_trip_with(
+        handler: axum::routing::MethodRouter<(FixtureState, &'static str)>,
+        id: &str,
+        field: &'static str,
+        own: bool,
+        history: Option<Value>,
+    ) -> (Value, Value) {
         let state = FixtureState::default();
         let router = Router::new()
-            .route("/chat/completions", post(reasoning_in_field))
+            .route("/chat/completions", handler)
             .with_state((state.clone(), field));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -5767,6 +5969,38 @@ mod tests {
         let assistant = state.0.lock()[1]["messages"][2].clone();
         assert_eq!(assistant["tool_calls"][0]["id"], "call_a");
         (metadata, assistant)
+    }
+
+    #[tokio::test]
+    async fn a_custom_server_that_names_its_reasoning_empty_gets_the_field_back() {
+        // DeepSeek behind an endpoint the person set up: a call made without
+        // thinking first is refused on the next request unless its
+        // `reasoning_content` comes back, empty as it was.
+        let (metadata, assistant) = round_trip_with(
+            post(empty_reasoning_in_field),
+            "my-deepseek",
+            "reasoning_content",
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(
+            metadata,
+            json!({"reasoning_content": "", "reasoning_provider": "my-deepseek"})
+        );
+        assert_eq!(assistant["reasoning_content"], "", "{assistant}");
+        assert!(assistant.get("reasoning").is_none(), "{assistant}");
+        // A built-in service whose API documents no such field still gets none.
+        let (metadata, assistant) = round_trip_with(
+            post(empty_reasoning_in_field),
+            "groq",
+            "reasoning",
+            false,
+            None,
+        )
+        .await;
+        assert_eq!(metadata, Value::Null);
+        assert!(assistant.get("reasoning").is_none(), "{assistant}");
     }
 
     #[tokio::test]
@@ -6184,5 +6418,328 @@ mod tests {
             1,
             "rejected request never reached HTTP"
         );
+    }
+
+    /// A custom endpoint at `base` for `model`, with a key.
+    fn custom_at(base: String) -> OpenAiCompatibleProvider {
+        OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "my-endpoint".into(),
+            name: "My endpoint".into(),
+            base_url: base,
+            api_key: Some("fixture".into()),
+            models: vec!["fixture-model".into()],
+            discover_models: false,
+            server_output_limit: false,
+            replay_observed_reasoning: true,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: crate::ProviderHeaders::default(),
+        })
+    }
+
+    fn hello(model: &str) -> ProviderRequest {
+        ProviderRequest {
+            model: model.into(),
+            system: "sys".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        }
+    }
+
+    async fn serve(router: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{address}")
+    }
+
+    /// Everything the stream sent, or the error that ended it.
+    async fn outcome(
+        provider: &OpenAiCompatibleProvider,
+        request: ProviderRequest,
+    ) -> Result<Vec<ProviderEvent>, CoreError> {
+        let mut stream = provider.stream(request, CancellationToken::new()).await?;
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event?);
+        }
+        Ok(events)
+    }
+
+    fn text_of(events: &[ProviderEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::TextDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn ready_stream() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+        (
+            [(CONTENT_TYPE, "text/event-stream")],
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ready\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        )
+    }
+
+    #[tokio::test]
+    async fn a_pasted_endpoint_works_and_a_wrong_address_says_what_to_change() {
+        let root = serve(
+            Router::new()
+                .route("/v1/chat/completions", post(ready_stream))
+                .fallback(|| async { axum::http::StatusCode::NOT_FOUND }),
+        )
+        .await;
+        // The base pasted with its endpoint, as a curl example shows it.
+        let pasted = custom_at(format!("{root}/v1/chat/completions/"));
+        let events = outcome(&pasted, hello("fixture-model")).await.unwrap();
+        assert_eq!(text_of(&events), "ready");
+        // A base without its version: every request would be refused.
+        let error = outcome(&custom_at(root.clone()), hello("fixture-model"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, CoreError::ProviderUnavailable(_)),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "My endpoint has no chat API at {root}/chat/completions. Change the provider's base URL to the one in its API documentation: it usually ends in /v1."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_model_keeps_the_providers_own_words() {
+        let root = serve(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(json!({"error":{"message":"The model `gone` does not exist or you do not have access to it.","code":"model_not_found"}})),
+                )
+            }),
+        ))
+        .await;
+        let error = outcome(&custom_at(format!("{root}/v1")), hello("gone"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Provider(_)), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("The model `gone` does not exist"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_that_refuses_stream_options_is_asked_again_without_them() {
+        let state = FixtureState::default();
+        let root = serve(
+            Router::new()
+                .route(
+                    "/v1/chat/completions",
+                    post(
+                        |State(state): State<FixtureState>, Json(request): Json<Value>| async move {
+                            let refuse = request.get("stream_options").is_some();
+                            state.0.lock().push(request);
+                            if refuse {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    [(CONTENT_TYPE, "application/json")],
+                                    r#"{"error":{"message":"Unrecognized request argument supplied: stream_options"}}"#,
+                                );
+                            }
+                            (
+                                axum::http::StatusCode::OK,
+                                [(CONTENT_TYPE, "text/event-stream")],
+                                "data: {\"choices\":[{\"delta\":{\"content\":\"ready\"},\"finish_reason\":\"stop\"}]}\n\n",
+                            )
+                        },
+                    ),
+                )
+                .with_state(state.clone()),
+        )
+        .await;
+        let events = outcome(&custom_at(format!("{root}/v1")), hello("fixture-model"))
+            .await
+            .unwrap();
+        assert_eq!(text_of(&events), "ready");
+        let requests = state.0.lock();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].get("stream_options").is_none());
+        assert_eq!(requests[1]["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn a_reply_sent_whole_is_read_like_a_stream() {
+        let root = serve(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "id": "whole-1",
+                    "object": "chat.completion",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Reading both.",
+                            "tool_calls": [
+                                {"id":"call_a","type":"function","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}},
+                                {"id":"call_b","type":"function","function":{"name":"read","arguments":"{\"path\":\"b.txt\"}"}}
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 5}
+                }))
+            }),
+        ))
+        .await;
+        let events = outcome(&custom_at(format!("{root}/v1")), hello("fixture-model"))
+            .await
+            .unwrap();
+        assert_eq!(text_of(&events), "Reading both.");
+        let calls: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ToolCall {
+                    call_id, arguments, ..
+                } => Some((call_id.clone(), arguments.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("call_a".to_owned(), json!({"path": "a.txt"})),
+                ("call_b".to_owned(), json!({"path": "b.txt"}))
+            ]
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::Usage {
+                input_tokens: 12,
+                output_tokens: 5,
+                ..
+            }
+        )));
+        assert!(events.iter().any(
+            |event| matches!(event, ProviderEvent::Finished { reason } if reason == "tool_calls")
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_call_with_broken_arguments_is_dropped_and_the_others_run() {
+        async fn calls() -> ([(axum::http::HeaderName, &'static str); 1], String) {
+            use std::fmt::Write as _;
+            let mut stream = String::new();
+            for chunk in [
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]}}]}),
+                // Cut off mid-object, as a model sometimes writes it.
+                json!({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","function":{"name":"read","arguments":"{\"path\":\"b.t"}}]}}]}),
+                // No parameters, sent as nothing at all.
+                json!({"choices":[{"delta":{"tool_calls":[{"index":2,"id":"call_c","function":{"name":"todoread","arguments":""}}]}}]}),
+                // The object encoded twice, as a string.
+                json!({"choices":[{"delta":{"tool_calls":[{"index":3,"id":"call_d","function":{"name":"read","arguments":"\"{\\\"path\\\":\\\"d.txt\\\"}\""}}]}}]}),
+                json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+            ] {
+                let _ = write!(stream, "data: {chunk}\n\n");
+            }
+            ([(CONTENT_TYPE, "text/event-stream")], stream)
+        }
+        let root = serve(Router::new().route("/v1/chat/completions", post(calls))).await;
+        let events = outcome(&custom_at(format!("{root}/v1")), hello("fixture-model"))
+            .await
+            .unwrap();
+        let calls: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ToolCall {
+                    call_id, arguments, ..
+                } => Some((call_id.as_str(), arguments.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("call_a", json!({"path": "a.txt"})),
+                ("call_c", json!({})),
+                ("call_d", json!({"path": "d.txt"}))
+            ]
+        );
+        let reason = events.iter().find_map(|event| match event {
+            ProviderEvent::Finished { reason } => Some(reason.as_str()),
+            _ => None,
+        });
+        assert_eq!(reason, Some("malformed_function_call"));
+        assert!(ProviderEvent::dropped_tool_call("malformed_function_call"));
+    }
+
+    #[tokio::test]
+    async fn words_before_a_call_go_in_the_calls_message_for_a_server_set_up_here() {
+        let state = FixtureState::default();
+        let root = serve(
+            Router::new()
+                .route(
+                    "/v1/chat/completions",
+                    post(
+                        |State(state): State<FixtureState>, Json(request): Json<Value>| async move {
+                            state.0.lock().push(request);
+                            ready_stream().await
+                        },
+                    ),
+                )
+                .with_state(state.clone()),
+        )
+        .await;
+        let history = || {
+            vec![
+                ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "Read a.txt".into(),
+                },
+                ProviderMessage::Text {
+                    role: "assistant".into(),
+                    content: "I'll read the file.".into(),
+                },
+                ProviderMessage::ToolCall {
+                    call_id: "call_a".into(),
+                    name: "read".into(),
+                    arguments: json!({"path": "a.txt"}),
+                    provider_metadata: json!({"reasoning_content": "", "reasoning_provider": "my-endpoint"}),
+                },
+                ProviderMessage::ToolResult {
+                    call_id: "call_a".into(),
+                    name: "read".into(),
+                    output: "contents".into(),
+                    is_error: false,
+                    attachments: Vec::new(),
+                },
+            ]
+        };
+        let mut request = hello("fixture-model");
+        request.messages = history();
+        outcome(&custom_at(format!("{root}/v1")), request)
+            .await
+            .unwrap();
+        let sent = state.0.lock()[0]["messages"].clone();
+        // system, user, one assistant message with words, call and field, tool.
+        assert_eq!(sent.as_array().unwrap().len(), 4, "{sent}");
+        assert_eq!(sent[2]["role"], "assistant");
+        assert_eq!(sent[2]["content"], "I'll read the file.");
+        assert_eq!(sent[2]["tool_calls"][0]["id"], "call_a");
+        assert_eq!(sent[2]["reasoning_content"], "");
+        assert_eq!(sent[3]["role"], "tool");
     }
 }

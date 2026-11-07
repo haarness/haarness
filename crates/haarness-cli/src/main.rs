@@ -621,7 +621,9 @@ enum ProviderCommand {
         /// Name shown for the provider (default: its id).
         #[arg(long)]
         name: Option<String>,
-        /// API base URL: https, or http on a loopback address.
+        /// API base URL: https, or http on this computer or its local
+        /// network. A pasted endpoint (`…/v1/chat/completions`) is saved as
+        /// its base, and the address is checked before it is saved.
         #[arg(long)]
         url: String,
         /// Native wire transport (for example azure-openai, google-vertex,
@@ -645,6 +647,9 @@ enum ProviderCommand {
         /// the global one.
         #[arg(long, visible_alias = "local")]
         project: bool,
+        /// Print the saved address and what the check found as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Remove a custom provider definition. Stored credentials are retained.
     Remove {
@@ -2374,25 +2379,38 @@ async fn provider_command(
             headers,
             no_auth,
             project,
+            json,
         } => {
             validate_custom_provider_id(&id)?;
-            haarness_providers::CompatibleProtocol::parse(&protocol).map_err(anyhow::Error::msg)?;
-            if !valid_provider_url(&url) {
-                anyhow::bail!(
-                    "provider URL must use https, or http on a loopback address for a local runtime"
-                );
-            }
+            let wire = haarness_providers::CompatibleProtocol::parse(&protocol)
+                .map_err(anyhow::Error::msg)?;
+            let url = provider_url_with_scheme(&url).map_err(anyhow::Error::msg)?;
             let headers = parse_mcp_key_values(&headers, "header")?;
             // Validate names, values, and environment references before the
             // config write. Secret values are never included in errors.
-            provider_headers(&headers).map_err(anyhow::Error::msg)?;
+            let resolved = provider_headers(&headers).map_err(anyhow::Error::msg)?;
             if models.iter().any(|model| model.trim().is_empty()) {
                 anyhow::bail!("provider model ids must be non-empty");
             }
+            let name = name.unwrap_or_else(|| id.clone());
+            // Ask the address for its models before saving: what can't work
+            // is said now, not on the first chat.
+            let key = api_key_env
+                .as_deref()
+                .and_then(|variable| std::env::var(variable).ok());
+            let checked = haarness_providers::endpoint::check(
+                &name,
+                wire,
+                &url,
+                key.as_deref(),
+                &resolved,
+                &models,
+            )
+            .await;
             let section = ProviderSection {
                 protocol,
-                name: Some(name.unwrap_or_else(|| id.clone())),
-                base_url: Some(url),
+                name: Some(name),
+                base_url: Some(checked.base_url),
                 api_key_env,
                 headers,
                 models,
@@ -2402,7 +2420,23 @@ async fn provider_command(
             let target = provider_config_target(paths, workspace, project);
             let scope = jsonconfig::SaveScope::of(project, workspace);
             write_provider_entry(&target, &scope, &id, Some(&section))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": id,
+                        "path": target,
+                        "baseUrl": section.base_url,
+                        "models": checked.models,
+                        "notes": checked.notes,
+                    })
+                );
+                return Ok(());
+            }
             println!("Added custom provider '{id}' to {}.", target.display());
+            for note in &checked.notes {
+                println!("{note}");
+            }
             if section.requires_auth && section.api_key_env.is_none() && section.headers.is_empty()
             {
                 println!("Connect it with `haarness auth set {id}` before use.");
@@ -2455,26 +2489,102 @@ fn validate_custom_provider_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn valid_provider_url(value: &str) -> bool {
-    let Some((scheme, rest)) = value.split_once("://") else {
-        return false;
+    provider_url_problem(value).is_none()
+}
+
+/// What keeps `value` from being a custom provider's address, in words that
+/// say what to change; `None` for an address Haarness can use. Cleartext
+/// `http://` is for this computer and the local network (a runtime on
+/// another computer at home, a server on the office network or a Tailscale
+/// address), where the key does not cross the internet unencrypted.
+fn provider_url_problem(value: &str) -> Option<String> {
+    let example = "Enter the provider's address starting with https://, for example https://api.example.com/v1.";
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return Some(example.into());
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    if authority.is_empty() || authority.contains('@') {
-        return false;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Some(
+            "Leave the user name and password out of the address, and give the key as the provider's API key."
+                .into(),
+        );
     }
-    if scheme == "https" {
-        return true;
+    let Some(host) = url.host() else {
+        return Some(example.into());
+    };
+    match url.scheme() {
+        "https" => None,
+        "http" if local_network_host(&host) => None,
+        "http" => Some(format!(
+            "Use https:// for {host}: an http:// address on the internet would send the API key unencrypted. http:// works for this computer and your local network."
+        )),
+        _ => Some(example.into()),
     }
-    if scheme != "http" {
-        return false;
+}
+
+/// Whether `host` is this computer or on its local network: a loopback,
+/// private, link-local or shared (Tailscale) address, or a name that only a
+/// local network resolves.
+fn local_network_host(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Ipv4(ip) => {
+            let [a, b, ..] = ip.octets();
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || (a == 100 && (64..128).contains(&b))
+        }
+        url::Host::Ipv6(ip) => {
+            let first = ip.segments()[0];
+            ip.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+        url::Host::Domain(name) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            !name.contains('.')
+                || [
+                    ".localhost",
+                    ".local",
+                    ".lan",
+                    ".home.arpa",
+                    ".internal",
+                    ".ts.net",
+                ]
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+        }
     }
-    authority == "localhost"
-        || authority.starts_with("localhost:")
-        || authority == "127.0.0.1"
-        || authority.starts_with("127.0.0.1:")
-        || authority == "[::1]"
-        || authority.starts_with("[::1]:")
+}
+
+/// A custom provider's address as it is saved: trimmed, with `https://` (or
+/// `http://` for this computer and the local network) when it names no
+/// scheme, and without the endpoint path people paste with it.
+fn normalized_provider_url(
+    protocol: haarness_providers::CompatibleProtocol,
+    value: &str,
+) -> std::result::Result<String, String> {
+    Ok(haarness_providers::endpoint::normalized_base_url(
+        protocol,
+        &provider_url_with_scheme(value)?,
+    ))
+}
+
+/// `value` trimmed, with the scheme it means when it names none, if it is
+/// an address a custom provider can use.
+fn provider_url_with_scheme(value: &str) -> std::result::Result<String, String> {
+    let value = value.trim();
+    let value = if value.contains("://") {
+        value.to_owned()
+    } else {
+        let local = reqwest::Url::parse(&format!("http://{value}"))
+            .ok()
+            .is_some_and(|url| url.host().is_some_and(|host| local_network_host(&host)));
+        format!("{}://{value}", if local { "http" } else { "https" })
+    };
+    match provider_url_problem(&value) {
+        Some(problem) => Err(problem),
+        None => Ok(value),
+    }
 }
 
 fn agents_command(
@@ -12074,10 +12184,8 @@ fn provider_instances(
             eprintln!("Provider {id}: base_url is required; skipped.");
             continue;
         };
-        if !valid_provider_url(&base_url) {
-            eprintln!(
-                "Provider {id}: base_url must use https, or http on an exact loopback host; skipped."
-            );
+        if let Some(problem) = provider_url_problem(&base_url) {
+            eprintln!("Provider {id}: base_url {base_url} can't be used; skipped. {problem}");
             continue;
         }
         let api_key = section
@@ -12276,10 +12384,8 @@ fn validate_provider_definitions(config: &FileConfig) -> Result<()> {
             .as_deref()
             .or_else(|| preset.map(|preset| preset.base_url))
             .with_context(|| format!("provider {id}: base_url is required"))?;
-        if !valid_provider_url(base_url) {
-            anyhow::bail!(
-                "provider {id}: base_url must use https, or http on an exact loopback host"
-            );
+        if let Some(problem) = provider_url_problem(base_url) {
+            anyhow::bail!("provider {id}: base_url {base_url} can't be used. {problem}");
         }
     }
     Ok(())
@@ -15375,12 +15481,12 @@ mod tests {
         assistant_messages_for_turn, configured_mcp, current_executable_fingerprint,
         finish_goal_run, goal_idle_timeout_from, load_output_style, loaded_mcp_entry,
         local_server_compatibility_error, mcp_config_for_display, mcp_oauth_callback,
-        migrate_legacy_workspace_database, normalize_natural_language_args, parse_mcp_key_values,
-        prepare_start_log, read_mcp_entry, receive_oauth_callback,
-        replace_incompatible_workspace_server, resolved_credentials, select_run_thread_client,
-        server_compatibility_error, set_goal_for_run_client, start_failure, valid_provider_url,
-        wait_for_goal_client, write_entry_fields, write_mcp_entry, write_provider_entry,
-        write_runtime,
+        migrate_legacy_workspace_database, normalize_natural_language_args,
+        normalized_provider_url, parse_mcp_key_values, prepare_start_log, provider_url_problem,
+        read_mcp_entry, receive_oauth_callback, replace_incompatible_workspace_server,
+        resolved_credentials, select_run_thread_client, server_compatibility_error,
+        set_goal_for_run_client, start_failure, valid_provider_url, wait_for_goal_client,
+        write_entry_fields, write_mcp_entry, write_provider_entry, write_runtime,
     };
     use super::{
         Approver, NO_MODEL_CONNECTED, Refusals, RunWatch, TurnStatus, allow_rule_example,
@@ -16877,14 +16983,70 @@ request_timeout = 0
     }
 
     #[test]
-    fn provider_urls_require_tls_except_for_exact_loopback_hosts() {
+    fn provider_urls_require_tls_except_on_this_computer_and_its_network() {
         assert!(valid_provider_url("https://models.example.test/v1"));
         assert!(valid_provider_url("http://localhost:11434/v1"));
         assert!(valid_provider_url("http://127.0.0.1:8000/v1"));
         assert!(valid_provider_url("http://[::1]:1234/v1"));
+        // A runtime on another computer at home, on the office network or
+        // over Tailscale.
+        for local in [
+            "http://192.168.1.20:11434/v1",
+            "http://10.0.0.5:8000/v1",
+            "http://172.20.1.2:1234/v1",
+            "http://100.101.102.103:11434/v1",
+            "http://169.254.10.1:8080/v1",
+            "http://[fd12:3456::1]:8000/v1",
+            "http://gpu-box:8000/v1",
+            "http://studio.local:1234/v1",
+            "http://llm.home.arpa/v1",
+            "http://box.tail1234.ts.net:11434/v1",
+        ] {
+            assert!(valid_provider_url(local), "{local}");
+        }
         assert!(!valid_provider_url("http://models.example.test/v1"));
         assert!(!valid_provider_url("http://localhost.evil.test/v1"));
+        assert!(!valid_provider_url("http://8.8.8.8/v1"));
+        assert!(!valid_provider_url("http://172.32.0.1/v1"));
         assert!(!valid_provider_url("https://user@example.test/v1"));
+        assert!(!valid_provider_url("ftp://models.example.test/v1"));
+        assert_eq!(
+            provider_url_problem("http://api.deepseek.com/v1").as_deref(),
+            Some(
+                "Use https:// for api.deepseek.com: an http:// address on the internet would send the API key unencrypted. http:// works for this computer and your local network."
+            )
+        );
+    }
+
+    #[test]
+    fn provider_addresses_are_saved_the_way_people_mean_them() {
+        use haarness_providers::CompatibleProtocol::{AnthropicMessages, OpenAiChatCompletions};
+        for (given, saved) in [
+            ("api.deepseek.com/v1", "https://api.deepseek.com/v1"),
+            ("localhost:1234/v1", "http://localhost:1234/v1"),
+            ("192.168.1.20:11434/v1/", "http://192.168.1.20:11434/v1"),
+            (
+                " https://api.groq.com/openai/v1/chat/completions\n",
+                "https://api.groq.com/openai/v1",
+            ),
+        ] {
+            assert_eq!(
+                normalized_provider_url(OpenAiChatCompletions, given).as_deref(),
+                Ok(saved),
+                "{given}"
+            );
+        }
+        assert_eq!(
+            normalized_provider_url(
+                AnthropicMessages,
+                "https://api.z.ai/api/anthropic/v1/messages"
+            )
+            .as_deref(),
+            Ok("https://api.z.ai/api/anthropic/v1")
+        );
+        assert!(
+            normalized_provider_url(OpenAiChatCompletions, "http://api.deepseek.com/v1").is_err()
+        );
     }
 
     #[test]

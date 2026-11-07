@@ -81,25 +81,16 @@ pub fn json_stream(
             response
         } else {
             let status = response.status();
-            let advised = advised_retry(status, response.headers());
-            let detail = within(limit, response.text())
+            let headers = response.headers().clone();
+            let body = within(limit, response.text())
                 .await?
-                .ok()
-                .and_then(|body| provider_error_detail(&body));
-            let mut message = detail.map_or_else(
-                || format!("HTTP {status}"),
-                |detail| format!("HTTP {status}: {detail}"),
-            );
-            if let Some(advised) = advised
-                && !message.to_ascii_lowercase().contains("retry in")
-            {
-                message.push_str(&advised);
-            }
-            Err(CoreError::Provider(message))?;
+                .unwrap_or_default();
+            Err(status_error(status, &headers, &body))?;
             unreachable!();
         };
         let mut chunks = response.bytes_stream();
         let mut buffer = Vec::new();
+        let mut yielded = false;
         loop {
             let chunk = tokio::select! {
                 () = cancel.cancelled() => Err(CoreError::Cancelled),
@@ -125,19 +116,106 @@ pub fn json_stream(
             while let Some(boundary) = find_boundary(&buffer) {
                 let frame: Vec<u8> = buffer.drain(..boundary.0).collect();
                 buffer.drain(..boundary.1);
-                let mut data = String::new();
-                for line in String::from_utf8_lossy(&frame).lines() {
-                    if let Some(value) = line.strip_prefix("data:") {
-                        if !data.is_empty() { data.push('\n'); }
-                        data.push_str(value.trim_start());
-                    }
+                if let Some(value) = frame_data(&frame)? {
+                    yielded = true;
+                    yield value;
                 }
-                if data.is_empty() || data == "[DONE]" { continue; }
-                let value = serde_json::from_str(&data).map_err(|error| CoreError::Provider(format!("invalid SSE JSON: {error}")))?;
-                yield value;
             }
         }
+        // What is left after the last blank line: a stream's final event
+        // sent without one, or a whole reply from a server that does not
+        // stream.
+        let rest = String::from_utf8_lossy(&buffer).trim().to_owned();
+        if rest.lines().any(|line| line.starts_with("data:")) {
+            if let Some(value) = frame_data(rest.as_bytes())? {
+                yield value;
+            }
+        } else if !yielded && !rest.is_empty() {
+            yield whole_reply(&rest)?;
+        }
     })
+}
+
+/// The JSON in one server-sent event, or `None` for an event with no data
+/// (a comment, a keep-alive) and the closing `[DONE]`.
+fn frame_data(frame: &[u8]) -> CoreResult<Option<Value>> {
+    let mut data = String::new();
+    for line in String::from_utf8_lossy(frame).lines() {
+        if let Some(value) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(value.trim_start());
+        }
+    }
+    if data.is_empty() || data == "[DONE]" {
+        return Ok(None);
+    }
+    serde_json::from_str(&data)
+        .map(Some)
+        .map_err(|error| CoreError::Provider(format!("invalid SSE JSON: {error}")))
+}
+
+/// A successful answer that carried no events: a server that ignores
+/// `stream` sends its reply whole, and the callers read a Chat Completions
+/// reply sent whole as one event. An error sent with status 200 fails with
+/// its own words; anything else is an address that serves no such API (Z.ai
+/// answers one it does not serve with `{"code":500,"msg":"404 NOT_FOUND"}`).
+fn whole_reply(body: &str) -> CoreResult<Value> {
+    let value = serde_json::from_str::<Value>(body).ok();
+    if let Some(value) = value
+        .as_ref()
+        .filter(|value| value.get("choices").is_some_and(Value::is_array))
+    {
+        return Ok(value.clone());
+    }
+    if let Some(detail) = value
+        .as_ref()
+        .filter(|value| value.get("error").is_some_and(|error| !error.is_null()))
+        .and_then(|_| provider_error_detail(body))
+    {
+        return Err(CoreError::Provider(detail));
+    }
+    let said = value
+        .as_ref()
+        .and_then(|value| {
+            ["/msg", "/message", "/detail"]
+                .iter()
+                .find_map(|pointer| value.pointer(pointer)?.as_str())
+        })
+        .map(str::trim)
+        .filter(|said| !said.is_empty())
+        .map(|said| {
+            format!(
+                " (it said \"{}\")",
+                said.chars().take(200).collect::<String>()
+            )
+        })
+        .unwrap_or_default();
+    Err(CoreError::ProviderUnavailable(format!(
+        "The provider answered without a reply{said}, so nothing at this address speaks its API. Check the provider's base URL against its API documentation."
+    )))
+}
+
+/// The error for a refused streamed request: `HTTP <status>` with the
+/// provider's own words, and the wait a rate limit names.
+pub(crate) fn status_error(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+) -> CoreError {
+    let advised = advised_retry(status, headers);
+    let detail = provider_error_detail(body);
+    let mut message = detail.map_or_else(
+        || format!("HTTP {status}"),
+        |detail| format!("HTTP {status}: {detail}"),
+    );
+    if let Some(advised) = advised
+        && !message.to_ascii_lowercase().contains("retry in")
+    {
+        message.push_str(&advised);
+    }
+    CoreError::Provider(message)
 }
 
 /// The wait a rate-limited response names in `Retry-After`, spelled the way
@@ -392,6 +470,90 @@ mod tests {
             .await
             .expect("the provider sees its connection close")
             .unwrap();
+    }
+
+    /// A server that answers 200 with `body` and closes the connection.
+    async fn answering(content_type: &'static str, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/v1/chat/completions",
+            listener.local_addr().unwrap()
+        );
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+        });
+        url
+    }
+
+    async fn events_of(url: &str) -> Vec<Result<serde_json::Value, haarness_core::CoreError>> {
+        let limits = idle(Duration::from_secs(5));
+        let response = send(reqwest::Client::new().post(url).body("{}"), limits)
+            .await
+            .unwrap();
+        json_stream(response, CancellationToken::new(), limits)
+            .collect()
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_last_event_without_a_blank_line_still_arrives() {
+        let url = answering("text/event-stream", "data: {\"n\":1}\n\ndata: {\"n\":2}").await;
+        let events: Vec<_> = events_of(&url)
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(events, [json!({"n": 1}), json!({"n": 2})]);
+    }
+
+    #[tokio::test]
+    async fn a_reply_sent_whole_is_one_event_and_an_error_body_says_so() {
+        let url = answering(
+            "application/json",
+            r#"{"choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#,
+        )
+        .await;
+        let events: Vec<_> = events_of(&url)
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(events[0]["choices"][0]["message"]["content"], "hi");
+        // Z.ai answers an address it does not serve this way, with 200.
+        let url = answering(
+            "application/json",
+            r#"{"code":500,"msg":"404 NOT_FOUND","success":false}"#,
+        )
+        .await;
+        let events = events_of(&url).await;
+        let error = events.last().unwrap().as_ref().unwrap_err();
+        assert!(
+            matches!(error, haarness_core::CoreError::ProviderUnavailable(_)),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "The provider answered without a reply (it said \"404 NOT_FOUND\"), so nothing at this address speaks its API. Check the provider's base URL against its API documentation."
+        );
+        // An error sent with 200 is the provider's own.
+        let url = answering(
+            "application/json",
+            r#"{"error":{"message":"Insufficient balance"}}"#,
+        )
+        .await;
+        let events = events_of(&url).await;
+        assert_eq!(
+            events.last().unwrap().as_ref().unwrap_err().to_string(),
+            "provider error: Insufficient balance"
+        );
     }
 
     #[test]

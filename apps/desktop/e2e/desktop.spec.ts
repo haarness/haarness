@@ -11065,9 +11065,24 @@ test("custom provider form discovers authenticated models and runs them without 
     await form
       .getByLabel("Display name", { exact: true })
       .fill("Form provider");
+    // Only formats a custom endpoint can be saved with are offered: the
+    // Responses API once was, and saving it always failed.
+    const format = form.getByRole("combobox", { name: "API format" });
+    await format.click();
+    const formats = page.locator(
+      `[id=${JSON.stringify(await format.getAttribute("aria-controls"))}] [role="option"]`,
+    );
+    await expect(formats.first()).toBeVisible();
+    expect(await formats.evaluateAll((rows) => rows.map((row) => row.getAttribute("data-value")))).not.toContain(
+      "openai-responses",
+    );
+    await formats.filter({ hasText: "OpenAI Chat Completions" }).click();
+    const done = page.locator(".select-footer").getByRole("button", { name: "Done", exact: true });
+    if (await done.isVisible()) await done.click();
+    // The endpoint pasted whole, as a curl example shows it, is saved as its base.
     await form
       .getByLabel("Base URL", { exact: true })
-      .fill(`http://127.0.0.1:${address.port}/v1`);
+      .fill(`http://127.0.0.1:${address.port}/v1/chat/completions`);
     await selectValue(
       form.getByRole("combobox", { name: "Available in" }),
       "local",
@@ -11140,6 +11155,9 @@ test("custom provider form discovers authenticated models and runs them without 
     ).toBe(true);
     expect(await readFile(configPath, "utf8")).not.toContain(
       "form-fixture-key",
+    );
+    expect(await readFile(configPath, "utf8")).toContain(
+      `base_url = "http://127.0.0.1:${address.port}/v1"`,
     );
     await settings
       .getByRole("button", { name: "Add custom provider", exact: true })

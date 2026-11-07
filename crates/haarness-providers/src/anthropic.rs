@@ -31,14 +31,18 @@ pub struct AnthropicProvider {
     headers: crate::ProviderHeaders,
 }
 
-/// The Messages endpoint under `ANTHROPIC_BASE_URL`. Anthropic's SDKs and
-/// Claude Code take the API root (`https://api.anthropic.com`) and add
-/// `/v1/messages`; a base that already names `/v1` or the endpoint is kept.
-fn messages_endpoint(base: &str) -> String {
-    let base = base.trim_end_matches('/');
+/// The Messages endpoint under a base URL, as `ANTHROPIC_BASE_URL` or a
+/// custom Anthropic-compatible provider gives it. Anthropic's SDKs and Claude
+/// Code take the API root (`https://api.anthropic.com`) and add
+/// `/v1/messages`, so that is the address services document for them (Z.ai's
+/// `https://api.z.ai/api/anthropic`, which answers anything else with a
+/// "404 NOT_FOUND" body and no stream); a base that already names a version
+/// (`/v1`) or the endpoint is kept.
+pub(crate) fn messages_endpoint(base: &str) -> String {
+    let base = base.trim().trim_end_matches('/');
     if base.ends_with("/messages") {
         base.to_owned()
-    } else if base.ends_with("/v1") {
+    } else if crate::ends_with_version(base) {
         format!("{base}/messages")
     } else {
         format!("{base}/v1/messages")
@@ -75,13 +79,7 @@ impl AnthropicProvider {
             client: reqwest::Client::new(),
             id: instance.id,
             name: instance.name,
-            endpoint: format!(
-                "{}/messages",
-                instance
-                    .base_url
-                    .trim_end_matches('/')
-                    .trim_end_matches("/messages")
-            ),
+            endpoint: messages_endpoint(&instance.base_url),
             api_key: instance.api_key.map(SecretString::from),
             auth_store: None,
             models: instance
@@ -953,6 +951,19 @@ mod tests {
                 "https://proxy.example/anthropic",
                 "https://proxy.example/anthropic/v1/messages",
             ),
+            // The addresses services document for Claude Code.
+            (
+                "https://api.z.ai/api/anthropic",
+                "https://api.z.ai/api/anthropic/v1/messages",
+            ),
+            (
+                "https://api.deepseek.com/anthropic/",
+                "https://api.deepseek.com/anthropic/v1/messages",
+            ),
+            (
+                " https://gateway.example/claude/v2 ",
+                "https://gateway.example/claude/v2/messages",
+            ),
         ] {
             assert_eq!(super::messages_endpoint(base), endpoint, "{base}");
         }
@@ -1013,6 +1024,36 @@ mod tests {
         assert_eq!(
             discovered_model_for(&entry, false).unwrap().id,
             "company-sonnet"
+        );
+    }
+
+    #[test]
+    fn a_custom_endpoint_at_a_documented_claude_code_address_reaches_its_messages() {
+        let at = |base: &str| {
+            AnthropicProvider::new(crate::NativeInstance {
+                id: "my-zai".into(),
+                name: "My Z.ai".into(),
+                base_url: base.into(),
+                api_key: None,
+                models: vec!["glm-4.5-air".into()],
+                discover_models: false,
+                model_defaults: crate::CompatibleModelDefaults::default(),
+                assume_authenticated: false,
+                headers: crate::ProviderHeaders::default(),
+            })
+            .endpoint
+        };
+        assert_eq!(
+            at("https://api.z.ai/api/anthropic"),
+            "https://api.z.ai/api/anthropic/v1/messages"
+        );
+        assert_eq!(
+            at("https://api.z.ai/api/anthropic/v1/"),
+            "https://api.z.ai/api/anthropic/v1/messages"
+        );
+        assert_eq!(
+            at("https://models.example.test/anthropic/v1/messages"),
+            "https://models.example.test/anthropic/v1/messages"
         );
     }
 
