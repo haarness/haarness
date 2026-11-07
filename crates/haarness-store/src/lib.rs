@@ -30,8 +30,6 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 const RECOVERED_TURN_MESSAGE: &str = "Haarness restarted while this turn was running. Work already recorded in this session is preserved. In-flight tool calls were not replayed automatically; retry or continue when ready.";
-/// The result a call gets when Haarness stopped before it finished.
-const RECOVERED_CALL_RESULT: &str = "Haarness stopped before this call finished, so there is no result. It may have done part of its work.";
 
 #[derive(Clone)]
 pub struct SqliteStore {
@@ -1750,7 +1748,7 @@ impl ThreadRepository for SqliteStore {
                 .map(|(call_id, name)| ItemData::ToolResult {
                     call_id,
                     name,
-                    output: RECOVERED_CALL_RESULT.into(),
+                    output: haarness_core::UNFINISHED_CALL_RESULT.into(),
                     is_error: true,
                     metadata: serde_json::Value::Null,
                 })
@@ -4149,7 +4147,7 @@ mod tests {
             assert_eq!(*turn_id, Some(turn));
             assert!(
                 matches!(data, ItemData::ToolResult { call_id, name, output, is_error: true, .. }
-                    if call_id == expected && name == "bash" && output == RECOVERED_CALL_RESULT),
+                    if call_id == expected && name == "bash" && output == haarness_core::UNFINISHED_CALL_RESULT),
                 "{data:?}"
             );
         }

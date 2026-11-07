@@ -10,8 +10,10 @@ use std::collections::HashMap;
 
 use haarness_protocol::ItemData;
 
-/// The result a call that will never finish gets in requests, so the model
-/// knows it ended and the provider takes the history.
+/// The result a call that will never finish gets, so the model knows it
+/// ended and the provider takes the history: stored by startup recovery for
+/// the calls a restart cut off, and given in requests to such a call stored
+/// without one.
 pub const UNFINISHED_CALL_RESULT: &str = "This call did not finish, so there is no result. It may have done part of its work before it stopped.";
 
 /// Where the calls without a result are, by position in the items given.

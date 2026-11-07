@@ -268,7 +268,7 @@ try:
     stored = [item["data"] for item in items(crashed)]
     results = [data for data in stored if data["type"] == "tool_result"]
     assert len(results) == 1 and results[0]["is_error"], results
-    assert "stopped before this call finished" in results[0]["output"], results
+    assert "did not finish" in results[0]["output"], results
     assert stored.index(results[0]) < max(i for i, data in enumerate(stored) if data["type"] == "error"), stored
     assert finished(start(crashed, "what happened?"))["status"] == "completed", REFUSED
     assert replies(crashed)[-1] == "REPLY_OK", replies(crashed)
