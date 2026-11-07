@@ -1,5 +1,6 @@
 use crate::{
     auth::{Credential, CredentialStore, XaiOAuthClient, unix_millis, xai_access_token_expiring},
+    media::Unreadable,
     sse::json_stream,
 };
 use async_stream::try_stream;
@@ -2007,25 +2008,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let model = request.model;
         let model_name = selected.map_or(model.as_str(), |model| model.display_name.as_str());
         let replay = self.reasoning_replay(&model);
-        // The person's newest message: nothing has answered it yet.
-        let newest = request.messages.iter().rposition(|message| {
-            matches!(message, ProviderMessage::Text { role, .. } | ProviderMessage::Media { role, .. } if role == "user")
-        });
-        let answered = newest.is_some_and(|newest| {
-            request.messages[newest..].iter().any(|message| {
-                matches!(message, ProviderMessage::Text { role, .. } if role == "assistant")
-                    || matches!(message, ProviderMessage::ToolCall { .. })
-            })
-        });
-        let images = |index: usize| {
-            if supports_images {
-                ImageInput::Read
-            } else if Some(index) == newest && !answered {
-                ImageInput::Refuse(model_name)
-            } else {
-                ImageInput::Note
-            }
-        };
+        let newest = crate::media::newest_unanswered(&request.messages);
         let mut messages = vec![json!({"role":"system","content":request.system})];
         let mut tool_media = Vec::new();
         for (index, message) in request.messages.into_iter().enumerate() {
@@ -2060,7 +2043,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     &role,
                     &content,
                     &attachments,
-                    images(index),
+                    supports_images,
+                    Unreadable::at(index, newest, model_name),
                 )?),
                 ProviderMessage::ToolCall {
                     call_id,
@@ -2136,11 +2120,14 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     if !attachments.is_empty() {
                         // Keep every tool result adjacent to its assistant batch;
                         // user media messages may only follow the completed batch.
+                        // A tool's file never refuses the turn: the model
+                        // goes on without it.
                         tool_media.push(openai_compatible_media_message(
                             "user",
                             "The preceding tool result includes this binary document or media.",
                             &attachments,
-                            images(index).note_only(),
+                            supports_images,
+                            Unreadable::Note,
                         )?);
                     }
                 }
@@ -2554,33 +2541,16 @@ impl ModelProvider for OpenAiCompatibleProvider {
     }
 }
 
-/// What a request does with an image, by whether its model reads them.
-#[derive(Debug, Clone, Copy)]
-enum ImageInput<'a> {
-    Read,
-    /// In the person's newest message: they are told, by the model's name,
-    /// and can send it without the picture or switch models.
-    Refuse(&'a str),
-    /// Earlier in the chat (sent to another model) or from a tool: a note
-    /// stands in for it, so one picture does not fail every later turn.
-    Note,
-}
-
-impl ImageInput<'_> {
-    /// A tool's picture never refuses the turn: the model goes on without it.
-    fn note_only(self) -> Self {
-        match self {
-            Self::Refuse(_) => Self::Note,
-            other => other,
-        }
-    }
-}
-
+/// A message carrying media for Chat Completions. A model that reads no
+/// images, and media the protocol has no portable form for (video, audio
+/// other than MP3 or WAV), get what `place` says: the newest message is
+/// refused and anything else becomes a note.
 fn openai_compatible_media_message(
     role: &str,
     content: &str,
     attachments: &[String],
-    images: ImageInput<'_>,
+    images: bool,
+    place: Unreadable<'_>,
 ) -> CoreResult<Value> {
     // A photo sent on its own has no text. Claude refuses a blank text block,
     // including through a router that passes the request on to Anthropic, so
@@ -2590,48 +2560,31 @@ fn openai_compatible_media_message(
         blocks.push(json!({"type":"text","text":content}));
     }
     for item in crate::media::load_all(attachments)? {
-        if item.is_image() {
-            match images {
-                ImageInput::Read => {
-                    blocks.push(json!({"type":"image_url","image_url":{"url":item.data_url()}}));
-                }
-                ImageInput::Refuse(model) => {
-                    return Err(CoreError::Provider(format!(
-                        "{model} doesn't read images. Send the message without the picture, or switch to a model that reads them."
-                    )));
-                }
-                // Earlier answers in the chat may come from a model that saw
-                // the picture; "this model" read as if none had.
-                ImageInput::Note => blocks.push(json!({
-                    "type":"text",
-                    "text":format!("[Image {} is not shown to you, because you don't read images. Don't guess what it shows; earlier answers may come from a model that saw it.]", item.filename)
-                })),
-            }
+        let audio = match item.mime_type.as_str() {
+            "audio/mpeg" => Some("mp3"),
+            "audio/wav" => Some("wav"),
+            _ => None,
+        };
+        if item.is_image() && images {
+            blocks.push(json!({"type":"image_url","image_url":{"url":item.data_url()}}));
         } else if item.is_pdf() {
             blocks.push(json!({
                 "type":"file",
                 "file":{"filename":item.filename,"file_data":item.data_url()}
             }));
-        } else if item.is_audio() {
-            let format = match item.mime_type.as_str() {
-                "audio/mpeg" => "mp3",
-                "audio/wav" => "wav",
-                _ => {
-                    return Err(CoreError::Provider(
-                        "OpenAI-compatible audio input supports MP3 and WAV; use Gemini for other audio formats"
-                            .into(),
-                    ));
-                }
-            };
+        } else if let Some(format) = audio {
             blocks.push(json!({
                 "type":"input_audio",
                 "input_audio":{"data":item.base64,"format":format}
             }));
-        } else if item.is_video() {
-            return Err(CoreError::Provider(
-                "OpenAI-compatible video input is not portable; use Gemini for video understanding"
-                    .into(),
-            ));
+        } else if item.is_audio()
+            && let Unreadable::Refuse(model) = place
+        {
+            return Err(CoreError::Provider(format!(
+                "Haarness can send {model} audio only as MP3 or WAV. Send the message without the recording, or with it as MP3 or WAV."
+            )));
+        } else {
+            blocks.push(json!({"type":"text","text":place.stand_in(&item)?}));
         }
     }
     Ok(json!({"role":role,"content":blocks}))
@@ -2666,7 +2619,7 @@ mod tests {
     use crate::auth::{Credential, CredentialStore, XaiOAuthClient, XaiOAuthConfig};
 
     use super::{
-        CompatibleInstance, CompatibleModelDefaults, ImageInput, OpenAiCompatibleProvider,
+        CompatibleInstance, CompatibleModelDefaults, OpenAiCompatibleProvider, Unreadable,
         append_reasoning_details, apply_lmstudio_details, apply_ollama_details, deepseek_charge,
         deepseek_peak, discovered_model_info, local_model_missing, model_info,
         openai_compatible_media_message,
@@ -3512,7 +3465,8 @@ mod tests {
                 "user",
                 content,
                 &["data:image/png;name=photo-1.png;base64,iVBORw0KGgo=".into()],
-                ImageInput::Read,
+                true,
+                Unreadable::Refuse("fixture"),
             )
             .unwrap();
             let blocks = message["content"].as_array().unwrap();
@@ -3523,7 +3477,8 @@ mod tests {
             "user",
             "What is this?",
             &["data:image/png;base64,iVBORw0KGgo=".into()],
-            ImageInput::Read,
+            true,
+            Unreadable::Refuse("fixture"),
         )
         .unwrap();
         assert_eq!(message["content"][0]["text"], "What is this?");
@@ -3539,7 +3494,8 @@ mod tests {
                 "data:application/pdf;name=agenda.pdf;base64,JVBERi0xLjQK".into(),
                 "data:audio/mpeg;name=meeting.mp3;base64,SUQz".into(),
             ],
-            ImageInput::Note,
+            false,
+            Unreadable::Note,
         )
         .unwrap();
         assert_eq!(message["content"][1]["type"], "file");
@@ -3551,10 +3507,16 @@ mod tests {
             "user",
             "Watch this",
             &["data:video/mp4;base64,AAAAIGZ0eXA=".into()],
-            ImageInput::Read,
+            true,
+            Unreadable::Refuse("Fixture 7B"),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("not portable"));
+        assert!(
+            error
+                .to_string()
+                .contains("Haarness can't send video to Fixture 7B."),
+            "{error}"
+        );
     }
 
     #[test]

@@ -539,3 +539,173 @@ async fn truncated_http_streams_never_fabricate_successful_completion() {
     }
     task.abort();
 }
+
+/// A chat in which audio and video the model can't take arrived earlier:
+/// with the person's message (answered since) and from a tool.
+fn chat_with_unreadable_media(audio: &str) -> Vec<ProviderMessage> {
+    let text = |role: &str, content: &str| ProviderMessage::Text {
+        role: role.into(),
+        content: content.into(),
+    };
+    vec![
+        ProviderMessage::Media {
+            role: "user".into(),
+            content: "What does the recording say?".into(),
+            attachments: vec![audio.into()],
+        },
+        text("assistant", "I can't hear recordings."),
+        text("user", "Record the demo"),
+        ProviderMessage::ToolCall {
+            call_id: "call_record".into(),
+            name: "record".into(),
+            arguments: json!({}),
+            provider_metadata: Value::Null,
+        },
+        ProviderMessage::ToolResult {
+            call_id: "call_record".into(),
+            name: "record".into(),
+            output: "recorded".into(),
+            is_error: false,
+            attachments: vec![
+                audio.into(),
+                "data:video/mp4;name=clip.mp4;base64,AAAAIGZ0eXA=".into(),
+            ],
+        },
+    ]
+}
+
+/// Audio and video `provider` can't send are a note wherever they are, so
+/// the chat goes on; in the person's newest message they are refused by the
+/// model's name, and nothing is sent.
+async fn notes_unreadable_media_and_refuses_only_the_newest(
+    provider: &dyn ModelProvider,
+    model: &str,
+    audio: &str,
+    captures: &Captures,
+) {
+    let mut req = request(model, None);
+    req.messages = chat_with_unreadable_media(audio);
+    events(provider, req).await;
+    let sent = captures.lock().unwrap().last().unwrap().0.to_string();
+    assert_eq!(sent.matches("[Audio meeting.").count(), 2, "{sent}");
+    assert_eq!(
+        sent.matches("[Video clip.mp4 is left out").count(),
+        1,
+        "{sent}"
+    );
+    assert!(
+        !sent.contains("SUQz") && !sent.contains("AAAAIGZ0eXA="),
+        "{sent}"
+    );
+
+    let name = provider
+        .info()
+        .models
+        .into_iter()
+        .find(|info| info.id == model)
+        .map_or_else(
+            || haarness_protocol::model_display_name(model, None),
+            |info| info.display_name,
+        );
+    let sent_before = captures.lock().unwrap().len();
+    let mut req = request(model, None);
+    req.messages.push(ProviderMessage::Media {
+        role: "user".into(),
+        content: "Watch this".into(),
+        attachments: vec!["data:video/mp4;name=clip.mp4;base64,AAAAIGZ0eXA=".into()],
+    });
+    let Err(error) = provider.stream(req, CancellationToken::new()).await else {
+        panic!("{model}: a video in the newest message must be refused");
+    };
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "provider error: Haarness can't send video to {name}. Send the message without the video, or switch to a model from the Gemini or Vertex AI provider."
+        )
+    );
+    assert_eq!(captures.lock().unwrap().len(), sent_before, "{model}");
+}
+
+#[tokio::test]
+async fn claude_notes_audio_and_video_and_refuses_only_the_newest() {
+    let (base, captures, task) = fixture().await;
+    let provider = AnthropicProvider::new(native(&base, "anthropic", "claude-opus-5-5"));
+    notes_unreadable_media_and_refuses_only_the_newest(
+        &provider,
+        "claude-opus-5-5",
+        "data:audio/mpeg;name=meeting.mp3;base64,SUQz",
+        &captures,
+    )
+    .await;
+    // An Anthropic-compatible endpoint's model set up as reading no images
+    // gets a tool's screenshot as a note too.
+    let mut instance = native(&base, "fixture", "text-only");
+    instance.model_defaults.images = Some(false);
+    let provider = AnthropicProvider::new(instance);
+    let mut req = request("text-only", None);
+    req.messages = chat_with_unreadable_media("data:image/png;name=shot.png;base64,iVBORw0KGgo=");
+    events(&provider, req).await;
+    let sent = captures.lock().unwrap().last().unwrap().0.to_string();
+    assert_eq!(
+        sent.matches("[Image shot.png is not shown to you").count(),
+        2,
+        "{sent}"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn openai_responses_notes_audio_and_video_and_refuses_only_the_newest() {
+    let (base, captures, task) = fixture().await;
+    let provider = OpenAiProvider::for_test(format!("{base}/responses"), "fixture");
+    notes_unreadable_media_and_refuses_only_the_newest(
+        &provider,
+        "gpt-6.1-sol",
+        "data:audio/mpeg;name=meeting.mp3;base64,SUQz",
+        &captures,
+    )
+    .await;
+    task.abort();
+}
+
+#[tokio::test]
+async fn chat_completions_notes_audio_and_video_and_refuses_only_the_newest() {
+    let (base, captures, task) = fixture().await;
+    let provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+        id: "custom".into(),
+        name: "Fixture".into(),
+        base_url: base,
+        api_key: Some("fixture".into()),
+        models: vec!["fixture-model".into()],
+        discover_models: false,
+        server_output_limit: false,
+        replay_observed_reasoning: false,
+        model_defaults: CompatibleModelDefaults::default(),
+        assume_authenticated: false,
+        headers: ProviderHeaders::default(),
+    });
+    // MP3 and WAV go as `input_audio`; Chat Completions has no other format.
+    notes_unreadable_media_and_refuses_only_the_newest(
+        &provider,
+        "fixture-model",
+        "data:audio/ogg;name=meeting.ogg;base64,SUQz",
+        &captures,
+    )
+    .await;
+    let mut req = request("fixture-model", None);
+    req.messages.push(ProviderMessage::Media {
+        role: "user".into(),
+        content: "Listen".into(),
+        attachments: vec!["data:audio/ogg;name=meeting.ogg;base64,SUQz".into()],
+    });
+    let Err(error) = provider.stream(req, CancellationToken::new()).await else {
+        panic!("an Ogg recording in the newest message must be refused");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("audio only as MP3 or WAV. Send the message without the recording"),
+        "{error}"
+    );
+    task.abort();
+}

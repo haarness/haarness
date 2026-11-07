@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use haarness_core::{CoreError, CoreResult};
+use haarness_core::{CoreError, CoreResult, ProviderMessage};
 
 /// Shared inline media cap. Adapters with a smaller request envelope (Gemini)
 /// retain their own aggregate budget for base64, JSON and conversation text.
@@ -36,6 +36,89 @@ impl LoadedMedia {
     pub fn is_video(&self) -> bool {
         self.mime_type.starts_with("video/")
     }
+}
+
+/// What a request does with media its model can't take in, by where the
+/// media is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unreadable<'a> {
+    /// In the person's newest message, which nothing has answered yet: the
+    /// request is refused, naming the model, so they can send the message
+    /// without the file or switch models.
+    Refuse(&'a str),
+    /// Earlier in the chat (perhaps sent to a model that took it) or from a
+    /// tool: a one-line note stands in for it, so one file does not fail
+    /// every later turn.
+    Note,
+}
+
+impl<'a> Unreadable<'a> {
+    /// How media in the message at `index` is treated; `newest` is what
+    /// [`newest_unanswered`] found. `model` names the model to the person.
+    pub(crate) fn at(index: usize, newest: Option<usize>, model: &'a str) -> Self {
+        if newest == Some(index) {
+            Self::Refuse(model)
+        } else {
+            Self::Note
+        }
+    }
+
+    /// The text that stands in for `item`, or the refusal.
+    pub(crate) fn stand_in(self, item: &LoadedMedia) -> CoreResult<String> {
+        let name = &item.filename;
+        match self {
+            Self::Refuse(model) => Err(CoreError::Provider(if item.is_image() {
+                format!(
+                    "{model} doesn't read images. Send the message without the picture, or switch to a model that reads them."
+                )
+            } else if item.is_audio() {
+                format!(
+                    "Haarness can't send audio to {model}. Send the message without the recording, or switch to a model from the Gemini or Vertex AI provider."
+                )
+            } else if item.is_video() {
+                format!(
+                    "Haarness can't send video to {model}. Send the message without the video, or switch to a model from the Gemini or Vertex AI provider."
+                )
+            } else {
+                format!(
+                    "Haarness can't send {name} to {model}. Send the message without the file, or switch to another model."
+                )
+            })),
+            // Earlier answers in the chat may come from a model that took the
+            // file; "this model" would read as if none had.
+            Self::Note => Ok(if item.is_image() {
+                format!(
+                    "[Image {name} is not shown to you, because you don't read images. Don't guess what it shows; earlier answers may come from a model that saw it.]"
+                )
+            } else if item.is_audio() {
+                format!(
+                    "[Audio {name} is left out, because it can't be sent to you. Don't guess what it says; earlier answers may come from a model that heard it.]"
+                )
+            } else if item.is_video() {
+                format!(
+                    "[Video {name} is left out, because it can't be sent to you. Don't guess what it shows; earlier answers may come from a model that saw it.]"
+                )
+            } else {
+                format!(
+                    "[File {name} is left out, because it can't be sent to you. Don't guess what it holds.]"
+                )
+            }),
+        }
+    }
+}
+
+/// The index of the person's newest message while nothing has answered it:
+/// the only media a request refuses. Once a reply or a call follows it, the
+/// message is history, and refusing it would fail every later turn.
+pub(crate) fn newest_unanswered(messages: &[ProviderMessage]) -> Option<usize> {
+    let newest = messages.iter().rposition(|message| {
+        matches!(message, ProviderMessage::Text { role, .. } | ProviderMessage::Media { role, .. } if role == "user")
+    })?;
+    let answered = messages[newest..].iter().any(|message| {
+        matches!(message, ProviderMessage::Text { role, .. } if role == "assistant")
+            || matches!(message, ProviderMessage::ToolCall { .. })
+    });
+    (!answered).then_some(newest)
 }
 
 pub fn load_all(sources: &[String]) -> CoreResult<Vec<LoadedMedia>> {

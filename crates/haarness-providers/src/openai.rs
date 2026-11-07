@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::{Credential, CredentialStore, OpenAiOAuthClient, openai_residency, unix_millis};
+use crate::media::Unreadable;
 use crate::sse::json_stream;
 
 /// The ChatGPT catalog hides models newer than the calling Codex client. A
@@ -587,8 +588,25 @@ impl ModelProvider for OpenAiProvider {
             if tool.name != STRUCTURED_OUTPUT_TOOL_NAME { value["strict"] = json!(false); }
             value
         }).collect();
+        let model_name = haarness_protocol::model_display_name(model, None);
+        let newest = crate::media::newest_unanswered(&request.messages);
+        // Responses takes images and PDFs. Anything else is refused in the
+        // person's newest message and is a note everywhere else.
+        let block = |item: crate::media::LoadedMedia, place: Unreadable<'_>| -> CoreResult<Value> {
+            Ok(if item.is_image() {
+                json!({"type":"input_image","image_url":item.data_url()})
+            } else if item.is_pdf() {
+                json!({
+                    "type":"input_file",
+                    "filename":item.filename,
+                    "file_data":item.data_url()
+                })
+            } else {
+                json!({"type":"input_text","text":place.stand_in(&item)?})
+            })
+        };
         let mut input: Vec<Value> = Vec::new();
-        for message in request.messages {
+        for (index, message) in request.messages.into_iter().enumerate() {
             let value = match message {
                 ProviderMessage::Text { role, content } => {
                     json!({"role":role,"content":content})
@@ -604,21 +622,9 @@ impl ModelProvider for OpenAiProvider {
                     if !content.trim().is_empty() {
                         blocks.push(json!({"type":"input_text","text":content}));
                     }
+                    let place = Unreadable::at(index, newest, &model_name);
                     for item in media {
-                        if item.is_image() {
-                            blocks.push(json!({"type":"input_image","image_url":item.data_url()}));
-                        } else if item.is_pdf() {
-                            blocks.push(json!({
-                                "type":"input_file",
-                                "filename":item.filename,
-                                "file_data":item.data_url()
-                            }));
-                        } else {
-                            return Err(CoreError::Provider(
-                                    "OpenAI Responses accepts Haarness image and PDF attachments; use Gemini for audio or video input"
-                                        .into(),
-                                ));
-                        }
+                        blocks.push(block(item, place)?);
                     }
                     json!({"role":role,"content":blocks})
                 }
@@ -646,23 +652,10 @@ impl ModelProvider for OpenAiProvider {
                         json!({"type":"function_call_output","call_id":call_id,"output":output})
                     } else {
                         let mut blocks = vec![json!({"type":"input_text","text":output})];
+                        // A tool's file never refuses the turn: the model
+                        // goes on without it.
                         for item in crate::media::load_all(&attachments)? {
-                            if item.is_image() {
-                                blocks.push(
-                                    json!({"type":"input_image","image_url":item.data_url()}),
-                                );
-                            } else if item.is_pdf() {
-                                blocks.push(json!({
-                                    "type":"input_file",
-                                    "filename":item.filename,
-                                    "file_data":item.data_url()
-                                }));
-                            } else {
-                                return Err(CoreError::Provider(
-                                        "OpenAI Responses tool results support Haarness images and PDFs, not audio or video"
-                                            .into(),
-                                    ));
-                            }
+                            blocks.push(block(item, Unreadable::Note)?);
                         }
                         json!({"type":"function_call_output","call_id":call_id,"output":blocks})
                     }
