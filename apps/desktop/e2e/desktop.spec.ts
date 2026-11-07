@@ -12143,8 +12143,8 @@ test("undo and redo through two turns that took a file past 2 MiB name it until 
   await expect(pressing).toHaveText(left);
   await expect(pressing).toHaveAttribute("title", "undo-two-big.bin");
   expect(await head()).toBe("b");
-  // The toast says so too.
-  await expect(page.locator(".toast")).toHaveText("Turn restored · 1 file left as it was");
+  // The toast says so too, without saying the redo left it alone.
+  await expect(page.locator(".toast")).toHaveText("Turn restored · 1 file wasn't restored");
   await expect(page.locator(".error-banner")).toHaveCount(0);
   const shots = async (name: string, target = page.locator(".conversation")) => {
     for (const theme of ["light", "dark"] as const) {

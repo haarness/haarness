@@ -74,16 +74,19 @@ export function createConversationControls(props: {
         props.restored(undone);
       } else if (action === "redo") props.redone();
       // A file left for its size is not as the checkpoint has it: said with
-      // the undo or redo, not only under its notice.
+      // the undo or redo, not only under its notice. A redo short of its
+      // last may have just changed it, to where the last one takes it, so
+      // it says only that the file was not restored.
       const left =
         action === "compact" ? 0 : unrestoredFiles(value as Thread).large.length;
+      const [one, many] =
+        action === "redo"
+          ? ["1 file wasn't restored", "{count} files weren't restored"]
+          : ["1 file left as it was", "{count} files left as they were"];
       const leftNote =
         left === 0
           ? ""
-          : " · " +
-            (left === 1
-              ? t("1 file left as it was")
-              : t("{count} files left as they were", { count: formatNumber(left) }));
+          : " · " + (left === 1 ? t(one) : t(many, { count: formatNumber(left) }));
       app.notify(
         action === "compact"
           ? t("Chat compacted")
