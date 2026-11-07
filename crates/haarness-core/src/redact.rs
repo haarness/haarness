@@ -610,6 +610,32 @@ pub fn text(text: &str) -> String {
                 r#"(?i:\b(sshpass))((?:[ \t]+(?:-[fdP][ \t]*[^\s-]\S*|-[a-oq-zA-Z]\S*))*[ \t]+-p[ \t]*)("[^"\r\n]*"?|'[^'\r\n]*'?|[^\s"',;&]+)"#.to_owned(),
                 "${1}${2}[redacted]",
             ),
+            // The password options of database clients and registry sign-ins,
+            // each among the words of that one command. MySQL's and
+            // MariaDB's `-pPASSWORD` is written in one word: a bare `-p`
+            // prompts for it, and `-P` is a port.
+            (
+                format!(r#"(?i:\b(mysql[a-z]*|mariadb(?:-[a-z]+)?))((?:[ \t]+[^\s;&|]+)*?[ \t]+-p)({VALUE}|[^\s"',;&|]+)"#),
+                "${1}${2}[redacted]",
+            ),
+            // `docker login -p PASSWORD`, but not `docker run -p 8080:80`.
+            (
+                format!(r#"(?i:\b(docker|podman|nerdctl|buildah|skopeo|helm|oc|cf)\b)((?:[ \t]+[^\s;&|]+)*?[ \t]+login\b(?:[ \t]+[^\s;&|]+)*?[ \t]+-p(?:[ \t]+|=)?)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
+                "${1}${2}[redacted]",
+            ),
+            // `redis-cli -a PASSWORD`, `sqlcmd -P PASSWORD`, `mongosh -p PASSWORD`.
+            (
+                format!(r#"(?i:\b(redis-cli|valkey-cli|keydb-cli))((?:[ \t]+[^\s;&|]+)*?[ \t]+-a[ \t]+)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
+                "${1}${2}[redacted]",
+            ),
+            (
+                format!(r#"(?i:\b(sqlcmd|bcp))((?:[ \t]+[^\s;&|]+)*?[ \t]+-P[ \t]*)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
+                "${1}${2}[redacted]",
+            ),
+            (
+                format!(r#"(?i:\b(mongosh|mongo|mongodump|mongorestore|mongoexport|mongoimport|mongostat|mongotop|mongofiles)\b)((?:[ \t]+[^\s;&|]+)*?[ \t]+-p(?:[ \t]+|=)?)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
+                "${1}${2}[redacted]",
+            ),
             // `-u user:password`, but not `sort -u file`.
             (
                 r#"(^|[^\w-])(-[uU][ \t]*)("[^"\r\n]*:[^"\r\n]*"?|'[^'\r\n]*:[^'\r\n]*'?|[^\s"',;&:]*:[^\s"',;&]*)"#.to_owned(),
@@ -1965,6 +1991,96 @@ mod tests {
             args(&["ssh", "-p", "22", "h"].map(str::to_owned)),
             ["ssh", "-p", "22", "h"]
         );
+    }
+
+    #[test]
+    fn free_text_hides_database_and_registry_passwords_given_as_options() {
+        for (input, output) in [
+            (
+                "mysql -u root -pPRIVATE app",
+                "mysql -u root -p[redacted] app",
+            ),
+            (
+                "mysql -h db -P 3306 -uroot -p'PRIVATE PART' -e 'select 1'",
+                "mysql -h db -P 3306 -uroot -p[redacted] -e 'select 1'",
+            ),
+            (
+                "mysqldump -uroot -pPRIVATE --all-databases > dump.sql",
+                "mysqldump -uroot -p[redacted] --all-databases > dump.sql",
+            ),
+            (
+                "mariadb -u sam --password=PRIVATE app",
+                "mariadb -u sam --password=[redacted] app",
+            ),
+            (
+                "mariadb-dump -u sam -pPRIVATE app",
+                "mariadb-dump -u sam -p[redacted] app",
+            ),
+            (
+                "docker exec db mysql -uroot -pPRIVATE app",
+                "docker exec db mysql -uroot -p[redacted] app",
+            ),
+            (
+                "docker login -u sam -p PRIVATE registry.fixture.test",
+                "docker login -u sam -p [redacted] registry.fixture.test",
+            ),
+            (
+                "docker login registry.fixture.test --password PRIVATE",
+                "docker login registry.fixture.test --password [redacted]",
+            ),
+            (
+                "podman login -pPRIVATE registry.fixture.test",
+                "podman login -p[redacted] registry.fixture.test",
+            ),
+            (
+                "helm registry login registry.fixture.test -u sam -p PRIVATE",
+                "helm registry login registry.fixture.test -u sam -p [redacted]",
+            ),
+            (
+                "oc login https://api.fixture.test:6443 -u sam -p PRIVATE",
+                "oc login https://api.fixture.test:6443 -u sam -p [redacted]",
+            ),
+            (
+                "redis-cli -h cache -p 6379 -a PRIVATE ping",
+                "redis-cli -h cache -p 6379 -a [redacted] ping",
+            ),
+            (
+                "sqlcmd -S db -U sa -P PRIVATE -Q 'select 1'",
+                "sqlcmd -S db -U sa -P [redacted] -Q 'select 1'",
+            ),
+            (
+                "sqlcmd -S db -U sa -PPRIVATE",
+                "sqlcmd -S db -U sa -P[redacted]",
+            ),
+            (
+                "mongosh --host db -u sam -p PRIVATE",
+                "mongosh --host db -u sam -p [redacted]",
+            ),
+            (
+                "mongodump --port 27017 -u sam -p 'PRIVATE PART' --out dump",
+                "mongodump --port 27017 -u sam -p [redacted] --out dump",
+            ),
+        ] {
+            assert_eq!(text(input), output, "{input}");
+            assert_eq!(text(output), output, "{output}");
+            assert!(!log_text(input, 500).contains("PRIVATE"), "{input}");
+        }
+        // A bare `-p` prompts, `-P` and other tools' `-p` are ports, and only
+        // a sign-in takes a password.
+        for kept in [
+            "mysql -u root -p app",
+            "mysql -h db -P 3306 -u root -p",
+            "ssh -p 2222 sam@host",
+            "docker run -p 8080:80 app",
+            "docker login registry.fixture.test && docker run -p 8080:80 app",
+            "mysql -u root -p app; ssh -p 2222 h",
+            "redis-cli -h cache -p 6379 ping",
+            "mongosh --port 27017 db",
+            "sort -u notes.txt",
+            "mongosh -p",
+        ] {
+            assert_eq!(text(kept), kept);
+        }
     }
 
     #[test]
