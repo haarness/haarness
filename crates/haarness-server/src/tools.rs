@@ -586,7 +586,6 @@ impl Tool for ExecuteTool {
         });
         let host = Arc::new(McpCodeHost {
             invoker,
-            thread: context.thread_id,
             calls: std::sync::atomic::AtomicUsize::new(0),
             max_calls: context.execution.code_max_calls,
         });
@@ -619,9 +618,6 @@ impl Tool for ExecuteTool {
 
 struct McpCodeHost {
     invoker: Arc<dyn haarness_core::ToolInvoker>,
-    /// The chat the script runs in: it gets back only that chat's cut
-    /// results (see [`take_whole_mcp_output`]).
-    thread: ThreadId,
     calls: std::sync::atomic::AtomicUsize,
     max_calls: usize,
 }
@@ -664,14 +660,14 @@ impl WorkflowHost for McpCodeHost {
             .filter(|value| value.is_object())
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let output = self
-            .invoker
-            .invoke(name, arguments)
+        let script = ScriptCall::new();
+        let output = script
+            .run(self.invoker.invoke(name, arguments))
             .await
             .map_err(|error| HostError::new(error.to_string()))?;
         // A call of a script is never shown to the model, so the file the
         // cut text names is read by nothing else once the script has it.
-        if let Some((text, metadata, file)) = take_whole_mcp_output(self.thread, &output).await {
+        if let Some((text, metadata, file)) = take_whole_mcp_output(&script, &output).await {
             if let Some(file) = file {
                 let _ = tokio::fs::remove_file(file).await;
             }
@@ -2663,7 +2659,7 @@ impl Tool for McpProjectedTool {
             result = self.registry.call(&self.server, &self.definition.name, arguments) => result,
         };
         match result {
-            Ok(output) => capped_mcp_output(output, &tool_output_dir(), context.thread_id).await,
+            Ok(output) => capped_mcp_output(output, &tool_output_dir()).await,
             // A failure's text is cut too: the model reads it all the same.
             Err(CoreError::Tool(text)) => Err(CoreError::Tool(
                 match cut_mcp_text(text.clone(), &tool_output_dir(), true).await {
@@ -2676,11 +2672,41 @@ impl Tool for McpProjectedTool {
     }
 }
 
-/// An MCP result [`capped_mcp_output`] cut for the model, kept for a script
-/// of the same chat that made the call (Code Mode, a workflow), which is
-/// not the model and gets the whole text and the server's own metadata.
+/// One call of a tool a script makes (Code Mode, a workflow): an MCP result
+/// it gets back is kept whole for it alone (see [`take_whole_mcp_output`]),
+/// and what is kept for it goes when it does.
+pub(crate) struct ScriptCall(u64);
+
+tokio::task_local! {
+    /// The script's call a tool runs for. The model's own calls run for
+    /// none, so nothing is kept for them.
+    static SCRIPT_CALL: u64;
+}
+
+impl ScriptCall {
+    pub(crate) fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Run `call`, the tool this call runs, as this call.
+    pub(crate) async fn run<F: Future>(&self, call: F) -> F::Output {
+        SCRIPT_CALL.scope(self.0, call).await
+    }
+}
+
+impl Drop for ScriptCall {
+    fn drop(&mut self) {
+        WHOLE_OUTPUTS.lock().retain(|kept| kept.call != self.0);
+    }
+}
+
+/// An MCP result [`capped_mcp_output`] cut for the model, or laid out,
+/// kept for the script's call that made it, which is not the model and
+/// gets the whole text and the server's own metadata.
 struct WholeOutput {
-    thread: ThreadId,
+    /// The [`ScriptCall`] it is kept for.
+    call: u64,
     /// The file the cut text names, or `None` for JSON that fit once laid
     /// out, which is not cut.
     file: Option<PathBuf>,
@@ -2695,10 +2721,10 @@ struct WholeOutput {
     metadata: Value,
 }
 
-/// The MCP results cut lately, newest last: at most
-/// [`WHOLE_OUTPUTS_KEPT`], and texts of [`WHOLE_TEXT_BYTES_KEPT`] together.
-/// Each is taken once, by the chat that made the call; one let go meanwhile
-/// leaves a script the file's form of the text.
+/// The MCP results kept for scripts' calls still running, newest last: at
+/// most [`WHOLE_OUTPUTS_KEPT`], and texts of [`WHOLE_TEXT_BYTES_KEPT`]
+/// together. Each is taken once, by its own call; one let go meanwhile
+/// leaves a script the text the model would read.
 static WHOLE_OUTPUTS: std::sync::LazyLock<
     parking_lot::Mutex<std::collections::VecDeque<WholeOutput>>,
 > = std::sync::LazyLock::new(Default::default);
@@ -2711,18 +2737,17 @@ const WHOLE_TEXT_BYTES_KEPT: usize = 32 * 1024 * 1024;
 /// with `truncated` and `outputPath` beside it when the text was cut.
 /// Structured content that uses one of those names moves under
 /// `structuredContent`, as for the names Haarness fills itself.
-async fn capped_mcp_output(
-    output: ToolOutput,
-    directory: &Path,
-    thread: ThreadId,
-) -> CoreResult<ToolOutput> {
+async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<ToolOutput> {
     let ToolOutput { text, metadata } = output;
-    let whole = text.clone();
+    let script = SCRIPT_CALL.try_with(|call| *call).ok();
+    let whole = script.map(|_| text.clone());
     let (capped, saved) = cut_mcp_text(text, directory, false).await?;
     let Some((file, reformatted)) = saved else {
-        if capped.text != whole {
+        if let (Some(call), Some(whole)) = (script, whole)
+            && capped.text != whole
+        {
             keep_whole_output(WholeOutput {
-                thread,
+                call,
                 file: None,
                 cut: (capped.text.len(), cut_fingerprint(capped.text.as_bytes())),
                 text: Some(whole),
@@ -2753,13 +2778,15 @@ async fn capped_mcp_output(
         other => serde_json::Map::from_iter([("structuredContent".to_owned(), other)]),
     };
     merged.extend(cut);
-    keep_whole_output(WholeOutput {
-        thread,
-        file: Some(file),
-        cut: (capped.text.len(), cut_fingerprint(capped.text.as_bytes())),
-        text: reformatted.then_some(whole),
-        metadata,
-    });
+    if let (Some(call), Some(whole)) = (script, whole) {
+        keep_whole_output(WholeOutput {
+            call,
+            file: Some(file),
+            cut: (capped.text.len(), cut_fingerprint(capped.text.as_bytes())),
+            text: reformatted.then_some(whole),
+            metadata,
+        });
+    }
     Ok(ToolOutput {
         text: capped.text,
         metadata: Value::Object(merged),
@@ -2785,36 +2812,39 @@ fn cut_fingerprint(text: &[u8]) -> [u8; 32] {
     sha2::Sha256::digest(text).into()
 }
 
-/// What a script of chat `thread` gets for an MCP result
-/// [`capped_mcp_output`] cut, or laid out: the whole text as the server
-/// wrote it and the server's own metadata, taken once, with the file that
-/// holds the whole when there is one. `None` for any other output, so a
-/// server cannot name a file, another call's or another chat's, in its
-/// structured content and have a script read it.
+/// What script's call `call` gets for `output`, an MCP result
+/// [`capped_mcp_output`] cut, or laid out, for that very call: the whole
+/// text as the server wrote it and the server's own metadata, taken once,
+/// with the file that holds the whole when there is one. `None` for any
+/// other output, so neither another call's result with the same text nor
+/// a file a server names in its structured content reaches the script.
 pub(crate) async fn take_whole_mcp_output(
-    thread: ThreadId,
+    call: &ScriptCall,
     output: &ToolOutput,
 ) -> Option<(String, Value, Option<PathBuf>)> {
+    // All that was kept for the call goes now, whatever is handed back.
+    let own: std::collections::VecDeque<WholeOutput> = {
+        let mut outputs = WHOLE_OUTPUTS.lock();
+        let (own, others) = std::mem::take(&mut *outputs)
+            .into_iter()
+            .partition(|kept| kept.call == call.0);
+        *outputs = others;
+        own
+    };
     let named = if output.metadata.get("truncated") == Some(&Value::Bool(true)) {
         Some(Path::new(output.metadata.get("outputPath")?.as_str()?))
     } else {
         None
     };
-    let kept = {
-        let mut outputs = WHOLE_OUTPUTS.lock();
-        let at = outputs.iter().position(|kept| {
-            let (length, hash) = kept.cut;
-            let text = output.text.as_bytes();
-            let start = match kept.file {
-                Some(_) => text.get(..length),
-                None => (text.len() == length).then_some(text),
-            };
-            kept.thread == thread
-                && kept.file.as_deref() == named
-                && start.is_some_and(|start| cut_fingerprint(start) == hash)
-        })?;
-        outputs.remove(at)?
-    };
+    let kept = own.into_iter().rev().find(|kept| {
+        let (length, hash) = kept.cut;
+        let text = output.text.as_bytes();
+        let start = match kept.file {
+            Some(_) => text.get(..length),
+            None => (text.len() == length).then_some(text),
+        };
+        kept.file.as_deref() == named && start.is_some_and(|start| cut_fingerprint(start) == hash)
+    })?;
     let text = match (kept.text, &kept.file) {
         (Some(text), _) => text,
         (None, Some(file)) => tokio::fs::read_to_string(file).await.ok()?,
@@ -10474,9 +10504,13 @@ mod webfetch_tests {
         async fn tools(&self, _name: &str) -> CoreResult<Vec<ToolDefinition>> {
             Ok(Vec::new())
         }
-        async fn call(&self, _name: &str, tool: &str, _arguments: Value) -> CoreResult<ToolOutput> {
+        async fn call(&self, _name: &str, tool: &str, arguments: Value) -> CoreResult<ToolOutput> {
             let output = |text: String, metadata: Value| Ok(ToolOutput { text, metadata });
             match tool {
+                // The same text each call, with what the call was given as
+                // its structured content.
+                "stamp" => output(rows_indented_four(), arguments),
+                "stamp_wide" => output(wide_text(), arguments),
                 "wide" => output(
                     wide_text(),
                     json!({"rows": 2000, "mcp_app": {"uri": "ui://rows"}}),
@@ -10535,18 +10569,42 @@ mod webfetch_tests {
         projected.execute(json!({}), context).await
     }
 
+    /// `call_wide` of a `stamp` tool, whose structured content is `stamp`.
+    async fn call_stamp(tool: &str, stamp: &Value) -> ToolOutput {
+        let projected = McpProjectedTool {
+            definition: ToolDefinition {
+                name: tool.into(),
+                description: "fixture".into(),
+                input_schema: json!({"type":"object"}),
+            },
+            server: "rows".into(),
+            registry: Arc::new(WideMcp),
+        };
+        let context = composite_context(&std::env::temp_dir());
+        projected.execute(stamp.clone(), context).await.unwrap()
+    }
+
+    /// Whether anything is kept for a script with structured content `stamp`.
+    fn kept_for(stamp: &Value) -> bool {
+        WHOLE_OUTPUTS
+            .lock()
+            .iter()
+            .any(|kept| &kept.metadata == stamp)
+    }
+
     fn saved(output: &ToolOutput) -> PathBuf {
         PathBuf::from(output.metadata["outputPath"].as_str().unwrap())
     }
 
     /// An MCP tool's text reached the model whole, however long. It is cut
-    /// as a native tool's is, the whole saved for the model to read, and a
-    /// script of the same chat gets the whole text and the server's own
-    /// metadata, once; the metadata the chat keeps is the server's too.
+    /// as a native tool's is, the whole saved for the model to read, and
+    /// the script's call that made it gets the whole text and the server's
+    /// own metadata, once; the metadata the chat keeps is the server's too.
     #[tokio::test]
     async fn a_long_mcp_result_is_cut_for_the_model_with_the_whole_saved() {
         let thread = ThreadId::new();
-        let output = call_wide("wide", thread).await.unwrap();
+        let script = ScriptCall::new();
+        let output = script.run(call_wide("wide", thread)).await.unwrap();
         assert!(output.text.len() < 52 * 1024, "{}", output.text.len());
         assert!(
             output.text.contains(
@@ -10562,19 +10620,19 @@ mod webfetch_tests {
         assert_eq!(output.metadata["truncated"], true);
         assert_eq!(output.metadata["rows"], 2000);
         assert_eq!(output.metadata["mcp_app"]["uri"], "ui://rows");
-        // Another chat's script, then this chat's (once).
+        // Another call's script, then this call's (once).
         assert!(
-            take_whole_mcp_output(ThreadId::new(), &output)
+            take_whole_mcp_output(&ScriptCall::new(), &output)
                 .await
                 .is_none()
         );
-        let (text, metadata, file) = take_whole_mcp_output(thread, &output).await.unwrap();
+        let (text, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
         assert_eq!(text, wide_text());
         assert_eq!(
             metadata,
             json!({"rows": 2000, "mcp_app": {"uri": "ui://rows"}})
         );
-        assert!(take_whole_mcp_output(thread, &output).await.is_none());
+        assert!(take_whole_mcp_output(&script, &output).await.is_none());
         std::fs::remove_file(file.unwrap()).unwrap();
 
         // Array content moves under `structuredContent` beside the cut.
@@ -10583,31 +10641,42 @@ mod webfetch_tests {
         std::fs::remove_file(saved(&listing)).unwrap();
 
         // A short one is as the server sent it, and a file a server names,
-        // even one another call of this chat saved, is never read for a
-        // script; that call's own script still gets its text.
-        let short = call_wide("short", thread).await.unwrap();
+        // even one its own call saved, is never read for a script: it gets
+        // the whole only for a text that starts with the cut one (hooks may
+        // add to it), and what was kept for the call goes either way.
+        let short_call = ScriptCall::new();
+        let short = short_call.run(call_wide("short", thread)).await.unwrap();
         assert_eq!(
             (short.text.as_str(), &short.metadata),
             ("short", &json!({"rows": 1}))
         );
-        let real = call_wide("wide", thread).await.unwrap();
-        for text in ["short".to_owned(), "x".repeat(real.text.len() + 1)] {
-            let named = ToolOutput {
-                text,
-                metadata: json!({"truncated": true, "outputPath": saved(&real)}),
-            };
-            assert!(take_whole_mcp_output(thread, &named).await.is_none());
-        }
-        let hooked = ToolOutput {
-            text: format!("{}\n\n<hook-context>\nnoted\n</hook-context>", real.text),
-            metadata: real.metadata.clone(),
-        };
-        assert!(take_whole_mcp_output(thread, &hooked).await.is_some());
         let spoofed = ToolOutput {
             text: "short".into(),
             metadata: json!({"truncated": true, "outputPath": "/etc/hosts"}),
         };
-        assert!(take_whole_mcp_output(thread, &spoofed).await.is_none());
+        assert!(take_whole_mcp_output(&short_call, &spoofed).await.is_none());
+        for longer in [false, true] {
+            let script = ScriptCall::new();
+            let real = script.run(call_wide("wide", thread)).await.unwrap();
+            let named = ToolOutput {
+                text: if longer {
+                    "x".repeat(real.text.len() + 1)
+                } else {
+                    "short".into()
+                },
+                metadata: json!({"truncated": true, "outputPath": saved(&real)}),
+            };
+            assert!(take_whole_mcp_output(&script, &named).await.is_none());
+            assert!(take_whole_mcp_output(&script, &real).await.is_none());
+            std::fs::remove_file(saved(&real)).unwrap();
+        }
+        let script = ScriptCall::new();
+        let real = script.run(call_wide("wide", thread)).await.unwrap();
+        let hooked = ToolOutput {
+            text: format!("{}\n\n<hook-context>\nnoted\n</hook-context>", real.text),
+            metadata: real.metadata.clone(),
+        };
+        assert!(take_whole_mcp_output(&script, &hooked).await.is_some());
         std::fs::remove_file(saved(&real)).unwrap();
     }
 
@@ -10616,14 +10685,17 @@ mod webfetch_tests {
     /// `result.metadata.tree` was gone; a script now gets it as sent.
     #[tokio::test]
     async fn structured_content_naming_truncated_stays_the_servers_for_scripts() {
-        let thread = ThreadId::new();
-        let output = call_wide("tree", thread).await.unwrap();
+        let script = ScriptCall::new();
+        let output = script
+            .run(call_wide("tree", ThreadId::new()))
+            .await
+            .unwrap();
         assert_eq!(
             output.metadata["structuredContent"],
             json!({"tree": [{"path": "a"}], "truncated": false})
         );
         assert_eq!(output.metadata["truncated"], true);
-        let (text, metadata, file) = take_whole_mcp_output(thread, &output).await.unwrap();
+        let (text, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
         assert_eq!(text.len(), 80 * 1024);
         assert_eq!(
             metadata,
@@ -10639,7 +10711,8 @@ mod webfetch_tests {
     #[tokio::test]
     async fn a_long_single_line_reaches_the_model_as_fifty_kib_and_reads_back_by_line() {
         let thread = ThreadId::new();
-        let rows = call_wide("rows", thread).await.unwrap();
+        let script = ScriptCall::new();
+        let rows = script.run(call_wide("rows", thread)).await.unwrap();
         let preview = rows
             .text
             .split("\n\nThe tool call succeeded")
@@ -10660,7 +10733,7 @@ mod webfetch_tests {
             serde_json::from_str::<Value>(&compact_rows()).unwrap()
         );
         // A script still gets the text as the server wrote it.
-        let (text, _, file) = take_whole_mcp_output(thread, &rows).await.unwrap();
+        let (text, _, file) = take_whole_mcp_output(&script, &rows).await.unwrap();
         assert_eq!(text, compact_rows());
         std::fs::remove_file(file.unwrap()).unwrap();
 
@@ -10720,7 +10793,8 @@ mod webfetch_tests {
     #[tokio::test]
     async fn json_that_fits_once_laid_out_is_not_cut() {
         let thread = ThreadId::new();
-        let output = call_wide("spaced", thread).await.unwrap();
+        let script = ScriptCall::new();
+        let output = script.run(call_wide("spaced", thread)).await.unwrap();
         assert!(
             !output.text.contains("truncated"),
             "{}",
@@ -10736,24 +10810,26 @@ mod webfetch_tests {
             serde_json::from_str::<Value>(&output.text).unwrap(),
             serde_json::from_str::<Value>(&rows_indented_four()).unwrap()
         );
-        // Matched whole: another chat's script, or a text with more after
+        // Matched whole: another call's script, or a text with more after
         // it, gets the text as it is.
         assert!(
-            take_whole_mcp_output(ThreadId::new(), &output)
+            take_whole_mcp_output(&ScriptCall::new(), &output)
                 .await
                 .is_none()
         );
-        let longer = ToolOutput {
-            text: format!("{}\n\nmore", output.text),
-            metadata: output.metadata.clone(),
-        };
-        assert!(take_whole_mcp_output(thread, &longer).await.is_none());
-        let (text, metadata, file) = take_whole_mcp_output(thread, &output).await.unwrap();
+        let (text, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
         assert_eq!(
             (text, metadata, file),
             (rows_indented_four(), json!({"rows": 200}), None)
         );
-        assert!(take_whole_mcp_output(thread, &output).await.is_none());
+        assert!(take_whole_mcp_output(&script, &output).await.is_none());
+        let script = ScriptCall::new();
+        let output = script.run(call_wide("spaced", thread)).await.unwrap();
+        let longer = ToolOutput {
+            text: format!("{}\n\nmore", output.text),
+            metadata: output.metadata.clone(),
+        };
+        assert!(take_whole_mcp_output(&script, &longer).await.is_none());
 
         // A resource read's text, and a failure's, are not cut either.
         let directory =
@@ -10765,6 +10841,52 @@ mod webfetch_tests {
             assert_eq!((cut.text, saved), (output.text.clone(), None));
         }
         assert!(!directory.exists());
+    }
+
+    /// A result that fit once laid out was kept for a script by its text
+    /// alone, the oldest first, and the model's own calls kept theirs too,
+    /// so a script calling a tool after the model had (that tool, or
+    /// another with the same text) got the model's call's structured
+    /// content. Each script's call now gets its own, and nothing is kept
+    /// for the model's calls or once a script's call is over.
+    #[tokio::test]
+    async fn a_script_gets_its_own_calls_result_not_another_with_the_same_text() {
+        let run = uuid::Uuid::now_v7().to_string();
+        let stamp = |call: u32| json!({"test": run, "call": call});
+        for tool in ["stamp", "stamp_wide"] {
+            let script = ScriptCall::new();
+            let first = script.run(call_stamp(tool, &stamp(1))).await;
+            let (_, metadata, _) = take_whole_mcp_output(&script, &first).await.unwrap();
+            assert_eq!(metadata, stamp(1));
+            // The model's calls, of this tool and of one with the same text.
+            let model = call_stamp(tool, &stamp(2)).await;
+            let other = call_stamp(tool, &json!({"test": run, "other": true})).await;
+            // A cut text differs only in the file it names.
+            assert_eq!(model.text == other.text, tool == "stamp");
+            assert!(!kept_for(&stamp(2)));
+            assert!(!kept_for(&json!({"test": run, "other": true})));
+            // Two scripts' calls kept side by side, as `parallel` makes them.
+            let (third, fourth) = (ScriptCall::new(), ScriptCall::new());
+            let three = third.run(call_stamp(tool, &stamp(3))).await;
+            let four = fourth.run(call_stamp(tool, &stamp(4))).await;
+            assert_eq!(three.text == four.text, tool == "stamp");
+            let (text, metadata, _) = take_whole_mcp_output(&fourth, &four).await.unwrap();
+            assert_eq!(metadata, stamp(4));
+            let (text_three, metadata, _) = take_whole_mcp_output(&third, &three).await.unwrap();
+            assert_eq!(metadata, stamp(3));
+            assert_eq!(text, text_three);
+            // A call the script never takes leaves nothing once it is over.
+            let lost = ScriptCall::new();
+            let five = lost.run(call_stamp(tool, &stamp(5))).await;
+            assert!(kept_for(&stamp(5)));
+            drop(lost);
+            assert!(!kept_for(&stamp(5)));
+            for output in [&first, &model, &other, &three, &four, &five] {
+                if output.metadata["truncated"] == true {
+                    std::fs::remove_file(saved(output)).unwrap();
+                }
+            }
+        }
     }
 
     /// Indenting gave each line two spaces a level, so JSON nested deep grew
@@ -11141,7 +11263,6 @@ mod agent_shell_tests {
     async fn code_mode_cannot_run_a_shell_command() {
         let host = McpCodeHost {
             invoker: Arc::new(NoTools),
-            thread: ThreadId::new(),
             calls: std::sync::atomic::AtomicUsize::new(0),
             max_calls: 100,
         };

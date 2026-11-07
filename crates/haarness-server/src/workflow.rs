@@ -125,8 +125,9 @@ impl WorkflowRuntimeAdapter {
         let options = optional_object(params.get("options"), "tool options")?;
         let timeout_ms = optional_u64(options, "timeout", "tool timeout")?;
         let null_on_error = on_error_null(options)?;
-        match self
-            .direct_tool(thread_id, name, arguments, timeout_ms, cancellation)
+        let script = crate::tools::ScriptCall::new();
+        match script
+            .run(self.direct_tool(thread_id, name, arguments, timeout_ms, cancellation))
             .await
         {
             // An MCP tool's whole text and its server's own metadata, where
@@ -134,7 +135,7 @@ impl WorkflowRuntimeAdapter {
             // own chat shows the call.
             Ok(result) if !result.is_error => {
                 let (output, metadata) =
-                    match crate::tools::take_whole_mcp_output(thread_id, &result.output).await {
+                    match crate::tools::take_whole_mcp_output(&script, &result.output).await {
                         Some((text, metadata, _)) => (text, metadata),
                         None => (result.output.text, result.output.metadata),
                     };

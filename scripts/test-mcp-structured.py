@@ -3,7 +3,8 @@
 resources embedded as base64 reach the model as what they hold (an image as an attachment, text as text, anything
 else named), never as base64; audio of a type Haarness does not carry is named rather than attached; and a 200 KB result reaches the model cut with the whole saved, while a workflow gets
 all of it. One-line JSON is laid out a value a line, whole when it then fits, and within a few times its length however deep
-it nests; what a Code Mode script returns is cut too, a string as its own lines.
+it nests; what a Code Mode script returns is cut too, a string as its own lines. A script gets the server's metadata
+for its own call, never an earlier call's with the same text.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-structured.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -44,6 +45,20 @@ def call(thread, tool):
     result = until(lambda: (values[before] if len(values := results(thread)) > before else None), f'{tool}: no result')
     until(lambda: not api('/turns/active'), 'turn still active')
     return result
+def execute(thread, code):
+    before = len(results(thread))
+    api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': '!tool execute ' + json.dumps({'code': code})})
+    until(lambda: not api('/turns/active') and any(item['name'] == 'execute' for item in results(thread)[before:]), 'execute: no result', 60)
+    coded = next(item for item in results(thread)[before:] if item['name'] == 'execute')
+    assert not coded['is_error'], coded['output'][:400]
+    return coded
+def workflow(source):
+    run_state = api('/workflows/run', {'source': source, 'model': 'echo/echo-1'})
+    deadline = time.monotonic() + 60
+    while run_state['status'] == 'running' and time.monotonic() < deadline:
+        time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
+    assert run_state['status'] == 'completed', run_state
+    return run_state.get('result')
 def check(label):
     checks.append(label); print('PASS ' + label, flush=True)
 
@@ -205,6 +220,20 @@ try:
     assert saved.replace('\n', '').replace(' ', '') == '[' * 30000 + ']' * 30000
     assert time.monotonic() - started < 20, time.monotonic() - started
     check('JSON nested 30,000 deep is laid out 32 levels down, its saved file about as long as the server\'s text')
+
+    # Each call of `stamp` gives the same text, laid out to fit, and its own number as structured content.
+    stamp = "return (await tool('mcp__structured__stamp', {})).metadata;"
+    assert json.loads(execute(thread, stamp)['output']) == {'call': 1}
+    assert call(thread, 'stamp')['metadata'] == {'call': 2}
+    call(thread, 'spaced')
+    assert json.loads(execute(thread, stamp)['output']) == {'call': 3}
+    assert call(thread, 'stamp')['metadata'] == {'call': 4}
+    spaced = execute(thread, "return (await tool('mcp__structured__spaced', {})).metadata;")
+    assert json.loads(spaced['output']) is None, spaced['output']
+    source = ("export const meta = { name: 'stamp-metadata', phases: ['call'] };\nphase('call');\n"
+              "return (await tool('mcp__structured__stamp', {})).metadata;\n")
+    assert workflow(source) == {'call': 5}
+    check('a script gets the server\'s metadata for its own call, not for the model\'s earlier call of that tool or of one with the same text')
 
     result = call(thread, 'loud_failure')
     assert result['is_error'] and len(result['output']) < 52 * 1024, len(result['output'])

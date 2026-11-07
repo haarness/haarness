@@ -1,5 +1,6 @@
 """MCP stdio fixture whose tools answer with structured content and little or no text, or embed resources as
-base64 blobs (an image under a type in capitals, text, an archive), or answer with 200 KB of text."""
+base64 blobs (an image under a type in capitals, text, an archive), or answer with 200 KB of text, or with the
+same text each call and the call's number as structured content."""
 import base64
 import json
 import sys
@@ -42,6 +43,8 @@ TOOLS = {
     'spaced': {'content': [{'type': 'text', 'text': json.dumps(
         [{'id': n, 'title': 't' * 50, 'body': 'b' * 50, 'owner': 'o' * 50, 'state': 'open'} for n in range(200)],
         indent=4)}]},
+    # The same text as `spaced` each call, with how many calls it has had as its structured content.
+    'stamp': {'content': [], 'structuredContent': {'call': 0}},
     # 60 KB of arrays nested 30,000 deep.
     'nested': {'content': [{'type': 'text', 'text': '[' * 30000 + ']' * 30000}]},
     # Structured content that names `truncated` itself, beside 80 KB of text.
@@ -54,6 +57,7 @@ TOOLS = {
              'structuredContent': {'rows': 2000}},
 }
 
+calls = 0
 for line in sys.stdin:
     request = json.loads(line)
     if 'id' not in request:
@@ -67,6 +71,9 @@ for line in sys.stdin:
                             for name, answer in TOOLS.items()]}
     elif method == 'tools/call':
         result = TOOLS[request['params']['name']]
+        if request['params']['name'] == 'stamp':
+            calls += 1
+            result = {'content': TOOLS['spaced']['content'], 'structuredContent': {'call': calls}}
     else:
         result = {}
     print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
