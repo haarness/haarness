@@ -60,11 +60,16 @@ const BLOB_STORED: &str = "SELECT EXISTS(SELECT 1 FROM snapshot_blobs WHERE hash
 const MAX_COPY_BYTES: u64 = 256 * 1024 * 1024;
 /// The most the copies of one database's pending undos hold together. Room
 /// is made by dropping the copies of undos that are confirmed or abandoned,
-/// the oldest first, never those of one still pending.
+/// the oldest first, and only then those of archived chats' pending undos,
+/// never those of an open chat's.
 const MAX_COPIES_BYTES: u64 = 1024 * 1024 * 1024;
-/// How long copies that no pending undo names are left, in case another
-/// process sharing the database is still in the middle of that undo.
+/// How long copies that no pending undo names are left when room is
+/// needed, in case another process sharing the database is still in the
+/// middle of that undo. Otherwise they are left as long as checkpoints are
+/// (see [`SqliteSnapshotStore::prune`]).
 const COPIES_GRACE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// What the disk keeps free beyond a new copy.
+const FREE_SPACE_MARGIN: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 struct BatchLimits {
@@ -1005,7 +1010,13 @@ impl SqliteSnapshotStore {
         keep_per_thread: usize,
     ) -> CoreResult<PruneReport> {
         let report = prune(&self.connection, Some((retention, keep_per_thread)))?;
-        self.copies.drop_unused(&self.connection, u64::MAX);
+        // Copies no chat names stay as long as checkpoints do.
+        self.copies.drop_unused(
+            &self.connection,
+            u64::MAX,
+            retention.to_std().unwrap_or_default(),
+            false,
+        );
         Ok(report)
     }
 
@@ -1014,9 +1025,7 @@ impl SqliteSnapshotStore {
     /// no manifest row names any more. A capture still being written keeps
     /// its rows and their blobs.
     pub fn sweep(&self) -> CoreResult<PruneReport> {
-        let report = prune(&self.connection, None)?;
-        self.copies.drop_unused(&self.connection, u64::MAX);
-        Ok(report)
+        prune(&self.connection, None)
     }
 }
 
@@ -1388,7 +1397,12 @@ impl SqliteSnapshotFolders {
         match connection {
             Some(connection) => {
                 let report = prune(&connection, Some((retention, keep_per_thread)))?;
-                self.inner.copies.drop_unused(&connection, u64::MAX);
+                self.inner.copies.drop_unused(
+                    &connection,
+                    u64::MAX,
+                    retention.to_std().unwrap_or_default(),
+                    false,
+                );
                 Ok(report)
             }
             None => Ok(PruneReport::default()),
@@ -1401,11 +1415,7 @@ impl SqliteSnapshotFolders {
     pub fn sweep(&self) -> CoreResult<PruneReport> {
         let connection = self.inner.connection.lock().clone();
         match connection {
-            Some(connection) => {
-                let report = prune(&connection, None)?;
-                self.inner.copies.drop_unused(&connection, u64::MAX);
-                Ok(report)
-            }
+            Some(connection) => prune(&connection, None),
             None => Ok(PruneReport::default()),
         }
     }
@@ -1460,9 +1470,11 @@ impl Drop for Copying {
 #[derive(Debug, Clone)]
 struct Copies {
     root: PathBuf,
-    /// [`MAX_COPY_BYTES`] and [`MAX_COPIES_BYTES`], smaller in tests.
+    /// [`MAX_COPY_BYTES`], [`MAX_COPIES_BYTES`] and [`FREE_SPACE_MARGIN`],
+    /// other sizes in tests.
     max_file: u64,
     max_total: u64,
+    free_margin: u64,
 }
 
 /// No checkpoint or kept copy holds the content of a large file.
@@ -1486,6 +1498,7 @@ impl Copies {
             root: database.with_file_name(format!("{name}.undo-copies")),
             max_file: MAX_COPY_BYTES,
             max_total: MAX_COPIES_BYTES,
+            free_margin: FREE_SPACE_MARGIN,
         }
     }
 
@@ -1514,8 +1527,11 @@ impl Copies {
     }
 
     /// Keep a copy of the live file `source`, as `entry` found it, for the
-    /// undo backed up by `backup`. Room is made by dropping the copies of
-    /// undos no longer pending.
+    /// undo backed up by `backup`, flushed to disk with its folder before
+    /// the original changes, so a crash or a power loss right after never
+    /// leaves the file gone and its copy empty. Room is made as
+    /// [`MAX_COPIES_BYTES`] says; no copy is made on a disk without
+    /// [`FREE_SPACE_MARGIN`] to spare beyond the file.
     fn keep(
         &self,
         connection: &Arc<Mutex<Connection>>,
@@ -1532,21 +1548,37 @@ impl Copies {
         }
         let needed = self.used().saturating_add(entry.size);
         if needed > self.max_total {
-            self.drop_unused(connection, needed - self.max_total);
+            // An archived chat's undo goes only when the undos that ended
+            // leave too little room.
+            let wanted = needed - self.max_total;
+            let freed = self.drop_unused(connection, wanted, COPIES_GRACE, false);
+            if freed < wanted {
+                self.drop_unused(connection, wanted - freed, COPIES_GRACE, true);
+            }
             if self.used().saturating_add(entry.size) > self.max_total {
                 return Err(NotKept::Full);
             }
         }
         fs::create_dir_all(&set).map_err(|_| NotKept::Full)?;
+        // A clone takes no room, but a copy to another volume does: either
+        // way the disk keeps a margin.
+        if fs2::available_space(&set)
+            .is_ok_and(|free| free < entry.size.saturating_add(self.free_margin))
+        {
+            return Err(NotKept::Full);
+        }
         let target = set.join(&entry.hash);
         let partial = set.join(format!(".{}.partial", uuid::Uuid::now_v7()));
         let copied = fs::copy(source, &partial)
+            .and_then(|_| OpenOptions::new().write(true).open(&partial)?.sync_all())
             .map_err(|_| NotKept::Full)
-            .and_then(|_| match hash_file(&partial) {
+            .and_then(|()| match hash_file(&partial) {
                 Ok((hash, size)) if hash == entry.hash && size == entry.size => Ok(()),
                 _ => Err(NotKept::Changed),
             })
-            .and_then(|()| fs::rename(&partial, &target).map_err(|_| NotKept::Full));
+            .and_then(|()| fs::rename(&partial, &target).map_err(|_| NotKept::Full))
+            .and_then(|()| sync_folder(&set).map_err(|_| NotKept::Full))
+            .and_then(|()| sync_folder(&self.root).map_err(|_| NotKept::Full));
         if let Err(not_kept) = copied {
             let _ = fs::remove_file(&partial);
             return Err(not_kept);
@@ -1566,8 +1598,17 @@ impl Copies {
 
     /// Drop the sets of copies no pending undo names, the oldest first, until
     /// `wanted` bytes are free; `u64::MAX` drops every one. A set this
-    /// process is using, or one written within [`COPIES_GRACE`], stays.
-    fn drop_unused(&self, connection: &Arc<Mutex<Connection>>, wanted: u64) -> u64 {
+    /// process is using, or one written within `grace`, stays: the first
+    /// step of an undo keeps its copies before the chat names the undo, so a
+    /// crash in between leaves a set no chat names. With `archived_ended`,
+    /// the pending undo of an archived chat counts as ended too.
+    fn drop_unused(
+        &self,
+        connection: &Arc<Mutex<Connection>>,
+        wanted: u64,
+        grace: std::time::Duration,
+        archived_ended: bool,
+    ) -> u64 {
         let mut sets = fs::read_dir(&self.root)
             .into_iter()
             .flatten()
@@ -1588,17 +1629,18 @@ impl Copies {
                 break;
             }
             // A time in the future is a clock that moved: keep it.
-            let recent = modified.elapsed().map_or(true, |age| age < COPIES_GRACE);
+            let recent = modified.elapsed().map_or(true, |age| age < grace);
             if recent || COPYING.lock().contains(&set) {
                 continue;
             }
+            let query = if archived_ended {
+                "SELECT EXISTS(SELECT 1 FROM threads WHERE revert_snapshot=?1 AND archived=0)"
+            } else {
+                "SELECT EXISTS(SELECT 1 FROM threads WHERE revert_snapshot=?1)"
+            };
             let pending: bool = connection
                 .lock()
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM threads WHERE revert_snapshot=?1)",
-                    [&backup],
-                    |row| row.get(0),
-                )
+                .query_row(query, [&backup], |row| row.get(0))
                 .unwrap_or(true);
             if pending {
                 continue;
@@ -1607,7 +1649,7 @@ impl Copies {
             match fs::remove_dir_all(&set) {
                 Ok(()) => freed = freed.saturating_add(bytes),
                 Err(error) => {
-                    tracing::warn!(path = %set.display(), %error, "cannot drop undo copies")
+                    tracing::warn!(path = %set.display(), %error, "cannot drop undo copies");
                 }
             }
         }
@@ -1624,6 +1666,17 @@ impl Copies {
             tracing::warn!(path = %set.display(), %error, "cannot drop undo copies");
         }
     }
+}
+
+/// Flush `folder`'s entries, so a file renamed into it stays after a crash.
+#[cfg(unix)]
+fn sync_folder(folder: &Path) -> std::io::Result<()> {
+    File::open(folder)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_folder(_folder: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// The refusal of a redo that no step can take to where the last one goes,
@@ -2571,8 +2624,8 @@ fn write_temporary(temporary: &Path, prepared: &PreparedEntry) -> CoreResult<()>
         );
     }
     if let Some(copy) = &prepared.copy {
-        // A clone where the file system makes one, so a large file costs
-        // no time or room until it changes.
+        // A clone where the file system makes one (on one APFS volume) costs
+        // no time or room until it changes; elsewhere it is a full copy.
         fs::copy(copy, temporary).map_err(io_error)?;
         let file = OpenOptions::new()
             .write(true)
@@ -3359,6 +3412,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn on_a_disk_short_of_room_a_large_file_is_left_and_named() {
+        let (guard, mut store) = fixture();
+        store.copies.free_margin = u64::MAX / 2;
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("made.bin"), large(1)).unwrap();
+        fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+        let backup = store.capture(ThreadId::new()).await.unwrap().id;
+
+        let undone = step(&store, &backup, &backup, &before.id, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert_eq!(undone.skipped, vec!["made.bin"]);
+        assert_eq!(
+            read("made.bin"),
+            Some(large(1)),
+            "not removed without a copy"
+        );
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o0\n"[..]));
+        assert_eq!(copies_of(&store, &backup), 0);
+    }
+
+    #[tokio::test]
     async fn a_redo_that_cannot_bring_a_large_file_back_says_so_and_changes_nothing() {
         let (guard, store) = fixture();
         let workspace = guard.0.join("ws");
@@ -3609,50 +3687,79 @@ mod tests {
                 .unwrap();
             set
         };
-        let hour = std::time::Duration::from_secs(3600);
-        let pending = make("0199d0c4-0000-7000-8000-000000000001", 1, hour * 3);
-        let old = make("0199d0c4-0000-7000-8000-000000000002", 2, hour * 2);
-        let older = make("0199d0c4-0000-7000-8000-000000000003", 3, hour * 4);
-        let recent = make("0199d0c4-0000-7000-8000-000000000004", 4, hour / 60);
-        store
-            .connection
-            .lock()
-            .execute(
-                "INSERT INTO threads(id,title,created_at,updated_at,provider,model,agent,archived,\
-                 revert_sequence,revert_snapshot) VALUES(?1,'t','now','now','p','m','build',0,1,?2)",
-                params![
-                    ThreadId::new().to_string(),
-                    pending.file_name().unwrap().to_string_lossy()
-                ],
-            )
-            .unwrap();
+        let pend = |set: &Path, archived: bool| {
+            store
+                .connection
+                .lock()
+                .execute(
+                    "INSERT INTO threads(id,title,created_at,updated_at,provider,model,agent,archived,\
+                     revert_sequence,revert_snapshot) VALUES(?1,'t','now','now','p','m','build',?2,1,?3)",
+                    params![
+                        ThreadId::new().to_string(),
+                        archived,
+                        set.file_name().unwrap().to_string_lossy()
+                    ],
+                )
+                .unwrap();
+        };
+        let day = std::time::Duration::from_secs(24 * 3600);
+        let pending = make("0199d0c4-0000-7000-8000-000000000001", 1, day * 3);
+        let old = make("0199d0c4-0000-7000-8000-000000000002", 2, day * 9);
+        let older = make("0199d0c4-0000-7000-8000-000000000003", 3, day * 10);
+        // The first step of an undo whose process stopped before the chat
+        // named it.
+        let unnamed = make("0199d0c4-0000-7000-8000-000000000004", 4, day / 24);
+        // The oldest of all, but its chat may come back from the archive.
+        let archived = make("0199d0c4-0000-7000-8000-000000000006", 6, day * 40);
+        pend(&pending, false);
+        pend(&archived, true);
 
-        // Room for one more copy: the oldest set no undo needs goes first.
-        store.copies.max_total = 14 * 1024 * 1024;
-        fs::write(workspace.join("big.bin"), large(9)).unwrap();
-        let entry = scan_live_entry(&workspace.join("big.bin"), "big.bin", &workspace)
-            .unwrap()
-            .unwrap();
-        let backup = "0199d0c4-0000-7000-8000-000000000005";
-        assert!(
+        // Room for one more copy: the oldest set no undo needs goes first,
+        // before an archived chat's.
+        store.copies.max_total = 15 * 1024 * 1024;
+        let keep = |byte: u8, backup: &str| {
+            fs::write(workspace.join("big.bin"), large(byte)).unwrap();
+            let entry = scan_live_entry(&workspace.join("big.bin"), "big.bin", &workspace)
+                .unwrap()
+                .unwrap();
             store
                 .copies
                 .keep(
                     &store.connection,
                     backup,
                     &workspace.join("big.bin"),
-                    &entry
+                    &entry,
                 )
                 .is_ok()
-        );
+        };
+        assert!(keep(9, "0199d0c4-0000-7000-8000-000000000005"));
         assert!(!older.exists(), "the oldest unneeded set made room");
-        assert!(old.exists() && pending.exists() && recent.exists());
+        assert!(old.exists() && pending.exists() && unnamed.exists() && archived.exists());
 
-        // A retention pass drops every unneeded set but a recent one.
-        store.sweep().unwrap();
+        // A retention pass drops what no chat names once checkpoints of its
+        // age go, and leaves an archived chat's undo.
+        store.prune(chrono::Duration::days(7), 0).unwrap();
         assert!(!old.exists());
         assert!(pending.exists(), "a pending undo keeps its copies");
-        assert!(recent.exists(), "another process may still be writing it");
+        assert!(unnamed.exists(), "kept as long as checkpoints are");
+        assert!(archived.exists());
+        // A pass that keeps every checkpoint keeps every copy.
+        let _ = fs::File::open(&unnamed)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - day * 30);
+        store.sweep().unwrap();
+        assert!(unnamed.exists());
+
+        // Room again: the set no chat names goes first, though younger than
+        // the archived chat's; then that one counts as ended, but not an
+        // open chat's.
+        assert!(keep(10, "0199d0c4-0000-7000-8000-000000000007"));
+        assert!(keep(11, "0199d0c4-0000-7000-8000-000000000008"));
+        assert!(!unnamed.exists());
+        assert!(archived.exists());
+        assert!(keep(12, "0199d0c4-0000-7000-8000-000000000009"));
+        assert!(!archived.exists(), "an archived chat's undo made room");
+        assert!(pending.exists());
     }
 
     #[tokio::test]

@@ -524,11 +524,14 @@ only the hash of a file over 2 MiB. Before undo or redo changes such a file,
 it keeps a copy of it in the data folder, beside the database, so undo still
 takes the folder back to the checkpoint (a file a turn made over 2 MiB goes,
 one it grew past 2 MiB gets its earlier content back) and redo brings the
-file back from the copy. Copies are kept up to 256 MiB per file and 1 GiB per
-database in all; room is made by dropping the copies of undos that are no
-longer pending, the oldest first. An undo's copies go when it is confirmed
-(the next message, a compaction or a direct tool), fully redone, or found
-abandoned by the retention pass. A file over 2 MiB that undo
+file back from the copy. A copy is on disk before the file changes. Copies
+are kept up to 256 MiB per file and 1 GiB per database in all, and only while
+the disk would still have 512 MiB free; room is made by dropping the copies of
+undos that are no longer pending, the oldest first, and then those of
+archived chats' pending undos. An undo's copies go when it is confirmed (the
+next message, a compaction or a direct tool) or fully redone; copies that no
+chat's undo names, as after a process stopped part way through a step, stay
+as long as checkpoints do (`retention_days`). A file over 2 MiB that undo
 cannot handle so (past those bounds, or one whose earlier content no copy
 holds, as when a turn shrank it or two turns rewrote it) stays as it is while
 the rest is restored; the next step takes it as that step left it, and a

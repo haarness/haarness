@@ -1874,6 +1874,7 @@ dependencies = [
  "chrono",
  "dunce",
  "flate2",
+ "fs2",
  "haarness-core",
  "haarness-protocol",
  "hex",
