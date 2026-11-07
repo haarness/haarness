@@ -401,7 +401,11 @@ try:
 
     # --- the 64 MB message limit
     big = call(thread, 'mcp__flood__big', {})
-    assert not big['is_error'] and len(big['output']) == 20 << 20, len(big['output'])
+    assert not big['is_error'] and len(big['output']) < 52 * 1024, len(big['output'])
+    assert 'The tool call succeeded but its output was truncated. Full output saved to: ' in big['output'], big['output'][-400:]
+    assert big['metadata']['truncated'] is True and pathlib.Path(big['metadata']['outputPath']).stat().st_size == 20 << 20, big['metadata']
+    pathlib.Path(big['metadata']['outputPath']).unlink()
+    check('a 20 MB MCP result reaches the model as 50 KiB, with the whole saved for it to read')
     before = rss_kb(daemon)
     started = time.monotonic()
     flood = call(thread, 'mcp__flood__flood', {})

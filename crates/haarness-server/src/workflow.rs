@@ -129,8 +129,11 @@ impl WorkflowRuntimeAdapter {
             .direct_tool(thread_id, name, arguments, timeout_ms, cancellation)
             .await
         {
+            // An MCP tool's whole text, which the model reads cut.
             Ok(result) if !result.is_error => Ok(Some(json!({
-                "output": result.output.text,
+                "output": crate::tools::whole_mcp_text(&result.output)
+                    .await
+                    .unwrap_or(result.output.text),
                 "metadata": result.output.metadata,
             }))),
             Ok(result) if null_on_error && !cancellation.is_cancelled() => {

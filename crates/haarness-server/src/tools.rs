@@ -650,7 +650,8 @@ impl WorkflowHost for McpCodeHost {
             .invoke(name, arguments)
             .await
             .map_err(|error| HostError::new(error.to_string()))?;
-        Ok(Some(json!({"text":output.text,"metadata":output.metadata})))
+        let text = whole_mcp_text(&output).await.unwrap_or(output.text);
+        Ok(Some(json!({"text":text,"metadata":output.metadata})))
     }
 }
 
@@ -2630,12 +2631,79 @@ impl Tool for McpProjectedTool {
     async fn execute(&self, arguments: Value, context: ToolContext) -> CoreResult<ToolOutput> {
         // MCP calls have no time limit of their own, so Stop must be able to
         // abandon one that hangs.
-        tokio::select! {
+        let output = tokio::select! {
             biased;
             () = context.cancel.cancelled() => Err(CoreError::Cancelled),
             result = self.registry.call(&self.server, &self.definition.name, arguments) => result,
-        }
+        }?;
+        capped_mcp_output(output, &tool_output_dir()).await
     }
+}
+
+/// The files [`capped_mcp_output`] saved an MCP result's whole text to,
+/// newest last. A script that called the tool (Code Mode, a workflow) gets
+/// the whole text back from one (see [`whole_mcp_text`]); only files saved
+/// here are read back, so a server cannot name a file of its own choosing
+/// in its structured content.
+static CAPPED_MCP_OUTPUTS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::VecDeque<PathBuf>>,
+> = std::sync::LazyLock::new(Default::default);
+/// How many of [`CAPPED_MCP_OUTPUTS`] are remembered.
+const CAPPED_MCP_OUTPUTS_KEPT: usize = 256;
+
+/// An MCP tool's output as the model takes it: its text cut as a native
+/// tool's is (past 50 KiB or 2,000 lines, with the whole saved in
+/// `directory` for the model to read), and its metadata as the server gave
+/// it, since MCP App pages and scripts read it, with `truncated` and
+/// `outputPath` beside it. Structured content that uses one of those names
+/// moves under `structuredContent`, as for the names Haarness fills itself.
+async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<ToolOutput> {
+    let ToolOutput { text, metadata } = output;
+    let capped = truncate_output_at(text, directory).await?;
+    let Value::Object(cut) = capped.metadata else {
+        return Ok(ToolOutput {
+            text: capped.text,
+            metadata,
+        });
+    };
+    if let Some(path) = cut.get("outputPath").and_then(Value::as_str) {
+        let mut saved = CAPPED_MCP_OUTPUTS.lock();
+        if saved.len() == CAPPED_MCP_OUTPUTS_KEPT {
+            saved.pop_front();
+        }
+        saved.push_back(PathBuf::from(path));
+    }
+    let mut merged = match metadata {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(object) if !cut.keys().any(|key| object.contains_key(key)) => object,
+        Value::Object(mut object) => {
+            let mut own = serde_json::Map::new();
+            for key in ["attachments", "diffs", "mcp_app"] {
+                if let Some(value) = object.remove(key) {
+                    own.insert(key.into(), value);
+                }
+            }
+            own.insert("structuredContent".into(), Value::Object(object));
+            own
+        }
+        other => serde_json::Map::from_iter([("structuredContent".to_owned(), other)]),
+    };
+    merged.extend(cut);
+    Ok(ToolOutput {
+        text: capped.text,
+        metadata: Value::Object(merged),
+    })
+}
+
+/// The whole text of an MCP result [`capped_mcp_output`] cut, for a script
+/// that called the tool: a script is not the model, and Code Mode cannot
+/// read the file the cut text names. `None` for any other output.
+pub(crate) async fn whole_mcp_text(output: &ToolOutput) -> Option<String> {
+    let path = PathBuf::from(output.metadata.get("outputPath")?.as_str()?);
+    if !CAPPED_MCP_OUTPUTS.lock().contains(&path) {
+        return None;
+    }
+    tokio::fs::read_to_string(&path).await.ok()
 }
 
 #[derive(Clone, Copy)]
@@ -9956,6 +10024,137 @@ mod webfetch_tests {
         ) -> CoreResult<Value> {
             unreachable!()
         }
+    }
+
+    /// Answers `wide` with 200 KB of text beside its structured content
+    /// and page, `listing` with as much under array content, `spoof` with
+    /// structured content that names a file, and anything else briefly.
+    struct WideMcp;
+
+    #[async_trait]
+    impl McpRegistry for WideMcp {
+        fn tool_snapshot(&self) -> Vec<ToolDefinition> {
+            Vec::new()
+        }
+        async fn list(&self) -> CoreResult<Vec<haarness_protocol::McpServerInfo>> {
+            Ok(Vec::new())
+        }
+        async fn configure(
+            &self,
+            _name: &str,
+            _config: haarness_protocol::McpConfigureRequest,
+        ) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn reconnect(&self, _name: &str) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn disconnect(&self, _name: &str) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn tools(&self, _name: &str) -> CoreResult<Vec<ToolDefinition>> {
+            Ok(Vec::new())
+        }
+        async fn call(&self, _name: &str, tool: &str, _arguments: Value) -> CoreResult<ToolOutput> {
+            let wide = format!("{}\n", "r".repeat(99)).repeat(2_000);
+            Ok(match tool {
+                "wide" => ToolOutput {
+                    text: wide,
+                    metadata: json!({"rows": 2000, "mcp_app": {"uri": "ui://rows"}}),
+                },
+                "listing" => ToolOutput {
+                    text: wide,
+                    metadata: json!([1, 2]),
+                },
+                "spoof" => ToolOutput {
+                    text: "short".into(),
+                    metadata: json!({"truncated": true, "outputPath": "/etc/hosts"}),
+                },
+                _ => ToolOutput {
+                    text: "short".into(),
+                    metadata: json!({"rows": 1}),
+                },
+            })
+        }
+        async fn resources(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn resource_templates(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn read_resource(&self, _name: &str, _uri: &str) -> CoreResult<Value> {
+            unreachable!()
+        }
+        async fn prompts(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn get_prompt(
+            &self,
+            _name: &str,
+            _prompt: &str,
+            _arguments: Value,
+        ) -> CoreResult<Value> {
+            unreachable!()
+        }
+    }
+
+    /// An MCP tool's text reached the model whole, however long. It is cut
+    /// as a native tool's is, the whole saved for the model to read and
+    /// handed whole to a script; the metadata stays the server's.
+    #[tokio::test]
+    async fn a_long_mcp_result_is_cut_for_the_model_with_the_whole_saved() {
+        let call = |tool: &str| {
+            let tool = McpProjectedTool {
+                definition: ToolDefinition {
+                    name: tool.into(),
+                    description: "fixture".into(),
+                    input_schema: json!({"type":"object"}),
+                },
+                server: "rows".into(),
+                registry: Arc::new(WideMcp),
+            };
+            async move {
+                tool.execute(json!({}), composite_context(&std::env::temp_dir()))
+                    .await
+                    .unwrap()
+            }
+        };
+        let wide = format!("{}\n", "r".repeat(99)).repeat(2_000);
+        let output = call("wide").await;
+        assert!(output.text.len() < 52 * 1024, "{}", output.text.len());
+        assert!(
+            output.text.contains(
+                "The tool call succeeded but its output was truncated. Full output saved to: "
+            ),
+            "{}",
+            &output.text[output.text.len() - 300..]
+        );
+        let saved = PathBuf::from(output.metadata["outputPath"].as_str().unwrap());
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), wide);
+        assert_eq!(output.metadata["truncated"], true);
+        assert_eq!(output.metadata["rows"], 2000);
+        assert_eq!(output.metadata["mcp_app"]["uri"], "ui://rows");
+        assert_eq!(
+            whole_mcp_text(&output).await.as_deref(),
+            Some(wide.as_str())
+        );
+        std::fs::remove_file(&saved).unwrap();
+
+        let listing = call("listing").await;
+        assert_eq!(listing.metadata["structuredContent"], json!([1, 2]));
+        let saved = PathBuf::from(listing.metadata["outputPath"].as_str().unwrap());
+        std::fs::remove_file(saved).unwrap();
+
+        // A short one is as the server sent it, and a file a server names
+        // is never read back for a script.
+        let short = call("short").await;
+        assert_eq!(
+            (short.text.as_str(), &short.metadata),
+            ("short", &json!({"rows": 1}))
+        );
+        let spoof = call("spoof").await;
+        assert_eq!(spoof.metadata["outputPath"], "/etc/hosts");
+        assert_eq!(whole_mcp_text(&spoof).await, None);
     }
 
     #[tokio::test]
