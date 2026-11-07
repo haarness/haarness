@@ -133,6 +133,9 @@ test("a call a crash cut off says quietly that it did not finish", async () => {
   await row.locator("summary").click();
   await expect(row).toHaveAttribute("open", "");
   expect(await row.textContent()).not.toContain(MODEL_TEXT);
+  // Nor does it say there is no output: "Didn't finish" already says it all.
+  await expect(row.locator(".tool-empty")).toHaveCount(0);
+  await expect(row).not.toContainText("No output");
   // The restart's own notice follows, once.
   await expect(page.getByText("Haarness restarted while this turn was running", { exact: false })).toHaveCount(1);
   await pictures("unfinished-call", page.locator(".transcript, .conversation").first());
