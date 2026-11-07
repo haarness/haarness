@@ -105,6 +105,11 @@ pub(crate) async fn answer_permission(
     if explicit && matches!(choice, 'w' | 'r' | 'u') {
         return Ok(());
     }
+    // Allowing the app in every chat is an Allow rule in Settings → Computer use, then this request once.
+    let lasting = crate::state::lasting_app(pending).map(str::to_owned);
+    if choice == 'e' && lasting.is_none() {
+        return Ok(());
+    }
     let id = pending.permission_id.clone();
     let lead = crate::view::approval::staged_lead(choice, pending, app.approval_reviewer);
     // A legacy prompt without patterns stages too: the rule it stores is the
@@ -126,8 +131,25 @@ pub(crate) async fn answer_permission(
     }
     app.confirm_always = None;
     app.permission_typed = None;
+    if choice == 'e'
+        && let Some(bundle) = lasting
+    {
+        let input = serde_json::json!({
+            "action": "app",
+            "bundle": bundle,
+            "rule": "allow",
+            "bar": crate::management::computer_bar_words(app.language),
+        });
+        if let Err(error) = client.manage("computer-use", &input).await {
+            app.notice = app
+                .language
+                .text("Could not allow this app: {error}")
+                .replace("{error}", &error.to_string());
+            return Ok(());
+        }
+    }
     let decision = match choice {
-        'y' | 'u' => PermissionReplyDecision::Once,
+        'y' | 'u' | 'e' => PermissionReplyDecision::Once,
         'a' => PermissionReplyDecision::Always,
         'w' => PermissionReplyDecision::AlwaysWorkspace,
         'r' => PermissionReplyDecision::AlwaysRepository,

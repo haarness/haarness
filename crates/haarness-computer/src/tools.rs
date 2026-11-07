@@ -22,7 +22,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use haarness_core::{CoreError, CoreResult, Tool, ToolContext, ToolDefinition, ToolOutput};
 use haarness_protocol::ThreadId;
 use serde_json::{Map, Value, json};
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Where preparation stores the resolved target for the approval card and the action. Models cannot supply it:
@@ -324,6 +328,15 @@ impl Target {
         }
     }
 
+    /// The element's own words: its title, else its description.
+    fn label(&self) -> &str {
+        if self.name.is_empty() {
+            &self.detail
+        } else {
+            &self.name
+        }
+    }
+
     /// `button "Save"`, as people read an element.
     fn describe(&self) -> String {
         let role = self.role.strip_prefix("AX").unwrap_or(&self.role);
@@ -362,6 +375,8 @@ struct Prepared {
     keys: Option<String>,
     /// For an app: whether it was running when the approval was asked.
     running: Option<bool>,
+    /// For a scroll: up, down, left or right.
+    direction: Option<String>,
     summary: String,
 }
 
@@ -374,6 +389,9 @@ impl Prepared {
             "bundle": target.map(|target| target.bundle.clone()),
             "app": target.map(|target| target.app_name().to_owned()),
             "target": target.map(Target::describe),
+            // The parts of `summary`, so a client can say it in the person's language.
+            "label": target.map(|target| target.label().to_owned()).filter(|label| !label.is_empty()),
+            "direction": self.direction,
             "endBundle": self.end.as_ref().map(|end| end.bundle.clone()),
             "endApp": self.end.as_ref().map(|end| end.app_name().to_owned()),
             "point": target.and_then(|target| target.point.clone()),
@@ -423,16 +441,20 @@ impl MacTool {
     /// on with today's terms accepted, and this chat claims or refreshes the screen lease. A paused agent waits here
     /// until the person resumes.
     async fn live(&self, thread: ThreadId, cancel: &CancellationToken) -> CoreResult<bool> {
+        // The lease before any wait: a pause holds the screen for the paused chat only, and any other is told it is
+        // busy instead of waiting too.
+        let chat = thread.to_string();
+        self.still_on().map_err(|error| tool_error(error.message))?;
+        self.computer.lease().take(&chat).map_err(tool_error)?;
         let waited = self
             .computer
             .wait_while_paused(cancel)
             .await
             .map_err(from_helper)?;
-        self.still_on().map_err(|error| tool_error(error.message))?;
-        self.computer
-            .lease()
-            .take(&thread.to_string())
-            .map_err(tool_error)?;
+        if waited {
+            self.still_on().map_err(|error| tool_error(error.message))?;
+            self.computer.lease().take(&chat).map_err(tool_error)?;
+        }
         Ok(waited)
     }
 
@@ -449,10 +471,42 @@ impl MacTool {
         cancel: &CancellationToken,
     ) -> Result<Value, HelperError> {
         let gate = || self.still_on();
-        self.computer
+        let first = self
+            .computer
             .helper()
-            .request(op, input, timeout, Some(cancel), Some(&gate), IDLE)
-            .await
+            .request(op, input.clone(), timeout, Some(cancel), Some(&gate), IDLE)
+            .await;
+        match first {
+            // Settings → Computer use promises that agents wait for the person to unlock or wake the Mac.
+            Err(error) if matches!(error.code.as_str(), "locked" | "asleep") => {
+                self.wait_for_screen(cancel).await?;
+                self.computer
+                    .helper()
+                    .request(op, input, timeout, Some(cancel), Some(&gate), IDLE)
+                    .await
+            }
+            other => other,
+        }
+    }
+
+    /// Waits while the screen is locked or the display asleep, keeping this process's claim on the screen; Stop and
+    /// switching off end the wait.
+    async fn wait_for_screen(&self, cancel: &CancellationToken) -> Result<(), HelperError> {
+        tracing::info!("computer use waits for the screen to be unlocked");
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => return Err(HelperError::new("cancelled", "Stopped.")),
+                () = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
+            self.still_on()?;
+            if let Some(holder) = self.computer.lease().current() {
+                let _ = self.computer.lease().take(&holder.thread);
+            }
+            let state = self.computer.helper().status(IDLE).await?;
+            if state["locked"].as_bool() != Some(true) && state["asleep"].as_bool() != Some(true) {
+                return Ok(());
+            }
+        }
     }
 
     /// A read-only helper request. If it was turned away by a pause that began at that moment, it is sent again after
@@ -761,6 +815,8 @@ impl MacTool {
                 Prepared {
                     kind: "act",
                     action: verb.into(),
+                    direction: (self.kind == Kind::Scroll)
+                        .then(|| args["direction"].as_str().unwrap_or("down").to_owned()),
                     text: args["text"].as_str().map(str::to_owned),
                     keys: args["key"].as_str().map(str::to_owned),
                     target: Some(target),
@@ -872,6 +928,27 @@ fn check_keys(keys: &str) -> CoreResult<()> {
     Ok(())
 }
 
+/// Turns away a click or drag into a terminal or editor while any approval waits for the person: such text can show
+/// a Haarness approval card that takes clicks, and the agent's click would answer it.
+fn quiet_console(prepared: &Value, context: &ToolContext) -> CoreResult<()> {
+    let waiting = context
+        .invoker
+        .as_ref()
+        .map_or(0, |invoker| invoker.approvals_waiting());
+    if prepared["console"] == true && waiting > 0 {
+        return Err(tool_error(
+            "Someone still has to answer an approval, and terminal or editor text may be showing it, so a click there now could answer it. Retry once it has been answered.",
+        ));
+    }
+    Ok(())
+}
+
+/// The chat a call's approvals and screen lease belong to: the root of its conversation, so a child agent shares them
+/// with the chat that started it.
+fn conversation(context: &ToolContext) -> ThreadId {
+    context.execution.root_thread.unwrap_or(context.thread_id)
+}
+
 /// Whether a key press types a character (and so must not go into a password field).
 fn types_text(keys: &str) -> bool {
     let parts: Vec<&str> = keys.split('+').collect();
@@ -915,7 +992,38 @@ async fn save_screenshot(workspace: &Path, encoded: &str) -> CoreResult<String> 
     tokio::io::AsyncWriteExt::write_all(&mut file, &bytes)
         .await
         .map_err(|error| tool_error(error.to_string()))?;
+    tokio::task::spawn_blocking(move || prune_screenshots(&root, KEPT_SCREENSHOTS, KEPT_FOR));
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// How many screenshots a project keeps, newest first, and for how long. Every action looks again, so they add up;
+/// a transcript row whose picture went shows none, and the model hears that it was left out.
+const KEPT_SCREENSHOTS: usize = 200;
+const KEPT_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Removes the screenshots (`mac-<id>` folders) beyond the newest `keep`, and those older than `age`.
+fn prune_screenshots(root: &Path, keep: usize, age: Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut shots: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("mac-"))
+        .filter_map(|entry| {
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect();
+    shots.sort_by(|a, b| b.0.cmp(&a.0));
+    let now = std::time::SystemTime::now();
+    for (index, (modified, path)) in shots.iter().enumerate() {
+        let old = now
+            .duration_since(*modified)
+            .is_ok_and(|elapsed| elapsed > age);
+        if index >= keep || old {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 }
 
 struct Look {
@@ -1050,29 +1158,32 @@ impl MacTool {
         mut input: Value,
         timeout: Duration,
     ) -> CoreResult<()> {
-        if self.live(context.thread_id, &context.cancel).await? {
+        if self.live(conversation(context), &context.cancel).await? {
             return Err(tool_error(RESUMED));
         }
         self.computer
-            .hold(context.thread_id, context.cancel.clone());
+            .hold(conversation(context), context.cancel.clone());
         let settings = self.computer.settings();
         input["ring"] = json!(settings.ring);
         input["bar"] = self.computer.bar_words();
         // Long actions, such as typing a long text, refresh the screen lease while they run.
         let renew = {
             let computer = self.computer.clone();
-            let thread = context.thread_id.to_string();
+            let thread = conversation(context).to_string();
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(crate::lease::IDLE / 3);
                 tick.tick().await;
                 loop {
                     tick.tick().await;
                     let _ = computer.lease().take(&thread);
+                    computer.touch();
                 }
             })
         };
         let result = self.helper(op, input, timeout, &context.cancel).await;
         renew.abort();
+        // Escape stays armed from the action's end, however long it took.
+        self.computer.touch();
         match result {
             Ok(_) => Ok(()),
             Err(error) if error.code == "paused" => {
@@ -1162,6 +1273,18 @@ impl Tool for MacTool {
         self.prepare(arguments, thread, cancel).await
     }
 
+    /// Approvals and the screen belong to the whole conversation: a child agent the chat started uses the apps the
+    /// person allowed there, and shares its screen lease, instead of asking again or finding the screen busy.
+    async fn prepare_arguments_in(
+        &self,
+        arguments: Value,
+        _thread: ThreadId,
+        root: ThreadId,
+        cancel: CancellationToken,
+    ) -> CoreResult<Value> {
+        self.prepare(arguments, root, cancel).await
+    }
+
     fn permission_constraint(
         &self,
         arguments: &Value,
@@ -1184,9 +1307,9 @@ impl Tool for MacTool {
         let prepared = &args[PREPARED];
         match self.kind {
             Kind::Snapshot => {
-                self.live(context.thread_id, &context.cancel).await?;
+                self.live(conversation(&context), &context.cancel).await?;
                 self.computer
-                    .hold(context.thread_id, context.cancel.clone());
+                    .hold(conversation(&context), context.cancel.clone());
                 if let Some(seconds) = args["wait"].as_f64().filter(|seconds| *seconds > 0.0) {
                     tokio::select! {
                         () = tokio::time::sleep(Duration::from_secs_f64(seconds.min(10.0))) => {}
@@ -1226,7 +1349,7 @@ impl Tool for MacTool {
             Kind::Apps => {
                 let action = args["action"].as_str().unwrap_or("list");
                 if action == "list" {
-                    self.live(context.thread_id, &context.cancel).await?;
+                    self.live(conversation(&context), &context.cancel).await?;
                     let settings = self.computer.settings();
                     let data = self
                         .peek("apps", json!({}), Duration::from_secs(15), &context.cancel)
@@ -1303,6 +1426,7 @@ impl Tool for MacTool {
                 })
             }
             Kind::Click => {
+                quiet_console(prepared, &context)?;
                 let mut input = spot(&args)?;
                 input["button"] = json!(args["button"].as_str().unwrap_or("left"));
                 input["count"] = json!(args["count"].as_u64().unwrap_or(1));
@@ -1382,6 +1506,7 @@ impl Tool for MacTool {
                 self.finish(&context, done, &args, look).await
             }
             Kind::Drag => {
+                quiet_console(prepared, &context)?;
                 let input = json!({
                     "from": spot(&args["from"])?,
                     "to": spot(&args["to"])?,
@@ -1402,6 +1527,30 @@ impl Tool for MacTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn old_and_surplus_screenshots_are_removed() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..5 {
+            let folder = root.path().join(format!("mac-{index}"));
+            std::fs::create_dir(&folder).unwrap();
+            std::fs::write(folder.join("screen.jpg"), b"x").unwrap();
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        std::fs::create_dir(root.path().join("photo-1")).unwrap();
+        super::prune_screenshots(root.path(), 3, Duration::from_secs(3600));
+        let mut left: Vec<String> = std::fs::read_dir(root.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        // The three newest screenshots stay, and other attachments are never touched.
+        assert_eq!(left, ["mac-2", "mac-3", "mac-4", "photo-1"]);
+        super::prune_screenshots(root.path(), 3, Duration::ZERO);
+        assert!(!root.path().join("mac-4").exists());
+        assert!(root.path().join("photo-1").exists());
+    }
+
     use super::*;
 
     #[test]

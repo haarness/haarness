@@ -170,6 +170,12 @@ enum WindowList {
     /// The app whose window is frontmost at a screen point, skipping the transparent full-screen windows the Dock
     /// and other system agents keep above everything.
     static func owner(_ x: Double, _ y: Double) -> NSRunningApplication? {
+        top(x, y).flatMap { NSRunningApplication(processIdentifier: $0.pid) }
+    }
+
+    /// The topmost window under a screen point, apart from the helper's own and screen-wide overlays: its owner and
+    /// its window level (0 for ordinary windows; menus and pop-ups sit higher).
+    static func top(_ x: Double, _ y: Double) -> (pid: pid_t, layer: Int)? {
         guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
             return nil
         }
@@ -183,7 +189,7 @@ enum WindowList {
             guard box.holds(x, y) else { continue }
             let layer = window[kCGWindowLayer as String] as? Int ?? 0
             if layer != 0 && box.width >= screen.width && box.height >= screen.height - 40 { continue }
-            return NSRunningApplication(processIdentifier: pid)
+            return (pid, layer)
         }
         return nil
     }

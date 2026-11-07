@@ -12147,13 +12147,16 @@ impl Paths {
     /// Cloud sign-in, and the servers the terminal UI saved with their
     /// tokens or passwords (`tui-servers.json`). Each project's server
     /// address and token (`runtime.json`) are recorded by
-    /// [`Self::record_credential_stores`].
+    /// [`Self::record_credential_stores`]. Computer use's settings
+    /// (`computer-use.json`) are guarded the same way: they say what agents
+    /// may do on this Mac, so an agent writing them would grant itself reach.
     fn credential_stores(&self) -> Vec<(PathBuf, bool)> {
         let mut stores = vec![
             (self.auth.clone(), false),
             (self.config_dir().join("auth.json"), false),
             (self.data.join("mcp-oauth"), true),
             (self.config_dir().join("tui-servers.json"), false),
+            (self.config_dir().join("computer-use.json"), false),
         ];
         if self.root.is_none()
             && let Some(legacy) = directories::ProjectDirs::from("dev", "haarness", "haarness")

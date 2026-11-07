@@ -64,11 +64,11 @@ def cli(*args, input=None):
                           capture_output=True, check=True, timeout=60).stdout
 
 
-def api(path, body=None):
+def api(path, body=None, headers=None):
     request = urllib.request.Request(connection["url"] + "/v1" + path,
                                      data=None if body is None else json.dumps(body).encode(),
                                      headers={"Authorization": "Bearer " + connection.get("token", ""),
-                                              "Content-Type": "application/json"})
+                                              "Content-Type": "application/json", **(headers or {})})
     with urllib.request.urlopen(request, timeout=60) as reply:
         data = reply.read()
         return json.loads(data) if data else None
@@ -136,11 +136,13 @@ class Chat:
     def __init__(self):
         self.thread = api("/threads", {"title": "Computer use live", "provider": "echo", "model": "echo-1"})["id"]
 
-    def turn(self, name, arguments, answer=None, expect_ask=None):
+    def turn(self, name, arguments, answer=None, expect_ask=None, headers=None, linger=None):
         """Runs one tool call. `answer` replies to an approval (once/always/reject); `expect_ask` says whether one
         must come. Returns (output, is_error, metadata, pending)."""
-        turn = api("/threads/" + self.thread + "/turns",
-                   {"requestId": str(uuid.uuid4()), "text": "!tool " + name + " " + json.dumps(arguments)})
+        text = "!tool " + name + " " + json.dumps(arguments)
+        if linger:
+            text = f"!linger {linger} {text}"
+        turn = api("/threads/" + self.thread + "/turns", {"requestId": str(uuid.uuid4()), "text": text}, headers)
         pending = None
         end = time.monotonic() + 60
         while time.monotonic() < end:
@@ -159,6 +161,11 @@ class Chat:
         result = self.result(turn["id"], name)
         read_refs(result[0])
         return result + (pending,)
+
+    def attachments(self):
+        items = api("/threads/" + self.thread + "/items")
+        items = items if isinstance(items, list) else items.get("items", [])
+        return [path for item in items for path in item.get("data", {}).get("metadata", {}).get("attachments", [])]
 
     def result(self, turn_id, name):
         items = api("/threads/" + self.thread + "/items")
@@ -225,6 +232,31 @@ try:
     assert state().get("passwordLength") == 0
     check("a password field is refused before anything is typed")
 
+    # With the password field focused, typing and printable keys aimed at the focus are refused too.
+    output, error, _, _ = chat.turn("mac_click", {"ref": refs["password"]}, expect_ask=False)
+    assert not error, output
+    for name, arguments in (("mac_type", {"text": "hunter2"}), ("mac_press", {"key": "a"})):
+        output, error, _, _ = chat.turn(name, arguments, expect_ask=False)
+        assert error and "Password fields are refused" in output, (name, output)
+    assert state().get("passwordLength") == 0, state()
+    check("typing or a key into a focused password field is refused")
+
+    # macOS may open its password suggestions (the Passwords app, a password manager) under the focused field, in
+    # the app's own process: pointer input there is refused too. Escape closes them.
+    output, error, metadata, _ = chat.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
+    password_field = re.search(r"\[text-field:secure-text-field\][^\n]* at=(\d+),(\d+) size=(\d+)x(\d+)", output)
+    px, py, pw, ph = map(int, password_field.groups())
+    lab_windows = subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--windows", str(lab_process.pid)],
+                                 capture_output=True, text=True).stdout.strip()
+    if int(lab_windows or 1) > 1:
+        before_slider = state().get("slider")
+        output, error, _, _ = chat.turn("mac_click", {"x": px + 30, "y": py + ph + 16}, expect_ask=False)
+        assert error and "password suggestion menu" in output, output
+        assert state().get("slider") == before_slider
+        check("a click on macOS's password suggestions under the field is refused")
+    output, error, _, _ = chat.turn("mac_press", {"key": "Escape"}, expect_ask=False)
+    assert not error, output
+
     first_row = refs["row1"]
     output, error, _, _ = chat.turn("mac_scroll", {"ref": refs["rows"], "direction": "down", "amount": 10, "snapshot": False},
                                     expect_ask=False)
@@ -251,19 +283,126 @@ try:
     check("dragging a slider")
 
     helper = subprocess.run(["pgrep", "-n", "-f", "mac-helper/.*/haarness-mac"], capture_output=True, text=True).stdout.strip()
-    windows = subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--windows", helper], capture_output=True, text=True).stdout.strip()
-    assert helper and int(windows or 0) >= 1, (helper, windows)
-    check("the bar is on screen while the agent works")
+    turn = api("/threads/" + chat.thread + "/turns",
+               {"requestId": str(uuid.uuid4()), "text": "!linger 4000 !tool mac_snapshot " + json.dumps({"app": LAB})})
+    until(lambda: int(subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--windows", helper],
+                                     capture_output=True, text=True).stdout.strip() or 0) >= 1, "the bar shows", seconds=4)
+    until(lambda: api("/turns/" + turn["id"])["status"] not in ("running", "queued"), "the lingering look ends")
+    until(lambda: int(subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--windows", helper],
+                                     capture_output=True, text=True).stdout.strip() or 0) == 0, "the bar goes with the turn", seconds=5)
+    check("the bar is on screen while the agent works, and leaves with its turn")
 
-    long_text = "x" * 4000
+    def bar(*arguments):
+        result = subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--bar", helper, *arguments],
+                                capture_output=True, text=True)
+        return result if arguments else json.loads(result.stdout or "{}")
+
+    # The bar speaks the language a client handed over, and keeps it for the server's next start.
+    japanese = {"usingApp": "Haarness が %@ で作業中", "usingMac": "Haarness がこの Mac で作業中", "paused": "Haarness はあなたを待っています",
+                "pause": "一時停止", "resume": "再開", "stop": "停止", "stopHint": "Esc でも止まります"}
+    api("/manage/computer-use", {"action": "words", "bar": japanese})
+    # The bar comes down when a turn ends, so it is read while one lingers after its look.
+    turn = api("/threads/" + chat.thread + "/turns",
+               {"requestId": str(uuid.uuid4()), "text": "!linger 6000 !tool mac_snapshot " + json.dumps({"app": LAB})})
+    until(lambda: "Haarness が Haarness Lab で作業中" in bar().get("texts", []), "the bar speaks Japanese", seconds=6)
+    until(lambda: api("/turns/" + turn["id"])["status"] not in ("running", "queued"), "the lingering look ends")
+    assert json.loads((home / "data/computer-use/bar.json").read_text())["pause"] == "一時停止"
+    check("the bar speaks the language a client sent, kept for the next start")
+
+    # Pause on the bar: typing stops, the chat keeps the screen past the lease's idle time, Resume lets it go on.
+    # Looks started straight through the API issued refs this script has not read, so it looks again first.
+    chat.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
+    typed_before = len(state().get("name", ""))
+    turn = api("/threads/" + chat.thread + "/turns",
+               {"requestId": str(uuid.uuid4()), "text": "!tool mac_type " + json.dumps({"ref": refs["name"], "text": "y" * 3000})})
+    until(lambda: len(state().get("name", "")) > typed_before + 20, "typing started before the pause")
+    assert bar("press", "一時停止").returncode == 0
+    time.sleep(1.5)
+    held = len(state().get("name", ""))
+    time.sleep(1.5)
+    assert len(state().get("name", "")) == held, "typing went on while paused"
+    other = Chat()
+    time.sleep(31)
+    output, error, _, _ = other.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
+    assert error and "The screen is busy" in output, output
+    assert bar("press", "再開").returncode == 0
+    finished = until(lambda: (value if (value := api("/turns/" + turn["id"]))["status"] not in ("running", "queued") else None),
+                     "the paused turn ends after Resume", seconds=60)
+    assert finished["status"] != "interrupted", finished
+    check(f"Pause on the bar holds the agent and the screen ({held - typed_before} characters before it), Resume lets go")
+
+    # Stop on the bar ends the turn using the screen.
+    chat.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
+    turn = api("/threads/" + chat.thread + "/turns",
+               {"requestId": str(uuid.uuid4()), "text": "!tool mac_type " + json.dumps({"ref": refs["name"], "text": "z" * 3000})})
+    until(lambda: "z" * 10 in state().get("name", ""), "typing started before Stop")
+    assert bar("press", "停止").returncode == 0
+    finished = until(lambda: (value if (value := api("/turns/" + turn["id"]))["status"] not in ("running", "queued") else None),
+                     "the stopped turn ends")
+    assert finished["status"] == "interrupted", finished
+    check("Stop on the bar ends the turn")
+    api("/manage/computer-use", {"action": "words", "bar": {
+        "usingApp": "Haarness is working in %@", "usingMac": "Haarness is working on this Mac", "paused": "Haarness is waiting for you",
+        "pause": "Pause", "resume": "Resume", "stop": "Stop", "stopHint": "Esc stops it too"}})
+
+    # Escape long after the agent's latest screen action belongs to the person: the turn goes on.
+    look_started = time.monotonic()
+    turn = api("/threads/" + chat.thread + "/turns",
+               {"requestId": str(uuid.uuid4()), "text": "!linger 52000 !tool mac_snapshot " + json.dumps({"app": LAB})})
+    until(lambda: api("/turns/" + turn["id"])["status"] == "running", "the lingering turn runs")
+    time.sleep(max(0, 47 - (time.monotonic() - look_started)))
+    subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--press-escape"], check=True)
+    time.sleep(1)
+    assert api("/turns/" + turn["id"])["status"] == "running", "Escape stopped a turn long after its last look"
+    finished = until(lambda: (value if (value := api("/turns/" + turn["id"]))["status"] not in ("running", "queued") else None),
+                     "the lingering turn ends", seconds=30)
+    assert finished["status"] == "completed", finished
+    check("Escape 47 seconds after the latest screen action leaves the turn alone")
+
+    # A child agent uses the apps its chat allowed: no new approval, and the screen is not busy for it.
+    chat.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
+    count_before = state().get("count", 0)
+    prompt = "!tool mac_click " + json.dumps({"ref": refs["count"], "snapshot": False})
+    output, error, _, _ = chat.turn("task", {"agent": "general", "description": "Count once", "prompt": prompt}, expect_ask=False)
+    assert not error, output
+    until(lambda: state().get("count", 0) == count_before + 1, "the child agent's click counted")
+    check("a child agent acts in an app its chat allowed without asking again")
+
+    # A look at every app's windows asks; focusing an app that already runs asks nothing.
+    output, error, metadata, _ = chat.turn("mac_snapshot", {"wholeScreen": True}, answer="once", expect_ask=True)
+    assert not error and metadata.get("wholeScreen") is True, output
+    output, error, _, _ = chat.turn("mac_apps", {"action": "activate", "app": LAB}, expect_ask=False)
+    assert not error, output
+    check("a whole-screen look asks, and focusing a running app does not")
+
+    # An agent's own command cannot give agents more reach, even with its chat's variable cleared.
+    output, _, _, _ = chat.turn("bash", {"command": f"env -u HAARNESS_SESSION_ID {binary} --workspace {workspace} mac allow com.apple.TextEdit"})
+    assert "Only you can give agents more reach" in output, output
+    assert "com.apple.TextEdit" not in settings_file.read_text()
+    check("an agent's command is refused when it tries to allow an app")
+
+    # A published chat's viewers see its transcript, so it never gets the screen, not even in the owner's turns.
+    shared = Chat()
+    output, error, _, _ = shared.turn("mac_snapshot", {"app": LAB}, headers={"x-haarness-remote-thread": shared.thread})
+    assert error and "mac_snapshot" in output and not shared.attachments(), output
+    output, error, _, _ = shared.turn("mac_snapshot", {"app": LAB})
+    assert error, output
+    check("a published chat never gets the screen tools")
+
+    # Typing goes sixteen characters at a time, about 3 seconds per 4000, so the longest text the tool takes is typed
+    # and Escape goes as soon as the first characters land.
+    long_text = "x" * 10000
+    chat.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
+    typed_before = len(state().get("name", ""))
     turn = api("/threads/" + chat.thread + "/turns",
                {"requestId": str(uuid.uuid4()), "text": "!tool mac_type " + json.dumps({"ref": refs["name"], "text": long_text})})
-    until(lambda: len(state().get("name", "")) > len("hello lab") + 20, "typing started")
+    until(lambda: len(state().get("name", "")) > typed_before, "typing started")
     subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--press-escape"], check=True)
     finished = until(lambda: (value if (value := api("/turns/" + turn["id"]))["status"] not in ("running", "queued") else None),
                      "the turn ends")
     assert finished["status"] == "interrupted", finished
-    typed = len(state().get("name", "")) - len("hello lab")
+    time.sleep(0.5)
+    typed = len(state().get("name", "")) - typed_before
     assert 0 < typed < len(long_text), typed
     check(f"Escape stops the turn and the typing under way ({typed} of {len(long_text)} characters typed)")
 

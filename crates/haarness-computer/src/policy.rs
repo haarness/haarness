@@ -45,6 +45,9 @@ pub const SECRETS: &[&str] = &[
     "com.apple.CoreAuthUI",
     "com.apple.loginwindow",
     "com.apple.ScreenSaver.Engine",
+    // Sign-in to a network share, and iCloud Keychain's prompts.
+    "com.apple.NetAuthAgent",
+    "com.apple.security.Keychain-Circle-Notification",
     "com.1password.1password",
     "com.agilebits.onepassword7",
     "com.agilebits.onepassword-osx",
@@ -67,6 +70,9 @@ pub const HAARNESS: &[&str] = &[
     "com.github.Electron",
     "com.apple.UserNotificationCenter",
     "com.apple.TCCPromptAgent",
+    // The prompt asking to allow Accessibility, and Screen Recording's prompts and picker.
+    "com.apple.accessibility.universalAccessAuthWarn",
+    "com.apple.screencaptureui",
 ];
 
 /// Web browsers. Screenshots of them are fine; page actions go through the browser tools, which work on the page

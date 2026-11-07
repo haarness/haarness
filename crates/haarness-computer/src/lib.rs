@@ -46,10 +46,26 @@ pub struct Config {
     pub console: Option<bool>,
 }
 
-/// The chat whose turn uses the screen now, and what stops that turn.
+/// Why a change that gives agents more reach was refused: it came from a program Haarness started.
+pub const INSIDE_REFUSAL: &str = "Only you can give agents more reach on this Mac. This request came from a program Haarness started (an agent's command, a hook or a Haarness terminal), so nothing changed. Use Settings → Computer use, /mac, or haarness mac in a terminal of your own.";
+
+/// The field a server adds to a management request that came from a program Haarness started (see
+/// [`haarness_core::process_tree`]). Only `true` means anything, so a client cannot loosen the check by sending it.
+pub const INSIDE_FIELD: &str = "__insideHaarness";
+
+/// How long after an agent's latest screen action Escape still stops it: as long as the helper's bar stays up after
+/// an action (`ControlBar.linger`). Later, Escape belongs to whatever the person is doing again (an editor, a
+/// dialog), even while the agent's turn runs on with other work.
+const ARMED: Duration = Duration::from_secs(45);
+
+/// How often a paused agent renews its claim on the screen, well inside the lease's idle time.
+const PAUSED_RENEWAL: Duration = Duration::from_secs(10);
+
+/// The chat whose turn uses the screen now, what stops that turn, and when it last used the screen.
 struct Active {
     thread: ThreadId,
     stop: CancellationToken,
+    used: std::time::Instant,
 }
 
 pub struct Computer {
@@ -59,8 +75,10 @@ pub struct Computer {
     paused: watch::Sender<bool>,
     active: Mutex<Option<Active>>,
     host: Option<String>,
-    /// The bar's words in the person's language, as the last client that asked sent them.
+    /// The bar's words in the person's language, as the last client that asked sent them; kept in `bar_file` so a
+    /// restarted server speaks them before any client has asked.
     bar: Mutex<Value>,
+    bar_file: PathBuf,
     /// App names by bundle identifier, as Spotlight found them.
     names: Mutex<std::collections::HashMap<String, Option<String>>>,
     console: Option<bool>,
@@ -82,6 +100,12 @@ impl Computer {
             },
         };
         let (paused, _) = watch::channel(false);
+        let bar_file = config.data_dir.join("computer-use").join("bar.json");
+        let bar = std::fs::read(&bar_file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .filter(Value::is_object)
+            .unwrap_or(Value::Null);
         let computer = Arc::new(Self {
             store: Store::new(&config.config_dir),
             helper: Arc::new(Helper::new(source)),
@@ -89,7 +113,8 @@ impl Computer {
             paused,
             active: Mutex::new(None),
             host: policy::host_app(),
-            bar: Mutex::new(Value::Null),
+            bar: Mutex::new(bar),
+            bar_file,
             names: Mutex::new(std::collections::HashMap::new()),
             console: config.console,
         });
@@ -120,9 +145,16 @@ impl Computer {
                         tracing::info!("computer use paused by the person");
                     }
                     Event::Resume | Event::Exit => computer.resume(),
-                    Event::Escape | Event::Stop => {
+                    // The bar's Stop is only there while the agent works; Escape counts only shortly after its
+                    // latest action.
+                    Event::Stop => {
                         computer.resume();
-                        computer.stop_active();
+                        computer.stop_active(None);
+                    }
+                    Event::Escape => {
+                        if computer.stop_active(Some(ARMED)) {
+                            computer.resume();
+                        }
                     }
                 }
             }
@@ -136,15 +168,25 @@ impl Computer {
     }
 
     /// Escape or the bar's Stop: the turn holding the screen is cancelled, the same as Stop in a client. With no turn
-    /// holding it, nothing happens.
-    fn stop_active(&self) {
-        let active = self.active.lock().take();
-        if let Some(active) = active {
-            tracing::info!(thread = %active.thread, "the person stopped the agent using the screen");
-            self.lease.release(&active.thread.to_string());
-            self.helper.release();
-            active.stop.cancel();
+    /// holding it, or (given `within`) none that used the screen that recently, nothing happens. Reports whether a
+    /// turn was stopped.
+    fn stop_active(&self, within: Option<Duration>) -> bool {
+        let mut slot = self.active.lock();
+        if within.is_some_and(|limit| {
+            slot.as_ref()
+                .is_some_and(|active| active.used.elapsed() > limit)
+        }) {
+            return false;
         }
+        let Some(active) = slot.take() else {
+            return false;
+        };
+        drop(slot);
+        tracing::info!(thread = %active.thread, "the person stopped the agent using the screen");
+        self.lease.release(&active.thread.to_string());
+        self.helper.release();
+        active.stop.cancel();
+        true
     }
 
     /// The `mac_*` tools, offered while computer use is on.
@@ -179,12 +221,13 @@ impl Computer {
 
     fn turn_ended(&self, thread: ThreadId) {
         let mut active = self.active.lock();
-        if active.as_ref().is_some_and(|item| item.thread == thread) {
+        let held = active.as_ref().is_some_and(|item| item.thread == thread);
+        if held {
             *active = None;
         }
         drop(active);
-        if self.lease.release(&thread.to_string()) {
-            // The turn is over, so the bar comes down.
+        // The turn is over, so the bar comes down and a pause ends with it, even if its lease was lost meanwhile.
+        if self.lease.release(&thread.to_string()) || held {
             self.helper.release();
             self.resume();
         }
@@ -228,9 +271,20 @@ impl Computer {
         &self.lease
     }
 
-    /// Remembers which turn is driving the screen, so Stop and Escape can cancel it.
+    /// Remembers which turn is driving the screen, so Stop and Escape can cancel it, and that it uses the screen now.
     pub(crate) fn hold(&self, thread: ThreadId, stop: CancellationToken) {
-        *self.active.lock() = Some(Active { thread, stop });
+        *self.active.lock() = Some(Active {
+            thread,
+            stop,
+            used: std::time::Instant::now(),
+        });
+    }
+
+    /// Notes that the turn holding the screen still uses it: an action under way, or one that just ended.
+    pub(crate) fn touch(&self) {
+        if let Some(active) = self.active.lock().as_mut() {
+            active.used = std::time::Instant::now();
+        }
     }
 
     #[must_use]
@@ -239,7 +293,8 @@ impl Computer {
     }
 
     /// Blocks while the agent is paused, until the person resumes or stops it; cancelling ends the wait early. Returns
-    /// true when it had to wait, since the screen may look different afterwards.
+    /// true when it had to wait, since the screen may look different afterwards. Meanwhile the paused chat keeps the
+    /// screen: a pause hands it to the person, not to another chat.
     pub(crate) async fn wait_while_paused(
         &self,
         cancel: &CancellationToken,
@@ -248,9 +303,16 @@ impl Computer {
         if !*paused.borrow_and_update() {
             return Ok(false);
         }
+        let mut renewal = tokio::time::interval(PAUSED_RENEWAL);
         loop {
             tokio::select! {
                 () = cancel.cancelled() => return Err(HelperError::new("cancelled", "Stopped.")),
+                _ = renewal.tick() => {
+                    // Refreshing this process's holder only: a pause never takes the screen from another chat.
+                    if let Some(holder) = self.lease.current() {
+                        let _ = self.lease.take(&holder.thread);
+                    }
+                }
                 changed = paused.changed() => {
                     if changed.is_err() || !*paused.borrow_and_update() {
                         return Ok(true);
@@ -263,6 +325,30 @@ impl Computer {
     /// What clients show in Settings → Computer use.
     pub async fn status(&self) -> Value {
         let settings = self.store.get();
+        // App names come from Spotlight, a process each: look the new ones up off the async threads, once.
+        let host_bundle = policy::responsible_app();
+        let unnamed: Vec<String> = settings
+            .apps
+            .keys()
+            .filter(|bundle| !bundle.ends_with(".*"))
+            .chain(host_bundle.as_ref())
+            .filter(|bundle| !self.names.lock().contains_key(*bundle))
+            .cloned()
+            .collect();
+        if !unnamed.is_empty()
+            && let Ok(found) = tokio::task::spawn_blocking(move || {
+                unnamed
+                    .into_iter()
+                    .map(|bundle| {
+                        let name = app_name(&bundle);
+                        (bundle, name)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+        {
+            self.names.lock().extend(found);
+        }
         let supported = self.supported();
         let permissions = if supported {
             let idle = if settings.on() {
@@ -274,7 +360,7 @@ impl Computer {
         } else {
             None
         };
-        let host = policy::responsible_app().map(|bundle| {
+        let host = host_bundle.map(|bundle| {
             let name = if policy::matches(&bundle, "dev.haarness.desktop") || bundle == "com.github.Electron" {
                 Some("Haarness".to_owned())
             } else {
@@ -453,10 +539,58 @@ impl Computer {
         Ok(())
     }
 
+    /// Takes the bar's words a client sent, and keeps them for the next start when they changed.
+    fn keep_words(&self, words: &Value) {
+        let mut bar = self.bar.lock();
+        if *bar == *words {
+            return;
+        }
+        *bar = words.clone();
+        drop(bar);
+        if let Some(folder) = self.bar_file.parent()
+            && std::fs::create_dir_all(folder).is_ok()
+            && let Ok(bytes) = serde_json::to_vec(words)
+            && let Err(error) = std::fs::write(&self.bar_file, bytes)
+        {
+            tracing::debug!(%error, "could not keep the computer use bar's words");
+        }
+    }
+
+    /// Whether a management request would let agents do more than they may now: agreeing to the terms, switching on,
+    /// letting apps without a rule act, hiding the click ring, or moving an app's rule toward allow. Switching off,
+    /// withdrawing and tightening never count.
+    #[must_use]
+    pub fn widens(&self, input: &Value) -> bool {
+        match input["action"].as_str().unwrap_or("get") {
+            "accept" => true,
+            "enable" => input["enabled"].as_bool().unwrap_or(true),
+            "configure" => {
+                input["defaultAct"].as_str() == Some("allow")
+                    || input["ring"].as_bool() == Some(false)
+            }
+            "app" => {
+                // An app without a rule follows the default, which may allow: between ask and allow.
+                let rank = |rule: Option<Rule>| match rule {
+                    Some(Rule::Deny) => 0,
+                    Some(Rule::Ask) => 1,
+                    None => 2,
+                    Some(Rule::Allow) => 3,
+                };
+                let bundle = input["bundle"].as_str().unwrap_or_default();
+                let wanted = input["rule"].as_str().and_then(Rule::parse);
+                rank(wanted) > rank(self.store.get().apps.get(bundle).copied())
+            }
+            _ => false,
+        }
+    }
+
     /// The `computer-use` management resource behind Desktop's Settings page and the terminal UI's `/mac`.
     pub async fn manage(&self, input: &Value) -> Result<Value, String> {
+        if input[INSIDE_FIELD].as_bool() == Some(true) && self.widens(input) {
+            return Err(INSIDE_REFUSAL.into());
+        }
         if let Some(words) = input.get("bar").filter(|words| words.is_object()) {
-            *self.bar.lock() = words.clone();
+            self.keep_words(words);
         }
         let action = input["action"].as_str().unwrap_or("get");
         match action {
@@ -559,5 +693,89 @@ fn app_name(bundle: &str) -> Option<String> {
     {
         let _ = bundle;
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn computer(root: &std::path::Path) -> Arc<Computer> {
+        Computer::new(Config {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            helper: Some(root.join("no-helper")),
+            console: Some(true),
+        })
+    }
+
+    #[test]
+    fn only_changes_that_give_agents_more_reach_count_as_widening() {
+        let root = tempfile::tempdir().unwrap();
+        let computer = computer(root.path());
+        computer
+            .set_app("com.apple.Mail", Some(Rule::Deny))
+            .unwrap();
+        computer
+            .set_app("com.apple.Notes", Some(Rule::Allow))
+            .unwrap();
+        for widening in [
+            json!({"action": "accept", "version": "1"}),
+            json!({"action": "enable", "enabled": true}),
+            json!({"action": "configure", "defaultAct": "allow"}),
+            json!({"action": "configure", "ring": false}),
+            json!({"action": "app", "bundle": "com.apple.TextEdit", "rule": "allow"}),
+            json!({"action": "app", "bundle": "com.apple.Mail", "rule": "clear"}),
+            json!({"action": "app", "bundle": "com.apple.Mail", "rule": "ask"}),
+        ] {
+            assert!(computer.widens(&widening), "{widening}");
+        }
+        for narrowing in [
+            json!({"action": "get"}),
+            json!({"action": "disable"}),
+            json!({"action": "enable", "enabled": false}),
+            json!({"action": "withdraw"}),
+            json!({"action": "configure", "defaultAct": "ask", "ring": true}),
+            json!({"action": "app", "bundle": "com.apple.TextEdit", "rule": "ask"}),
+            json!({"action": "app", "bundle": "com.apple.Notes", "rule": "clear"}),
+            json!({"action": "app", "bundle": "com.apple.Notes", "rule": "deny"}),
+        ] {
+            assert!(!computer.widens(&narrowing), "{narrowing}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_from_inside_haarness_cannot_widen_but_can_switch_off() {
+        let root = tempfile::tempdir().unwrap();
+        let computer = computer(root.path());
+        let refused = computer
+            .manage(&json!({"action": "accept", "version": terms::VERSION, INSIDE_FIELD: true}))
+            .await
+            .unwrap_err();
+        assert_eq!(refused, INSIDE_REFUSAL);
+        assert!(!computer.settings().accepted());
+        // From a person (no field, or a client claiming false) the same change goes through.
+        computer
+            .manage(&json!({"action": "accept", "version": terms::VERSION, INSIDE_FIELD: false}))
+            .await
+            .unwrap();
+        assert!(computer.settings().on());
+        computer
+            .manage(&json!({"action": "disable", INSIDE_FIELD: true}))
+            .await
+            .unwrap();
+        assert!(!computer.settings().on());
+    }
+
+    #[tokio::test]
+    async fn the_bar_s_words_outlast_a_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let words = json!({"usingApp": "Haarness が %@ で作業中", "pause": "一時停止"});
+        computer(root.path())
+            .manage(&json!({"action": "words", "bar": words}))
+            .await
+            .unwrap();
+        assert_eq!(computer(root.path()).bar_words(), words);
     }
 }

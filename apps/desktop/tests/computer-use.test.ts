@@ -50,22 +50,45 @@ test("app rules take bundle identifiers and prefix rules only", () => {
   for (const value of ["", "TextEdit app", "../etc", ".hidden", "com.*.app", "*", "com.apple.TextEdit;rm"]) assert.ok(!validBundle(value), value);
 });
 
-test("a computer use card names the app, shows the spot and offers this chat at most", () => {
+test("a computer use card names the app, shows the spot and offers this chat or every chat", () => {
   const preview = "data:image/jpeg;base64,/9j/AAAA";
   const card = computerApproval(
-    request({ kind: "act", action: "click", app: "TextEdit", bundle: "com.apple.TextEdit", target: 'button "Save"', summary: 'Click button "Save" in TextEdit', preview }),
+    request({ kind: "act", action: "click", app: "TextEdit", bundle: "com.apple.TextEdit", target: 'button "Save"', label: "Save", summary: 'Click button "Save" in TextEdit', preview }),
     english,
   );
-  assert.equal(card.summary, 'Click button "Save" in TextEdit');
+  assert.equal(card.summary, "Click “Save” in TextEdit");
   assert.equal(card.preview, preview);
-  assert.equal(card.inChat, "Allow in TextEdit for this chat");
+  assert.equal(card.inChat, "Allow in this chat");
+  assert.deepEqual(card.always, { label: "Always allow TextEdit", bundle: "com.apple.TextEdit" });
+  assert.match(card.alwaysHint!, /in any chat/);
   assert.deepEqual(card.notes, []);
+  // An older server sends only its English line, which stands as it is.
+  const older = computerApproval(request({ kind: "act", action: "click", app: "TextEdit", target: 'button "Save"', summary: 'Click button "Save" in TextEdit' }), english);
+  assert.equal(older.summary, 'Click button "Save" in TextEdit');
   // Typed text shows on the card, its line breaks kept visible and its length bounded.
   const typed = computerApproval(request({ kind: "act", action: "type", app: "Notes", text: "one\ntwo", summary: "Type into text area in Notes" }), english);
   assert.equal(typed.text, "one ⏎ two");
   assert.equal(shownText("x".repeat(400)).length, 161);
   // Keys show when nothing is typed.
   assert.equal(computerApproval(request({ action: "press", app: "Notes", keys: "Meta+S" }), english).keys, "Meta+S");
+});
+
+test("the card's main line is said in the person's language from the request's parts", () => {
+  const line = (mac: Record<string, unknown>) => computerApproval(request({ kind: "act", app: "Notes", label: null, ...mac }), english).summary;
+  assert.equal(line({ action: "click" }), "Click the marked spot in Notes");
+  assert.equal(line({ action: "double-click", label: "Inbox" }), "Double-click “Inbox” in Notes");
+  assert.equal(line({ action: "scroll", direction: "up", label: "Rows" }), "Scroll up over “Rows” in Notes");
+  assert.equal(line({ action: "press", keys: "Meta+S" }), "Press Meta+S in Notes");
+  assert.equal(line({ action: "drag", label: "note.txt", endApp: "Finder" }), "Drag “note.txt” from Notes to Finder");
+  assert.equal(line({ action: "drag", label: "note.txt", endApp: "Notes" }), "Drag “note.txt” in Notes");
+  assert.equal(line({ kind: "launch", action: "quit" }), "Quit Notes");
+  assert.equal(line({ kind: "launch", action: "launch" }), "Open Notes");
+  // An action this build does not know keeps the server's words.
+  assert.equal(line({ action: "squeeze", summary: "Squeeze it in Notes" }), "Squeeze it in Notes");
+  const japanese = dictionaries.ja;
+  const translate = (key: string, values?: Record<string, string>) =>
+    Object.entries(values ?? {}).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, value), japanese[key] ?? key);
+  assert.equal(computerApproval(request({ kind: "act", action: "click", app: "メモ", label: "保存" }), translate).summary, "メモ で 「保存」 をクリック");
 });
 
 test("a request that asks every time offers nothing lasting and says why", () => {

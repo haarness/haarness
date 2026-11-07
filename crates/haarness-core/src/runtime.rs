@@ -7779,6 +7779,13 @@ impl crate::ToolInvoker for TurnToolInvoker {
     fn stop_token(&self) -> Option<CancellationToken> {
         Some(self.runner.cancel.clone())
     }
+    fn approvals_waiting(&self) -> usize {
+        self.runner
+            .permissions
+            .iter()
+            .filter(|entry| entry.value().announced)
+            .count()
+    }
     fn parallel_safe(&self, name: &str, arguments: &serde_json::Value) -> bool {
         self.runner
             .tools
@@ -11147,6 +11154,12 @@ impl RunnerTask {
         if matches!(name, "bash_output" | "bash_stop") && !self.tool_enabled("bash") {
             return false;
         }
+        // A published chat's viewers see its transcript: this Mac's screen stays out of it.
+        if name.starts_with("mac_")
+            && crate::shared_chats::contains(self.thread.id, self.root_thread_id)
+        {
+            return false;
+        }
         if name == "preview"
             && self
                 .request
@@ -11716,7 +11729,12 @@ impl RunnerTask {
         }
         if let Some(tool) = &tool {
             arguments = tool
-                .prepare_arguments(arguments, self.thread.id, self.cancel.clone())
+                .prepare_arguments_in(
+                    arguments,
+                    self.thread.id,
+                    self.root_thread_id,
+                    self.cancel.clone(),
+                )
                 .await?;
         }
         if is_resource_tool(name) {
@@ -11877,6 +11895,7 @@ impl RunnerTask {
         }
         let mut execution = self.config.execution.clone();
         execution.chat_home = self.chat_home.then(|| self.runtime_workspace.clone());
+        execution.root_thread = Some(self.root_thread_id);
         if name == "bash"
             && let Some(hooks) = &self.hooks
         {
@@ -15445,12 +15464,45 @@ fn inherited_tool_refusal(tool: &str, rule: &str) -> String {
     )
 }
 
-/// Why a scheduled run's Chrome site gate failed instead of waiting.
+/// Why a scheduled run's Chrome site or computer use gate failed instead of waiting.
 fn cannot_ask(operations: &[String]) -> String {
+    if let Some(apps) = computer_targets(operations) {
+        return format!(
+            "Acting in {apps} on this Mac needs a person's approval, and this run cannot ask. The person can allow the app under Settings → Computer use, or do this from an interactive chat."
+        );
+    }
     format!(
         "Chrome needs the user's approval for {} and this run cannot ask. Ask the user to allow it in an interactive chat, then retry.",
         explicit_origins(operations)
     )
+}
+
+/// The apps that computer use operations (`computer:<kind>:<chat>:<bundle>…`) are about, for messages; `None` when
+/// none of `operations` is one.
+fn computer_targets(operations: &[String]) -> Option<String> {
+    let mut apps: Vec<&str> = Vec::new();
+    let mut any = false;
+    for operation in operations {
+        let Some(rest) = operation.strip_prefix(crate::permissions::COMPUTER_GRANT_PREFIX) else {
+            continue;
+        };
+        any = true;
+        let mut parts = rest.split(':');
+        match (parts.next(), parts.nth(1)) {
+            (Some("screen"), _) => apps.push("every app on screen"),
+            (_, Some(bundle)) if !bundle.is_empty() => apps.push(bundle),
+            _ => {}
+        }
+    }
+    apps.sort_unstable();
+    apps.dedup();
+    any.then(|| {
+        if apps.is_empty() {
+            "an app".to_owned()
+        } else {
+            apps.join(", ")
+        }
+    })
 }
 
 /// The error a turn ends with when its code panicked. The panic itself, with

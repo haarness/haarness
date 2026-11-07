@@ -88,6 +88,11 @@ export interface MacDetail {
   preview?: string | null;
   text?: string | null;
   keys?: string | null;
+  /** The element's own words, and a scroll's direction: the parts of `summary`. */
+  label?: string | null;
+  direction?: string | null;
+  /** Whether the server sent the parts above: an older one sends only `summary`. */
+  parts?: boolean;
   console?: boolean;
   everyTime?: boolean;
   summary?: string;
@@ -115,10 +120,54 @@ export function macDetail(detail: unknown): MacDetail {
     preview: /^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(text("preview") ?? "") ? text("preview") : null,
     text: text("text"),
     keys: text("keys"),
+    label: text("label"),
+    direction: text("direction"),
+    // A server that sends the line's parts always sends `label`, null for an element without words.
+    parts: Object.prototype.hasOwnProperty.call(mac, "label"),
     console: mac.console === true,
     everyTime: mac.everyTime === true,
     summary: text("summary") ?? undefined,
   };
+}
+
+/** The card's main line for each action, with the element as `{target}` and its app as `{app}`. */
+const actionLines: Record<string, string> = {
+  click: "Click {target} in {app}",
+  "double-click": "Double-click {target} in {app}",
+  "triple-click": "Triple-click {target} in {app}",
+  "right-click": "Right-click {target} in {app}",
+  "middle-click": "Middle-click {target} in {app}",
+  type: "Type into {target} in {app}",
+  replace: "Type into {target} in {app}",
+  hover: "Point at {target} in {app}",
+};
+const scrollLines: Record<string, string> = {
+  up: "Scroll up over {target} in {app}",
+  down: "Scroll down over {target} in {app}",
+  left: "Scroll left over {target} in {app}",
+  right: "Scroll right over {target} in {app}",
+};
+
+/**
+ * The card's main line in the person's language, built from the request's parts; null when the server sent an action
+ * this build does not know, whose line the server's own words then give.
+ */
+export function computerLine(mac: MacDetail, translate: (key: string, values?: Record<string, string>) => string) {
+  if (!mac.parts) return null;
+  const app = mac.app ?? mac.bundle ?? translate("this app");
+  const target = mac.label ? translate("“{label}”", { label: mac.label }) : translate("the marked spot");
+  if (mac.kind === "launch") return translate(mac.action === "quit" ? "Quit {app}" : "Open {app}", { app });
+  if (mac.action === "press" && mac.keys) return translate("Press {keys} in {app}", { keys: mac.keys, app });
+  if (mac.action === "drag")
+    return mac.endApp && mac.endApp !== app
+      ? translate("Drag {target} from {app} to {endApp}", { target, app, endApp: mac.endApp })
+      : translate("Drag {target} in {app}", { target, app });
+  if (mac.action === "scroll") {
+    const line = scrollLines[mac.direction ?? "down"];
+    return line ? translate(line, { target, app }) : null;
+  }
+  const line = mac.action ? actionLines[mac.action] : undefined;
+  return line ? translate(line, { target, app }) : null;
 }
 
 /** Typed text on a card: its start, whole lines kept short. */
@@ -138,6 +187,7 @@ export function computerApproval(
 ) {
   const mac = macDetail(request.detail);
   const app = mac.app ?? mac.bundle ?? translate("this app");
+  const lasting = lastingApp(request);
   const notes: string[] = [];
   if (mac.kind === "screen")
     notes.push(translate("Everything open on screen, apart from password managers and Haarness, goes to the model."));
@@ -145,7 +195,8 @@ export function computerApproval(
     notes.push(translate("Terminal and editor text can hold someone's prompt, so every click on it needs your approval."));
   else if (mac.everyTime) notes.push(translate("You set this app to ask every time."));
   return {
-    summary: mac.kind === "screen" ? translate("Look at every app's windows") : (mac.summary ?? app),
+    summary:
+      mac.kind === "screen" ? translate("Look at every app's windows") : (computerLine(mac, translate) ?? mac.summary ?? app),
     preview: mac.kind === "screen" ? null : mac.preview,
     text: mac.text ? shownText(mac.text) : null,
     keys: mac.text ? null : mac.keys,
@@ -153,11 +204,27 @@ export function computerApproval(
     /** Label for the chat-wide allow; absent when the request must be approved each time. */
     inChat:
       request.allowAlways !== false && !mac.everyTime
-        ? mac.kind === "screen"
+        ? lasting
           ? translate("Allow in this chat")
-          : translate("Allow in {app} for this chat", { app })
+          : mac.kind === "screen"
+            ? translate("Allow in this chat")
+            : translate("Allow in {app} for this chat", { app })
         : null,
+    /**
+     * Allowing the app in every chat (an Allow rule in Settings → Computer use): offered for an action in an ordinary
+     * app, never for opening one, the whole screen, or a request that asks every time.
+     */
+    always: lasting ? { label: translate("Always allow {app}", { app }), bundle: mac.bundle! } : null,
+    alwaysHint: lasting
+      ? translate("Agents won't ask before using {app} again, in any chat. You can change this in Settings → Computer use.", { app })
+      : null,
   };
+}
+
+/** Whether a computer use request may allow its app in every chat. */
+export function lastingApp(request: Pick<PendingPermissionInfo, "detail" | "allowAlways">) {
+  const mac = macDetail(request.detail);
+  return request.allowAlways !== false && mac.kind === "act" && !mac.everyTime && !mac.console && !!mac.bundle;
 }
 
 /** Catalog keys this module and its pane reach through variables, for the catalog guard. */
@@ -169,6 +236,17 @@ export const computerUseKeys = [
   "this app",
   "Allow in this chat",
   "Allow in {app} for this chat",
+  "Always allow {app}",
+  ...Object.values(actionLines),
+  ...Object.values(scrollLines),
+  "“{label}”",
+  "the marked spot",
+  "Open {app}",
+  "Quit {app}",
+  "Press {keys} in {app}",
+  "Drag {target} in {app}",
+  "Drag {target} from {app} to {endApp}",
+  "Agents won't ask before using {app} again, in any chat. You can change this in Settings → Computer use.",
   "Look at every app's windows",
   "Everything open on screen, apart from password managers and Haarness, goes to the model.",
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.",

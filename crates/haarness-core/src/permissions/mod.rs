@@ -1032,7 +1032,17 @@ fn tool_denial<'a>(
     tool: &str,
 ) -> Option<&'a PermissionRule> {
     if let Some(method) = tool.strip_prefix("browser_") {
-        return ruleset_disables_browser(rules, method);
+        return ruleset_disables_operation(rules, "browser", method);
+    }
+    // Every screen action raises `computer:act:…` (or `computer:each:…`, which a ruleset refusing acts refuses as the
+    // plan ceiling does): one that denies them all hides those tools. Looking and the app list stay.
+    if let Some(action) = tool.strip_prefix("mac_")
+        && matches!(
+            action,
+            "click" | "type" | "press" | "scroll" | "drag" | "hover"
+        )
+    {
+        return ruleset_disables_operation(rules, "computer", "act");
     }
     ruleset_disables_tool(rules, canonical_tool_permission(tool))
 }
@@ -1140,15 +1150,18 @@ fn real_folder_rule(pattern: &str) -> Option<String> {
     (real != folder).then(|| format!("{EXTERNAL_DIRECTORY}{real}{rest}"))
 }
 
-fn ruleset_disables_browser<'a>(
+/// The rule that refuses every `<name>:<method>:…` operation: the last rule naming that permission and method (or the
+/// whole permission), when it is a deny of any resource.
+fn ruleset_disables_operation<'a>(
     rules: impl DoubleEndedIterator<Item = &'a PermissionRule>,
+    name: &str,
     method: &str,
 ) -> Option<&'a PermissionRule> {
     rules
         .rev()
         .find_map(|rule| {
             let (permission, target) = rule.pattern.split_once(':').unwrap_or((&rule.pattern, "*"));
-            if !wildcard_match(permission, "browser") {
+            if !wildcard_match(permission, name) {
                 return None;
             }
             if target == "*" {

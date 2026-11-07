@@ -41,6 +41,26 @@ pub enum PermissionChoice {
     Workspace,
     Repository,
     Reject,
+    /// A computer use request's app, allowed in every chat: an Allow rule in Settings → Computer use.
+    App,
+}
+
+/// The app a computer use request may allow in every chat (see [`PermissionChoice::App`]): an action in an ordinary
+/// app. Opening an app, looking at the whole screen, and anything that asks every time (terminals and editors, apps
+/// set to ask) offer nothing lasting.
+#[must_use]
+pub fn lasting_app(pending: &haarness_protocol::PendingPermissionInfo) -> Option<&str> {
+    let mac = &pending.detail["__mac"];
+    let computer =
+        pending.permission == "computer" || pending.operation.split(':').next() == Some("computer");
+    (computer
+        && pending.allow_always != Some(false)
+        && mac["kind"] == "act"
+        && mac["everyTime"] != true
+        && mac["console"] != true)
+        .then(|| mac["bundle"].as_str())
+        .flatten()
+        .filter(|bundle| !bundle.is_empty())
 }
 
 impl PermissionChoice {
@@ -67,10 +87,14 @@ impl PermissionChoice {
         // repository, and never by switching the chat to Auto. Allowing it
         // in this chat is the answer people mean, so it comes first and is
         // what a bare Enter picks.
-        if app
+        if let Some(pending) = app
             .first_pending_permission()
-            .is_some_and(|pending| pending.explicit)
+            .filter(|pending| pending.explicit)
         {
+            // A computer use request in an ordinary app can also allow that app in every chat.
+            if lasting_app(pending).is_some() {
+                return vec![Self::Always, Self::App, Self::Once, Self::Reject];
+            }
             return vec![Self::Always, Self::Once, Self::Reject];
         }
         let mut choices = Self::ALL.to_vec();
@@ -97,6 +121,7 @@ impl PermissionChoice {
             Self::Workspace => 'w',
             Self::Repository => 'r',
             Self::Reject => 'n',
+            Self::App => 'e',
         }
     }
 
@@ -109,6 +134,7 @@ impl PermissionChoice {
             Self::Workspace => "This folder",
             Self::Repository => "Repository",
             Self::Reject => "Reject",
+            Self::App => "Always allow this app",
         }
     }
 

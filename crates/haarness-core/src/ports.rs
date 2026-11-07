@@ -787,6 +787,11 @@ pub trait ToolInvoker: Send + Sync {
     fn stop_token(&self) -> Option<CancellationToken> {
         None
     }
+    /// How many approvals of this server wait for a person now, in any chat:
+    /// a click on a terminal's text could answer one shown there.
+    fn approvals_waiting(&self) -> usize {
+        0
+    }
     async fn invoke(&self, name: &str, arguments: Value) -> CoreResult<ToolOutput>;
     /// A batch step refused before it starts still takes its number, so the
     /// call ids of the steps after it (`<batch call id>:N`) stay their place
@@ -852,6 +857,17 @@ pub trait Tool: Send + Sync {
         _cancel: CancellationToken,
     ) -> CoreResult<Value> {
         Ok(arguments)
+    }
+    /// [`Self::prepare_arguments`], also told the chat at the root of the conversation (`root`, the chat itself
+    /// unless a child agent calls), for a tool whose approvals belong to the whole conversation.
+    async fn prepare_arguments_in(
+        &self,
+        arguments: Value,
+        thread: ThreadId,
+        _root: ThreadId,
+        cancel: CancellationToken,
+    ) -> CoreResult<Value> {
+        self.prepare_arguments(arguments, thread, cancel).await
     }
     /// A live, tool-owned policy may tighten normal permissions but never loosen them.
     /// Ask constraints must still prompt when hooks or session rules pre-approve a tool.

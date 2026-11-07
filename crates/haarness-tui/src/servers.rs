@@ -474,6 +474,7 @@ async fn prepare(client: ApiClient, previous: &App) -> Result<Connection> {
     app.original_client = previous.original_client.clone();
     app.workspace_local_switching = client.supports_local_workspace_switch();
     app.server_info = Some(info);
+    crate::management::send_computer_words(&app, &client);
     app.server_commands = client.commands().await?;
     app.mcp_status = client.mcp().await?;
     if let Ok(catalog) = client.workflows().await {

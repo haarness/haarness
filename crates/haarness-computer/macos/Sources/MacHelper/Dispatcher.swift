@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import ApplicationServices
 import MacKit
 
@@ -329,6 +330,7 @@ final class Dispatcher {
         if input["ref"] != nil || input["x"] != nil {
             let (x, y, element) = try locate(input)
             spot = (x, y)
+            if (input["acting"] as? Bool) == true { try refusePasswordMenu(x, y) }
             out = (element ?? AXTree.hit(x, y)).map { AXTree.summary($0) } ?? [:]
             // A bare point names no native control: it counts as content.
             if element == nil { out["content"] = true }
@@ -439,6 +441,7 @@ final class Dispatcher {
         try ControlBar.shared.outOfTheWay(x, y) {
             // Whatever is topmost receives the pointer event, so confirm it is the approved app.
             try confirm(input, point: (x, y))
+            try refusePasswordMenu(x, y)
             try ready(toAct: true)
             try Presence.shared.waitForQuiet()
             Synth.click(x, y, button: button, count: count, held: modifiers)
@@ -447,8 +450,27 @@ final class Dispatcher {
         return ["via": "pointer"]
     }
 
-    func refusePassword(_ element: AXUIElement?) throws {
-        if let element = element ?? Self.keyboardFocus(), AXTree.isPassword(element) {
+    /// While a password field has the keyboard focus, macOS may open its password suggestions under it: a pop-up in
+    /// the app's own process offering the Passwords app or a password manager. Pointer input landing on any pop-up
+    /// then is refused, so an agent never reaches saved passwords that way.
+    func refusePasswordMenu(_ x: Double, _ y: Double) throws {
+        guard IsSecureEventInputEnabled(), let top = WindowList.top(x, y), top.layer != 0 else { return }
+        throw HelperFailure("password", "A password suggestion menu is open there, under a focused password field, and passwords stay with the person. Press Escape to close it, or click another field first.")
+    }
+
+    /// Refuses keystrokes bound for a password: `element`'s, or the focused element's when `element` is nil. Typing
+    /// where focus cannot be read is refused too, since that field could be one; so is typing at the focus while
+    /// macOS holds secure keyboard input, which apps turn on while a password field has focus. A named `element` is
+    /// judged by itself (`secureInput` false): focusing it moves the keyboard away from any password field, and the
+    /// checks before each keystroke then see that.
+    func refusePassword(_ element: AXUIElement?, secureInput: Bool = true) throws {
+        if secureInput && IsSecureEventInputEnabled() {
+            throw HelperFailure("password", "Password fields are refused; the person enters passwords themselves. macOS reports a password field in use right now.")
+        }
+        guard let target = element ?? Self.keyboardFocus() else {
+            throw HelperFailure("focus_unknown", "The field with the keyboard focus can't be read here, and it might take a password, so nothing was typed. Pass the field's ref instead.")
+        }
+        if AXTree.isPassword(target) {
             throw HelperFailure("password", "Password fields are refused; the person enters passwords themselves.")
         }
     }
@@ -462,7 +484,7 @@ final class Dispatcher {
             let (x, y, found) = try locate(input)
             guard let found else { throw HelperFailure("invalid", "Typing needs a ref. Click the field first to type at a point.") }
             try confirm(input, element: found)
-            try refusePassword(found)
+            try refusePassword(found, secureInput: false)
             Self.raise(found)
             if AXUIElementSetAttributeValue(found, kAXFocusedAttribute as CFString, kCFBooleanTrue) != .success {
                 try ControlBar.shared.outOfTheWay(x, y) {
@@ -492,7 +514,8 @@ final class Dispatcher {
         let (x, y, element) = try locate(input)
         guard let element else { throw HelperFailure("invalid", "Replacing a value needs a ref.") }
         try confirm(input, element: element)
-        try refusePassword(element)
+        // The value is set on the element itself, whatever has the keyboard.
+        try refusePassword(element, secureInput: false)
         Marker.shared.flash(x, y)
         guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString) == .success else {
             throw HelperFailure("failed", "Setting this element's value directly failed; click into it and use mac_type.")
@@ -522,6 +545,7 @@ final class Dispatcher {
         let (x, y, _) = try locate(input)
         // Scroll events go wherever the pointer is.
         try confirm(input, point: (x, y))
+        try refusePasswordMenu(x, y)
         let lines = Int32(max(1, min(50, double(input["amount"]) ?? 3)))
         let (dx, dy): (Int32, Int32) = switch (input["direction"] as? String) ?? "down" {
         case "up": (0, lines)
@@ -548,6 +572,8 @@ final class Dispatcher {
                 // Check both ends: the pickup and the drop must each be in an approved app.
                 try confirm(input, point: (start.x, start.y))
                 try confirm(input, point: (end.x, end.y), key: "expectEnd")
+                try refusePasswordMenu(start.x, start.y)
+                try refusePasswordMenu(end.x, end.y)
                 Marker.shared.flash(start.x, start.y, seconds: 0.25)
                 try Synth.drag(from: (start.x, start.y), to: (end.x, end.y))
             }
@@ -561,6 +587,7 @@ final class Dispatcher {
         let (x, y, _) = try locate(input)
         try ControlBar.shared.outOfTheWay(x, y) {
             try confirm(input, point: (x, y))
+            try refusePasswordMenu(x, y)
             Synth.hover(x, y)
         }
         Thread.sleep(forTimeInterval: settle)

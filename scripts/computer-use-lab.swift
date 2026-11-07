@@ -2,9 +2,11 @@
 // a password field, a slider, a scrolling list and a Submit button that Return presses. After every change it writes
 // its state as JSON to the file named by its first argument, so the test checks what the agent's actions did.
 import AppKit
+import ApplicationServices
 
-// Two errands for the test that need no window: press Escape as the person would (an event the helper did not
-// post), and list the on-screen windows of a process (the helper's bar).
+// Errands for the test that need no window: press Escape as the person would (an event the helper did not post),
+// list the on-screen windows of a process (the helper's bar), and read the bar's words or press one of its buttons
+// through Accessibility, as a person clicking it would.
 if CommandLine.arguments.dropFirst().first == "--press-escape" {
     let source = CGEventSource(stateID: .hidSystemState)
     CGEvent(keyboardEventSource: source, virtualKey: 0x35, keyDown: true)?.post(tap: .cghidEventTap)
@@ -15,6 +17,35 @@ if CommandLine.arguments.dropFirst().first == "--windows", let pid = Int32(Comma
     let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
     let mine = info.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == pid }
     print(mine.count)
+    exit(0)
+}
+
+// `--bar <pid>` prints {"texts": [...], "buttons": [...]} for the helper's bar; `--bar <pid> press <title>` presses
+// the button with that title and exits 1 when there is none. A press that takes the bar down (Stop) can report an
+// error although it happened, so the test judges by what followed.
+if CommandLine.arguments.dropFirst().first == "--bar", CommandLine.arguments.count >= 3, let pid = Int32(CommandLine.arguments[2]) {
+    func value(_ element: AXUIElement, _ name: String) -> AnyObject? {
+        var out: AnyObject?
+        return AXUIElementCopyAttributeValue(element, name as CFString, &out) == .success ? out : nil
+    }
+    var texts: [String] = []
+    var buttons: [(String, AXUIElement)] = []
+    func walk(_ element: AXUIElement, _ depth: Int) {
+        guard depth < 12 else { return }
+        let role = value(element, kAXRoleAttribute) as? String ?? ""
+        if role == kAXStaticTextRole, let text = value(element, kAXValueAttribute) as? String, !text.isEmpty { texts.append(text) }
+        if role == kAXButtonRole { buttons.append(((value(element, kAXTitleAttribute) as? String) ?? "", element)) }
+        for child in (value(element, kAXChildrenAttribute) as? [AXUIElement]) ?? [] { walk(child, depth + 1) }
+    }
+    for window in (value(AXUIElementCreateApplication(pid), kAXWindowsAttribute) as? [AXUIElement]) ?? [] { walk(window, 0) }
+    let arguments = Array(CommandLine.arguments.dropFirst(3))
+    if arguments.first == "press", arguments.count == 2 {
+        guard let button = buttons.first(where: { $0.0 == arguments[1] }) else { exit(1) }
+        print(AXUIElementPerformAction(button.1, kAXPressAction as CFString).rawValue)
+        exit(0)
+    }
+    let data = try JSONSerialization.data(withJSONObject: ["texts": texts, "buttons": buttons.map(\.0)])
+    print(String(decoding: data, as: UTF8.self))
     exit(0)
 }
 

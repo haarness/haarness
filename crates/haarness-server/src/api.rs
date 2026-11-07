@@ -2817,11 +2817,30 @@ struct ManagementApi;
 async fn manage_resource(
     State(state): State<ServerState>,
     Path(resource): Path<String>,
-    Json(input): Json<Value>,
+    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    Json(mut input): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let registry = state.management.as_ref().ok_or_else(|| {
         haarness_core::CoreError::Tool("Client management is unavailable on this server".into())
     })?;
+    // Computer use takes more reach for agents only from a person: say whether a change came from a program Haarness
+    // started (an agent's command, say). Reads skip the look at the process table.
+    if resource == "computer-use"
+        && matches!(
+            input["action"].as_str(),
+            Some("accept" | "enable" | "configure" | "app")
+        )
+        && let Some(object) = input.as_object_mut()
+    {
+        let peer = connection.map(|axum::Extension(axum::extract::ConnectInfo(peer))| peer);
+        let inside = tokio::task::spawn_blocking(move || {
+            peer.and_then(haarness_core::process_tree::local_client)
+                .is_some_and(haarness_core::process_tree::inside_haarness)
+        })
+        .await
+        .unwrap_or(false);
+        object.insert("__insideHaarness".into(), Value::Bool(inside));
+    }
     Ok(Json(
         registry
             .user_request(&resource, input)
@@ -2838,6 +2857,7 @@ async fn cloud_agents(
     manage_resource(
         State(state),
         Path("cloud_agent_manage".into()),
+        None,
         Json(serde_json::to_value(input).expect("Cloud input serializes")),
     )
     .await
@@ -2851,6 +2871,7 @@ async fn cloud_workspaces(
     manage_resource(
         State(state),
         Path("cloud_workspace".into()),
+        None,
         Json(serde_json::to_value(input).expect("Cloud input serializes")),
     )
     .await
@@ -2864,6 +2885,7 @@ async fn cloud_chats(
     manage_resource(
         State(state),
         Path("cloud_chat".into()),
+        None,
         Json(serde_json::to_value(input).expect("Cloud input serializes")),
     )
     .await
@@ -2876,6 +2898,7 @@ async fn cloud_schedules(
     manage_resource(
         State(state),
         Path("cloud_schedule".into()),
+        None,
         Json(serde_json::to_value(input).expect("Cloud input serializes")),
     )
     .await
@@ -3214,17 +3237,22 @@ async fn reply_permission(
     headers: HeaderMap,
     Json(reply): Json<PermissionReply>,
 ) -> ApiResult<StatusCode> {
-    // A published chat's viewers may not let agents into the owner's Chrome.
+    // A published chat's viewers may not let agents into the owner's Chrome or onto the owner's Mac.
     if crate::remote_scope::root(&headers).is_some()
-        && state
+        && let Some(pending) = state
             .runtime
             .pending_permissions()
-            .iter()
-            .any(|pending| pending.permission_id == id && pending.explicit)
+            .into_iter()
+            .find(|pending| pending.permission_id == id && pending.explicit)
     {
+        let answer = if pending.permission == "computer" {
+            "Only the person at this Mac can answer this."
+        } else {
+            "Answer this on the computer running Chrome."
+        };
         return Err(ApiFailure(
             CoreError::PermissionDenied("explicit approval".into()),
-            Some("Answer this on the computer running Chrome.".into()),
+            Some(answer.into()),
         ));
     }
     state.runtime.reply_permission(&id, reply).await?;

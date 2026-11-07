@@ -322,7 +322,9 @@ fn computer_subject(
         );
         return Some(lines.join("\n"));
     }
-    if let Some(summary) = mac["summary"]
+    if let Some(line) = computer_line(mac, language, show) {
+        lines.push(line);
+    } else if let Some(summary) = mac["summary"]
         .as_str()
         .filter(|summary| !summary.is_empty())
     {
@@ -355,6 +357,62 @@ fn computer_subject(
         );
     }
     (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// The computer use card's main line in the person's language, from the request's parts; `None` for an action this
+/// build does not know, whose line the server's own words then give.
+fn computer_line(mac: &serde_json::Value, language: Language, show: Show) -> Option<String> {
+    // A server that sends the line's parts always sends `label` (null for an element without words); an older one
+    // sends only its English line.
+    mac.get("label")?;
+    let text = |key: &str| mac[key].as_str().filter(|value| !value.is_empty());
+    let app = show(text("app").or_else(|| text("bundle")).unwrap_or("this app"));
+    let target = match text("label") {
+        Some(label) => language.text("“{label}”").replace("{label}", &show(label)),
+        None => language.text("the marked spot").to_owned(),
+    };
+    let fill = |line: &str| {
+        language
+            .text(line)
+            .replace("{target}", &target)
+            .replace("{app}", &app)
+    };
+    if mac["kind"] == "launch" {
+        return Some(fill(if text("action") == Some("quit") {
+            "Quit {app}"
+        } else {
+            "Open {app}"
+        }));
+    }
+    let line = match text("action")? {
+        "click" => "Click {target} in {app}",
+        "double-click" => "Double-click {target} in {app}",
+        "triple-click" => "Triple-click {target} in {app}",
+        "right-click" => "Right-click {target} in {app}",
+        "middle-click" => "Middle-click {target} in {app}",
+        "type" | "replace" => "Type into {target} in {app}",
+        "hover" => "Point at {target} in {app}",
+        "press" => {
+            return Some(fill("Press {keys} in {app}").replace("{keys}", &show(text("keys")?)));
+        }
+        "drag" => match text("endApp").map(show).filter(|end| *end != app) {
+            Some(end) => {
+                return Some(
+                    fill("Drag {target} from {app} to {endApp}").replace("{endApp}", &end),
+                );
+            }
+            None => "Drag {target} in {app}",
+        },
+        "scroll" => match text("direction").unwrap_or("down") {
+            "up" => "Scroll up over {target} in {app}",
+            "down" => "Scroll down over {target} in {app}",
+            "left" => "Scroll left over {target} in {app}",
+            "right" => "Scroll right over {target} in {app}",
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(fill(line))
 }
 
 /// Files a read or edit is asked about besides the path the tool names: where

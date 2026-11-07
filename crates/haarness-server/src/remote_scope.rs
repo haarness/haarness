@@ -113,6 +113,7 @@ pub async fn enforce(State(state): State<ServerState>, request: Request, next: N
     let Ok(allowed) = state.runtime.thread_tree_ids(root).await else {
         return denied();
     };
+    haarness_core::shared_chats::mark(root);
     let path = request.uri().path().trim_start_matches("/v1").to_owned();
     let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     let get = request.method() == Method::GET;

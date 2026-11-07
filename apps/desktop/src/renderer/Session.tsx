@@ -98,7 +98,7 @@ import { useApp } from "./state";
 import { Button, Icon, ago, stringify } from "./ui";
 import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
 import { watchOpenImages } from "./ImageViewer";
-import { computerApproval, isComputerPermission } from "./computer-use";
+import { barWords, computerApproval, isComputerPermission } from "./computer-use";
 import "./computer-use.css";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import type { FileContent } from "../shared";
@@ -3729,6 +3729,17 @@ function Permission(props: {
         // Once + Auto still turns Auto on.
         if (decision === "auto") {
           if (await app.allowOnceAndAuto(props.permission)) return showSettled();
+        } else if (decision === "app") {
+          // The app is allowed in every chat (a rule in Settings → Computer use), then this request once.
+          const always = computerCard()?.always;
+          if (!always) throw new Error("This request cannot allow its app in every chat.");
+          await app.api("manageResource", "computer-use", {
+            action: "app",
+            bundle: always.bundle,
+            rule: "allow",
+            bar: barWords((key) => t(key)),
+          });
+          await app.api("replyPermission", props.permission.permissionId, { decision: "once" });
         } else
           await app.api("replyPermission", props.permission.permissionId, {
             decision,
@@ -4105,6 +4116,19 @@ function Permission(props: {
           >
             {t("Allow once")}
           </button>
+          {/* An action in an ordinary app can allow that app in every chat. */}
+          <Show when={computerCard()?.always}>
+            {(always) => (
+              <button
+                disabled={answered()}
+                onClick={() => decide("app")}
+                title={computerCard()!.alwaysHint ?? undefined}
+                data-testid="computer-always"
+              >
+                {always().label}
+              </button>
+            )}
+          </Show>
           {/* A computer use request that asks every time offers nothing
               lasting; any other allows its app (or site) for this chat. */}
           <Show when={!computer() || computerCard()?.inChat}>

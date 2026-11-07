@@ -1,6 +1,6 @@
 //! `haarness mac`: computer use from the command line, and the `computer-use` view the terminal UI's `/mac` shows.
-//! The settings belong to this Mac and apply to every project; only a person changes them, so the commands that
-//! change them refuse to run inside an agent's shell command.
+//! The settings belong to this Mac and apply to every project; only a person gives agents more reach, so the commands
+//! that widen them refuse to run inside a program Haarness started. Switching off and tightening always work.
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
@@ -55,9 +55,24 @@ enum MacCommand {
     },
 }
 
-/// Whether this command runs inside an agent's shell command, which must never change these settings.
-fn from_agent() -> bool {
+/// Whether this command runs inside a program Haarness started: an agent's shell command (which names its chat),
+/// or anything below a `haarness` process, which catches a command that cleared that variable.
+fn inside_haarness() -> bool {
     std::env::var_os(haarness_core::SESSION_ID_ENV).is_some_and(|value| !value.is_empty())
+        || haarness_core::process_tree::inside_haarness(std::process::id())
+}
+
+/// The management request a command amounts to, for [`Computer::widens`].
+fn request(command: &MacCommand) -> Value {
+    let app = |app: &str, rule: &str| json!({"action": "app", "bundle": app, "rule": rule});
+    match command {
+        MacCommand::On => json!({"action": "enable", "enabled": true}),
+        MacCommand::Allow { app: name } => app(name, "allow"),
+        MacCommand::Ask { app: name } => app(name, "ask"),
+        MacCommand::Deny { app: name } => app(name, "deny"),
+        MacCommand::Forget { app: name } => app(name, "clear"),
+        _ => json!({"action": "get"}),
+    }
 }
 
 pub async fn run(computer: &Computer, args: &MacArgs) -> Result<()> {
@@ -81,10 +96,8 @@ pub async fn run(computer: &Computer, args: &MacArgs) -> Result<()> {
         }
         _ => {}
     }
-    if from_agent() {
-        bail!(
-            "Only you change computer use, from your own terminal: Haarness refuses it inside an agent's command."
-        );
+    if computer.widens(&request(&command)) && inside_haarness() {
+        bail!(haarness_computer::INSIDE_REFUSAL);
     }
     if !computer.supported() {
         bail!("Computer use needs macOS and a build of Haarness that includes it.");

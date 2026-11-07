@@ -526,6 +526,7 @@ async fn run_with_client(
             .collect();
     }
     app.server_info = server_info;
+    crate::management::send_computer_words(&app, &client);
     app.hydrate_shell_commands(&client).await;
     app.server_commands = client.commands().await.unwrap_or_default();
     // Workflow definitions are first-class slash commands (for example,

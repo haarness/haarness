@@ -25120,6 +25120,39 @@ async fn a_computer_use_card_names_the_action_and_stays_in_this_chat() {
     );
 }
 
+/// An action in an ordinary app can also allow that app in every chat, on
+/// its own key; the card says the action in the person's language from the
+/// request's parts.
+#[tokio::test]
+async fn a_computer_use_card_offers_the_app_in_every_chat_and_speaks_the_language() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mac = serde_json::json!({"kind": "act", "action": "click", "app": "TextEdit", "bundle": "com.apple.TextEdit",
+        "label": "Save", "summary": "Click button \"Save\" in TextEdit", "everyTime": false, "console": false});
+    app.reduce(
+        computer_event(&thread, "perm-lasting", mac, true),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        crate::state::PermissionChoice::available(&app),
+        [
+            crate::state::PermissionChoice::Always,
+            crate::state::PermissionChoice::App,
+            crate::state::PermissionChoice::Once,
+            crate::state::PermissionChoice::Reject,
+        ]
+    );
+    let text = frame_text(&app, (130, 40));
+    assert!(text.contains("Click “Save” in TextEdit"), "{text}");
+    assert!(text.contains("Always allow this app"), "{text}");
+    app.language = crate::locale::Language::Japanese;
+    let text = frame_text(&app, (130, 40));
+    assert!(text.contains("TextEdit で 「Save」 をクリック"), "{text}");
+    assert!(text.contains("このアプリを常に許可"), "{text}");
+}
+
 /// A click on a terminal's text asks every time: the card says why and
 /// offers no answer that lasts.
 #[tokio::test]
@@ -25138,4 +25171,6 @@ async fn a_terminal_text_click_card_says_it_asks_every_time() {
     assert!(text.contains("Click text area in Terminal"), "{text}");
     assert!(text.contains("needs your approval"), "{text}");
     assert!(!text.contains("Allow in this chat"), "{text}");
+    assert!(!text.contains("Always allow this app"), "{text}");
+    assert!(crate::state::lasting_app(app.first_pending_permission().unwrap()).is_none());
 }

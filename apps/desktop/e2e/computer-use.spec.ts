@@ -398,25 +398,42 @@ test("a computer use request docks as Use this Mac, with the spot, and allows th
       bundle: "com.apple.TextEdit",
       app: "TextEdit",
       target: 'button "Save"',
+      label: "Save",
       summary: 'Click button "Save" in TextEdit',
       preview: picture,
     }),
   ]);
   const dock = page.getByRole("alert", { name: "Permission request" });
   await expect(dock.locator(".prompt-title")).toHaveText("Use this Mac");
-  await expect(dock.locator(".computer-approval-summary")).toHaveText('Click button "Save" in TextEdit');
+  await expect(dock.locator(".computer-approval-summary")).toHaveText("Click “Save” in TextEdit");
   await expect(dock.locator(".computer-approval-preview img")).toHaveAttribute("src", picture);
   // Shown smaller than it is, the picture opens full size.
   await expect(dock.locator(".computer-approval-preview img")).toHaveJSProperty("naturalWidth", 360);
   await expect(dock.locator(".computer-approval-preview [data-image-open]")).toHaveCount(1);
   await expect(dock).not.toContainText("asks");
   await expect(dock).not.toContainText("Chrome");
-  await expect(dock.locator(".prompt-actions").getByRole("button")).toHaveText(["Deny", "Allow once", "Allow in TextEdit for this chat"]);
-  await expect(dock.getByRole("button", { name: "Allow in TextEdit for this chat", exact: true })).toHaveClass(/primary/);
+  await expect(dock.locator(".prompt-actions").getByRole("button")).toHaveText(["Deny", "Allow once", "Always allow TextEdit", "Allow in this chat"]);
+  await expect(dock.getByRole("button", { name: "Allow in this chat", exact: true })).toHaveClass(/primary/);
   await look("computer-use-approval", docked);
-  await dock.getByRole("button", { name: "Allow in TextEdit for this chat", exact: true }).click();
+  await dock.getByRole("button", { name: "Allow in this chat", exact: true }).click();
   await expect.poll(async () => (await fake()).replies.at(-1)).toEqual({ id, decision: "always" });
   await expect(dock).toHaveCount(0);
+});
+
+test("Always allow saves a rule for the app, then allows this request once", async () => {
+  const id = crypto.randomUUID();
+  await showPermissions([
+    request(id, { kind: "act", action: "type", bundle: "com.apple.Notes", app: "Notes", label: "Body", text: "milk", summary: 'Type into text area "Body" in Notes' }),
+  ]);
+  const dock = page.getByRole("alert", { name: "Permission request" });
+  await expect(dock.locator(".computer-approval-summary")).toHaveText("Type into “Body” in Notes", { timeout: 10000 });
+  const button = dock.getByRole("button", { name: "Always allow Notes", exact: true });
+  await expect(button).toHaveAttribute("title", "Agents won't ask before using Notes again, in any chat. You can change this in Settings → Computer use.");
+  await button.click();
+  await expect.poll(async () => (await fake()).replies.at(-1)).toEqual({ id, decision: "once" });
+  const rule = (await fake()).calls.find((call) => call.action === "app");
+  expect(rule).toMatchObject({ action: "app", bundle: "com.apple.Notes", rule: "allow" });
+  expect(rule?.bar?.usingApp).toBeTruthy();
 });
 
 test("a click on a terminal's text asks every time and offers no chat-wide allow", async () => {
@@ -441,6 +458,7 @@ test("a click on a terminal's text asks every time and offers no chat-wide allow
   await expect(dock.locator(".prompt-title")).toHaveText("Use this Mac", { timeout: 10000 });
   await expect(dock.locator(".prompt-actions").getByRole("button")).toHaveText(["Deny", "Allow once"]);
   await expect(dock.getByRole("button", { name: "Allow once", exact: true })).toHaveClass(/primary/);
+  await expect(dock.getByTestId("computer-always")).toHaveCount(0);
   await expect(dock.locator(".computer-approval-note")).toHaveText(
     "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.",
   );

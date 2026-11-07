@@ -94,8 +94,12 @@ final class AXTree {
         text(element, kAXRoleAttribute) == "AXSecureTextField" || text(element, kAXSubroleAttribute) == "AXSecureTextField"
     }
 
+    /// The element keystrokes go to. The system-wide query often fails (kAXErrorCannotComplete for most apps on
+    /// recent macOS), so the frontmost app is then asked for its own.
     static func focused() -> AXUIElement? {
-        element(value(systemWide(), kAXFocusedUIElementAttribute))
+        if let found = element(value(systemWide(), kAXFocusedUIElementAttribute)) { return found }
+        guard let front = NSWorkspace.shared.frontmostApplication else { return nil }
+        return element(value(application(front.processIdentifier), kAXFocusedUIElementAttribute))
     }
 
     /// Hit-tests a screen point. Hits on the helper's own bar are ignored, since it belongs to no app.

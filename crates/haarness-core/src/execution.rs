@@ -53,6 +53,10 @@ pub struct ExecutionSettings {
     /// by the runtime, never configured.
     #[serde(skip)]
     pub shell_call: Option<crate::ShellCall>,
+    /// The chat at the root of the calling turn's conversation: the chat itself, or for a child agent's turn the
+    /// chat that started it all. `None` outside a turn. Set per call by the runtime, never configured.
+    #[serde(skip)]
+    pub root_thread: Option<haarness_protocol::ThreadId>,
 }
 
 impl Default for ExecutionSettings {
@@ -75,6 +79,7 @@ impl Default for ExecutionSettings {
             person_shell: false,
             chat_home: None,
             shell_call: None,
+            root_thread: None,
         }
     }
 }

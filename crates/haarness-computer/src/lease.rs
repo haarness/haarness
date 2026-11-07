@@ -1,8 +1,8 @@
 //! A single chat drives the screen at any moment. Two agents sharing one pointer, or one agent using refs another
 //! has just invalidated, would hit the wrong things. A chat's first computer use call claims a lease, a lock-guarded
 //! file in the data folder that every other chat of this user is turned away by, in this process or any other. The
-//! lease ends with the chat's turn, with its process, or [`IDLE`] after the chat's latest call.
-//! [`IDLE`] after the chat's last call.
+//! lease ends with the chat's turn, with its process, or [`IDLE`] after the chat's latest call. Every process sharing
+//! one data folder shares the lease: two Haarness installs with separate homes (`HAARNESS_HOME`) do not see each other's.
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};

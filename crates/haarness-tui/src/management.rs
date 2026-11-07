@@ -399,6 +399,26 @@ impl App {
     }
 }
 
+/// Hands the server the bar's words in this client's language as soon as it connects, so the bar an agent raises
+/// later speaks it even when `/mac` was never opened. Nothing happens on a server without computer use.
+pub(crate) fn send_computer_words(app: &App, client: &ApiClient) {
+    let offered = app.server_info.as_ref().is_some_and(|info| {
+        info.capabilities
+            .iter()
+            .any(|capability| capability == "computer-use.v1")
+    });
+    if !offered {
+        return;
+    }
+    let input = json!({"action": "words", "bar": computer_bar_words(app.language)});
+    let client = client.clone();
+    tokio::spawn(async move {
+        if let Err(error) = client.manage("computer-use", &input).await {
+            tracing::debug!(%error, "could not hand over the computer use bar's words");
+        }
+    });
+}
+
 /// The words of the bar computer use shows at the top of the screen, in
 /// `language`, with `%@` where the app's name goes.
 pub(crate) fn computer_bar_words(language: crate::locale::Language) -> Value {
