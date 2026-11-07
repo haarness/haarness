@@ -25,6 +25,7 @@ pub mod sharing;
 pub mod skills;
 pub mod tools;
 pub mod vcs;
+mod webfetch;
 pub mod workflow;
 
 pub use api::{ServerHandle, ServerState, serve};

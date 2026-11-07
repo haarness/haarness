@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Real server, echo provider: webfetch reads pages as text, meets rules for every spelling of an address,
-reports redirects off the address by reason, follows one on it only where the rules allow its new address
-(in a turn and in a workflow's own call), stops oversized and stalled pages, and honours Stop; media
-generation still follows its backend's redirects.
+"""Real server, echo provider: webfetch reads pages as text, meets rules for every spelling of an address
+(one written without a scheme too), reports redirects off the address by reason, follows one on it only
+where the rules allow its new address (in a turn and in a workflow's own call), stops oversized and
+stalled pages, and honours Stop; it asks for a page as a reader does, reads compressed pages and legacy
+character sets, attaches a PDF, and says what a bot check or an error page means. Media generation still
+follows its backend's redirects.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-webfetch.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
-import http.server, json, os, pathlib, shutil, subprocess, tempfile, threading, time, urllib.request, uuid
+import gzip, http.server, json, os, pathlib, shutil, subprocess, tempfile, threading, time, urllib.request, uuid
 import e2e_scratch
 from e2e_env import clean_env
 
@@ -26,6 +28,20 @@ PAGES = {
     '/landing': ('text/plain', b'same-host-landing-proof'),
     '/private': ('text/plain', b'private-page-proof'),
 }
+# Path: (status, headers, body), sent as they are.
+RAW = {
+    # Compressed although the request did not have to ask for it, as some servers do.
+    '/gzipped': (200, {'Content-Type': 'text/html', 'Content-Encoding': 'gzip'},
+                 gzip.compress(b'<html><body><p>gzipped-page-proof</p></body></html>')),
+    # Shift_JIS named only by the page: こころ (kokoro).
+    '/sjis': (200, {'Content-Type': 'text/html'},
+              b'<html><head><meta http-equiv="Content-Type" content="text/html;charset=Shift_JIS"></head>'
+              b'<body><p>\x82\xb1\x82\xb1\x82\xeb</p></body></html>'),
+    '/challenge': (403, {'Content-Type': 'text/html', 'cf-mitigated': 'challenge'}, b'<title>Just a moment...</title>'),
+    '/gone': (404, {'Content-Type': 'application/json'}, b'{"message":"No such release"}'),
+    '/paper.pdf': (200, {'Content-Type': 'application/pdf'}, b'%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n'),
+}
+accepts = {}
 
 class Web(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
@@ -47,7 +63,13 @@ class Web(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
         requests.append(self.headers.get('Host', '') + self.path)
-        if self.path == '/endless':
+        accepts[self.path] = {name: self.headers.get(name, '') for name in ('Accept', 'Accept-Language', 'Accept-Encoding')}
+        if self.path in RAW:
+            status, headers, body = RAW[self.path]
+            self.send_response(status)
+            for name, value in headers.items(): self.send_header(name, value)
+            self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+        elif self.path == '/endless':
             # No Content-Length: only the size limit can stop the reader early.
             self.chunked(); block = b'a' * 65536; sent['endless'] = 0
             try:
@@ -137,6 +159,44 @@ try:
     assert finish(thread, before)['output'].strip() == 'bare-nonce-314159'
     check('HTML reads as its text, without inline scripts and styles, and bare text is kept')
 
+    asked = accepts['/ordinary']
+    assert asked['Accept'].startswith('text/markdown') and 'text/html' in asked['Accept'], asked
+    assert asked['Accept-Language'] and 'gzip' in asked['Accept-Encoding'], asked
+    _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/gzipped'})
+    result = finish(thread, before)
+    assert not result['is_error'] and result['output'].strip() == 'gzipped-page-proof', result
+    _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/sjis'})
+    result = finish(thread, before)
+    assert not result['is_error'] and result['output'].strip() == '\u3053\u3053\u308d', result
+    check('a fetch asks for a page as a reader does, and reads a compressed page and one in Shift_JIS as text')
+
+    _, before = fetch(thread, {'url': f'127.0.0.1:{port}/ordinary'})
+    result = finish(thread, before)
+    assert not result['is_error'] and 'ordinary-page-proof' in result['output'], result
+    for address in [f'127.0.0.1:{port}/private', f'//127.0.0.1:{port}/private', f'localhost:{port}/landing']:
+        _, before = fetch(thread, {'url': address})
+        result = finish(thread, before)
+        assert result['is_error'] and 'denied by permission rule' in result['output'], (address, result)
+    assert not any(path.endswith('/private') or path.startswith('localhost') for path in requests), requests
+    check('an address without a scheme is fetched over http here, and meets the rules for the address it reads')
+
+    _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/challenge'})
+    result = finish(thread, before)
+    assert result['is_error'] and 'a bot check from Cloudflare (HTTP 403)' in result['output'], result
+    assert 'will not help' in result['output'], result
+    _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/gone'})
+    result = finish(thread, before)
+    assert result['is_error'] and 'answered HTTP 404 (Not Found): there is no page at this address' in result['output'], result
+    assert result['output'].endswith('The server said: {"message":"No such release"}'), result
+    check('a bot check and a missing page say what happened and what to try')
+
+    _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/paper.pdf'})
+    result = finish(thread, before)
+    assert not result['is_error'] and result['output'].startswith('PDF fetched from'), result
+    attached = result['metadata']['attachments'][0]
+    assert attached.endswith('.pdf') and pathlib.Path(attached).read_bytes().startswith(b'%PDF-1.4'), result
+    check('a PDF is saved and attached for the model, not shown as bytes')
+
     for address in [f'HTTP://127.0.0.1:{port}/private', f'http://someone@127.0.0.1:{port}/private',
                     f'http://127.0.0.1:{port}/public/../private', f'http://LOCALHOST.:{port}/landing']:
         _, before = fetch(thread, {'url': address})
@@ -202,7 +262,7 @@ try:
     rss_before = rss_kb(pid) if pid else 0
     _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/endless'})
     result = finish(thread, before, 60)
-    assert result['is_error'] and 'Response too large' in result['output'], result
+    assert result['is_error'] and 'is larger than the 6.0 MB webfetch reads' in result['output'], result
     until(lambda: 'endless' in sent and sent['endless'] < ENDLESS_CAP, 'server kept sending')
     time.sleep(.5)
     assert sent['endless'] < 24 * 1024 * 1024, sent

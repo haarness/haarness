@@ -103,6 +103,11 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 toml = { version = "1.0", features = ["preserve_order"] }
 tower = "0.5"
 htmd = "0.5"
+# What webfetch reads: pages compressed with brotli or zstd (gzip and
+# deflate come from flate2) and pages in legacy character sets.
+brotli-decompressor = "6.3"
+ruzstd = { version = "0.9", default-features = false, features = ["std"] }
+encoding_rs = "0.8.35"
 jsonc-parser = { version = "0.33", features = ["serde", "cst"] }
 jsonschema = { version = "0.51", default-features = false }
 # The macOS Keychain and the Windows Credential Manager, for the secrets MCP

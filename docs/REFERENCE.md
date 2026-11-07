@@ -581,9 +581,25 @@ OpenAI-compatible Chat endpoints receive their native file, image, or MP3/WAV
 shape where available, but the selected gateway and model remain authoritative.
 
 `webfetch` reads one HTTP or HTTPS address and turns an HTML page into Markdown,
-leaving out its scripts, styles and embedded frames. Reading stops as soon as a response
-passes 6 MiB, also when the server sends no length or a wrong one; a fetch that
-has not finished after 60 seconds ends with an error, and Stop ends it at once.
+leaving out its scripts, styles and embedded frames. An address written without a scheme
+(`docs.rs/serde`, `localhost:3000/api`) is read over https, or over plain http when it names
+this computer or a private network address, and the permission rules meet it as that address.
+It asks for a page as a reader's client does: the page as Markdown where the site offers it,
+else text or HTML, in English, compressed with gzip, deflate, brotli or zstd, which it unpacks
+(also when a server compresses a page unasked). Text is read in the character set the response,
+its byte order mark, an HTML `<meta>` or an XML declaration names, else as UTF-8 (windows-1252
+for bytes that are not). A PDF or an image (PNG, JPEG, GIF, WebP) is saved and attached for the
+model, as `read` attaches one; any other file is saved, and the result says where. A page that
+holds almost no text without JavaScript says so and where else to read it. Reading stops as soon
+as a response passes 6 MiB, also when the server sends no length or a wrong one, or when a small
+compressed body unpacks past it; a server that does not accept the connection within 20 seconds,
+or a fetch that has not finished after 60, ends with an error, and Stop ends it at once.
+A failed fetch says what happened and what to try, in plain words: the status a server answered
+with and what it means (with the error page's title or the start of an API's error text), a
+bot check (Cloudflare, Fastly, Vercel, AWS WAF, DataDome, HUMAN, Akamai) that only a browser
+passes, a name that does not resolve, a connection refused or cut, or a certificate that is
+not valid; for the sites agents read most (Stack Exchange, npm, PyPI, crates.io, GitHub) it names
+the API or raw address that has the same content.
 
 `image_generate` and `video_generate` are lazy, side-effecting tools that always
 require the `media_generate` permission unless an explicit later rule allows

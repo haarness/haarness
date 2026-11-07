@@ -1437,9 +1437,15 @@ fn web_client() -> reqwest::Client {
     http_client()
         // `fetch_page` follows redirects itself, judging each one.
         .redirect(reqwest::redirect::Policy::none())
+        // A host that never answers is reported long before the fetch's
+        // own deadline.
+        .connect_timeout(WEBFETCH_CONNECT_TIMEOUT)
         .build()
         .expect("the static WebFetch HTTP client configuration is valid")
 }
+
+/// How long webfetch waits for a server to accept its connection.
+const WEBFETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How many redirects one fetch follows before it gives up.
 const WEBFETCH_REDIRECTS: usize = 10;
@@ -1541,17 +1547,58 @@ async fn webfetch(
     rules: Option<&FetchRules>,
     cancel: &tokio_util::sync::CancellationToken,
     deadline: Duration,
+    media_max_bytes: u64,
 ) -> CoreResult<ToolOutput> {
+    // Named in a failure without the sign-in it may carry.
+    let mut asked = url.clone();
+    let _ = asked.set_username("");
+    let _ = asked.set_password(None);
     tokio::select! {
         biased;
         () = cancel.cancelled() => Err(CoreError::Cancelled),
-        result = tokio::time::timeout(deadline, fetch_page(client, url, raw, rules)) => {
+        result = tokio::time::timeout(deadline, fetch_page(client, url, raw, rules, media_max_bytes)) => {
             result.unwrap_or_else(|_| {
-                Err(CoreError::Tool(format!(
-                    "The page did not finish loading within {} seconds",
-                    deadline.as_secs()
+                Err(CoreError::Tool(crate::webfetch::timeout_failure(
+                    &asked,
+                    deadline.as_secs().max(1),
                 )))
             })
+        }
+    }
+}
+
+/// A webfetch request for `url`: what it asks the server for, as a reader's
+/// client asks for a page.
+fn fetch_request(client: &reqwest::Client, url: url::Url, raw: bool) -> reqwest::RequestBuilder {
+    use crate::webfetch::{ACCEPT_ENCODING, ACCEPT_LANGUAGE, ACCEPT_MARKDOWN, ACCEPT_RAW};
+    client
+        .get(url)
+        .header(
+            reqwest::header::ACCEPT,
+            if raw { ACCEPT_RAW } else { ACCEPT_MARKDOWN },
+        )
+        .header(reqwest::header::ACCEPT_LANGUAGE, ACCEPT_LANGUAGE)
+        .header(reqwest::header::ACCEPT_ENCODING, ACCEPT_ENCODING)
+}
+
+/// Sends `request` for `url`, a failure in the words of
+/// [`crate::webfetch::send_failure`].
+async fn send_fetch(
+    request: reqwest::RequestBuilder,
+    url: &url::Url,
+) -> CoreResult<reqwest::Response> {
+    match request.send().await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            tracing::info!(
+                host = url.host_str().unwrap_or_default(),
+                connect = error.is_connect(),
+                timeout = error.is_timeout(),
+                "webfetch got no answer"
+            );
+            Err(CoreError::Tool(
+                crate::webfetch::send_failure(url, &error).await,
+            ))
         }
     }
 }
@@ -1576,9 +1623,10 @@ async fn fetch_page(
     url: url::Url,
     raw: bool,
     rules: Option<&FetchRules>,
+    media_max_bytes: u64,
 ) -> CoreResult<ToolOutput> {
     let mut signed_in = !url.username().is_empty() || url.password().is_some();
-    let mut response = client.get(url.clone()).send().await.map_err(tool_error)?;
+    let mut response = send_fetch(fetch_request(client, url.clone(), raw), &url).await?;
     let mut followed = 0;
     let stop = loop {
         if !response.status().is_redirection() {
@@ -1598,7 +1646,9 @@ async fn fetch_page(
         }
         if followed == WEBFETCH_REDIRECTS {
             return Err(CoreError::Tool(format!(
-                "{url} redirects more than {WEBFETCH_REDIRECTS} times"
+                "{url} redirects more than {WEBFETCH_REDIRECTS} times, so the fetch gave up. \
+                 The site is probably redirecting in a loop (often one that wants cookies or \
+                 a sign-in); read the content from another source."
             )));
         }
         followed += 1;
@@ -1615,12 +1665,12 @@ async fn fetch_page(
         let mut next = target;
         let _ = next.set_username(if signed_in { url.username() } else { "" });
         let _ = next.set_password(url.password().filter(|_| signed_in));
-        response = client
-            .get(next)
-            .header(reqwest::header::REFERER, referer.as_str())
-            .send()
-            .await
-            .map_err(tool_error)?;
+        let hop = next.clone();
+        response = send_fetch(
+            fetch_request(client, next, raw).header(reqwest::header::REFERER, referer.as_str()),
+            &hop,
+        )
+        .await?;
     };
     if let Some((target, stop)) = stop {
         let (from, status) = (response.url(), response.status().as_u16());
@@ -1647,36 +1697,246 @@ async fn fetch_page(
             metadata: json!({"redirect": target.as_str()}),
         });
     }
-    let response = response.error_for_status().map_err(tool_error)?;
-    let html_content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.contains("text/html"));
-    let Some(body) = read_limited(response, WEBFETCH_MAX_BYTES).await? else {
+    let status = response.status();
+    let headers = response.headers().clone();
+    // Where the page really is, with no sign-in, for what the model reads.
+    let mut page = response.url().clone();
+    let _ = page.set_username("");
+    let _ = page.set_password(None);
+    let header = |name: reqwest::header::HeaderName| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    let content_type = header(reqwest::header::CONTENT_TYPE);
+    let content_encoding = header(reqwest::header::CONTENT_ENCODING);
+    if !status.is_success() {
+        // The start of an error page says why, and marks a bot check.
+        let head = read_head(response, WEBFETCH_ERROR_HEAD).await;
+        let head =
+            crate::webfetch::decode_head(content_encoding.as_deref(), head, WEBFETCH_ERROR_HEAD);
+        let service = crate::webfetch::bot_check(status.as_u16(), &headers, &head);
+        tracing::info!(
+            host = url.host_str().unwrap_or_default(),
+            status = status.as_u16(),
+            bot_check = service.unwrap_or_default(),
+            "webfetch got an error page"
+        );
+        if let Some(service) = service {
+            return Err(CoreError::Tool(crate::webfetch::bot_check_failure(
+                &page,
+                status.as_u16(),
+                service,
+            )));
+        }
+        let kind = crate::webfetch::kind(content_type.as_deref(), &head);
+        let said = match kind {
+            crate::webfetch::Kind::Text { html, .. } => {
+                let text = crate::webfetch::decode_text(&head, content_type.as_deref(), kind);
+                if html {
+                    // The page's title says the most in the fewest words.
+                    page_title(&text).unwrap_or_default()
+                } else {
+                    text
+                }
+            }
+            _ => String::new(),
+        };
+        return Err(CoreError::Tool(crate::webfetch::status_failure(
+            &page, status, &headers, &said,
+        )));
+    }
+    let declared = response.content_length();
+    let too_large = |declared| {
         tracing::info!(
             host = url.host_str().unwrap_or_default(),
             limit = WEBFETCH_MAX_BYTES,
             "the page is too large to fetch"
         );
-        return Err(CoreError::Tool(
-            "Response too large (over the 6 MiB webfetch limit)".into(),
-        ));
+        CoreError::Tool(crate::webfetch::too_large_failure(
+            &page,
+            WEBFETCH_MAX_BYTES,
+            declared,
+        ))
     };
-    let mut text = String::from_utf8_lossy(&body).into_owned();
+    let body = match read_body_limited(response, WEBFETCH_MAX_BYTES).await {
+        Ok(Some(body)) => body,
+        Ok(None) => return Err(too_large(declared)),
+        Err(error) => {
+            return Err(CoreError::Tool(crate::webfetch::body_failure(
+                &page, &error,
+            )));
+        }
+    };
+    let body =
+        crate::webfetch::decode_coding(content_encoding.as_deref(), body, WEBFETCH_MAX_BYTES)
+            .map_err(|why| match why {
+                crate::webfetch::Undecodable::TooLarge => too_large(None),
+                why => CoreError::Tool(crate::webfetch::undecodable_failure(
+                    &page,
+                    &why,
+                    WEBFETCH_MAX_BYTES,
+                )),
+            })?;
+    if body.is_empty() {
+        return Ok(output(format!(
+            "{page} answered HTTP {} with an empty page.",
+            status.as_u16()
+        )));
+    }
+    let kind = crate::webfetch::kind(content_type.as_deref(), &body);
+    let crate::webfetch::Kind::Text { html, .. } = kind else {
+        return fetched_file(&page, kind, content_type.as_deref(), body, media_max_bytes).await;
+    };
+    // A challenge some services answer with 200 instead of the page.
+    if let Some(service) = crate::webfetch::bot_check(status.as_u16(), &headers, &body) {
+        return Err(CoreError::Tool(crate::webfetch::bot_check_failure(
+            &page,
+            status.as_u16(),
+            service,
+        )));
+    }
+    let mut text = crate::webfetch::decode_text(&body, content_type.as_deref(), kind);
     // HTML pages become markdown so the model reads content, not markup
-    // soup; sniff the body when the header is absent.
-    let looks_like_html = html_content_type
-        || text.trim_start().get(..15).is_some_and(|head| {
-            head.to_ascii_lowercase().starts_with("<!doctype html")
-                || head.to_ascii_lowercase().starts_with("<html")
-        });
-    if !raw && looks_like_html {
+    // soup.
+    if !raw && html {
         if let Some(markdown) = html_to_markdown(&text) {
-            text = markdown;
+            if let Some(note) = crate::webfetch::thin_page_note(&page, body.len(), &markdown) {
+                text = format!("{}\n\n{note}", markdown.trim_end());
+            } else {
+                text = markdown;
+            }
         }
     }
     truncate_output(text).await
+}
+
+/// How much of an error page webfetch reads to say why the fetch failed.
+const WEBFETCH_ERROR_HEAD: usize = 256 * 1024;
+
+/// The text of an HTML page's `<title>`, when it has one.
+fn page_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open = lower.find("<title")?;
+    let start = open + lower[open..].find('>')? + 1;
+    let end = start + lower[start..].find("</title")?;
+    let title = html
+        .get(start..end)?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!title.is_empty()).then_some(title)
+}
+
+/// The first `limit` bytes of a body, or as much of it as arrives: for an
+/// error page, where the start says enough.
+async fn read_head(mut response: reqwest::Response, limit: usize) -> Vec<u8> {
+    let mut body = Vec::new();
+    while body.len() < limit {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                body.extend_from_slice(&chunk[..chunk.len().min(limit - body.len())])
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    body
+}
+
+/// A fetched file that is not text: a PDF or an image is saved and attached
+/// for the model, as `read` attaches one; any other file is saved, and the
+/// model is told where.
+async fn fetched_file(
+    page: &url::Url,
+    kind: crate::webfetch::Kind,
+    content_type: Option<&str>,
+    body: Vec<u8>,
+    media_max_bytes: u64,
+) -> CoreResult<ToolOutput> {
+    use crate::webfetch::Kind;
+    let size = body.len() as u64;
+    let extension = match kind {
+        Kind::Pdf => "pdf",
+        Kind::Image(extension) => extension,
+        Kind::Other | Kind::Text { .. } => "bin",
+    };
+    let (path, mut file) =
+        crate::data_folder::new_private_file_with(&tool_output_dir(), "fetched", extension)
+            .await
+            .map_err(tool_error)?;
+    file.write_all(&body).await.map_err(tool_error)?;
+    file.flush().await.map_err(tool_error)?;
+    drop(file);
+    let saved = path.display().to_string();
+    let title = page
+        .path_segments()
+        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
+        .map_or_else(|| page.to_string(), str::to_owned);
+    let attachable = size <= media_max_bytes;
+    // An image the model cannot be shown (a broken one) is a saved file.
+    let image = match kind {
+        Kind::Image(_) if attachable => read_image(&path, media_max_bytes).await.ok(),
+        _ => None,
+    };
+    match (kind, image) {
+        (Kind::Pdf, _) if attachable => Ok(ToolOutput {
+            text: format!(
+                "PDF fetched from {page} ({}), attached for you to read. Saved to: {saved}",
+                crate::webfetch::size(size)
+            ),
+            metadata: json!({
+                "title": title,
+                "url": page.as_str(),
+                "path": saved,
+                "mime": "application/pdf",
+                "size": size,
+                "attachments": [saved],
+            }),
+        }),
+        (Kind::Image(_), Some(mut output)) => {
+            output.text = format!(
+                "Image fetched from {page} ({}), attached for you to see. Saved to: {saved}",
+                crate::webfetch::size(size)
+            );
+            if let Some(metadata) = output.metadata.as_object_mut() {
+                metadata.insert("url".into(), json!(page.as_str()));
+            }
+            Ok(output)
+        }
+        (kind, _) => {
+            let what = match (kind, crate::webfetch::mime(content_type)) {
+                (Kind::Pdf, _) => "a PDF".to_owned(),
+                (Kind::Image(extension), _) => {
+                    format!("an image ({})", extension.to_ascii_uppercase())
+                }
+                (_, mime) if !mime.is_empty() => format!("a file of type {mime}"),
+                _ => "a binary file".to_owned(),
+            };
+            let attach = if attachable {
+                String::new()
+            } else {
+                format!(
+                    ", too large to attach (over {})",
+                    crate::webfetch::size(media_max_bytes)
+                )
+            };
+            Ok(ToolOutput {
+                text: format!(
+                    "{page} is {what} ({}){attach}, not a page that reads as text. It was saved \
+                     to: {saved}\nInspect it there with shell commands (for example file, \
+                     unzip -l or tar -tf).",
+                    crate::webfetch::size(size)
+                ),
+                metadata: json!({
+                    "title": title,
+                    "url": page.as_str(),
+                    "path": saved,
+                    "size": size,
+                }),
+            })
+        }
+    }
 }
 
 /// htmd writes the text of `script` and `style` like any other block, so a
@@ -1695,10 +1955,16 @@ fn html_to_markdown(html: &str) -> Option<String> {
 /// declared length is checked first, and a body sent without one (or with a
 /// wrong one) is read only up to the limit; dropping the response closes
 /// the connection.
-async fn read_limited(
+async fn read_limited(response: reqwest::Response, limit: usize) -> CoreResult<Option<Vec<u8>>> {
+    read_body_limited(response, limit).await.map_err(tool_error)
+}
+
+/// [`read_limited`], with the HTTP client's own error when the body stops
+/// arriving.
+async fn read_body_limited(
     mut response: reqwest::Response,
     limit: usize,
-) -> CoreResult<Option<Vec<u8>>> {
+) -> Result<Option<Vec<u8>>, reqwest::Error> {
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)
@@ -1706,7 +1972,7 @@ async fn read_limited(
         return Ok(None);
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(tool_error)? {
+    while let Some(chunk) = response.chunk().await? {
         if body.len() + chunk.len() > limit {
             return Ok(None);
         }
@@ -3275,7 +3541,7 @@ impl Tool for BuiltinTool {
                     }
                 }
                 if haarness_core::attachments::is_image_source(&path.to_string_lossy()) {
-                    return read_image(&path, &context).await;
+                    return read_image(&path, context.execution.media_max_bytes).await;
                 }
                 if let Some(mime) = workflow_media_mime(&path) {
                     let metadata = tokio::fs::metadata(&path).await.map_err(tool_error)?;
@@ -3702,16 +3968,32 @@ impl Tool for BuiltinTool {
                 .await
             }
             Kind::WebFetch => {
-                let url = url::Url::parse(string(&args, "url")?).map_err(|error| {
-                    CoreError::Invalid(format!("invalid webfetch URL: {error}"))
+                let written = string(&args, "url")?;
+                // `docs.rs/serde` reads as https://docs.rs/serde; the
+                // permission rules met that address too.
+                let address = haarness_core::webfetch_address(written);
+                let url = url::Url::parse(&address).map_err(|error| {
+                    CoreError::Invalid(format!(
+                        "webfetch needs a full web address such as https://example.com/page, \
+                         and \"{written}\" is not one ({error})."
+                    ))
                 })?;
                 if !matches!(url.scheme(), "http" | "https") {
-                    return Err(CoreError::Invalid(
-                        "webfetch URL must use http or https".into(),
-                    ));
+                    let instead = if url.scheme() == "file" {
+                        " For a file on this computer, use read."
+                    } else {
+                        ""
+                    };
+                    return Err(CoreError::Invalid(format!(
+                        "webfetch reads only http and https addresses, not {}: ones.{instead}",
+                        url.scheme()
+                    )));
                 }
-                if url.host_str().is_none() {
-                    return Err(CoreError::Invalid("webfetch URL has no hostname".into()));
+                if url.host_str().is_none_or(str::is_empty) {
+                    return Err(CoreError::Invalid(format!(
+                        "webfetch needs an address with a host name, such as \
+                         https://example.com/page, and \"{written}\" has none."
+                    )));
                 }
                 let raw = args.get("format").and_then(serde_json::Value::as_str) == Some("raw");
                 let rules = context
@@ -3729,6 +4011,7 @@ impl Tool for BuiltinTool {
                     rules.as_ref(),
                     &context.cancel,
                     WEBFETCH_TIMEOUT,
+                    context.execution.media_max_bytes,
                 )
                 .await
             }
@@ -4783,7 +5066,7 @@ fn usize_value(value: &Value, key: &str) -> Option<usize> {
 /// to the file; a converted or shrunk one travels inline, since the file
 /// itself is not what the provider would accept. Bytes that are no image fail
 /// the call with the reason, so nothing unreadable reaches the transcript.
-async fn read_image(path: &Path, context: &ToolContext) -> CoreResult<ToolOutput> {
+async fn read_image(path: &Path, media_max_bytes: u64) -> CoreResult<ToolOutput> {
     let metadata = tokio::fs::metadata(path).await.map_err(tool_error)?;
     if !metadata.is_file() {
         return Err(CoreError::Tool(format!(
@@ -4791,11 +5074,11 @@ async fn read_image(path: &Path, context: &ToolContext) -> CoreResult<ToolOutput
             path.display()
         )));
     }
-    if metadata.len() > context.execution.media_max_bytes {
+    if metadata.len() > media_max_bytes {
         return Err(CoreError::Tool(format!(
             "{} is larger than the configured {} byte inline media limit",
             path.display(),
-            context.execution.media_max_bytes
+            media_max_bytes
         )));
     }
     let bytes = tokio::fs::read(path).await.map_err(tool_error)?;
@@ -10185,7 +10468,12 @@ mod webfetch_tests {
             )
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("Response too large"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("is larger than the 6.0 MB webfetch reads"),
+            "{error}"
+        );
         let sent = tokio::time::timeout(Duration::from_secs(20), server)
             .await
             .expect("the fetch closed the connection")
@@ -10218,7 +10506,12 @@ mod webfetch_tests {
         .await
         .expect("refused before any body arrived")
         .unwrap_err();
-        assert!(error.to_string().contains("Response too large"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("is larger than the 6.0 MB webfetch reads"),
+            "{error}"
+        );
         server.abort();
     }
 
@@ -10267,6 +10560,7 @@ mod webfetch_tests {
             None,
             &CancellationToken::new(),
             Duration::from_millis(300),
+            20 * 1024 * 1024,
         )
         .await
         .unwrap_err();
@@ -10321,6 +10615,458 @@ mod webfetch_tests {
             .await
             .expect("the read closed the connection")
             .unwrap();
+    }
+
+    /// A server that answers each request with what `answer` makes of its
+    /// head (request line and headers): a whole raw HTTP response. It
+    /// records each head.
+    async fn answering_server(
+        answer: impl Fn(&str) -> Vec<u8> + Send + 'static,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, request) = accept_request(&listener).await;
+                let reply = answer(&request);
+                seen.lock().unwrap().push(request);
+                let _ = stream.write_all(&reply).await;
+            }
+        });
+        (address, requests, server)
+    }
+
+    /// A raw HTTP response: `status` (`200 OK`), headers and body.
+    fn reply(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+        let mut head = vec![format!("HTTP/1.1 {status}")];
+        head.extend(
+            headers
+                .iter()
+                .map(|(name, value)| format!("{name}: {value}")),
+        );
+        head.push(format!("Content-Length: {}", body.len()));
+        head.push("Connection: close\r\n\r\n".into());
+        let mut reply = head.join("\r\n").into_bytes();
+        reply.extend_from_slice(body);
+        reply
+    }
+
+    /// The path a request head asks for.
+    fn path_of(request: &str) -> &str {
+        request.split(' ').nth(1).unwrap_or_default()
+    }
+
+    async fn fetch(arguments: Value) -> CoreResult<ToolOutput> {
+        webfetch_tool()
+            .execute(
+                arguments,
+                composite_context(&std::env::current_dir().unwrap()),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_fetch_asks_for_the_page_as_a_reader_does() {
+        // A site that answers a request naming no page type with 404, as
+        // some registries do, and a page otherwise.
+        let (address, requests, server) = answering_server(|request| {
+            if request.to_ascii_lowercase().contains("text/html") {
+                reply(
+                    "200 OK",
+                    &[("Content-Type", "text/html")],
+                    b"<h1>Package page</h1>",
+                )
+            } else {
+                reply("404 Not Found", &[], b"")
+            }
+        })
+        .await;
+        let output = fetch(json!({"url": format!("http://{address}/crates/serde")}))
+            .await
+            .unwrap();
+        assert_eq!(output.text, "# Package page");
+        fetch(json!({"url": format!("http://{address}/raw"), "format": "raw"}))
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap().clone();
+        let header = |request: &str, name: &str| {
+            request
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case(name)
+                        .then(|| value.trim().to_owned())
+                })
+                .unwrap_or_default()
+        };
+        let markdown = &requests[0];
+        assert!(
+            header(markdown, "accept").starts_with("text/markdown;q=1.0,"),
+            "{markdown}"
+        );
+        assert!(
+            header(markdown, "accept").contains("text/html"),
+            "{markdown}"
+        );
+        assert_eq!(header(markdown, "accept-language"), "en-US,en;q=0.9");
+        assert_eq!(
+            header(markdown, "accept-encoding"),
+            "gzip, deflate, br, zstd"
+        );
+        assert!(
+            header(markdown, "user-agent").starts_with("haarness/"),
+            "{markdown}"
+        );
+        assert!(
+            header(&requests[1], "accept").starts_with("text/html,"),
+            "{}",
+            requests[1]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_compressed_page_is_read_whether_it_was_asked_for_or_not() {
+        use std::io::Write as _;
+        let page = b"<html><body><p>unpacked page text</p></body></html>";
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gzip.write_all(page).unwrap();
+        let gzip = gzip.finish().unwrap();
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        zlib.write_all(br#"{"deflated": true}"#).unwrap();
+        let zlib = zlib.finish().unwrap();
+        let mut bomb = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        bomb.write_all(&vec![b' '; WEBFETCH_MAX_BYTES + 1024])
+            .unwrap();
+        let bomb = bomb.finish().unwrap();
+        let (address, _, server) = answering_server(move |request| match path_of(request) {
+            "/gzip" => reply(
+                "200 OK",
+                &[("Content-Type", "text/html"), ("Content-Encoding", "gzip")],
+                &gzip,
+            ),
+            "/deflate" => reply(
+                "200 OK",
+                &[
+                    ("Content-Type", "application/json"),
+                    ("Content-Encoding", "deflate"),
+                ],
+                &zlib,
+            ),
+            "/bomb" => reply(
+                "200 OK",
+                &[("Content-Type", "text/plain"), ("Content-Encoding", "gzip")],
+                &bomb,
+            ),
+            _ => reply(
+                "200 OK",
+                &[
+                    ("Content-Type", "text/plain"),
+                    ("Content-Encoding", "compress"),
+                ],
+                b"\x1f\x9d",
+            ),
+        })
+        .await;
+        let output = fetch(json!({"url": format!("http://{address}/gzip")}))
+            .await
+            .unwrap();
+        assert_eq!(output.text, "unpacked page text");
+        let output = fetch(json!({"url": format!("http://{address}/deflate")}))
+            .await
+            .unwrap();
+        assert_eq!(output.text, r#"{"deflated": true}"#);
+        let error = fetch(json!({"url": format!("http://{address}/bomb")}))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("is larger than the 6.0 MB webfetch reads"),
+            "{error}"
+        );
+        let error = fetch(json!({"url": format!("http://{address}/other")}))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("came compressed as \"compress\""),
+            "{error}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_page_is_read_in_the_character_set_it_names() {
+        let (address, _, server) = answering_server(|request| match path_of(request) {
+            // こころ in Shift_JIS, named only by the page.
+            "/sjis" => reply(
+                "200 OK",
+                &[("Content-Type", "text/html")],
+                b"<html><head><meta http-equiv=\"Content-Type\" content=\"text/html;charset=Shift_JIS\"></head><body><p>\x82\xb1\x82\xb1\x82\xeb</p></body></html>",
+            ),
+            // Привет in KOI8-R, named by the header.
+            "/koi8" => reply("200 OK", &[("Content-Type", "text/plain; charset=koi8-r")], b"\xf0\xd2\xc9\xd7\xc5\xd4"),
+            // Source code served as octet-stream is still text.
+            _ => reply("200 OK", &[("Content-Type", "application/octet-stream")], b"fn main() {}\n"),
+        })
+        .await;
+        assert_eq!(
+            fetch(json!({"url": format!("http://{address}/sjis")}))
+                .await
+                .unwrap()
+                .text,
+            "こころ"
+        );
+        assert_eq!(
+            fetch(json!({"url": format!("http://{address}/koi8")}))
+                .await
+                .unwrap()
+                .text,
+            "Привет"
+        );
+        assert_eq!(
+            fetch(json!({"url": format!("http://{address}/main.rs")}))
+                .await
+                .unwrap()
+                .text,
+            "fn main() {}\n"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_bot_check_or_an_error_page_says_what_happened_and_what_to_try() {
+        let (address, _, server) = answering_server(|request| match path_of(request) {
+            "/challenge" => reply(
+                "403 Forbidden",
+                &[("Content-Type", "text/html"), ("cf-mitigated", "challenge")],
+                b"<title>Just a moment...</title>",
+            ),
+            "/client-check" => reply(
+                "200 OK",
+                &[("Content-Type", "text/html")],
+                b"<html><head><link href=\"/_fs-ch-1T1/assets/styles.css\"><title>Client Challenge</title></head><body><noscript>Please enable JavaScript</noscript></body></html>",
+            ),
+            "/api" => reply(
+                "404 Not Found",
+                &[("Content-Type", "application/json")],
+                br#"{"message":"Not Found","documentation_url":"https://docs.example/rest"}"#,
+            ),
+            "/busy" => reply(
+                "429 Too Many Requests",
+                &[("Content-Type", "text/html"), ("Retry-After", "30")],
+                b"<html><head><title>Slow down</title></head><body>...</body></html>",
+            ),
+            _ => reply(
+                "503 Service Unavailable",
+                &[("Content-Type", "text/html")],
+                b"<html><head><title>Down for maintenance</title></head></html>",
+            ),
+        })
+        .await;
+        let failure = |path: &'static str| async move {
+            fetch(json!({"url": format!("http://{address}{path}")}))
+                .await
+                .unwrap_err()
+                .to_string()
+        };
+        let challenge = failure("/challenge").await;
+        assert!(
+            challenge.contains(&format!(
+                "http://{address}/challenge answered with a bot check from Cloudflare (HTTP 403) instead of the page"
+            )),
+            "{challenge}"
+        );
+        assert!(
+            challenge.contains("fetching it again will not help"),
+            "{challenge}"
+        );
+        let check = failure("/client-check").await;
+        assert!(
+            check.contains("a bot check from Fastly (HTTP 200)"),
+            "{check}"
+        );
+        let api = failure("/api").await;
+        assert!(
+            api.contains("answered HTTP 404 (Not Found): there is no page at this address."),
+            "{api}"
+        );
+        assert!(
+            api.ends_with(r#"The server said: {"message":"Not Found","documentation_url":"https://docs.example/rest"}"#),
+            "{api}"
+        );
+        let busy = failure("/busy").await;
+        assert!(busy.contains("It asks to wait 30 seconds."), "{busy}");
+        assert!(busy.ends_with("The server said: Slow down"), "{busy}");
+        let down = failure("/down").await;
+        assert!(down.contains("HTTP 503 (Service Unavailable)"), "{down}");
+        assert!(down.contains("This is on the site's side"), "{down}");
+        assert!(!down.contains("HTTP status server error"), "{down}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_pdf_or_an_image_is_attached_and_another_file_is_saved() {
+        let pdf = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n".to_vec();
+        let png = STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+            .unwrap();
+        let (served_pdf, served_png) = (pdf.clone(), png.clone());
+        let (address, _, server) = answering_server(move |request| match path_of(request) {
+            "/paper.pdf" => reply(
+                "200 OK",
+                &[("Content-Type", "application/pdf")],
+                &served_pdf,
+            ),
+            "/dot.png" => reply("200 OK", &[("Content-Type", "image/png")], &served_png),
+            _ => reply(
+                "200 OK",
+                &[("Content-Type", "application/zip")],
+                b"PK\x03\x04\x14\0\0\0",
+            ),
+        })
+        .await;
+        let output = fetch(json!({"url": format!("http://{address}/paper.pdf")}))
+            .await
+            .unwrap();
+        assert!(
+            output.text.starts_with(&format!(
+                "PDF fetched from http://{address}/paper.pdf (45 bytes), attached for you to read."
+            )),
+            "{}",
+            output.text
+        );
+        assert_eq!(output.metadata["mime"], "application/pdf");
+        let saved = output.metadata["attachments"][0]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(Path::new(&saved).extension().unwrap(), "pdf", "{saved}");
+        assert_eq!(std::fs::read(&saved).unwrap(), pdf);
+        let image = fetch(json!({"url": format!("http://{address}/dot.png")}))
+            .await
+            .unwrap();
+        assert!(
+            image.text.starts_with("Image fetched from"),
+            "{}",
+            image.text
+        );
+        assert_eq!(image.metadata["attachments"].as_array().unwrap().len(), 1);
+        let archive = fetch(json!({"url": format!("http://{address}/release.zip")}))
+            .await
+            .unwrap();
+        assert!(
+            archive.text.starts_with(&format!(
+                "http://{address}/release.zip is a file of type application/zip (8 bytes), not a page that reads as text. It was saved to: "
+            )),
+            "{}",
+            archive.text
+        );
+        for output in [&output, &image, &archive] {
+            if let Some(path) = output.metadata["path"].as_str() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_address_written_without_a_scheme_is_fetched() {
+        let (address, requests, server) = answering_server(|_| {
+            reply(
+                "200 OK",
+                &[("Content-Type", "text/plain")],
+                b"no-scheme-proof",
+            )
+        })
+        .await;
+        let output = fetch(json!({"url": format!("{address}/page")}))
+            .await
+            .unwrap();
+        assert_eq!(output.text, "no-scheme-proof");
+        assert!(requests.lock().unwrap()[0].starts_with("GET /page HTTP/1.1"));
+        let error = fetch(json!({"url": "notes"})).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("webfetch needs a full web address such as https://example.com/page"),
+            "{error}"
+        );
+        let error = fetch(json!({"url": "file:///etc/hosts"}))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("For a file on this computer, use read."),
+            "{error}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_fails_says_why() {
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = closed.local_addr().unwrap();
+        drop(closed);
+        let refused = fetch(json!({"url": format!("http://{address}/")}))
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains(&format!(
+                "Nothing is listening at 127.0.0.1:{} on this computer (the connection was refused).",
+                address.port()
+            )),
+            "{refused}"
+        );
+        let unknown = fetch(json!({"url": "https://no-such-host.invalid/page"}))
+            .await
+            .unwrap_err();
+        assert!(
+            unknown.to_string().contains(
+                "Could not find the site no-such-host.invalid: the name does not resolve"
+            ),
+            "{unknown}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_page_or_one_built_by_scripts_says_so() {
+        let shell = format!(
+            "<!doctype html><html><head><title>Registry</title><script>{}</script></head><body><div id=\"app\"></div></body></html>",
+            "var x = 1;".repeat(400)
+        );
+        let (address, _, server) = answering_server(move |request| match path_of(request) {
+            "/empty" => reply("200 OK", &[("Content-Type", "text/html")], b""),
+            _ => reply("200 OK", &[("Content-Type", "text/html")], shell.as_bytes()),
+        })
+        .await;
+        let empty = fetch(json!({"url": format!("http://{address}/empty")}))
+            .await
+            .unwrap();
+        assert_eq!(
+            empty.text,
+            format!("http://{address}/empty answered HTTP 200 with an empty page.")
+        );
+        let app = fetch(json!({"url": format!("http://{address}/app")}))
+            .await
+            .unwrap();
+        assert!(
+            app.text.starts_with(
+                "Registry\n\n[This page has almost no text without JavaScript (1 words"
+            ),
+            "{}",
+            app.text
+        );
+        server.abort();
     }
 
     struct EchoInvoker;

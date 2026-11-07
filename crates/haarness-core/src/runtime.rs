@@ -17346,8 +17346,89 @@ fn resource_server_pattern(server: &str) -> String {
         .collect()
 }
 
+/// The address a fetch of `written` reads. One written without a scheme,
+/// as people and models often write them (`docs.rs/serde`,
+/// `localhost:3000/api`, `//example.com/x`), is read over https, or over
+/// plain http when its host is this computer or a private network address,
+/// where development servers listen without TLS. Anything else is given back
+/// as written (trimmed), to be read or refused as it is. The fetch and every
+/// rule about it use this one reading, so a rule for
+/// `https://docs.rs/*` holds for `docs.rs/serde`.
+pub fn webfetch_address(written: &str) -> String {
+    let written = written.trim();
+    // A scheme of its own, even one a fetch refuses (`ftp://`), stays.
+    let schemed = written.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.starts_with(|character: char| character.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "+-.".contains(character))
+    });
+    if schemed {
+        return written.to_owned();
+    }
+    let rest = written.strip_prefix("//").unwrap_or(written);
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(bracketed) => match bracketed.split_once(']') {
+            Some((inside, port)) if inside.parse::<std::net::Ipv6Addr>().is_ok() => {
+                (inside, port.strip_prefix(':').unwrap_or(port))
+            }
+            _ => return written.to_owned(),
+        },
+        None => authority.split_once(':').unwrap_or((authority, "")),
+    };
+    let labels = host.strip_suffix('.').unwrap_or(host);
+    let named = !labels.is_empty()
+        && labels.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .chars()
+                    .all(|character| character.is_alphanumeric() || matches!(character, '-' | '_'))
+        })
+        && (labels.contains('.') || labels.eq_ignore_ascii_case("localhost"));
+    let literal = authority.starts_with('[');
+    if !(named || literal)
+        || port.len() > 5
+        || !port.bytes().all(|byte| byte.is_ascii_digit())
+        || (authority.contains(':') && !literal && port.is_empty())
+    {
+        return written.to_owned();
+    }
+    let scheme = if on_this_computer_or_network(host) {
+        "http"
+    } else {
+        "https"
+    };
+    format!("{scheme}://{rest}")
+}
+
+/// Whether `host` names this computer or an address of a private network:
+/// `localhost` and the `.localhost` and `.local` names, and loopback,
+/// private, link-local and unspecified IP addresses.
+fn on_this_computer_or_network(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let last = host.rsplit('.').next().unwrap_or_default();
+    if host == "localhost" || (host.contains('.') && matches!(last, "localhost" | "local")) {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            let first = ip.segments()[0];
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || first & 0xfe00 == 0xfc00
+                || first & 0xffc0 == 0xfe80
+        }
+        Err(_) => false,
+    }
+}
+
 /// The other ways rules may name the address a fetch of `target` reads:
-/// scheme and host in lower case, without a user name or password, a
+/// the address [`webfetch_address`] reads when it is written without a
+/// scheme, scheme and host in lower case, without a user name or password, a
 /// trailing dot on the host, the default port, `.`/`..` path segments or a
 /// `#` fragment (which never reaches the server), and with the letters,
 /// digits and `-._~` of its path written plainly where `%` codes spell them
@@ -17356,7 +17437,7 @@ fn resource_server_pattern(server: &str) -> String {
 /// in punycode also in Unicode, as a rule may name it. Empty when `target`
 /// is already written that way or is not an http(s) URL.
 fn webfetch_patterns(target: &str) -> Vec<String> {
-    let Ok(mut url) = url::Url::parse(target.trim()) else {
+    let Ok(mut url) = url::Url::parse(&webfetch_address(target)) else {
         return Vec::new();
     };
     if !matches!(url.scheme(), "http" | "https")
@@ -22918,6 +22999,100 @@ mod tests {
         );
         // Another port is another address.
         assert!(!plan("https://denied.example:8443/secret").1);
+    }
+
+    #[test]
+    fn an_address_without_a_scheme_is_read_and_judged_as_the_fetch_reads_it() {
+        for (written, read) in [
+            ("docs.rs/serde", "https://docs.rs/serde"),
+            ("  www.python.org/doc/ ", "https://www.python.org/doc/"),
+            ("//example.com/x?y#z", "https://example.com/x?y#z"),
+            ("example.com:8443/x", "https://example.com:8443/x"),
+            ("bücher.example/list", "https://bücher.example/list"),
+            (
+                "docs.rs/releases/search?query=https://x",
+                "https://docs.rs/releases/search?query=https://x",
+            ),
+            ("docs.rs.", "https://docs.rs."),
+            ("localhost:3000/api", "http://localhost:3000/api"),
+            ("LOCALHOST", "http://LOCALHOST"),
+            ("app.localhost:5173", "http://app.localhost:5173"),
+            ("printer.local/status", "http://printer.local/status"),
+            ("127.0.0.1:8080/health", "http://127.0.0.1:8080/health"),
+            ("192.168.1.10/admin", "http://192.168.1.10/admin"),
+            ("10.0.0.2:9000", "http://10.0.0.2:9000"),
+            (
+                "169.254.169.254/latest/meta-data",
+                "http://169.254.169.254/latest/meta-data",
+            ),
+            ("[::1]:8080/x", "http://[::1]:8080/x"),
+            ("[fd00::1]/x", "http://[fd00::1]/x"),
+            ("8.8.8.8/dns", "https://8.8.8.8/dns"),
+            // Written with a scheme, or not an address at all: as written.
+            ("https://example.com/a", "https://example.com/a"),
+            ("ftp://example.com/a", "ftp://example.com/a"),
+            ("file:///etc/passwd", "file:///etc/passwd"),
+            ("mailto:someone@example.com", "mailto:someone@example.com"),
+            ("javascript:alert(1)", "javascript:alert(1)"),
+            ("data:text/html,hi", "data:text/html,hi"),
+            ("someone@example.com/x", "someone@example.com/x"),
+            ("src/main.rs", "src/main.rs"),
+            ("example", "example"),
+            ("example.com:/x", "example.com:/x"),
+            ("example.com:http/x", "example.com:http/x"),
+            ("[not-an-ip]/x", "[not-an-ip]/x"),
+            ("", ""),
+        ] {
+            assert_eq!(super::webfetch_address(written), read, "{written:?}");
+        }
+        // A rule for the address read holds for the address as written, so
+        // leaving out the scheme cannot step around it.
+        let engine = crate::PermissionEngine::new(vec![
+            crate::PermissionRule {
+                pattern: "webfetch:https://denied.example/*".into(),
+                decision: crate::PermissionDecision::Deny,
+            },
+            crate::PermissionRule {
+                pattern: "webfetch:http://localhost:3000/*".into(),
+                decision: crate::PermissionDecision::Deny,
+            },
+            crate::PermissionRule {
+                pattern: "webfetch:http://169.254.169.254/*".into(),
+                decision: crate::PermissionDecision::Deny,
+            },
+        ]);
+        for (written, denied) in [
+            ("denied.example/secret", true),
+            ("DENIED.example./secret", true),
+            ("//denied.example/secret", true),
+            ("localhost:3000/admin", true),
+            ("169.254.169.254/latest/meta-data", true),
+            ("allowed.example/page", false),
+            ("localhost:3001/admin", false),
+        ] {
+            let plan = super::ask_plans(
+                "webfetch",
+                &json!({"url": written}),
+                std::path::Path::new("/workspace"),
+            )
+            .remove(0);
+            assert_eq!(
+                plan.patterns.iter().any(|pattern| {
+                    engine.evaluate(&plan.operation(pattern)) == crate::PermissionDecision::Deny
+                }),
+                denied,
+                "{written}: {:?}",
+                plan.patterns
+            );
+        }
+        assert_eq!(
+            super::webfetch_redirect_verdict(
+                &engine,
+                "denied.example/start",
+                "https://denied.example/next"
+            ),
+            crate::PermissionDecision::Deny
+        );
     }
 
     #[test]
