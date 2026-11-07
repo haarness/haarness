@@ -181,6 +181,9 @@ CORPUS = [
     # What sets GIT_WORK_TREE
     'unset GIT_WORK_TREE && git clean -fd', 'echo "$GIT_WORK_TREE" && git clean -fdn', 'GIT_WORK_TREE= git clean -fd',
     'declare -x GIT_WORK_TREE=../outside; git clean -fdx', "eval 'export GIT_WORK_TREE=../outside'; git clean -fdx",
+    # CDPATH set in the line
+    'CDPATH=/ cd etc && cat passwd', 'export CDPATH=/ && cd etc && cat passwd', 'CDPATH=/; cd etc; cat passwd',
+    'CDPATH=.: cd src && ls', 'CDPATH="$X" cd etc', 'unset CDPATH; cd src && ls', 'CDPATH=/ cd ./src && ls',
 ]
 
 

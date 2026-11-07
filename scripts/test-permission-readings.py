@@ -43,11 +43,13 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    leaves the project from there still asks.
 15. auto_deletions: in Auto, a `git clean -f` whose work tree (`--work-tree`, `GIT_WORK_TREE`) is outside the
    project, and an `rm` a trap runs there, ask though the reviewer allows them; a clean of the project runs.
+16. cdpath: a `cd` under a `CDPATH` the line sets asks for the folder it may enter (`CDPATH=/ cd etc && cat
+   hosts` asks for `/etc` before the line runs), while `CDPATH=.: cd sub && cat inside.txt` runs.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
 toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins, holding_always,
-workdir_home, wrappers, trap, owners_and_dots, cd_pipeline, auto_deletions). No model is
+workdir_home, wrappers, trap, owners_and_dots, cd_pipeline, auto_deletions, cdpath). No model is
 called; nothing outside the fixture is touched.
 """
 import grp
@@ -591,12 +593,31 @@ def case_auto_deletions():
            'there ask; a clean of the project runs')
 
 
+def case_cdpath():
+    """A cd under a CDPATH the line sets asks for where it may go."""
+    _, env = environment('cdpath')
+    folder = project('cdpath', REVIEW)
+    (folder / 'sub').mkdir(exist_ok=True)
+    (folder / 'sub' / 'inside.txt').write_text('inside\n')
+    etc = Path('/etc').resolve()
+    try:
+        for line in ['CDPATH=/ cd etc && cat hosts', 'export CDPATH=/ && cd etc && cat hosts']:
+            output = bash(env, folder, line, code=1)
+            assert 'Stopped:' in output and str(etc) in output, (line, output)
+            assert 'localhost' not in output, (line, output)
+        output = bash(env, folder, 'CDPATH=.: cd sub && cat inside.txt', code=0)
+        assert 'inside' in output and 'Stopped' not in output, output
+    finally:
+        stop(env, folder)
+    passed('a cd under a CDPATH the line sets asks for the folder it may enter; one that stays in the project runs')
+
+
 CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
          'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev,
          'action_case': case_action_case, 'sign_ins': case_sign_ins, 'holding_always': case_holding_always,
          'workdir_home': case_workdir_home, 'wrappers': case_wrappers, 'trap': case_trap,
          'owners_and_dots': case_owners_and_dots, 'cd_pipeline': case_cd_pipeline,
-         'auto_deletions': case_auto_deletions}
+         'auto_deletions': case_auto_deletions, 'cdpath': case_cdpath}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]

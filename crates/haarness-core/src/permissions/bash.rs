@@ -317,6 +317,7 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         lost: false,
         carried: None,
         names_work_tree: false,
+        cdpaths: Vec::new(),
         work_trees: Vec::new(),
         loops: Vec::new(),
     };
@@ -712,6 +713,11 @@ struct Reader<'w> {
     /// before. A `git clean` may then clean a work tree set where it is not
     /// read.
     names_work_tree: bool,
+    /// The values the line gives `CDPATH` (see [`note_cdpath`]), `None` for
+    /// one only known when it runs: in the text being read, one it is read
+    /// from, or text run again read before. A `cd` to a relative folder may
+    /// then go to one under any of them.
+    cdpaths: Vec<Option<String>>,
     /// The `GIT_WORK_TREE` settings of the command being read, by where
     /// each starts: see [`work_tree_settings`].
     work_trees: Vec<(usize, Path_)>,
@@ -836,9 +842,11 @@ impl Reader<'_> {
         let mut list_parents = HashMap::new();
         let mut loops = Vec::new();
         let mut sets_tree = false;
+        let mut cdpaths = Vec::new();
         let mut cursor = tree.walk();
         while let Some((node, parent)) = stack.pop() {
             sets_tree = sets_tree || sets_work_tree(node, parent, command);
+            note_cdpath(node, command, &mut cdpaths);
             if node.kind() == "command" {
                 command_nodes.push((node, parent));
             }
@@ -986,6 +994,7 @@ impl Reader<'_> {
         // Kept for the rest of the line once set: `eval 'export
         // GIT_WORK_TREE=…'` sets it for what follows.
         self.names_work_tree |= sets_tree;
+        self.cdpaths.extend(cdpaths);
         let outer_work_trees = std::mem::take(&mut self.work_trees);
         let outer_loops = std::mem::replace(&mut self.loops, loops);
         let continued = command.contains("\\\n");
@@ -2486,8 +2495,49 @@ impl Reader<'_> {
                     continue;
                 }
                 self.check_folder(&name, &path.raw, &path.value, path.complete);
+                if matches!(name.as_str(), "cd" | "pushd") {
+                    self.check_cdpath(&name, &path);
+                }
             }
             ended |= ends;
+        }
+    }
+
+    /// A `cd` or `pushd` to a relative folder that does not start with `.`
+    /// goes to the first folder `CDPATH` names that holds it, so where the
+    /// line sets `CDPATH` (the launcher clears it, but an assignment wins)
+    /// it is also checked under each folder named there, and under `/` for a
+    /// value only known when it runs.
+    fn check_cdpath(&mut self, name: &str, path: &Path_) {
+        let searched = path.complete
+            && !path.value.is_empty()
+            && !path.raw.starts_with('~')
+            && !path.value.starts_with('/')
+            && !matches!(path.value.as_str(), "." | "..")
+            && !path.value.starts_with("./")
+            && !path.value.starts_with("../");
+        if !searched || self.cdpaths.is_empty() {
+            return;
+        }
+        let mut candidates = Vec::new();
+        for value in &self.cdpaths {
+            match value {
+                // Only known when it runs: anywhere.
+                None => push_unique(&mut candidates, "/".to_owned()),
+                Some(value) => {
+                    // An empty entry is the folder the shell is in, which is
+                    // checked already.
+                    for entry in value.split(':').filter(|entry| !entry.is_empty()) {
+                        push_unique(
+                            &mut candidates,
+                            format!("{}/{}", entry.trim_end_matches('/'), path.value),
+                        );
+                    }
+                }
+            }
+        }
+        for candidate in candidates {
+            self.check_folder(name, &candidate, &candidate, true);
         }
     }
 }
@@ -2703,6 +2753,38 @@ fn sets_work_tree(
                 .is_some_and(|rest| !(literal && rest.is_empty()))
         }
         _ => false,
+    }
+}
+
+/// The value an assignment to `CDPATH` in `node` gives it (`CDPATH=/x:.`,
+/// also one `export` makes), added to `values`: `None` for one only known
+/// when it runs, and for `${CDPATH:=…}`.
+fn note_cdpath(node: tree_sitter::Node<'_>, source: &str, values: &mut Vec<Option<String>>) {
+    const NAME: &str = "CDPATH";
+    let text = |node: tree_sitter::Node<'_>| source.get(node.byte_range()).unwrap_or_default();
+    match node.kind() {
+        "variable_assignment"
+            if node
+                .child_by_field_name("name")
+                .is_some_and(|name| text(name) == NAME) =>
+        {
+            values.push(match node.child_by_field_name("value") {
+                Some(value) => {
+                    let (text, complete) = path_literal(value, source);
+                    complete.then_some(text)
+                }
+                None => Some(String::new()),
+            });
+        }
+        "expansion"
+            if text(node)
+                .strip_prefix("${")
+                .and_then(|rest| rest.strip_prefix(NAME))
+                .is_some_and(|rest| rest.starts_with('=') || rest.starts_with(":=")) =>
+        {
+            values.push(None);
+        }
+        _ => {}
     }
 }
 
@@ -6562,6 +6644,65 @@ mod regression {
             outside_deletions("cd sub && rm -rf ../x | cat", &workspace, None),
             vec![OutsideDeletion {
                 path: "../x".into(),
+                placed: false,
+                effect: Effect::Deletes,
+            }]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cd_under_a_cdpath_the_line_sets_is_checked_where_it_may_go() {
+        let root = std::env::temp_dir().join(format!("haarness-cdpath-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        // The launcher clears `CDPATH`, but an assignment in the line wins:
+        // `cd etc` then goes to `/etc`.
+        let etc = analyze("cd /etc", &workspace).external_dirs;
+        assert!(!etc.is_empty());
+        for command in [
+            "CDPATH=/ cd etc && cat passwd",
+            "export CDPATH=/ && cd etc && cat passwd",
+            "CDPATH=/; cd etc; cat passwd",
+            "CDPATH=/tmp:/ pushd etc",
+            "CDPATH=.:/ cd etc",
+            "eval 'CDPATH=/'; cd etc",
+            "CDPATH=/ bash -c 'cd etc && cat passwd'",
+        ] {
+            let found = analyze(command, &workspace).external_dirs;
+            assert!(
+                etc.iter().all(|dir| found.contains(dir)),
+                "{command}: {found:?}"
+            );
+        }
+        // A value only known when it runs may lead anywhere.
+        assert!(
+            analyze("CDPATH=\"$X\" cd etc", &workspace)
+                .external_dirs
+                .contains(&"/*".to_owned())
+        );
+        // A folder `CDPATH` does not search, a value of the folder the shell
+        // is in, and a line that only reads or clears it ask nothing.
+        for command in [
+            "cd etc && cat passwd",
+            "CDPATH=/ cd ./src",
+            "CDPATH=/ cd .",
+            "CDPATH=.: cd src && ls",
+            "CDPATH= cd src",
+            "unset CDPATH; cd src",
+            "echo \"$CDPATH\"; cd src",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        // Not followed: what the line deletes after it cannot be placed.
+        assert_eq!(
+            outside_deletions("CDPATH=/ cd etc && rm -rf x", &workspace, None),
+            vec![OutsideDeletion {
+                path: "x".into(),
                 placed: false,
                 effect: Effect::Deletes,
             }]
