@@ -6,6 +6,13 @@ export function retainedItems(items: Item[], thread?: Thread) {
   const boundary = thread?.revert?.sequence ?? Infinity;
   return items.filter((item) => item.sequence <= boundary);
 }
+/** The files a pending undo left as they are: the names the server gave,
+ * and how many there are in all. An older server names none. */
+export function unrestoredFiles(thread?: Thread) {
+  const names = thread?.revert?.unrestored ?? [];
+  const count = Math.max(names.length, thread?.revert?.unrestoredCount ?? 0);
+  return { names, count, more: count - names.length };
+}
 export function lastUserMessage(items: Item[], boundary = Infinity) {
   return items.findLast(
     (item) =>

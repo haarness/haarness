@@ -1712,6 +1712,53 @@ fn plan_row(app: &App, width: usize) -> Line {
     ])
 }
 
+/// The files a pending undo left as they are, counted and then named:
+/// `2 files weren't restored · .env, ~/notes.txt`. `None` when it put
+/// everything back.
+fn unrestored_text(app: &App) -> Option<String> {
+    let revert = app.thread.revert.as_ref()?;
+    let shown = revert.unrestored.len();
+    let count = revert
+        .unrestored_count
+        .map_or(shown, |count| usize::try_from(count).unwrap_or(usize::MAX))
+        .max(shown);
+    if count == 0 {
+        return None;
+    }
+    let summary = if count == 1 {
+        app.language.text("1 file wasn't restored").to_owned()
+    } else {
+        app.language.format(
+            "{count} files weren't restored",
+            &[("count", &count.to_string())],
+        )
+    };
+    // The home folder reads as `~`, and a path is text, never a control.
+    let home = haarness_protocol::home_dir().map(|home| home.display().to_string());
+    let mut names = revert
+        .unrestored
+        .iter()
+        .map(|path| {
+            let path = match home.as_deref().and_then(|home| path.strip_prefix(home)) {
+                Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+                _ => path.clone(),
+            };
+            path.chars().filter(|c| !c.is_control()).collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    if count > shown {
+        names.push(
+            app.language
+                .format("+{count} more", &[("count", &(count - shown).to_string())]),
+        );
+    }
+    Some(if names.is_empty() {
+        summary
+    } else {
+        format!("{summary} · {}", names.join(", "))
+    })
+}
+
 pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
     let theme = &app.theme;
     let mut transcript = TaggedLines::default();
@@ -2757,6 +2804,13 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
             Span::new("  ↶ ", theme.muted),
             Span::new(single_line(&text, width.saturating_sub(4)), theme.muted),
         ]));
+        // What the undo left as it is, under it on one line of its own.
+        if let Some(text) = unrestored_text(app) {
+            block.push(Line::new(vec![
+                Span::new("    ", theme.muted),
+                Span::new(single_line(&text, width.saturating_sub(4)), theme.muted),
+            ]));
+        }
         append_block(
             &mut transcript,
             block,

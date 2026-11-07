@@ -18887,6 +18887,88 @@ fn undo_and_redo_report_how_far_the_history_reaches() {
     assert_eq!(app.undo_depth(), (0, 3));
 }
 
+#[test]
+fn an_undo_that_left_files_says_so_under_its_marker() {
+    let thread = fixture_thread();
+    let items = vec![
+        message_item(
+            1,
+            &thread,
+            ItemData::UserMessage {
+                text: "first".into(),
+                attachments: vec![],
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        ),
+        message_item(
+            2,
+            &thread,
+            ItemData::UserMessage {
+                text: "edit the env".into(),
+                attachments: vec![],
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text = |app: &App| {
+        app.lines((100, 40))
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let undone = |unrestored: &[&str], count| haarness_protocol::RevertState {
+        sequence: 1,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+        unrestored: unrestored.iter().map(|path| (*path).to_owned()).collect(),
+        unrestored_count: count,
+    };
+    // An undo that put everything back: the marker alone.
+    app.thread.revert = Some(undone(&[], None));
+    let quiet = text(&app);
+    assert!(quiet.contains("↶ "), "{quiet}");
+    assert!(!quiet.contains("restored ·"), "{quiet}");
+    assert!(!quiet.contains("wasn't restored"), "{quiet}");
+
+    app.thread.revert = Some(undone(&[".env"], None));
+    let one = text(&app);
+    let marker = one
+        .lines()
+        .position(|line| line.contains("↶ "))
+        .expect("the undone marker");
+    assert_eq!(
+        one.lines().nth(marker + 1).map(str::trim_end),
+        Some("    1 file wasn't restored · .env"),
+        "{one}"
+    );
+
+    // Named up to what the server sent, the rest counted.
+    app.thread.revert = Some(undone(&["big.bin", "src/\u{1b}[31mlog"], Some(5)));
+    let many = text(&app);
+    assert!(
+        many.contains("    5 files weren't restored · big.bin, src/[31mlog, +3 more"),
+        "{many}"
+    );
+    assert!(
+        !many.contains('\u{1b}'),
+        "a name is never a terminal control"
+    );
+
+    // Read in the interface language.
+    app.language = crate::locale::Language::Japanese;
+    let japanese = text(&app);
+    assert!(
+        japanese.contains("5 個のファイルは復元されませんでした · big.bin"),
+        "{japanese}"
+    );
+}
+
 #[tokio::test]
 async fn auto_mode_replies_once_including_background_and_child_requests_and_preserves_review() {
     let thread = fixture_thread();

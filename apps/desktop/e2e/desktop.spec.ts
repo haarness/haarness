@@ -12001,6 +12001,82 @@ test("conversation controls undo and redo real files, preserve drafts, and compa
   expect(errors).toEqual([]);
 });
 
+test("an undo that left files says so on one quiet line under its notice", async () => {
+  await page.locator(".project-list .project-heading").filter({ hasText: /^workspace$/ }).click();
+  const expand = page.getByRole("button", { name: "Expand project workspace", exact: true });
+  if (await expand.count()) await expand.click();
+  const thread = await client.createThread({ title: "Undo left files fixture", provider: "echo", model: "echo-1", agent: "build" });
+  await page.getByRole("button", { name: thread.title, exact: true }).click();
+  const menu = async (name: string) => {
+    await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+    await page.getByRole("menuitem", { name, exact: true }).click();
+  };
+  const approval = page.getByRole("button", { name: /^Approvals: (Review|Auto|Yolo)$/ });
+  if (await approval.getAttribute("aria-label") !== "Approvals: Auto") await pickApprovals(page, "Auto");
+  // Ignored for this clone only, so no other test sees a changed Git status.
+  const exclude = join(workspace, ".git", "info", "exclude");
+  const excluded = await readFile(exclude, "utf8").catch(() => "");
+  await mkdir(dirname(exclude), { recursive: true });
+  await writeFile(exclude, excluded + "undo-left-*.env\n");
+  const kept = join(workspace, "undo-left-settings.env");
+  const made = join(workspace, "undo-left-tokens.env");
+  const tracked = join(workspace, "undo-left-tracked.txt");
+  await writeFile(kept, "TOKEN=old\n");
+  const calls = [
+    ["undo-left-settings.env", "TOKEN=new\n"],
+    ["undo-left-tokens.env", "SECRET=made\n"],
+    ["undo-left-tracked.txt", "turn output\n"],
+  ].map(([path, content]) => ({ name: "write", arguments: { path, content } }));
+  await send("!multi " + JSON.stringify(calls));
+  await expect.poll(() => readFile(tracked, "utf8").catch(() => "")).toBe("turn output\n");
+  await settled();
+  await expect(page.locator(".composer")).not.toHaveClass(/running/);
+  const notice = page.locator(".conversation-history-notice");
+  await menu("Undo last turn");
+  await expect(notice).toContainText("Turn undone");
+  await expect.poll(() => existsSync(tracked)).toBe(false);
+  // The ignored files stay as the turn left them, and the notice says so.
+  expect(await readFile(kept, "utf8")).toBe("TOKEN=new\n");
+  expect(await readFile(made, "utf8")).toBe("SECRET=made\n");
+  const left = notice.locator(".undo-unrestored");
+  const summary = left.locator("summary");
+  await expect(summary).toHaveText("2 files weren't restored");
+  await expect(summary).toHaveAttribute("title", "undo-left-settings.env\nundo-left-tokens.env");
+  await expect(left.locator("li").first()).toBeHidden();
+  // The notice's first line is where it always is: the sentence, then Redo.
+  const sentence = await notice.locator("span").first().boundingBox();
+  const redo = await notice.getByRole("button", { name: "Redo turn", exact: true }).boundingBox();
+  expect(Math.abs(sentence!.y + sentence!.height / 2 - (redo!.y + redo!.height / 2))).toBeLessThan(2);
+  expect((await summary.boundingBox())!.y).toBeGreaterThan(redo!.y + redo!.height - 1);
+  const shots = async (name: string) => {
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((value) => window.haarness.preferences({ theme: value }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.locator(".conversation").screenshot({ path: test.info().outputPath(`${name}-${theme}.png`) });
+    }
+  };
+  await shots("undo-unrestored-closed");
+  await summary.click();
+  await expect(left.locator("li")).toHaveText(["undo-left-settings.env", "undo-left-tokens.env"]);
+  await expect(left.locator("p")).toHaveText("Undo leaves files that are ignored, outside the folder or over 2 MiB as they are.");
+  await shots("undo-unrestored-open");
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(summary).toHaveText(/^لم تتم استعادة (2|٢) ملفات$/);
+  await expect(left.locator("li bdi").first()).toHaveAttribute("dir", "ltr");
+  await shots("undo-unrestored-rtl");
+  await page.evaluate(() => window.haarness.preferences({ language: "en", theme: "dark" }));
+  // Kept with the undo across a reload.
+  await page.reload();
+  await expect(notice.locator(".undo-unrestored summary")).toHaveText("2 files weren't restored");
+  await menu("Redo turn");
+  await expect.poll(() => readFile(tracked, "utf8").catch(() => "")).toBe("turn output\n");
+  await expect(notice).toHaveCount(0);
+  await writeFile(exclude, excluded);
+  for (const path of [kept, made, tracked]) await rm(path);
+  expect(errors).toEqual([]);
+});
+
 test("conversation find reaches virtual history, cycles matches, and respects keyboard focus", async () => {
   await page.locator(".project-list .project-heading").filter({ hasText: /^workspace$/ }).click();
   const expand = page.getByRole("button", { name: "Expand project workspace", exact: true });
