@@ -2131,9 +2131,11 @@ const URL_WITHOUT_HOST: &str = "Its URL is not a web address (http or https) wit
 /// asked there. Unchecked, such a URL failed deep in the transport with an
 /// error that named the transport's own types and quoted it. The status
 /// never holds the URL, which may carry a token; it names a variable that
-/// is not set, since setting it is the fix. A JSON setting has read its
-/// references already (and filled an unset one with nothing), so a value
-/// that itself holds `${OTHER}` is read once more here, a known limit.
+/// is not set, since setting it is the fix. This is the one pass for a url
+/// from any setting (the JSON loader leaves it as written), and what a
+/// variable holds is used as it is: a `${OTHER}` in its value is never read,
+/// so text from outside (a branch name, say) cannot have another variable's
+/// value, a key, put into the address.
 fn reachable_url(url: &str) -> Result<String, String> {
     reachable_url_with(url, &|name| std::env::var(name).ok())
 }
@@ -2181,9 +2183,8 @@ fn unreachable_server(name: &str, problem: &str) -> CoreError {
     ))
 }
 
-/// Whether `url` is written with nothing where its host goes. A JSON
-/// setting fills an unset variable with nothing, so `https://${DOCS_HOST}/mcp`
-/// arrives as `https:///mcp`, which the URL parser reads as host `mcp`.
+/// Whether `url` is written with nothing where its host goes, as
+/// `https:///mcp` is: the URL parser reads that as host `mcp`.
 fn without_host(url: &str) -> bool {
     url.trim()
         .split_once(':')
@@ -3781,6 +3782,9 @@ mod tests {
         let environment = |name: &str| match name {
             "DOCS_HOST" => Some("docs.fixture.test".to_owned()),
             "DOCS_PORT" => Some("8443".to_owned()),
+            // A value from outside that names another variable.
+            "DOCS_BRANCH" => Some("x.evil.example/${DOCS_SECRET}#".to_owned()),
+            "DOCS_SECRET" => Some("key-secret".to_owned()),
             _ => None,
         };
         let reach = |url: &str| reachable_url_with(url, &environment);
@@ -3811,6 +3815,11 @@ mod tests {
             (
                 "https://${DOCS_HOST}/mcp?api_key=${DOCS_KEY:-none}",
                 "https://docs.fixture.test/mcp?api_key=none",
+            ),
+            // What a variable holds is used as it is, never read again.
+            (
+                "https://${DOCS_BRANCH}.docs.fixture.test/mcp",
+                "https://x.evil.example/${DOCS_SECRET}#.docs.fixture.test/mcp",
             ),
         ] {
             assert_eq!(reach(usable).as_deref(), Ok(asked), "{usable}");

@@ -50,9 +50,10 @@ workspace = root/'project'; (workspace/'.haarness').mkdir(parents=True); (worksp
 keychain = root/'keychain.json'
 SECRET = 'ghp_e2e-' + uuid.uuid4().hex
 URL_SECRET = 'url-e2e-' + uuid.uuid4().hex
-# A JSON setting fills an unset variable with nothing; a server configured through the API keeps the reference.
-BAD_URL = 'Its URL is not a web address (http or https) with a host.'
-BAD_VAR = 'Its URL names an environment variable that is not set: HAARNESS_E2E_UNSET_HOST.'
+# A url is read once, when its server starts, whatever setting it comes from (the JSON loader leaves it as written).
+BAD_URL = 'Its URL names an environment variable that is not set: HAARNESS_E2E_UNSET_HOST.'
+BAD_VAR = BAD_URL
+NO_HOST = 'Its URL is not a web address (http or https) with a host.'
 # Quotes, backslashes and length the old `security -i` path split or mangled.
 AWKWARD = 'a"b\\c\\"d \'e\' $(f) %g% ' + 'x' * 4096
 python = sys.executable
@@ -294,6 +295,14 @@ try:
     assert re.search(r'^badvar\tstreamable_http\tfailed\t' + re.escape(BAD_VAR) + '$', listed, re.M), listed
     assert URL_SECRET not in listed and URL_SECRET not in json.dumps(servers()), listed
     api('/mcp/badvar/disconnect', {})
+    # A url with nothing where its host goes.
+    try:
+        api('/mcp/nohost', {'transport': 'streamable_http', 'enabled': True, 'url': 'https:///mcp?api_key=' + URL_SECRET})
+        raise AssertionError('a server whose url has no host was configured')
+    except urllib.error.HTTPError:
+        pass
+    assert servers()['nohost']['detail'] == NO_HOST, servers()['nohost']
+    api('/mcp/nohost/disconnect', {})
     # One in the query is named too, before anything is sent.
     try:
         api('/mcp/badquery', {'transport': 'streamable_http', 'enabled': True,

@@ -53,7 +53,7 @@ test.beforeAll(async () => {
           docs: server("resources.py"),
           // Floods its handshake: stopped at once, and says why.
           flood: server("flood.py", { env: { FLOOD_INIT: "1" } }),
-          // Its host is a variable that is not set, which a JSON setting fills with nothing.
+          // Its host is a variable that is not set: the url is read once, when the server starts.
           badurl: { type: "http", url: "https://${HAARNESS_E2E_UNSET_HOST}/mcp?api_key=e2e-url-secret" },
           // Lists a tool without an inputSchema beside a good one.
           shelf: server("names.py", {
@@ -188,7 +188,7 @@ test("a remote server whose url cannot be asked says so in one sentence, without
   await openMcpSettings();
   const bad = block("badurl");
   await expect(bad.locator(".mcp-server-detail")).toHaveText(
-    "Its URL is not a web address (http or https) with a host.",
+    "Its URL names an environment variable that is not set: HAARNESS_E2E_UNSET_HOST.",
   );
   await expect(bad).not.toContainText("e2e-url-secret");
   await pictures(bad, "mcp-bad-url-detail");
