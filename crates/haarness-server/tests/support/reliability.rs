@@ -1780,3 +1780,113 @@ async fn reliability_an_explained_failure_still_leaves_the_step_limit_its_summar
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+/// Groq checks the model's tool calls itself and refuses a reply whose call
+/// does not match its tool, with a 400 before anything streams.
+const REFUSED_CALL: &str = "HTTP 400 Bad Request: [tool_use_failed] Tool call validation failed: tool call validation failed: parameters for tool apply_patch did not match schema: errors: [missing properties: 'input', additionalProperties 'patch' not allowed]";
+
+fn correction_note(request: &ProviderRequest) -> bool {
+    request.messages.iter().any(|message| matches!(message, ProviderMessage::Text {role, content} if role == "user" && content.contains("did not match the tool's definition") && content.contains("missing properties: 'input'")))
+}
+
+#[tokio::test]
+async fn reliability_a_tool_call_the_provider_refused_is_corrected_by_the_model() {
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![cut(REFUSED_CALL)],
+            vec![Ok(text("corrected")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("patch it"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert!(!correction_note(&requests[0]));
+        assert!(correction_note(&requests[1]), "{:?}", requests[1].messages);
+    }
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_tool_calls_the_provider_keeps_refusing_end_the_turn_in_plain_words() {
+    let (directory, runtime, provider, _hooks) = setup_streams(
+        vec![vec![cut(REFUSED_CALL)]],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("patch it"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Failed);
+    // Asked twice to correct it, then the turn ends.
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let error = items
+        .iter()
+        .find_map(|item| match &item.data {
+            ItemData::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        error
+            .contains("refused the model's tool calls, which did not match the tools' definitions")
+            && !error.contains("HTTP 400"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Groq streams the model's reasoning first, then refuses the reply in the
+/// stream: the reasoning stays and the model is asked again.
+#[tokio::test]
+async fn reliability_a_tool_call_refused_after_the_reasoning_streamed_is_corrected() {
+    let refused = "Tool call validation failed: tool call validation failed: parameters for tool apply_patch did not match schema: errors: [missing properties: 'input', additionalProperties 'patch' not allowed]";
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![
+                Ok(ProviderEvent::ReasoningDelta("Patch the file.".into())),
+                cut(refused),
+            ],
+            vec![Ok(text("corrected")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("patch it"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert!(correction_note(&provider.requests.lock().unwrap()[1]));
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(
+        |item| matches!(&item.data, ItemData::Reasoning { text, .. } if text == "Patch the file.")
+    ));
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}

@@ -2342,10 +2342,20 @@ impl ToolRegistry for NativeToolRegistry {
         self.mcp.as_ref()?.starting()
     }
     fn list(&self) -> Vec<ToolDefinition> {
+        self.listed(|tool| tool.offered())
+    }
+    fn list_for(&self, thread: ThreadId) -> Vec<ToolDefinition> {
+        self.listed(|tool| tool.offered() && tool.unavailable_to(thread).is_none())
+    }
+}
+
+impl NativeToolRegistry {
+    /// The native tools `keep` lets through, then the MCP ones, by name.
+    fn listed(&self, keep: impl Fn(&Arc<dyn Tool>) -> bool) -> Vec<ToolDefinition> {
         let mut values: Vec<_> = self
             .tools
             .values()
-            .filter(|tool| tool.offered())
+            .filter(|tool| keep(tool))
             .map(|tool| tool.definition())
             .collect();
         if let Some(mcp) = &self.mcp {

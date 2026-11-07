@@ -892,6 +892,14 @@ pub trait Tool: Send + Sync {
     fn offered(&self) -> bool {
         true
     }
+    /// Why `thread` can't use this tool now, or `None` when it can. A tool
+    /// that needs something attached to the chat (a browser tool needs a
+    /// browser that can serve it) leaves that chat's list while it is
+    /// missing, and a call the model makes anyway is answered with these
+    /// words. Must be cheap: it is asked every time a chat's list is built.
+    fn unavailable_to(&self, _thread: ThreadId) -> Option<String> {
+        None
+    }
     /// Whether this concrete call can mutate the local workspace. Most tools
     /// use their static classification; tools such as a shell may recognize a
     /// deliberately tiny set of provably inert invocations so unrelated
@@ -950,6 +958,12 @@ pub trait Tool: Send + Sync {
 pub trait ToolRegistry: Send + Sync {
     fn get(&self, name: &str) -> Option<Arc<dyn Tool>>;
     fn list(&self) -> Vec<ToolDefinition>;
+    /// The tools `thread` can use now: [`Self::list`] without those a tool
+    /// says are unavailable to it ([`Tool::unavailable_to`]).
+    fn list_for(&self, thread: ThreadId) -> Vec<ToolDefinition> {
+        let _ = thread;
+        self.list()
+    }
     /// The connected MCP servers that declare resources, for the resource
     /// tools' reach (see [`McpRegistry::resource_servers`]).
     fn resource_servers(&self) -> Vec<String> {

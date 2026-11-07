@@ -1028,6 +1028,35 @@ fn closed_call_reason(error: &CoreError, provider: Option<&str>) -> String {
 const STEP_LIMIT_CALL: &str =
     "This call was not run: the turn reached its step limit, so no more tools run in it.";
 
+/// What the request after a reply the provider refused for its tool call
+/// says, before the provider's reason.
+const REFUSED_CALL: &str = "The provider refused your last reply before it reached Haarness, because a tool call in it did not match the tool's definition. Call the tool again with arguments that match its schema, or answer without it. The provider said: ";
+
+/// How often a turn asks the model to correct a tool call the provider
+/// refused, before the turn fails.
+const REFUSED_CALL_RETRIES: u8 = 2;
+
+/// The provider's reason when it refused the model's own reply for a tool
+/// call that does not match its tool (Groq's `tool_use_failed`: "Tool call
+/// validation failed: parameters for tool apply_patch did not match
+/// schema…", or a call of a tool it was not sent). The request was fine; a
+/// model asked again usually gets the call right.
+fn refused_tool_call(error: &CoreError) -> Option<String> {
+    let CoreError::Provider(message) = error else {
+        return None;
+    };
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("tool_use_failed") && !lower.contains("tool call validation failed") {
+        return None;
+    }
+    let reason = lower
+        .rfind("tool call validation failed: ")
+        .map_or(message.as_str(), |at| {
+            &message[at + "tool call validation failed: ".len()..]
+        });
+    Some(clean_error_text(reason, 600))
+}
+
 /// What the request after an empty reply says, when a call before it failed.
 const EXPLAIN_FAILURE: &str = "Your last reply was empty, but a tool call before it failed. Explain what went wrong and what happens next, then carry on with the task if you can.";
 
@@ -1160,6 +1189,11 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
         return None;
     };
     let lower = message.to_ascii_lowercase();
+    // A quota of nothing ("limit: 0", Google's free tier for a model it
+    // leaves out) names a wait all the same, but no wait lifts it.
+    if quota_limits(&lower).any(|limit| limit == 0) {
+        return None;
+    }
     let Some(advised) = named_wait(&lower) else {
         // A shared pool upstream that is briefly full ("temporarily
         // rate-limited upstream. Please retry shortly", or a Haarness router's
@@ -1202,6 +1236,43 @@ fn named_wait(lower: &str) -> Option<std::time::Duration> {
         return None;
     };
     Some(std::time::Duration::from_secs(value.saturating_mul(scale)))
+}
+
+/// The quotas a refusal names ("Quota exceeded for metric: …, limit: 20,
+/// model: …"), in a lower-cased message.
+fn quota_limits(lower: &str) -> impl Iterator<Item = u64> + '_ {
+    lower.match_indices("limit: ").filter_map(|(at, marker)| {
+        let rest = &lower[at + marker.len()..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        // "limit: 0.5" or "limit: 0x" is no count; a full stop after it is.
+        let after = &rest.as_bytes()[digits..];
+        if digits == 0
+            || after.first().is_some_and(u8::is_ascii_alphanumeric)
+            || (after.first() == Some(&b'.') && after.get(1).is_some_and(u8::is_ascii_digit))
+        {
+            return None;
+        }
+        rest[..digits].parse().ok()
+    })
+}
+
+/// A refusal of Google's free tier: the smallest quota it names (`0` for a
+/// model the free tier leaves out) and the wait it names.
+struct FreeTierQuota {
+    limit: u64,
+    wait: Option<std::time::Duration>,
+}
+
+fn free_tier_quota(lower: &str) -> Option<FreeTierQuota> {
+    if !lower.contains("free_tier") || !lower.contains("quota exceeded") {
+        return None;
+    }
+    Some(FreeTierQuota {
+        limit: quota_limits(lower).min()?,
+        wait: lower
+            .split_once("retry in ")
+            .and_then(|(_, rest)| advised_wait(rest)),
+    })
 }
 
 /// A wait written the way providers write it: "17.19s", "59s", "1m30s",
@@ -1696,10 +1767,90 @@ fn describe_model_refusal(
             "Your GitHub Copilot plan doesn't include {name}. Choose another model{such_as}, or turn it on at github.com/settings/copilot."
         ));
     }
+    let provider = &info.name;
+    // Google still lists an older model to every key but refuses it to
+    // accounts made since it was retired ("This model models/gemini-2.5-pro
+    // is no longer available to new users. Please update your code to use
+    // models/gemini-3.1-pro-preview …"), naming the model to use instead.
+    if lower.contains("no longer available to new users") {
+        let suggested = lower
+            .find("use models/")
+            .map(|at| &raw[at + "use models/".len()..])
+            .and_then(|rest| rest.split(|c: char| c.is_whitespace() || c == ',').next())
+            .map(|id| id.trim_end_matches('.'))
+            .filter(|id| !id.is_empty() && *id != model)
+            .map(|id| {
+                haarness_protocol::model_display_name(
+                    id,
+                    model_metadata(&info.models, id).map(|listed| listed.display_name.as_str()),
+                )
+            });
+        let such_as = match (suggested, others.as_slice()) {
+            (Some(suggested), _) => format!(", such as {suggested}"),
+            (None, []) => String::new(),
+            (None, names) => format!(", such as {}", spoken_list(names, "or")),
+        };
+        return Some(if advice {
+            format!(
+                "{provider} no longer offers {name} to new accounts. Choose another model for this chat{such_as}."
+            )
+        } else {
+            format!("{provider} no longer offers {name} to new accounts.")
+        });
+    }
+    // Google's free tier: a model it leaves out (`limit: 0`) is refused at
+    // once whatever the wait it names, and a daily allowance used up is back
+    // only the next day; a per-minute one was already waited out.
+    if let Some(quota) = free_tier_quota(&lower) {
+        let billing = "turn on billing for this API key's project in Google AI Studio";
+        // Google's free tier is for its Flash models.
+        let flash: Vec<_> = info
+            .models
+            .iter()
+            .filter(|listed| listed.id.contains("flash"))
+            .cloned()
+            .collect();
+        let such_as = match listed_alternatives(&flash, model).as_slice() {
+            [] => String::new(),
+            names => format!(", such as {}", spoken_list(names, "or")),
+        };
+        if quota.limit == 0 {
+            return Some(if advice {
+                format!(
+                    "{provider}'s free tier doesn't include {name}. Choose another model for this chat{such_as}, or {billing}."
+                )
+            } else {
+                format!("{provider}'s free tier doesn't include {name} for this API key.")
+            });
+        }
+        if let Some(wait) = quota.wait.filter(|wait| *wait > LONGEST_ADVISED_WAIT) {
+            let minutes = wait.as_secs().div_ceil(60);
+            let renews = if minutes >= 90 {
+                format!("about {} hours", (minutes + 30) / 60)
+            } else {
+                format!("about {minutes} minutes")
+            };
+            return Some(if advice {
+                format!(
+                    "This API key has used up {provider}'s free allowance for {name}, which comes back in {renews}. Choose another model for this chat, or {billing}."
+                )
+            } else {
+                format!(
+                    "This API key has used up {provider}'s free allowance for {name}, which comes back in {renews}."
+                )
+            });
+        }
+        return Some(if advice {
+            format!(
+                "{name} is at the limit of {provider}'s free tier for this API key. Wait a minute and send the message again, choose another model, or {billing}."
+            )
+        } else {
+            format!("{name} is at the limit of {provider}'s free tier for this API key.")
+        });
+    }
     if model_metadata(&info.models, model).is_some() || !refuses_unknown_model(&lower, model) {
         return None;
     }
-    let provider = &info.name;
     Some(match (others.as_slice(), advice) {
         ([], true) => {
             format!("{provider} no longer offers {name}. Choose another model for this chat.")
@@ -1982,6 +2133,19 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             None => "The provider did not accept this API key: it is not valid, or not a key for this provider. Connect it again to replace it.".into(),
         };
     }
+    // A sign-in whose renewal the provider refused (its refresh token
+    // expired, was revoked, or was spent by another copy of the sign-in):
+    // only signing in again helps, and the words of the token server ("xAI
+    // sign-in failed: refresh token returned 400 Bad Request: Invalid or
+    // unknown refresh token") say nothing a person can act on.
+    if lower.contains("sign-in failed: refresh token returned 4") {
+        return match provider {
+            Some(name) => format!(
+                "Your {name} sign-in has expired or was ended elsewhere. Connect {name} again to sign in."
+            ),
+            None => "Your sign-in with this provider has expired or was ended elsewhere. Connect it again to sign in.".into(),
+        };
+    }
     // Bedrock refuses a wrong API key with 403 "Authentication failed: Please
     // make sure your API Key is valid", or "Invalid API Key format".
     if lower.contains("http 401")
@@ -2016,6 +2180,15 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
                 "The provider rejected the API key or sign-in{reason}. Connect it again to replace it."
             ),
         };
+    }
+    // The model's tool calls kept not matching their tools, and a provider
+    // that checks them (Groq) refused each reply, though it was asked to
+    // correct them.
+    if refused_tool_call(error).is_some() {
+        return format!(
+            "{} refused the model's tool calls, which did not match the tools' definitions, even after it was asked to correct them. Send the message again, or choose another model.",
+            provider.unwrap_or("The provider")
+        );
     }
     // A Haarness router's words already say whose account ran out of credit:
     // the key's owner, or the router's own (which its users can't top up).
@@ -2075,6 +2248,15 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
                 grouped(requested)
             );
         }
+    }
+    // OpenAI's `insufficient_quota` is an API account with no credit, or at
+    // the spending limit set for it, on every model at once: no wait helps.
+    // A ChatGPT plan does not pay for the API, which surprises many who paste
+    // a key, and Haarness can sign in with ChatGPT instead.
+    // Through a router the account is the router's, so only OpenAI's own
+    // answer is worded so.
+    if provider == Some("OpenAI") && lower.contains("insufficient_quota") {
+        return "Your OpenAI API account has no credit left, or has reached its spending limit. Add credit at platform.openai.com/settings/organization/billing, or connect OpenAI by signing in with ChatGPT instead: a ChatGPT plan doesn't pay for API keys.".into();
     }
     if is_provider_usage_limit(error) {
         // The provider's own words say which limit and what helps; a bare
@@ -3058,7 +3240,10 @@ impl AgentRuntime {
             lazy_tools.mode = mode;
         }
         let mut response = select_tools(
-            components.tools.list(),
+            match thread_id {
+                Some(thread) => components.tools.list_for(thread),
+                None => components.tools.list(),
+            },
             &components.config.tool_availability,
             &live,
             &lazy_tools,
@@ -4179,7 +4364,7 @@ impl AgentRuntime {
         let (messages, mut origins) = provider_messages_with_origins(items);
         let messages = crate::side_question::settled(messages);
         origins.truncate(messages.len());
-        let catalog = components.tools.list();
+        let catalog = components.tools.list_for(thread_id);
         let prepared = self.prepared_prompts.lock().request(
             thread_id,
             turn_id,
@@ -7731,6 +7916,7 @@ impl AgentRuntime {
             tool_execution_gates: self.tool_execution_gates.clone(),
             tool_promotions: self.tool_promotions.clone(),
             advertised_tools: Mutex::new(HashSet::new()),
+            turn_tools: Mutex::new(HashSet::new()),
             last_tool_catalog: Mutex::new(None),
             config: components.config.clone(),
             snapshots,
@@ -8225,6 +8411,11 @@ struct RunnerTask {
     /// execution-time authority against hallucinated or prematurely-loaded
     /// calls, not merely UI bookkeeping.
     advertised_tools: Mutex<HashSet<String>>,
+    /// Every tool this turn's requests have offered: a tool the chat can no
+    /// longer use (its browser went away) stays in the list until the turn
+    /// ends, so the list the cached prompt opens with changes at most once a
+    /// turn, when a tool becomes usable (see `request_tools`).
+    turn_tools: Mutex<HashSet<String>>,
     last_tool_catalog: Mutex<Option<ToolCatalogResponse>>,
     config: Arc<RuntimeConfig>,
     /// The store of `workspace`.
@@ -10142,6 +10333,11 @@ impl RunnerTask {
             let mut failure_beside_text = false;
             let mut explain_failure = false;
             let mut asked_to_explain = false;
+            // Why the provider refused the model's last reply for a tool call
+            // that did not match its tool, for the next request to say, and
+            // how often this turn has asked the model to correct one.
+            let mut refused_call: Option<String> = None;
+            let mut refused_calls = 0_u8;
             // Whether this turn asked again for the summary at its step limit.
             let mut asked_for_summary = false;
             // UserPromptSubmit hooks may block the turn or inject context.
@@ -10499,6 +10695,12 @@ impl RunnerTask {
                         "The previous provider response ended before completion. Continue from the saved partial response without repeating it. Completed tool results are already in the conversation; do not repeat those actions.".into() });
                     recovering = false;
                 }
+                if let Some(reason) = refused_call.take() {
+                    messages.push(ProviderMessage::Text {
+                        role: "user".into(),
+                        content: format!("{REFUSED_CALL}{reason}"),
+                    });
+                }
                 // Asked in every request until a reply to it shows words, a
                 // tool call or structured output, or ends: a retry, an image
                 // retry, a compaction, or a recovery after a cut that brought
@@ -10620,7 +10822,7 @@ impl RunnerTask {
                 // cached prompt prefix those sessions share. Such a tool is
                 // refused when called, naming the parent's rule.
                 let permission_engine = self.permission_engine(agent);
-                let catalog = self.tools.list();
+                let catalog = self.request_tools();
                 // The resource tools reach only servers whose tools this
                 // agent may have; with none left they would only fail.
                 let resources_open = self.tools.resource_servers().iter().any(|server| {
@@ -10812,6 +11014,14 @@ impl RunnerTask {
                             compacted_for_size |= oversized;
                             continue 'provider_round;
                         }
+                        if let Some(reason) = refused_tool_call(&error_value)
+                            && refused_calls < REFUSED_CALL_RETRIES
+                        {
+                            refused_calls += 1;
+                            tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "the provider refused a tool call that did not match its tool; asking the model to correct it");
+                            refused_call = Some(reason);
+                            continue 'provider_round;
+                        }
                         if let Some((attempt, delay)) = retries.retry(&error_value) {
                             self.wait_before_retry(attempt, delay, &error_value).await?;
                             continue 'provider_round;
@@ -10897,6 +11107,20 @@ impl RunnerTask {
                             {
                                 compactions_this_turn = compactions_this_turn.saturating_add(1);
                                 compacted_for_size |= oversized;
+                                continue 'provider_round;
+                            }
+                            // A provider that checks the model's tool calls
+                            // itself (Groq) refuses a reply whose call does
+                            // not match its tool, before anything streamed:
+                            // the model is told why and asked again.
+                            if !saw_provider_event
+                                && refused_calls < REFUSED_CALL_RETRIES
+                                && let Some(reason) = refused_tool_call(&error_value)
+                            {
+                                refused_calls += 1;
+                                drop(stream);
+                                tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "the provider refused a tool call that did not match its tool; asking the model to correct it");
+                                refused_call = Some(reason);
                                 continue 'provider_round;
                             }
                             // Providers report an HTTP failure as the stream's
@@ -11270,6 +11494,18 @@ impl RunnerTask {
                             () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
                             () = tokio::time::sleep(pause) => {}
                         }
+                        continue 'provider_round;
+                    }
+                    // Groq streams the model's reasoning, then refuses the
+                    // reply whose tool call does not match its tool: what
+                    // streamed stays, and the model is told why and asked
+                    // again.
+                    if refused_calls < REFUSED_CALL_RETRIES
+                        && let Some(reason) = refused_tool_call(&error)
+                    {
+                        refused_calls += 1;
+                        tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "the provider refused a tool call that did not match its tool; asking the model to correct it");
+                        refused_call = Some(reason);
                         continue 'provider_round;
                     }
                     return Err(error);
@@ -11813,6 +12049,29 @@ impl RunnerTask {
         )
     }
 
+    /// The tools for this turn's next request: those the chat can use now
+    /// (see [`ToolRegistry::list_for`]) and those an earlier request of the
+    /// turn offered. A browser attached mid-turn adds its tools from the next
+    /// request; one that goes away mid-turn leaves them until the turn ends,
+    /// and a call is then answered by the tool, in plain words.
+    fn request_tools(&self) -> Vec<crate::ToolDefinition> {
+        let usable: HashSet<String> = self
+            .tools
+            .list_for(self.thread.id)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        let mut offered = self.turn_tools.lock();
+        let tools: Vec<crate::ToolDefinition> = self
+            .tools
+            .list()
+            .into_iter()
+            .filter(|tool| usable.contains(&tool.name) || offered.contains(&tool.name))
+            .collect();
+        offered.extend(tools.iter().map(|tool| tool.name.clone()));
+        tools
+    }
+
     fn check_tool_name(&self, agent: &str, name: &str, require_advertised: bool) -> CoreResult<()> {
         let engine = self.permission_engine(agent);
         if name != LOAD_TOOL_NAME && self.tools.get(name).is_none() {
@@ -11840,6 +12099,17 @@ impl RunnerTask {
             return Err(CoreError::PermissionDenied(format!(
                 "tool {name} is disabled for this workflow agent turn or by permission policy. Do not retry it or try a different spelling."
             )));
+        }
+        // A tool this chat can't use now (a browser tool with no browser to
+        // serve it) says why and what to do instead.
+        if require_advertised
+            && !self.advertised_tools.lock().contains(name)
+            && let Some(reason) = self
+                .tools
+                .get(name)
+                .and_then(|tool| tool.unavailable_to(self.thread.id))
+        {
+            return Err(CoreError::Tool(reason));
         }
         let advertised = self.advertised_tools.lock();
         if require_advertised && !advertised.contains(name) {
@@ -14029,6 +14299,7 @@ impl RunnerTask {
             tool_execution_gates: self.tool_execution_gates.clone(),
             tool_promotions: self.tool_promotions.clone(),
             advertised_tools: Mutex::new(HashSet::new()),
+            turn_tools: Mutex::new(HashSet::new()),
             last_tool_catalog: Mutex::new(None),
             config: self.config.clone(),
             snapshots: self.snapshots.clone(),
@@ -23961,6 +24232,147 @@ mod tests {
             Some(
                 "Your GitHub Copilot plan doesn't include GPT-5.4. Choose another model, such as Claude Sonnet 5.5, or turn it on at github.com/settings/copilot."
             )
+        );
+    }
+
+    #[test]
+    fn googles_refusals_of_a_model_for_this_key_say_what_to_choose_instead() {
+        let mut flash = model_info("gemini-3.8-flash", 1_048_576);
+        flash.display_name = "Gemini 3.8 Flash".into();
+        let mut argon = model_info("gemini-4-argon", 1_048_576);
+        argon.display_name = "Gemini 4 Argon".into();
+        let mut pro = model_info("gemini-2.5-pro", 1_048_576);
+        pro.display_name = "Gemini 2.5 Pro".into();
+        let catalog = haarness_protocol::ProviderInfo {
+            id: "gemini".into(),
+            name: "Google Gemini".into(),
+            authenticated: true,
+            models: vec![
+                argon,
+                flash,
+                model_info("gemini-3.1-pro-preview", 1_048_576),
+                pro,
+            ],
+        };
+        // As Gemini answers a key made after Gemini 2.5 was retired, though
+        // its model list still has it.
+        let retired = CoreError::Provider(
+            "HTTP 404 Not Found: This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview for the latest features and improvements. We recommend you to use the Interactions API (https://aistudio.google.com/docs/get-started).".into(),
+        );
+        assert_eq!(
+            super::describe_model_refusal(&retired, &catalog, "gemini-2.5-pro", true).as_deref(),
+            Some(
+                "Google Gemini no longer offers Gemini 2.5 Pro to new accounts. Choose another model for this chat, such as Gemini 3.1 Pro Preview."
+            )
+        );
+        assert_eq!(
+            super::describe_model_refusal(&retired, &catalog, "gemini-2.5-pro", false).as_deref(),
+            Some("Google Gemini no longer offers Gemini 2.5 Pro to new accounts.")
+        );
+        // A free-tier key and a model its tier leaves out: Google names a
+        // wait, but the turn fails at once and says what to do.
+        let left_out = CoreError::Provider(
+            "HTTP 429 Too Many Requests: You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 0, model: gemini-4-argon\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-4-argon\nPlease retry in 41.236318127s.".into(),
+        );
+        assert_eq!(super::retry_delay(&left_out, 1), None);
+        assert_eq!(
+            super::describe_model_refusal(&left_out, &catalog, "gemini-4-argon", true).as_deref(),
+            Some(
+                "Google Gemini's free tier doesn't include Gemini 4 Argon. Choose another model for this chat, such as Gemini 3.8 Flash, or turn on billing for this API key's project in Google AI Studio."
+            )
+        );
+        assert_eq!(
+            super::describe_model_refusal(&left_out, &catalog, "gemini-4-argon", false).as_deref(),
+            Some("Google Gemini's free tier doesn't include Gemini 4 Argon for this API key.")
+        );
+        // A day's allowance used up comes back the next day.
+        let daily = CoreError::Provider(
+            "HTTP 429 Too Many Requests: You exceeded your current quota, please check your plan and billing details. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash\nPlease retry in 21h16m10.222s.".into(),
+        );
+        assert_eq!(super::retry_delay(&daily, 1), None);
+        assert_eq!(
+            super::describe_model_refusal(&daily, &catalog, "gemini-3.8-flash", true).as_deref(),
+            Some(
+                "This API key has used up Google Gemini's free allowance for Gemini 3.8 Flash, which comes back in about 21 hours. Choose another model for this chat, or turn on billing for this API key's project in Google AI Studio."
+            )
+        );
+        // A per-minute allowance is waited out; when the turn still fails it
+        // says so plainly.
+        let minute = CoreError::Provider(
+            "HTTP 429 Too Many Requests: You exceeded your current quota. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 5, model: gemini-3.8-flash\nPlease retry in 17.197029539s.".into(),
+        );
+        assert!(super::retry_delay(&minute, 1).is_some());
+        assert_eq!(
+            super::describe_model_refusal(&minute, &catalog, "gemini-3.8-flash", true).as_deref(),
+            Some(
+                "Gemini 3.8 Flash is at the limit of Google Gemini's free tier for this API key. Wait a minute and send the message again, choose another model, or turn on billing for this API key's project in Google AI Studio."
+            )
+        );
+        // Any provider's quota of nothing is not waited for; other limits
+        // and counts that are not whole numbers are read as before.
+        assert_eq!(
+            super::retry_delay(
+                &CoreError::Provider(
+                    "HTTP 429: quota exceeded, limit: 0. Please retry in 5s.".into()
+                ),
+                1
+            ),
+            None
+        );
+        assert!(
+            super::retry_delay(
+                &CoreError::Provider(
+                    "HTTP 429: rate limit, limit: 0.5 per second. Please retry in 5s.".into()
+                ),
+                1
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn a_refused_sign_in_renewal_and_an_unfunded_api_account_say_what_to_do() {
+        for raw in [
+            "xAI sign-in failed: refresh token returned 400 Bad Request: Invalid or unknown refresh token",
+            "xAI sign-in failed: refresh token returned 401 Unauthorized",
+        ] {
+            assert_eq!(
+                super::describe_error(&CoreError::Provider(raw.into()), Some("xAI")),
+                "Your xAI sign-in has expired or was ended elsewhere. Connect xAI again to sign in.",
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    "OpenAI sign-in failed: refresh token returned 401 Unauthorized".into()
+                ),
+                Some("OpenAI")
+            ),
+            "Your OpenAI sign-in has expired or was ended elsewhere. Connect OpenAI again to sign in."
+        );
+        // A sign-in server that could not be reached is not a refused renewal.
+        assert!(
+            !super::describe_error(
+                &CoreError::Provider(
+                    "xAI sign-in failed: request failed: error sending request for url (https://auth.x.ai/oauth2/token)".into()
+                ),
+                Some("xAI")
+            )
+            .contains("expired")
+        );
+        let unfunded = CoreError::Provider(
+            "HTTP 429 Too Many Requests: [insufficient_quota] You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.".into(),
+        );
+        assert_eq!(
+            super::describe_error(&unfunded, Some("OpenAI")),
+            "Your OpenAI API account has no credit left, or has reached its spending limit. Add credit at platform.openai.com/settings/organization/billing, or connect OpenAI by signing in with ChatGPT instead: a ChatGPT plan doesn't pay for API keys."
+        );
+        assert_eq!(super::retry_delay(&unfunded, 1), None);
+        // Through a router the account is the router's: its words stay.
+        assert!(
+            super::describe_error(&unfunded, Some("Haarness Router"))
+                .starts_with("Haarness Router rate limit or quota reached: ")
         );
     }
 

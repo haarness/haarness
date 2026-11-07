@@ -1611,3 +1611,196 @@ async fn auto_keeps_deferring_a_chats_tools_across_a_restart_and_in_a_fork() {
     drop(runtime);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// A tool that needs a browser, as the browser tools do: unavailable to
+/// every chat while `served` is false.
+struct NeedsBrowser {
+    served: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Tool for NeedsBrowser {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "browser_fixture".into(),
+            description: "Use the fixture browser".into(),
+            input_schema: json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    fn side_effectful(&self) -> bool {
+        false
+    }
+
+    fn unavailable_to(&self, _thread: haarness_protocol::ThreadId) -> Option<String> {
+        (!self.served.load(Ordering::SeqCst))
+            .then(|| "No browser is available to this chat now.".into())
+    }
+
+    async fn execute(&self, _arguments: Value, _context: ToolContext) -> CoreResult<ToolOutput> {
+        Ok(ToolOutput {
+            text: "browsed".into(),
+            metadata: Value::Null,
+        })
+    }
+}
+
+/// `attach` and `detach` stand for a browser connecting and going away
+/// while a turn runs.
+struct Switch {
+    name: &'static str,
+    served: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Tool for Switch {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name.into(),
+            description: "Attach or detach the fixture browser".into(),
+            input_schema: json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    fn side_effectful(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, _arguments: Value, _context: ToolContext) -> CoreResult<ToolOutput> {
+        self.served.store(self.name == "attach", Ordering::SeqCst);
+        Ok(ToolOutput {
+            text: self.name.into(),
+            metadata: Value::Null,
+        })
+    }
+}
+
+struct BrowserRegistry {
+    tools: HashMap<String, Arc<dyn Tool>>,
+}
+
+impl ToolRegistry for BrowserRegistry {
+    fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.get(name).cloned()
+    }
+
+    fn list(&self) -> Vec<ToolDefinition> {
+        self.tools.values().map(|tool| tool.definition()).collect()
+    }
+
+    fn list_for(&self, thread: haarness_protocol::ThreadId) -> Vec<ToolDefinition> {
+        self.tools
+            .values()
+            .filter(|tool| tool.unavailable_to(thread).is_none())
+            .map(|tool| tool.definition())
+            .collect()
+    }
+}
+
+/// A tool that needs a browser is offered only while one can serve the
+/// chat. One that attaches mid-turn adds it from the next request; one that
+/// goes away mid-turn leaves the list as it was until the turn ends, so the
+/// list the cached prompt opens with changes at most once a turn. A call the
+/// model makes while it is not offered is answered in plain words, and the
+/// turn goes on.
+#[tokio::test]
+async fn a_tool_that_needs_a_browser_is_offered_only_while_one_can_serve_the_chat() {
+    let root =
+        std::env::temp_dir().join(format!("haarness-browser-offer-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(SqliteStore::open(root.join("state.db")).unwrap());
+    let served = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+    tools.insert(
+        "read".into(),
+        Arc::new(FixtureTool {
+            name: "read",
+            description: "Read a local file",
+        }),
+    );
+    tools.insert(
+        "browser_fixture".into(),
+        Arc::new(NeedsBrowser {
+            served: served.clone(),
+        }),
+    );
+    for name in ["attach", "detach"] {
+        tools.insert(
+            name.into(),
+            Arc::new(Switch {
+                name,
+                served: served.clone(),
+            }),
+        );
+    }
+    let provider = Scripted::default();
+    provider
+        .then(call("call-1", "browser_fixture", json!({})))
+        .then(ProviderEvent::TextDelta("no browser".into()))
+        .then(call("call-2", "attach", json!({})))
+        .then(ProviderEvent::TextDelta("attached".into()))
+        .then(call("call-3", "detach", json!({})))
+        .then(ProviderEvent::TextDelta("detached".into()));
+    let runtime = AgentRuntime::with_config(
+        store,
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(BrowserRegistry { tools }),
+        EventBus::new(128),
+        root.clone(),
+        String::new(),
+        RuntimeConfig {
+            lazy_tools: LazyToolSettings {
+                mode: LazyToolMode::Off,
+                ..LazyToolSettings::default()
+            },
+            ..RuntimeConfig::default()
+        },
+    );
+    runtime.recover().await.unwrap();
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("scripted".into()),
+            model: Some("scripted-1".into()),
+            ..CreateThreadRequest::default()
+        })
+        .await
+        .unwrap();
+    let browser = |request: usize| provider.offered()[request].contains("\"browser_fixture\"");
+
+    // No browser: not offered, and a call anyway is refused in plain words.
+    one_turn(&runtime, thread.id, "browse without a browser").await;
+    assert!(!browser(0) && !browser(1));
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let refused = items
+        .iter()
+        .find_map(|item| match &item.data {
+            haarness_protocol::ItemData::ToolResult {
+                call_id,
+                output,
+                is_error,
+                ..
+            } if call_id == "call-1" => Some((output.clone(), *is_error)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        refused.1
+            && refused
+                .0
+                .contains("No browser is available to this chat now."),
+        "{refused:?}"
+    );
+
+    // A browser attaches mid-turn: offered from the next request.
+    one_turn(&runtime, thread.id, "attach one").await;
+    assert!(!browser(2) && browser(3));
+
+    // It goes away mid-turn: still listed to the end of that turn, then gone.
+    one_turn(&runtime, thread.id, "detach it").await;
+    assert!(browser(4) && browser(5));
+    one_turn(&runtime, thread.id, "after it went away").await;
+    assert!(!browser(6));
+    assert_eq!(provider.offered().len(), 7);
+}

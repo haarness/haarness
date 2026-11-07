@@ -17,8 +17,8 @@ daemon in a private data folder shows that:
    it must not pay a cache write), while the chat's own requests keep their breakpoints;
 5. a `general` subagent started from a plan chat and one started from a build chat send a
    byte-identical tool list and system prompt, so the second reads the cached prefix the first
-   wrote: the plan chat's browser and write ceiling refuses those tools when called, it does not
-   take them out of the list;
+   wrote: the plan chat's edit and write ceiling refuses those tools when called, it does not
+   take them out of the list (no browser is attached, so neither is sent the browser tools);
 6. a tool the model loaded with `load_tool` stays in the chat's tool list after the daemon
    restarts and in a fork of the chat: the next request's tools are byte-identical to the last
    request's before, so the cached prefix holds;
@@ -400,7 +400,9 @@ try:
     assert not missing, f'the plan chat\'s subagent lacks {missing}'
     assert clean(under_plan['tools']) == clean(under_build['tools']), 'the subagents sent different tool lists'
     assert json.dumps(clean(under_plan['system'])) == json.dumps(clean(under_build['system'])), 'the subagents sent different system prompts'
-    assert 'browser_navigate' in plan_tools and 'write' in plan_tools, plan_tools
+    assert 'edit' in plan_tools and 'write' in plan_tools, plan_tools
+    # No browser is attached to this server, so none of its tools are sent.
+    assert not any(name.startswith('browser_') for name in plan_tools), plan_tools
     if SYSTEM_FOLDER:
         assert 'BASE_PROMPT_MARKER' in system_text(under_plan), 'the subagent lost the base prompt file'
         after = {path: path.read_bytes() for path in team.rglob('*') if path.is_file()}
@@ -409,7 +411,7 @@ try:
                                        'compaction.md prepended to the summary prompt', 'system folder unchanged']})
         print('PASS system folder prompt files on the wire, system folder unchanged', flush=True)
     checks.append({'subagent prefix': [f'{len(plan_tools)} tools identical under a plan and a build chat',
-                                       'system identical', 'browser_navigate and write listed under the plan chat']})
+                                       'system identical', 'edit and write listed under the plan chat, no browser tools without a browser']})
     print(f'PASS subagents of a plan chat and a build chat send one prefix ({len(plan_tools)} tools)', flush=True)
 
     # 6. A loaded tool outlasts a restart and carries into a fork. Default rules, so `load_tool`

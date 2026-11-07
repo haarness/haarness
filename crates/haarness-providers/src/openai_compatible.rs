@@ -1766,6 +1766,47 @@ fn known_reasoning_efforts(provider: &str, model: &str) -> Vec<&'static str> {
     }
 }
 
+/// Add one streamed part of a Mistral reply to what the next request sends
+/// back. Mistral streams its thinking a few words a chunk, each as a part
+/// of its own; sent back so, every few words cost a part's wrapping, which
+/// made a reply's thinking several times larger in each later request.
+/// Consecutive thinking parts, and consecutive text parts, become one.
+fn push_mistral_part(content: &mut Vec<Value>, part: &Value) {
+    let texts = |part: &Value| -> Option<String> {
+        match part["type"].as_str()? {
+            "thinking" => part["thinking"].as_array().and_then(|thoughts| {
+                thoughts
+                    .iter()
+                    .all(|thought| thought["type"] == "text" && thought["text"].is_string())
+                    .then(|| {
+                        thoughts
+                            .iter()
+                            .filter_map(|thought| thought["text"].as_str())
+                            .collect()
+                    })
+            }),
+            "text" => part["text"].as_str().map(str::to_owned),
+            _ => None,
+        }
+    };
+    if let (Some(previous), Some(addition)) = (content.last_mut(), texts(part))
+        && previous["type"] == part["type"]
+        && let Some(mut joined) = texts(previous)
+    {
+        joined.push_str(&addition);
+        if part["type"] == "thinking" {
+            previous["thinking"] = json!([{"type": "text", "text": joined}]);
+            if let Some(closed) = part.get("closed") {
+                previous["closed"] = closed.clone();
+            }
+        } else {
+            previous["text"] = json!(joined);
+        }
+        return;
+    }
+    content.push(part.clone());
+}
+
 fn append_reasoning_details(target: &mut Vec<Value>, details: &Value) {
     let Some(details) = details.as_array() else {
         return;
@@ -2591,7 +2632,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 }
                 if let Some(parts) = delta["content"].as_array() {
                     for part in parts {
-                        mistral_content.push(part.clone());
+                        push_mistral_part(&mut mistral_content, part);
                         if part["type"] == "text" && let Some(text) = part["text"].as_str() { yield ProviderEvent::TextDelta(text.into()); }
                         if part["type"] == "thinking" && let Some(thoughts) = part["thinking"].as_array() {
                             for thought in thoughts { if let Some(text) = thought["text"].as_str() { yield ProviderEvent::ReasoningDelta(text.into()); } }
@@ -2852,7 +2893,7 @@ mod tests {
         CompatibleInstance, CompatibleModelDefaults, ListedAudio, OpenAiCompatibleProvider,
         Unreadable, append_reasoning_details, apply_lmstudio_details, apply_ollama_details,
         deepseek_charge, deepseek_peak, discovered_model_info, local_model_missing, model_info,
-        openai_compatible_media_message,
+        openai_compatible_media_message, push_mistral_part,
     };
 
     #[derive(Clone, Default)]
@@ -5858,6 +5899,81 @@ mod tests {
         assert_eq!(assistant["reasoning_details"], details);
         assert_eq!(assistant["tool_calls"][0]["id"], "previous-call");
         assert_eq!(assistant["tool_calls"][0]["function"]["name"], "read");
+    }
+
+    /// A Mistral reasoning model's stream: its thinking a few words a part.
+    async fn mistral_thinking(
+        Json(_request): Json<Value>,
+    ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+        use std::fmt::Write as _;
+        let thinking = |text: &str| json!({"type":"thinking","thinking":[{"type":"text","text":text}],"closed":true});
+        let mut stream = String::new();
+        for chunk in [
+            json!({"choices":[{"delta":{"role":"assistant","content":[thinking("The user wants me")]}}]}),
+            json!({"choices":[{"delta":{"content":[thinking(" to read a file")]}}]}),
+            json!({"choices":[{"delta":{"content":[thinking(", then answer.")]}}]}),
+            json!({"choices":[{"delta":{"content":[{"type":"text","text":"Reading "}]}}]}),
+            json!({"choices":[{"delta":{"content":[{"type":"text","text":"it now."}]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]}}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+        ] {
+            let _ = write!(stream, "data: {chunk}\n\n");
+        }
+        ([(CONTENT_TYPE, "text/event-stream")], stream)
+    }
+
+    #[tokio::test]
+    async fn mistral_thinking_streamed_in_pieces_is_sent_back_whole() {
+        let router = Router::new().route("/chat/completions", post(mistral_thinking));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider =
+            OpenAiCompatibleProvider::for_test(format!("http://{address}/chat/completions"));
+        let mut stream = provider
+            .stream(
+                ProviderRequest {
+                    model: "compat-test".into(),
+                    system: "sys".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "read a.txt".into(),
+                    }],
+                    tools: Vec::new(),
+                    reasoning_effort: None,
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let mut content = None;
+        while let Some(event) = stream.next().await {
+            if let ProviderEvent::ToolCall {
+                provider_metadata, ..
+            } = event.unwrap()
+            {
+                content = Some(provider_metadata["mistral_content"].clone());
+            }
+        }
+        // One thinking part and one text part, as Mistral's own complete
+        // reply has them, not a part for every few words.
+        assert_eq!(
+            content.unwrap(),
+            json!([
+                {"type":"thinking","thinking":[{"type":"text","text":"The user wants me to read a file, then answer."}],"closed":true},
+                {"type":"text","text":"Reading it now."}
+            ])
+        );
+        // Parts that are not plain text are kept as they came.
+        let mut parts = vec![json!({"type":"thinking","thinking":[{"type":"text","text":"a"}]})];
+        push_mistral_part(&mut parts, &json!({"type":"image_url","image_url":"x"}));
+        push_mistral_part(
+            &mut parts,
+            &json!({"type":"thinking","thinking":[{"type":"text","text":"b"}]}),
+        );
+        assert_eq!(parts.len(), 3);
     }
 
     /// A server that streams its reasoning in `field`, then calls `read`.

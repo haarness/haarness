@@ -121,6 +121,20 @@ but never a provider's page: confirming a price is a person's job. Fix or add th
 entry in haarness-cloud from the provider's page with today's `checked` date,
 then `--sync` copies the table here.
 
+## Provider fixes: 2026-11-08
+
+Found by running coding chats on each provider with the owner's own keys, on the released 0.1.16 and on main.
+
+| Provider | Change |
+| --- | --- |
+| Gemini | Google still lists Gemini 2.5 to every key but refuses it to accounts made since ("no longer available to new users … use models/gemini-3.1-pro-preview"): the chat says Google no longer offers it to new accounts and names the model Google suggests. A free-tier key asking for a model its tier leaves out (`limit: 0`, Gemini 4 Argon among them) failed after waiting the 41 seconds Google names four times; it now fails at once and says to choose a Flash model or turn on billing in Google AI Studio. A day's free allowance used up says when it comes back. No provider's quota of 0 is waited for. |
+| xAI, OpenAI (ChatGPT sign-in) | A sign-in whose renewal the provider refuses (a refresh token that expired, was revoked or was spent elsewhere) says to connect the provider again, not "refresh token returned 400 Bad Request: Invalid or unknown refresh token". |
+| OpenAI (API key) | `insufficient_quota` says the API account has no credit or is at its spending limit, where to add credit, and that signing in with ChatGPT is the other way in: a ChatGPT plan doesn't pay for API keys. |
+| Groq | Groq checks the model's tool calls itself and refuses a reply whose call doesn't match its tool ("Tool call validation failed", `tool_use_failed`), before or after the reasoning streamed. The turn now sends the request again with Groq's reason, at most twice a turn, keeping what streamed, then fails saying the model's tool calls kept not matching. gpt-oss-120b on the free tier still calls `apply_patch` with `patch` instead of `input` each time, so a coding task there does not finish yet. |
+| Mistral | A reasoning model's thinking, streamed a few words a part, goes back in later requests as one part instead of one per chunk, which made it four to six times larger in every later request. |
+| Gemini | A new Gemini connection, and a chat that names no Gemini model, starts on Google's newest Flash model (Gemini 3.8 Flash today), which free Google AI Studio keys can use; Gemini 4 Argon is listed next and stays choosable. A model someone chose, or set as the default, stays as it is. |
+| All | `marketplace_manage` and `capability_manage` wait behind `load_tool` like the other managers instead of going out with every request (4.5 KB). The `browser_*` tools (44 schemas, about 36 KB) are sent only while a browser can serve the chat ([Browser](BROWSER.md#tools)): a terminal chat's request to Groq's free tier went from 10,618 to about 5,400 tokens. |
+
 ## Provider fixes: 2026-11-07
 
 | Provider | Change |
@@ -275,6 +289,13 @@ checked. It stores credential-free evidence in its temporary output directory.
 `--providers`, `--models`, and `--workers` bound the test matrix. Missing explicit
 models and failed turns produce a failing exit status; they are never reported as
 passes. API-key-only options can differ from a ChatGPT subscription's live list.
+`--scenarios coding` has the model fix a failing unit test (the shell, a read or
+search, an edit, the shell again) and then add a function with its test in a
+second turn, and the script runs the tests itself after each; `long` sends a
+message of about 30,000 tokens. Writing a model as `provider/model>provider2/model2`
+switches the chat between the coding turns, as the picker does.
+`--global-config` gives the private profile a global configuration, where a
+provider's `base_url` can point at a recording proxy.
 
 The results and account limitations for this update are recorded in
 [the model-support audit](records/2026-09-23-model-support.md).
