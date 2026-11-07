@@ -294,9 +294,20 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
         );
         format!("You've reached Haarness Cloud's rate limit{limit} requests a minute. {next}")
     } else if message.contains("[exposure_cap]") {
-        "Too many requests are still settling on this Haarness Cloud account. Wait a moment, \
-         then try again."
-            .to_owned()
+        // Cloud names a wait when requests still settling are in the way.
+        // Without one, this request alone could cost more than the cap, and
+        // no wait makes room. "usage limit" lets the words read on their own,
+        // and nothing in them asks the turn to try again.
+        if advised_seconds(&message).is_some() {
+            "Too many requests are still settling on this Haarness Cloud account. Wait a moment, \
+             then try again."
+                .to_owned()
+        } else {
+            "This request could cost more than the usage limit Haarness Cloud sets on requests in \
+             flight, so waiting won't help. Lower the output limit, or compact or shorten the \
+             conversation."
+                .to_owned()
+        }
     } else if message.contains("[account_suspended]") {
         format!(
             "This Haarness Cloud account is suspended. Open Billing in Haarness Cloud for \
@@ -755,6 +766,45 @@ mod tests {
             message.ends_with("(in the terminal: /billing)."),
             "{message}"
         );
+    }
+
+    /// Cloud's unsettled-request cap names a wait only when requests still
+    /// settling are in the way; a request that alone could cost more than the
+    /// cap is told plainly that waiting won't help. The words read as a usage
+    /// limit (`describe_error` shows them as they are) and ask for no retry.
+    #[test]
+    fn an_exposure_cap_says_whether_waiting_helps() {
+        let raw = "HTTP 429 Too Many Requests: [exposure_cap] too many unsettled requests for this \
+                   account (cap 5000000000 nanos)";
+        for readable in [readable, readable_router] {
+            let CoreError::Provider(message) = readable(CoreError::Provider(raw.into())) else {
+                panic!("still a provider error");
+            };
+            assert_eq!(
+                message,
+                "This request could cost more than the usage limit Haarness Cloud sets on \
+                 requests in flight, so waiting won't help. Lower the output limit, or compact or \
+                 shorten the conversation."
+            );
+            let lower = message.to_ascii_lowercase();
+            assert!(lower.contains("usage limit"), "{message}");
+            assert!(
+                !["try again", "retry", "wait a moment"]
+                    .iter()
+                    .any(|words| lower.contains(words)),
+                "{message}"
+            );
+            let CoreError::Provider(timed) =
+                readable(CoreError::Provider(format!("{raw} Please retry in 5s.")))
+            else {
+                panic!("still a provider error");
+            };
+            assert_eq!(
+                timed,
+                "Too many requests are still settling on this Haarness Cloud account. Wait a \
+                 moment, then try again."
+            );
+        }
     }
 
     /// Cloud refuses a busy key or router with a 429 of its own. The runtime

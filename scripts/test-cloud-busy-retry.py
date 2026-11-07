@@ -32,6 +32,7 @@ MESSAGES = {
     'concurrency_limited': 'per-key concurrency limit reached',
     'rate_limited': 'per-key rate limit of 300 requests per minute reached',
     'router_overloaded': 'router concurrency limit reached',
+    'exposure_cap': 'too many unsettled requests for this account (cap 5000000000 nanos)',
 }
 # Per scenario prompt: the refusals still to send ((code, Retry-After or None), …) and when each
 # chat request arrived.
@@ -182,6 +183,15 @@ try:
     assert errors[-1] == ('Haarness Cloud is already running as many of your requests at once as its rate limit allows. '
                           'Try again in a moment, or once another chat or agent finishes.'), errors
     print(f'PASS a key that stays busy ends the turn after {sum(gaps):.0f} s in plain words: {errors[-1]}', flush=True)
+    passed += 1
+    # A request that alone could cost more than the account's cap gets no Retry-After: no wait makes room, and the
+    # turn ends at once in plain words, not "Provider error".
+    turn, thread, gaps = scenario('too_costly', [('exposure_cap', None)])
+    errors = [item['message'] for item in items(thread, 'error')]
+    assert turn['status'] == 'failed' and gaps == [], (turn, gaps, errors)
+    assert errors[-1] == ("This request could cost more than the usage limit Haarness Cloud sets on requests in flight, "
+                          "so waiting won't help. Lower the output limit, or compact or shorten the conversation."), errors
+    print(f'PASS a request over the unsettled-request cap ends at once, saying waiting won\'t help', flush=True)
     passed += 1
     print(f'PASS {passed} Haarness Cloud busy scenarios.', flush=True)
 finally:
