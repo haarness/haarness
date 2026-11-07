@@ -7636,6 +7636,13 @@ mod readings {
                 "{command}"
             );
         }
+        // A delimiter that starts with `-` keeps its document's text a text.
+        let dashed = analyze("cat << -EOF; true\nbody\n-EOF\nrm -rf ~/x", &workspace);
+        assert!(
+            !dashed.patterns.iter().any(|pattern| pattern == "body"),
+            "{:?}",
+            dashed.patterns
+        );
         // Many that share a line and a delimiter are set apart together.
         let chain = format!(
             "{}rm -rf ~/x\nbody\nEOF",
