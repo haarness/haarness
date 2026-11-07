@@ -149,7 +149,16 @@ async fn spawn(
     agent: Option<ThreadId>,
 ) -> CoreResult<Spawned> {
     let error = |e: std::io::Error| CoreError::Tool(e.to_string());
-    let mut command = haarness_ripgrep::shell_command(command).map_err(error)?;
+    // Git for Windows' bash on Windows when Git is installed, else cmd.exe;
+    // the choice is gone before anything here waits.
+    let mut command = {
+        let shell = haarness_core::agent_shell::current();
+        let windows_bash = match &shell {
+            haarness_core::agent_shell::AgentShell::GitBash(bash) => Some(bash.as_path()),
+            _ => None,
+        };
+        haarness_ripgrep::shell_command(command, windows_bash).map_err(error)?
+    };
     command
         .current_dir(dunce::simplified(workdir))
         .stdin(Stdio::null())
@@ -188,18 +197,25 @@ async fn spawn(
     let (path, file) = crate::data_folder::new_private_file(directory, "tool")
         .await
         .map_err(error)?;
-    let mut child = Command::from(command)
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(error)?;
+    let mut command = Command::from(command);
+    command.kill_on_drop(true);
+    let mut command = process_wrap::tokio::CommandWrap::from(command);
+    command.wrap(process_wrap::tokio::KillOnDrop);
+    // On Windows the command runs in a job of its own, which ends with
+    // everything still in it when the command's reading lets it go: a
+    // process its tree lost track of (Git Bash's `exec` and `&` leave
+    // processes whose parent is gone, out of `taskkill /T`'s reach) ends too.
+    #[cfg(windows)]
+    command.wrap(process_wrap::tokio::JobObject);
+    let mut child = command.spawn().map_err(error)?;
     let leader = child
         .id()
         .ok_or_else(|| CoreError::Tool("shell process did not start".into()))?;
     let group = ProcessGroup(leader);
     // Stopped by the next server should this one die before it can.
     let recorded = haarness_core::process_groups::recorded(Some(leader));
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
+    let stdout = child.stdout().take().expect("piped stdout");
+    let stderr = child.stderr().take().expect("piped stderr");
     let output = Arc::new(CommandOutput::new(path, file, save_limit));
     let stats = Arc::new(parking_lot::Mutex::new(Stats::default()));
     let control = Arc::new(GroupControl {
@@ -230,7 +246,7 @@ async fn spawn(
 
 /// What reads a running command, owning its process.
 struct Pump {
-    child: tokio::process::Child,
+    child: Box<dyn process_wrap::tokio::ChildWrapper>,
     stdout: tokio::process::ChildStdout,
     stderr: tokio::process::ChildStderr,
     output: Arc<CommandOutput>,
@@ -283,7 +299,9 @@ async fn pump(mut pump: Pump) {
         // it; the quiet time last.
         let (bytes, from_stdout) = tokio::select! {
             biased;
-            waited = pump.child.wait(), if status.is_none() => {
+            // The shell itself, not the job it leads, which waits for
+            // everything left in it.
+            waited = pump.child.inner_mut().wait(), if status.is_none() => {
                 match waited {
                     Ok(waited) => status = Some(waited),
                     Err(error) => {
@@ -363,6 +381,8 @@ async fn pump(mut pump: Pump) {
     });
     pump.control.live.store(false, Ordering::SeqCst);
     drop(pump.group);
+    // Its job, on Windows, with whatever is still in it.
+    drop(pump.child);
     drop(pump.recorded);
     pump.end.send_replace(Some(ProcessEnd {
         exit_code,
@@ -1433,5 +1453,180 @@ mod tests {
     #[test]
     fn the_markers_carry_only_fixed_values_and_the_chat_id_logged_once_per_command() {
         in_server_environment("clean", &[("HAARNESS_SERVER_TOKEN", "server-secret")]);
+    }
+}
+
+/// Agent commands in Git for Windows' bash: what a command finds there, and
+/// that its process tree ends with it.
+#[cfg(all(test, windows))]
+mod git_bash_tests {
+    use super::*;
+    use haarness_core::agent_shell::{AgentShell, current};
+
+    /// Whether agent commands run in Git Bash here. Where Git for Windows is
+    /// in its usual folder (GitHub's Windows runners) they must; elsewhere
+    /// (Wine) the test says it was skipped.
+    fn git_bash() -> bool {
+        let usual = Path::new(r"C:\Program Files\Git\bin\bash.exe").is_file();
+        let found = matches!(current(), AgentShell::GitBash(_));
+        assert!(
+            found || !usual,
+            "Git for Windows is installed, yet agent commands would run in {:?}",
+            current()
+        );
+        if !found {
+            eprintln!("no Git for Windows here; skipped");
+        }
+        found
+    }
+
+    /// A folder whose name holds a space and non-ASCII letters.
+    fn folder() -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("haarness git bash é {}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&path).unwrap();
+        haarness_core::paths::canonicalize(&path).unwrap()
+    }
+
+    async fn bash(command: &str, workdir: &Path, timeout_ms: u64) -> CoreResult<ToolOutput> {
+        run(
+            command,
+            workdir,
+            timeout_ms,
+            &CancellationToken::new(),
+            workdir,
+            &BTreeMap::new(),
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_command_runs_in_its_folder_with_posix_tools_windows_programs_home_and_system_root() {
+        if !git_bash() {
+            return;
+        }
+        let root = folder();
+        std::fs::write(root.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+        let output = bash(
+            "pwd -W; ls; grep -c o notes.txt | sed 's/^/count=/'; head -n 1 notes.txt; \
+             command -v cmd.exe; test -n \"$HOME\" && echo home=yes; \
+             cmd //c \"echo root=%SystemRoot%\"; exit 7",
+            &root,
+            60_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.metadata["exit"], 7, "{}", output.text);
+        let text = output.text.to_lowercase();
+        let named = root.display().to_string().replace('\\', "/").to_lowercase();
+        assert!(text.contains(&named), "{text}");
+        for line in [
+            "notes.txt",
+            "count=2",
+            "one",
+            "cmd.exe",
+            "home=yes",
+            "root=c:\\windows",
+        ] {
+            assert!(text.contains(line), "{line} in {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn quotes_backslashes_and_globs_reach_the_shell_as_written() {
+        if !git_bash() {
+            return;
+        }
+        let root = folder();
+        std::fs::write(root.join("a.py"), "").unwrap();
+        let output = bash(
+            "printf '%s|' 'a b' \"c\\\"d\" 'e\\f' '*.py' *.py \"$((6 * 7))\" '日本'",
+            &root,
+            60_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.metadata["exit"], 0, "{}", output.text);
+        assert!(
+            output.text.contains("a b|c\"d|e\\f|*.py|a.py|42|日本|"),
+            "{}",
+            output.text
+        );
+    }
+
+    #[tokio::test]
+    async fn a_windows_switch_is_kept_as_the_description_says() {
+        if !git_bash() {
+            return;
+        }
+        let root = folder();
+        let output = bash(
+            "cmd //c echo doubled; MSYS_NO_PATHCONV=1 cmd /c echo kept",
+            &root,
+            60_000,
+        )
+        .await
+        .unwrap();
+        assert!(
+            output.text.contains("doubled") && output.text.contains("kept"),
+            "{}",
+            output.text
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timeout_or_a_stop_ends_what_the_command_started() {
+        if !git_bash() {
+            return;
+        }
+        for timeout in [0, 3000] {
+            let root = folder();
+            let cancel = CancellationToken::new();
+            let token = cancel.clone();
+            let work = root.clone();
+            let task = tokio::spawn(async move {
+                run(
+                    "sh -c 'sleep 6; touch escaped' & printf ready > ready; wait",
+                    &work,
+                    timeout,
+                    &token,
+                    &work,
+                    &BTreeMap::new(),
+                    None,
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while !root.join("ready").exists() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if timeout == 0 {
+                cancel.cancel();
+            }
+            let error = task.await.unwrap().unwrap_err();
+            if timeout == 0 {
+                assert!(matches!(error, CoreError::Cancelled), "{error}");
+            } else {
+                assert!(error.to_string().contains("timed out"), "{error}");
+            }
+            tokio::time::sleep(Duration::from_millis(7000)).await;
+            assert!(
+                !root.join("escaped").exists(),
+                "a process outlived its command"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn without_git_cmd_exe_runs_the_command() {
+        let root = folder();
+        let mut command = haarness_ripgrep::shell_command("echo %OS%& exit 3", None).unwrap();
+        let output = command.current_dir(&root).output().unwrap();
+        assert_eq!(output.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Windows_NT"));
     }
 }

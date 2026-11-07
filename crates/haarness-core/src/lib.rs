@@ -1,5 +1,6 @@
 //! Provider, storage, and transport independent agent runtime.
 
+pub mod agent_shell;
 mod agents;
 mod approval_mode;
 pub mod attachments;

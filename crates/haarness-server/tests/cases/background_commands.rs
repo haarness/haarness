@@ -256,8 +256,21 @@ async fn notices(runtime: &AgentRuntime, thread: ThreadId) -> Vec<String> {
         .collect()
 }
 
+/// Whether agent commands are POSIX shell here: everywhere but Windows
+/// without Git, where they run in cmd.exe. Where Git for Windows is in its
+/// usual folder (GitHub's Windows runners) they must be.
+fn posix_shell() -> bool {
+    let shell = haarness_core::agent_shell::current();
+    let usual =
+        cfg!(windows) && std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe").is_file();
+    assert!(
+        shell.posix() || !usual,
+        "Git for Windows is installed, yet agent commands would run in {shell:?}"
+    );
+    shell.posix()
+}
+
 /// The command checkpoints the chat holds, as (id, state).
-#[cfg(unix)]
 async fn checkpoints(
     runtime: &AgentRuntime,
     thread: ThreadId,
@@ -276,11 +289,13 @@ async fn checkpoints(
         .collect()
 }
 
-// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
-#[cfg(unix)]
+// POSIX shell commands for the agent's shell tool: Git Bash on Windows.
 #[tokio::test]
 async fn a_command_started_in_the_background_returns_at_once_and_tells_its_chat_when_it_ends() {
     use haarness_protocol::ShellCommandState as State;
+    if !posix_shell() {
+        return;
+    }
     let workspace = Workspace::new();
     let (runtime, provider) = commands_runtime(&workspace.0, |_| {});
     let events = runtime.events().subscribe(None);
@@ -631,10 +646,13 @@ async fn a_subagents_background_command_stops_untold_when_its_turn_ends() {
 }
 
 // POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
-#[cfg(unix)]
+// POSIX shell commands for the agent's shell tool: Git Bash on Windows.
 #[tokio::test]
 async fn the_agent_reads_waits_for_and_stops_its_commands() {
     use haarness_protocol::ShellCommandState as State;
+    if !posix_shell() {
+        return;
+    }
     let workspace = Workspace::new();
     let (runtime, _) = commands_runtime(&workspace.0, |_| {});
     let thread = chat(&runtime, None).await;

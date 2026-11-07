@@ -95,24 +95,33 @@ async fn turn(runtime: &AgentRuntime, thread: ThreadId, prompt: &str) {
     );
 }
 
-/// The shell command that prints the folder it runs in: Windows runs one
-/// in cmd.exe, where that is `echo %CD%` (a bare `cd` reads as the home folder).
-const PWD: &str = if cfg!(windows) { "echo %CD%" } else { "pwd -P" };
+/// The shell command that prints the folder it runs in, as Windows writes
+/// it there: in cmd.exe `echo %CD%` (a bare `cd` reads as the home folder),
+/// in Git Bash cmd.exe's `cd` (`pwd` writes `/c/…`).
+fn pwd_command() -> &'static str {
+    if !cfg!(windows) {
+        "pwd -P"
+    } else if haarness_core::agent_shell::current().posix() {
+        "cmd //c cd"
+    } else {
+        "echo %CD%"
+    }
+}
 
-/// What [`PWD`] prints in `folder`: one line, ended by CRLF in cmd.exe.
+/// What [`pwd_command`] prints in `folder`: one line, ended by CRLF on Windows.
 fn printed_line(folder: &std::path::Path) -> String {
     let end = if cfg!(windows) { "\r\n" } else { "\n" };
     format!("{}{end}", folder.display())
 }
 
-/// The `bash` tool's result for [`PWD`] in `folder`.
+/// The `bash` tool's result for [`pwd_command`] in `folder`.
 fn printed(folder: &std::path::Path) -> String {
     format!("exit: 0\n{}", printed_line(folder))
 }
 
 /// The model's `bash` call printing its working folder.
 fn pwd() -> String {
-    format!("!tool bash {}", json!({ "command": PWD }))
+    format!("!tool bash {}", json!({ "command": pwd_command() }))
 }
 
 /// The output of the last `name` result of `thread`.
@@ -237,7 +246,10 @@ async fn a_chats_hooks_run_in_its_own_folder() {
     }
     let ran = last_result(&runtime, own.id, "bash").await;
     assert!(ran.contains(&folder(&own).display().to_string()), "{ran}");
-    runtime.run_shell(own.id, PWD.into()).await.unwrap();
+    runtime
+        .run_shell(own.id, pwd_command().into())
+        .await
+        .unwrap();
     std::fs::remove_dir(folder(&gone)).unwrap();
     for thread in [&own, &gone] {
         runtime.update_thread(thread.id, archived()).await.unwrap();
@@ -292,7 +304,10 @@ async fn a_chat_home_chats_hooks_take_its_folder_as_their_project() {
     let runtime = runtime.with_hooks(Arc::new(recording_hooks(&fixture.workspace, &log)));
     let thread = chat(&runtime, None).await.unwrap();
     turn(&runtime, thread.id, &pwd()).await;
-    runtime.run_shell(thread.id, PWD.into()).await.unwrap();
+    runtime
+        .run_shell(thread.id, pwd_command().into())
+        .await
+        .unwrap();
     runtime.update_thread(thread.id, archived()).await.unwrap();
     let own = folder(&thread);
     assert!(own.starts_with(&fixture.workspace) && own != fixture.workspace);
@@ -681,7 +696,7 @@ async fn a_chat_works_in_its_folder_and_a_sibling_s_folder_is_outside() {
             printed(&folder(thread))
         );
     }
-    let person = runtime.run_shell(a.id, PWD.into()).await.unwrap();
+    let person = runtime.run_shell(a.id, pwd_command().into()).await.unwrap();
     assert!(
         matches!(&person.data, ItemData::ToolResult { output, .. }
             if *output == printed(&folder(&a))),
@@ -692,7 +707,7 @@ async fn a_chat_works_in_its_folder_and_a_sibling_s_folder_is_outside() {
         .run_workflow_tool(
             b.id,
             "bash",
-            json!({"command": PWD}),
+            json!({"command": pwd_command()}),
             CancellationToken::new(),
         )
         .await
@@ -891,7 +906,7 @@ async fn children_and_forks_work_in_their_parent_s_folder() {
     let fixture = Fixture::new();
     let (runtime, _) = fixture.runtime();
     let parent = chat(&runtime, Some("2026-10-24/parent")).await.unwrap();
-    turn(&runtime, parent.id, &tasks_prompt(1, PWD)).await;
+    turn(&runtime, parent.id, &tasks_prompt(1, pwd_command())).await;
     let child = runtime
         .list_threads(false)
         .await
@@ -1152,7 +1167,10 @@ async fn a_chat_stored_without_a_folder_gets_one_before_it_works_in_the_chat_hom
         printed(&folder(&now))
     );
     // A person's own command there too.
-    let item = runtime.run_shell(legacy.id, PWD.into()).await.unwrap();
+    let item = runtime
+        .run_shell(legacy.id, pwd_command().into())
+        .await
+        .unwrap();
     assert!(
         matches!(&item.data, ItemData::ToolResult { output, .. }
             if *output == printed(&folder(&now))),
